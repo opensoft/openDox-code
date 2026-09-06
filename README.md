@@ -34,4 +34,6 @@ not here: see
 and
 [CODE_OF_CONDUCT.md](https://github.com/opensoft/openDox/blob/main/CODE_OF_CONDUCT.md)
 in `opensoft/openDox`. Security reports for this repository go through
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](SECURITY.md). The `validate` check is a required status check
+on `main`, enforced by a repository ruleset — see
+[docs/branch-protection.md](docs/branch-protection.md).
