@@ -21,7 +21,7 @@ not any check content):
 | target | `main` (the default branch) |
 | rule | `required_status_checks`, naming context `validate` |
 
-## The EVALUATE → ACTIVE history
+## The `evaluate` → `active` history
 
 1. **Created in `evaluate`** on 2026-09-05, before this pull request existed,
    so the required check's first real report under the ruleset is this PR's
@@ -35,10 +35,11 @@ not any check content):
 Before this ruleset existed, nothing in this repository required `validate`
 to pass before a merge: the org-wide rulesets require a pull request and a
 Copilot review, but neither names a status check, and classic branch
-protection was never configured (`404 Branch not protected`). The one PR
-this project merged before this one (#1, bootstrapping posture) landed
-without `validate` being a required check — a gap this file, and the
-ruleset it documents, closes.
+protection was never configured — `gh api
+repos/opensoft/openDox-code/branches/main/protection` returned `404 Branch not
+protected`. The one PR this project merged before this one (#1, bootstrapping
+posture) landed without `validate` being a required check — a gap this file,
+and the ruleset it documents, closes.
 
 ## Correction to PR #1's claim
 
