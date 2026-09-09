@@ -56,8 +56,8 @@ RULING of 2026-09-09: *"level the six scaffolds first, one small PR per
 repo"*), which measured the six rulesets and found one difference that is not
 a tree fact and cannot be closed by a pull request.
 
-`strict_required_status_checks_policy` is **`false`** on all three `opendox`
-rulesets (this one is id `22364973`) and **`true`** on all three `openxdox`
+`strict_required_status_checks_policy` is **`false`** on all three openDox-family
+rulesets (this one is id `22364973`) and **`true`** on all three openXdox-family
 rulesets. Strict means a pull request must be **up to date with `main`**
 before it can merge; not-strict means a stale-but-green branch may merge.
 

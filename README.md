@@ -43,7 +43,7 @@ on `main`, enforced by a repository ruleset — see
 The doc index for this repository. Everything under `docs/` is listed here,
 and a new document is linked from this table in the same pull request that
 adds it — the xFactory family's standing rule, levelled across all six
-`opendox`/`openxdox` repositories by the OQ-O scaffold pass
+`openDox`/`openXdox` repositories by the OQ-O scaffold pass
 (`opensoft/openxFactory#656`).
 
 | document | what it is |
