@@ -48,3 +48,22 @@ work: 1.5 (this file's subject) was not done in PR #1 — no ruleset existed in
 this repository until this pull request. PR #1's description is being
 corrected, as part of landing this fix, to say § 1.3-1.4 with a pointer to
 this PR for 1.5.
+
+## One difference from the openXdox family, RECORDED rather than changed
+
+Added by the **OQ-O scaffold-levelling pass** (`opensoft/openxFactory#656`,
+RULING of 2026-09-09: *"level the six scaffolds first, one small PR per
+repo"*), which measured the six rulesets and found one difference that is not
+a tree fact and cannot be closed by a pull request.
+
+`strict_required_status_checks_policy` is **`false`** on all three openDox-family
+rulesets (this one is id `22364973`) and **`true`** on all three openXdox-family
+rulesets. Strict means a pull request must be **up to date with `main`**
+before it can merge; not-strict means a stale-but-green branch may merge.
+
+The levelling pass does **not** change it. A ruleset is a repository setting
+outside any pull request's reach, and choosing which of the two policies the
+family should standardise on is Brett Heap's act, not an author's. What the
+pass owes is that the difference is written down where somebody hits it —
+which is here, in the openXdox family's matching file, and in the pull
+requests that add both.

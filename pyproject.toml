@@ -1,0 +1,43 @@
+# The IMPORT ROOT for this leg, created by the OQ-O scaffold-levelling pass
+# (openxFactory#656) BEFORE any carved content arrives.
+#
+# Why it exists at all. `tests/test_leg_shape.py::test_role_directory_exists`
+# fixes this leg's role directory as `src/`, and the carve places this
+# project's package at `src/opendox/`. With a `src/` layout and no import root,
+# `import opendox` does not resolve under `python -m pytest` run from the
+# repository root, so the required `validate` check would go red on the first
+# carved commit for a reason that has nothing to do with the carve. Creating
+# it during the levelling pass keeps a carve failure a carve failure.
+#
+# This is a CREATED file and therefore carries NO row in openxFactory's
+# `docs/opendox-carve-manifest.yaml` — RULED OQ-C: the manifest declares what
+# LEAVES openxFactory, never what a destination assembles.
+
+[project]
+name = "opendox"
+version = "0.0.0"
+description = "The openDox code leg — the `opendox` package, carved from openxFactory."
+requires-python = ">=3.12"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# The ROOTDIR ANCHOR. With no pytest ini table anywhere, pytest infers a
+# rootdir from the arguments it is handed, so `pytest -q` and `pytest tests/`
+# can disagree about what the root is and therefore about which conftest chain
+# applies. Anchoring it here is what makes the conftest chain a guarantee
+# rather than an accident of the command line.
+minversion = "8.0"
+testpaths = ["tests"]
+# `pythonpath` (pytest >= 7) puts `src/` on sys.path for the whole session.
+# The repository-root `conftest.py` does the same thing by hand, so the leg
+# still imports correctly under a runner that does not read this table.
+pythonpath = ["src"]
