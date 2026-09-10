@@ -62,10 +62,21 @@ if SRC.is_dir():
 # amendment lands WITHOUT declaring `tests/test_boundary.py:14`, this list is
 # one entry short and the re-cut leg's `validate` will be red on it.
 #
+# NOTHING THIS LIST NAMES EXISTS ON THIS BRANCH YET, AND THAT IS THE POINT.
+# Every path below arrives with the carve (leg 1, `split-opendox` § 3.2), and
+# this file has to be carrying the list already when they do: the arrival
+# verifier admits a scaffold file only when its bytes equal `main`'s copy, so
+# `conftest.py` cannot be edited during or after the re-cut. The list is
+# therefore written ahead of the tree it describes, and was computed against
+# that tree — the leg's own (opensoft/openDox-code#4, head `cfabe3c4`) — rather
+# than guessed. A `collect_ignore` entry naming an absent file is inert, so this
+# list is a no-op on this branch and takes effect the moment the rows land.
+#
 # Paths are relative to this file's directory (pytest resolves a conftest's
 # `collect_ignore` against the conftest's own parent), and this is the ROOT
-# conftest, so each entry is repository-relative. The arrived `tests/conftest.py`
-# defines no `collect_ignore` of its own, so this list is the one pytest reads.
+# conftest, so each entry is repository-relative. `tests/conftest.py` — which
+# also arrives with the carve, as a declared replica — defines no
+# `collect_ignore` of its own, so this list stays the one pytest reads.
 collect_ignore = [
     # --- awaits openXdox-code leg (imports openxdox.*) ---
     "tests/test_doxbench_chat_view.py",
