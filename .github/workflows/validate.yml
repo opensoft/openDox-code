@@ -28,5 +28,11 @@ jobs:
       - name: install the package and its test extra
         run: python -m pip install -e ".[test]"
 
+      # RULED Q-L5 (b′), opensoft/openxFactory#656, 2026-09-10: until the
+      # BUILD arc (split-opendox § 3.5/3.6) inverts the openDox → openXdox
+      # dependency, validate runs only the scaffold's shape assertions; the
+      # carved tests arrive byte-identical and return to this workflow when
+      # the BUILD arc lands. The root conftest's collect_ignore list (round 2)
+      # remains the record of what was already known.
       - name: pytest
-        run: python -m pytest -q
+        run: python -m pytest -q tests/test_leg_shape.py --noconftest
