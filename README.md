@@ -36,7 +36,10 @@ and
 in `opensoft/openDox`. Security reports for this repository go through
 [SECURITY.md](SECURITY.md). The `validate` check is a required status check
 on `main`, enforced by a repository ruleset — see
-[docs/branch-protection.md](docs/branch-protection.md).
+[docs/branch-protection.md](docs/branch-protection.md). Until the BUILD arc
+(`split-opendox` § 3.5/3.6) inverts the openDox → openXdox dependency,
+`validate` runs only the scaffold's shape assertions (RULED Q-L5 (b′),
+`opensoft/openxFactory#656`, 2026-09-10).
 
 ## Documentation
 
