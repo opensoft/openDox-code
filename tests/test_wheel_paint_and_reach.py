@@ -40,7 +40,7 @@ import pytest
 
 from conftest import REPO_ROOT
 
-WEB = REPO_ROOT / "scripts" / "ideation_dashboard" / "web"
+WEB = REPO_ROOT / "src" / "opendox" / "web"
 WHEEL_MODEL_JS = WEB / "views" / "wheel-model.js"
 WHEEL_JS = WEB / "views" / "wheel.js"
 STYLES_CSS = WEB / "styles.css"

@@ -11,7 +11,7 @@ import pytest
 
 from conftest import REPO_ROOT  # noqa: F401  (sys.path side effect)
 
-import output_boundary
+from opendox import output_boundary
 
 # Imported through the RE-EXPORT path on purpose. The guard's source of truth
 # is `scripts/output_boundary.py` since `split-opendox-two-layer-product`
@@ -19,8 +19,8 @@ import output_boundary
 # assertion below therefore also exercises the alias, and
 # `test_the_re_export_hands_back_the_same_objects` pins that it is an alias
 # rather than a second definition.
-from ideation_dashboard import boundary
-from ideation_dashboard.boundary import (
+from opendox import boundary
+from opendox.boundary import (
     AGENT, MACHINERY, OUTSIDE_ALLOWLIST, OUTSIDE_ROOT,
     SOURCE_DELETE, SOURCE_EDIT, BoundaryViolation, HumanGate, OutputBoundary,
 )

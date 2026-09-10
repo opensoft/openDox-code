@@ -74,7 +74,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import yaml
 
 from . import doxbench_hash
-from . import gate_console
+from openxdox import gate_console
 # `SessionGitRefused` is re-exported (see __all__) so a caller catching session
 # refusals can catch both classes from one module: this module refuses on
 # identity/shape, `session_git` refuses on git discipline (a stage-everything
@@ -1552,7 +1552,7 @@ def _repo_reference(root: Path, path: Path) -> str:
 
 def _change_rows(checkout_root: Path | str):
     """The shared active/archive enumeration plus declared staged origin."""
-    from . import generator
+    from openxdox import generator
 
     root = Path(checkout_root)
     return tuple(
@@ -1571,7 +1571,7 @@ def _active_pick_fallbacks(
     A change picked from two staging ids is ambiguous and is refused instead of
     selecting whichever register row happened to be encountered first.
     """
-    from .register import CrossReferenceIndexAdapter
+    from openxdox.register import CrossReferenceIndexAdapter
 
     rows = rows if rows is not None else _change_rows(checkout_root)
     active_without_origin = {
@@ -1989,7 +1989,7 @@ def proposal_state_for(tile: "Tile", *, records_root: Path | str | None = None,
 
     Only a STAGED-TOPIC tile can carry a proposal: both signals are keyed on a
     staging id, and a cluster or possible tile has none."""
-    from . import kickoff as kickoff_mod   # lazy: mirrors gate_console's cycle note
+    from openxdox import kickoff as kickoff_mod   # lazy: mirrors gate_console's cycle note
 
     staged = tile.scope_kind == STAGED_TOPIC
     landed = None
@@ -2089,7 +2089,7 @@ def session_entry(repository: str, branch: str, worktree: Path | str, *,
     `tile` records WHOSE session this is (finding 6). The ref cannot answer it — a
     `-2` branch is one tile's first session and another's second — so the caller
     that OPENED the session, the only place the answer exists, states it here."""
-    from .snapshot_registry import SnapshotEntry   # lazy: keeps the import graph flat
+    from openxdox.snapshot_registry import SnapshotEntry   # lazy: keeps the import graph flat
 
     return SnapshotEntry(repository=repository, ref=branch,
                          source_root=Path(worktree),
@@ -2135,7 +2135,7 @@ def register_session_entry(registry: Any, *, repository: str, branch: str,
     (or the bootstrap's marker read) is where the branch point is known, and the
     chat-turn binding check reads it back off the entry. None degrades to the
     original name-equality binding — advisory, never a refusal."""
-    from .snapshot_registry import entry_from_snapshot_file
+    from openxdox.snapshot_registry import entry_from_snapshot_file
 
     snapshot_path = session_snapshot_path(checkout_root, branch)
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2212,7 +2212,7 @@ def refresh_session_snapshot(registry: Any, *, repository: str, branch: str,
     The ACTIVE entry is restored afterwards: `_regenerate` promotes what it
     regenerates, and a session snapshot must never become what the wheel, the
     funnel, and the pipeline board render (FR-014a)."""
-    from .snapshot_registry import BINDING_REGENERATE, SnapshotSource
+    from openxdox.snapshot_registry import BINDING_REGENERATE, SnapshotSource
 
     source = SnapshotSource(checkout_root=Path(worktree), generator=generator,
                             project_register=project_register)
@@ -3557,7 +3557,7 @@ def refresh_main_view(registry: Any, *, repository: str,
     a second one. Returns None when there is nothing regenerable (a served plane, a
     registry with no local `main` entry) — an absent shared snapshot is not an
     error, and it must never be the reason a session cannot end."""
-    from .snapshot_registry import (
+    from openxdox.snapshot_registry import (
         BINDING_REGENERATE, DEFAULT_REF, SnapshotSource,
     )
 

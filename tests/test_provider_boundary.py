@@ -51,9 +51,9 @@ import pytest
 
 from conftest import REPO_ROOT
 
-from ideation_dashboard import doxbench_provider as provider_mod
+from opendox import doxbench_provider as provider_mod
 
-PACKAGE = REPO_ROOT / "scripts" / "ideation_dashboard"
+PACKAGE = REPO_ROOT / "src" / "opendox"
 WEB = PACKAGE / "web"
 
 #: The ONE module the boundary permits. Read from the module's own constant so

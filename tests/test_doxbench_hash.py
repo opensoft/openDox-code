@@ -16,7 +16,7 @@ import pytest
 
 from conftest import FIXTURES, REPO_ROOT
 
-from ideation_dashboard.doxbench_hash import (
+from opendox.doxbench_hash import (
     MAX_BUFFER_BYTES,
     ContentEncodingError,
     ContentSizeError,
@@ -29,8 +29,8 @@ from ideation_dashboard.doxbench_hash import (
 VECTORS_PATH = FIXTURES / "doxbench_hash_vectors.json"
 STATE_JS = (
     REPO_ROOT
-    / "scripts"
-    / "ideation_dashboard"
+    / "src"
+    / "opendox"
     / "web"
     / "views"
     / "doxbench-state.js"

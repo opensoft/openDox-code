@@ -20,8 +20,8 @@ from conftest import REPO_ROOT
 
 STATE_JS = (
     REPO_ROOT
-    / "scripts"
-    / "ideation_dashboard"
+    / "src"
+    / "opendox"
     / "web"
     / "views"
     / "doxbench-state.js"

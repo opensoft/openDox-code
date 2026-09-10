@@ -24,7 +24,7 @@ const NOTES = {
   kickoff: "dispatch the ratified change's next step — refused without a recorded ratification",
 };
 
-const CLI = "python3 scripts/ideation_dashboard/cli.py";
+const CLI = "python3 src/opendox/cli.py";
 
 // A change document is gate-bearing when it is one of the OpenSpec change
 // documents (proposal / design / tasks / spec deltas) — purely from its path.

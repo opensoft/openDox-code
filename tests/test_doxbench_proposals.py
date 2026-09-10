@@ -21,7 +21,7 @@ import pytest
 from conftest import REPO_ROOT
 
 NODE = shutil.which("node")
-CHAT_MODEL_JS = (REPO_ROOT / "scripts" / "ideation_dashboard" / "web" /
+CHAT_MODEL_JS = (REPO_ROOT / "src" / "opendox" / "web" /
                  "views" / "doxbench-chat-model.js")
 
 _HARNESS = """

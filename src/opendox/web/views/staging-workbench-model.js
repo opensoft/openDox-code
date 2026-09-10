@@ -541,7 +541,7 @@ export const STAGING_AREA = "ideation/staging/";
 export const CREATE_TABS = ["docs", "lens", "outline"];
 export const STATUS_BRAINSTORM = "brainstorm";
 export const CREATE_ROUTE = "/actions/gate/create-document";
-export const CREATE_CLI = "python3 scripts/ideation_dashboard/cli.py";
+export const CREATE_CLI = "python3 src/opendox/cli.py";
 
 // A staged scope writes into its OWN topic folder; a cluster or a possible has
 // no topic folder, so it writes into the brainstorm area (design D7). The area

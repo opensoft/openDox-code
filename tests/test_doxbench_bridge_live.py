@@ -57,9 +57,9 @@ from conftest import REPO_ROOT  # noqa: F401  (sys.path side effect)
 
 import hermeticity  # noqa: E402  (after conftest's path insert, by construction)
 
-from ideation_dashboard import doxbench_bridge as br  # noqa: E402
-from ideation_dashboard import doxbench_mcp as mcp  # noqa: E402
-from ideation_dashboard.doxbench_model import (  # noqa: E402
+from opendox import doxbench_bridge as br  # noqa: E402
+from opendox import doxbench_mcp as mcp  # noqa: E402
+from opendox.doxbench_model import (  # noqa: E402
     ModelCatalog, ModelCatalogEntry,
 )
 

@@ -34,8 +34,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ideation_dashboard import authoring as authoring_mod
-from ideation_dashboard.boundary import HUMAN, OutputBoundary
+from opendox import authoring as authoring_mod
+from opendox.boundary import HUMAN, OutputBoundary
 
 
 def _core():

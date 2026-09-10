@@ -62,7 +62,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from ideation_dashboard import doxbench_knowledge  # noqa: E402
+from opendox import doxbench_knowledge  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # identity and the mount name (verification §3.2's realization note)

@@ -84,13 +84,13 @@ from __future__ import annotations
 
 import json
 
-from ideation_dashboard import doxbench_knowledge
-from ideation_dashboard import doxbench_packet
-from ideation_dashboard import doxbench_threads
+from opendox import doxbench_knowledge
+from opendox import doxbench_packet
+from opendox import doxbench_threads
 # The family's NON-BLANK rule (issue #263), imported rather than
 # restated: the type gate and this server boundary share one
 # implementation so they cannot drift into two spellings of one rule.
-from ideation_dashboard.doxbench_packet import states_something
+from opendox.doxbench_packet import states_something
 
 # The three FIXED WIRE STRINGS moved OUT of this module to the neutral
 # `scripts/wire_messages.py` (OQ-B re-plumb B-2, ruled on `#656`
@@ -102,7 +102,7 @@ from ideation_dashboard.doxbench_packet import states_something
 # siblings keep resolving for every existing caller (`serve.py`,
 # `serve_workbench.py`, `serve_project.py`, `serve_gate.py`,
 # `serve_projection.py`, and the suites that read them off `serve`).
-from wire_messages import (  # noqa: F401  (re-export)
+from .wire_messages import (  # noqa: F401  (re-export)
     HOSTED_SESSION_REFUSAL,
     JSON_CTYPE,
     JSON_OBJECT_BODY_REQUIRED,
@@ -1203,7 +1203,7 @@ def provider_retry_fact(before: tuple, after: tuple) -> dict | None:
     words, never a status code. The audit reference is disclosable by
     construction: the broker's declaration records no token material against
     one."""
-    from ideation_dashboard import doxbench_provider
+    from opendox import doxbench_provider
     fresh = fresh_ledger_events(before, after)
     if not any(getattr(event, "reason", None) == doxbench_provider.REASON_PAID_RETRY
                for event in fresh):

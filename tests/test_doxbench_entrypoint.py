@@ -31,11 +31,11 @@ import pytest
 
 from conftest import BASE_REPO, PINNED_REVISION  # noqa: F401  (sys.path side effect)
 
-from ideation_dashboard import cli as cli_mod
-from ideation_dashboard import doxbench_bridge as br
-from ideation_dashboard import doxbench_install as install_mod
-from ideation_dashboard import doxbench_model
-from ideation_dashboard import serve as serve_mod
+from opendox import cli as cli_mod
+from opendox import doxbench_bridge as br
+from opendox import doxbench_install as install_mod
+from opendox import doxbench_model
+from opendox import serve as serve_mod
 
 
 def _handler_class(httpd):

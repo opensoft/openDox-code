@@ -49,10 +49,10 @@ from conftest import REPO_ROOT
 
 from session_fixtures import build_scratch_repo
 
-from ideation_dashboard import branch_session as bs
-from ideation_dashboard import cli as cli_mod
-from ideation_dashboard import session_pr as session_pr_mod
-from ideation_dashboard import workbench as wb
+from opendox import branch_session as bs
+from opendox import cli as cli_mod
+from opendox import session_pr as session_pr_mod
+from opendox import workbench as wb
 
 SESSION_ALIAS = bs.notebook_alias("openxFactory", "draft/demo-topic")
 

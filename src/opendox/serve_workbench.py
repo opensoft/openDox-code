@@ -42,12 +42,12 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from ideation_dashboard import doxbench_abstract_store
-from ideation_dashboard import doxbench_knowledge
-from ideation_dashboard import doxbench_packet
-from ideation_dashboard import doxbench_threads
-from ideation_dashboard import snapshot_registry as registry_mod
-from ideation_dashboard.serve_wire import (
+from opendox import doxbench_abstract_store
+from opendox import doxbench_knowledge
+from opendox import doxbench_packet
+from opendox import doxbench_threads
+from openxdox import snapshot_registry as registry_mod
+from opendox.serve_wire import (
     DOXBENCH_ABSTRACT_REFUSED_PROSE_BYTES,
     DOXBENCH_ABSTRACT_REFUSED_SUBJECT_BYTES,
     DOXBENCH_ABSTRACT_REFUSED_SUBJECT_NOT_DISTILLABLE,
@@ -343,7 +343,7 @@ class WorkbenchRoutes:
         already diverged from it — different ref comparison, different exception
         breadth — which is precisely how the two would have drifted apart on the
         next change to what counts as a live session."""
-        from ideation_dashboard import doxbench_scope
+        from openxdox import doxbench_scope
         return doxbench_scope.is_live_session_ref(
             self.source.registry, key,
             repository=entry.repository or key.repository, ref=key.ref)
@@ -403,8 +403,8 @@ class WorkbenchRoutes:
         it — the one gate on this surface whose allowlist carries the thread
         prefix (`gate_routes.first_edit_gate_factory`, task 9.5). Built through
         that factory rather than beside it, so the widening has one spelling."""
-        from ideation_dashboard import gate_console
-        from ideation_dashboard import gate_routes
+        from openxdox import gate_console
+        from openxdox import gate_routes
         return gate_routes.first_edit_gate_factory(
             self.actor, gate_console.DEFAULT_RECORDS_DIR)(worktree)
 
@@ -540,7 +540,7 @@ class WorkbenchRoutes:
                 doxbench_error_status(DOXBENCH_ERR_INVALID_TURN_REQUEST),
                 doxbench_error_body(DOXBENCH_ERR_INVALID_TURN_REQUEST))
             return
-        from ideation_dashboard import doxbench_scope
+        from openxdox import doxbench_scope
         key = doxbench_scope.ScopeKey(
             repository=fields["repository"], ref=fields["ref"],
             tile_kind=fields["tile_kind"], tile_id=fields["tile_id"])
@@ -780,7 +780,7 @@ class WorkbenchRoutes:
             self._send_json(doxbench_error_status(DOXBENCH_ERR_CATALOG_UNAVAILABLE),
                             doxbench_error_body(DOXBENCH_ERR_CATALOG_UNAVAILABLE))
             return
-        from ideation_dashboard import doxbench_model
+        from opendox import doxbench_model
         if port := self._workbench_model_port():
             try:
                 catalog = port.catalog()
@@ -861,7 +861,7 @@ class WorkbenchRoutes:
         if not self.checkout_root:
             return None
         try:
-            from ideation_dashboard import doxbench_intake
+            from opendox import doxbench_intake
             return doxbench_intake.DeclarationStore(
                 doxbench_intake.declarations_path(Path(self.checkout_root)))
         except Exception:  # noqa: BLE001 - absence is a capability verdict
@@ -930,7 +930,7 @@ class WorkbenchRoutes:
             self._send_json(doxbench_error_status(refusal),
                             doxbench_error_body(refusal))
             return
-        from ideation_dashboard import doxbench_intake
+        from opendox import doxbench_intake
         store = self._workbench_declaration_store()
         if store is None:
             self._send_json(
@@ -946,7 +946,7 @@ class WorkbenchRoutes:
             # read first.
             disclosure = None
         offered = bool(disclosure and disclosure.get("broker"))
-        from ideation_dashboard import doxbench_binding
+        from opendox import doxbench_binding
         envelope: dict = {
             "kind": "workbench-model-intake",
             "offered": offered,
@@ -1013,9 +1013,9 @@ class WorkbenchRoutes:
             self._send_json(doxbench_error_status(refusal),
                             doxbench_error_body(refusal))
             return
-        from ideation_dashboard import doxbench_binding
-        from ideation_dashboard import doxbench_intake
-        from ideation_dashboard import doxbench_provider
+        from opendox import doxbench_binding
+        from opendox import doxbench_intake
+        from opendox import doxbench_provider
         store = self._workbench_declaration_store()
         if store is None:
             self._send_json(
@@ -1210,8 +1210,8 @@ class WorkbenchRoutes:
             self._send_json(doxbench_error_status(refusal),
                             doxbench_error_body(refusal))
             return
-        from ideation_dashboard import doxbench_intake
-        from ideation_dashboard import gate_console
+        from opendox import doxbench_intake
+        from openxdox import gate_console
         store = self._workbench_declaration_store()
         if store is None:
             self._send_json(
@@ -1296,7 +1296,7 @@ class WorkbenchRoutes:
         """The binding a pending declaration names, or None. Read through the
         ONE store both entrypoints read, so an approval cannot be recorded
         against a binding the port would never resolve."""
-        from ideation_dashboard import doxbench_binding
+        from opendox import doxbench_binding
         try:
             return doxbench_binding.BindingStore(
                 doxbench_binding.bindings_path(Path(self.checkout_root))
@@ -1384,7 +1384,7 @@ class WorkbenchRoutes:
         exactly what actually differs -- how the binding is DECLARED and how many
         buffers may ride -- rather than in a second copy of the eight fields that
         do not. Each family parser calls this, then adds its own half."""
-        from ideation_dashboard import doxbench_turns
+        from opendox import doxbench_turns
 
         if not isinstance(payload, dict):
             return None
@@ -1659,10 +1659,10 @@ class WorkbenchRoutes:
         transcript_turns = fields["transcript_turns"]
         turn_buffers = fields["turn_buffers"]
 
-        from ideation_dashboard import doxbench_hash
-        from ideation_dashboard import doxbench_model
-        from ideation_dashboard import doxbench_scope
-        from ideation_dashboard import doxbench_turns
+        from opendox import doxbench_hash
+        from opendox import doxbench_model
+        from openxdox import doxbench_scope
+        from opendox import doxbench_turns
 
         key = doxbench_scope.ScopeKey(repository=scope_fields["repository"],
                                       ref=scope_fields["ref"],
@@ -2601,10 +2601,10 @@ class WorkbenchRoutes:
         subject's saved bytes, the verification base, the model, the assembled
         request, the store, the conversation this generation is bound to, and
         only then a provider."""
-        from ideation_dashboard import doxbench_hash
-        from ideation_dashboard import doxbench_model
-        from ideation_dashboard import doxbench_scope
-        from ideation_dashboard import doxbench_turns
+        from opendox import doxbench_hash
+        from opendox import doxbench_model
+        from openxdox import doxbench_scope
+        from opendox import doxbench_turns
 
         # ---- step 1: the plane. The SAME three-part verdict the catalog and
         # chat-turn routes sit behind -- a loopback human console, a real
@@ -3106,7 +3106,7 @@ class WorkbenchRoutes:
         grace for the wrapper's bookkeeping, and an overrun returns the SAME
         fixed model_timeout outcome dispatch_turn itself would map. The late
         result is discarded unread (FR-020/FR-022)."""
-        from ideation_dashboard import doxbench_model
+        from opendox import doxbench_model
         try:
             deadline = doxbench_model.validated_timeout_seconds(
                 port.timeout_seconds)

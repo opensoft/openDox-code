@@ -43,20 +43,20 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import PurePosixPath
 
-from ideation_dashboard.doxbench_hash import (
+from opendox.doxbench_hash import (
     MAX_BUFFER_BYTES,
     ContentIdentity,
     content_identity,
     sha256_hex,
     utf8_size,
 )
-from ideation_dashboard import doxbench_packet
-from ideation_dashboard.doxbench_model import (
+from opendox import doxbench_packet
+from opendox.doxbench_model import (
     SERVER_MAX_INPUT_LIMIT_BYTES,
     SERVER_MAX_OUTPUT_LIMIT_BYTES,
 )
-from ideation_dashboard.doxbench_scope_types import ScopeKey, ScopeProjection
-from ideation_dashboard.doxbench_telemetry import (
+from opendox.doxbench_scope_types import ScopeKey, ScopeProjection
+from opendox.doxbench_telemetry import (
     OPERATION_CONTEXT_PACKET, PROVIDER_ROLE_RETRIEVAL, TurnUsage,
 )
 

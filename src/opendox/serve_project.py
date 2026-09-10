@@ -38,8 +38,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ideation_dashboard import action_errors
-from ideation_dashboard.serve_wire import (
+from opendox import action_errors
+from opendox.serve_wire import (
     AGENT_INVOCATION_REFUSAL,
     JSON_CTYPE,
     JSON_OBJECT_BODY_REQUIRED,
@@ -169,7 +169,7 @@ class ProjectRoutes:
             lambda command: _launch_editor(
                 command, configured_editor=bool(editor)))
         try:
-            from ideation_dashboard import authoring
+            from opendox import authoring
             argv = authoring.edit_command(entry.source_root, path, editor=editor)
             launcher(argv)
         # The wire response is fixed; full detail stays in the local server log.
@@ -193,7 +193,7 @@ class ProjectRoutes:
         if not isinstance(body, dict):
             self._send_error_code(action_errors.ERR_INVALID_BODY)
             return
-        from ideation_dashboard import notebook_action
+        from opendox import notebook_action
         self._run_notebook_action(notebook_action, body.get("tile_kind"), body.get("tile_id"))
 
     def _run_notebook_action(self, notebook_action, tile_kind, tile_id) -> None:
@@ -243,8 +243,8 @@ class ProjectRoutes:
         already carries is dropped: the register wins the moment the
         fulfilment lands, even before the descriptor's status flips."""
         import yaml
-        from ideation_dashboard.gate_console import DEFAULT_RECORDS_DIR
-        from ideation_dashboard.kickoff import (
+        from openxdox.gate_console import DEFAULT_RECORDS_DIR
+        from openxdox.kickoff import (
             dispatched_commission_rows, dispatched_commissions,
             discover_project_register)
         source = discover_project_register(Path(self.checkout_root))
