@@ -71,7 +71,7 @@ import types
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Protocol, runtime_checkable
 
-from ideation_dashboard.doxbench_memory_gateway import DECLARATION
+from opendox.doxbench_memory_gateway import DECLARATION
 
 # ---------------------------------------------------------------------------
 # refusals

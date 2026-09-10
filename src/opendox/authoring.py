@@ -314,7 +314,7 @@ def _classify_proposal(text: str):
     read exactly as it was written and one that cannot be encoded is read the
     way this corpus would read it rather than raising inside a gate.
     """
-    from corpus_adapter import DocumentId
+    from .corpus_adapter import DocumentId
     from corpus_adapter_openxfactory import home_corpus
 
     with tempfile.TemporaryDirectory(prefix="xf-proposal-") as staged:

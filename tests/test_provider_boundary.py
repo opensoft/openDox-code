@@ -51,7 +51,7 @@ import pytest
 
 from conftest import REPO_ROOT
 
-from ideation_dashboard import doxbench_provider as provider_mod
+from opendox import doxbench_provider as provider_mod
 
 PACKAGE = REPO_ROOT / "scripts" / "ideation_dashboard"
 WEB = PACKAGE / "web"

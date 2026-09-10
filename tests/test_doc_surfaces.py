@@ -36,7 +36,7 @@ import pytest
 
 from conftest import REPO_ROOT
 
-WEB = REPO_ROOT / "scripts" / "ideation_dashboard" / "web"
+WEB = REPO_ROOT / "src" / "opendox" / "web"
 DOCS_JS = WEB / "views" / "docs.js"
 LINEAGE_JS = WEB / "views" / "lineage.js"
 HELPERS_JS = WEB / "views" / "helpers.js"

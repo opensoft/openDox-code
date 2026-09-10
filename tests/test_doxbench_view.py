@@ -295,10 +295,10 @@ EDITOR_JS = (
     / "doxbench-editor.js"
 )
 VIEWER_JS = (
-    REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "views" / "viewer.js"
+    REPO_ROOT / "src" / "opendox" / "web" / "views" / "viewer.js"
 )
 VENDOR_MARKDOWN_JS = (
-    REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "vendor" / "markdown-it.min.js"
+    REPO_ROOT / "src" / "opendox" / "web" / "vendor" / "markdown-it.min.js"
 )
 PREVIEW_CASES_PATH = (
     REPO_ROOT
@@ -2857,7 +2857,7 @@ def test_the_controller_is_fully_inert_after_destroy(editor_results):
 # ---------------------------------------------------------------------------
 
 STAGING_WORKBENCH_JS = (
-    REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "views" / "staging-workbench.js"
+    REPO_ROOT / "src" / "opendox" / "web" / "views" / "staging-workbench.js"
 )
 
 

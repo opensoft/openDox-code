@@ -36,8 +36,8 @@ import pytest
 
 from conftest import BASE_REPO, REPO_ROOT, find_openxfactory_validator
 
-from ideation_dashboard import workbench as wb
-from ideation_dashboard.boundary import BoundaryViolation, OutputBoundary, STAGING_DIR
+from opendox import workbench as wb
+from opendox.boundary import BoundaryViolation, OutputBoundary, STAGING_DIR
 
 VALIDATOR = find_openxfactory_validator()
 

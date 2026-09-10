@@ -78,8 +78,8 @@ import sys
 import threading
 from pathlib import Path
 
-from ideation_dashboard import doxbench_bridge as bridge_mod
-from ideation_dashboard.doxbench_model import ModelCatalog, ModelCatalogEntry
+from opendox import doxbench_bridge as bridge_mod
+from opendox.doxbench_model import ModelCatalog, ModelCatalogEntry
 
 # --------------------------------------------------------------------------
 # the harness-side declaration
@@ -248,7 +248,7 @@ def brokered_model_port_factory(binding, *, runner=None, opener=None,
     every turn and discard a live one. The seams (`runner`, `opener`, `clock`,
     `notice`) pass through so a test can exercise a turn without a broker and
     without a provider; production declares none of them."""
-    from ideation_dashboard import doxbench_provider as provider_mod
+    from opendox import doxbench_provider as provider_mod
 
     seams = {name: value for name, value in (
         ("runner", runner), ("opener", opener), ("clock", clock),
@@ -308,8 +308,8 @@ def declared_model_port_factory(session_root: Path | str, *,
     unaffected, byte for byte — it was declared by hand in the settings file by
     the operator, and the operator is who approval is a record of (see
     `doxbench_intake`'s module docstring for why the rule is not inverted)."""
-    from ideation_dashboard import doxbench_binding as binding_mod
-    from ideation_dashboard import doxbench_intake as intake_mod
+    from opendox import doxbench_binding as binding_mod
+    from opendox import doxbench_intake as intake_mod
 
     store = binding_mod.BindingStore(
         bindings_path if bindings_path is not None

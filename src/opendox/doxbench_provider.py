@@ -96,9 +96,9 @@ import urllib.request
 from collections.abc import Mapping
 from datetime import datetime, timezone
 
-from ideation_dashboard import doxbench_binding as binding_mod
-from ideation_dashboard import doxbench_bridge as bridge_mod
-from ideation_dashboard import doxbench_model as model_mod
+from opendox import doxbench_binding as binding_mod
+from opendox import doxbench_bridge as bridge_mod
+from opendox import doxbench_model as model_mod
 
 #: THIS MODULE'S OWN NAME, declared so the structural boundary test and the
 #: module cannot drift into naming two different files. The test asserts the

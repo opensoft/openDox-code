@@ -24,11 +24,11 @@ import pytest
 
 from conftest import REPO_ROOT
 
-from ideation_dashboard import serve as serve_mod
+from opendox import serve as serve_mod
 
 NODE = shutil.which("node")
 
-CHAT_MODEL_JS = (REPO_ROOT / "scripts" / "ideation_dashboard" / "web" /
+CHAT_MODEL_JS = (REPO_ROOT / "src" / "opendox" / "web" /
                  "views" / "doxbench-chat-model.js")
 
 _HARNESS = """
@@ -258,7 +258,7 @@ def test_rekey_isolates_browser_session_state_per_scope_fr011(chat_results):
 # discipline. The module imports ONLY doxbench-chat-model.js (+ viewer seam).
 # ---------------------------------------------------------------------------
 
-CHAT_VIEW_JS = (REPO_ROOT / "scripts" / "ideation_dashboard" / "web" /
+CHAT_VIEW_JS = (REPO_ROOT / "src" / "opendox" / "web" /
                 "views" / "doxbench-chat.js")
 
 _VIEW_HARNESS = """
@@ -1368,7 +1368,7 @@ def test_the_stale_console_token_mapping_covers_both_route_spellings():
     source = CHAT_VIEW_JS.read_text(encoding="utf-8")
     assert '=== "agent_invocation"' in source
     assert '=== "console_required"' in source
-    from ideation_dashboard import serve as serve_mod
+    from opendox import serve as serve_mod
     assert serve_mod.DOXBENCH_ERR_CONSOLE_REQUIRED == "console_required"
 
 

@@ -43,7 +43,7 @@ import dataclasses
 import threading
 from collections.abc import Mapping
 
-from ideation_dashboard.doxbench_scope_types import ScopeKey
+from opendox.doxbench_scope_types import ScopeKey
 
 # ---------------------------------------------------------------------------
 # the declared-absence shape

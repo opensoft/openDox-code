@@ -27,7 +27,7 @@ import pytest
 from conftest import REPO_ROOT
 
 NODE = shutil.which("node")
-WEB = REPO_ROOT / "scripts" / "ideation_dashboard" / "web"
+WEB = REPO_ROOT / "src" / "opendox" / "web"
 
 _DOM_SHIM = r"""
 class Node {

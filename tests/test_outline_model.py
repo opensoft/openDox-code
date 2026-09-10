@@ -20,7 +20,7 @@ from tempfile import TemporaryDirectory
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MODEL_JS = REPO_ROOT / "scripts/ideation_dashboard/web/views/outline-model.js"
+MODEL_JS = REPO_ROOT / "src/opendox/web/views/outline-model.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")

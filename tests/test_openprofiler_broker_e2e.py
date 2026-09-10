@@ -52,9 +52,9 @@ import pytest
 
 from conftest import REPO_ROOT  # noqa: F401  (path setup)
 
-from ideation_dashboard import doxbench_binding as binding_mod
-from ideation_dashboard import doxbench_install as install_mod
-from ideation_dashboard import doxbench_provider as provider_mod
+from opendox import doxbench_binding as binding_mod
+from opendox import doxbench_install as install_mod
+from opendox import doxbench_provider as provider_mod
 
 #: The credential this test enrols. A SENTINEL: long, unique, and impossible to
 #: produce by accident, so a sweep that finds it has found the real thing. On

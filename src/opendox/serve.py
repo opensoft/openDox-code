@@ -106,9 +106,6 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 # The ROUTE EXTENSION POINT (`split-opendox-two-layer-product` § 2.4, design
 # § D2). A neutral module at the top of `scripts/`, belonging to neither
@@ -119,8 +116,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
 # that way.
 import route_extension  # noqa: E402
 
-from ideation_dashboard import action_errors  # noqa: E402
-from ideation_dashboard import doxbench_abstract_store  # noqa: E402
+from opendox import action_errors  # noqa: E402
+from opendox import doxbench_abstract_store  # noqa: E402
 # The INSTALL-TIME model-provider declaration the two entrypoints make.
 # Hoisted to module scope by add-doxbench-distilled-abstract §5: the graph is
 # acyclic (`doxbench_install` -> `doxbench_bridge` -> `doxbench_mcp`/
@@ -131,11 +128,11 @@ from ideation_dashboard import doxbench_abstract_store  # noqa: E402
 # ENTRYPOINT has any business reading an install declaration"; that is a rule
 # about who CALLS `model_port_factory`, which is still exactly one place, and
 # a deferred import was never what enforced it.
-from ideation_dashboard import doxbench_install  # noqa: E402
-from ideation_dashboard import doxbench_knowledge  # noqa: E402
-from ideation_dashboard import doxbench_packet  # noqa: E402
-from ideation_dashboard import doxbench_telemetry  # noqa: E402
-from ideation_dashboard import snapshot_registry as registry_mod  # noqa: E402
+from opendox import doxbench_install  # noqa: E402
+from opendox import doxbench_knowledge  # noqa: E402
+from opendox import doxbench_packet  # noqa: E402
+from opendox import doxbench_telemetry  # noqa: E402
+from openxdox import snapshot_registry as registry_mod  # noqa: E402
 # THE BY-FUNCTION SPLIT (`split-opendox-two-layer-product` § 2.4, PRs 2 and 3
 # of 4). The openDox column's routes live in `serve_workbench.py` (the doxBench
 # workbench surface) and `serve_project.py` (projects, the notebook tile action,
@@ -167,12 +164,12 @@ from ideation_dashboard import snapshot_registry as registry_mod  # noqa: E402
 # resolve for every reader that already had them.
 # That is what the `F401`s below declare: names imported to be RE-EXPORTED,
 # not names this module happens not to use yet.
-from ideation_dashboard import serve_gate  # noqa: E402
+from openxdox import serve_gate  # noqa: E402
 from ideation_dashboard import serve_openxfactory_lanes  # noqa: E402
-from ideation_dashboard import serve_project  # noqa: E402
-from ideation_dashboard import serve_projection  # noqa: E402
-from ideation_dashboard import serve_workbench  # noqa: E402
-from ideation_dashboard.serve_gate import (  # noqa: E402,F401
+from opendox import serve_project  # noqa: E402
+from openxdox import serve_projection  # noqa: E402
+from opendox import serve_workbench  # noqa: E402
+from openxdox.serve_gate import (  # noqa: E402,F401
     ACTIONS_GATE_PREFIX,
 )
 from ideation_dashboard.serve_openxfactory_lanes import (  # noqa: E402,F401
@@ -182,13 +179,13 @@ from ideation_dashboard.serve_openxfactory_lanes import (  # noqa: E402,F401
     ACTIONS_STAGING_SEED_ROUTE,
     COMMITTED_INTENTS_ROUTE,
 )
-from ideation_dashboard.serve_project import (  # noqa: E402,F401
+from opendox.serve_project import (  # noqa: E402,F401
     _edit_request_fields,
     _launch_editor,
     _listed_source_paths,
     _resolved_listed_edit_entry,
 )
-from ideation_dashboard.serve_projection import (  # noqa: E402,F401
+from openxdox.serve_projection import (  # noqa: E402,F401
     BARE_SOURCE_ROUTE,
     SNAPSHOT_INDEX_ROUTE,
     SOURCE_PREFIX,
@@ -196,7 +193,7 @@ from ideation_dashboard.serve_projection import (  # noqa: E402,F401
     hosted_ref_refused,
     resolve_source_path,
 )
-from ideation_dashboard.serve_wire import (  # noqa: E402,F401
+from opendox.serve_wire import (  # noqa: E402,F401
     AGENT_INVOCATION_REFUSAL,
     CONTEXT_REDUCED_REASON_MAX_LENGTH,
     HOSTED_SESSION_REFUSAL,
@@ -531,7 +528,7 @@ def _checkout_real(checkout_root: Path | str) -> bool:
     reaching the predicate through `generator` would newly require PyYAML in a
     startup path that serves snapshots and scans nothing. Imported lazily, as this
     module does for every sibling."""
-    from ideation_dashboard.corpus_root import corpus_scan_defect
+    from openxdox.corpus_root import corpus_scan_defect
     return corpus_scan_defect(checkout_root) is None
 
 
@@ -549,7 +546,7 @@ def resolve_actor(checkout_root: Path | str, override: str | None = None) -> str
     that cannot be authenticated resolves to None, which is this surface's
     fail-closed spelling: the plane comes up with gate actions OFF rather than
     with a fabricated identity attached to them."""
-    from ideation_dashboard import actor_identity
+    from opendox import actor_identity
 
     if override and str(override).strip():
         return actor_identity.authenticated_actor_or_none(
@@ -575,7 +572,7 @@ def real_notebook_adapter():
     `serve()` (which `main()` runs) and the CLI's `generate-and-open` — declare
     this factory explicitly. A caller that declares no adapter gets a plane with
     no notebook capability, which FR-042 already defines as a complete session."""
-    from ideation_dashboard import workbench
+    from opendox import workbench
 
     return workbench.NotebookAdapter()
 
@@ -826,7 +823,7 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         try:
             if self.pull_request_factory is not None:
                 return self.pull_request_factory()
-            from ideation_dashboard.session_pr import GhPullRequests
+            from opendox.session_pr import GhPullRequests
             return GhPullRequests(Path(self.checkout_root))
         except Exception:  # noqa: BLE001 - absence is a capability verdict
             return None
@@ -1239,7 +1236,7 @@ def _bootstrap_session_entries(source, checkout_root: Path,
     repository = repository or served_repository(source)
     if not repository:
         return
-    from ideation_dashboard import branch_session as session_mod
+    from opendox import branch_session as session_mod
     report = session_mod.bootstrap_sessions(
         source.registry, repository=repository,
         checkout_root=Path(checkout_root))
@@ -1350,7 +1347,7 @@ def build_server(
     have silently lost `/snapshot-index.json`, `/source/` and every gate verb
     from the servers in the file that tests this very seam. This line is also
     the one the § 3 carve deletes rather than moves."""
-    from ideation_dashboard import doxbench_turns
+    from opendox import doxbench_turns
     # Imported HERE rather than at module scope, for the reason that is
     # actually true on this branch — narrower than the one this comment gave
     # before (Copilot review `PRRT_kwDOTAvnrs6f_iG1`): the profile is a WIRING
@@ -1368,7 +1365,6 @@ def build_server(
     # time, so only `cli.py`'s read of them pays. `cli.py` names the same
     # profile at module scope because a parser is built from it at import time;
     # a server is not.
-    from ideation_dashboard import profile_openxfactory
 
     # FIRST, before a socket, a checkout read or a session bootstrap: a
     # malformed, duplicated, overlapping or non-conforming binding refuses the
@@ -1611,7 +1607,7 @@ def _source_roots_from_args(values) -> dict:
 # Placeholders only, for the same reason `cli._GENERATE_SHAPE` carries none: a real
 # path in the message would re-create the confusion it is ending.
 _SERVE_SHAPE = (
-    "python3 scripts/ideation_dashboard/serve.py \\\n"
+    "python3 src/opendox/serve.py \\\n"
     "  --snapshot <the snapshot json to serve> \\\n"
     "  --checkout-root <path to the corpus checkout>"
 )
@@ -1636,7 +1632,7 @@ def _refuse_impossible_checkout_root(value: Path | str) -> int:
         `_checkout_real` reports false and the write-bearing affordances stay off.
         So it serves, and says loudly what it will not be able to do — which on a
         LOCAL run is the same wrong path, diagnosed."""
-    from ideation_dashboard.corpus_root import corpus_root_refusal, corpus_scan_defect
+    from openxdox.corpus_root import corpus_root_refusal, corpus_scan_defect
     path = Path(value)
     if not path.is_dir():
         print(corpus_root_refusal(value, flag="--checkout-root",

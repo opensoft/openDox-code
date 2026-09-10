@@ -56,11 +56,11 @@ import pytest
 
 from conftest import REPO_ROOT  # noqa: F401  (path setup)
 
-from ideation_dashboard import cli as cli_mod
-from ideation_dashboard import doxbench_binding as binding_mod
-from ideation_dashboard import doxbench_install as install_mod
-from ideation_dashboard import doxbench_model as model_mod
-from ideation_dashboard import doxbench_provider as provider_mod
+from opendox import cli as cli_mod
+from opendox import doxbench_binding as binding_mod
+from opendox import doxbench_install as install_mod
+from opendox import doxbench_model as model_mod
+from opendox import doxbench_provider as provider_mod
 
 # The credential a human types. A SENTINEL: long, unique, and impossible to
 # produce by accident, so a sweep that finds it has found the real thing.
@@ -368,7 +368,7 @@ def test_a_hosted_install_with_a_bindings_document_still_serves(tmp_path,
 
     resolve = install_mod.declared_model_port_factory(
         tmp_path / "sessions", checkout_root=checkout)
-    from ideation_dashboard import doxbench_bridge as bridge_mod
+    from opendox import doxbench_bridge as bridge_mod
     assert isinstance(resolve(), bridge_mod.OmpHarnessBridge)
     assert "bindings document could not be read" in capsys.readouterr().err
 
@@ -1152,7 +1152,7 @@ def test_a_checkout_with_no_bindings_resolves_exactly_the_harness_declaration(
     resolve = install_mod.declared_model_port_factory(
         tmp_path / "sessions", checkout_root=checkout)
     port = resolve()
-    from ideation_dashboard import doxbench_bridge as bridge_mod
+    from opendox import doxbench_bridge as bridge_mod
     assert isinstance(port, bridge_mod.OmpHarnessBridge)
     assert [entry.model_id for entry in install_mod.HARNESS_CATALOG.entries] \
         == [install_mod.HARNESS_MODEL_ID]
@@ -1180,7 +1180,7 @@ def test_an_unreadable_bindings_document_falls_back_and_says_so(tmp_path,
                     encoding="utf-8")
     resolve = install_mod.declared_model_port_factory(
         tmp_path / "sessions", checkout_root=checkout)
-    from ideation_dashboard import doxbench_bridge as bridge_mod
+    from opendox import doxbench_bridge as bridge_mod
     assert isinstance(resolve(), bridge_mod.OmpHarnessBridge)
     assert "bindings document could not be read" in capsys.readouterr().err
 
@@ -1191,7 +1191,7 @@ def test_the_unconfigured_refusal_is_byte_identical_to_what_it_always_was():
     Nothing in this change may move it: a plane with no model port refuses
     exactly as it did, with the same code, the same status and the same
     sentence."""
-    from ideation_dashboard import serve as serve_mod
+    from opendox import serve as serve_mod
     code = serve_mod.DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE
     assert code == "model_capability_unavailable"
     assert serve_mod.doxbench_error_status(code) == 403
@@ -1286,7 +1286,7 @@ def test_the_scrubbed_environment_still_carries_what_a_broker_needs():
     bare program name resolves. The allowlist already carries both, so the
     reconciliation needed no widening of it — which is worth asserting, because
     a broker that could not find its own store would have been a reason to."""
-    from ideation_dashboard import doxbench_bridge as bridge_mod
+    from opendox import doxbench_bridge as bridge_mod
     assert "HOME" in bridge_mod.INHERITED_ENVIRONMENT
     assert "PATH" in bridge_mod.INHERITED_ENVIRONMENT
 

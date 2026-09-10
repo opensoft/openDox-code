@@ -74,9 +74,9 @@ import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 
-from ideation_dashboard.doxbench_hash import utf8_size
-from ideation_dashboard.doxbench_scope_types import ScopeKey, ScopeProjection
-from ideation_dashboard.doxbench_threads import (
+from opendox.doxbench_hash import utf8_size
+from opendox.doxbench_scope_types import ScopeKey, ScopeProjection
+from opendox.doxbench_threads import (
     DocumentThread, render_state_header, render_thread,
 )
 

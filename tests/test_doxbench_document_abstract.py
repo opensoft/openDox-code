@@ -37,9 +37,9 @@ import pytest
 
 from conftest import REPO_ROOT  # noqa: F401  (sys.path side effect)
 
-from ideation_dashboard import doxbench_knowledge as kn  # noqa: E402
-from ideation_dashboard import doxbench_packet as pk  # noqa: E402
-from ideation_dashboard import doxbench_threads as dt  # noqa: E402
+from opendox import doxbench_knowledge as kn  # noqa: E402
+from opendox import doxbench_packet as pk  # noqa: E402
+from opendox import doxbench_threads as dt  # noqa: E402
 
 MODULE_PATH = (REPO_ROOT / "scripts" / "ideation_dashboard"
                / "doxbench_knowledge.py")
@@ -278,7 +278,7 @@ def test_the_default_fake_ports_constant_answer_is_refused():
     the same constant for every envelope, so a suite that only ran the default
     fake through the verifier would prove nothing. It is REFUSED: the constant
     names no subject at all."""
-    from ideation_dashboard.doxbench_model import FakeWorkbenchModelPort
+    from opendox.doxbench_model import FakeWorkbenchModelPort
 
     port = FakeWorkbenchModelPort()
     result = port.dispatch(object())

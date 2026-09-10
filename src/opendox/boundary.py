@@ -21,7 +21,7 @@ over the corpus, and the human-only gate) at the top of `output_boundary.py`.
 
 from __future__ import annotations
 
-from output_boundary import (  # noqa: F401  (re-export)
+from .output_boundary import (  # noqa: F401  (re-export)
     AGENT,
     DOCUMENT_ESCAPE,
     GATE_SIDE_EFFECT,

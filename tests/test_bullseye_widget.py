@@ -37,7 +37,7 @@ import pytest
 
 from conftest import REPO_ROOT  # noqa: F401 (sys.path side effect)
 
-WEB = REPO_ROOT / "scripts" / "ideation_dashboard" / "web"
+WEB = REPO_ROOT / "src" / "opendox" / "web"
 BULLSEYE_JS = WEB / "views" / "bullseye.js"
 LENS_MODEL_JS = WEB / "views" / "lens-model.js"
 LENS_JS = WEB / "views" / "lens.js"

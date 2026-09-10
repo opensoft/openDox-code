@@ -25,7 +25,7 @@ import pytest
 
 from session_fixtures import GATE_RECORDS_PREFIX, build_scratch_repo
 
-from ideation_dashboard import session_git as sg
+from opendox import session_git as sg
 
 
 class RecordingRunner:

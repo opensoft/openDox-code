@@ -59,7 +59,7 @@ import yaml
 # the bound and its key half keep resolving for every existing caller
 # (`authoring`, `gate_console`, `gate_routes`, the suite, and `lens-model.js`'s
 # comment, which names `workbench.MAX_SLUG_CHARS` as its twin).
-from path_slug import (  # noqa: F401  (re-export)
+from .path_slug import (  # noqa: F401  (re-export)
     MAX_SLUG_CHARS,
     _SLUG_KEY_DIGEST_CHARS,
     _SLUG_KEY_SEPARATOR,
@@ -67,7 +67,7 @@ from path_slug import (  # noqa: F401  (re-export)
     slug,
 )
 from .boundary import OutputBoundary
-from .snapshot import find_validator
+from openxdox.snapshot import find_validator
 
 # --------------------------------------------------------------------------
 # contract constants (mirror ideation-workbench.schema.yaml — the READ-ONLY

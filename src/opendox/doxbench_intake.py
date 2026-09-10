@@ -58,7 +58,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ideation_dashboard import doxbench_binding as binding_mod
+from opendox import doxbench_binding as binding_mod
 
 # ---------------------------------------------------------------------------
 # the record's identity (the workspace rule: every YAML carries both)

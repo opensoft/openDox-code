@@ -23,7 +23,7 @@ import re
 
 from conftest import REPO_ROOT
 
-WEB = REPO_ROOT / "scripts" / "ideation_dashboard" / "web"
+WEB = REPO_ROOT / "src" / "opendox" / "web"
 EDITOR_JS = WEB / "views" / "doxbench-editor.js"
 SHELL_JS = WEB / "views" / "staging-workbench.js"
 STYLES_CSS = WEB / "styles.css"
@@ -153,7 +153,7 @@ def test_long_text_wraps_instead_of_overflowing():
 # ---------------------------------------------------------------------------
 
 def test_the_view_tablist_implements_the_apg_roving_pattern():
-    source = (REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "views"
+    source = (REPO_ROOT / "src" / "opendox" / "web" / "views"
               / "doxbench-editor.js").read_text(encoding="utf-8")
     # roving tabindex maintained by the one function that owns what is on screen
     assert "tabIndex = selected ? 0 : -1" in source
@@ -214,7 +214,7 @@ def test_the_model_selector_sits_by_send_and_states_why_send_is_unreachable():
     reason must be associated PROGRAMMATICALLY rather than living in a `title`
     a screen reader may never surface — so the sentence stays in the DOM,
     sr-only, as the button's `aria-describedby` target."""
-    rail = (REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "views"
+    rail = (REPO_ROOT / "src" / "opendox" / "web" / "views"
             / "doxbench-chat.js").read_text(encoding="utf-8")
     assert 'selector.setAttribute("aria-label", "approved model")' in rail
     assert 'const sendrow = el("div", "doxchat-sendrow")' in rail
@@ -263,7 +263,7 @@ def test_the_working_subject_box_says_what_it_is_and_what_it_does():
     never a replacement: a placeholder disappears the moment a human types, so it
     is not an accessible name and the `aria-label` stays. The TITLE carries what
     the value DOES, which is the half the annotation actually asked about."""
-    rail = (REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "views"
+    rail = (REPO_ROOT / "src" / "opendox" / "web" / "views"
             / "doxbench-chat.js").read_text(encoding="utf-8")
     # The accessible name is untouched by the affordance.
     assert 'subjectInput.setAttribute("aria-label", "working subject")' in rail
@@ -450,7 +450,7 @@ def test_the_retired_buffer_tablist_is_not_rendered_as_a_control():
     buffer" and "which view" in one panel is how a design conversation stops
     being able to say which one it means. The buffer strip is gone as a
     RENDERED control; its labels survive only as accessible names."""
-    source = (REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "views"
+    source = (REPO_ROOT / "src" / "opendox" / "web" / "views"
               / "doxbench-editor.js").read_text(encoding="utf-8")
     assert "DOXBENCH_BUFFER_TABS" not in source
     assert "DOXBENCH_VIEW_TABS" in source

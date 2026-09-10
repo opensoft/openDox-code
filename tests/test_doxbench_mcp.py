@@ -24,8 +24,8 @@ import pytest
 
 from conftest import REPO_ROOT  # noqa: F401  (sys.path side effect)
 
-from ideation_dashboard import doxbench_knowledge as kn  # noqa: E402
-from ideation_dashboard import doxbench_mcp as mcp  # noqa: E402
+from opendox import doxbench_knowledge as kn  # noqa: E402
+from opendox import doxbench_mcp as mcp  # noqa: E402
 
 
 def _manifest(tmp_path):
@@ -108,7 +108,7 @@ def test_a_name_the_harness_would_rewrite_is_refused_rather_than_pinned():
     collapses repeats — so a server or tool name carrying a digit, a hyphen or
     a capital mounts under a DIFFERENT string than it is spelled with, and a pin
     that did not know that would pin a lie."""
-    import ideation_dashboard.doxbench_mcp as module
+    import opendox.doxbench_mcp as module
 
     original = module.MCP_SERVER_NAME
     try:

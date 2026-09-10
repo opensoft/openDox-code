@@ -38,7 +38,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests"))
 import subcommand_extension  # noqa: E402
 from import_scan import imported_modules, names_a_forbidden_package  # noqa: E402
 
-from ideation_dashboard import cli as cli_mod  # noqa: E402
+from opendox import cli as cli_mod  # noqa: E402
 
 MODULE = REPO_ROOT / "scripts" / "subcommand_extension.py"
 

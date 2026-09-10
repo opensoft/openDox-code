@@ -26,7 +26,7 @@ import pytest
 
 from conftest import REPO_ROOT  # noqa: F401  (sys.path side effect)
 
-from ideation_dashboard import doxbench_knowledge as kn  # noqa: E402
+from opendox import doxbench_knowledge as kn  # noqa: E402
 
 MODULE_PATH = (REPO_ROOT / "scripts" / "ideation_dashboard"
                / "doxbench_knowledge.py")

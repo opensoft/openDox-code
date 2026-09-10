@@ -43,8 +43,8 @@ from conftest import REPO_ROOT
 from test_doxbench_view import _EDITOR_DOM_SHIM
 
 NODE = shutil.which("node")
-VIEWS = REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "views"
-VENDOR = REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "vendor"
+VIEWS = REPO_ROOT / "src" / "opendox" / "web" / "views"
+VENDOR = REPO_ROOT / "src" / "opendox" / "web" / "vendor"
 
 _COMPOSITION_HARNESS = _EDITOR_DOM_SHIM + r"""
 import { createRequire } from 'node:module';

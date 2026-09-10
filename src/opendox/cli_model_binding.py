@@ -17,7 +17,7 @@ import dataclasses
 import sys
 from pathlib import Path
 
-from ideation_dashboard import doxbench_binding as binding_mod
+from opendox import doxbench_binding as binding_mod
 
 
 # ===========================================================================
@@ -128,7 +128,7 @@ def cmd_model_binding_set_credential(args: argparse.Namespace, *,
     none can outlive the call, be echoed in a message, or reach an exception.
     It is deliberately NOT a command-line argument: an argv is visible in the
     process table and lands in a shell history."""
-    from ideation_dashboard import doxbench_provider as provider_mod
+    from opendox import doxbench_provider as provider_mod
 
     store = _binding_store(args)
     try:

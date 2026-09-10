@@ -53,7 +53,7 @@ if __name__ == "__main__":
     # Handing over here means the body below only ever executes as a package
     # module — under whichever of the spellings imported it — which is what lets
     # every line beneath this one bind its siblings relatively.
-    from ideation_dashboard import cli as _package_cli
+    from opendox import cli as _package_cli
 
     sys.exit(_package_cli.main())
 
@@ -64,22 +64,22 @@ if __name__ == "__main__":
 # `boundary.py` spells `output_boundary`.
 import subcommand_extension  # noqa: E402
 
-from ideation_dashboard import actor_identity as actor_mod  # noqa: E402
-from ideation_dashboard import authoring as authoring_mod  # noqa: E402
-from ideation_dashboard import branch_session as branch_session_mod  # noqa: E402
-from ideation_dashboard import doxbench_install as install_mod  # noqa: E402
-from ideation_dashboard import doxbench_knowledge as knowledge_mod  # noqa: E402
-from ideation_dashboard import gate_console as gate_mod  # noqa: E402
-from ideation_dashboard import serve as serve_mod  # noqa: E402
-from ideation_dashboard import snapshot as snapshot_mod  # noqa: E402
-from ideation_dashboard import workbench as workbench_mod  # noqa: E402
-from ideation_dashboard.boundary import (  # noqa: E402
+from opendox import actor_identity as actor_mod  # noqa: E402
+from opendox import authoring as authoring_mod  # noqa: E402
+from opendox import branch_session as branch_session_mod  # noqa: E402
+from opendox import doxbench_install as install_mod  # noqa: E402
+from opendox import doxbench_knowledge as knowledge_mod  # noqa: E402
+from openxdox import gate_console as gate_mod  # noqa: E402
+from opendox import serve as serve_mod  # noqa: E402
+from openxdox import snapshot as snapshot_mod  # noqa: E402
+from opendox import workbench as workbench_mod  # noqa: E402
+from opendox.boundary import (  # noqa: E402
     BoundaryViolation, HumanGate, OutputBoundary,
 )
-from ideation_dashboard.corpus_root import (  # noqa: E402
+from openxdox.corpus_root import (  # noqa: E402
     SCANNED_ROOTS, corpus_root_refusal,
 )
-from ideation_dashboard.generator import (  # noqa: E402
+from openxdox.generator import (  # noqa: E402
     generate_snapshot, is_rfc3339_datetime,
 )
 
@@ -101,7 +101,6 @@ from ideation_dashboard.generator import (  # noqa: E402
 # under, so the core, its three columns and the composition point are always one
 # coherent set: whichever spelling reaches the CLI gets columns whose `_core()`
 # resolves back to the very module object that is running.
-from . import profile_openxfactory  # noqa: E402
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -110,7 +109,7 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 # message whose whole job is to end a path-namespace confusion — and only flags
 # this parser really accepts.
 _GENERATE_SHAPE = (
-    "python3 scripts/ideation_dashboard/cli.py generate-and-open \\\n"
+    "python3 src/opendox/cli.py generate-and-open \\\n"
     "  --repo-root <path to the corpus checkout> \\\n"
     "  --repository <that checkout's repository id>"
 )
@@ -574,7 +573,7 @@ def _session_registry(checkout_root: Path, repository: str | None):
 
     This is the ONE place a CLI verb obtains a registry — every session-bearing
     verb this feature adds goes through it."""
-    from ideation_dashboard.snapshot_registry import SnapshotRegistry
+    from openxdox.snapshot_registry import SnapshotRegistry
 
     registry = SnapshotRegistry()
     report = branch_session_mod.bootstrap_sessions(
@@ -632,7 +631,7 @@ def _notebook_port(repo_root: Path):
 
     A named seam purely so a test injects `FakeNotebookAdapter`: no test may create
     a real notebook (FR-043)."""
-    from ideation_dashboard import workbench as wb_mod
+    from opendox import workbench as wb_mod
 
     return wb_mod.NotebookAdapter()
 
@@ -776,7 +775,7 @@ def _pull_request_port(repo_root: Path):
 
     It is a named seam purely so a test can inject `FakePullRequests`: no test may
     perform a real remote write (quickstart step 6)."""
-    from ideation_dashboard.session_pr import GhPullRequests
+    from opendox.session_pr import GhPullRequests
 
     return GhPullRequests(repo_root)
 
@@ -976,7 +975,7 @@ def main(argv: list[str] | None = None, *,
 # core re-exports must be the columns of its OWN package spelling.
 # ---------------------------------------------------------------------------
 
-from .cli_gate import (  # noqa: E402,F401
+from openxdox.cli_gate import (  # noqa: E402,F401
     cmd_gate_abandon_session, cmd_gate_cleanup_abandoned_branch,
     cmd_gate_create_document, cmd_gate_create_project, cmd_gate_demote,
     cmd_gate_derive_possibles, cmd_gate_dispose_possible, cmd_gate_edit_apply,

@@ -66,9 +66,9 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 
-from ideation_dashboard import doxbench_mcp, doxbench_threads
-from ideation_dashboard.doxbench_hash import utf8_size
-from ideation_dashboard.doxbench_model import (
+from opendox import doxbench_mcp, doxbench_threads
+from opendox.doxbench_hash import utf8_size
+from opendox.doxbench_model import (
     EMPTY_CATALOG, ModelCatalog, validated_timeout_seconds,
 )
 

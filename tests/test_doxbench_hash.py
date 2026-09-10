@@ -16,7 +16,7 @@ import pytest
 
 from conftest import FIXTURES, REPO_ROOT
 
-from ideation_dashboard.doxbench_hash import (
+from opendox.doxbench_hash import (
     MAX_BUFFER_BYTES,
     ContentEncodingError,
     ContentSizeError,

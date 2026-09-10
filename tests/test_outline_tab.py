@@ -44,8 +44,8 @@ from conftest import REPO_ROOT
 from test_doxbench_view import _EDITOR_DOM_SHIM
 
 NODE = shutil.which("node")
-VIEWS = REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "views"
-VENDOR = REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "vendor"
+VIEWS = REPO_ROOT / "src" / "opendox" / "web" / "views"
+VENDOR = REPO_ROOT / "src" / "opendox" / "web" / "vendor"
 
 # A fragment mid-migration: it carries Claims / Conflicts / Exit and lacks the
 # idea-notes and open-questions sections. The FENCED example is the point — a

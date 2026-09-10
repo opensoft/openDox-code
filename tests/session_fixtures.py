@@ -40,7 +40,7 @@ from pathlib import Path
 import pytest
 
 # The ONE definition of the port's fake (T063) — re-exported, never re-declared.
-from ideation_dashboard.session_pr import (  # noqa: F401 - re-export
+from opendox.session_pr import (  # noqa: F401 - re-export
     FakePullRequests, PullRequest, PullRequestPort, PullRequestRefused,
 )
 
@@ -387,7 +387,7 @@ def fake_cli_notebook(monkeypatch):
 
     Requesting this fixture is how a CLI test stays inside FR-043. Forgetting it
     is no longer silent: `tests/hermeticity.py` makes the default runner raise."""
-    from ideation_dashboard import cli as cli_mod
+    from opendox import cli as cli_mod
 
     adapter = FakeNotebookAdapter()
     monkeypatch.setattr(cli_mod, "_notebook_port", lambda repo_root: adapter)
@@ -410,7 +410,7 @@ def declared_human_console(monkeypatch):
     Autouse so no CLI test has to think about it, and `monkeypatch`-scoped so it
     is gone the moment the test ends. The refusal is asserted in
     `test_session_confinement.py`, which deletes the variable it sets."""
-    from ideation_dashboard import cli as cli_mod
+    from opendox import cli as cli_mod
 
     monkeypatch.setenv(cli_mod.HUMAN_CONSOLE_ENV, "1")
 
@@ -437,7 +437,7 @@ def declared_gate_principals(monkeypatch):
     """Declare this suite's authenticated principals (autouse; monkeypatch-scoped
     so it is gone the moment a test ends). Tests that assert the REFUSAL delete
     or narrow it — see `test_trust_gaps.py`."""
-    from ideation_dashboard import actor_identity as actor_mod
+    from opendox import actor_identity as actor_mod
 
     # A stronger source in the developer's own environment would otherwise
     # decide the suite's identity, so the roster is declared from a clean slate.

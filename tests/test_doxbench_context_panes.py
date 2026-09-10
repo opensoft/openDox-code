@@ -66,7 +66,7 @@ import pytest
 
 from conftest import REPO_ROOT  # noqa: F401  (sys.path side effect)
 
-from ideation_dashboard import doxbench_knowledge as kn  # noqa: E402
+from opendox import doxbench_knowledge as kn  # noqa: E402
 # The SAME DOM instrument the full-shell composition suite drives, imported
 # rather than copied (`test_doxbench_composition.py`'s own reasoning): a
 # second shim is a second set of behaviours to keep in step, and a keydown
@@ -75,7 +75,7 @@ from ideation_dashboard import doxbench_knowledge as kn  # noqa: E402
 from test_doxbench_view import _EDITOR_DOM_SHIM  # noqa: E402
 
 NODE = shutil.which("node")
-WEB = REPO_ROOT / "scripts" / "ideation_dashboard" / "web"
+WEB = REPO_ROOT / "src" / "opendox" / "web"
 VIEWS = WEB / "views"
 SHELL_JS = VIEWS / "staging-workbench.js"
 MODEL_JS = VIEWS / "staging-workbench-model.js"
@@ -577,7 +577,7 @@ def test_the_abstracts_prose_bound_is_the_number_the_280px_budget_bought():
     to 2_000 left all of them green while shipping an abstract that overflows
     the region it was sized for. This one names the number, and the budget it
     came from is one screen above it."""
-    from ideation_dashboard import doxbench_turns
+    from opendox import doxbench_turns
 
     assert doxbench_turns.MAX_ABSTRACT_PROSE_BYTES == 1_500
 

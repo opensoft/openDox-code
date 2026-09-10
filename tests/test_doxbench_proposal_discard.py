@@ -45,7 +45,7 @@ import pytest
 from conftest import REPO_ROOT
 
 NODE = shutil.which("node")
-WEB_VIEWS = REPO_ROOT / "scripts" / "ideation_dashboard" / "web" / "views"
+WEB_VIEWS = REPO_ROOT / "src" / "opendox" / "web" / "views"
 CHAT_VIEW_JS = WEB_VIEWS / "doxbench-chat.js"
 CHAT_MODEL_JS = WEB_VIEWS / "doxbench-chat-model.js"
 
