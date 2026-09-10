@@ -95,6 +95,24 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 package-dir = { "" = "src" }
 
+# THE TWO EXTENSION-POINT SEAMS, packaged — levelling round 4, RULED Q-L8 (a)
+# (openxFactory#656, Brett Heap, 2026-09-10: "rule Q-L8 (a) approve, (b)
+# (b′), (c) approve"). Carve leg 1 placed `route_extension.py` and
+# `subcommand_extension.py` at the top of `src/` (bare top-level imports were
+# demanded by the arrived code: `src/opendox/cli.py:65` imports
+# `subcommand_extension`, `src/opendox/serve.py:117` imports
+# `route_extension`), but `[tool.setuptools.packages.find]` below discovers
+# only the `opendox` package, so a built wheel — and therefore
+# `pip install git+…openDox-code@<sha>`, which is how openXdox-code's
+# levelling round 2 consumes this repository — omitted both modules and the
+# installed `opendox.cli` raised `ModuleNotFoundError: No module named
+# 'subcommand_extension'`. That was 493 of leg 3's 615 `validate` errors at
+# openXdox-code. The source-tree `validate` above never saw it because
+# `pip install -e ".[test]"` puts `src/` on the path directly instead of
+# packaging it. Declaring both as top-level `py-modules` ships them at the
+# same import path a wheel install resolves.
+py-modules = ["route_extension", "subcommand_extension"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
