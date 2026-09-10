@@ -17,8 +17,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: install pytest
-        run: python -m pip install "pytest>=8,<9"
+      # INSTALL THE PACKAGE, not just the runner — RULED Q-L2 (openxFactory#656,
+      # 2026-09-10). This step was `pip install "pytest>=8,<9"` and nothing
+      # else, which is exactly why the first carved commit failed the required
+      # check with `No module named 'yaml'`: the runner was there and the
+      # package's own dependencies never were. `-e .[test]` installs both from
+      # `pyproject.toml`, so the pytest range round 1 chose — `pytest>=8,<9`,
+      # unchanged — is declared once, in the `test` extra, and read from here
+      # rather than copied here.
+      - name: install the package and its test extra
+        run: python -m pip install -e ".[test]"
 
       - name: pytest
         run: python -m pytest -q
