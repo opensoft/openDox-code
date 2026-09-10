@@ -19,6 +19,75 @@ version = "0.0.0"
 description = "The openDox code leg — the `opendox` package, carved from openxFactory."
 requires-python = ">=3.12"
 
+# THE RUNTIME DEPENDENCY SET, round 2 of the levelling pass — RULED Q-L2
+# (openxFactory#656, Brett Heap, 2026-09-10: "rule Q-L1 approve, Q-L2 approve,
+# Q-L3 (b), Q-L4 re-cut").
+#
+# Round 1 created the import root and stopped there, so this file declared NO
+# dependencies and `.github/workflows/validate.yml` installed the test runner
+# alone. That is sufficient for a scaffold whose only suite reads its own tree,
+# and it goes red the moment carved content arrives: the first carved commit
+# (opensoft/openDox-code#4) failed the required `validate` check with
+# `No module named 'yaml'` — cause 4 of the four reds recorded on #656, and the
+# only one of the four that is a levelling gap rather than carve-arc work.
+#
+# HOW THIS LIST WAS DERIVED, so a reviewer can re-derive it instead of trusting
+# it: an `ast` walk over all 88 `.py` files under `src/opendox/` and `tests/` in
+# the carve leg's tree (opensoft/openDox-code#4, head `cfabe3c4`), collecting
+# every `Import`/`ImportFrom` in the module body AND in module-level
+# `if`/`try`/`with` blocks, discarding explicitly-relative imports, then
+# partitioning the top-level names against `sys.stdlib_module_names`. 37 names
+# are standard library. Of the rest, exactly TWO are third-party:
+#
+#   yaml    -> PyYAML   module-level in branch_session.py, canvas_drafts.py,
+#                       workbench.py; function-level in doxbench_binding.py,
+#                       doxbench_intake.py, serve_project.py,
+#                       tests/test_doxbench_chat_view.py,
+#                       tests/test_model_provider_broker.py   RUNTIME, below
+#   pytest              41 test modules                       TEST, the extra
+#
+# Every other non-stdlib name is a file this repository already supplies — the
+# `opendox` package itself, the test-tree helpers that arrive as rows or as
+# declared replicas (`conftest`, `session_fixtures`, `staging_shapes`,
+# `hermeticity`, `import_scan`, `smoke_signals`), and the two neutral
+# extension-point modules of RULED Q-L1 (`route_extension`,
+# `subcommand_extension`, both stdlib-only, so neither adds a dependency).
+#
+# Two names are NOT dependencies and must never be declared as any: `openxdox`
+# and `ideation_dashboard`. They are the cross-column reaches the BUILD arc
+# removes (`split-opendox-two-layer-product` § 3.5/3.6); `conftest.py` records
+# which suites wait on them. Declaring either would buy a green check by
+# pinning openxFactory's tree shape into this leg's dependency set.
+#
+# LOWER BOUNDS ONLY, and the floor is stated rather than guessed. The carved
+# modules use exactly two PyYAML entry points — `yaml.safe_load` (9 sites) and
+# `yaml.safe_dump` (5, with `sort_keys` / `default_flow_style` /
+# `allow_unicode`) — and the newest of those is `sort_keys=`, carried since
+# PyYAML 5.1. So `>=6.0` is NOT the oldest release that would work; it is the
+# floor this leg has actually been exercised against, and it is what
+# openxFactory itself runs (`requirements/hermes-runtime-contracts.lock` at the
+# carve commit pins `pyyaml==6.0.3`). Stating a floor the code has been run
+# against beats stating the oldest one that might parse.
+#
+# Deliberately NOT done here: a `--require-hashes` lockfile. Pinning this leg's
+# supply chain by digest is a real act with a real owner, not something a
+# levelling PR should invent for a destination's `validate`; it is recorded as
+# the obvious successor rather than done quietly.
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# The pytest RANGE FROM ROUND 1, unchanged — `pytest>=8,<9`, still the only
+# upper bound in this file, because round 1 chose it deliberately. What moves is
+# its HOME: `validate.yml` used to carry the range as a literal in its install
+# step and now installs `.[test]`, so the range is declared ONCE and the
+# workflow reads it, instead of two copies that can drift apart while both keep
+# passing.
+test = [
+    "pytest>=8,<9",
+]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
