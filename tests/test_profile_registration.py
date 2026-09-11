@@ -20,9 +20,8 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE RATHER THAN IMPLIED
    silent `()`: a parser whose contributed verbs are absent looks exactly like a
    working one. So a read is asserted to RAISE, not to return something falsy.
 4. A REGISTERED PROFILE RESOLVES BOTH FACETS. `SUBCOMMAND_EXTENSIONS`
-   (`cli.build_parser()`) and `ROUTE_EXTENSIONS` (`serve.build_server()`, whose
-   contribution is a later declared edit — see the runbook) come off the same
-   object, which is what "one registration" means at this end.
+   (`cli.build_parser()`) and `ROUTE_EXTENSIONS` (`serve.build_server()`) come
+   off the same object, which is what "one registration" means at this end.
 5. DOUBLE REGISTRATION REFUSES; RE-REGISTERING THE SAME OBJECT DOES NOT. An
    idempotent host start-up is not a defect and must not be punished; a swap
    under a live process is.
@@ -30,6 +29,16 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE RATHER THAN IMPLIED
    `repr` must not resolve a profile, and a missing facet must stay an
    `AttributeError` — `hasattr`, `getattr(..., default)`, `copy` and pytest's
    own rewriting all depend on it.
+7. THE SERVED COMPOSITION POINT IS EXECUTED, NOT DESCRIBED (RULED ASK-6 -> 1,
+   `5635150678`). `serve.build_server()` now reads `ROUTE_EXTENSIONS` through
+   this proxy, and `import opendox.serve` CANNOT be performed in this
+   repository — `serve.py:181` still reaches `ideation_dashboard`, openxFactory's
+   pre-carve package, which exists at neither carve destination (recorded in
+   `test_consumer_reach.py`'s `STILL_REACHING` and owed to a later act). So the
+   two statements that make up the composition point are lifted OUT of
+   `build_server`'s body BY AST and executed against a stand-in `route_extension`
+   seam. That runs the real source lines — an assertion about the tree, not a
+   paraphrase of it — and it keeps working the day `serve.py` becomes importable.
 
 `--noconftest` SAFE, deliberately: `validate` runs this file alongside
 `test_leg_shape.py` and `test_consumer_reach.py` with conftest collection off
@@ -42,6 +51,7 @@ A CREATED file: no carve-manifest row (RULED OQ-C).
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 import textwrap
@@ -348,21 +358,183 @@ def test_naming_a_profile_never_raises_and_never_runs_long() -> None:
     assert len(named) <= 120 and named.endswith("…")
 
 
-def test_the_proxy_names_only_the_reader_that_actually_reads_it() -> None:
-    """`serve.build_server()` does not read this proxy on this branch.
+@pytest.mark.parametrize("facet,names,not_named", (
+    ("ROUTE_EXTENSIONS", "serve.build_server()", "build_parser"),
+    ("SUBCOMMAND_EXTENSIONS", "cli.build_parser()", "build_server"),
+))
+def test_a_missing_facet_names_the_one_reader_that_asked_for_it(
+        facet: str, names: str, not_named: str) -> None:
+    """Two readers now share ONE proxy, so the refusal must not name both.
 
-    Slice 2b removed its `ROUTE_EXTENSIONS` reach outright; restoring it is a
-    separate declared edit. A refusal naming a reader that made no access
-    misdirects the host it is supposed to help, so the label is added by the act
-    that adds the read.
+    Before RULED ASK-6 -> 1 there was one reader and the label simply said so:
+    `serve.build_server()` had no read at all (slice 2b removed it), and naming
+    a reader that made no access misdirects the host the message exists to help
+    (the Copilot review thread on openDox-code#11). Adding the routes half could
+    have thrown that away by concatenating the two labels. It does not — the
+    proxy maps FACET to READER, so each refusal still names exactly the
+    composition point that asked.
     """
-    assert "build_parser" in repr(profile_openxfactory)
-    assert "build_server" not in repr(profile_openxfactory)
-
     class _Partial:
-        SUBCOMMAND_EXTENSIONS = ()
+        pass
 
+    setattr(_Partial, "SUBCOMMAND_EXTENSIONS" if facet == "ROUTE_EXTENSIONS"
+            else "ROUTE_EXTENSIONS", ())
     domain_profile.register(_Partial())
     with pytest.raises(profile_proxy.ProfileFacetMissing) as caught:
-        profile_openxfactory.ROUTE_EXTENSIONS
-    assert "build_server" not in str(caught.value)
+        getattr(profile_openxfactory, facet)
+    message = str(caught.value)
+    assert names in message, f"the {facet} refusal must name {names}"
+    assert not_named not in message, (
+        f"the {facet} refusal names {not_named!r}, a reader that made no "
+        "access — the misdirection the per-facet map exists to prevent")
+
+
+def test_the_repr_names_the_whole_composition_surface() -> None:
+    """`repr` is not a refusal: it has no facet, so it names both readers.
+
+    A facet the map does not carry falls back to the same string, because for a
+    name openDox does not yet read, naming too much is a smaller failure than
+    naming wrong.
+    """
+    shown = repr(profile_openxfactory)
+    assert "cli.build_parser()" in shown and "serve.build_server()" in shown
+
+    class _Empty:
+        pass
+
+    domain_profile.register(_Empty())
+    with pytest.raises(profile_proxy.ProfileFacetMissing) as caught:
+        profile_openxfactory.SOMETHING_NEITHER_READS
+    assert "cli.build_parser() / serve.build_server()" in str(caught.value)
+
+
+# --------------------------------------------------------------------------
+# 9 — the SERVED composition point (RULED ASK-6 -> 1, `5635150678`)
+# --------------------------------------------------------------------------
+
+SERVE = SRC / "opendox" / "serve.py"
+PROXY_IMPORT = "opendox.profile_proxy"
+
+
+def _build_server_body() -> list[ast.stmt]:
+    """`build_server`'s statements, from the real `serve.py` on disk."""
+    tree = ast.parse(SERVE.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "build_server":
+            return node.body
+    raise AssertionError("serve.py no longer defines build_server()")
+
+
+def _composition_statements() -> list[ast.stmt]:
+    """The TWO statements that are the served composition point.
+
+    Lifted by AST rather than by a line number or a regex: the whole point of
+    the carve's declared-edit grammar is that line numbers move, and a test
+    pinned to one would go green on the wrong statement the first time anything
+    above it changed.
+    """
+    wanted: list[ast.stmt] = []
+    for node in _build_server_body():
+        if isinstance(node, ast.ImportFrom) and node.module == PROXY_IMPORT:
+            wanted.append(node)
+        elif isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "route_bindings"
+                for t in node.targets):
+            wanted.append(node)
+    assert len(wanted) == 2, (
+        "expected `from opendox.profile_proxy import profile_openxfactory` and "
+        f"the `route_bindings = ...` assignment in build_server(); found "
+        f"{len(wanted)}")
+    return wanted
+
+
+class _RecordingSeam:
+    """A stand-in for `route_extension`, which is all these two lines touch."""
+
+    def __init__(self) -> None:
+        self.handed: tuple = ()
+
+    def collect_bindings(self, extensions):
+        self.handed = tuple(extensions)
+        return self.handed
+
+
+def _run_composition(route_extensions: tuple) -> _RecordingSeam:
+    """Execute the two real statements, and report what the seam was handed."""
+    seam = _RecordingSeam()
+    namespace: dict = {"route_extension": seam,
+                       "route_extensions": route_extensions}
+    module = ast.Module(body=_composition_statements(), type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), str(SERVE), "exec"),  # noqa: S102
+         namespace)
+    return seam
+
+
+def test_the_served_composition_point_binds_the_proxy_and_reads_the_facet() -> None:
+    """The two statements are there, and they are the ones ASK-6 -> 1 ruled."""
+    imports, assign = _composition_statements()
+    assert [alias.name for alias in imports.names] == ["profile_openxfactory"]
+    read = [node for node in ast.walk(assign)
+            if isinstance(node, ast.Attribute) and node.attr == "ROUTE_EXTENSIONS"]
+    assert read, "build_server() no longer reads ROUTE_EXTENSIONS off the proxy"
+
+
+def test_the_served_binding_is_deferred_and_never_runs_at_import_time() -> None:
+    """`serve.py` must not name the proxy where importing the module runs it.
+
+    The proxy resolves nothing when imported, so this is not about failure — it
+    is about POSTURE: a module-level binding would make the profile a thing
+    `serve.py` has at import time, and the next reader would reasonably use it
+    there. `test_consumer_reach.py` holds the same line for the consumer seam,
+    for the same reason.
+    """
+    tree = ast.parse(SERVE.read_text(encoding="utf-8"))
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.FunctionDef):
+            continue
+        for inner in ast.walk(node):
+            assert not (isinstance(inner, ast.ImportFrom)
+                        and inner.module == PROXY_IMPORT), (
+                f"serve.py imports the proxy at import time (line {inner.lineno})")
+            assert not (isinstance(inner, ast.Name)
+                        and inner.id == "profile_openxfactory"), (
+                f"serve.py names the profile at import time (line {inner.lineno})")
+
+
+def test_the_served_routes_put_the_hosts_contribution_ahead_of_the_callers() -> None:
+    """The carve's own order, restored: the host's routes first, then the caller's.
+
+    This EXECUTES `serve.py`'s two lines. `route_extensions` stays the § 2.4
+    seam for whatever a caller adds ON TOP, and the default `()` still means
+    "add nothing" — so a caller who passes nothing gets exactly the host's.
+    """
+    domain_profile.register(_HostProfile)
+    assert _run_composition(("the caller's",)).handed == \
+        ("the host's routes", "the caller's")
+    assert _run_composition(()).handed == ("the host's routes",)
+
+
+def test_the_served_composition_point_refuses_when_no_host_registered() -> None:
+    """ASK-2's "REFUSAL, NOT A DEFAULT", now true of the server as well.
+
+    `domain_profile.current()`'s message has always told a host to register
+    "before it calls `cli.build_parser()` or `serve.build_server()`". Until this
+    slice that was half aspirational: slice 2b had removed serve's read, so a
+    server composed from whatever it was handed and never asked. It asks now,
+    and an unregistered process is told which call is missing rather than
+    silently serving without its contributed routes.
+    """
+    with pytest.raises(domain_profile.ProfileNotRegistered) as caught:
+        _run_composition(("the caller's",))
+    assert domain_profile.REGISTRATION_CALL in str(caught.value)
+
+
+def test_a_host_profile_without_routes_is_told_which_reader_wanted_them() -> None:
+    """Registered but no `ROUTE_EXTENSIONS`: the server's refusal, at the server."""
+    class _CliOnly:
+        SUBCOMMAND_EXTENSIONS = ("the host's subcommands",)
+
+    domain_profile.register(_CliOnly())
+    with pytest.raises(profile_proxy.ProfileFacetMissing) as caught:
+        _run_composition(())
+    assert "serve.build_server()" in str(caught.value)

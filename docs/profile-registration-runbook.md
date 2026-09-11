@@ -57,11 +57,20 @@ domain_profile.register(<the host's profile module or object>)
 | attribute | read by | shape |
 | --- | --- | --- |
 | `SUBCOMMAND_EXTENSIONS` | `cli.build_parser()` | a tuple of `subcommand_extension.SubcommandExtension` |
-| `ROUTE_EXTENSIONS` | `serve.build_server()` — see "owed", below | a tuple of `route_extension.RouteExtension` |
+| `ROUTE_EXTENSIONS` | `serve.build_server()` | a tuple of `route_extension.RouteExtension` |
 
 Reads happen at **first attribute access**, never at import time. `import
 opendox.cli` and `import opendox.profile_proxy` touch no registry and cannot
-fail for want of a host.
+fail for want of a host, and `serve.py` binds the proxy INSIDE `build_server()`
+rather than in its import header.
+
+**Both composition points read the same registration.** `build_parser()` reads
+`SUBCOMMAND_EXTENSIONS` where it assembles its subcommands; `build_server()`
+reads `ROUTE_EXTENSIONS` where it collects its route bindings, placing the
+host's routes **ahead of** the caller's `route_extensions=` tuple — the order
+the pre-carve tree had, restored unchanged. `route_extensions` remains the
+§ 2.4 seam for whatever a caller adds ON TOP, and its default `()` still means
+"add nothing".
 
 ### What happens when a host does not
 
@@ -167,36 +176,71 @@ every future `<Domainx>Dox` profile may want; not now"*: when it arrives it
 changes how a host's profile is DISTRIBUTED, not this contract, because a plugin
 still ends in one `register()` call at process start.
 
+## What a host that only ever built a server must now do
+
+**Register, or `build_server()` refuses.** Between BUILD slice 2b and this slice
+a server composed from exactly what its caller handed it: 2b removed `serve.py`'s
+`ROUTE_EXTENSIONS` reach outright rather than repairing it, because repairing it
+needed a ruling it did not have. Brett Heap RULED **ASK-6 → 1** on comment
+[`5635150678`](https://github.com/opensoft/openxFactory/issues/656#issuecomment-5635150678)
+— *"the routes half of § 4.3 — serve.py reads the proxy too ... the same author
+adds the server-side binding in the same PR (one mechanism, one registration,
+under ASK-2)"* — and the reach is back, through this proxy.
+
+So a process that builds a server now registers a profile first, exactly as one
+that builds a parser does. This is the same **REFUSAL, NOT A DEFAULT** stance,
+applied for the same reason: a server silently missing its contributed routes
+looks exactly like a working one. It also makes
+`domain_profile.current()`'s message true of both readers rather than one — that
+text has always said "before it calls `cli.build_parser()` or
+`serve.build_server()`".
+
+The edit is **declared**: openxFactory's carve manifest declares carve lines
+`:1371` (the deferred profile import) and `:1380-1381` (the `collect_bindings`
+reach) on the `scripts/ideation_dashboard/serve.py` row, the second under the
+row annotation RULED Q-L1 ([`5628560136`](https://github.com/opensoft/openxFactory/issues/656#issuecomment-5628560136))
+that landed with PR-2 #940. The restored expression is **byte-identical to the
+carve commit's own two lines**; only the module the name is bound to changed.
+
 ## Owed, and deliberately not taken here
 
-* **`serve.build_server()`'s `ROUTE_EXTENSIONS` contribution.** BUILD slice 2b
-  removed `serve.py`'s reach outright rather than repairing it
-  (`route_bindings = route_extension.collect_bindings(route_extensions)`), so a
-  server today composes from exactly what its caller hands it. Restoring the
-  profile's contribution through this proxy is a HOST act and a **separate
-  declared edit**; a branch stacked on 2b does not revert 2b's landed decision.
-  The proxy already answers `ROUTE_EXTENSIONS`, so the act is one line at the
-  composition point once its row is declared.
 * **The docstring corrections.** `cli.build_parser()`'s docstring and
   `serve.py`'s at `:166` / `:755` / `:1368` still describe the in-tree profile
   ("the one line the § 3 carve deletes rather than moves"). Those lines are not
   ones openxFactory's carve manifest declares for their rows, and an edit
   outside the declared lines is an undeclared movement the arrival verifier
-  refuses (RULED OQ-1). In-tree comments carry the correction until a declaring
-  act lands — the posture BUILD slice 2b took at the same docstrings.
+  refuses (RULED OQ-1). **RULED ASK-7 → 1**
+  ([`5635150678`](https://github.com/opensoft/openxFactory/issues/656#issuecomment-5635150678))
+  leaves all four standing and fixes them "at the next declared-edit window",
+  with no manifest rows for prose. In-tree comments carry the correction until
+  then — the posture BUILD slice 2b took at the same docstrings, and the one
+  this slice takes beside its own two edits.
 * **The openxFactory half.** The real profile (the two tuples) and the
   process-start hook that calls `register()` are adapter code, and adapter code
-  stays in openxFactory (design § D3). It follows PR-2.
+  stays in openxFactory (design § D3). PR-2 (#940) has landed at `cc4ae9d3`;
+  the adapter is the act after it.
 
 ## Where this is executed rather than described
 
-`tests/test_profile_registration.py`, which `validate` runs. Twenty-one cases:
+`tests/test_profile_registration.py`, which `validate` runs. Twenty-eight cases:
 import-time inertness (in a subprocess), the unregistered refusal and its text,
 both facets resolving, the double-registration refusal and the idempotent no-op,
 the missing-facet refusal and its `AttributeError`-ness, the dunder and `repr`
 probing rules, how a refusal NAMES a profile (two opaque instances of one class
 told apart; a hostile `repr` that neither raises nor runs long) and which reader
-it names, and the duck type openXdox delegates to — module path included.
+it names per facet, the duck type openXdox delegates to — module path included
+— and the SERVED composition point.
+
+That last one is executed rather than described, and it has to be got at
+sideways: `import opendox.serve` cannot be performed in this repository at all,
+because `serve.py:181` still reaches `ideation_dashboard`, openxFactory's
+pre-carve package, which exists at neither carve destination (recorded in
+`tests/test_consumer_reach.py`'s `STILL_REACHING`, owed to a later act). So the
+suite lifts `build_server()`'s two composition statements out of the real file
+**by AST** and executes them against a stand-in `route_extension` seam. It runs
+the tree's own lines, it pins the host-ahead-of-caller order, it proves the
+unregistered refusal at the server, and it keeps working unchanged the day
+`serve.py` becomes importable.
 
 ---
 

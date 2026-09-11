@@ -92,11 +92,26 @@ class _LateProfile:
     .current()`, which is public, one line away, and says what it is doing.
     """
 
+    #: Which composition point reads which facet, so a `ProfileFacetMissing`
+    #: names the ONE reader that made the access rather than every reader this
+    #: proxy has. Both composition points bind ONE object — that is what "one
+    #: registration" means at this end — so without this the `ROUTE_EXTENSIONS`
+    #: refusal would send a host to `build_parser()` and the
+    #: `SUBCOMMAND_EXTENSIONS` refusal to `build_server()`, which is the exact
+    #: misdirection the earlier single label was narrowed to avoid (Copilot
+    #: review thread on openDox-code#11, when `serve` had no read at all). A
+    #: facet not listed here falls back to `_reader`, the whole composition
+    #: surface, because naming too much is a smaller failure than naming wrong.
+    READERS = {
+        "SUBCOMMAND_EXTENSIONS": "cli.build_parser()",
+        "ROUTE_EXTENSIONS": "serve.build_server()",
+    }
+
     __slots__ = ("_reader",)
 
     def __init__(self, reader: str) -> None:
-        #: The composition point this stand-in exists for, quoted in refusals so
-        #: a message names the READER as well as the missing name.
+        #: The composition SURFACE this stand-in exists for, quoted in `repr` and
+        #: in a refusal for any facet `READERS` does not name.
         self._reader = reader
 
     def resolve(self) -> Any:
@@ -122,10 +137,11 @@ class _LateProfile:
         try:
             return getattr(profile, attr)
         except AttributeError:
+            reader = self.READERS.get(attr, self._reader)
             raise ProfileFacetMissing(
                 f"the registered host profile "
                 f"({domain_profile.name_of(profile)}) does not carry "
-                f"{attr!r}, which {self._reader} reads. A profile IS registered "
+                f"{attr!r}, which {reader} reads. A profile IS registered "
                 "— this is not a missing registration — so the gap is in the "
                 "profile the host handed "
                 f"`{domain_profile.REGISTRATION_CALL}`, not in when it handed "
@@ -142,14 +158,15 @@ class _LateProfile:
         return f"<late host profile for {self._reader} ({state})>"
 
 
-#: THE COMPOSITION POINT. `cli.py` binds this name and reads
-#: `SUBCOMMAND_EXTENSIONS` off it at `build_parser()` time. That is the ONLY
-#: reader today, and the label says so: `serve.build_server()` does not read
-#: this proxy on this branch — BUILD slice 2b removed its `ROUTE_EXTENSIONS`
-#: reach outright, and restoring it through this proxy is a separate declared
-#: edit (see the runbook's "owed" section). A label naming a reader that made
-#: no access would misdirect a host debugging a `ProfileFacetMissing` — the one
-#: thing that message exists to prevent — so `serve.build_server()` is added to
-#: it by the act that adds the read, and not before. (Copilot review thread on
-#: openDox-code#11.)
-profile_openxfactory = _LateProfile("cli.build_parser()")
+#: THE COMPOSITION POINT, AND NOW BOTH OF THEM. `cli.py` binds this name and
+#: reads `SUBCOMMAND_EXTENSIONS` off it at `build_parser()` time; `serve.py`
+#: binds it inside `build_server()` and reads `ROUTE_EXTENSIONS` — the routes
+#: half, RULED ASK-6 -> 1 (openxFactory#656 comment 5635150678), added by the
+#: act that adds the read and not before. The earlier label named `cli` alone
+#: for exactly that reason: naming a reader that made no access misdirects a
+#: host debugging a `ProfileFacetMissing`, which is the one thing that message
+#: exists to prevent (Copilot review thread on openDox-code#11). The precision
+#: is kept now that there are two, by `READERS` above: this label is the
+#: composition SURFACE, and each refusal still names the single reader whose
+#: facet was missing.
+profile_openxfactory = _LateProfile("cli.build_parser() / serve.build_server()")
