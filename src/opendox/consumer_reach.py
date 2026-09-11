@@ -186,6 +186,86 @@ class _LateConsumerCallable:
         return f"<late consumer callable {self.name!r}>"
 
 
+class _LateConsumerValue:
+    """One CONSTANT of a consumer module, resolved on first use.
+
+    THE NARROWEST MEMBER OF THIS FAMILY, and the one that needs an argument for
+    existing at all. A constant cannot be deferred the way a module or a
+    function can: a module stand-in defers until an attribute is read and a
+    callable stand-in defers until it is called, but a name bound to a VALUE is
+    read by whatever the value is handed to. So this proxy defers to the first
+    OPERATION on the value — iteration, length, membership, subscript,
+    comparison, truthiness, `str()` — and forwards it to the resolved object.
+
+    IT IS HERE FOR ONE SITE AND IT SAYS WHICH. `cli.py` re-exports
+    `openxdox.corpus_root.SCANNED_ROOTS` and reads it at :228 inside a function
+    body (`for root in SCANNED_ROOTS`), which defers correctly — but :228 is
+    not a line openxFactory's carve manifest declares for `cli.py`'s row, so
+    the READ cannot be respelled `corpus_root.SCANNED_ROOTS` and the NAME has
+    to keep behaving like the tuple it used to be. `SCANNED_ROOTS` is itself
+    DERIVED at the consumer (`tuple(sorted({*corpus.GOVERNED_ROOTS,
+    "openspec"}))`, over openxFactory's doc-health corpus), so unlike the
+    values in `opendox/defaults.py` it cannot simply be owned here: openDox has
+    no corpus to derive it from.
+
+    NOT A GENERAL VALUE FACADE. `__getattr__` is deliberately NOT forwarded: an
+    attribute read on a constant is almost always a caller who wanted the
+    MODULE, and answering it here would turn this into the facade the module
+    docstring refuses. The operations below are the ones a re-exported
+    sequence constant is actually subjected to, and a site needing more is a
+    site that should be respelled instead.
+    """
+
+    __slots__ = ("_module", "_attr")
+
+    def __init__(self, module: _LateConsumerModule, attr: str) -> None:
+        self._module = module
+        self._attr = attr
+
+    @property
+    def name(self) -> str:
+        return f"{self._module.name}.{self._attr}"
+
+    def resolve(self) -> Any:
+        """The consumer's value, or `ConsumerReachUnavailable` naming the layering."""
+        return getattr(self._module.resolve(), self._attr)
+
+    def __iter__(self):
+        return iter(self.resolve())
+
+    def __len__(self) -> int:
+        return len(self.resolve())
+
+    def __contains__(self, item: Any) -> bool:
+        return item in self.resolve()
+
+    def __getitem__(self, key: Any) -> Any:
+        return self.resolve()[key]
+
+    def __eq__(self, other: Any) -> bool:
+        return self.resolve() == other
+
+    def __ne__(self, other: Any) -> bool:
+        return self.resolve() != other
+
+    def __hash__(self) -> int:
+        return hash(self.resolve())
+
+    def __bool__(self) -> bool:
+        return bool(self.resolve())
+
+    def __str__(self) -> str:
+        return str(self.resolve())
+
+    def __repr__(self) -> str:
+        # Deliberately does NOT resolve: `repr` is what a debugger, a pytest
+        # assertion rewrite and a logging call reach for, and resolving the
+        # consumer because something formatted a value would make the reach
+        # fire at a moment no verb chose — the same rule `_LateConsumerModule`
+        # applies to dunder lookups.
+        return f"<late consumer value {self.name!r}>"
+
+
 def module(name: str, *, reason: str) -> _LateConsumerModule:
     """A late stand-in for `openxdox.<name>`. `name` carries no package prefix."""
     if name.startswith(f"{CONSUMER_PACKAGE}."):
@@ -198,6 +278,11 @@ def module(name: str, *, reason: str) -> _LateConsumerModule:
 def function(holder: _LateConsumerModule, attr: str) -> _LateConsumerCallable:
     """A late stand-in for one function of a consumer module."""
     return _LateConsumerCallable(holder, attr)
+
+
+def constant(holder: _LateConsumerModule, attr: str) -> _LateConsumerValue:
+    """A late stand-in for one CONSTANT of a consumer module."""
+    return _LateConsumerValue(holder, attr)
 
 
 # --------------------------------------------------------------------------
@@ -227,17 +312,75 @@ snapshot_registry = module(
     reason="the snapshot registry belongs to the projection mechanism, which "
            "is openXdox's column (design.md § D3)")
 
+#: The corpus-root predicate — whether a checkout can be scanned as
+#: openxFactory's governed corpus at all. The SHAPE of a corpus is the
+#: consumer's business (`SCANNED_ROOTS` is derived from `doc_health.corpus`'s
+#: governed roots), and openDox's `cli` asks the question on the way into a
+#: generate verb.
+corpus_root = module(
+    "corpus_root",
+    reason="what counts as a scannable corpus checkout is derived from "
+           "openxFactory's governed document roots, which openDox does not "
+           "carry (design.md § D3)")
+
+#: The snapshot GENERATOR — the projection mechanism's writer half, beside
+#: `snapshot` (its validator half) above.
+generator = module(
+    "generator",
+    reason="the snapshot generator is the projection mechanism, which is "
+           "openXdox's column (design.md § D3)")
+
+#: The projection's HTTP column. openDox's `serve` core keeps one reach into it
+#: — `hosted_ref_refused`, below — after slice 2b stopped naming the column as
+#: a mixin base and stopped re-exporting its names.
+serve_projection = module(
+    "serve_projection",
+    reason="the snapshot, index and /source routes are openXdox's column "
+           "(design.md § D3); this core dispatches them through the § 2.4 "
+           "route extension point instead of inheriting them")
+
 #: `snapshot.find_validator`, bound as a callable because `workbench.py` and
 #: `cli.py` import the FUNCTION rather than the module.
 find_validator = function(snapshot, "find_validator")
 
+#: `corpus_root.corpus_root_refusal` — `cli.py:130` refuses a generate whose
+#: `--repo-root` is not a corpus checkout, and the refusal text is the whole
+#: message.
+corpus_root_refusal = function(corpus_root, "corpus_root_refusal")
+
+#: `generator.generate_snapshot` and `generator.is_rfc3339_datetime` —
+#: `cli.py`'s two generate verbs (:184, :501) and its `--generated-at` shape
+#: check (:156).
+generate_snapshot = function(generator, "generate_snapshot")
+is_rfc3339_datetime = function(generator, "is_rfc3339_datetime")
+
+#: `serve_projection.hosted_ref_refused` — `serve.py:760` must never NAME a
+#: session ref on a hosted response (FR-048), and the predicate that decides it
+#: travelled to the projection column with its neighbours.
+hosted_ref_refused = function(serve_projection, "hosted_ref_refused")
+
+#: `corpus_root.SCANNED_ROOTS` — the one CONSTANT reach, and the family's
+#: narrowest member. `cli.py:228` iterates it to name the roots a rejected
+#: checkout is missing; that line is not one the carve manifest declares, so
+#: the NAME must keep behaving like the tuple it was. See `_LateConsumerValue`.
+scanned_roots = constant(corpus_root, "SCANNED_ROOTS")
+
 __all__ = [
     "CONSUMER_PACKAGE",
     "ConsumerReachUnavailable",
+    "constant",
+    "corpus_root",
+    "corpus_root_refusal",
     "find_validator",
     "function",
     "gate_console",
+    "generate_snapshot",
+    "generator",
+    "hosted_ref_refused",
+    "is_rfc3339_datetime",
     "module",
+    "scanned_roots",
+    "serve_projection",
     "snapshot",
     "snapshot_registry",
 ]
