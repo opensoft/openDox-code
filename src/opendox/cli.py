@@ -77,12 +77,23 @@ from opendox import workbench as workbench_mod  # noqa: E402
 from opendox.boundary import (  # noqa: E402
     BoundaryViolation, HumanGate, OutputBoundary,
 )
-from openxdox.corpus_root import (  # noqa: E402
-    SCANNED_ROOTS, corpus_root_refusal,
-)
-from openxdox.generator import (  # noqa: E402
-    generate_snapshot, is_rfc3339_datetime,
-)
+# THE CORPUS-ROOT PREDICATE AND THE SNAPSHOT GENERATOR, NAMED LATE (BUILD slice
+# 2b). Both statements named `openxdox` — the layer that PINS openDox — in an
+# IMPORT, so `import opendox.cli` required the consumer to be installed, which
+# `design.md`:243 refuses: *"what must not survive is the direction, not the
+# calls."* The four names bind to `consumer_reach` stand-ins instead, in the
+# idiom `gate_mod` and `snapshot_mod` above already use. Each resolves on first
+# CALL and refuses naming the layering; every call site below is unchanged
+# (`corpus_root_refusal` :141, `is_rfc3339_datetime` :167, `generate_snapshot`
+# :195 and :512).
+corpus_root_refusal = consumer_reach.corpus_root_refusal  # noqa: E402
+generate_snapshot = consumer_reach.generate_snapshot  # noqa: E402
+is_rfc3339_datetime = consumer_reach.is_rfc3339_datetime  # noqa: E402
+# ...and `SCANNED_ROOTS` keeps its NAME and its behaviour, not just its value:
+# :239 iterates it (`for root in SCANNED_ROOTS`) and that line is not one the
+# carve manifest declares, so the read cannot be respelled and the name has to
+# go on behaving like the tuple it was. `_LateConsumerValue` is why it can.
+SCANNED_ROOTS = consumer_reach.scanned_roots  # noqa: E402
 
 # THE MODULES THE § 2.4 SPLIT CREATED ARE NAMED RELATIVELY, and they are the
 # only imports in this file that are.
@@ -976,15 +987,28 @@ def main(argv: list[str] | None = None, *,
 # core re-exports must be the columns of its OWN package spelling.
 # ---------------------------------------------------------------------------
 
-from openxdox.cli_gate import (  # noqa: E402,F401
-    cmd_gate_abandon_session, cmd_gate_cleanup_abandoned_branch,
-    cmd_gate_create_document, cmd_gate_create_project, cmd_gate_demote,
-    cmd_gate_derive_possibles, cmd_gate_dispose_possible, cmd_gate_edit_apply,
-    cmd_gate_edit_document, cmd_gate_edit_project, cmd_gate_kickoff,
-    cmd_gate_lens_add_as_cluster, cmd_gate_lens_save_recipe, cmd_gate_open_pr,
-    cmd_gate_promote_to_staging, cmd_gate_propose, cmd_gate_ratify,
-    cmd_gate_research_brief, cmd_gate_share_session,
-)
+# THE NINETEEN GATE VERBS ARE NO LONGER RE-EXPORTED HERE (BUILD slice 2b). The
+# block was `from openxdox.cli_gate import (...)` — nineteen names bound back
+# onto this module at import time, which is the single largest reason
+# `import opendox.cli` required the layer that PINS openDox.
+#
+# They are a CONTRIBUTION, not a core name, which is what makes deleting them
+# right rather than merely convenient: `cli_gate.GateSubcommands.register()`
+# attaches every one of them to the very `sub` action built above, through
+# `subcommand_extension` (§ 2.4), so `args.func` already carries the function
+# OBJECT and `openxdox.cli_gate.cmd_gate_*` is the name that holds it. A late
+# stand-in was considered and refused: it would answer the call and break
+# `args.func is cli_mod.cmd_gate_edit_document`, which is the identity the
+# re-export existed to keep — a proxy here would look like it worked.
+#
+# Nothing under `src/opendox/` read any of the nineteen. OWED, and it is
+# openXdox-code's to pay under a declared line of its own: four carved suites
+# there still spell four verbs through this module — `test_session_verbs.py`
+# :689, :784, :1174, :1252; `test_session_gates.py` :587, :652, :662, :2137;
+# `test_readiness_gate.py` :239; `test_staging_workbench.py` :773, :1658-:1660
+# — at lines that repository's manifest rows do not declare. None is collected
+# today (its `validate` runs two shape suites `--noconftest`), so the
+# respelling belongs to the act that un-ignores them.
 from .cli_model_binding import (  # noqa: E402,F401
     _add_model_binding_parser, cmd_model_binding_add, cmd_model_binding_edit,
     cmd_model_binding_list, cmd_model_binding_remove,
