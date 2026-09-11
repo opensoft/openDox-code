@@ -127,11 +127,18 @@ class _LateConsumerModule:
                 "openXdox pins openDox by commit and tree digest "
                 "(split-opendox § 4.2, RULED OQ-2) and openDox pins nothing "
                 "back, so a neutral openDox with no openXdox installed is the "
-                "normal case and this reach is the exception. Install "
-                "openXdox, or assemble a server that contributes this "
-                "capability through the § 2.4 extension points "
-                "(`build_server(route_extensions=...)`, "
-                "`build_parser(subcommand_extensions=...)`)") from exc
+                "normal case and this reach is the exception. THE REMEDY IS "
+                "TO INSTALL openXdox — and only that, today. The § 2.4 "
+                "extension points are NOT an alternative here and this "
+                "message will not offer one: `build_server(route_extensions=)` "
+                "contributes route bindings and "
+                "`build_parser(subcommand_extensions=)` contributes "
+                "subcommands, and neither injects a MODULE, so a caller who "
+                "followed them would arrive back at this same refusal. The "
+                "injection that would make this reach disappear — openDox "
+                "naming a protocol and being handed an implementation — does "
+                "not exist yet and is BUILD-arc work "
+                "(split-opendox § 3.5/3.6, § 4.3)") from exc
         return self._module
 
     def __getattr__(self, attr: str) -> Any:

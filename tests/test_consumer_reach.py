@@ -130,6 +130,18 @@ def test_the_reaching_modules_are_recorded_as_reaching(module: str) -> None:
         "STILL_REACHING into NEUTRAL_MODULES in the same act, so the claim is "
         "asserted rather than merely no longer contradicted, and lower "
         "openXdox-code's OPENDOX_BACK_IMPORTS ratchet to the new census")
+    # A NONZERO EXIT IS NOT THE CLAIM. A syntax error, a missing `yaml`, or
+    # any other breakage would exit nonzero too and would sit here forever
+    # being read as "still reaching" — a record that stays green by being
+    # broken. So the failure must be the BLOCKED IMPORT and nothing else.
+    last = done.stderr.strip().splitlines()[-1] if done.stderr.strip() else ""
+    assert last.startswith(("ModuleNotFoundError", "ImportError")), (
+        f"`import {module}` failed for a reason that is NOT the blocked "
+        f"consumer, so this record is masking a defect:\n{done.stderr}")
+    assert "openxdox" in last, (
+        f"`import {module}` raised an import error naming something other "
+        f"than the blocked consumer — a real missing dependency, not a "
+        f"layering edge:\n{done.stderr}")
 
 
 # --------------------------------------------------------------------------
@@ -197,7 +209,13 @@ def test_resolution_forwards_to_the_real_module_and_caches(tmp_path: Path) -> No
     module_object.verb = lambda x: x * 2
     reach = consumer_reach.module("pretend", reason="a test's own")
     sys.modules["openxdox.pretend"] = module_object
-    sys.modules.setdefault("openxdox", type(sys)("openxdox"))
+    # The fake PARENT is removed again below only if this test created it.
+    # Leaving an empty `openxdox` package in `sys.modules` would make every
+    # later test in the process see an importable-but-empty consumer instead
+    # of normal import behaviour — including this file's own seam tests.
+    parent_was_created = "openxdox" not in sys.modules
+    if parent_was_created:
+        sys.modules["openxdox"] = type(sys)("openxdox")
     try:
         assert reach.ANSWER == 42
         assert reach.resolve() is module_object
@@ -206,6 +224,8 @@ def test_resolution_forwards_to_the_real_module_and_caches(tmp_path: Path) -> No
             "a late callable forwards arguments and the return value")
     finally:
         sys.modules.pop("openxdox.pretend", None)
+        if parent_was_created:
+            sys.modules.pop("openxdox", None)
 
 
 def test_a_dunder_lookup_does_not_resolve_the_consumer() -> None:
