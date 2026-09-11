@@ -132,7 +132,21 @@ from opendox import doxbench_install  # noqa: E402
 from opendox import doxbench_knowledge  # noqa: E402
 from opendox import doxbench_packet  # noqa: E402
 from opendox import doxbench_telemetry  # noqa: E402
-from openxdox import snapshot_registry as registry_mod  # noqa: E402
+# THE PROJECTION REGISTRY, NAMED LATE, AND openDox'S OWN DEFAULTS BESIDE IT
+# (BUILD slice 2b). `from openxdox import snapshot_registry as registry_mod`
+# stood on this line: an import of the layer that PINS openDox, evaluated when
+# this module loads, which `design.md`:243 refuses — *"what must not survive is
+# the direction, not the calls."* The stand-in resolves on first attribute
+# access, so every `registry_mod.X` read below is unchanged.
+#
+# EXCEPT `build_server`'s two signature DEFAULTS (:1304, :1308), which no
+# stand-in can defer: a default argument is evaluated where the `def` sits, at
+# import time. openDox owns those two values (`defaults.py`), and openXdox-code's
+# drift guard holds the literals together.
+from opendox import consumer_reach  # noqa: E402
+from opendox import defaults  # noqa: E402
+
+registry_mod = consumer_reach.snapshot_registry  # noqa: E402
 # THE BY-FUNCTION SPLIT (`split-opendox-two-layer-product` § 2.4, PRs 2 and 3
 # of 4). The openDox column's routes live in `serve_workbench.py` (the doxBench
 # workbench surface) and `serve_project.py` (projects, the notebook tile action,
@@ -164,14 +178,13 @@ from openxdox import snapshot_registry as registry_mod  # noqa: E402
 # resolve for every reader that already had them.
 # That is what the `F401`s below declare: names imported to be RE-EXPORTED,
 # not names this module happens not to use yet.
-from openxdox import serve_gate  # noqa: E402
 from ideation_dashboard import serve_openxfactory_lanes  # noqa: E402
 from opendox import serve_project  # noqa: E402
-from openxdox import serve_projection  # noqa: E402
 from opendox import serve_workbench  # noqa: E402
-from openxdox.serve_gate import (  # noqa: E402,F401
-    ACTIONS_GATE_PREFIX,
-)
+# `serve_gate`'s ONE re-exported name (`ACTIONS_GATE_PREFIX`) is no longer bound
+# here (BUILD slice 2b). It named openXdox at import time and nothing in this
+# module read it: the prefix belongs to the binding `GateRoutesExtension.routes()`
+# declares, and `openxdox.serve_gate.ACTIONS_GATE_PREFIX` is where it lives.
 from ideation_dashboard.serve_openxfactory_lanes import (  # noqa: E402,F401
     ACTIONS_APPLY_REGISTER_EDITS_ROUTE,
     ACTIONS_DTN_SEED_ROUTE,
@@ -185,14 +198,25 @@ from opendox.serve_project import (  # noqa: E402,F401
     _listed_source_paths,
     _resolved_listed_edit_entry,
 )
-from openxdox.serve_projection import (  # noqa: E402,F401
-    BARE_SOURCE_ROUTE,
-    SNAPSHOT_INDEX_ROUTE,
-    SOURCE_PREFIX,
-    hosted_index,
-    hosted_ref_refused,
-    resolve_source_path,
-)
+# `serve_projection`'s six re-exported names are no longer bound by an import
+# statement here (BUILD slice 2b): the statement named openXdox at import time.
+# FOUR of the six had no reader anywhere in this repository — `BARE_SOURCE_ROUTE`,
+# `SNAPSHOT_INDEX_ROUTE` and `SOURCE_PREFIX` are the patterns
+# `ProjectionRoutesExtension.routes()` declares and travel with it, and
+# `hosted_index` is the column's own verb. All four stay reachable at
+# `openxdox.serve_projection`, which is where they live.
+#
+# THE OTHER TWO KEEP THEIR NAMES HERE, bound to late stand-ins, because each has
+# a reader that would otherwise become an ImportError:
+#   - `hosted_ref_refused` decides at :785 that a hosted response must never
+#     NAME a session ref (FR-048) — a reader in THIS module;
+#   - `resolve_source_path` is imported `from .serve` by `notebook_action.py`:52
+#     and re-checks every resolved document at :139 before a notebook action may
+#     name a path. It is a CONTAINMENT check reached through this module's name,
+#     so the re-export is part of the contract, not incidental.
+# Both resolve on first CALL, so neither costs an import-time reach.
+hosted_ref_refused = consumer_reach.hosted_ref_refused  # noqa: E402
+resolve_source_path = consumer_reach.resolve_source_path  # noqa: E402
 from opendox.serve_wire import (  # noqa: E402,F401
     AGENT_INVOCATION_REFUSAL,
     CONTEXT_REDUCED_REASON_MAX_LENGTH,
@@ -622,8 +646,17 @@ def _head_of(checkout_root: Path, git=None) -> str | None:
 
 class DashboardHandler(serve_workbench.WorkbenchRoutes,
                        serve_project.ProjectRoutes,
-                       serve_gate.GateRoutes,
-                       serve_projection.ProjectionRoutes,
+                       # BUILD slice 2b: these two read `serve_gate.GateRoutes`
+                       # and `serve_projection.ProjectionRoutes` — openXdox
+                       # classes, and a base expression is evaluated when the
+                       # class statement runs, so these two lines alone made
+                       # `import opendox.serve` require the layer that PINS
+                       # openDox. The stand-ins carry the same method names and
+                       # forward to the same functions with the same `self` on
+                       # first call, so the core `/snapshot.json` arm and every
+                       # contributed binding behave exactly as before.
+                       consumer_reach.LateGateRoutes,
+                       consumer_reach.LateProjectionRoutes,
                        serve_openxfactory_lanes.LaneRoutes,
                        http.server.SimpleHTTPRequestHandler):
     """Static bundle + snapshot + read-only source pass-through. Bound
@@ -1276,11 +1309,11 @@ def build_server(
     repository: str | None = None,
     ref: str | None = None,
     data_source=None,
-    index_name: str = registry_mod.DEFAULT_INDEX_NAME,
+    index_name: str = defaults.DEFAULT_INDEX_NAME,
     source_roots: dict | None = None,
     local_index: Path | str | None = None,
     project_register: Path | str | None = None,
-    peek_ttl_seconds: float = registry_mod.PEEK_TTL_SECONDS,
+    peek_ttl_seconds: float = defaults.PEEK_TTL_SECONDS,
     snapshot_source=None,
     knowledge_declaration=None,
     packet_assembler=None,
@@ -1373,8 +1406,24 @@ def build_server(
     # between a contributed route and one of this assembly's own is refused
     # here too, INCLUDING a caller's exact binding declared under one of this
     # assembly's prefixes (RULING A, 2026-09-07; `collect_bindings`).
-    route_bindings = route_extension.collect_bindings(
-        tuple(profile_openxfactory.ROUTE_EXTENSIONS) + tuple(route_extensions))
+    # THE IN-TREE PROFILE IS GONE (BUILD slice 2b). This read
+    # `tuple(profile_openxfactory.ROUTE_EXTENSIONS) + tuple(route_extensions)`,
+    # and openxFactory's carve manifest files `profile_openxfactory.py` as
+    # `not_moved / deleted_at_carve`: "the one file the § 3 carve deletes rather
+    # than moves -- after the carve openXdox declares its own profile and
+    # openDox's core has no line naming any". The deferred import that fed this
+    # reach WAS deleted with the carve (the declared `:1371`) and the reach
+    # itself was left behind, so `build_server()` raised
+    # `NameError: profile_openxfactory` for every caller. A server is now
+    # assembled from exactly what its caller hands it, which is what the § 2.4
+    # seam is for.
+    #
+    # THE DOCSTRING ABOVE STILL DESCRIBES THE IN-TREE PROFILE and is NOT
+    # corrected here: its lines are not ones openxFactory's carve manifest
+    # declares for this row, and an edit outside the declared lines is an
+    # UNDECLARED MOVEMENT that the arrival verifier refuses (RULED OQ-1). This
+    # comment is the correction until an act that declares them lands.
+    route_bindings = route_extension.collect_bindings(route_extensions)
 
     web_dir = Path(web_dir).resolve()
     snapshot_path = Path(snapshot_path).resolve()
