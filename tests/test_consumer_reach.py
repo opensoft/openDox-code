@@ -290,6 +290,130 @@ def test_a_dunder_lookup_does_not_resolve_the_consumer() -> None:
     assert "unresolved" in repr(reach)
 
 
+@pytest.fixture()
+def pretend_corpus_root():
+    """A stand-in for `openxdox.corpus_root` carrying a `SCANNED_ROOTS` tuple.
+
+    Installed in `sys.modules` rather than imported, so the test holds on a
+    machine with openXdox-code present and in CI where it is absent — and the
+    fake PARENT is removed again only if this fixture created it, because
+    leaving an empty `openxdox` package behind would make every later test in
+    the process see an importable-but-empty consumer.
+    """
+    module_object = type(sys)("openxdox.corpus_root")
+    module_object.SCANNED_ROOTS = ("contracts", "docs", "openspec")
+    sys.modules["openxdox.corpus_root"] = module_object
+    parent_was_created = "openxdox" not in sys.modules
+    if parent_was_created:
+        sys.modules["openxdox"] = type(sys)("openxdox")
+    try:
+        yield module_object
+    finally:
+        sys.modules.pop("openxdox.corpus_root", None)
+        if parent_was_created:
+            sys.modules.pop("openxdox", None)
+
+
+def test_constructing_a_constant_resolves_nothing() -> None:
+    """The laziness claim, made for the VALUE member of the family.
+
+    `scanned_roots` is built at `consumer_reach` import time, in a package that
+    must import with no consumer present. If construction resolved, the module
+    that exists to remove import-time reaches would itself be one.
+    """
+    from opendox import consumer_reach
+
+    absent = consumer_reach.constant(
+        consumer_reach.module("no_such_column", reason="a test's own"), "ROOTS")
+    assert "no_such_column.ROOTS" in repr(absent)
+    assert "<late consumer value" in repr(absent), (
+        "repr must not resolve either: a debugger, a logging call and pytest's "
+        "own assertion rewriting all reach for it, and resolving there would "
+        "fire the reach at a moment no verb chose")
+
+
+def test_the_sequence_operations_a_re_exported_constant_meets(
+        pretend_corpus_root) -> None:
+    """Every operation `SCANNED_ROOTS` is actually subjected to, forwarded.
+
+    `cli.py`:228 iterates it; the rest are what a re-exported sequence constant
+    meets from a caller who believes it is still the tuple it was. The point of
+    the assertions is that the stand-in is INDISTINGUISHABLE from the tuple at
+    these operations — anything less and the name could not have been left in
+    place on a line the carve manifest does not declare.
+    """
+    from opendox import consumer_reach
+
+    roots = consumer_reach.constant(
+        consumer_reach.module("corpus_root", reason="a test's own"),
+        "SCANNED_ROOTS")
+    real = pretend_corpus_root.SCANNED_ROOTS
+
+    assert list(roots) == list(real), "iteration — cli.py:228's `for root in ...`"
+    assert len(roots) == 3
+    assert "docs" in roots
+    assert "no-such-root" not in roots
+    assert roots[0] == "contracts"
+    assert roots[-1] == "openspec"
+    assert list(roots[1:]) == ["docs", "openspec"], "slicing is indexing too"
+    assert roots == real, "equality against the real tuple"
+    assert not (roots != real)
+    assert roots != ("something", "else")
+    assert bool(roots) is True
+    assert str(roots) == str(real)
+    assert hash(roots) == hash(real), (
+        "a constant re-exported into a set or a dict key must hash as its value")
+    assert roots.resolve() is real
+
+
+def test_a_constant_does_not_forward_attribute_reads(pretend_corpus_root) -> None:
+    """`__getattr__` is deliberately absent — the refusal is part of the design.
+
+    An attribute read on a constant is almost always a caller who wanted the
+    MODULE, and answering it would turn the value stand-in into the general
+    facade this module refuses to be. It must fail as an `AttributeError`, the
+    way the tuple it stands for would.
+    """
+    from opendox import consumer_reach
+
+    roots = consumer_reach.constant(
+        consumer_reach.module("corpus_root", reason="a test's own"),
+        "SCANNED_ROOTS")
+    with pytest.raises(AttributeError):
+        roots.corpus_root_refusal
+
+
+def test_an_unavailable_consumer_refuses_at_the_operation_not_at_the_binding() -> None:
+    """The error path, and WHERE it fires: at use, naming the layering.
+
+    With no consumer installed the binding is still constructed — that is the
+    whole point — so the refusal has to arrive at the first operation, and it
+    has to name which way the pin runs rather than reading as a missing-module
+    accident.
+    """
+    from opendox import consumer_reach
+
+    absent = consumer_reach.constant(
+        consumer_reach.module("no_such_column", reason="a test's own"), "ROOTS")
+
+    for operation in (lambda: list(absent),
+                      lambda: len(absent),
+                      lambda: "x" in absent,
+                      lambda: absent[0],
+                      lambda: absent == ("x",),
+                      lambda: absent != ("x",),
+                      lambda: hash(absent),
+                      lambda: bool(absent),
+                      lambda: str(absent),
+                      lambda: absent.resolve()):
+        with pytest.raises(consumer_reach.ConsumerReachUnavailable) as caught:
+            operation()
+        message = str(caught.value)
+        assert "openxdox.no_such_column" in message
+        assert "RULED OQ-2" in message
+        assert isinstance(caught.value.__cause__, ModuleNotFoundError)
+
+
 def test_the_prefix_is_refused_rather_than_doubled() -> None:
     from opendox import consumer_reach
 
