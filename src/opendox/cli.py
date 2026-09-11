@@ -88,6 +88,28 @@ from opendox.boundary import (  # noqa: E402
 # :195 and :512).
 corpus_root_refusal = consumer_reach.corpus_root_refusal  # noqa: E402
 generate_snapshot = consumer_reach.generate_snapshot  # noqa: E402
+
+# THE COMPOSITION POINT, BOUND AT LAST (§ 4.3; RULED ASK-2 option (2),
+# openxFactory#656 comment 5628886636). `build_parser()` below reads
+# `profile_openxfactory.SUBCOMMAND_EXTENSIONS` and NOTHING bound that name: the
+# § 3 carve files `profile_openxfactory.py` as `not_moved / deleted_at_carve`
+# and its deferred import went with it, so `build_parser()` raised `NameError:
+# profile_openxfactory` for every caller (the slice-2b finding, comment
+# 5633826227). The name now binds to the LAZY PROXY beside this module: nothing
+# resolves here, at import time; the FIRST attribute read resolves the profile
+# the host registered at process start
+# (`opendox.domain_profile.register(...)`, docs/profile-registration-runbook.md)
+# and refuses, naming that call, when no host did. The READ at :927 is
+# unchanged — this is a binding, not a rewrite of the composition point.
+#
+# THE `build_parser()` DOCSTRING BELOW STILL DESCRIBES THE IN-TREE PROFILE
+# ("the one line the § 3 carve deletes rather than moves") and is NOT corrected
+# here: its lines are not ones openxFactory's carve manifest declares for this
+# row, and an edit outside the declared lines is an UNDECLARED MOVEMENT the
+# arrival verifier refuses (RULED OQ-1). This comment is the correction until
+# an act that declares them lands — the same posture, for the same reason, that
+# BUILD slice 2b took at `serve.py`'s matching docstring.
+from opendox.profile_proxy import profile_openxfactory  # noqa: E402
 is_rfc3339_datetime = consumer_reach.is_rfc3339_datetime  # noqa: E402
 # ...and `SCANNED_ROOTS` keeps its NAME and its behaviour, not just its value:
 # :239 iterates it (`for root in SCANNED_ROOTS`) and that line is not one the
