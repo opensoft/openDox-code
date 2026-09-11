@@ -46,7 +46,8 @@ from opendox import doxbench_abstract_store
 from opendox import doxbench_knowledge
 from opendox import doxbench_packet
 from opendox import doxbench_threads
-from openxdox import snapshot_registry as registry_mod
+from opendox import consumer_reach
+registry_mod = consumer_reach.snapshot_registry
 from opendox.serve_wire import (
     DOXBENCH_ABSTRACT_REFUSED_PROSE_BYTES,
     DOXBENCH_ABSTRACT_REFUSED_SUBJECT_BYTES,

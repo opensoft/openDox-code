@@ -69,9 +69,10 @@ from opendox import authoring as authoring_mod  # noqa: E402
 from opendox import branch_session as branch_session_mod  # noqa: E402
 from opendox import doxbench_install as install_mod  # noqa: E402
 from opendox import doxbench_knowledge as knowledge_mod  # noqa: E402
-from openxdox import gate_console as gate_mod  # noqa: E402
+from opendox import consumer_reach  # noqa: E402
+gate_mod = consumer_reach.gate_console  # noqa: E402
 from opendox import serve as serve_mod  # noqa: E402
-from openxdox import snapshot as snapshot_mod  # noqa: E402
+snapshot_mod = consumer_reach.snapshot  # noqa: E402
 from opendox import workbench as workbench_mod  # noqa: E402
 from opendox.boundary import (  # noqa: E402
     BoundaryViolation, HumanGate, OutputBoundary,
