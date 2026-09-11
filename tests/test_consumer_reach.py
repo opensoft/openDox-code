@@ -420,6 +420,174 @@ def test_an_unavailable_consumer_refuses_at_the_operation_not_at_the_binding() -
         assert isinstance(caught.value.__cause__, ModuleNotFoundError)
 
 
+@pytest.fixture()
+def pretend_column():
+    """A stand-in for a consumer module carrying one handler-method COLUMN.
+
+    The methods are written the way the real columns are — plain functions on a
+    class, called with the live request handler as `self` — so what the test
+    exercises is the forwarding contract and not a mock's idea of it.
+    """
+    module_object = type(sys)("openxdox.pretend_routes")
+
+    class PretendRoutes:
+        def _serve_thing(self, path, *, keyed=False):
+            # Reads state off `self`, which is the whole point: the forwarder
+            # must pass the HANDLER, not the column, as `self`.
+            return f"{self.marker}:{path}:{keyed}"
+
+        def _refuse_thing(self):
+            return f"{self.marker}:refused"
+
+    module_object.PretendRoutes = PretendRoutes
+    sys.modules["openxdox.pretend_routes"] = module_object
+    parent_was_created = "openxdox" not in sys.modules
+    if parent_was_created:
+        sys.modules["openxdox"] = type(sys)("openxdox")
+    try:
+        yield module_object
+    finally:
+        sys.modules.pop("openxdox.pretend_routes", None)
+        if parent_was_created:
+            sys.modules.pop("openxdox", None)
+
+
+def _late_handler(consumer_reach, methods=("_serve_thing", "_refuse_thing")):
+    """A `DashboardHandler`-shaped class over a late column, as `serve.py` builds one."""
+    column = consumer_reach.route_column(
+        consumer_reach.module("pretend_routes", reason="a test's own"),
+        "PretendRoutes", methods)
+
+    class Handler(column):
+        marker = "handler"
+
+    return column, Handler
+
+
+def test_a_late_column_is_built_without_resolving_the_consumer() -> None:
+    """The class statement runs at IMPORT time — this is the whole reason the
+
+    column member exists. A base that resolved while being built would defer
+    nothing: `DashboardHandler`'s bases are evaluated when `serve.py` loads.
+    """
+    from opendox import consumer_reach
+
+    column, Handler = _late_handler(consumer_reach)
+    assert Handler.marker == "handler"
+    assert column.LATE_COLUMN == ("openxdox.pretend_routes", "PretendRoutes",
+                                  ("_serve_thing", "_refuse_thing")), (
+        "the triple openXdox-code's drift guard reads to hold the two surfaces "
+        "together must name the module, the class and the method list")
+    assert column._serve_thing.__name__ == "_serve_thing", (
+        "the forwarder keeps the method's NAME, because a contributed binding "
+        "is resolved against the bound class BY NAME at wiring time")
+
+
+def test_the_forwarders_call_the_consumer_with_the_handler_as_self(
+        pretend_column) -> None:
+    """The contract: same function object, same `self`, same arguments.
+
+    `route_extension.resolve_handlers` refuses a route that cannot be served
+    before a socket is opened, and it resolves the handler by name against the
+    BOUND CLASS — so a wrong method list or a forwarding signature that dropped
+    an argument would leave imports green and break requests, which is exactly
+    what this test is here to stop.
+    """
+    from opendox import consumer_reach
+
+    _column, Handler = _late_handler(consumer_reach)
+    handler = Handler()
+
+    assert handler._serve_thing("/a/b") == "handler:/a/b:False", (
+        "positional arguments forward, and `self` is the HANDLER — the column's "
+        "method reads `self.marker`, which only the handler has")
+    assert handler._serve_thing("/a/b", keyed=True) == "handler:/a/b:True", (
+        "keyword arguments forward too")
+    assert handler._refuse_thing() == "handler:refused"
+    assert handler._serve_thing.__func__ is not \
+        pretend_column.PretendRoutes._serve_thing, (
+        "the BOUND method is the forwarder, not the column's function")
+
+
+def test_a_late_column_answers_only_the_names_it_was_given(pretend_column) -> None:
+    """No `__getattr__`, deliberately, and the absence is asserted.
+
+    A handler instance is probed for absent attributes constantly — `http.server`
+    asks `hasattr(self, "do_PUT")`, and `copy`, `pickle` and pytest all probe —
+    so a base that answered those by importing openXdox would fire the reach at
+    a moment no verb chose, and would raise `ConsumerReachUnavailable` where the
+    caller was testing for `AttributeError`.
+    """
+    from opendox import consumer_reach
+
+    _column, Handler = _late_handler(consumer_reach, methods=("_serve_thing",))
+    handler = Handler()
+
+    assert handler._serve_thing("/x") == "handler:/x:False"
+    with pytest.raises(AttributeError):
+        handler.do_PUT
+    with pytest.raises(AttributeError):
+        # Present on the consumer's column, absent from the NAMED list: a name
+        # left out of the list is left out of the class, not silently proxied.
+        handler._refuse_thing
+    assert not hasattr(handler, "_refuse_thing")
+
+
+def test_a_late_column_with_no_consumer_refuses_at_the_call() -> None:
+    """Construction succeeds, the call refuses, and the refusal names the layering."""
+    from opendox import consumer_reach
+
+    column = consumer_reach.route_column(
+        consumer_reach.module("no_such_column", reason="a test's own"),
+        "NoRoutes", ("_serve_thing",))
+
+    class Handler(column):
+        marker = "handler"
+
+    with pytest.raises(consumer_reach.ConsumerReachUnavailable) as caught:
+        Handler()._serve_thing("/x")
+    message = str(caught.value)
+    assert "openxdox.no_such_column" in message
+    assert "RULED OQ-2" in message
+    assert isinstance(caught.value.__cause__, ModuleNotFoundError)
+
+
+def test_a_column_standing_in_for_nothing_is_refused() -> None:
+    """An empty method list would build a base that inherits nothing and hides it."""
+    from opendox import consumer_reach
+
+    with pytest.raises(ValueError, match="name the methods"):
+        consumer_reach.route_column(
+            consumer_reach.module("pretend_routes", reason="a test's own"),
+            "PretendRoutes", ())
+
+
+def test_the_two_live_columns_name_the_methods_serve_dispatches() -> None:
+    """The real bindings, held against the names `serve.py` and § 2.4 rely on.
+
+    `_serve_snapshot` is the one to watch: `/snapshot.json`'s HANDLER travelled
+    to the projection column while its dispatch ARM stayed core, so `serve.py`
+    itself calls `self._serve_snapshot`. Dropping it from the list would leave
+    every import green and `/snapshot.json` broken.
+    """
+    from opendox import consumer_reach
+
+    gate_module, gate_class, gate_methods = \
+        consumer_reach.LateGateRoutes.LATE_COLUMN
+    assert (gate_module, gate_class) == ("openxdox.serve_gate", "GateRoutes")
+    assert "_handle_gate_action" in gate_methods, (
+        "the route the § 2.4 gate binding declares")
+
+    proj_module, proj_class, proj_methods = \
+        consumer_reach.LateProjectionRoutes.LATE_COLUMN
+    assert (proj_module, proj_class) == ("openxdox.serve_projection",
+                                        "ProjectionRoutes")
+    for required in ("_serve_snapshot", "_serve_index", "_serve_source",
+                     "_refuse_bare_source"):
+        assert required in proj_methods, (
+            f"{required} is dispatched by name and must be on the column")
+
+
 def test_the_prefix_is_refused_rather_than_doubled() -> None:
     from opendox import consumer_reach
 
