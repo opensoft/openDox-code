@@ -143,10 +143,13 @@ class _LateProfile:
 
 
 #: THE COMPOSITION POINT. `cli.py` binds this name and reads
-#: `SUBCOMMAND_EXTENSIONS` off it at `build_parser()` time; `serve.py`'s
-#: `ROUTE_EXTENSIONS` half is the same object's other facet, and is composed by
-#: whatever act re-declares that line (see the runbook — BUILD slice 2b removed
-#: `serve.py`'s reach outright and its restoration through this proxy is a
-#: separate declared edit, not this one).
-profile_openxfactory = _LateProfile(
-    "cli.build_parser() / serve.build_server()")
+#: `SUBCOMMAND_EXTENSIONS` off it at `build_parser()` time. That is the ONLY
+#: reader today, and the label says so: `serve.build_server()` does not read
+#: this proxy on this branch — BUILD slice 2b removed its `ROUTE_EXTENSIONS`
+#: reach outright, and restoring it through this proxy is a separate declared
+#: edit (see the runbook's "owed" section). A label naming a reader that made
+#: no access would misdirect a host debugging a `ProfileFacetMissing` — the one
+#: thing that message exists to prevent — so `serve.build_server()` is added to
+#: it by the act that adds the read, and not before. (Copilot review thread on
+#: openDox-code#11.)
+profile_openxfactory = _LateProfile("cli.build_parser()")

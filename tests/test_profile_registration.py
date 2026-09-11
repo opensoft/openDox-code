@@ -300,3 +300,69 @@ def test_the_registry_answers_the_duck_type_openxdox_delegates_to() -> None:
     domain_profile.register(profile)
     assert domain_profile.is_registered() is True
     assert domain_profile.current() is profile
+
+
+# --------------------------------------------------------------------------
+# 8 — how a refusal NAMES a profile (Copilot review threads on openDox-code#11)
+# --------------------------------------------------------------------------
+
+def test_two_opaque_profiles_of_one_class_are_named_apart() -> None:
+    """`AlreadyRegistered` is reporting exactly this case, so it must tell them apart.
+
+    A profile carrying neither `__name__` nor `mapping_id` falls back to `repr`,
+    not to its type name: two registrations of the same class named "a
+    _HostProfile" twice would name neither, and the whole message is about the
+    difference between them.
+    """
+    first, second = _HostProfile(), _HostProfile()
+    domain_profile.register(first)
+    with pytest.raises(domain_profile.AlreadyRegistered) as caught:
+        domain_profile.register(second)
+    message = str(caught.value)
+    assert domain_profile.name_of(first) != domain_profile.name_of(second)
+    assert domain_profile.name_of(first) in message
+    assert domain_profile.name_of(second) in message
+
+
+def test_naming_a_profile_never_raises_and_never_runs_long() -> None:
+    """`repr` is arbitrary code on an object this package does not type-check.
+
+    A refusal that fails while formatting itself replaces the reader's problem
+    with a worse one, and one that pastes a screenful buries its own words.
+    """
+    class _Hostile:
+        @property
+        def __name__(self):        # noqa: D105 - the point is that it raises
+            raise RuntimeError("nope")
+
+        def __repr__(self):        # noqa: D105
+            raise RuntimeError("nope either")
+
+    assert domain_profile.name_of(_Hostile()) == "a _Hostile"
+
+    class _Verbose:
+        def __repr__(self):        # noqa: D105
+            return "x" * 5000
+
+    named = domain_profile.name_of(_Verbose())
+    assert len(named) <= 120 and named.endswith("…")
+
+
+def test_the_proxy_names_only_the_reader_that_actually_reads_it() -> None:
+    """`serve.build_server()` does not read this proxy on this branch.
+
+    Slice 2b removed its `ROUTE_EXTENSIONS` reach outright; restoring it is a
+    separate declared edit. A refusal naming a reader that made no access
+    misdirects the host it is supposed to help, so the label is added by the act
+    that adds the read.
+    """
+    assert "build_parser" in repr(profile_openxfactory)
+    assert "build_server" not in repr(profile_openxfactory)
+
+    class _Partial:
+        SUBCOMMAND_EXTENSIONS = ()
+
+    domain_profile.register(_Partial())
+    with pytest.raises(profile_proxy.ProfileFacetMissing) as caught:
+        profile_openxfactory.ROUTE_EXTENSIONS
+    assert "build_server" not in str(caught.value)

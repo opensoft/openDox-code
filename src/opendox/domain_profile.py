@@ -113,6 +113,11 @@ __all__ = [
 #: differently in two files would send a reader looking for a third.
 REGISTRATION_CALL = "opendox.domain_profile.register(<the host's profile>)"
 
+#: How much of a `repr` a refusal quotes before it stops being read. Long enough
+#: to tell two instances apart, short enough that the refusal's own words are
+#: still visible after it.
+_NAME_LIMIT = 120
+
 
 class ProfileNotRegistered(RuntimeError):
     """No host profile has been registered, and openDox composes no profile.
@@ -236,10 +241,22 @@ def name_of(profile: Any) -> str:
     private helper reached across a module boundary is a contract pretending
     not to be one.
 
-    A module says `__name__`; an object says its type. Neither is required to
-    exist on an object this module deliberately does not type-check, so the
-    fallback is `repr`, and no branch of this may raise: a refusal that fails
-    while formatting itself replaces the reader's problem with a worse one.
+    A module says `__name__`; an object built from a profile YAML says
+    `mapping_id` (§ 4.4's field). Neither is required to exist on an object this
+    module deliberately does not type-check, so the last resort is `repr` —
+    TRUNCATED, because an opaque profile's `repr` can be a screenful and a
+    refusal is read, not parsed, but not REPLACED by the type name: two
+    registrations of the same class are exactly the case `AlreadyRegistered` is
+    reporting, and a message that called them both "a HostProfile" would name
+    neither.
+
+    NO BRANCH OF THIS MAY RAISE. A refusal that fails while formatting itself
+    replaces the reader's problem with a worse one, and `repr` is arbitrary
+    code on an object this module was handed. Hence the guard on every step and
+    the final constant.
+
+    (Copilot review thread on openDox-code#11: the docstring promised `repr` and
+    the code returned the type name.)
     """
     for attr in ("__name__", "mapping_id"):
         try:
@@ -248,6 +265,12 @@ def name_of(profile: Any) -> str:
             continue
         if isinstance(value, str) and value:
             return value
+    try:
+        text = repr(profile)
+    except Exception:          # noqa: BLE001
+        text = ""
+    if text:
+        return text if len(text) <= _NAME_LIMIT else text[:_NAME_LIMIT - 1] + "…"
     try:
         return f"a {type(profile).__name__}"
     except Exception:          # noqa: BLE001
