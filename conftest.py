@@ -88,3 +88,43 @@ collect_ignore = [
     # --- awaits BUILD arc (execs openxFactory-only script) ---
     "tests/test_session_harness.py",
 ]
+
+
+# ---------------------------------------------------------------------------
+# THE HOST CONTRACT, EXERCISED — § 4.3 (RULED ASK-2 option (2),
+# openxFactory#656 comment 5628886636).
+#
+# `cli.build_parser()` composes its contributed subcommands from a profile the
+# HOST registers at process start; with nothing registered it REFUSES rather
+# than composing from an empty profile (`opendox.domain_profile
+# .ProfileNotRegistered`). A test process is a host like any other, so it
+# registers one HERE — in the root of the conftest chain, which is this suite's
+# process start — rather than in a fixture each suite would have to remember.
+# That is the contract being exercised, not worked around: a suite that built a
+# parser without this block would be a suite proving the refusal, and
+# `tests/test_profile_registration.py` already proves it, in isolation and with
+# the registry emptied around every case.
+#
+# THE PROFILE IS THE TEST HARNESS'S OWN, and it is deliberately EMPTY. openDox
+# ships no profile (the § 3 carve deleted the in-tree one) and this file must
+# not invent openxFactory's: an empty pair of tuples composes the CORE parser
+# and the CORE server — which is exactly the surface this leg's suites assert
+# against, and byte-identical help text is what several of them pin.
+#
+# Guarded, because this scaffold file also runs where the package is not yet
+# importable, and a conftest that raises collects nothing at all.
+try:                                           # pragma: no cover - scaffolding
+    from opendox import domain_profile as _domain_profile
+except Exception:                              # pragma: no cover - scaffolding
+    _domain_profile = None
+
+
+class _SuiteProfile:
+    """The empty host profile this test process registers. See the block above."""
+
+    SUBCOMMAND_EXTENSIONS: tuple = ()
+    ROUTE_EXTENSIONS: tuple = ()
+
+
+if _domain_profile is not None and not _domain_profile.is_registered():
+    _domain_profile.register(_SuiteProfile())

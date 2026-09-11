@@ -40,9 +40,19 @@ jobs:
       # openDox's own modules import with `openxdox` unimportable — which is
       # the property Q-L5 (b′) is waiting on. Both files are `--noconftest`
       # safe and neither needs the consumer installed, which is the point.
+      #
+      # § 4.3 adds `tests/test_profile_registration.py` on the same footing
+      # (RULED ASK-2 option (2), openxFactory#656 comment 5628886636): it
+      # asserts the COMPOSITION POINT — that `profile_openxfactory` resolves at
+      # first attribute access through a registration the host makes, and
+      # refuses naming that call when no host made one — and it is the only
+      # place the ruled contract is executed rather than described. It is
+      # `--noconftest` safe and needs no consumer, for the same reason and by
+      # the same means as its two neighbours.
       - name: pytest
         run: >-
           python -m pytest -q
           tests/test_leg_shape.py
           tests/test_consumer_reach.py
+          tests/test_profile_registration.py
           --noconftest
