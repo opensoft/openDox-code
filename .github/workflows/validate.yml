@@ -34,5 +34,15 @@ jobs:
       # carved tests arrive byte-identical and return to this workflow when
       # the BUILD arc lands. The root conftest's collect_ignore list (round 2)
       # remains the record of what was already known.
+      #
+      # BUILD SLICE 2 adds `tests/test_consumer_reach.py` beside it, and it is
+      # not a carved suite returning early: it asserts the DIRECTION — that
+      # openDox's own modules import with `openxdox` unimportable — which is
+      # the property Q-L5 (b′) is waiting on. Both files are `--noconftest`
+      # safe and neither needs the consumer installed, which is the point.
       - name: pytest
-        run: python -m pytest -q tests/test_leg_shape.py --noconftest
+        run: >-
+          python -m pytest -q
+          tests/test_leg_shape.py
+          tests/test_consumer_reach.py
+          --noconftest

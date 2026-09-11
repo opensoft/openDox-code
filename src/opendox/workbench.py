@@ -67,7 +67,8 @@ from .path_slug import (  # noqa: F401  (re-export)
     slug,
 )
 from .boundary import OutputBoundary
-from openxdox.snapshot import find_validator
+from . import consumer_reach
+find_validator = consumer_reach.find_validator
 
 # --------------------------------------------------------------------------
 # contract constants (mirror ideation-workbench.schema.yaml — the READ-ONLY
