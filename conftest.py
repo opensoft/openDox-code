@@ -113,9 +113,22 @@ collect_ignore = [
 #
 # Guarded, because this scaffold file also runs where the package is not yet
 # importable, and a conftest that raises collects nothing at all.
+#
+# THE GUARD IS NARROW ON PURPOSE (Copilot review thread on openDox-code#11).
+# It was `except Exception`, which would have swallowed a `SyntaxError` or any
+# other import-time breakage inside `opendox/domain_profile.py`, left
+# `_domain_profile` as `None`, and SKIPPED the registration in silence — after
+# which every suite that reached a composition point would fail, or pass,
+# according to what happened to be collected. The registry would be broken and
+# this file would be the reason nobody could tell. Only two things are
+# scaffolding: the package is not importable yet, AND it is the PACKAGE that is
+# missing rather than something the registry itself imports. Everything else is
+# a regression and is re-raised, loudly, here.
 try:                                           # pragma: no cover - scaffolding
     from opendox import domain_profile as _domain_profile
-except Exception:                              # pragma: no cover - scaffolding
+except ModuleNotFoundError as _missing:        # pragma: no cover - scaffolding
+    if (_missing.name or "").split(".")[0] != "opendox":
+        raise
     _domain_profile = None
 
 
