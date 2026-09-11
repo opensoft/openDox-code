@@ -20,9 +20,17 @@ time. Rewrite `from openxdox import gate_console` into a late-bound stand-in and
 the census falls by one while the module still cannot be imported without
 openXdox — the reach simply stops being an `Import` node. `branch_session.py`
 (7 such sites) and `serve.py` (2) are exactly that case, and both were reverted
-out of this slice rather than shipped as a census that reads better than the
+out of slice 2 rather than shipped as a census that reads better than the
 tree. **So this file asserts the thing the census is a proxy for**: the module
 imports, in a subprocess, with `openxdox` made unimportable.
+
+BUILD SLICE 2b is what that reversion was waiting for: `defaults.py` gives
+openDox its own spelling of the three values the nine default-argument sites
+read, so the reach can be removed at the site rather than renamed at the import
+line, and `branch_session` moves from the recorded half to the asserted half
+below. That move is the point of the second test: it FAILED on the slice-2b
+commit that made the module importable, and this act is the answer it asked
+for.
 
 `--noconftest` safe and dependency-free: `.github/workflows/validate.yml` runs
 this file beside `tests/test_leg_shape.py`, and the repository's root
@@ -76,28 +84,37 @@ NEUTRAL_MODULES = (
     "opendox.workbench",
     "opendox.serve_workbench",
     "opendox.consumer_reach",
+    # BUILD slice 2b. Seven default-argument reads of
+    # `gate_console.DEFAULT_RECORDS_DIR` / `DEFAULT_BRANCH_PREFIX` — evaluated
+    # where the `def` sits, so no stand-in could defer them — now read
+    # `opendox.defaults`, which is openDox's own spelling of values openDox
+    # owns. openXdox-code's drift guard holds the two spellings together.
+    "opendox.branch_session",
 )
 
 #: Modules that STILL require the consumer at import time, with the reason. They
 #: are listed so the suite is a census of the whole surface rather than of its
 #: good half, and each entry names what has to land for it to move up.
 #:
-#: `branch_session` and `serve` are NOT here because of an import statement
-#: alone: both also evaluate `<consumer module>.<CONSTANT>` as a DEFAULT
-#: ARGUMENT (`branch_session` at 7 sites, `serve` at 2), and those lines sit
-#: OUTSIDE the declared-edit ranges openxFactory's carve manifest gives their
-#: rows — so they are owed a declared-edit ruling, not a patch.
+#: `serve` is NOT here because of an import statement alone: it also evaluates
+#: `registry_mod.<CONSTANT>` as a DEFAULT ARGUMENT at 2 sites, which no
+#: late-binding stand-in can defer, and it names two consumer classes as MIXIN
+#: BASES — a base expression is evaluated when the class statement runs, and a
+#: class needs its bases before its first instance.
+#:
+#: `cli` is a DERIVED entry, and the distinction matters when reading this
+#: record: since BUILD slice 2b step 3 `cli.py` names no consumer of its own at
+#: import time. It is here only because it imports `opendox.serve`, so it
+#: leaves this list the moment `serve` does — one act, two modules.
 STILL_REACHING = {
-    "opendox.cli": "cli.py's `from openxdox.corpus_root import (...)` and "
-                   "`from openxdox.generator import (...)` are multi-line "
-                   "statements whose continuation lines the manifest does not "
-                   "declare; and it imports serve and branch_session",
-    "opendox.serve": "serve.py names serve_gate/serve_projection as MIXIN "
-                     "BASES of DashboardHandler and re-exports their names in "
-                     "multi-line blocks, all on undeclared lines",
-    "opendox.branch_session": "branch_session.py evaluates "
-                              "gate_console.DEFAULT_RECORDS_DIR as a default "
-                              "argument at 7 undeclared lines",
+    "opendox.cli": "cli.py itself no longer names the consumer at import time "
+                   "(BUILD slice 2b step 3); it still imports opendox.serve, "
+                   "which does, and an importing module inherits its imports' "
+                   "reaches",
+    "opendox.serve": "serve.py names serve_gate.GateRoutes and "
+                     "serve_projection.ProjectionRoutes as MIXIN BASES of "
+                     "DashboardHandler, and evaluates two registry_mod "
+                     "constants as default arguments of build_server",
 }
 
 
