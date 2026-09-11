@@ -102,6 +102,7 @@ __all__ = [
     "REGISTRATION_CALL",
     "current",
     "is_registered",
+    "name_of",
     "register",
     "unregister",
 ]
@@ -173,8 +174,8 @@ def register(profile: Any) -> Any:
             "state RULED ASK-2 asks for rather than a silent empty profile.")
     if _registered is not None and _registered is not profile:
         raise AlreadyRegistered(
-            f"a host profile is already registered ({_name_of(_registered)}), "
-            f"and {_name_of(profile)} would replace it. Registration happens "
+            f"a host profile is already registered ({name_of(_registered)}), "
+            f"and {name_of(profile)} would replace it. Registration happens "
             "ONCE, at process start (RULED ASK-4 Q5, openxFactory#656 comment "
             "5634195861): a parser or a server built before the swap keeps the "
             "first profile's contributed subcommands and routes, so a second "
@@ -227,8 +228,13 @@ def current() -> Any:
     return _registered
 
 
-def _name_of(profile: Any) -> str:
+def name_of(profile: Any) -> str:
     """A profile's most nameable name, for a refusal message.
+
+    PUBLIC because `profile_proxy.py` quotes it in its own refusal: the two
+    accessors of one registration must name a profile the same way, and a
+    private helper reached across a module boundary is a contract pretending
+    not to be one.
 
     A module says `__name__`; an object says its type. Neither is required to
     exist on an object this module deliberately does not type-check, so the
