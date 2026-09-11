@@ -190,11 +190,13 @@ still ends in one `register()` call at process start.
 
 ## Where this is executed rather than described
 
-`tests/test_profile_registration.py`, which `validate` runs. Eighteen cases:
+`tests/test_profile_registration.py`, which `validate` runs. Twenty-one cases:
 import-time inertness (in a subprocess), the unregistered refusal and its text,
 both facets resolving, the double-registration refusal and the idempotent no-op,
 the missing-facet refusal and its `AttributeError`-ness, the dunder and `repr`
-probing rules, and the duck type openXdox delegates to — module path included.
+probing rules, how a refusal NAMES a profile (two opaque instances of one class
+told apart; a hostile `repr` that neither raises nor runs long) and which reader
+it names, and the duck type openXdox delegates to — module path included.
 
 ---
 
