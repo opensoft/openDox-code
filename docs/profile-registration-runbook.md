@@ -222,25 +222,34 @@ carve commit's own two lines**; only the module the name is bound to changed.
 
 ## Where this is executed rather than described
 
-`tests/test_profile_registration.py`, which `validate` runs. Twenty-eight cases:
+`tests/test_profile_registration.py`, which `validate` runs. Thirty cases:
 import-time inertness (in a subprocess), the unregistered refusal and its text,
 both facets resolving, the double-registration refusal and the idempotent no-op,
 the missing-facet refusal and its `AttributeError`-ness, the dunder and `repr`
 probing rules, how a refusal NAMES a profile (two opaque instances of one class
 told apart; a hostile `repr` that neither raises nor runs long) and which reader
 it names per facet, the duck type openXdox delegates to — module path included
-— and the SERVED composition point.
+— and **both composition points, executed**.
 
-That last one is executed rather than described, and it has to be got at
-sideways: `import opendox.serve` cannot be performed in this repository at all,
-because `serve.py:181` still reaches `ideation_dashboard`, openxFactory's
-pre-carve package, which exists at neither carve destination (recorded in
-`tests/test_consumer_reach.py`'s `STILL_REACHING`, owed to a later act). So the
-suite lifts `build_server()`'s two composition statements out of the real file
-**by AST** and executes them against a stand-in `route_extension` seam. It runs
-the tree's own lines, it pins the host-ahead-of-caller order, it proves the
-unregistered refusal at the server, and it keeps working unchanged the day
-`serve.py` becomes importable.
+That last group has to be got at sideways. **Neither `opendox.cli` nor
+`opendox.serve` can be imported in this repository at all**: `serve.py:181` still
+reaches `ideation_dashboard`, openxFactory's pre-carve package, which exists at
+neither carve destination, and `cli.py` imports `serve` and inherits the block.
+Both are recorded by name, with the blocker named, in
+`tests/test_consumer_reach.py`'s `STILL_REACHING`, and both are owed to a later
+act of the BUILD arc.
+
+So the suite lifts each composition point out of its own file **by AST** — the
+binding of the proxy, wherever that module puts it, plus the statement that reads
+a facet off it — and executes those statements against stand-ins for the two
+§ 2.4 seams. What runs is the tree's own lines, so a deleted binding, a renamed
+import or a deleted read all fail here, including the original defect
+(`NameError: profile_openxfactory` at `build_parser()`) that a unit test of the
+proxy alone could never see. It pins the host-ahead-of-caller order, it proves
+the unregistered refusal at BOTH readers, it holds `cli.py` to its module-scope
+binding and `serve.py` to its deferred one, and none of it is pinned to a line
+number that the next declared edit would move — or has to change the day the two
+modules become importable.
 
 ---
 

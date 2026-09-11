@@ -81,15 +81,33 @@ class _HostProfile:
 
 @pytest.fixture(autouse=True)
 def _empty_registry():
-    """Every test starts and ends with NO registration.
+    """Every test starts with NO registration — and PUTS BACK what it found.
 
-    The registry is process-global by design — it is one registration — so the
-    isolation has to be explicit, and `unregister()` exists for exactly this and
-    for a host tearing down.
+    The registry is process-global by design: it is ONE registration, for the
+    whole process. That is what makes the isolation explicit (`unregister()`
+    exists for exactly this, and for a host tearing down) and it is also what
+    makes a bare teardown wrong.
+
+    THE RESTORE IS NOT COSMETIC (Copilot review thread on openDox-code#11). The
+    root `conftest.py` registers an empty `_SuiteProfile` AT PROCESS START,
+    because a test process is a host like any other; a teardown that only
+    unregistered would strip it for the rest of the session, and every later
+    test that reached a composition point — `cli.build_parser()`, and now
+    `serve.build_server()` — would raise `ProfileNotRegistered` for a reason
+    that has nothing to do with it. Collection order would decide whether the
+    suite passed.
+
+    `validate` does not see that failure, which is exactly why it is worth
+    fixing rather than noting: this file runs there under `--noconftest`
+    (RULED Q-L5 (b′)), so there is no conftest registration to destroy and the
+    bug would have waited for the day the ignore list shrinks.
     """
+    previous = domain_profile.current() if domain_profile.is_registered() else None
     domain_profile.unregister()
     yield
     domain_profile.unregister()
+    if previous is not None:
+        domain_profile.register(previous)
 
 
 # --------------------------------------------------------------------------
@@ -409,74 +427,140 @@ def test_the_repr_names_the_whole_composition_surface() -> None:
 
 
 # --------------------------------------------------------------------------
-# 9 — the SERVED composition point (RULED ASK-6 -> 1, `5635150678`)
+# 9 — the composition points themselves, EXECUTED
+#     (RULED ASK-6 -> 1, `5635150678`; Copilot review threads on openDox-code#11)
 # --------------------------------------------------------------------------
+#
+# NEITHER `opendox.cli` NOR `opendox.serve` CAN BE IMPORTED IN THIS REPOSITORY.
+# `serve.py:181` still reaches `ideation_dashboard`, openxFactory's PRE-CARVE
+# package, which exists at neither carve destination — and `cli.py` imports
+# `serve`, so it inherits the block. Both are recorded in
+# `tests/test_consumer_reach.py`'s `STILL_REACHING`, by name and with the
+# blocker named, and both are owed to a later act of the BUILD arc.
+#
+# That is a real obstacle to the assertion Copilot asked for ("add an
+# integration assertion that registers a profile and builds the parser"), and
+# narrowing to "the proxy works in isolation" would have been the wrong answer:
+# the regression under discussion is `NameError: profile_openxfactory` AT A
+# COMPOSITION POINT, which a unit test of `_LateProfile` cannot see.
+#
+# So the composition points are lifted OUT of their own files BY AST and
+# executed against stand-ins for the two § 2.4 seams. What runs is the tree's
+# own statements — the module-level or function-level binding of the proxy, and
+# the statement that reads a facet off it — so a deleted binding, a renamed
+# import or a deleted read all fail here, which is the whole of the regression
+# class. Nothing is pinned to a line number, which the next declared edit would
+# move, and none of it has to change the day the two modules become importable.
 
-SERVE = SRC / "opendox" / "serve.py"
 PROXY_IMPORT = "opendox.profile_proxy"
+PROXY_NAME = "profile_openxfactory"
 
 
-def _build_server_body() -> list[ast.stmt]:
-    """`build_server`'s statements, from the real `serve.py` on disk."""
-    tree = ast.parse(SERVE.read_text(encoding="utf-8"))
+def _module_body(path: Path, function: str) -> tuple[list[ast.stmt], list[ast.stmt]]:
+    """`path`'s module-level statements and `function`'s body."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "build_server":
-            return node.body
-    raise AssertionError("serve.py no longer defines build_server()")
+        if isinstance(node, ast.FunctionDef) and node.name == function:
+            return tree.body, node.body
+    raise AssertionError(f"{path.name} no longer defines {function}()")
 
 
-def _composition_statements() -> list[ast.stmt]:
-    """The TWO statements that are the served composition point.
+def _binds_proxy(node: ast.AST) -> bool:
+    return isinstance(node, ast.ImportFrom) and node.module == PROXY_IMPORT
 
-    Lifted by AST rather than by a line number or a regex: the whole point of
-    the carve's declared-edit grammar is that line numbers move, and a test
-    pinned to one would go green on the wrong statement the first time anything
-    above it changed.
+
+def _import_time_nodes(body: list[ast.stmt]):
+    """Every node evaluated when the module is IMPORTED.
+
+    A function's BODY defers; its decorators and default arguments do not, and a
+    class body runs outright. `tests/test_consumer_reach.py::_import_time_uses`
+    draws the line in the same place for the consumer seam, and for the same
+    reason: `ast.walk` over a module descends into function bodies and would
+    call every deferred binding an import-time one.
     """
-    wanted: list[ast.stmt] = []
-    for node in _build_server_body():
-        if isinstance(node, ast.ImportFrom) and node.module == PROXY_IMPORT:
-            wanted.append(node)
-        elif isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == "route_bindings"
-                for t in node.targets):
-            wanted.append(node)
-    assert len(wanted) == 2, (
-        "expected `from opendox.profile_proxy import profile_openxfactory` and "
-        f"the `route_bindings = ...` assignment in build_server(); found "
-        f"{len(wanted)}")
-    return wanted
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            for sub in [*node.decorator_list, *args.defaults,
+                        *(d for d in args.kw_defaults if d)]:
+                yield from ast.walk(sub)
+            continue
+        yield node
+        nested: list[ast.stmt] = []
+        for _field, value in ast.iter_fields(node):
+            for item in (value if isinstance(value, list) else [value]):
+                if isinstance(item, ast.stmt):
+                    nested.append(item)
+                elif isinstance(item, ast.AST):
+                    yield from ast.walk(item)
+        yield from _import_time_nodes(nested)
+
+
+def _reads_facet(node: ast.stmt, facet: str) -> bool:
+    return any(isinstance(inner, ast.Attribute) and inner.attr == facet
+               and isinstance(inner.value, ast.Name) and inner.value.id == PROXY_NAME
+               for inner in ast.walk(node))
+
+
+def _composition_statements(path: Path, function: str,
+                            facet: str) -> list[ast.stmt]:
+    """The binding of the proxy, and the statement(s) that read `facet` off it.
+
+    The binding is taken from wherever the module actually puts it — `cli.py`
+    binds at module scope because a parser is built from it at import time,
+    `serve.py` inside `build_server()` because a server is not — so this helper
+    asserts that ONE exists rather than legislating which.
+    """
+    module_body, function_body = _module_body(path, function)
+    binding = [n for n in module_body if _binds_proxy(n)] + \
+              [n for n in function_body if _binds_proxy(n)]
+    assert len(binding) == 1, (
+        f"expected exactly one `from {PROXY_IMPORT} import {PROXY_NAME}` "
+        f"reachable by {function}() in {path.name}; found {len(binding)}. "
+        "Without it the composition point raises `NameError: "
+        f"{PROXY_NAME}` for every caller, which is the defect § 4.3 repairs")
+    reads = [n for n in function_body if _reads_facet(n, facet)]
+    assert reads, (
+        f"{path.name}:{function}() no longer reads {facet} off {PROXY_NAME}. "
+        "A composition point that stopped asking for the host's contribution "
+        "would compose a CORE-only parser or server and look exactly like a "
+        "working one, which is the failure RULED ASK-2 refuses")
+    return binding + reads
+
+
+def _run(path: Path, function: str, facet: str, namespace: dict) -> dict:
+    """Execute those statements, and hand back the namespace they wrote into."""
+    module = ast.Module(body=_composition_statements(path, function, facet),
+                        type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), str(path), "exec"),  # noqa: S102
+         namespace)
+    return namespace
 
 
 class _RecordingSeam:
-    """A stand-in for `route_extension`, which is all these two lines touch."""
+    """A stand-in for the § 2.4 seam module each composition point calls."""
 
     def __init__(self) -> None:
-        self.handed: tuple = ()
+        self.handed: list[tuple] = []
 
-    def collect_bindings(self, extensions):
-        self.handed = tuple(extensions)
-        return self.handed
+    def collect_bindings(self, extensions):       # `route_extension`'s
+        self.handed.append(tuple(extensions))
+        return tuple(extensions)
+
+    def register_all(self, extensions, _sub):     # `subcommand_extension`'s
+        self.handed.append(tuple(extensions))
 
 
-def _run_composition(route_extensions: tuple) -> _RecordingSeam:
-    """Execute the two real statements, and report what the seam was handed."""
+# --- the SERVER composition point (the routes half, RULED ASK-6 -> 1) --------
+
+SERVE = SRC / "opendox" / "serve.py"
+
+
+def _run_server(route_extensions: tuple) -> _RecordingSeam:
     seam = _RecordingSeam()
-    namespace: dict = {"route_extension": seam,
-                       "route_extensions": route_extensions}
-    module = ast.Module(body=_composition_statements(), type_ignores=[])
-    exec(compile(ast.fix_missing_locations(module), str(SERVE), "exec"),  # noqa: S102
-         namespace)
+    _run(SERVE, "build_server", "ROUTE_EXTENSIONS",
+         {"route_extension": seam, "route_extensions": route_extensions})
     return seam
-
-
-def test_the_served_composition_point_binds_the_proxy_and_reads_the_facet() -> None:
-    """The two statements are there, and they are the ones ASK-6 -> 1 ruled."""
-    imports, assign = _composition_statements()
-    assert [alias.name for alias in imports.names] == ["profile_openxfactory"]
-    read = [node for node in ast.walk(assign)
-            if isinstance(node, ast.Attribute) and node.attr == "ROUTE_EXTENSIONS"]
-    assert read, "build_server() no longer reads ROUTE_EXTENSIONS off the proxy"
 
 
 def test_the_served_binding_is_deferred_and_never_runs_at_import_time() -> None:
@@ -485,33 +569,29 @@ def test_the_served_binding_is_deferred_and_never_runs_at_import_time() -> None:
     The proxy resolves nothing when imported, so this is not about failure — it
     is about POSTURE: a module-level binding would make the profile a thing
     `serve.py` has at import time, and the next reader would reasonably use it
-    there. `test_consumer_reach.py` holds the same line for the consumer seam,
-    for the same reason.
+    there. `cli.py` is the deliberate opposite and is asserted so below; the
+    difference is the one `serve.py`'s own comment gives — a parser is built at
+    import time, a server is not.
     """
-    tree = ast.parse(SERVE.read_text(encoding="utf-8"))
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, ast.FunctionDef):
-            continue
-        for inner in ast.walk(node):
-            assert not (isinstance(inner, ast.ImportFrom)
-                        and inner.module == PROXY_IMPORT), (
-                f"serve.py imports the proxy at import time (line {inner.lineno})")
-            assert not (isinstance(inner, ast.Name)
-                        and inner.id == "profile_openxfactory"), (
-                f"serve.py names the profile at import time (line {inner.lineno})")
+    module_body, _ = _module_body(SERVE, "build_server")
+    for inner in _import_time_nodes(module_body):
+        assert not _binds_proxy(inner), (
+            f"serve.py binds the proxy at import time (line {inner.lineno})")
+        assert not (isinstance(inner, ast.Name) and inner.id == PROXY_NAME), (
+            f"serve.py names the profile at import time (line {inner.lineno})")
 
 
 def test_the_served_routes_put_the_hosts_contribution_ahead_of_the_callers() -> None:
     """The carve's own order, restored: the host's routes first, then the caller's.
 
-    This EXECUTES `serve.py`'s two lines. `route_extensions` stays the § 2.4
-    seam for whatever a caller adds ON TOP, and the default `()` still means
-    "add nothing" — so a caller who passes nothing gets exactly the host's.
+    `route_extensions` stays the § 2.4 seam for whatever a caller adds ON TOP,
+    and the default `()` still means "add nothing" — so a caller who passes
+    nothing gets exactly the host's.
     """
     domain_profile.register(_HostProfile)
-    assert _run_composition(("the caller's",)).handed == \
-        ("the host's routes", "the caller's")
-    assert _run_composition(()).handed == ("the host's routes",)
+    assert _run_server(("the caller's",)).handed == \
+        [("the host's routes", "the caller's")]
+    assert _run_server(()).handed == [("the host's routes",)]
 
 
 def test_the_served_composition_point_refuses_when_no_host_registered() -> None:
@@ -520,12 +600,10 @@ def test_the_served_composition_point_refuses_when_no_host_registered() -> None:
     `domain_profile.current()`'s message has always told a host to register
     "before it calls `cli.build_parser()` or `serve.build_server()`". Until this
     slice that was half aspirational: slice 2b had removed serve's read, so a
-    server composed from whatever it was handed and never asked. It asks now,
-    and an unregistered process is told which call is missing rather than
-    silently serving without its contributed routes.
+    server composed from whatever it was handed and never asked. It asks now.
     """
     with pytest.raises(domain_profile.ProfileNotRegistered) as caught:
-        _run_composition(("the caller's",))
+        _run_server(("the caller's",))
     assert domain_profile.REGISTRATION_CALL in str(caught.value)
 
 
@@ -536,5 +614,51 @@ def test_a_host_profile_without_routes_is_told_which_reader_wanted_them() -> Non
 
     domain_profile.register(_CliOnly())
     with pytest.raises(profile_proxy.ProfileFacetMissing) as caught:
-        _run_composition(())
+        _run_server(())
     assert "serve.build_server()" in str(caught.value)
+
+
+# --- the PARSER composition point, the defect § 4.3 was opened for -----------
+
+CLI = SRC / "opendox" / "cli.py"
+
+
+def _run_parser() -> _RecordingSeam:
+    seam = _RecordingSeam()
+    _run(CLI, "build_parser", "SUBCOMMAND_EXTENSIONS",
+         {"subcommand_extension": seam, "sub": object()})
+    return seam
+
+
+def test_the_parser_composition_point_resolves_instead_of_raising_nameerror() -> None:
+    """THE regression this slice exists to prevent, asserted at the real statement.
+
+    Copilot's finding on this PR, and it is the right one: a suite that only
+    exercised `_LateProfile` would stay green while `build_parser()` went back
+    to raising `NameError: profile_openxfactory` — which is precisely the defect
+    the carve left behind (`openxFactory#656` comment `5633826227`). The binding
+    and the read are lifted out of `cli.py` itself, so deleting either one fails
+    HERE rather than in a suite this repository cannot yet collect.
+    """
+    domain_profile.register(_HostProfile)
+    assert _run_parser().handed == [("the host's subcommands",)]
+
+
+def test_the_parser_composition_point_refuses_when_no_host_registered() -> None:
+    """The same refusal at the same shape, for the reader that has always read."""
+    with pytest.raises(domain_profile.ProfileNotRegistered) as caught:
+        _run_parser()
+    assert domain_profile.REGISTRATION_CALL in str(caught.value)
+
+
+def test_the_parser_binds_the_proxy_at_module_scope() -> None:
+    """`cli.py` binds where `serve.py` deliberately does not, and that is the point.
+
+    A parser is built from the profile at import time and a server is not, so
+    the two modules take opposite postures ON PURPOSE. Asserting only "a binding
+    exists somewhere" would let either drift into the other's shape without a
+    word, and the comment in each file would silently stop being true.
+    """
+    module_body, _ = _module_body(CLI, "build_parser")
+    assert [n for n in _import_time_nodes(module_body) if _binds_proxy(n)], (
+        "cli.py no longer binds the proxy at module scope")
