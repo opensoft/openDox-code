@@ -101,6 +101,19 @@ NEUTRAL_MODULES = (
     # not two constants: `DEFAULT_BRANCH_PREFIX` is not reached from this
     # module and `defaults.py` does not carry it.
     "opendox.branch_session",
+    # § 4.3 (RULED ASK-2 option (2), openxFactory#656 comment 5628886636). The
+    # host-profile registry and the `profile_openxfactory` lazy proxy over it.
+    # They are listed here for the reason every other entry is — a module added
+    # to this package's import surface is added to this census — and they are
+    # the two modules for which the claim is least surprising and most worth
+    # stating: a seam whose whole job is to let a HOST hand openDox a profile
+    # is precisely where a reach into `openxdox` would look reasonable, and
+    # neither of them makes one. openXdox reads this registry, not the reverse
+    # (RULED ASK-4 Q5 `5634195861`; `openxdox.domain_profile._upstream()`
+    # imports `opendox.domain_profile` late), which is the lawful direction
+    # because openXdox PINS openDox (§ 4.2, RULED OQ-2).
+    "opendox.domain_profile",
+    "opendox.profile_proxy",
 )
 
 #: Modules that STILL require the consumer at import time, with the reason. They

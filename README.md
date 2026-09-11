@@ -52,3 +52,4 @@ adds it — the xFactory family's standing rule, levelled across all six
 | document | what it is |
 |---|---|
 | [docs/branch-protection.md](docs/branch-protection.md) | the repository ruleset that makes `validate` a required status check on `main`, its `evaluate` → `active` history, and the one policy difference between the two families |
+| [docs/profile-registration-runbook.md](docs/profile-registration-runbook.md) | the host profile: the one `opendox.domain_profile.register()` call a descendant makes at process start, what openDox reads off it, how it refuses when no host registers, and how RULED ASK-4 Q5's one registration serves both legs' accessors without an import between them |

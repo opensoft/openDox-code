@@ -1398,6 +1398,26 @@ def build_server(
     # time, so only `cli.py`'s read of them pays. `cli.py` names the same
     # profile at module scope because a parser is built from it at import time;
     # a server is not.
+    #
+    # § 4.3, THE ROUTES HALF — RULED ASK-6 -> 1 (openxFactory#656 comment
+    # 5635150678): "the routes half of § 4.3 — serve.py reads the proxy too;
+    # after 2b lands and openDox-code #11 is rebased onto main, the same
+    # author adds the server-side binding in the same PR (one mechanism, one
+    # registration, under ASK-2)". The name is back AT ITS OWN SITE: the carve
+    # deleted `from ideation_dashboard import profile_openxfactory` from this
+    # line (the declared `:1371`), and what replaces it is not another in-tree
+    # module but the LAZY PROXY over the host's registration.
+    #
+    # THE DEFERRAL NO LONGER KEEPS ANYTHING OUT OF THE IMPORT GRAPH, and the
+    # paragraph above is the only reason left for it: `opendox.profile_proxy`
+    # resolves NOTHING when imported — it touches no registry and cannot fail
+    # for want of a host — so this line would cost nothing in the module
+    # header. It sits here because the read it feeds is the NEXT STATEMENT in
+    # this body, and a wiring input read once per build belongs beside the
+    # composition it feeds. `tests/test_profile_registration.py` holds the
+    # import to this body rather than to the module, so the posture is
+    # asserted and not merely intended.
+    from opendox.profile_proxy import profile_openxfactory
 
     # FIRST, before a socket, a checkout read or a session bootstrap: a
     # malformed, duplicated, overlapping or non-conforming binding refuses the
@@ -1406,24 +1426,41 @@ def build_server(
     # between a contributed route and one of this assembly's own is refused
     # here too, INCLUDING a caller's exact binding declared under one of this
     # assembly's prefixes (RULING A, 2026-09-07; `collect_bindings`).
-    # THE IN-TREE PROFILE IS GONE (BUILD slice 2b). This read
+    # THE IN-TREE PROFILE IS GONE AND THE CONTRIBUTION IS BACK — two different
+    # facts, from two different acts. At the carve commit this read
     # `tuple(profile_openxfactory.ROUTE_EXTENSIONS) + tuple(route_extensions)`,
-    # and openxFactory's carve manifest files `profile_openxfactory.py` as
-    # `not_moved / deleted_at_carve`: "the one file the § 3 carve deletes rather
-    # than moves -- after the carve openXdox declares its own profile and
-    # openDox's core has no line naming any". The deferred import that fed this
-    # reach WAS deleted with the carve (the declared `:1371`) and the reach
-    # itself was left behind, so `build_server()` raised
-    # `NameError: profile_openxfactory` for every caller. A server is now
-    # assembled from exactly what its caller hands it, which is what the § 2.4
-    # seam is for.
+    # naming a module openxFactory's carve manifest files as `not_moved /
+    # deleted_at_carve`: "the one file the § 3 carve deletes rather than moves
+    # -- after the carve openXdox declares its own profile and openDox's core
+    # has no line naming any". The deferred import that fed the reach WAS
+    # deleted with the carve (the declared `:1371`) and the reach itself was
+    # left behind, so `build_server()` raised `NameError: profile_openxfactory`
+    # for every caller. BUILD slice 2b cut the reach out rather than repairing
+    # it, because repairing it needed a ruling it did not yet have.
+    #
+    # It has one now (RULED ASK-6 -> 1). THE ORDER AND THE SHAPE ARE THE
+    # CARVE'S, unchanged — the host's routes ahead of the caller's tuple, and
+    # `route_extensions` still the seam for whatever a caller adds ON TOP. Only
+    # the SOURCE of the name is different: an in-tree module became a host
+    # registration resolved at first access.
+    #
+    # A SERVER BUILT WITH NO HOST REGISTERED REFUSES HERE, naming
+    # `opendox.domain_profile.register(<the host's profile>)` — exactly as
+    # `build_parser()` refuses at its own read of `SUBCOMMAND_EXTENSIONS`. That
+    # is ASK-2's "REFUSAL, NOT A DEFAULT" ("a server missing its contributed
+    # routes looks exactly like a working one"), and it is what makes
+    # `domain_profile.current()`'s message — which already tells a host to
+    # register "before it calls `cli.build_parser()` or `serve.build_server()`"
+    # — true of this function instead of merely aspirational.
     #
     # THE DOCSTRING ABOVE STILL DESCRIBES THE IN-TREE PROFILE and is NOT
     # corrected here: its lines are not ones openxFactory's carve manifest
     # declares for this row, and an edit outside the declared lines is an
-    # UNDECLARED MOVEMENT that the arrival verifier refuses (RULED OQ-1). This
-    # comment is the correction until an act that declares them lands.
-    route_bindings = route_extension.collect_bindings(route_extensions)
+    # UNDECLARED MOVEMENT that the arrival verifier refuses (RULED OQ-1) —
+    # RULED ASK-7 -> 1 leaves those four stale lines standing until the next
+    # declared-edit window. This comment is the correction until then.
+    route_bindings = route_extension.collect_bindings(
+        tuple(profile_openxfactory.ROUTE_EXTENSIONS) + tuple(route_extensions))
 
     web_dir = Path(web_dir).resolve()
     snapshot_path = Path(snapshot_path).resolve()
