@@ -266,6 +266,87 @@ class _LateConsumerValue:
         return f"<late consumer value {self.name!r}>"
 
 
+class _LateConsumerColumn:
+    """The BASE-CLASS member of this family: one handler-method column of the
+    consumer, reached on first CALL instead of at class-definition time.
+
+    THE SITE, AND WHY NOTHING NARROWER WOULD DO. `serve.DashboardHandler` named
+    `serve_gate.GateRoutes` and `serve_projection.ProjectionRoutes` as MIXIN
+    BASES. A base expression is evaluated when the class statement runs, which
+    is when the module loads, so those two lines alone made
+    `import opendox.serve` require openXdox — and a base, unlike a call, cannot
+    be deferred by any of the stand-ins above: a class needs its bases to exist
+    before its first instance does.
+
+    So the column is replaced by a base openDox OWNS, carrying one method per
+    name the consumer's column defines. Each forwards
+    `getattr(<consumer class>, name)(self, *args, **kwargs)` — the SAME function
+    object, with the SAME `self`, which is the live request handler — so the
+    handler behaves exactly as it did when it inherited: `serve.py`'s core
+    `/snapshot.json` arm still finds `self._serve_snapshot`, and a contributed
+    binding naming `_handle_gate_action` or `_serve_index` still resolves
+    against the bound class at wiring time
+    (`route_extension.resolve_handlers`), which is the check that refuses a
+    route that cannot be served BEFORE a socket.
+
+    `design.md`:243 is the standard again: *"What must not survive is the
+    direction, not the calls."* The call into openXdox's column survives, and it
+    is the same call; what goes is the import that used to make it at load time.
+
+    WHY THE METHOD NAMES ARE RESTATED HERE. The same reason `defaults.py`
+    restates three literals: the alternative is reading them off the consumer,
+    which is the import this removes. `LATE_COLUMN` publishes the triple
+    (consumer module, class, method names) so openXdox-code's
+    `tests/test_dependency_direction.py` can hold the two surfaces together and
+    refuse if either side moves without the other — the drift guard is the
+    invariant, the restatement is the spelling.
+
+    NOT A GENERAL SUBCLASS PROXY. There is no `__getattr__` here, deliberately:
+    a handler instance is probed for absent attributes constantly (`hasattr(self,
+    "do_PUT")` in `http.server`'s own dispatch, `copy`, `pickle`, pytest), and a
+    base that answered those by importing openXdox would fire the reach at a
+    moment no verb chose — and, worse, would raise this module's
+    `ConsumerReachUnavailable` where the caller was testing for `AttributeError`.
+    A NAMED method list answers exactly the names the column has and nothing
+    else, and an absent consumer refuses at the call with the layering spelled
+    out.
+    """
+
+    #: `(consumer module, class, method names)`. Set on each generated subclass.
+    LATE_COLUMN: tuple[str, str, tuple[str, ...]] = ("", "", ())
+
+
+def _column_forwarder(holder: _LateConsumerModule, class_name: str, attr: str):
+    """One forwarding method: resolve the column's class, then call through it."""
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        column = getattr(holder.resolve(), class_name)
+        return getattr(column, attr)(self, *args, **kwargs)
+
+    forward.__name__ = attr
+    forward.__qualname__ = f"Late{class_name}.{attr}"
+    forward.__doc__ = (
+        f"`{holder.name}.{class_name}.{attr}`, resolved on first call "
+        f"(consumer_reach._LateConsumerColumn).")
+    return forward
+
+
+def route_column(holder: _LateConsumerModule, class_name: str,
+                 methods: tuple[str, ...]) -> type:
+    """A mixin base standing in for `<consumer module>.<class_name>`."""
+    if not methods:
+        raise ValueError(
+            "a late column with no methods stands in for nothing; name the "
+            f"methods {holder.name}.{class_name} defines")
+    namespace: dict[str, Any] = {
+        name: _column_forwarder(holder, class_name, name) for name in methods}
+    namespace["LATE_COLUMN"] = (holder.name, class_name, tuple(methods))
+    namespace["__doc__"] = (
+        f"Late stand-in for `{holder.name}.{class_name}` as a mixin base. "
+        "See `consumer_reach._LateConsumerColumn`.")
+    return type(f"Late{class_name}", (_LateConsumerColumn,), namespace)
+
+
 def module(name: str, *, reason: str) -> _LateConsumerModule:
     """A late stand-in for `openxdox.<name>`. `name` carries no package prefix."""
     if name.startswith(f"{CONSUMER_PACKAGE}."):
@@ -359,11 +440,47 @@ is_rfc3339_datetime = function(generator, "is_rfc3339_datetime")
 #: travelled to the projection column with its neighbours.
 hosted_ref_refused = function(serve_projection, "hosted_ref_refused")
 
+#: `serve_projection.resolve_source_path` — the CONTAINMENT check, and the one
+#: name `serve.py` re-exported that has a reader OUTSIDE `serve.py`:
+#: `notebook_action.py`:52 imports it `from .serve` and :139 re-checks every
+#: resolved document through it before a notebook action may name a path. So the
+#: name stays bound in `serve.py` when the other five re-exports go, and it is
+#: bound to this stand-in: same callable, same root-confinement, resolved on
+#: first CALL. Dropping it would have moved a path-containment check into an
+#: ImportError, which is the one class of removal this slice must not make.
+resolve_source_path = function(serve_projection, "resolve_source_path")
+
 #: `corpus_root.SCANNED_ROOTS` — the one CONSTANT reach, and the family's
 #: narrowest member. `cli.py:228` iterates it to name the roots a rejected
 #: checkout is missing; that line is not one the carve manifest declares, so
 #: the NAME must keep behaving like the tuple it was. See `_LateConsumerValue`.
 scanned_roots = constant(corpus_root, "SCANNED_ROOTS")
+
+#: The gate console's HTTP column — the door the gate verbs are posted through.
+#: Named here only to carry `LateGateRoutes` below; `serve.py` holds no other
+#: reference to it.
+serve_gate = module(
+    "serve_gate",
+    reason="the gate console's route column is openXdox's (design.md § D3); "
+           "this core dispatches its one contributed route through the § 2.4 "
+           "route extension point")
+
+#: `serve_gate.GateRoutes` as a mixin base — `DashboardHandler`'s third base
+#: until slice 2b. Two methods: the contributed `POST /actions/gate/` handler
+#: the § 2.4 binding names, and the failure logger it calls.
+LateGateRoutes = route_column(serve_gate, "GateRoutes",
+                              ("_handle_gate_action", "_log_gate_failure"))
+
+#: `serve_projection.ProjectionRoutes` as a mixin base — `DashboardHandler`'s
+#: fourth base until slice 2b. Eight methods: the three the § 2.4 bindings name
+#: (`_serve_index`, `_serve_source`, `_refuse_bare_source`), `_serve_snapshot`
+#: — which `serve.py`'s own CORE arm calls, because `/snapshot.json`'s handler
+#: travelled with its neighbours while its arm stayed core — and the four those
+#: four call between them.
+LateProjectionRoutes = route_column(
+    serve_projection, "ProjectionRoutes",
+    ("_query_key", "_read_snapshot", "_serve_snapshot", "_hosted_entry_refused",
+     "_serve_index", "_keyed_source", "_serve_source", "_refuse_bare_source"))
 
 __all__ = [
     "CONSUMER_PACKAGE",
@@ -378,8 +495,13 @@ __all__ = [
     "generator",
     "hosted_ref_refused",
     "is_rfc3339_datetime",
+    "LateGateRoutes",
+    "LateProjectionRoutes",
     "module",
+    "resolve_source_path",
+    "route_column",
     "scanned_roots",
+    "serve_gate",
     "serve_projection",
     "snapshot",
     "snapshot_registry",

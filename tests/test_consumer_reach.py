@@ -51,6 +51,11 @@ from pathlib import Path
 
 import pytest
 
+#: The package openDox must not require. Spelled once here rather than
+#: imported from `opendox.consumer_reach`, because this file must hold even if
+#: that module is the thing that broke.
+CONSUMER_PACKAGE = "openxdox"
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 PACKAGE = SRC / "opendox"
@@ -96,25 +101,38 @@ NEUTRAL_MODULES = (
 #: are listed so the suite is a census of the whole surface rather than of its
 #: good half, and each entry names what has to land for it to move up.
 #:
-#: `serve` is NOT here because of an import statement alone: it also evaluates
-#: `registry_mod.<CONSTANT>` as a DEFAULT ARGUMENT at 2 sites, which no
-#: late-binding stand-in can defer, and it names two consumer classes as MIXIN
-#: BASES — a base expression is evaluated when the class statement runs, and a
-#: class needs its bases before its first instance.
+#: Modules that still cannot be imported with the consumer blocked — with the
+#: reason, and with the PACKAGE NAME whose absence is what actually stops them.
 #:
-#: `cli` is a DERIVED entry, and the distinction matters when reading this
-#: record: since BUILD slice 2b step 3 `cli.py` names no consumer of its own at
-#: import time. It is here only because it imports `opendox.serve`, so it
-#: leaves this list the moment `serve` does — one act, two modules.
+#: THE SECOND FIELD IS SLICE 2b STEP 4's DOING, and it is the whole content of
+#: this record now. Both remaining entries are blocked by `ideation_dashboard`,
+#: NOT by `openxdox`: the consumer reaches that used to stop them are gone, and
+#: what is left is the OTHER cross-column reach — openxFactory's PRE-CARVE
+#: package name, a `stays_openxfactory_adapter` row (RULING DQ-1) present at
+#: neither carve destination, censused two lines down at
+#: `test_no_module_under_src_names_the_pre_carve_package_at_import_time` and
+#: owed to a later act. Recording only "still reaching" would have let that
+#: substitution pass unread: the test would stay green on a nonzero exit while
+#: the thing it was written to measure had actually been fixed.
+#:
+#: So the test below now asserts the blocker BY NAME, and — for an entry whose
+#: recorded blocker is not the consumer — asserts that `openxdox` is NOT what
+#: the failure names. That turns each of these two rows from a placeholder into
+#: a claim: *this module's consumer reach is gone; it waits on something else.*
 STILL_REACHING = {
-    "opendox.cli": "cli.py itself no longer names the consumer at import time "
-                   "(BUILD slice 2b step 3); it still imports opendox.serve, "
-                   "which does, and an importing module inherits its imports' "
-                   "reaches",
-    "opendox.serve": "serve.py names serve_gate.GateRoutes and "
-                     "serve_projection.ProjectionRoutes as MIXIN BASES of "
-                     "DashboardHandler, and evaluates two registry_mod "
-                     "constants as default arguments of build_server",
+    "opendox.cli": ("cli.py itself no longer names the consumer at import time "
+                    "(step 3), and opendox.serve no longer does either (step "
+                    "4); it imports serve, and so inherits serve's remaining "
+                    "pre-carve reach",
+                    "ideation_dashboard"),
+    "opendox.serve": ("serve.py's consumer reaches are gone (step 4): the two "
+                      "mixin bases are late columns, the two build_server "
+                      "defaults read opendox.defaults, and the registry and "
+                      "re-export blocks are late bindings. What remains is "
+                      "`from ideation_dashboard import serve_openxfactory_"
+                      "lanes` at :181 and :199, whose rewrite target exists at "
+                      "neither carve destination",
+                      "ideation_dashboard"),
 }
 
 
@@ -140,6 +158,7 @@ def test_the_reaching_modules_are_recorded_as_reaching(module: str) -> None:
     `NEUTRAL_MODULES`, which is where the claim is made. Recording it this way
     is what stops the list above from silently becoming a list of two.
     """
+    _reason, blocker = STILL_REACHING[module]
     done = _import_in_subprocess(module, consumer_blocked=True)
     assert done.returncode != 0, (
         f"`import {module}` now SUCCEEDS with no `openxdox` — good, and the "
@@ -153,12 +172,23 @@ def test_the_reaching_modules_are_recorded_as_reaching(module: str) -> None:
     # broken. So the failure must be the BLOCKED IMPORT and nothing else.
     last = done.stderr.strip().splitlines()[-1] if done.stderr.strip() else ""
     assert last.startswith(("ModuleNotFoundError", "ImportError")), (
-        f"`import {module}` failed for a reason that is NOT the blocked "
-        f"consumer, so this record is masking a defect:\n{done.stderr}")
-    assert "openxdox" in last, (
+        f"`import {module}` failed for a reason that is NOT a blocked import, "
+        f"so this record is masking a defect:\n{done.stderr}")
+    assert blocker in last, (
         f"`import {module}` raised an import error naming something other "
-        f"than the blocked consumer — a real missing dependency, not a "
-        f"layering edge:\n{done.stderr}")
+        f"than {blocker!r}, which is what this record says blocks it — a real "
+        f"missing dependency, or a moved blocker, not a layering edge:\n"
+        f"{done.stderr}")
+    if blocker != CONSUMER_PACKAGE:
+        # THE HALF THAT MADE THE SECOND FIELD NECESSARY. This row claims the
+        # module's CONSUMER reach is gone and that it waits on something else.
+        # Without this line the claim is untested: an `openxdox` reach could
+        # come back on a line after the one that raises, and the row would go
+        # on reading "still reaching" — true, but no longer about openXdox.
+        assert CONSUMER_PACKAGE not in last, (
+            f"`import {module}` is recorded as blocked by {blocker!r} with its "
+            f"consumer reach removed, but the failure names "
+            f"{CONSUMER_PACKAGE!r}:\n{done.stderr}")
 
 
 # --------------------------------------------------------------------------
@@ -279,6 +309,14 @@ CONVERTED_SITES = {
     "cli.py": ("gate_mod", "snapshot_mod"),
     "serve_workbench.py": ("registry_mod",),
     "workbench.py": ("find_validator",),
+    # Slice 2b step 4. `consumer_reach` and `defaults` are deliberately NOT
+    # listed: both ARE read at import time and must be. Constructing a stand-in
+    # resolves nothing (`test_importing_the_seam_resolves_nothing`), and the two
+    # late COLUMNS are mixin bases, which a class statement needs before its
+    # first instance exists; `defaults` is openDox's own module, which is the
+    # point of it. What must not be read at import time is a name BOUND to a
+    # stand-in, and these are serve.py's two.
+    "serve.py": ("registry_mod", "hosted_ref_refused", "resolve_source_path"),
 }
 
 
