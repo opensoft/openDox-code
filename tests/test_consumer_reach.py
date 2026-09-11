@@ -19,15 +19,18 @@ A DEFAULT ARGUMENT is evaluated when the `def` executes, which is at import
 time. Rewrite `from openxdox import gate_console` into a late-bound stand-in and
 the census falls by one while the module still cannot be imported without
 openXdox — the reach simply stops being an `Import` node. `branch_session.py`
-(7 such sites) and `serve.py` (2) are exactly that case, and both were reverted
-out of slice 2 rather than shipped as a census that reads better than the
-tree. **So this file asserts the thing the census is a proxy for**: the module
+(NINE such sites) and `serve.py` (2) are exactly that case, and both were
+reverted out of slice 2 rather than shipped as a census that reads better than
+the tree. (Slice 2 wrote "7" here and openXdox-code's ratchet file repeats it;
+both are counted and corrected in slice 2b, because a number a later audit
+reads off a comment is worth no more than the count behind it.) **So this file asserts the thing the census is a proxy for**: the module
 imports, in a subprocess, with `openxdox` made unimportable.
 
 BUILD SLICE 2b is what that reversion was waiting for: `defaults.py` gives
-openDox its own spelling of the three values the nine default-argument sites
-read, so the reach can be removed at the site rather than renamed at the import
-line, and `branch_session` moves from the recorded half to the asserted half
+openDox its own spelling of the three values those eleven default-argument
+sites read — `DEFAULT_RECORDS_DIR` at `branch_session.py`'s nine,
+`DEFAULT_INDEX_NAME` and `PEEK_TTL_SECONDS` at `serve.py`'s two — so the reach
+can be removed at the site rather than renamed at the import line, and `branch_session` moves from the recorded half to the asserted half
 below. That move is the point of the second test: it FAILED on the slice-2b
 commit that made the module importable, and this act is the answer it asked
 for.
@@ -89,11 +92,14 @@ NEUTRAL_MODULES = (
     "opendox.workbench",
     "opendox.serve_workbench",
     "opendox.consumer_reach",
-    # BUILD slice 2b. Seven default-argument reads of
-    # `gate_console.DEFAULT_RECORDS_DIR` / `DEFAULT_BRANCH_PREFIX` — evaluated
-    # where the `def` sits, so no stand-in could defer them — now read
-    # `opendox.defaults`, which is openDox's own spelling of values openDox
-    # owns. openXdox-code's drift guard holds the two spellings together.
+    # BUILD slice 2b. NINE default-argument reads of
+    # `gate_console.DEFAULT_RECORDS_DIR` (:1740, :1859, :1878, :4179, :4217,
+    # :4254, :4287, :4504, :4991) — evaluated where the `def` sits, so no
+    # stand-in could defer them — now read `opendox.defaults`, which is
+    # openDox's own spelling of a value openDox owns. openXdox-code's drift
+    # guard holds the two spellings together. It is ONE constant at nine sites,
+    # not two constants: `DEFAULT_BRANCH_PREFIX` is not reached from this
+    # module and `defaults.py` does not carry it.
     "opendox.branch_session",
 )
 
