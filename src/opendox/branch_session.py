@@ -74,7 +74,20 @@ from typing import Any, Iterable, Mapping, Sequence
 import yaml
 
 from . import doxbench_hash
-from openxdox import gate_console
+# THE GATE COLUMN, NAMED LATE (BUILD slice 2b, `split-opendox-two-layer-product`
+# § 3.5/3.6). `gate_console` is openXdox's — the layer that PINS this one — so an
+# import statement here made `import opendox.branch_session` require openXdox to
+# be installed, which `design.md`:243 refuses: *"what must not survive is the
+# direction, not the calls."* The stand-in resolves on first attribute access and
+# refuses naming the layering; every `gate_console.X` below is unchanged.
+from .consumer_reach import gate_console
+
+# ...EXCEPT the nine `records_dir` DEFAULTS at :1740, :1859, :1878, :4179, :4217,
+# :4254, :4287, :4504 and :4991, which no stand-in can defer: a default argument
+# is evaluated where the `def` sits, at import time. openDox owns that value
+# instead (`defaults.py`), and openXdox-code's drift guard holds the two literals
+# together.
+from .defaults import DEFAULT_RECORDS_DIR
 # `SessionGitRefused` is re-exported (see __all__) so a caller catching session
 # refusals can catch both classes from one module: this module refuses on
 # identity/shape, `session_git` refuses on git discipline (a stage-everything
@@ -1737,7 +1750,7 @@ def _contained_repo_path(root: Path, reference: str) -> Path | None:
 
 def _demotion_retention_candidates(
     checkout_root: Path | str, tile: "Tile", *,
-    records_dir: str = gate_console.DEFAULT_RECORDS_DIR,
+    records_dir: str = DEFAULT_RECORDS_DIR,
 ) -> tuple[RetentionReleaseEvidence, ...]:
     """EVERY demotion that returned a proposal to this exact tile: receipt-proved
     executions first, then the corroborated pre-receipt ones.
@@ -1856,7 +1869,7 @@ def _demotion_retention_candidates(
 
 def retention_release_candidates(
     checkout_root: Path | str, tile: "Tile", *,
-    records_dir: str = gate_console.DEFAULT_RECORDS_DIR,
+    records_dir: str = DEFAULT_RECORDS_DIR,
 ) -> tuple[RetentionReleaseEvidence, ...]:
     """The closed machine-evidence set for this tile — EVERY matching record, in
     acceptance order (proposal custody, then demotion).
@@ -1875,7 +1888,7 @@ def retention_release_candidates(
 
 def retention_release_for(
     checkout_root: Path | str, tile: "Tile", *,
-    records_dir: str = gate_console.DEFAULT_RECORDS_DIR,
+    records_dir: str = DEFAULT_RECORDS_DIR,
     explicit_reason: str | None = None,
     superseding_references: Sequence[str] = (),
 ) -> RetentionReleaseEvidence | None:
@@ -4176,7 +4189,7 @@ def _refuse_reconciling_over_uncommitted_work(git: SessionGit, session: Any,
 # --------------------------------------------------------------------------
 
 def abandon_records_for(checkout_root: Path | str, branch: str, *,
-                        records_dir: str = gate_console.DEFAULT_RECORDS_DIR
+                        records_dir: str = DEFAULT_RECORDS_DIR
                         ) -> tuple[Path, ...]:
     """Every MAIN-RESIDENT `abandon-session` gate-action record naming `branch`.
 
@@ -4214,7 +4227,7 @@ class AbandonEvidence:
 
 
 def abandon_evidence(checkout_root: Path | str, branch: str, *,
-                     records_dir: str = gate_console.DEFAULT_RECORDS_DIR
+                     records_dir: str = DEFAULT_RECORDS_DIR
                      ) -> AbandonEvidence | None:
     """Structured durable proof that ``branch`` was intentionally abandoned."""
     root = Path(checkout_root)
@@ -4251,7 +4264,7 @@ def abandon_evidence(checkout_root: Path | str, branch: str, *,
 
 
 def abandon_proof(checkout_root: Path | str, branch: str, *,
-                  records_dir: str = gate_console.DEFAULT_RECORDS_DIR
+                  records_dir: str = DEFAULT_RECORDS_DIR
                   ) -> str | None:
     """WHY this branch's session is known to have been ABANDONED, or None
     (PR #49 second-review finding 3).
@@ -4284,7 +4297,7 @@ def assert_branch_cleanup_permitted(git: SessionGit, registry: Any, *,
                                     retention: RetentionReleaseEvidence | None,
                                     checkout_root: Path | str,
                                     inventory: TileInventory | None = None,
-                                    records_dir: str = gate_console.DEFAULT_RECORDS_DIR
+                                    records_dir: str = DEFAULT_RECORDS_DIR
                                     ) -> str:
     """The FIVE preconditions of FR-028's cleanup, in the order they answer the
     human's question. Every one of them persists nothing. RETURNS the proof that
@@ -4501,7 +4514,7 @@ def _refuse_missing_commit_artifact(record: Mapping[str, Any], stamp: str) -> No
 def commit_gate_action(gate: Any, git: SessionGit, *, worktree: Path | str,
                        branch: str, record: dict,
                        documents: Sequence[str],
-                       records_dir: str = gate_console.DEFAULT_RECORDS_DIR,
+                       records_dir: str = DEFAULT_RECORDS_DIR,
                        summary: str | None = None,
                        session: Any = None) -> GateActionCommit:
     """Write the record beside the action's documents and commit them TOGETHER,
@@ -4988,7 +5001,7 @@ def commit_first_edit(git: SessionGit, registry: Any, *, repository: str,
                       gate_factory: Any, checkout_root: Path | str,
                       owned_prefix: str | None = None,
                       base_hash: str | None = None,
-                      records_dir: str = gate_console.DEFAULT_RECORDS_DIR,
+                      records_dir: str = DEFAULT_RECORDS_DIR,
                       at: str | None = None, notes: str | None = None,
                       inventory: "TileInventory | None" = None,
                       base: str = DEFAULT_BASE, notebook: Any = None,
