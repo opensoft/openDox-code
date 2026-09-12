@@ -40,7 +40,19 @@ import { renderViewer } from "./views/viewer.js";
 import { createEditAction } from "./views/edit.js";
 import { renderCanvas } from "./views/canvas.js";
 import { renderLens } from "./views/lens.js";
-import { isGateBearing, mountGateBar } from "./views/gate.js";
+// THE GATE BAR IS NOT IMPORTED HERE ANY MORE (§ 3.4 slice S3, the view
+// registry). This line was `import { isGateBearing, mountGateBar } from
+// "./views/gate.js"` — the shell's ONE direct import of a class-B module, and
+// § 4.1's named example: "app.js stops importing class-B modules directly. Its
+// line 43 becomes a lookup in the collected bindings, and a shell built with no
+// gate binding registered renders the tab strip WITHOUT the gate bar rather
+// than failing to load." It is now the `gate.bar` binding of CORE_VIEWS below,
+// resolved through `resolveView` at render time; when slice S5 moves the gate
+// loop behind a binding openXdox supplies, the binding leaves the core arm and
+// nothing else in this file changes.
+import {
+  collectViewBindings, contributedViewBindings, manifestRoutes, resolveView,
+} from "./views/view_extension.js";
 import { mountStagingWorkbench } from "./views/staging-workbench.js";
 import { firstEditTransport } from "./views/swb-session.js";
 import { createModelIntakeTransports } from "./views/swb-model-intake.js";
@@ -467,26 +479,62 @@ function initTheme() {
 // `onOpenTile` is the funnel/board tiles' drill-down entrypoint (T017):
 // staged/proposal/realized cards call it with (kind, id); the explorer
 // resolves the snapshot-only folder listing and renders the overlay.
-const TABS = [
-  { tab: "tab-funnel", view: "view-funnel",
-    render: (root, snap, ctx) => renderFunnel(root, snap, {
+// ---- THE CORE ARM OF THE VIEW REGISTRY (§ 3.4 slice S3) ----
+// This was the hardcoded seven-entry `TABS` table, read by the tab router and
+// by nothing else. It is now the CORE ARM of the view registry — the fixed
+// bindings openDox itself supplies — collected through `collectViewBindings()`
+// alongside whatever the consumer column contributes, exactly as
+// `serve.build_server()` collects `profile.ROUTE_EXTENSIONS` and the caller's
+// `route_extensions` through ONE `route_extension.collect_bindings()`.
+//
+// WHAT EACH FIELD IS. `id` + `region` are the slot (two bindings claiming one
+// slot is a refused collision); `control` is the tab button that activates the
+// panel, so the tab strip is DERIVED from the registry rather than duplicated
+// beside it; `module` + `entry` name the module that mounts the panel and the
+// export that does it — truthfully, because a CONTRIBUTED binding carries only
+// those and is loaded through `resolveView()`; `view_class` is § 2.1's census
+// class; `mount` is the shell's own adapter closure, which only a core binding
+// has (its module is already imported above — the core arm always holds its own
+// view modules statically, because they are the product).
+//
+// `routes` IS DELIBERATELY UNDECLARED ON EVERY CORE TAB BINDING, and it is not
+// an omission. RULED Q3 makes `routes` "the routes that travel WITH the binding
+// that calls them" — a declaration of ownership, not a transitive inventory of
+// every path a module's import graph happens to touch. Today exactly one core
+// binding owns a route that way: `gate.bar`. The census's eighteen remaining
+// route-ownership breaches are FILE-level facts (§ 4.5 assertion 2) measured by
+// slice S1's `tests/test_web_boundary.py` and cleared by S4 and S6; declaring
+// them here would encode S4's answers before S4 has done its work, and would
+// refuse this assembly outright, since `/source/` is a contributed prefix today.
+//
+// `onOpenTile` is the funnel/board tiles' drill-down entrypoint (T017):
+// staged/proposal/realized cards call it with (kind, id); the explorer
+// resolves the snapshot-only folder listing and renders the overlay.
+const CORE_VIEWS = [
+  { id: "funnel.realization", control: "tab-funnel", region: "view-funnel",
+    module: "./views/funnel.js", entry: "renderFunnel", view_class: "C",
+    mount: (root, snap, ctx) => renderFunnel(root, snap, {
       onOpenTile: ctx.explorer.openTile, notebook: ctx.notebook,
       signal: ctx.signal }) },
-  { tab: "tab-wheel", view: "view-wheel",
-    render: (root, snap, ctx) => renderWheel(root, snap,
+  { id: "wheel.deck", control: "tab-wheel", region: "view-wheel",
+    module: "./views/wheel.js", entry: "renderWheel", view_class: "C",
+    mount: (root, snap, ctx) => renderWheel(root, snap,
       { caps: ctx.caps, nav: ctx.nav, notebook: ctx.notebook,
         sourceBase: ctx.sourceBase, composed: ctx.composed,
         signal: ctx.signal }) },
-  { tab: "tab-board", view: "view-board",
-    render: (root, snap, ctx) => renderBoard(root, snap, { onOpenTile: ctx.explorer.openTile, notebook: ctx.notebook }) },
-  { tab: "tab-canvas", view: "view-canvas",
-    render: (root, snap, ctx) => renderCanvas(root, snap, { notebook: ctx.notebook }) },
-  { tab: "tab-lens", view: "view-lens",
+  { id: "board.pipeline", control: "tab-board", region: "view-board",
+    module: "./views/board.js", entry: "renderBoard", view_class: "C",
+    mount: (root, snap, ctx) => renderBoard(root, snap, { onOpenTile: ctx.explorer.openTile, notebook: ctx.notebook }) },
+  { id: "canvas.cluster", control: "tab-canvas", region: "view-canvas",
+    module: "./views/canvas.js", entry: "renderCanvas", view_class: "C",
+    mount: (root, snap, ctx) => renderCanvas(root, snap, { notebook: ctx.notebook }) },
+  { id: "lens.keyword", control: "tab-lens", region: "view-lens",
+    module: "./views/lens.js", entry: "renderLens", view_class: "?",
     // D21: the lens receives the UNNARROWED composed snapshot as well as the
     // rendered one. Its repository rail is the control surface for the
     // visible set, so it must see every member — the narrowed view could only
     // ever shrink further, never restore a repository the human unticked.
-    render: (root, snap, ctx) => renderLens(root, snap, {
+    mount: (root, snap, ctx) => renderLens(root, snap, {
       caps: ctx.caps,
       composedSnapshot: ctx.rawSnapshot,
       visible: ctx.visible,
@@ -518,9 +566,37 @@ const TABS = [
   // sweep, defect 7 — the rows advertised themselves as clickable and were
   // inert). app.js owns every cross-view jump, so the view declares the row and
   // calls back here; `ctx.nav.openDoc` is the one entry point.
-  { tab: "tab-docs", view: "view-docs",
-    render: (root, snap, ctx) => renderDocs(root, snap, { onOpenDoc: ctx.nav.openDoc }) },
-  { tab: "tab-lineage", view: "view-lineage", render: (root, snap) => renderLineage(root, snap) },
+  { id: "docs.list", control: "tab-docs", region: "view-docs",
+    module: "./views/docs.js", entry: "renderDocs", view_class: "A",
+    mount: (root, snap, ctx) => renderDocs(root, snap, { onOpenDoc: ctx.nav.openDoc }) },
+  { id: "lineage.readiness", control: "tab-lineage", region: "view-lineage",
+    module: "./views/lineage.js", entry: "renderLineage", view_class: "C",
+    mount: (root, snap) => renderLineage(root, snap) },
+  // THE GATE BAR — class B, OPTIONAL, and the proof this slice exists to give.
+  // `app.js`'s line 43 used to import `isGateBearing` and `mountGateBar`
+  // straight out of `views/gate.js`; § 4.1 names that import as the one the
+  // registry replaces, so it is a binding now, resolved rather than imported.
+  // Three properties follow, and each is a thing that was not true before:
+  //
+  //   * `optional: true` — a shell assembled WITHOUT it renders the viewer with
+  //     no gate bar instead of failing to load. `views/viewer.js` already
+  //     tolerates a null `mountGate` (`const mountGate = o.mountGate || null`),
+  //     so nothing there changes: the absence was always representable
+  //     downstream and was simply unreachable from here.
+  //   * `routes: ["/actions/gate/ratify"]` — RULED Q3's "a route constant
+  //     travels with the binding that calls it". `gate.js`:120's
+  //     `GATE_RATIFY_ROUTE` is the gate loop's, and it now says so in the one
+  //     place the registry can check.
+  //   * it is in the CORE arm and that is TRANSITIONAL. `gate.js` is still a
+  //     file of this bundle; slice S5 moves the four class-B files behind a
+  //     binding openXdox supplies, at which point this entry is deleted and the
+  //     identical binding arrives through `contributedViewBindings()`. Nothing
+  //     else in this file changes when it does — which is the test of whether
+  //     the seam was drawn in the right place.
+  { id: "gate.bar", region: "viewer-gatebar",
+    module: "./views/gate.js", entry: "mountGateBar", view_class: "B",
+    routes: ["/actions/gate/ratify"], requires: ["actions.gate"],
+    optional: true },
 ];
 
 // Tab router with the WAI-ARIA roving-tabindex pattern (a11y #19): only the
@@ -571,23 +647,30 @@ function storeTab(view) {
 function initTabs(snapshot, ctx, signal) {
   const controllers = {};
   const rendered = new Set();
-  const tabEls = TABS.map((t) => document.getElementById(t.tab));
+  // THE TAB STRIP IS DERIVED FROM THE REGISTRY, not declared beside it (§ 3.4
+  // slice S3). `ctx.views` is the COLLECTED order — this shell's core arm plus
+  // whatever the consumer column contributed — and a tab is simply a binding
+  // that declared a `control`. A binding with no control (the gate bar, and
+  // every overlay binding after it) is in `ctx.views` and is not a tab, which
+  // is why the filter is here and not a second list.
+  const TABS = ctx.views.filter((b) => b.control);
+  const tabEls = TABS.map((t) => document.getElementById(t.control));
   let current = TABS[0];
   let searchTerm = "";
 
   function applySearch() {
-    const c = controllers[current.view];
+    const c = controllers[current.region];
     if (typeof c?.search === "function") c.search(searchTerm);
   }
 
   function show(target, focusTab) {
     current = target;
-    storeTab(target.view);
+    storeTab(target.region);
     TABS.forEach((t, i) => {
-      const isTarget = t.tab === target.tab;
+      const isTarget = t.control === target.control;
       tabEls[i].setAttribute("aria-selected", String(isTarget));
       tabEls[i].tabIndex = isTarget ? 0 : -1;
-      document.getElementById(t.view).hidden = !isTarget;
+      document.getElementById(t.region).hidden = !isTarget;
     });
     // The LENS takes the whole page (Brett, 2026-08-08: "when we are on the
     // lens screen we want to remove anything not lens related… give as much
@@ -596,14 +679,15 @@ function initTabs(snapshot, ctx, signal) {
     // and say nothing about a keyword or repository set, so the lens hides
     // them and takes the height back.
     document.querySelector(".wrap")
-      ?.classList.toggle("lensfull", target.view === "view-lens");
-    if (focusTab) document.getElementById(target.tab).focus();
+      ?.classList.toggle("lensfull", target.region === "view-lens");
+    if (focusTab) document.getElementById(target.control).focus();
     // lazy render on first activation; funnel edge geometry needs a visible layout
-    if (!rendered.has(target.view)) {
-      controllers[target.view] = target.render(document.getElementById(target.view), snapshot, ctx);
-      rendered.add(target.view);
-    } else if (controllers[target.view]?.redraw) {
-      controllers[target.view].redraw();
+    if (!rendered.has(target.region)) {
+      controllers[target.region] = target.mount(
+        document.getElementById(target.region), snapshot, ctx);
+      rendered.add(target.region);
+    } else if (controllers[target.region]?.redraw) {
+      controllers[target.region].redraw();
     }
     applySearch();
   }
@@ -628,7 +712,7 @@ function initTabs(snapshot, ctx, signal) {
   // Open where the human was, if that view still exists on this plane — a tab
   // list can differ between planes, and a remembered view that is gone falls
   // back to the first exactly as before.
-  const remembered = TABS.find((t) => t.view === storedTab());
+  const remembered = TABS.find((t) => t.region === storedTab());
   show(remembered || TABS[0], false);
 
   return {
@@ -637,7 +721,7 @@ function initTabs(snapshot, ctx, signal) {
     // (rendering it on first activation, exactly like a click) and returns that
     // view's controller so the caller can hand it a preselection.
     goto(view) {
-      const target = TABS.find((t) => t.view === view);
+      const target = TABS.find((t) => t.region === view);
       if (!target) return null;
       show(target, false);
       return controllers[view] || null;
@@ -840,8 +924,19 @@ async function render() {
         repository: snapshot.repository, ref: "main",
       });
     };
+    // THE GATE BAR, THROUGH THE REGISTRY (§ 3.4 slice S3). `gateView` is
+    // assigned just below, after the capability probe that carries the consumer
+    // column; both closures here only run from inside `mountExplorer`'s
+    // `onOpenFile` callback, which cannot fire before then. NULL is the
+    // student's install: no gate column registered, so no gate context is ever
+    // built and `mountGate` is not supplied — and `views/viewer.js` already
+    // reads a null `mountGate` as "render the document without a gate bar"
+    // (`const mountGate = o.mountGate || null`). That is § 4.2's refusal turned
+    // into an outcome: an absent column is an absent panel, never a blank page.
+    let gateView = null;
     const gateContext = (tile, entry, key) =>
-      tile?.kind === "proposal" && isGateBearing(entry.path) && key
+      tile?.kind === "proposal" && gateView
+        && gateView.exports.isGateBearing(entry.path) && key
         ? { changeId: tile.id, repository: key.repository }
         : null;
     // The ONE capability probe (#1): a same-origin GET the local backend answers
@@ -863,6 +958,26 @@ async function render() {
     // are the same object, so the list is one object named twice — harmless,
     // and cheaper than deciding which of the two this render produced.
     const consoleRepair = createConsoleRepair([probedCaps, caps]);
+    // THE VIEW REGISTRY, COLLECTED ONCE PER RENDER (§ 3.4 slice S3, § 4.1).
+    // The core arm openDox supplies, then the consumer column the host
+    // contributed — the same order and the same single collection
+    // `serve.build_server()` uses for routes, and for the same reason: a
+    // collision between a contributed panel and one of this shell's own must be
+    // refused HERE, before anything mounts, rather than discovered as a panel
+    // that silently never rendered.
+    //
+    // The consumer column is read out of the `/capabilities` payload this
+    // render already fetched (§ 4.3's "no new route and no second fetch"). It
+    // is EMPTY at this slice and on every static image, so the shell renders
+    // exactly as it did before — which is what the note's S3 row asks for:
+    // "nothing is contributed yet, so the shell renders exactly as today with
+    // an empty extension tuple". The server-side line that publishes a manifest
+    // is slice S5's, in `serve.py`'s own declared-edit window.
+    const views = collectViewBindings(
+      [{ views: () => CORE_VIEWS },
+       { views: () => contributedViewBindings(probedCaps) }],
+      { contributedRoutes: manifestRoutes(probedCaps) });
+    gateView = await resolveView(views, "gate.bar");
     const explorer = mountExplorer(explorerRoot, snapshot, {
       signal,
       onOpenFile: (entry, pane, tile) => {
@@ -873,7 +988,11 @@ async function render() {
           sourceBase: sourceBaseFor(sourceKey),
           edit: createEditAction({ caps, key: sourceKey }),
           gate: gateContext(tile, entry, sourceKey),
-          mountGate: (host, gctx) => mountGateBar(host, gctx, { caps }),
+          // Supplied only when a gate binding was collected; absent, the viewer
+          // renders the document and no gate bar (see `gateView` above).
+          mountGate: gateView
+            ? (host, gctx) => gateView.exports.mountGateBar(host, gctx, { caps })
+            : null,
         });
       },
     });
@@ -1100,6 +1219,14 @@ async function render() {
     };
     tabs = initTabs(snapshot, {
       explorer, notebook, caps, nav, composed, sourceBase: sourceBaseFor(active),
+      // THE COLLECTED REGISTRY, handed to every view (§ 3.4 slice S3). The tab
+      // router derives the tab strip from it, and a view that needs an OPTIONAL
+      // contributed panel asks for it by id — `lookupView(ctx.views, "…")`,
+      // null when the column that supplies it is not installed. Slice S2's
+      // intent chips are the first such reader: `wheel-intent` and
+      // `dispose-intent` are declared regions already, so S2 adds an optional
+      // binding and two `lookupView` calls and touches nothing here.
+      views,
       // the UNSTRIPPED probe and the serve's own writable repository — read by
       // exactly one affordance (see `createCaps` at the lens's mount)
       probedCaps,
