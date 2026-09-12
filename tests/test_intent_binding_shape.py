@@ -74,7 +74,7 @@ def _static_imports(text: str) -> list[tuple[list[str], str]]:
     return out
 
 
-def test_the_absent_module_still_exists_on_disk_as_a_check() -> None:
+def test_the_absent_module_is_still_absent_from_disk_as_a_check() -> None:
     # Sanity: if this ever stops being true the whole premise of this file —
     # and of RULING OQ-F — needs re-reading, not a silently-skipped suite.
     assert not (VIEWS / "intent-feed.js").exists(), (

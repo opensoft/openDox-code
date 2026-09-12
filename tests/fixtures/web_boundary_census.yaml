@@ -73,7 +73,7 @@
 #   total 42 files, 30,585 lines -- unchanged (a reclassification, not a move)
 #
 # AMENDMENT (S2, opensoft/openDox-code 330cf816, merged into this leg after
-# a99eba03): a 43rd file, `views/intent-binding.js` (class A, 107 lines),
+# a99eba03): a 43rd file, `views/intent-binding.js` (class A, 114 lines),
 # lands after this fixture's own `measured_at` head. Assertion 1's ratchet
 # (`test_every_web_file_is_classified_exactly_once`) is unmarked, so the row
 # is added here rather than left for a future slice -- the ratchet does not

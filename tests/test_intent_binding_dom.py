@@ -71,7 +71,9 @@ export function intentCapable(caps) {
 export function feedActor() { return "fake-actor"; }
 export function refusalLine(rec) { return "fake-refusal:" + rec.state; }
 export function startIntentFeed() { return { subscribe() {}, stop() {} }; }
-export function statesByTarget() { return new Map(); }
+export function statesByTarget(rows) {
+  return new Map((rows || []).map((r) => [r.id, "fake:" + r.id]));
+}
 export function renderIntentChips(container, targetId, rows, error) {
   container.__fakeRendered = { targetId, rows, error };
   return container;
@@ -252,3 +254,71 @@ def test_intent_capable_is_false_whenever_the_binding_is_absent(tmp_path):
 def test_intent_capable_follows_caps_once_the_binding_is_contributed(tmp_path):
     r = _run(tmp_path, _CAPABLE_PROBE, contribute_intent_feed=True)
     assert r == {"capsTrue": True, "capsFalse": False, "capsMissing": False}
+
+
+# ---- the other five forwards -----------------------------------------------
+#
+# PR REVIEW FIX (opensoft/openDox-code#15, Copilot): the two probes above only
+# ever exercise `intentCapable` and `renderIntentChips` (the tray render tests
+# call it indirectly through `mountDisposeTray`) — a wrapper could forward
+# either of those correctly while getting `feedActor`, `refusalLine`,
+# `startIntentFeed`, `statesByTarget` or `emitIntent` wrong (an argument
+# dropped, the wrong fallback value) and every existing test here would still
+# pass. This probe calls all five directly, both absent and contributed, so
+# each one's OWN forward (or safe fallback) is what the assertion checks —
+# not merely that the tray happens to still render. `statesByTarget`'s fake
+# is made to depend on `rows` (`"fake:" + r.id`, not an unconditional empty
+# Map) specifically so the contributed case is distinguishable from the
+# absent one's own empty-Map fallback; an unconditional empty Map on both
+# sides would let this probe pass without proving the forward happened at
+# all.
+
+_FORWARDS_PROBE = _DOM_SHIM + """
+import {
+  feedActor, refusalLine, startIntentFeed, statesByTarget, emitIntent,
+} from "./intent-binding.js";
+
+const rec = { state: "accepted" };
+const rows = [{ id: "t1" }, { id: "t2" }];
+const started = startIntentFeed({ some: "opts" });
+const emitted = await emitIntent({ verb: "propose" });
+console.log(JSON.stringify({
+  feedActor: feedActor({ actions: { intent: true } }),
+  refusalLine: refusalLine(rec),
+  startedIsNull: started === null,
+  startedHasSubscribe: !!(started && typeof started.subscribe === "function"),
+  states: Array.from(statesByTarget(rows).entries()),
+  emitted,
+}));
+"""
+
+
+def test_the_remaining_forwards_answer_safely_when_intent_feed_is_absent(tmp_path):
+    """Every one of the five, absent a contributed module: `feedActor` and
+    `startIntentFeed` null, `refusalLine` empty, `statesByTarget` an empty
+    Map, `emitIntent` an honestly-refusing error record — never a thrown
+    exception, the same "no chips, no thrown error" contract the tray probes
+    above already prove for `intentCapable`/`renderIntentChips`."""
+    r = _run(tmp_path, _FORWARDS_PROBE, contribute_intent_feed=False)
+    assert r["feedActor"] is None
+    assert r["refusalLine"] == ""
+    assert r["startedIsNull"] is True
+    assert r["states"] == []
+    assert r["emitted"] == {
+        "state": "error",
+        "message": "the intent-feed binding is not contributed in this deployment",
+    }
+
+
+def test_the_remaining_forwards_reach_the_contributed_module(tmp_path):
+    """The same five, with the fake `intent-feed.js` contributed: each
+    answer comes from the FAKE module, not from intent-binding.js's own
+    fallback — `states` in particular is keyed from `rows`, which only the
+    contributed `statesByTarget` (not the absent-case empty Map) can produce."""
+    r = _run(tmp_path, _FORWARDS_PROBE, contribute_intent_feed=True)
+    assert r["feedActor"] == "fake-actor"
+    assert r["refusalLine"] == "fake-refusal:accepted"
+    assert r["startedIsNull"] is False
+    assert r["startedHasSubscribe"] is True
+    assert r["states"] == [["t1", "fake:t1"], ["t2", "fake:t2"]]
+    assert r["emitted"] == {"state": "pending", "message": "fake-queued:propose"}
