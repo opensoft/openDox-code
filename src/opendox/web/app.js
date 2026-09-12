@@ -991,7 +991,7 @@ async function render() {
           // Supplied only when a gate binding was collected; absent, the viewer
           // renders the document and no gate bar (see `gateView` above).
           mountGate: gateView
-            ? (host, gctx) => gateView.exports.mountGateBar(host, gctx, { caps })
+            ? (host, gctx) => gateView.exports[gateView.binding.entry](host, gctx, { caps })
             : null,
         });
       },

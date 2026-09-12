@@ -287,7 +287,8 @@ def test_the_doc_tab_is_wired_to_the_one_cross_view_jump():
     """app.js owns every cross-view jump; the doc list must reach the SAME
     read-only overlay the wheel's `read` verb uses, not a second viewer."""
     app = APP_JS.read_text(encoding="utf-8")
-    block = app.split('{ tab: "tab-docs"', 1)[1].split("},", 1)[0]
+    block = app.split('{ id: "docs.list", control: "tab-docs", region: "view-docs",',
+                       1)[1].split("},", 1)[0]
     assert "renderDocs(root, snap, { onOpenDoc: ctx.nav.openDoc })" in block
 
 
