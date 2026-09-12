@@ -603,10 +603,21 @@ def test_the_two_live_columns_name_the_methods_serve_dispatches() -> None:
         consumer_reach.LateProjectionRoutes.LATE_COLUMN
     assert (proj_module, proj_class) == ("openxdox.serve_projection",
                                         "ProjectionRoutes")
-    for required in ("_serve_snapshot", "_serve_index", "_serve_source",
-                     "_refuse_bare_source"):
+    for required in ("_serve_snapshot", "_serve_index"):
         assert required in proj_methods, (
             f"{required} is dispatched by name and must be on the column")
+    # § 3.4 SLICE S6, RULED Q4 (openxFactory#656 comment 5642758731): the
+    # `/source` pair is `serve.py`'s own FIXED CORE ARM now, so the three
+    # methods that answer it must NOT be forwarded into the consumer. Asserted
+    # as an ABSENCE and not left as silence: a forwarder left behind here would
+    # be invisible — the route would keep working wherever openXdox happens to
+    # be installed, which is every developer machine and neither claim this
+    # slice makes.
+    for departed in ("_keyed_source", "_serve_source", "_refuse_bare_source"):
+        assert departed not in proj_methods, (
+            f"{departed} answers /source, which RULED Q4 makes openDox's own "
+            "core arm; it must be defined in serve.py, not forwarded to "
+            "openxdox.serve_projection")
 
 
 def test_the_prefix_is_refused_rather_than_doubled() -> None:
@@ -635,7 +646,13 @@ CONVERTED_SITES = {
     # first instance exists; `defaults` is openDox's own module, which is the
     # point of it. What must not be read at import time is a name BOUND to a
     # stand-in, and these are serve.py's two.
-    "serve.py": ("registry_mod", "hosted_ref_refused", "resolve_source_path"),
+    #
+    # § 3.4 SLICE S6, RULED Q4: `resolve_source_path` LEFT this tuple because it
+    # stopped being a stand-in — it is a real `def` in `serve.py` now, reaching
+    # `registry_mod.resolve_within` from inside a function body like every other
+    # deferred use. Nothing is unguarded by the removal: `registry_mod` is still
+    # listed, and that is the name the containment call actually reads.
+    "serve.py": ("registry_mod", "hosted_ref_refused"),
 }
 
 

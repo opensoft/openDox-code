@@ -290,8 +290,21 @@ _OWNED_ROUTE_PATTERNS = {
     "openxFactory's adapter lanes (serve_openxfactory_lanes.py)": re.compile(
         r'["\']/actions/(?:dtn-seed|staging-seed|apply-register-edits)["\']'
     ),
+    # `/source` AND `/source/` LEFT THIS PATTERN AT SLICE S6 — RULED Q4 (Brett
+    # Heap, 2026-09-12, opensoft/openxFactory#656 comment 5642758731):
+    # "`/source/` is openDox's, and openXdox's projection binding keeps only
+    # `/snapshot-index.json` and the three `/projections/*` routes." The pair is
+    # a FIXED CORE ARM of `opendox/serve.py` now (`SOURCE_PREFIX`,
+    # `BARE_SOURCE_ROUTE`, `_serve_source`, `_refuse_bare_source`), so a class-A
+    # or class-C file addressing it is no longer naming ANOTHER column's route —
+    # it is naming its own product's. That is why S6 discharges four sites
+    # without editing one line of the four files that carry them (§ 5 row S6:
+    # "`views/viewer.js` and `views/wheel.js`:97 become clean"): the note's
+    # remedy for the census's ONE class-A breach was always to move the ROUTE,
+    # not the file. The § 3.3 ownership table this dict transcribes is amended
+    # by the same ruling; the note's own § 3.3 predates it.
     "openXdox's projection routes (serve_projection.py)": re.compile(
-        r'["\']/(?:snapshot-index\.json|source/?|projections/(?:evidence|workbench|role-authority))["\']'
+        r'["\']/(?:snapshot-index\.json|projections/(?:evidence|workbench|role-authority))["\']'
     ),
 }
 
@@ -340,36 +353,49 @@ def _route_ownership_violations() -> list[str]:
     raises=AssertionError,
     reason=(
         "docs/front-end-package-boundary.md § 4.5 point 2 (opensoft/openDox-spec "
-        "#8 -> a44ac06d): 10 sites outside class B name a route another column "
-        "declares. THE ARITHMETIC, since every slice so far has moved it: 18 "
-        "at S1 -> 20 at S3 (which added app.js's `gate.bar` entry and closed "
-        "none) -> 12 measured after S4 -> 10 in scope, because S4 also gives "
-        "this assertion the DECLARED EXCEPTION the note's own last paragraph "
-        "states for views/lens.js:41/45. S4 CLEARED ALL TWELVE SPLIT-FILE "
-        "SITES the note's point-2 table assigns to it (views/lens-model.js:"
-        "1036/1037, views/repo-selector.js:33/39/43/46, "
-        "views/staging-workbench-model.js:543/817/818/821/822/826): every one "
-        "of those constants now sits in a class-B file, exempt by construction "
-        "-- which is RULED Q3 in force rather than described. WHAT IS LEFT, "
-        "and whose it is: 6 the gate prefix, ALL of them in app.js's CORE arm "
-        "-- :589/:601 the `gate.bar` entry (S3) and :624/:625/:630 the "
-        "`gate.lens` and `gate.projects` entries (S4) -- each a class-B "
-        "binding's `routes:` declaration, which view_extension.py calls the "
-        "thing that makes Q3 'checkable instead of aspirational', and each a "
-        "real breach by this assertion's own rule only while the entry sits "
-        "in app.js (class A) rather than in the class-B module it names. All "
-        "six are TRANSITIONAL and close together at slice S5, when the class-B "
-        "files move behind a host-supplied contribution and all three entries "
-        "leave app.js for contributedViewBindings(). Plus 4 openXdox's "
-        "projection routes -- app.js:195/196, views/viewer.js:314, "
-        "views/wheel.js:97, the `/source/` sites RULED Q4 re-homes at slice "
-        "S6. NOT IN SCOPE, by declaration rather than by silence: "
-        "views/lens.js's two openxFactory-lane sites "
-        "(`route_ownership_exceptions` in the census, with the ruling gap "
-        "beside them) -- none of Q1-Q5 rules on that file, so they clear on no "
-        "slice's schedule and 'they never entered it'. This marker therefore "
-        "comes off at S6, once BOTH remaining families are closed; unmark only "
-        "once verified green."
+        "#8 -> a44ac06d): 6 sites outside class B name a route another column "
+        "declares, MEASURED WITH BOTH S4 AND S6 APPLIED (this branch carries "
+        "S4; S6 landed to main at opensoft/openDox-code#16 first, so this "
+        "count is the first to combine them). THE ARITHMETIC: 18 at S1 -> 20 "
+        "at S3 (which added app.js's `gate.bar` entry and closed none) -> 12 "
+        "measured after S4 alone, 10 in scope (S4 gives this assertion the "
+        "DECLARED EXCEPTION the note's own last paragraph states for "
+        "views/lens.js, and CLEARS ALL TWELVE SPLIT-FILE SITES the note's "
+        "point-2 table assigns to it -- views/lens-model.js:1036/1037, "
+        "views/repo-selector.js:33/39/43/46, "
+        "views/staging-workbench-model.js:543/817/818/821/822/826 -- every "
+        "one of those constants now sits in a class-B file, exempt by "
+        "construction, which is RULED Q3 in force rather than described) -> 8 "
+        "measured, 6 in scope with S6 ALSO applied (RULED Q4, "
+        "opensoft/openxFactory#656 comment 5642758731): the four openXdox "
+        "projection sites -- app.js:195/196, views/viewer.js:314, "
+        "views/wheel.js:97 -- CLEAR HERE too, not because any of those four "
+        "files changed (none did on this branch) but because the route they "
+        "name is openDox's own fixed core arm now, so naming it is the "
+        "boundary working, not breaking -- the same discharge S6's own note "
+        "records, reached here by merge rather than by that slice's own "
+        "commit. WHAT IS LEFT, measured on this branch: 6, all of them the "
+        "gate prefix and ALL of them in app.js's CORE arm -- 589/601 the "
+        "`gate.bar` entry (S3, the first of the pair a `//` comment citing "
+        "the second's real `routes:` array, both matching the same way) and "
+        "624/625/630 the `gate.lens` and `gate.projects` entries (S4) -- each "
+        "a class-B binding's `routes:` declaration, which view_extension.py "
+        "calls the thing that makes Q3 'checkable instead of aspirational', "
+        "and each a real breach by this assertion's own rule only while the "
+        "entry sits in app.js (class A) rather than in the class-B module it "
+        "names. All six are TRANSITIONAL and close together at slice S5, when "
+        "the class-B files move behind a host-supplied contribution and all "
+        "three entries leave app.js for contributedViewBindings(). NOT IN "
+        "SCOPE, by declaration rather than by silence: views/lens.js's two "
+        "openxFactory-lane sites, `/actions/dtn-seed` (line 40) and "
+        "`/actions/staging-seed` (line 44) -- named in "
+        "`route_ownership_exceptions` in the census, with the ruling gap "
+        "beside them -- none of Q1-Q5 rules on that file, so they clear on no "
+        "slice's schedule and 'they never entered it'. They are EXCLUDED from "
+        "the count above (not merely uncounted by silence), which is why 8 "
+        "measured resolves to 6 in scope rather than 8. This marker therefore "
+        "comes off at S5, once the remaining six close; unmark only once "
+        "verified green."
     ),
 )
 def test_no_ownership_violation_outside_class_b() -> None:
