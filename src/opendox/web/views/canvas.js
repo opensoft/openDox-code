@@ -26,6 +26,15 @@
 import {
   buildCanvasModel, listCanvasClusters, supersedePlan, composerPlan, DRAFTS_DIR,
 } from "./canvas-model.js";
+import {
+  STAGE_ROLES, STATUS_ROLE, TILE_KINDS, VOCABULARY, neutralDisplay,
+} from "./display.js";
+
+const [SOURCE, GROUPING, CANDIDATE, SELECTION, SUBMISSION, COMPLETION] =
+  STAGE_ROLES;
+
+// The per-render vocabulary (§ 3.4 slice S7).
+let vocab = neutralDisplay();
 
 // textContent-only element builder (viewer.js discipline) — the `text` arg is
 // ALWAYS set via textContent, never innerHTML.
@@ -49,7 +58,7 @@ function shortHash(h) {
 function memberPane(model) {
   const pane = el("div", "pane");
   const h = el("div", "pane-h");
-  h.appendChild(el("span", null, "member docs"));
+  h.appendChild(el("span", null, "member " + vocab.many(SOURCE)));
   h.appendChild(el("span", "n", String(model.members.length)));
   pane.appendChild(h);
 
@@ -63,10 +72,15 @@ function memberPane(model) {
     // the evidence board pane).
     const unclaimed = model.gaps.some(
       (g) => g.kind === "unclaimed-member" && g.document === m.document);
-    if (unclaimed) card.appendChild(el("span", "pill blocked", "unclaimed by any possible"));
+    if (unclaimed) {
+      card.appendChild(el("span", "pill blocked",
+        "unclaimed by any " + vocab.one(CANDIDATE)));
+    }
     pane.appendChild(card);
   }
-  if (!model.members.length) pane.appendChild(el("div", "empty", "no member docs"));
+  if (!model.members.length) {
+    pane.appendChild(el("div", "empty", "no member " + vocab.many(SOURCE)));
+  }
 
   // draft-affordance (follow-on authoring story): proposing membership scaffolds
   // a Topics: edit in the human's editor — never written here.
@@ -109,12 +123,15 @@ function evidencePane(model) {
   for (const g of model.gaps) {
     const slot = el("div", "gapslot");
     if (g.kind === "unclaimed-member") {
-      slot.appendChild(el("div", "title", "gap: " + basename(g.document) + " unclaimed by any possible"));
+      slot.appendChild(el("div", "title", "gap: " + basename(g.document)
+        + " unclaimed by any " + vocab.one(CANDIDATE)));
       slot.appendChild(el("div", "meta",
         (g.summary ? g.summary + " — " : "") +
-        "a latent feat is waiting to be named here. Compose it in the possibles rail →"));
+        "an unnamed feat is waiting to be named here. Compose it in the "
+        + vocab.many(CANDIDATE) + " rail →"));
     } else {
-      slot.appendChild(el("div", "title", "gap: possible has no document support"));
+      slot.appendChild(el("div", "title", "gap: " + vocab.one(CANDIDATE)
+        + " has no document support"));
       slot.appendChild(el("div", "meta",
         "“" + g.possibleTitle + "” (" + g.state + ") pins no passage — pin evidence from a member doc."));
     }
@@ -134,7 +151,9 @@ function possibleCard(p) {
   if (state === "picked" && p.pick) {
     meta = "picked → " + (p.pick.staging_id || "");
     if (p.pick.change_id) meta += " · " + p.pick.change_id;
-  } else if ((state === "rejected" || state === "superseded") && p.reason) {
+  } else if ((state === vocab.registerState(STATUS_ROLE.RETIRED)
+              || state === vocab.registerState(STATUS_ROLE.SUPERSEDED))
+             && p.reason) {
     meta = state + " — " + p.reason;
   }
   body.appendChild(el("div", "meta", meta));
@@ -153,7 +172,7 @@ function possibleCard(p) {
 function possiblesRail(model, ctx) {
   const pane = el("div", "pane");
   const h = el("div", "pane-h");
-  h.appendChild(el("span", null, "possibles — this cluster"));
+  h.appendChild(el("span", null, vocab.many(CANDIDATE) + " — this " + vocab.one(GROUPING)));
   h.appendChild(el("span", "n", String(model.possibles.length)));
   pane.appendChild(h);
 
@@ -161,10 +180,13 @@ function possiblesRail(model, ctx) {
 
   for (const os of model.optionSets) {
     const box = el("div", "optset");
-    box.appendChild(el("div", "oh", "option set · " + os.id + " — choose one; siblings draft superseded"));
+    box.appendChild(el("div", "oh", "option set · " + os.id
+      + " — choose one; siblings draft "
+      + vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.SUPERSEDED)));
     for (const p of os.members) {
       const { card, body } = possibleCard(p);
-      const choose = el("button", "cbtn", "choose this — draft sibling supersession");
+      const choose = el("button", "cbtn", "choose this — draft the sibling "
+        + vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.SUPERSEDED));
       choose.type = "button";
       choose.addEventListener("click", () => {
         const plan = supersedePlan(ctx.snapshot, model.cluster.id, os.id, p.id,
@@ -176,14 +198,18 @@ function possiblesRail(model, ctx) {
     }
     pane.appendChild(box);
   }
-  if (!model.possibles.length) pane.appendChild(el("div", "empty", "no possibles claim this cluster"));
+  if (!model.possibles.length) {
+    pane.appendChild(el("div", "empty", "no " + vocab.many(CANDIDATE)
+      + " claim this " + vocab.one(GROUPING)));
+  }
 
   pane.appendChild(composerForm(model, ctx));
 
   // AI suggest/derive trays are explicitly OUT of scope (follow-on deltas) —
   // surfaced as an inert note so the boundary is visible on the surface.
   pane.appendChild(el("div", "canvas-ai-note",
-    "AI suggest / derive-possibles trays are out of scope here — follow-on deltas."));
+    "AI suggest / " + vocab.act("derive") + " trays are out of scope here — "
+    + "follow-on deltas."));
   return pane;
 }
 
@@ -192,7 +218,8 @@ function possiblesRail(model, ctx) {
 // commit.
 function composerForm(model, ctx) {
   const box = el("div", "composer");
-  box.appendChild(el("span", "ch", "compose possible → draft register entry (human commits)"));
+  box.appendChild(el("span", "ch", "compose " + vocab.one(CANDIDATE)
+    + " → draft register entry (human commits)"));
 
   const name = el("input");
   name.setAttribute("aria-label", "Possible id");
@@ -261,13 +288,16 @@ function renderConfirm(container, plan, kind) {
       "chosen: " + plan.chosenId + " · supersedes " + plan.siblings.length +
       " sibling" + (plan.siblings.length === 1 ? "" : "s")));
     for (const s of plan.siblings) {
-      box.appendChild(el("div", "dc-line", "  • " + s.title + " (" + s.id + "): " + s.fromState + " → superseded"));
+      box.appendChild(el("div", "dc-line", "  • " + s.title + " (" + s.id
+        + "): " + s.fromState + " → "
+        + vocab.registerState(STATUS_ROLE.SUPERSEDED)));
     }
     box.appendChild(el("div", "dc-line", "reason: " + plan.reason));
     box.appendChild(el("div", "dc-line", "citation: " + plan.citation));
     box.appendChild(el("div", "dc-line", "lands at: " + plan.landsAt));
   } else {
-    box.appendChild(el("div", "dc-h", "drafted: possibles-register entry (human commits)"));
+    box.appendChild(el("div", "dc-h", "drafted: " + vocab.one(CANDIDATE)
+      + "-register entry (human commits)"));
     box.appendChild(el("div", "dc-line", "id: " + (plan.id || "(missing)")));
     box.appendChild(el("div", "dc-line", "title: " + (plan.title || "(missing)")));
     box.appendChild(el("div", "dc-line", "claim: " + (plan.claim || "(missing)")));
@@ -285,12 +315,14 @@ function renderConfirm(container, plan, kind) {
 // ---- view assembly ----
 export function renderCanvas(root, snapshot, opts) {
   const options = opts || {};
+  vocab = options.display || neutralDisplay();
   const notebook = options.notebook || null;
   root.innerHTML = "";
   const clusters = listCanvasClusters(snapshot);
 
   if (!clusters.length) {
-    root.appendChild(el("div", "empty", "no clusters in the snapshot"));
+    root.appendChild(el("div", "empty",
+      "no " + vocab.many(GROUPING) + " in the snapshot"));
     return;
   }
 
@@ -302,10 +334,12 @@ export function renderCanvas(root, snapshot, opts) {
   const head = el("div", "canvas-head");
   const cname = el("span", "cname");
   head.appendChild(cname);
-  head.appendChild(el("span", "pill stage", "cluster canvas · D12"));
+  head.appendChild(el("span", "pill stage", vocab.one(GROUPING)
+    + " canvas · D12"));
   head.appendChild(el("span", "canvas-note",
-    "Members are exactly this cluster's Topics: edges; downstream artifacts live in the lineage strip. " +
-    "Every action assembles a draft a human commits — machinery enters nothing into the register."));
+    "Members are exactly this " + vocab.one(GROUPING) + "'s Topics: edges; "
+    + "downstream artifacts live in the lineage strip. Every action assembles "
+    + "a draft a human commits — machinery enters nothing into the register."));
   // "Open in NotebookLM" for the selected cluster (v2 tile action) — rebuilt per
   // selection; empty (and absent from the DOM) when the capability probe said no.
   const nbHolder = el("span", "canvas-nb");
@@ -355,11 +389,12 @@ export function renderCanvas(root, snapshot, opts) {
   function renderLineageStrip(model) {
     lineageStrip.innerHTML = "";
     const rows = [
-      ["staged picks", model.lineage.staged_picks, "staged"],
-      ["proposals", model.lineage.proposals, "proposal"],
-      ["realized", model.lineage.realized, "realized"],
+      [vocab.label(SELECTION), model.lineage.staged_picks, "lchip-selection"],
+      [vocab.label(SUBMISSION), model.lineage.proposals, "lchip-submission"],
+      [vocab.label(COMPLETION), model.lineage.realized, "lchip-completion"],
     ].filter(([, ids]) => ids?.length);
-    lineageStrip.appendChild(el("div", "lk", "lineage strip — downstream of this cluster (never members)"));
+    lineageStrip.appendChild(el("div", "lk", "lineage strip — downstream of this "
+      + vocab.one(GROUPING) + " (never members)"));
     if (!rows.length) {
       lineageStrip.appendChild(el("span", "meta", "no downstream lineage yet"));
       return;
@@ -379,7 +414,7 @@ export function renderCanvas(root, snapshot, opts) {
     cname.textContent = model.cluster.name || model.cluster.id;
     nbHolder.textContent = "";  // clear (textContent, never innerHTML)
     if (notebook) {
-      const btn = notebook.button("cluster", clusterId);
+      const btn = notebook.button(TILE_KINDS[GROUPING], clusterId);
       if (btn) nbHolder.appendChild(btn);
     }
     canvas.innerHTML = "";

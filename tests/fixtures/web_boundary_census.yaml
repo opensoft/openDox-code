@@ -183,7 +183,7 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 totals:
   A: {files: 26, loc: 17352}
   B: {files: 1, loc: 73}
-  C: {files: 14, loc: 12208}
+  C: {files: 14, loc: 12270}
   "?": {files: 1, loc: 1435}
   "?": {files: 1, loc: 1435}
 files:
@@ -234,7 +234,7 @@ files:
 
   - path: views/canvas.js
     class: C
-    loc: 405
+    loc: 440
     note: "renders canvas-model.js's output; 7 governance literals"
 
   - path: views/composed-model.js
@@ -293,7 +293,7 @@ files:
 
   - path: views/explorer.js
     class: C
-    loc: 279
+    loc: 306
     note: "Q2 RULING: class C outright (was \"?\" in the note's own table) -- a projection whose only domain content is the artifact-folder vocabulary; classifyChangeFile; reads staged_topics[].files / changes[].files"
 
   - path: views/funnel.js
