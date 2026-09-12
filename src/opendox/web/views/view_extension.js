@@ -210,17 +210,44 @@ export function viewBinding(spec) {
 // and a table beside them would be a second copy that drifts. The client reads
 // them out of the manifest (`contributed_routes`), which is the same list
 // `route_extension.collect_bindings` returned server-side.
+//
+// ONE SHAPE CHECK, used here AND where the manifest is first read
+// (`manifestRoutes`, below), so a malformed entry refuses at whichever point
+// sees it first rather than only once some binding's route happens to reach
+// it — a binding with no routes, or routes that never collide with THIS
+// entry, would otherwise let it ride through unexamined. Mirrors
+// `view_extension.py`'s `_route_ownership_breach` on `pattern` ("carries no
+// string pattern"); goes one further on `is_prefix`, which that function
+// reads as `bool(getattr(contributed, "is_prefix", False))` — safe there only
+// because `RouteBinding.__post_init__` already refused a non-bool `is_prefix`
+// at CONSTRUCTION, before `_route_ownership_breach` ever runs. JSON off
+// `/capabilities` has no constructor to have refused it first, so a
+// non-boolean here (Copilot, PR #16, `view_extension.js:358`) must refuse
+// rather than fall through a truthy check (`claimed.is_prefix && …`), which
+// silently reads a missing or malformed field as "not a prefix" — the wrong
+// answer for a payload nobody has vetted yet.
+function requireRouteShape(claimed) {
+  const pattern = claimed && claimed.pattern;
+  if (typeof pattern !== "string") {
+    refuse("contributed route " + JSON.stringify(claimed) + " carries no "
+      + "string pattern, so no view binding can be checked against it");
+  }
+  const isPrefix = claimed && claimed.is_prefix;
+  if (typeof isPrefix !== "boolean") {
+    refuse("contributed route " + JSON.stringify(claimed) + " declares "
+      + "is_prefix " + JSON.stringify(isPrefix) + ", not a boolean: a "
+      + "contributed route this seam cannot classify as exact-or-prefix must "
+      + "not be silently read as neither");
+  }
+  return { pattern, isPrefix };
+}
+
 function ownershipBreach(binding, contributedRoutes) {
   if (binding.view_class === "B") return null;
   for (const route of binding.routes) {
     for (const claimed of contributedRoutes) {
-      const pattern = claimed && claimed.pattern;
-      if (typeof pattern !== "string") {
-        refuse("contributed route " + JSON.stringify(claimed) + " carries no "
-          + "string pattern, so no view binding can be checked against it");
-      }
-      if (route === pattern
-          || (claimed.is_prefix && route.startsWith(pattern))) {
+      const { pattern, isPrefix } = requireRouteShape(claimed);
+      if (route === pattern || (isPrefix && route.startsWith(pattern))) {
         return pattern;
       }
     }
@@ -363,6 +390,15 @@ export function manifestRoutes(capabilities) {
       + "contributed_routes cannot be trusted for the ownership check that "
       + "field exists to carry.");
   }
+  // EVERY ENTRY, NOT JUST THE ARRAY ITSELF (Copilot, PR #16,
+  // `view_extension.js:358`): the array check alone let an entry missing
+  // `pattern` or `is_prefix` — or carrying either as the wrong type — ride
+  // through as "valid" contributed_routes, because `ownershipBreach()` only
+  // ever inspected an entry when some binding's route reached it. Validating
+  // every entry here, at the one place the whole manifest is read, means a
+  // malformed entry refuses whether or not any binding's routes would have
+  // exposed it.
+  routes.forEach(requireRouteShape);
   return routes;
 }
 
