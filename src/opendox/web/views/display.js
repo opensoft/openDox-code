@@ -171,6 +171,40 @@ export const SCOPE_KINDS = {
   selection: "staged",
 };
 
+// TAB_IDS — the staging workbench's own three tab keys. A seam key on § 2.2
+// rule 3's footing like its five siblings above: the tab id is the key the
+// panel switch, the create affordance and the retained per-tab state are all
+// filed under, and `views/swb-create.js` (contributed, class B) is handed the
+// same id when it mounts, so the two ends must spell it identically. What a
+// human READS on the tab is `display.short(role)` for the source tab and
+// openDox's own two plain words for the other two — neither is a governance
+// word in any domain.
+export const TAB_IDS = { source: "docs", lens: "lens", outline: "outline" };
+
+// SESSION_SCOPE_KINDS — the branch-session transport's own scope vocabulary,
+// keyed by the workbench's scope kind. A CROSS-PROCESS seam key like
+// `DRAFT_PATHS`: `src/opendox/branch_session.py` reads exactly these words off
+// the wire, so a respelling here opens a session the engine cannot resolve.
+// Declared here rather than in `views/staging-workbench-model.js` for the same
+// reason `SCOPE_KINDS` is: the model is class C and may carry no literal, and
+// the two ends of a seam belong in one table.
+export const SESSION_SCOPE_KINDS = {
+  [SCOPE_KINDS.selection]: "staged-topic",
+  [SCOPE_KINDS.grouping]: "cluster",
+  [SCOPE_KINDS.candidate]: "possible",
+};
+
+// SESSION_BRANCH_NAMESPACES — the git ref namespace each scope kind's session
+// branch is cut under, mirroring `branch_session.session_branch`. The seventh
+// and last seam-key table, and the one with the sharpest consequence: a
+// respelling here names a branch nobody is on. `git check-ref-format` bounds
+// what these may be, which is another way of saying they are not vocabulary.
+export const SESSION_BRANCH_NAMESPACES = {
+  [SCOPE_KINDS.selection]: "draft",
+  [SCOPE_KINDS.grouping]: "cluster",
+  [SCOPE_KINDS.candidate]: "possible",
+};
+
 // REGISTER_STATES — the candidate register's own four-state enum, by status
 // role. The fifth SEAM KEY table on § 2.2 rule 3's footing: these are VALUES
 // the snapshot carries on a candidate (`possibles[].state`), written by the

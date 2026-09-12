@@ -27,8 +27,44 @@
 // from the cluster. They are returned as two separately-labelled sections and
 // are kept disjoint, because merging them would silently upgrade an inference
 // into evidence.
+//
+// § 3.4 SLICE S7 — THE VOCABULARY IS THE REGISTERED DOMAIN'S. This file is a
+// declared class-A TAIL (census row `tail: STATUS_BRAINSTORM`, § 3.2: "plus
+// STATUS_BRAINSTORM / BRAINSTORM_AREA / STAGING_AREA (class-C)"): its substance
+// is class A and its vocabulary is class C, so the words and the two corpus
+// paths come off the display facet and the SEAM KEYS it dispatches on come off
+// `views/display.js`'s declared tables.
+//
+// THE ONE SIBLING IMPORT it now carries is `./display.js`, which is itself
+// import-free by design — the same amendment `views/helpers.js`'s scope note
+// took at this slice. The vocabulary rides in MODULE SCOPE rather than on every
+// exported signature (`views/lineage.js`'s pattern), because `workbenchScope`
+// is called from five places in `views/staging-workbench.js` and from the node
+// parity harness, and a fourth positional argument on a derivation this widely
+// called is a worse seam than one assignment at the mount: the shell hands the
+// facet down ONCE, at `setDisplay`, and every derivation below reads the same
+// vocabulary for the life of that render. A caller that sets none gets
+// openDox's own neutral words, which is the student install.
+import { SCOPE_KINDS, STAGE_ROLES, STATUS_ROLE, SESSION_SCOPE_KINDS,
+         SESSION_BRANCH_NAMESPACES, TAB_IDS,
+         neutralDisplay } from "./display.js";
 
-export const WORKBENCH_KINDS = ["cluster", "possible", "staged"];
+const [SOURCE, GROUPING, CANDIDATE, SELECTION] = STAGE_ROLES;
+
+let vocab = neutralDisplay();
+
+/** The shell hands the registered domain's vocabulary down once, at mount. */
+export function setDisplay(display) {
+  vocab = display || neutralDisplay();
+  return vocab;
+}
+
+/** What this module is currently spelling things in — the node harness reads
+ *  it, and `views/staging-workbench.js` renders the section labels through it. */
+export function displayVocabulary() { return vocab; }
+
+export const WORKBENCH_KINDS = [SCOPE_KINDS.grouping, SCOPE_KINDS.candidate,
+                                SCOPE_KINDS.selection];
 
 // The five completeness signals, in the emission/spec order the `docs` panel
 // renders them in. The renderer walks THIS list and skips a signal the snapshot
@@ -51,28 +87,36 @@ export const SIGNAL_KEYS = [
 // `rewritableDocuments` is the one reader, and without this flag the rewrite
 // picker offered every one of them — which is how a tile's session came to
 // overwrite another topic's staged document.
-const SECTION_META = {
+// EVERY LABEL AND NOTE IS A FUNCTION OF THE FACET (slice S7). The KEY is the
+// role — `members` is "the documents this grouping itself claims" in any domain
+// — and the WORDS are the registered domain's spelling of the two stations the
+// sentence names. openxFactory reads "cluster documents"; a neutral install
+// reads "group documents"; MedxDox reads whatever its profile declares.
+const SECTION_META = () => ({
   members: {
-    label: "cluster documents",
-    note: "the cluster's own snapshot document edges",
+    label: vocab.one(GROUPING) + " " + vocab.many(SOURCE),
+    note: "the " + vocab.one(GROUPING) + "'s own snapshot document edges",
   },
   cited: {
     label: "cited supporting evidence",
     note: "recorded evidence pins — a governed citation",
   },
   inherited: {
-    label: "inherited from claiming clusters",
-    note: "membership INFERRED from the claiming clusters — not cited evidence",
+    label: "inherited from claiming " + vocab.many(GROUPING),
+    note: "membership INFERRED from the claiming " + vocab.many(GROUPING)
+      + " — not cited evidence",
     inherited: true,
   },
   folder: {
-    label: "topic folder documents",
-    note: "the corpus documents that live in this staging folder — the topic's own material",
+    label: vocab.one(SELECTION) + " folder " + vocab.many(SOURCE),
+    note: "the corpus " + vocab.many(SOURCE) + " that live in this "
+      + vocab.one(SELECTION) + "'s folder — its own material",
     owned: true,
   },
   declaring: {
-    label: "documents declaring this topic",
-    note: "documents whose declared destinations name this staging topic — inbound context",
+    label: vocab.many(SOURCE) + " declaring this " + vocab.one(SELECTION),
+    note: vocab.many(SOURCE) + " whose declared destinations name this "
+      + vocab.one(SELECTION) + " — inbound context",
   },
   // Brett's 2026-07-25 dogfood ruling: a staged topic's docs panel additionally
   // lists the member documents of the topic's LINKED clusters as a THIRD,
@@ -82,13 +126,18 @@ const SECTION_META = {
   // topic's own folder/declaring material. It is context only: it is NOT an
   // input to the topic's health or the readiness gate, which stay folder-scoped.
   neighbourhood: {
-    label: "cluster neighbourhood",
-    note: "member documents of the topic's linked clusters — inferred via clusters, not the topic's own material",
+    label: vocab.one(GROUPING) + " neighbourhood",
+    note: "member " + vocab.many(SOURCE) + " of this "
+      + vocab.one(SELECTION) + "'s linked "
+      + vocab.many(GROUPING) + " — inferred via " + vocab.many(GROUPING)
+      + ", not its own material",
     inherited: true,
   },
-};
+});
 
-export const SECTION_KEYS = Object.keys(SECTION_META);
+// The section keys are ROLES and do not move with the vocabulary, so they are
+// read off the neutral table once rather than rebuilt per render.
+export const SECTION_KEYS = Object.keys(SECTION_META());
 
 function asId(value) {
   return value == null ? "" : String(value);
@@ -135,7 +184,7 @@ function uniqueStrings(list) {
 // non-documents) and OFF for evidence/edge references, where an unresolvable id
 // is a real finding the human should see rather than a row silently dropped.
 function buildSection(key, refs, { byId, seen, requireResolved = false }) {
-  const meta = SECTION_META[key];
+  const meta = SECTION_META()[key];
   const documents = [];
   for (const raw of refs || []) {
     const id = asId(raw);
@@ -266,7 +315,7 @@ export function workbenchScope(snapshot, kind, id) {
   const byId = buildIndex(s);
   const seen = new Set();
 
-  if (kind === "cluster") {
+  if (kind === SCOPE_KINDS.grouping) {
     const cluster = (s.clusters || []).find((c) => asId(c?.id) === wanted);
     if (!cluster) return null;
     return finishScope({
@@ -278,7 +327,7 @@ export function workbenchScope(snapshot, kind, id) {
     });
   }
 
-  if (kind === "possible") {
+  if (kind === SCOPE_KINDS.candidate) {
     const possible = (s.possibles || []).find((p) => asId(p?.id) === wanted);
     if (!possible) return null;
     const cited = buildSection("cited",
@@ -301,7 +350,7 @@ export function workbenchScope(snapshot, kind, id) {
     });
   }
 
-  if (kind === "staged") {
+  if (kind === SCOPE_KINDS.selection) {
     const topic = (s.staged_topics || [])
       .find((t) => asId(t?.staging_id) === wanted);
     if (!topic) return null;
@@ -334,7 +383,7 @@ export function workbenchScope(snapshot, kind, id) {
       kind, id: wanted, title: wanted, ref: topic,
       keywords: uniqueStrings(keywords),
       sections,
-      outline: stagedOutline(topic, "staged-topic"),
+      outline: stagedOutline(topic, SESSION_SCOPE_KINDS[SCOPE_KINDS.selection]),
     });
   }
 
@@ -536,10 +585,25 @@ export function toggleKeyword(checked, keyword) {
 // route defaults identically, so a hand-rolled request lands the same header.
 // ==========================================================================
 
-export const BRAINSTORM_AREA = "ideation/brainstorm/";
-export const STAGING_AREA = "ideation/staging/";
-export const CREATE_TABS = ["docs", "lens", "outline"];
-export const STATUS_BRAINSTORM = "brainstorm";
+// THE TWO CORPUS PATHS AND THE STATUS WORD COME OFF THE FACET (slice S7) —
+// they are § 3.2's own reading of this row's class-C tail, and § 2.2 rule 3's
+// sharpest case: "a RENDERED WORD or a CORPUS PATH is [a governance literal]".
+//
+// A domain that declares no corpus layout has NO prefix (`views/display.js`'s
+// neutral `areas` declare `prefix: null`, deliberately), so a neutral install
+// defaults the dialog's Area field to the repository root and the human types
+// where the document goes. That is the honest answer for a product told no
+// layout, and it costs nothing: the field is editable in the dialog, the create
+// is create-only, and a wrong area is one file in the wrong folder. Inventing
+// `ideation/brainstorm/` for an install that never declared it is the failure
+// mode § 4.3 point 5 names — "a fallback to TODAY'S WORDS is how the literals
+// survive the refactor invisibly".
+export const capturedArea = () => vocab.area(STATUS_ROLE.CAPTURED).prefix || "";
+export const organizedArea = () => vocab.area(STATUS_ROLE.ORGANIZED).prefix || "";
+export const CREATE_TABS = [TAB_IDS.source, TAB_IDS.lens, TAB_IDS.outline];
+// The status a just-captured document carries — `documents[].stage`'s own
+// closed enum, read by role (§ 2.2 rule 3, `display.js`'s `SNAPSHOT_VALUES`).
+export const capturedStatus = () => vocab.documentStage(STATUS_ROLE.CAPTURED);
 // `CREATE_ROUTE` stood on the next line at the carve commit (:543) and is
 // `views/swb-create.js`'s now — RULED Q3 (§ 3.4 slice S4): the dialog that
 // POSTs it is the binding that calls it, and this module never did.
@@ -550,10 +614,11 @@ export const CREATE_CLI = "python3 src/opendox/cli.py";
 // is editable in the dialog, and the create is create-only — a wrong area costs
 // one file in the wrong folder, never a lost document.
 export function createArea(scope) {
-  if (scope?.kind === "staged" && asId(scope.id)) {
-    return STAGING_AREA + asId(scope.id) + "/";
+  if (scope?.kind === SCOPE_KINDS.selection && asId(scope.id)) {
+    const base = organizedArea();
+    return base ? base + asId(scope.id) + "/" : "";
   }
-  return BRAINSTORM_AREA;
+  return capturedArea();
 }
 
 // The `Source:` citation. For `docs`/`outline` it names the workbench scope by
@@ -611,7 +676,7 @@ export function createSeed(snapshot, scope, tab, opts) {
     // never a form value.
     repository: asId(snapshot?.repository),
     kind: asId(o.kind) || "note",
-    status: STATUS_BRAINSTORM,     // every area; the ruling — never area-derived
+    status: capturedStatus(),      // every area; the ruling — never area-derived
     source: createSource(snapshot, scope, tab, o),
     scopeKind: asId(scope?.kind),
     scopeId: asId(scope?.id),
@@ -625,7 +690,7 @@ export function createSeed(snapshot, scope, tab, opts) {
 export function createOffered(scope, tab) {
   if (!scope) return false;
   if (!CREATE_TABS.includes(tab)) return false;
-  return tab !== "outline" || scope.kind === "staged";
+  return tab !== TAB_IDS.outline || scope.kind === SCOPE_KINDS.selection;
 }
 
 // The tile's scope kind as the SESSION resolves it (007-workbench-branch-sessions
@@ -633,11 +698,11 @@ export function createOffered(scope, tab) {
 // vocabulary spells it `staged-topic` (the branch namespace is `draft/`), so the
 // two are mapped here rather than at the transport — one definition, in the pure
 // module, pinned from both sides like every other payload rule above.
-export const SESSION_SCOPE_KINDS = {
-  staged: "staged-topic",
-  cluster: "cluster",
-  possible: "possible",
-};
+// DECLARED IN `views/display.js` at slice S7 (`SESSION_SCOPE_KINDS`), where its
+// five sibling seam tables already live and where a class-C file may read it
+// without carrying the literal itself. Re-exported here so every caller that
+// already names it keeps naming it.
+export { SESSION_SCOPE_KINDS };
 
 export function sessionScopeKind(kind) {
   return SESSION_SCOPE_KINDS[asId(kind)] || "";
@@ -725,12 +790,12 @@ export function createDocumentCommand(seed, opts) {
     "--repo-root", q("."),
     "--actor", q(asId(o.actor) || "<you>"),
     ...scope,
-    "--area", q(asId(s.area) || BRAINSTORM_AREA),
+    "--area", q(asId(s.area) || capturedArea()),
     "--title", q(s.title || "<title>"),
     "--summary", q(s.summary || "<one-sentence summary>"),
     "--topics", q((s.topics || []).join(", ")),
     "--repository-context", q(s.repositoryContext || "<repo>"),
-    "--status", q(asId(s.status) || STATUS_BRAINSTORM),
+    "--status", q(asId(s.status) || capturedStatus()),
     "--kind", q(asId(s.kind) || "note"),
     "--source", q(s.source || ""),
   ];
@@ -1033,15 +1098,16 @@ export function sessionSurfaceHidden(caps) {
 // so this MUST agree with `branch_session.session_branch` — a drift would name a
 // branch nobody is on. Pinned against the real Python derivation in
 // `test_the_session_branch_derivation_agrees_with_the_python_side`.
-export const SESSION_BRANCH_NAMESPACES = {
-  staged: "draft",
-  cluster: "cluster",
-  possible: "possible",
-};
+// DECLARED IN `views/display.js` at slice S7, beside `SESSION_SCOPE_KINDS`.
+export { SESSION_BRANCH_NAMESPACES };
 
 // A colon-qualified corpus staging id reduces to its final segment (research R2:
 // `git check-ref-format` rejects `:`), and a path-shaped id derives NOTHING
 // rather than a branch in another namespace (FR-002).
+// The `selection` station's session-branch namespace, named once so the four
+// posture sentences below say what the ref actually is instead of spelling it.
+const DRAFT_NS = SESSION_BRANCH_NAMESPACES[SCOPE_KINDS.selection];
+
 export function reduceScopeId(scopeId) {
   const reduced = asId(scopeId).trim().split(":").at(-1).trim();
   return reduced.includes("/") ? "" : reduced;
@@ -1095,15 +1161,15 @@ export function advertisedTiles(snapshot) {
   const out = [];
   for (const topic of s.staged_topics || []) {
     const id = asId(topic && topic.staging_id);
-    if (id) out.push({ kind: "staged", id });
+    if (id) out.push({ kind: SCOPE_KINDS.selection, id });
   }
   for (const cluster of s.clusters || []) {
     const id = asId(cluster && cluster.id);
-    if (id) out.push({ kind: "cluster", id });
+    if (id) out.push({ kind: SCOPE_KINDS.grouping, id });
   }
   for (const possible of s.possibles || []) {
     const id = asId(possible && possible.id);
-    if (id) out.push({ kind: "possible", id });
+    if (id) out.push({ kind: SCOPE_KINDS.candidate, id });
   }
   return out;
 }
@@ -1229,7 +1295,8 @@ export function sessionPosture(scope, opts) {
   let detail;
   if (draft && ambiguous.includes(activeRef)) {
     label = "DRAFT VIEW · " + activeRef + " · AMBIGUOUS session";
-    detail = "the page is on the draft ref " + activeRef + ", which is BOTH a " +
+    detail = "the page is on the " + DRAFT_NS + " ref " + activeRef
+      + ", which is BOTH a " +
       "member of this tile's ordinal family and tile " + ambiguousOwner +
       "'s own session branch. This view is reading UNMERGED work either way; " +
       "session affordances here resolve THIS tile's session through the engine, " +
@@ -1238,15 +1305,16 @@ export function sessionPosture(scope, opts) {
     label = "DRAFT VIEW · " + activeRef;
     detail = "this workbench is reading UNMERGED session work on branch " +
       activeRef + ". The wheel, the funnel, and the board still render " +
-      MAIN_REF + " — a draft never appears in a shared surface.";
+      MAIN_REF + " — a " + DRAFT_NS + " ref never appears in a shared surface.";
   } else if (inFamily) {
     label = "session ENDED · " + activeRef;
     detail = "this tile's session on " + activeRef + " ended during this page's " +
-      "life, and the view is still its draft snapshot. Reload to return to " +
+      "life, and the view is still its " + DRAFT_NS + " snapshot. Reload to return to " +
       MAIN_REF + " and see the tile's current state.";
   } else if (draft) {
     label = "DRAFT VIEW · " + activeRef + " · another tile's session";
-    detail = "the page is on the draft ref " + activeRef + ", which is not this " +
+    detail = "the page is on the " + DRAFT_NS + " ref " + activeRef
+      + ", which is not this " +
       "tile's session branch" + (base ? " (" + base + ")" : "") +
       ". Session affordances here still resolve THIS tile's session, and the " +
       "engine refuses if it has none.";
@@ -1424,7 +1492,8 @@ export function presentationPosture(input) {
     return {
       kind: "hosted-hidden", canvas: false,
       note: "read-only surface: editing, chat, Apply, and Save are not " +
-        "offered on this plane — docs, lens, and outline stay readable.",
+        "offered on this plane — " + vocab.short(SOURCE) + ", " + TAB_IDS.lens
+        + ", and " + TAB_IDS.outline + " stay readable.",
     };
   }
   if (!gateLive) {
@@ -1437,8 +1506,8 @@ export function presentationPosture(input) {
   if (!keyed) {
     return {
       kind: "unkeyed", canvas: false,
-      note: "no active repository and ref are resolved, so the authoring " +
-        "canvas is not offered yet.",
+      note: "no repository and ref are resolved yet, so the authoring " +
+        "canvas is not offered.",
     };
   }
   if (!sourceAvailable) {
