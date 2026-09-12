@@ -320,12 +320,132 @@ _GOVERNANCE_WORD_PATTERN = re.compile(
     r"\b(" + "|".join(re.escape(w) for w in GOVERNANCE_WORDS) + r")\b"
 )
 
+# PR REVIEW FIX (opensoft/openDox-code#13, Copilot on tests/test_web_boundary.py
+# :330): the sweep must not run over prose. `views/model.js`:8-9's own comment
+# -- "Six-column docs-first funnel ... docs -> clusters -> possibles -> staged
+# picks -> proposals -> realized" -- and `views/board.js`:1-5's "Four lifecycle
+# columns -- brainstorm, staged, active proposals, realized/archived" carry six
+# of the eight watched words as EXPLANATORY TEXT, not as runtime vocabulary; so
+# does `styles.css`:1 ("grown verbatim from the staged mockup") among 197 `/*
+# */` blocks. Left unstripped, S7 parameterizing every real literal would still
+# not turn this assertion green -- the note's own words are "a governance word
+# AS A LITERAL" (§ 2.2 rule 2), and a `//`/`/*`/`<!--` comment is not a literal.
+# `_strip_comments_for_scan` blanks `//` and `/* */` (JS/CSS) and `<!-- -->`
+# (HTML) to spaces -- preserving every newline, so `_line_of` still lines up --
+# tracking quotes so a comment MARKER that turns up inside a real string (a
+# URL, say) is left alone; none of the 17 in-scope files hit that case today
+# (`grep -rn '://'` over them is empty), so no genuine literal is at risk of
+# being swallowed by the tracking itself. Verified this does not silently empty
+# the assertion: every one of the 17 in-scope files still carries at least one
+# hit with comments excluded (1,377 raw hits across the set fall to 841 with
+# comments stripped, and the per-file minimum is 3, not 0) -- so the assertion
+# keeps failing today for a real, in-code reason and `strict=True` cannot XPASS
+# out from under S1.
+#
+# NOT FIXED HERE, same footing as assertions 2/3's own "fidelity over
+# tidiness" notes: a bare identifier or property access that only READS a
+# snapshot schema key (`s.documents`, `s.clusters` and their kind, all over
+# `model.js`/`board.js`) still trips this sweep, even though note § 2.2 rule 3
+# treats a schema key as distinct from a rendered word. Whether those sites
+# need their own declared exemption (mirroring `declared_exemptions`) or a
+# literal-vs-identifier-aware rewrite is left for S7 (or a further amendment)
+# to decide against the real vocabulary sites it is parameterizing, rather
+# than guessed at here.
+
+
+def _strip_comments_for_scan(text: str, path: str) -> str:
+    """Blank out this file's COMMENT syntax -- `//`/`/* */` for `.js`, `/* */`
+    only for `.css` (no line-comment syntax exists), `<!-- -->` for `.html` --
+    replacing every character except newlines with a space, so byte offsets
+    inside a comment never match and `_line_of` still reports the original
+    line for every match outside one. Quote-aware for the C-style languages
+    (single/double/backtick), so a `//` or `/*` that appears INSIDE a string
+    literal (a URL, say) is not mistaken for a comment opener; a file with no
+    comment syntax at all (nothing under `WEB_ROOT` today besides these three
+    extensions) is returned unchanged.
+    """
+    if path.endswith(".js"):
+        return _strip_c_style_comments(text, allow_line_comments=True)
+    if path.endswith(".css"):
+        return _strip_c_style_comments(text, allow_line_comments=False)
+    if path.endswith(".html"):
+        return _strip_html_comments(text)
+    return text
+
+
+def _strip_c_style_comments(text: str, *, allow_line_comments: bool) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string: str | None = None  # one of '"', "'", "`", or None
+    in_line_comment = False
+    in_block_comment = False
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if in_line_comment:
+            if c == "\n":
+                in_line_comment = False
+                out.append(c)
+            else:
+                out.append(" ")
+            i += 1
+            continue
+        if in_block_comment:
+            if c == "*" and nxt == "/":
+                in_block_comment = False
+                out.append("  ")
+                i += 2
+                continue
+            out.append(c if c == "\n" else " ")
+            i += 1
+            continue
+        if in_string:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(nxt)  # keep the escaped character verbatim too
+                i += 2
+                continue
+            if c == in_string:
+                in_string = None
+            i += 1
+            continue
+        if c in ("'", '"', "`"):
+            in_string = c
+            out.append(c)
+            i += 1
+            continue
+        if allow_line_comments and c == "/" and nxt == "/":
+            in_line_comment = True
+            out.append("  ")
+            i += 2
+            continue
+        if c == "/" and nxt == "*":
+            in_block_comment = True
+            out.append("  ")
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _strip_html_comments(text: str) -> str:
+    return re.sub(
+        r"<!--.*?-->",
+        lambda m: re.sub(r"[^\n]", " ", m.group(0)),
+        text,
+        flags=re.DOTALL,
+    )
+
 
 def _governance_literal_violations() -> list[str]:
     violations = []
     for row in _assertion_4_scope():
         path = row["path"]
-        text = (WEB_ROOT / path).read_text(encoding="utf-8")
+        text = _strip_comments_for_scan(
+            (WEB_ROOT / path).read_text(encoding="utf-8"), path
+        )
         for m in _GOVERNANCE_WORD_PATTERN.finditer(text):
             violations.append(f"{path}:{_line_of(text, m.start())} carries {m.group(1)!r}")
     return violations
@@ -342,8 +462,19 @@ def _governance_literal_violations() -> list[str]:
         "registered profile's vocabulary as LITERALS -- COLUMN_KEYS, "
         "WHEEL_KEYS/WHEEL_LABELS, board.js's four columns, styles.css's "
         "four --st-* tokens, and more (every in-scope file trips at least "
-        "one hit today). The note assigns closure to slice S7 (parameterize "
-        "class C from the registered domain profile)."
+        "one hit today IN CODE, once `//`/`/* */`/`<!-- -->` prose comments "
+        "are excluded from the sweep by `_strip_comments_for_scan` -- added "
+        "on this PR's review, opensoft/openDox-code#13, after Copilot caught "
+        "the unstripped sweep counting explanatory comments too, e.g. "
+        "views/model.js's own \"docs -> clusters -> possibles -> staged "
+        "picks -> proposals -> realized\" pipeline sentence). The note "
+        "assigns closure to slice S7 (parameterize class C from the "
+        "registered domain profile). A bare identifier or property access "
+        "that only reads a snapshot schema key (`s.documents`, `s.clusters` "
+        "and their kind) still trips this sweep and is NOT excluded here -- "
+        "left for S7 (or a further amendment) to decide against the real "
+        "sites it parameterizes, the same fidelity-over-tidiness call "
+        "assertions 2 and 3 already make about their own scope."
     ),
 )
 def test_no_class_c_file_carries_a_governance_literal() -> None:
