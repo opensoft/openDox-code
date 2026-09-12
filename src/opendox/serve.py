@@ -163,7 +163,7 @@ registry_mod = consumer_reach.snapshot_registry  # noqa: E402
 # columns are still FIXED CORE ARMS of `_route`/`do_POST`, exactly as they were.
 # PR 3's three are CONTRIBUTED: their arms have left the fixed tables and they
 # arrive as `RouteBinding`s through the extension point, assembled in
-# `profile_openxfactory.py` and dispatched BY NAME against the live handler —
+# `route_extension.collect_bindings` and dispatched BY NAME against the live handler —
 # so they meet `self.loopback`, `self.capabilities` and the console test by
 # construction rather than by their author's memory. One route deliberately
 # straddles the two: `/snapshot.json`'s HANDLER moved to `serve_projection.py`
@@ -752,7 +752,7 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     # The CONTRIBUTED routes this server was assembled with
     # (`split-opendox-two-layer-product` § 2.4), already flattened into one
     # consult order by `route_extension.collect_bindings`: the in-tree profile
-    # (`profile_openxfactory.ROUTE_EXTENSIONS` — the gate console, the
+    # (`profile_openxfactory.ROUTE_EXTENSIONS` — now host-registered — the gate console, the
     # projection routes, this repository's lane routes) plus whatever the
     # caller added. The fixed core arms below are consulted first and the
     # fallback after, so the ORDER a route is reached in is unchanged by where
@@ -1365,7 +1365,7 @@ def build_server(
     request, and a dispatch table that can change under traffic is not a
     dispatch table.
 
-    THE IN-TREE PROFILE (`profile_openxfactory.ROUTE_EXTENSIONS`) is registered
+    THE HOST-REGISTERED PROFILE (`profile_openxfactory.ROUTE_EXTENSIONS`) is registered
     HERE, ahead of the caller's tuple, and is NOT passed in by `main()` — the
     same shape `build_parser` uses for `SUBCOMMAND_EXTENSIONS` (PR 4 of § 2.4).
     `build_server(...)` names the whole of THIS assembly's server, which is what
