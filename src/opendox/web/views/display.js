@@ -160,6 +160,53 @@ export const TILE_KINDS = {
   submission: "proposal",
 };
 
+// SCOPE_KINDS — the staging workbench's own scope-kind keys, by stage role. The
+// fourth SEAM KEY table on § 2.2 rule 3's footing: `views/doxbench-state.js`
+// declares the closed set (`SCOPE_KINDS`, itself a declared exemption since
+// slice S1) and the workbench's session state is keyed by it, so the wheel, the
+// workbench and the stored state must spell it identically. Never rendered.
+export const SCOPE_KINDS = {
+  grouping: "cluster",
+  candidate: "possible",
+  selection: "staged",
+};
+
+// REGISTER_STATES — the candidate register's own four-state enum, by status
+// role. The fifth SEAM KEY table on § 2.2 rule 3's footing: these are VALUES
+// the snapshot carries on a candidate (`possibles[].state`), written by the
+// generator and compared against here, never rendered — what a human reads is
+// `display.status(VOCABULARY.CANDIDATE, role)`. openxFactory's own profile
+// declares the same four against the same roles
+// (`contracts/domain-profiles/openxfactory-engineering.yaml`:294-297), which is
+// what makes the role the right key and the word the wrong one.
+// THE SNAPSHOT'S CLOSED ENUM VALUES, by role — the rest of § 2.2 rule 3's
+// schema half, mirrored from `display_profile.SNAPSHOT_VALUES` and carried on
+// the payload (`values`) so a host may override them.
+//
+// `documents[].stage` and `possibles[].state` are values the renderer MATCHES —
+// which column a card belongs in, which dot a candidate wears — and never
+// values it RENDERS: every word a human reads comes from `display.status(...)`.
+// That is § 2.2 rule 3 read over a closed enum rather than over a field name,
+// and it is what keeps the product working: every profile in the estate today
+// registers WITHOUT a `DISPLAY` facet, so a board that filtered on the facet's
+// neutral word would show an empty column against the very snapshot it renders.
+export const SNAPSHOT_VALUES = {
+  document_stage: { captured: "brainstorm", organized: "staged" },
+  register_state: { captured: "latent", proposed: "picked",
+                    retired: "rejected", superseded: "superseded" },
+};
+
+// DRILL_KINDS — the explorer's own tile-kind keys, by stage role. The sixth and
+// last SEAM KEY table on § 2.2 rule 3's footing: `views/explorer.js` opens a
+// tile as its artifact folder and branches on the kind the caller names, so the
+// board, the funnel, the wheel and the explorer must spell it identically.
+// Only the three artifact-folder-bearing stations carry one.
+export const DRILL_KINDS = {
+  selection: "staged",
+  submission: "proposal",
+  completion: "realized",
+};
+
 // openDox's OWN words. Kept BYTE-FOR-BYTE in step with
 // `display_profile.NEUTRAL_DISPLAY`; `tests/test_display_facet.py` parses both
 // and refuses a difference.
@@ -278,6 +325,13 @@ export class Display {
         pick(facet.stages, NEUTRAL_DISPLAY.stages, role),
         this.fields[role]);
     }
+    this._values = {};
+    for (const name of Object.keys(SNAPSHOT_VALUES)) {
+      const declared = facet.values && facet.values[name];
+      this._values[name] = Object.assign(
+        {}, SNAPSHOT_VALUES[name],
+        declared && typeof declared === "object" ? declared : null);
+    }
     this._statuses = {};
     for (const vocabulary of STATUS_VOCABULARIES) {
       const declared = facet.statuses && facet.statuses[vocabulary];
@@ -336,6 +390,21 @@ export class Display {
     if (!Array.isArray(all)) return [];
     if (!stage.status) return all;
     return all.filter((item) => item && item.status === stage.status);
+  }
+
+  // ---- the snapshot's closed enums, through a role (§ 2.2 rule 3) ----
+  // `documentStage(role)` is the word `documents[].stage` carries;
+  // `registerState(role)` the word `possibles[].state` carries. MATCHED, never
+  // rendered.
+  documentStage(role) { return this._value("document_stage", role); }
+  registerState(role) { return this._value("register_state", role); }
+
+  _value(name, role) {
+    const table = this._values[name];
+    if (!table) refuseRole("snapshot enum", name, Object.keys(this._values));
+    const word = table[role];
+    if (word === undefined) refuseRole(name + " value", role, Object.keys(table));
+    return word;
   }
 
   // ---- statuses ----

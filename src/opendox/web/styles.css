@@ -363,18 +363,18 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .tally { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; color: var(--muted); }
 .tally b { color: var(--ink); }
 
-.possible { padding: 5px 9px 5px 10px; display: flex; align-items: flex-start; gap: 8px; }
-.possible .dot { flex: none; width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; }
-.possible.latent { border-style: dashed; }
-.possible.latent .dot { border: 1.5px dashed var(--faint-ink); background: transparent; }
-.possible.picked .dot { background: var(--st-staged); }
-.possible.rejected .dot { background: var(--blocked); }
-.possible.rejected .title { color: var(--muted); }
-.possible.superseded .dot { background: transparent; border: 1.5px solid var(--faint-ink); }
-.possible.superseded .title { text-decoration: line-through; color: var(--muted); font-weight: 400; }
-.possible .title { font-size: 12.5px; font-weight: 500; }
-.possible .meta { font-size: 11px; }
-.possible.shared { border-color: var(--st-brainstorm); }
+.tile-candidate { padding: 5px 9px 5px 10px; display: flex; align-items: flex-start; gap: 8px; }
+.tile-candidate .dot { flex: none; width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; }
+.tile-candidate.latent { border-style: dashed; }
+.tile-candidate.latent .dot { border: 1.5px dashed var(--faint-ink); background: transparent; }
+.tile-candidate.picked .dot { background: var(--st-staged); }
+.tile-candidate.rejected .dot { background: var(--blocked); }
+.tile-candidate.rejected .title { color: var(--muted); }
+.tile-candidate.superseded .dot { background: transparent; border: 1.5px solid var(--faint-ink); }
+.tile-candidate.superseded .title { text-decoration: line-through; color: var(--muted); font-weight: 400; }
+.tile-candidate .title { font-size: 12.5px; font-weight: 500; }
+.tile-candidate .meta { font-size: 11px; }
+.tile-candidate.shared { border-color: var(--st-brainstorm); }
 
 .pill {
   display: inline-flex; align-items: center; gap: 4px; border-radius: 3px; padding: 1px 6px;

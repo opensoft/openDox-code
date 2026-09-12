@@ -552,6 +552,9 @@ const CORE_VIEWS = [
     module: "./views/board.js", entry: "renderBoard", view_class: "C",
     mount: (root, snap, ctx) => renderBoard(root, snap, {
       onOpenTile: ctx.explorer.openTile, notebook: ctx.notebook,
+      // the board's ONE cross-view jump, performed by the shell rather than by
+      // the view reaching for another view's tab button by DOM id (slice S7)
+      onOpenDocList: ctx.nav.openDocList,
       display: ctx.display }) },
   { id: "canvas.cluster", control: "tab-canvas", region: "view-canvas",
     module: "./views/canvas.js", entry: "renderCanvas", view_class: "C",
@@ -1370,6 +1373,9 @@ async function render() {
       // composed tiles -> the tile's member repository (D10's one verb): store
       // the key at the member's own ref and reload — the ratified selector
       // posture, after which every verb works as on any single-repo view.
+      // board -> the doc list. The board's "open the doc list" footer used to
+      // click `#tab-docs` itself; app.js owns every cross-view jump.
+      openDocList: () => { tabs?.goto("view-docs"); },
       openRepository: (repository) => {
         storeKey({ repository, ref: memberRef(rawSnapshot, repository) });
         render();

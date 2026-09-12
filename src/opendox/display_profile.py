@@ -111,6 +111,7 @@ __all__ = [
     "DISPLAY_SCHEMA_VERSION",
     "NEUTRAL_DISPLAY",
     "PROFILE_FACET",
+    "SNAPSHOT_VALUES",
     "STAGE_FIELDS",
     "STAGE_ROLES",
     "STATUS_ROLES",
@@ -203,6 +204,31 @@ STAGE_FIELDS: tuple[tuple[str, str, str | None], ...] = (
     ("submission", "changes", "active"),
     ("completion", "changes", "archived"),
 )
+
+#: THE SNAPSHOT'S CLOSED ENUM VALUES, by role — the rest of § 2.2 rule 3's
+#: schema half, and the reason it is here rather than in the vocabulary above.
+#:
+#: `documents[].stage` and `possibles[].state` are VALUES the renderer MATCHES
+#: (which column a card belongs in, which dot a candidate wears); they are never
+#: VALUES IT RENDERS — every word a human reads comes from `statuses` above,
+#: through `display.status(vocabulary, role)`. That distinction is exactly
+#: § 2.2 rule 3's ("a class-A file MAY read a schema key; it may NOT carry a
+#: word it renders"), read over a closed enum rather than over a field name, and
+#: it is what keeps the product working: `build_server()` refuses without a
+#: registered profile, but every profile in the estate today registers WITHOUT a
+#: `DISPLAY` facet, so a board that filtered on the facet's neutral word would
+#: show an empty first column against the very snapshot it was built to render.
+#:
+#: A HOST MAY STILL OVERRIDE THEM, on the `values` block of the facet, for the
+#: descendant whose generator writes different words into the same schema. The
+#: default is openDox's declaration, not a domain's silence.
+SNAPSHOT_VALUES: dict[str, dict[str, str]] = {
+    # `documents[].stage` — which pipeline column a source document sits in.
+    "document_stage": {"captured": "brainstorm", "organized": "staged"},
+    # `possibles[].state` — the candidate register's own four-state enum.
+    "register_state": {"captured": "latent", "proposed": "picked",
+                       "retired": "rejected", "superseded": "superseded"},
+}
 
 #: openDox's OWN words — the neutral product's plain vocabulary for its own
 #: shape, rendered when no host declares a `DISPLAY` facet. NOT openxFactory's
@@ -389,7 +415,7 @@ def normalize_display(declared: Any) -> dict[str, Any]:
     table = _mapping(declared, where="the facet itself")
     _unknown_roles(table.keys(),
                    ("stages", "statuses", "areas", "tokens", "acts",
-                    "artifacts"),
+                    "artifacts", "values"),
                    where="the facet itself")
     out = _copy_display(NEUTRAL_DISPLAY)
 
@@ -502,6 +528,28 @@ def _copy_display(source: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _snapshot_values(declared: Any) -> dict[str, dict[str, str]]:
+    """The snapshot's enum values, host-overridden per role where declared.
+
+    Refuses an unknown enum or an unknown role for the same reason every other
+    role table does: a value openDox never matches on changes nothing, so
+    declaring one is a silent no-op.
+    """
+    out = {name: dict(values) for name, values in SNAPSHOT_VALUES.items()}
+    if declared is None:
+        return out
+    table = _mapping(declared, where="the facet itself")
+    values = _mapping(table.get("values", {}), where="values")
+    _unknown_roles(values.keys(), tuple(SNAPSHOT_VALUES), where="values")
+    for name, entry in values.items():
+        words = _mapping(entry, where=f"values.{name}")
+        _unknown_roles(words.keys(), tuple(SNAPSHOT_VALUES[name]),
+                       where=f"values.{name}")
+        for role, word in words.items():
+            out[name][role] = _text(word, where=f"values.{name}.{role}")
+    return out
+
+
 def display_manifest(declared: Any, *, host_profile: str | None = None
                      ) -> dict[str, Any]:
     """The `display` block of `/capabilities` — the ONE crossing of the boundary.
@@ -530,6 +578,7 @@ def display_manifest(declared: Any, *, host_profile: str | None = None
         "stage_order": list(STAGE_ROLES),
         "fields": {role: {"field": field, "status": status}
                    for role, field, status in STAGE_FIELDS},
+        "values": _snapshot_values(declared),
         "area_order": list(AREA_ROLES),
         "artifact_roles": list(ARTIFACT_ROLES),
         "token_roles": list(TOKEN_ROLES),

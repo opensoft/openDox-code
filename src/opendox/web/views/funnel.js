@@ -23,7 +23,8 @@
 import { buildFunnelModel, visibleEdges } from "./model.js";
 import { el, txt, basename, readinessHeat } from "./helpers.js";
 import {
-  STAGE_ROLES, STATUS_ROLE, TILE_KINDS, VOCABULARY, neutralDisplay,
+  DRILL_KINDS, STAGE_ROLES, STATUS_ROLE, TILE_KINDS, VOCABULARY,
+  neutralDisplay,
 } from "./display.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -140,7 +141,9 @@ function possibleMeta(p, state, shared) {
     if (p.pick.change_id) meta += " · " + p.pick.change_id;
     return meta;
   }
-  if ((state === "rejected" || state === "superseded") && p.reason) return state + " — " + p.reason;
+  if ((state === vocab.registerState(STATUS_ROLE.RETIRED)
+       || state === vocab.registerState(STATUS_ROLE.SUPERSEDED))
+      && p.reason) return state + " — " + p.reason;
   if (shared) {
     return state + " — claimed by " + p.claiming_clusters.length + " "
       + vocab.count(GROUPING, p.claiming_clusters.length);
@@ -152,7 +155,7 @@ function possibleCard(node) {
   const p = node.possible;
   const state = p.state || "latent";
   const shared = (p.claiming_clusters || []).length > 1;
-  const card = el("div", "card possible " + state + " stage-brainstorm" + (shared ? " shared" : ""));
+  const card = el("div", "card tile-candidate " + state + " stage-brainstorm" + (shared ? " shared" : ""));
   card.id = node.domId;
   card.tabIndex = 0;
   card.dataset.node = "";
@@ -179,8 +182,10 @@ function stagedCard(node, onOpenTile, notebook) {
   }
   card.appendChild(el("div", "meta", meta));
   if (t.readiness_state) card.appendChild(el("span", "pill neutral", t.readiness_state));
-  if (onOpenTile) card.appendChild(openButton("staged", t.staging_id, onOpenTile));
-  maybeNotebookButton(card, notebook, "staged", t.staging_id);
+  if (onOpenTile) {
+    card.appendChild(openButton(DRILL_KINDS[SELECTION], t.staging_id, onOpenTile));
+  }
+  maybeNotebookButton(card, notebook, TILE_KINDS[SELECTION], t.staging_id);
   return card;
 }
 
@@ -209,7 +214,9 @@ function changeCard(node, stageClass, onOpenTile, kind, notebook) {
   if (onOpenTile) card.appendChild(openButton(kind, c.id, onOpenTile));
   // only the active-proposal column carries the NotebookLM action (kind guard);
   // realized/archived tiles do not (the action is for live governance material).
-  if (kind === "proposal") maybeNotebookButton(card, notebook, "proposal", c.id);
+  if (kind === DRILL_KINDS[SUBMISSION]) {
+    maybeNotebookButton(card, notebook, TILE_KINDS[SUBMISSION], c.id);
+  }
   return card;
 }
 
@@ -219,8 +226,8 @@ const CARD_BUILDERS = {
   [CANDIDATE]: (n) => possibleCard(n),
   [SELECTION]: (n, cb, nb) => stagedCard(n, cb, nb),
   [SUBMISSION]: (n, cb, nb) =>
-    changeCard(n, "stage-proposal", cb, TILE_KINDS[SUBMISSION], nb),
-  [COMPLETION]: (n, cb) => changeCard(n, "stage-realized", cb, null),
+    changeCard(n, "stage-proposal", cb, DRILL_KINDS[SUBMISSION], nb),
+  [COMPLETION]: (n, cb) => changeCard(n, "stage-realized", cb, DRILL_KINDS[COMPLETION]),
 };
 
 // #15: multi-member clusters render as cards; one-member clusters fold into a

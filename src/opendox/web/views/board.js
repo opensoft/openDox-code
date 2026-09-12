@@ -14,8 +14,36 @@
 // text node); innerHTML is only ever assigned a literal empty string to clear.
 
 import { el, txt, basename } from "./helpers.js";
+import {
+  DRILL_KINDS, STAGE_ROLES, STATUS_ROLE, TILE_KINDS, VOCABULARY,
+  neutralDisplay,
+} from "./display.js";
 
-const COLUMN_KEYS = ["brainstorm", "staged", "proposals", "realized"];
+const [SOURCE, GROUPING, CANDIDATE, SELECTION, SUBMISSION, COMPLETION] =
+  STAGE_ROLES;
+
+// THE FOUR LIFECYCLE COLUMNS, AS ROLES (§ 3.4 slice S7). § 4.3 point 4 names
+// this file directly — "`board.js`'s four columns become the profile's board
+// roles" — and § 3.2 measured it at "25 governance literals". The first column
+// is the SOURCE station filtered to documents at the CAPTURED status; the other
+// three are the selection, submission and completion stations themselves.
+const COLUMN_KEYS = [SOURCE, SELECTION, SUBMISSION, COMPLETION];
+
+// THE PER-RENDER VOCABULARY, on `views/funnel.js`'s own footing: `renderBoard`
+// is the entry point and every helper runs inside it.
+let vocab = neutralDisplay();
+
+// A board column's heading: the SOURCE station's first column is its CAPTURED
+// documents, so it is labelled by the status rather than by the station.
+function columnLabel(role) {
+  return role === SOURCE
+    ? vocab.status(VOCABULARY.DOCUMENT, STATUS_ROLE.CAPTURED)
+    : vocab.label(role);
+}
+
+function emptyNote(role) {
+  return "no " + columnLabel(role);
+}
 
 // The drill-down affordance (T017/FR-008): only staged/proposal/realized
 // cards are backed by a real artifact folder in the snapshot.
@@ -84,7 +112,8 @@ function brainstormCard(d, indexes) {
   card.appendChild(el("div", "meta", [d.kind, captured, topics].filter(Boolean).join(" · ")));
   const badge = possiblesForDoc(d.id, indexes);
   card.appendChild(el("span", "pill stage",
-    badge.total + " possible" + (badge.total === 1 ? "" : "s") + " · " + badge.picked + " picked"));
+    badge.total + " " + vocab.count(CANDIDATE, badge.total) + " · "
+    + badge.picked + " " + vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.PROPOSED)));
   return card;
 }
 
@@ -102,8 +131,10 @@ function stagedTopicCard(t, onOpenTile, notebook) {
   if (t.readiness_state) card.appendChild(el("span", "pill neutral", t.readiness_state));
   if (t.target_change) card.appendChild(el("span", "pill good", "→ " + t.target_change));
   else card.appendChild(el("span", "pill neutral", "no pick yet"));
-  if (onOpenTile) card.appendChild(openButton("staged", t.staging_id, onOpenTile));
-  maybeNotebookButton(card, notebook, "staged", t.staging_id);
+  if (onOpenTile) {
+    card.appendChild(openButton(DRILL_KINDS[SELECTION], t.staging_id, onOpenTile));
+  }
+  maybeNotebookButton(card, notebook, TILE_KINDS[SELECTION], t.staging_id);
   return card;
 }
 
@@ -114,16 +145,24 @@ function proposalCard(c, onOpenTile, notebook) {
   if (c.task_progress?.total) bits.push((c.task_progress.completed || 0) + "/" + c.task_progress.total + " tasks");
   if (c.origin_staging_id) bits.push("from " + c.origin_staging_id);
   if (bits.length) card.appendChild(el("div", "meta", bits.join(" · ")));
-  if (onOpenTile) card.appendChild(openButton("proposal", c.id, onOpenTile));
-  maybeNotebookButton(card, notebook, "proposal", c.id);
+  if (onOpenTile) {
+    card.appendChild(openButton(DRILL_KINDS[SUBMISSION], c.id, onOpenTile));
+  }
+  maybeNotebookButton(card, notebook, TILE_KINDS[SUBMISSION], c.id);
   return card;
 }
 
 function realizedCard(c, onOpenTile) {
   const card = el("div", "card stage-realized");
   card.appendChild(el("div", "id", c.id));
-  if (c.ratification) card.appendChild(el("div", "meta", "ratified " + c.ratification.date + " · " + c.ratification.ratifier));
-  if (onOpenTile) card.appendChild(openButton("realized", c.id, onOpenTile));
+  if (c.ratification) {
+    card.appendChild(el("div", "meta",
+      vocab.status(VOCABULARY.CHANGE, STATUS_ROLE.RATIFIED) + " "
+      + c.ratification.date + " · " + c.ratification.ratifier));
+  }
+  if (onOpenTile) {
+    card.appendChild(openButton(DRILL_KINDS[COMPLETION], c.id, onOpenTile));
+  }
   return card;
 }
 
@@ -138,8 +177,9 @@ function buildColumn(colKey, head, items, makeCard, makeHay, emptyText, track) {
 
 // --- #18: documents that are not pipeline cards are COUNTED, never silently
 // hidden. Everything but a brainstorm-stage doc lives only in the doc list. ---
-function elseFooter(documents) {
-  const elsewhere = documents.filter((d) => d.stage !== "brainstorm");
+function elseFooter(documents, onOpenDocList) {
+  const elsewhere = documents.filter(
+    (d) => d.stage !== vocab.documentStage(STATUS_ROLE.CAPTURED));
   if (!elsewhere.length) return null;
   const byStage = new Map();
   for (const d of elsewhere) byStage.set(d.stage || "—", (byStage.get(d.stage || "—") || 0) + 1);
@@ -151,10 +191,12 @@ function elseFooter(documents) {
     + " aren't pipeline cards (" + breakdown + ") — "));
   const jump = el("button", "openbtn", "open the doc list");
   jump.type = "button";
-  jump.addEventListener("click", () => {
-    const tab = document.getElementById("tab-docs");
-    if (tab) tab.click();
-  });
+  // THE SHELL OWNS EVERY CROSS-VIEW JUMP (§ 3.4 slice S7). This used to reach
+  // `document.getElementById("tab-docs")` and click it — a view reaching into
+  // another view's tab control by its DOM id, which is the coupling `app.js`'s
+  // `nav` exists to hold. The view declares the verb; the shell performs it.
+  jump.disabled = !onOpenDocList;
+  if (onOpenDocList) jump.addEventListener("click", () => onOpenDocList());
   foot.appendChild(jump);
   return foot;
 }
@@ -165,8 +207,8 @@ function columnFilterBar(onChange) {
   const wrap = el("label");
   wrap.appendChild(txt("column "));
   const sel = document.createElement("select");
-  for (const [value, text] of [["", "all"], ["brainstorm", "brainstorm"], ["staged", "staged"],
-    ["proposals", "active proposals"], ["realized", "realized · archived"]]) {
+  for (const [value, text] of [["", "all"],
+    ...COLUMN_KEYS.map((role) => [role, columnLabel(role)])]) {
     const opt = document.createElement("option");
     opt.value = value;
     opt.textContent = text;
@@ -192,6 +234,7 @@ function applyBoardFilters(cards, columns, filterState) {
 // ---- view assembly (orchestrator) ----
 
 export function renderBoard(root, snapshot, opts) {
+  vocab = opts?.display || neutralDisplay();
   const onOpenTile = opts?.onOpenTile || null;
   const notebook = opts?.notebook || null;
   const documents = snapshot.documents || [];
@@ -199,9 +242,10 @@ export function renderBoard(root, snapshot, opts) {
   const staged = snapshot.staged_topics || [];
   const indexes = buildIndexes(snapshot.clusters || [], snapshot.possibles || []);
 
-  const brainstorms = documents.filter((d) => d.stage === "brainstorm");
-  const active = changes.filter((c) => c.status === "active");
-  const archived = changes.filter((c) => c.status === "archived");
+  const brainstorms = documents.filter(
+    (d) => d.stage === vocab.documentStage(STATUS_ROLE.CAPTURED));
+  const active = vocab.items(snapshot, SUBMISSION);
+  const archived = vocab.items(snapshot, COMPLETION);
 
   root.innerHTML = "";
 
@@ -214,24 +258,30 @@ export function renderBoard(root, snapshot, opts) {
   };
 
   const columns = [
-    buildColumn("brainstorm", colHead("var(--st-brainstorm)", "brainstorm", brainstorms.length),
+    buildColumn(SOURCE,
+      colHead(vocab.tokenVar(STATUS_ROLE.CAPTURED), columnLabel(SOURCE), brainstorms.length),
       brainstorms, (d) => brainstormCard(d, indexes),
-      (d) => [d.summary, d.path, d.kind, ...(d.topics || [])], "no brainstorms", track),
-    buildColumn("staged", colHead("var(--st-staged)", "staged", staged.length),
+      (d) => [d.summary, d.path, d.kind, ...(d.topics || [])],
+      emptyNote(SOURCE), track),
+    buildColumn(SELECTION,
+      colHead(vocab.tokenVar(STATUS_ROLE.ORGANIZED), columnLabel(SELECTION), staged.length),
       staged, (t) => stagedTopicCard(t, onOpenTile, notebook),
-      (t) => [t.staging_id, t.target_change, t.readiness_state], "no staged topics", track),
-    buildColumn("proposals", colHead("var(--st-proposal)", "active proposals", active.length),
+      (t) => [t.staging_id, t.target_change, t.readiness_state],
+      emptyNote(SELECTION), track),
+    buildColumn(SUBMISSION,
+      colHead(vocab.tokenVar(STATUS_ROLE.PROPOSED), columnLabel(SUBMISSION), active.length),
       active, (c) => proposalCard(c, onOpenTile, notebook),
-      (c) => [c.id, c.origin_staging_id], "no active proposals", track),
-    buildColumn("realized", colHead("var(--st-realized)", "realized · archived", archived.length),
+      (c) => [c.id, c.origin_staging_id], emptyNote(SUBMISSION), track),
+    buildColumn(COMPLETION,
+      colHead(vocab.tokenVar("completion"), columnLabel(COMPLETION), archived.length),
       archived, (c) => realizedCard(c, onOpenTile),
-      (c) => [c.id, c.ratification?.ratifier], "no archived changes", track),
+      (c) => [c.id, c.ratification?.ratifier], emptyNote(COMPLETION), track),
   ];
 
   const scroller = el("div", "scroller");
   const board = el("div", "board");
   for (const col of columns) board.appendChild(col);
-  const foot = elseFooter(documents);
+  const foot = elseFooter(documents, opts?.onOpenDocList);
   if (foot) board.appendChild(foot);
   scroller.appendChild(board);
 

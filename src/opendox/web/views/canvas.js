@@ -126,7 +126,7 @@ function evidencePane(model) {
 // ---- pane 3: possibles rail (T021 makes this interactive) ----
 function possibleCard(p) {
   const state = p.state || "latent";
-  const card = el("div", "card possible " + state);
+  const card = el("div", "card tile-candidate " + state);
   card.appendChild(el("span", "dot"));
   const body = el("div");
   body.appendChild(el("div", "title", p.title || p.id));
