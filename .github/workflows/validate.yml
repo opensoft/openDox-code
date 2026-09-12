@@ -49,10 +49,21 @@ jobs:
       # place the ruled contract is executed rather than described. It is
       # `--noconftest` safe and needs no consumer, for the same reason and by
       # the same means as its two neighbours.
+      #
+      # § 3.4 SLICE S3 adds `tests/test_view_registry.py`, on exactly the same
+      # footing as its three neighbours and for the same reason: it asserts a
+      # SEAM — that a contributed panel is collected, refused or absent by the
+      # rules `route_extension.collect_bindings` already holds for routes — and
+      # it is the only place slice S3's ruled contract is executed rather than
+      # described. `--noconftest` safe and needs no consumer: the Python half
+      # imports `opendox.view_extension` alone, and the JavaScript half drives
+      # the real `views/view_extension.js` under the `node` the runner already
+      # has (skipped, never failed, where node is absent).
       - name: pytest
         run: >-
           python -m pytest -q
           tests/test_leg_shape.py
           tests/test_consumer_reach.py
           tests/test_profile_registration.py
+          tests/test_view_registry.py
           --noconftest
