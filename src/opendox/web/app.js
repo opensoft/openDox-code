@@ -1079,10 +1079,24 @@ async function render() {
     // is a `moved_verbatim` row of openxFactory's carve manifest whose declared
     // edit classes (`import rewrites | path constants | adapter calls`) have no
     // class for an added element. So the shell builds it here, once per page,
-    // and the generic mount pass hands it to whichever binding claims the
-    // region — today the gate column's refusal panel, which used to append
+    // and HANDS IT OVER — `page-overlay` is a `shell` region, so RULED Q1's
+    // generic pass deliberately skips it and the CALLER that builds the host is
+    // the caller that mounts into it, which is the gate bar's own pattern.
+    // Today that is the gate column's refusal panel, which used to append
     // itself to `document.body`, "never a contract surface".
-    ensurePageOverlayHost();
+    //
+    // MOUNTED, NOT MERELY HOSTED (Copilot review, round 1). Building the host
+    // and never calling the binding's entry left `views/dispose.js` with no
+    // `panelHost`, and its `ensurePanel()` REFUSES rather than falling back to
+    // the body — which Q8 forbids — so the first refused gate verb on a
+    // composed install would have thrown instead of showing its refusal. The
+    // declared entry, never a hardcoded export name (slice S3's own re-review
+    // finding).
+    const pageOverlayHost = ensurePageOverlayHost();
+    if (disposeView) {
+      disposeView.exports[disposeView.binding.entry](
+        pageOverlayHost, snapshot, { caps });
+    }
     // RULED Q1 (openxFactory#656 comment `5648044785`): "the shell MOUNTS
     // contributed bindings generically: one mount pass over every contributed
     // binding whose region is a `dom` region; the three `shell` regions stay

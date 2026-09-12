@@ -615,3 +615,18 @@ def test_no_shell_file_reaches_into_the_contributed_column_to_supply_it() -> Non
         for module in gone:
             assert not re.search(rf'^import .*from "\./(?:views/)?{re.escape(module)}"',
                                  text, re.M), (path.name, module)
+
+
+def test_the_shell_mounts_the_page_overlay_binding_it_builds_the_host_for() -> None:
+    """RULED Q8's region is a `shell` region, so RULED Q1's generic pass SKIPS
+    it and the caller that builds the host must mount into it. Building the host
+    and never calling the binding's entry left the contributed `views/dispose.js`
+    with no `panelHost`, and its `ensurePanel()` REFUSES rather than falling back
+    to `document.body` (which Q8 forbids) — so the first refused gate verb on a
+    composed install would have THROWN instead of showing its refusal. Copilot
+    review round 1 found it; this holds it."""
+    app = _app()
+    assert "const pageOverlayHost = ensurePageOverlayHost();" in app
+    assert re.search(
+        r"if \(disposeView\) \{\s*\n\s*disposeView\.exports\[disposeView\.binding\.entry\]\(\s*\n"
+        r"\s*pageOverlayHost, snapshot, \{ caps \}\);", app), app
