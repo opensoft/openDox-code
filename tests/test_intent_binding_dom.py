@@ -50,13 +50,20 @@ WEB = ROOT / "src" / "opendox" / "web"
 # intent-feed.js (RULED `not_moved`, never carried here) and PLUS
 # intent-binding.js (the seam this slice adds). Measured by reading each
 # file's own `^import` lines: wheel-model.js, helpers.js, notebook.js and
-# settings.js are import-free leaves; dispose.js imports only helpers.js and
-# (after this slice) intent-binding.js. A file added to this set by a future
+# settings.js are import-free leaves. A file added to this set by a future
 # slice without updating this constant fails loudly (`_write_tree` copies
 # exactly this list, so a newly-added import the closure omits is a
 # `MODULE_NOT_FOUND` in the harness, not a silent gap).
+#
+# `dispose.js` LEFT THE CLOSURE AT SLICE S5, and it left twice over: it is no
+# longer in this bundle at all (openXdox-code's package data, RULED Q5,
+# openxFactory#656 comment `5648044785`), and `wheel.js` no longer imports it —
+# the shell resolves the `gate.dispose` binding and hands its declared namespace
+# down as `ctx.dispose`, which is the class-C -> class-B breach § 4.5 assertion
+# 3 measured, closed. Copying it here would be copying a file this repository
+# does not ship.
 WHEEL_CLOSURE = (
-    "wheel.js", "wheel-model.js", "helpers.js", "dispose.js",
+    "wheel.js", "wheel-model.js", "helpers.js",
     "intent-binding.js", "notebook.js", "settings.js",
     # § 3.4 slice S7: the wheel and its model read the registered domain's
     # vocabulary through `display.js`, which is import-free by design -- the
@@ -164,12 +171,20 @@ def _run(tmp_path, script: str, *, contribute_intent_feed: bool):
 
 # ---- the module graph itself (the note's § 1.2(b) defect) ------------------
 
+# `import * as D from "./dispose.js"` WAS THE SECOND HALF OF THIS PROBE, and it
+# went with the module at slice S5. The graph statement it made — that BOTH
+# halves load in one tree — can only be made where both halves exist, which is
+# the COMPOSED bundle, so it is made at openXdox-code
+# (`tests/test_gate_loop_probes.py`,
+# `test_js_the_composed_graph_resolves_with_or_without_a_contributed_feed`)
+# against openDox's own `web/` with this column's modules assembled into it.
+# What stays here is the half this bundle can still answer, and it is the half
+# the note's § 1.2(b) defect was actually about: `wheel.js`'s OWN closure loads
+# and evaluates with the never-carved `intent-feed.js` absent.
 _GRAPH_PROBE = """
 import * as W from "./wheel.js";
-import * as D from "./dispose.js";
 console.log(JSON.stringify({
   renderWheel: typeof W.renderWheel,
-  mountDisposeTray: typeof D.mountDisposeTray,
 }));
 """
 
@@ -181,63 +196,43 @@ def test_wheel_module_graph_resolves_with_intent_feed_absent(tmp_path):
     missing render. This is that failure, gone: the entire closure loads and
     evaluates with intent-feed.js absent, exactly as this leg ships today."""
     r = _run(tmp_path, _GRAPH_PROBE, contribute_intent_feed=False)
-    assert r == {"renderWheel": "function", "mountDisposeTray": "function"}
+    assert r == {"renderWheel": "function"}
 
 
 def test_wheel_module_graph_also_resolves_with_intent_feed_contributed(tmp_path):
     """The forward path: a deployment that DOES drop intent-feed.js beside
     the others (openxFactory's composed column) still loads cleanly."""
     r = _run(tmp_path, _GRAPH_PROBE, contribute_intent_feed=True)
-    assert r == {"renderWheel": "function", "mountDisposeTray": "function"}
+    assert r == {"renderWheel": "function"}
 
 
-# ---- dispose.js's tray, gated the way wheel.js actually gates it -----------
+# ---- dispose.js's TRAY MOVED WITH dispose.js (slice S5) ---------------------
 #
-# `mountDisposeTray` itself does not consult `intentCapable` — it trusts its
-# caller (`wheel.js`) to pass `opts.intent` only once `intentCapable(caps)`
-# has already said yes (`wheel.js`'s own `hosted` local). So the realistic
-# probe reproduces THAT gate rather than handing `opts.intent` to the tray
-# unconditionally, which would prove nothing about the binding.
-
-_TRAY_PROBE = _DOM_SHIM + """
-import { mountDisposeTray } from "./dispose.js";
-import { intentCapable } from "./intent-binding.js";
-
-const caps = { actions: { intent: true } };
-const hosted = intentCapable(caps);
-const row = new Node("div");
-mountDisposeTray(row, { id: "p1" },
-  hosted ? { intent: { snapshotRev: "r", rows: [], error: null } } : {});
-const tray = byClass(row, "disposetray")[0];
-const chips = row.walk().find((n) => String(n.className).includes("intentchips"));
-console.log(JSON.stringify({
-  hosted,
-  verdictButtons: tray ? tray.children.length : -1,
-  chipsMounted: !!chips,
-  chipsCarryRealForward: !!(chips && chips.__fakeRendered),
-}));
-"""
-
-
-def test_dispose_tray_renders_with_no_chips_when_intent_feed_absent(tmp_path):
-    r = _run(tmp_path, _TRAY_PROBE, contribute_intent_feed=False)
-    assert r["hosted"] is False
-    assert r["verdictButtons"] == 3          # accept / reject / defer, unchanged
-    assert r["chipsMounted"] is False        # no chips element at all — not
-                                              # merely an empty one: wheel.js
-                                              # never passed opts.intent
-    assert r["chipsCarryRealForward"] is False
-
-
-def test_dispose_tray_renders_real_chips_when_intent_feed_contributed(tmp_path):
-    r = _run(tmp_path, _TRAY_PROBE, contribute_intent_feed=True)
-    assert r["hosted"] is True
-    assert r["verdictButtons"] == 3
-    assert r["chipsMounted"] is True
-    assert r["chipsCarryRealForward"] is True   # not just present — actually
-                                                 # rendered BY the contributed
-                                                 # module, not a same-named
-                                                 # look-alike
+# TWO PROBES STOOD HERE: the tray rendering its three verdict buttons and NO
+# chips element when no intent feed is contributed, and the same tray rendering
+# chips that the CONTRIBUTED module actually wrote when one is. Both mounted the
+# real `views/dispose.js`, and that module is openXdox-code's package data as of
+# this slice (RULED Q5, openxFactory#656 comment `5648044785`). A probe that
+# imported it from `src/opendox/web/views/` would be asserting against a file
+# this bundle no longer ships.
+#
+# THEY WERE PORTED, NOT DELETED, on the precedent slice S4's five node probes
+# set one slice ago: deleting behavioural coverage in a refactor slice is how a
+# move that passes every shape assertion silently breaks a verb. They run at
+# openXdox-code, in `tests/test_gate_loop_probes.py`, with slice S2's own DOM
+# shim carried across unchanged and against an ASSEMBLED bundle — openDox's
+# `web/` with that column's modules placed into it by RULED Q5's assembly hook —
+# so the byte measured is the shipped byte in the shipped position.
+#
+# ONE FACT MOVED WITH THEM, RULED counterpart Q6 (`#656` comment `5649094228`):
+# the tray reached `renderIntentChips` by importing this bundle's
+# `intent-binding.js`, and a contributed module may now import
+# `./views/helpers.js` and nothing else — so the chip renderer travels in
+# `opts.intent` beside the emitter, supplied by the shell that starts the feed
+# (`views/wheel.js`'s mount in this leg).
+#
+# What stays below is everything about `views/intent-binding.js`, which is this
+# bundle's own file and the seam slice S2 actually added.
 
 
 # ---- intentCapable's AND semantics ------------------------------------------

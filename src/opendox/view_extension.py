@@ -110,6 +110,7 @@ __all__ = [
     "collect_view_bindings",
     "dom_regions",
     "host_view_extensions",
+    "host_view_facet",
     "view_manifest",
 ]
 
@@ -671,13 +672,43 @@ def host_view_extensions(profile: Any = None) -> tuple[Any, ...]:
     real proxy at CALL time (never at import time — the whole value of the lazy
     proxy is that importing it cannot fail for want of a host).
     """
+    return host_view_facet(profile)[1]
+
+
+#: The sentinel that is NOT a facet value. `None` cannot serve: a profile is
+#: free to declare `VIEW_EXTENSIONS = None` and that is a MALFORMED declaration
+#: rather than an absent one, which is a distinction this seam exists to keep.
+_NO_FACET = object()
+
+
+def host_view_facet(profile: Any = None) -> tuple[str, tuple[Any, ...]]:
+    """The facet's PRESENCE and its value: `("declared" | "absent", extensions)`.
+
+    PRESENCE IS NOT TRUTHINESS, and reading one for the other loses the very
+    diagnostic `view_manifest` promises (Copilot review of openDox-code#20,
+    round 2). `build_server()` asked `host_facet="declared" if view_extensions
+    else "absent"`, so a host that DECLARES `VIEW_EXTENSIONS = ()` — a column
+    that has grown the facet and contributes nothing on this plane, which is a
+    perfectly ordinary state — was reported to the browser as a host that never
+    grew the facet at all. The two are different facts about the host, exactly
+    as `host_view_extensions`' own docstring argues, and the payload now
+    distinguishes them because it is read by the column debugging its own
+    contribution.
+
+    `declared is None` still answers "absent" ALONGSIDE the missing facet: a
+    profile is entitled to spell "I contribute no views" as `None`, and
+    `tuple(None)` would raise where this function's whole posture is that an
+    absence is not a defect. Anything else declared is tupled, and a value that
+    cannot be tupled raises out of here — a MALFORMED declaration, which is the
+    third fact and is not this function's to soften.
+    """
     if profile is None:
         from opendox.profile_proxy import profile_openxfactory
         profile = profile_openxfactory
-    declared = getattr(profile, PROFILE_FACET, None)
-    if declared is None:
-        return ()
-    return tuple(declared)
+    declared = getattr(profile, PROFILE_FACET, _NO_FACET)
+    if declared is _NO_FACET or declared is None:
+        return "absent", ()
+    return "declared", tuple(declared)
 
 
 def view_manifest(bindings: Iterable[ViewBinding], *,

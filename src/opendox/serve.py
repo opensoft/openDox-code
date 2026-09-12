@@ -178,6 +178,17 @@ registry_mod = consumer_reach.snapshot_registry  # noqa: E402
 # `path == self.snapshot_route` — a per-server keyword `build_server` accepts,
 # which a frozen `RouteBinding.pattern` cannot carry.
 #
+# AND ONE ROUTE HAS SINCE GONE THE OTHER WAY. § 3.4 slice S6 (RULED Q4, Brett
+# Heap, 2026-09-12, openxFactory#656 comment 5642758731) returns the `/source`
+# pair from CONTRIBUTED to FIXED: the read-only pass-through over the pinned
+# checkout is the NEUTRAL product's own, so `SOURCE_PREFIX`,
+# `BARE_SOURCE_ROUTE` and the three methods that answer them are declared below
+# and `_route` branches on them again, above the contributed consult so no
+# binding can take the route back. The projection column's contribution is
+# `/snapshot-index.json` alone now. It is a route-ownership correction, not a
+# reversal of PR 3: what a COLUMN owns is contributed, and `/source` turned out
+# not to be a column's.
+#
 # EVERY MOVED MODULE-LEVEL NAME IS IMPORTED BACK BY NAME, so this module's
 # namespace is what it always was: `serve.doxbench_error_body`,
 # `serve.DOXBENCH_ERROR_CATALOG`, `serve.JSON_CTYPE`, `serve._launch_editor`,
@@ -207,23 +218,28 @@ from opendox.serve_project import (  # noqa: E402,F401
 )
 # `serve_projection`'s six re-exported names are no longer bound by an import
 # statement here (BUILD slice 2b): the statement named openXdox at import time.
-# FOUR of the six had no reader anywhere in this repository — `BARE_SOURCE_ROUTE`,
-# `SNAPSHOT_INDEX_ROUTE` and `SOURCE_PREFIX` are the patterns
-# `ProjectionRoutesExtension.routes()` declares and travel with it, and
-# `hosted_index` is the column's own verb. All four stay reachable at
+# TWO of the six are still the projection column's — `SNAPSHOT_INDEX_ROUTE` is
+# the pattern `ProjectionRoutesExtension.routes()` declares and travels with it,
+# and `hosted_index` is the column's own verb — and both stay reachable at
 # `openxdox.serve_projection`, which is where they live.
 #
-# THE OTHER TWO KEEP THEIR NAMES HERE, bound to late stand-ins, because each has
-# a reader that would otherwise become an ImportError:
-#   - `hosted_ref_refused` decides at :785 that a hosted response must never
-#     NAME a session ref (FR-048) — a reader in THIS module;
-#   - `resolve_source_path` is imported `from .serve` by `notebook_action.py`:52
-#     and re-checks every resolved document at :139 before a notebook action may
-#     name a path. It is a CONTAINMENT check reached through this module's name,
-#     so the re-export is part of the contract, not incidental.
-# Both resolve on first CALL, so neither costs an import-time reach.
+# THREE OF THE SIX ARE THIS MODULE'S OWN NAMES SINCE § 3.4 SLICE S6 (RULED Q4,
+# Brett Heap, 2026-09-12, openxFactory#656 comment 5642758731: "`/source/` is
+# openDox's, and openXdox's projection binding keeps only `/snapshot-index.json`
+# and the three `/projections/*` routes"). `SOURCE_PREFIX`, `BARE_SOURCE_ROUTE`
+# and `resolve_source_path` are DECLARED BELOW, because reading a file out of
+# the pinned checkout is the NEUTRAL product's own read-only pass-through and is
+# therefore a fixed core arm rather than a contributed binding. The last of the
+# three is what `notebook_action.py`:52 imports `from .serve` and re-checks
+# every resolved document with at :139 — a containment check reached through
+# this module's name, and now a real definition here rather than a forwarder
+# into the layer that pins this one.
+#
+# `hosted_ref_refused` KEEPS ITS LATE STAND-IN. It decides at :785 that a hosted
+# response must never NAME a session ref, and FR-048 is the PROJECTION column's
+# confinement rule, not this core's: the route moved, the hosted-plane rule did
+# not. It resolves on first CALL, so it costs no import-time reach.
 hosted_ref_refused = consumer_reach.hosted_ref_refused  # noqa: E402
-resolve_source_path = consumer_reach.resolve_source_path  # noqa: E402
 from opendox.serve_wire import (  # noqa: E402,F401
     AGENT_INVOCATION_REFUSAL,
     CONTEXT_REDUCED_REASON_MAX_LENGTH,
@@ -330,6 +346,30 @@ SNAPSHOT_ROUTE = "/snapshot.json"
 # image, which never serves this route) -> 404 -> the picker hides and the
 # selector degrades to today's ungrouped roster.
 PROJECT_REGISTER_ROUTE = "/project-register.json"
+# THE READ-ONLY SOURCE PASS-THROUGH (D15), a FIXED CORE ARM of this module since
+# § 3.4 slice S6 — RULED Q4 (Brett Heap, 2026-09-12, openxFactory#656 comment
+# 5642758731). It was `openxdox/serve_projection.py`'s contributed pair from
+# § 2.4 PR 3 until then, which is what made `views/viewer.js` — the read-only
+# Markdown viewer, class A, the most obviously student-usable surface in the
+# bundle — address a route another column declared: the ONE § 2.2 rule 1 breach
+# the boundary note's census carries (openDox-spec
+# `docs/front-end-package-boundary.md` § 3.2, § 4.5 assertion 2). Under RULING
+# OQ-2 a student runs openDox ALONE, so a viewer that cannot load a file without
+# the consumer layer is a route-ownership defect, not a layering one.
+#
+# THE PAIR IS ONE ROUTE WITH TWO ANSWERS and the ORDER between them is
+# load-bearing, so it is restated here rather than left to whoever reads the two
+# arms next. `/source` EXACTLY — no file named — is `send_error(404, "no source
+# path")`. `/source/` with an empty tail is NOT that: it reaches the prefix arm
+# with `tail == ""`, resolves nothing, and answers 404 with the divergence
+# headers and a zero-length body. `serve_projection.py` reproduced that split
+# with an exact binding plus a prefix binding, relying on `collect_bindings`
+# grouping every exact ahead of every prefix; `_route` reproduces it by putting
+# the exact arm above the prefix arm, which is the same order written the way a
+# fixed arm writes it.
+SOURCE_PREFIX = "/source/"
+#: The BARE `/source` route, with no file named.
+BARE_SOURCE_ROUTE = "/source"
 CAPABILITIES_ROUTE = "/capabilities"
 ACTIONS_NOTEBOOK_ROUTE = "/actions/notebook"
 ACTIONS_EDIT_ROUTE = "/actions/edit"
@@ -539,6 +579,33 @@ def loopback_authorities(port: int) -> frozenset[str]:
             for host in LOOPBACK_HOSTS
         }
     return frozenset(authorities)
+
+
+# --------------------------- source-path containment (pure) ---------------------------
+
+def resolve_source_path(checkout_root: Path, url_tail: str) -> Path | None:
+    """Resolve a `/source/<tail>` request to an absolute file under
+    `checkout_root`, or None to reject. Rejects absolute paths, NUL bytes, any
+    escape of the root (via `..`, encoded `..`, or a symlink), and non-files.
+    Percent-decoding happens BEFORE the containment check so `%2e%2e` cannot slip
+    past.
+
+    The containment check itself lives in `snapshot_registry.resolve_within`
+    so the SAME rule applies per registry entry (task 2.2); this stays the
+    single-root entry point every existing caller and test uses.
+
+    ARRIVED HERE AT § 3.4 SLICE S6 (RULED Q4) with the route it confines, from
+    `openxdox/serve_projection.py`:66. The body is unchanged: the RULE is
+    `snapshot_registry.resolve_within` and the rule has NOT moved — it is the
+    projection column's, it is the same rule per registry entry, and openDox
+    reaches it through the same late `consumer_reach` seam `serve_workbench.py`
+    already uses at five sites. What moved is the ENTRY POINT, to the module
+    that now declares the route and to the module `notebook_action.py`:52
+    already imported it from. A second copy of the containment rule here would
+    be the fork `route_extension.py`:89 names; a forwarder into the consumer for
+    this core's OWN route is the direction `design.md`:243 names. This is
+    neither."""
+    return registry_mod.resolve_within(Path(checkout_root), url_tail)
 
 
 def _checkout_real(checkout_root: Path | str) -> bool:
@@ -956,6 +1023,20 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         if path == WORKBENCH_THREAD_ROUTE:
             self._handle_workbench_thread(head_only)
             return True
+        # ---- the read-only source pass-through (D15; RULED Q4, § 3.4 S6) ----
+        # THE EXACT ARM SITS ABOVE THE PREFIX ARM, and that is the whole of the
+        # order `serve_projection.py` got from `collect_bindings` grouping every
+        # exact binding ahead of every prefix one. `/source` matches the first
+        # and refuses with a message; `/source/` does not (the strings differ),
+        # falls to the second, and reaches `_serve_source("")` — 404 with the
+        # divergence headers and a zero-length body, never an HTML error page.
+        # Written the other way round the bare route would become unreachable.
+        if path == BARE_SOURCE_ROUTE:
+            self._refuse_bare_source(head_only)
+            return True
+        if path.startswith(SOURCE_PREFIX):
+            self._serve_source(path[len(SOURCE_PREFIX):], head_only)
+            return True
         # ---- the CONTRIBUTED read routes (§ 2.4) ----
         # AFTER every fixed core arm and BEFORE the static fallback, which is
         # the placement that makes two things true at once: a contributed route
@@ -984,6 +1065,94 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     def do_HEAD(self):  # noqa: N802
         if not self._route(head_only=True):
             super().do_HEAD()
+
+    # ---- source pass-through ----
+    # ARRIVED HERE AT § 3.4 SLICE S6 (RULED Q4, openxFactory#656 comment
+    # 5642758731) from `openxdox/serve_projection.py`:295-361, byte for byte.
+    # The three methods are a unit: `_serve_source` is the arm, `_keyed_source`
+    # is the optional `<repository>@<ref>/` split it starts with, and
+    # `_refuse_bare_source` is the bare route's one-line answer.
+    #
+    # THEY STILL REACH THE CONSUMER, and that is unchanged rather than
+    # overlooked. `hosted_ref_refused` is FR-048, the projection column's
+    # hosted-plane confinement; `self.source.registry` and
+    # `self._hosted_entry_refused` are the snapshot registry's per-entry rules,
+    # and `_hosted_entry_refused` stays on `consumer_reach.LateProjectionRoutes`
+    # with `_serve_snapshot`, which also calls it. Q4 rules on ROUTE OWNERSHIP —
+    # "this is a route-ownership correction at § 4.3 of the packet, not a new
+    # capability" — so the arm comes here and the rules it consults stay where
+    # they are, reached through the seam this module already declares. Every one
+    # of those reaches is guarded by `self.source is not None`, which is None
+    # only in a hand-built handler, so the SHAPE of the neutral case is already
+    # here even though the BUILD arc (§ 3.5/3.6) is what makes it reachable.
+    def _keyed_source(self, tail: str):
+        """Split an optional `<repository>@<ref>/` prefix off a `/source/` tail.
+        The prefix is honoured ONLY when it names a REGISTERED pair, so a real
+        file whose first path segment happens to contain `@` still resolves as a
+        path. Returns (repository, ref, remaining tail).
+
+        A SESSION ref CONTAINS a slash (`draft/<topic>`, `cluster/<id>`), so the
+        key is not always one path segment: the split is tried at every separator,
+        shortest prefix first, and the first candidate naming a REGISTERED pair
+        wins. Registration remains the whole admission test — an unregistered pair
+        falls through to the plain path exactly as before — so widening the split
+        cannot make an unknown key addressable. Both spellings work: the browser
+        percent-encodes the whole key (`repo%40draft%2Ftopic`, one segment) and the
+        runbook's `curl` writes it plainly (`repo@draft/topic`, two)."""
+        if self.source is None or "/" not in tail:
+            return None, None, tail
+        parts = tail.split("/")
+        for cut in range(1, len(parts)):
+            rest = "/".join(parts[cut:])
+            if not rest:
+                break
+            parsed = registry_mod.parse_key_id(
+                urllib.parse.unquote("/".join(parts[:cut])))
+            if parsed is None:
+                continue
+            if self.source.registry.get(*parsed) is not None:
+                return parsed[0], parsed[1], rest
+        return None, None, tail
+
+    def _serve_source(self, tail: str, head_only: bool) -> None:
+        repository, ref, rest = self._keyed_source(tail)
+        # the keyed form is the OTHER route that names a ref (FR-048): a hosted
+        # plane serves no session worktree's bytes, keyed or not
+        if hosted_ref_refused(self.loopback, ref):
+            self._send_json(403, {"ok": False, "error": "session_unavailable",
+                                  "message": HOSTED_SESSION_REFUSAL})
+            return
+        entry = None
+        if self.source is not None:
+            target = self.source.registry.resolve_source(repository, ref, rest)
+            entry = self.source.registry.resolve(repository, ref)
+            # the UNKEYED form resolves to the ACTIVE entry, which the query never
+            # named — the same ref-less hole `_serve_snapshot` closes
+            if self._hosted_entry_refused(entry):
+                return
+        else:
+            target = resolve_source_path(Path(self.checkout_root), rest)
+        if target is None:
+            self.send_response(404)
+            self._divergence_headers(entry)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        try:
+            body = target.read_bytes()
+        except OSError:
+            self.send_error(404, "unreadable source")
+            return
+        ctype = "text/markdown; charset=utf-8" if target.suffix == ".md" else "text/plain; charset=utf-8"
+        self._serve_bytes(body, ctype, head_only, entry=entry)
+
+    def _refuse_bare_source(self, head_only: bool) -> None:
+        """`GET /source` with no file named — refused, exactly as before.
+
+        `head_only` is accepted and unused for the same reason the pre-carve core
+        arm ignored it: `send_error` suppresses the body on a HEAD itself.
+        """
+        self.send_error(404, "no source path")
 
     # ---- write route (v2 seam): the loopback-only "Open in NotebookLM" action ----
     # RESPONSE DISCIPLINE: every error body is {"error": <catalog code>,
@@ -1570,12 +1739,21 @@ def build_server(
     # facet gets `host_facet: "absent"` with its profile NAMED, never a refusal,
     # because every host has yet to grow the facet and refusing would be a flag
     # day imposed by the seam that exists to avoid one.
-    view_extensions = view_extension.host_view_extensions(profile_openxfactory)
+    #
+    # PRESENCE, NOT TRUTHINESS (Copilot review, round 2). `host_view_facet`
+    # answers BOTH halves in one read: a host that declares `VIEW_EXTENSIONS =
+    # ()` is "declared" with an empty column, and a host that never grew the
+    # facet is "absent" — the same empty tuple, two different facts, and a
+    # conditional on the tuple's TRUTHINESS reported both as the second. That is
+    # the diagnostic this manifest exists to carry, so it is read the way it is
+    # written.
+    host_facet, view_extensions = view_extension.host_view_facet(
+        profile_openxfactory)
     capabilities["views"] = view_extension.view_manifest(
         view_extension.collect_view_bindings(
             view_extensions, contributed_routes=route_bindings),
         contributed_routes=route_bindings,
-        host_facet="declared" if view_extensions else "absent",
+        host_facet=host_facet,
         host_profile=getattr(profile_openxfactory, "__name__", None),
     )
 
