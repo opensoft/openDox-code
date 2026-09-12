@@ -22,8 +22,8 @@
 // removes.)
 //
 // THE FIX IS THIS FILE, NOT A CHANGE TO WHAT IS ABSENT. `dispose.js` and
-// `wheel.js` now import the seven names below FROM HERE instead of from
-// "./intent-feed.js" directly — same names, same call sites, nothing else in
+// `wheel.js` now import the seven names below FROM HERE, not from that
+// other file directly — same names, same call sites, nothing else in
 // either file changes (split-opendox-two-layer-product § 3.4, slice S2).
 // This module makes the real `intent-feed.js` an OPTIONAL CONTRIBUTED
 // BINDING: a dynamic `import()` — never a static `import` — so a missing
