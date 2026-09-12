@@ -143,9 +143,18 @@ def _temp_bundle(tmp_path: Path) -> Path:
     module into `src/opendox/web/views/` keeps the real bundle exactly the set
     of files the census counts — § 4.5 assertion 1 fails an unrowed file, and a
     test fixture would be one.
+
+    Carries its OWN `package.json` (`"type": "module"`) for the same reason the
+    repository root now carries one (Copilot, PR #14): `tmp_path` sits under the
+    system temp directory, outside the repository's own directory tree, so the
+    root `package.json` is not an ancestor of anything copied or written here —
+    Node would decide this bundle's `.js` format on its own heuristic alone
+    without a copy of the declaration in the bundle itself.
     """
     web = tmp_path / "web"
     (web / "views").mkdir(parents=True)
+    (web / "package.json").write_text(
+        '{"private": true, "type": "module"}\n', encoding="utf-8")
     copied = web / "views" / "view_extension.js"
     copied.write_bytes(REGISTRY_JS.read_bytes())
     assert copied.read_bytes() == REGISTRY_JS.read_bytes()
@@ -933,3 +942,46 @@ catch (e) {{ name = e.name; }}
 console.log(JSON.stringify({{ refused: name }}));
 """, tmp_path)
     assert result == {"refused": "ViewBindingError"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_module_scope_holds_without_node_s_detection_heuristic(tmp_path):
+    # Copilot, PR #14: this repository ships no `package.json`, so every
+    # `export`/named-import test above only ran because Node's
+    # `--experimental-detect-module` (default ON since Node ~20.10, unflagged
+    # by Node 22) reparses an ambiguous `.js` file as ESM the moment it finds
+    # module syntax -- proven by hand: importing the real, unmodified
+    # `view_extension.js` with NO `package.json` anywhere in its parents raises
+    # `SyntaxError: Named export '...' not found. The requested module '...' is
+    # a CommonJS module ...` the instant that heuristic is turned off with
+    # `--no-experimental-detect-module`, which is the same failure shape the
+    # finding names ("the export/named-import tests fail before exercising the
+    # registry"). It does not reproduce today against either Node the way this
+    # suite runs it (locally, or `validate`'s Node 24) only because the
+    # heuristic happens to be on by default there -- Node's own warning without
+    # the fix ends 'To eliminate this warning, add "type": "module" to
+    # .../package.json', which is the fix, not an argument that the gap is
+    # imaginary. `package.json` (repository root, and one written into every
+    # `_temp_bundle`) makes the format an explicit, version-independent fact
+    # instead of a default that a Node upgrade, downgrade or flag could change
+    # again. This test is the POSITIVE assertion that the fact now holds even
+    # with the heuristic OFF, for both the real registry (root
+    # `package.json`) and a `_temp_bundle` copy (bundle-local one) --
+    # confirmed failing on the pre-fix tree by hand, not implied.
+    for label, registry in (
+        ("real", REGISTRY_JS.as_uri()),
+        ("bundle", (_temp_bundle(tmp_path) / "views"
+                    / "view_extension.js").as_uri()),
+    ):
+        script = tmp_path / f"no-detect-{label}.mjs"
+        script.write_text(
+            f'import {{ VIEW_CLASSES }} from {json.dumps(registry)};\n'
+            f'console.log(JSON.stringify({{ classes: VIEW_CLASSES }}));\n',
+            encoding="utf-8")
+        proc = subprocess.run(
+            [NODE, "--no-experimental-detect-module", str(script)],
+            capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, (label, proc.stderr)
+        assert "CommonJS" not in proc.stderr, (label, proc.stderr)
+        assert json.loads(proc.stdout.strip()) == {
+            "classes": list(VIEW_CLASSES)}
