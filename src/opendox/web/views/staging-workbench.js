@@ -82,6 +82,21 @@ import {
   documentAbstract, docWheelEntries, existingOnTopic,
   abstractRegionState, abstractSubjectDigest,
 } from "./staging-workbench-model.js";
+// THE MODEL, AS A NAMESPACE, BECAUSE THE CONTRIBUTED COLUMN REACHES IT THROUGH
+// `ctx` — RULED counterpart Q6 (opensoft/openxFactory#656 comment `5649094228`,
+// Brett Heap, 2026-09-12): "what a CONTRIBUTED view module may IMPORT from
+// openDox's bundle: `./views/helpers.js` and NOTHING ELSE. Every other need
+// reaches the binding through its `ctx` (Q1-Q4) or its own package (Q5)."
+//
+// `views/swb-create.js` and `views/swb-session.js` took five and nine names
+// from this model by static import while they lived in this bundle. They are
+// openXdox's package data now, and the model is still openDox's — so the SHELL
+// hands it down at the mount, in the ctx it already builds, and openDox keeps
+// the one definition of its own request bodies. The namespace and not a picked
+// set: the binding declares which names it needs (`CTX_MODEL_REACH`) and
+// refuses by name when one is missing, which is a contract this file cannot
+// improve on by re-listing it.
+import * as workbenchModel from "./staging-workbench-model.js";
 import { renderDocWheel } from "./doc-wheel.js";
 import { buildLensModel } from "./lens-model.js";
 import { renderBullseye } from "./bullseye.js";
@@ -1795,6 +1810,9 @@ export function mountStagingWorkbench(container, snapshot,
       return {
         caps, fetcher, repair: consoleRepair, slot: (extra || {}).slot,
         label: CREATE_LABELS[activeTab],
+        // RULED counterpart Q6: openDox's model, handed to the contributed
+        // binding rather than imported by it.
+        model: workbenchModel,
         // task 5.8: land on the document, not on a path string. The snapshot
         // predates the new file, so the viewer resolves it through the same
         // read-only source pass-through every other document read uses.
@@ -1877,6 +1895,9 @@ export function mountStagingWorkbench(container, snapshot,
     // set can shadow the other; the old call passed the context second and the
     // seams third.
     sessionColumn.mountSessionAffordances(sessionhost, snapshot, {
+      // RULED counterpart Q6: openDox's model, handed to the contributed
+      // binding rather than imported by it.
+      model: workbenchModel,
       session: {
       scope,
       posture,
@@ -3238,6 +3259,8 @@ export function mountStagingWorkbench(container, snapshot,
         // RULED Q3: `mount(host, snapshot, ctx)`, the seed under `ctx.seed`.
         createColumn.openCreateDialog(detailsPane, shellSnapshot, {
           seed,
+          // RULED counterpart Q6 (see the namespace import at the head).
+          model: workbenchModel,
           caps: authoring, fetcher, repair: consoleRepair,
           label: "create document",
           // SAVE, not create (Brett, 2026-08-10: "it seems to the user that we

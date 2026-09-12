@@ -74,6 +74,16 @@ import { mountStagingWorkbench } from "./views/staging-workbench.js";
 // `refusalTransport` is the fallback.
 import { createModelIntakeTransports } from "./views/swb-model-intake.js";
 import { CONSOLE_TOKEN_FIELD } from "./views/staging-workbench-model.js";
+// THE TWO MODELS THE CONTRIBUTED GATE COLUMN REACHES THROUGH `ctx` — RULED
+// counterpart Q6 (opensoft/openxFactory#656 comment `5649094228`, Brett Heap,
+// 2026-09-12): "what a CONTRIBUTED view module may IMPORT from openDox's
+// bundle: `./views/helpers.js` and NOTHING ELSE. Every other need reaches the
+// binding through its `ctx` (Q1-Q4) or its own package (Q5)." Both namespaces
+// are openDox's own pure models; the shell hands them to the bindings that used
+// to import them (`views/gate-lens.js`, `views/swb-session.js`), at the two
+// sites below where their context is composed.
+import * as lensModel from "./views/lens-model.js";
+import * as workbenchModel from "./views/staging-workbench-model.js";
 import { runSave, savePlanState } from "./views/doxbench-save.js";
 import { contentIdentity } from "./views/doxbench-state.js";
 import { initSettings } from "./views/settings.js";
@@ -1104,10 +1114,24 @@ async function render() {
     // is a `moved_verbatim` row of openxFactory's carve manifest whose declared
     // edit classes (`import rewrites | path constants | adapter calls`) have no
     // class for an added element. So the shell builds it here, once per page,
-    // and the generic mount pass hands it to whichever binding claims the
-    // region — today the gate column's refusal panel, which used to append
+    // and HANDS IT OVER — `page-overlay` is a `shell` region, so RULED Q1's
+    // generic pass deliberately skips it and the CALLER that builds the host is
+    // the caller that mounts into it, which is the gate bar's own pattern.
+    // Today that is the gate column's refusal panel, which used to append
     // itself to `document.body`, "never a contract surface".
-    ensurePageOverlayHost();
+    //
+    // MOUNTED, NOT MERELY HOSTED (Copilot review, round 1). Building the host
+    // and never calling the binding's entry left `views/dispose.js` with no
+    // `panelHost`, and its `ensurePanel()` REFUSES rather than falling back to
+    // the body — which Q8 forbids — so the first refused gate verb on a
+    // composed install would have thrown instead of showing its refusal. The
+    // declared entry, never a hardcoded export name (slice S3's own re-review
+    // finding).
+    const pageOverlayHost = ensurePageOverlayHost();
+    if (disposeView) {
+      disposeView.exports[disposeView.binding.entry](
+        pageOverlayHost, snapshot, { caps });
+    }
     // RULED Q1 (openxFactory#656 comment `5648044785`): "the shell MOUNTS
     // contributed bindings generically: one mount pass over every contributed
     // binding whose region is a `dom` region; the three `shell` regions stay
@@ -1283,7 +1307,10 @@ async function render() {
         savePlanState(request),
         { transport: workbenchGate.session
             ? workbenchGate.session.firstEditTransport(
-                { caps, repair: consoleRepair })
+                // RULED counterpart Q6: this export is reached through the
+                // registry and not through a mount, so openDox's model reaches
+                // it as a field of the options object it already takes.
+                { caps, repair: consoleRepair, model: workbenchModel })
             : refusalTransport(),
           ...(request && request.only !== undefined
             ? { only: request.only } : {}) }),
@@ -1407,9 +1434,18 @@ async function render() {
       // re-review fix, applied to S4's two mounts for the same reason: a
       // contributed binding names its entry in the manifest, and reading
       // anything else here would silently ignore the name it declared).
+      // RULED counterpart Q6 (openxFactory#656 comment `5649094228`, Brett
+      // Heap, 2026-09-12): a contributed view module may import
+      // `./views/helpers.js` and nothing else, so `views/gate-lens.js` —
+      // openXdox's package data since slice S5 — reaches openDox's lens model
+      // through `ctx.model` instead of importing `./lens-model.js`. The
+      // adapter supplies it HERE, where the binding's context is already being
+      // composed, so `views/lens.js` (which builds `lctx`) needs no change and
+      // knows nothing about the contributed column's needs.
       mountLensGate: lensGateView
         ? (host, lctx) =>
-            lensGateView.exports[lensGateView.binding.entry](host, snapshot, lctx)
+            lensGateView.exports[lensGateView.binding.entry](
+              host, snapshot, { ...lctx, model: lensModel })
         : null,
       // the UNSTRIPPED probe and the serve's own writable repository — read by
       // exactly one affordance (see `createCaps` at the lens's mount)

@@ -118,7 +118,15 @@ const NO_DISPOSE_COLUMN = Object.freeze({
 //: threading a per-render object through it would mean giving every mounter a
 //: ninth parameter that only exists to be forwarded.
 let disposeColumn = NO_DISPOSE_COLUMN;
-import { feedActor, intentCapable, refusalLine, startIntentFeed, statesByTarget }
+// `emitIntent` and `renderIntentChips` join this import for the CONTRIBUTED
+// tray's sake — RULED counterpart Q6 (opensoft/openxFactory#656 comment
+// `5649094228`, Brett Heap, 2026-09-12): a contributed view module may import
+// `./views/helpers.js` and nothing else, so `views/dispose.js` (openXdox's
+// package data since slice S5) reaches this module's emitter and chip renderer
+// through the `intent` context THIS file already builds for it, and never
+// through a static import of its own.
+import { emitIntent, feedActor, intentCapable, refusalLine, renderIntentChips,
+         startIntentFeed, statesByTarget }
   from "./intent-binding.js";
 import { notebookCapable } from "./notebook.js";
 import { SETTINGS_EVENT, currentDrumFactor } from "./settings.js";
@@ -1579,6 +1587,13 @@ export function renderWheel(root, snapshot, ctx) {
           onApplied: () => { railKey = ""; drawAll(); },
           onEmitted: () => { railKey = ""; drawAll(); if (intentFeed) intentFeed.refresh(); },
           intent: hosted ? {
+            // RULED counterpart Q6: the EMITTER and the CHIP RENDERER travel
+            // with the rest of the hosted context. The tray used to fall back
+            // to `emitIntent` through an import of its own; a fallback into a
+            // module a contributed binding may not import is a refusal, not a
+            // default, so the transport is supplied here or the tray refuses.
+            emit: emitIntent,
+            renderChips: renderIntentChips,
             // D4: the revision the human is LOOKING at, full and unabbreviated
             // (the header renders a 12-char prefix of this same field).
             snapshotRev: snapshot?.generation?.source_revision || "",
