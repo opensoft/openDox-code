@@ -474,8 +474,11 @@ def _run_node(body: str, tmp_path: Path) -> dict:
 # coverage in a refactor slice is how a move that passes every shape assertion
 # silently breaks a verb, which is the failure this suite's own header names as
 # "the worst possible outcome of this slice". They run at openXdox-code, against
-# the same real files, in `tests/test_gate_loop_views.py` -- same harness, same
-# DOM stub, same assertions, one import path different.
+# the same real files, in `tests/test_gate_loop_probes.py` -- same harness, same
+# DOM stub, same assertions, and one thing STRONGER: there each probe assembles
+# a COMPOSED bundle first (openDox's own `web/` with that column's six modules
+# placed into it by RULED Q5's assembly hook) and imports the module from there,
+# so the byte measured is the shipped byte in the shipped position.
 #
 # What stays here is everything about the modules this bundle still ships, and
 # the SHAPE assertions above, which are what this leg can still answer.
