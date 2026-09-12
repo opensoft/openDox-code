@@ -50,6 +50,23 @@ jobs:
       # `--noconftest` safe and needs no consumer, for the same reason and by
       # the same means as its two neighbours.
       #
+      # § 3.4 slice S1 (`docs/front-end-package-boundary.md`, openDox-spec #8
+      # → a44ac06d; RULED opensoft/openxFactory#656 comment 5642758731) adds
+      # `tests/test_web_boundary.py` on the same footing: it declares the
+      # `src/opendox/web/` census (`tests/fixtures/web_boundary_census.yaml`)
+      # and asserts the four things that hold the front-end package boundary
+      # — the census is complete, no file outside the gate loop names a
+      # route another column declares, every relative import resolves and
+      # stays in its class, and no stage-named file carries a governance
+      # literal. Three of the four are marked `xfail(strict=True)` for
+      # defects slices S2–S7 close (RULED, START S1–S3 NOW, same comment) —
+      # `strict=True` is what keeps this addition from putting the required
+      # check red for the length of that arc, and what turns it red the
+      # moment a later slice closes a defect without removing that slice's
+      # marker. `--noconftest` safe: it parses the tree and the declared
+      # YAML census, and imports no view module (they are JavaScript) and no
+      # `opendox` submodule.
+      #
       # § 3.4 SLICE S3 adds `tests/test_view_registry.py`, on exactly the same
       # footing as its three neighbours and for the same reason: it asserts a
       # SEAM — that a contributed panel is collected, refused or absent by the
@@ -65,5 +82,6 @@ jobs:
           tests/test_leg_shape.py
           tests/test_consumer_reach.py
           tests/test_profile_registration.py
+          tests/test_web_boundary.py
           tests/test_view_registry.py
           --noconftest
