@@ -67,6 +67,22 @@ jobs:
       # YAML census, and imports no view module (they are JavaScript) and no
       # `opendox` submodule.
       #
+      # `docs/front-end-package-boundary.md` § 3.4 slice S2 (RULED Q5,
+      # openxFactory#656 comment 5642758731) adds
+      # `tests/test_intent_binding_shape.py` on the same footing again: a
+      # text/regex SHAPE assertion over dispose.js, wheel.js and the new
+      # intent-binding.js (there is no JS parser in this leg's dependency
+      # set, and the note's own § 4.5 test is written to the same
+      # constraint) proving the two views no longer name the absent
+      # `views/intent-feed.js` (RULED OQ-F `not_moved`) in a static import.
+      # `--noconftest` safe and needs no consumer — it reads three files as
+      # text and nothing else. The BEHAVIOURAL probe of the same seam
+      # (`tests/test_intent_binding_dom.py`, node-driven) stays off this
+      # list on the same footing as its narrowed siblings
+      # `test_intent_tray_dom.py` / `test_wheel_verbs_dom.py`: it is a DOM
+      # probe of a `web/` view, and un-narrowing that class of test is
+      # slice S8's job, not S2's.
+      #
       # § 3.4 SLICE S3 adds `tests/test_view_registry.py`, on exactly the same
       # footing as its three neighbours and for the same reason: it asserts a
       # SEAM — that a contributed panel is collected, refused or absent by the
@@ -75,7 +91,11 @@ jobs:
       # described. `--noconftest` safe and needs no consumer: the Python half
       # imports `opendox.view_extension` alone, and the JavaScript half drives
       # the real `views/view_extension.js` under the `node` the runner already
-      # has (skipped, never failed, where node is absent).
+      # has (skipped, never failed, where node is absent). S3's registry test
+      # also carries its own `package.json` fix (opensoft/openDox-code#14,
+      # Copilot re-review): the repository ships no other Node tooling, so
+      # `type: module` is declared explicitly rather than left to Node's
+      # default-on `--experimental-detect-module` heuristic.
       - name: pytest
         run: >-
           python -m pytest -q
@@ -83,5 +103,6 @@ jobs:
           tests/test_consumer_reach.py
           tests/test_profile_registration.py
           tests/test_web_boundary.py
+          tests/test_intent_binding_shape.py
           tests/test_view_registry.py
           --noconftest

@@ -73,7 +73,7 @@ import { el } from "./helpers.js";
 import { appliedOutcome, commissionedVerb, commissionedWorkflow, gateCapable,
   mountDisposeTray, mountProposeButton, mountWheelVerb, panelEntry } from "./dispose.js";
 import { feedActor, intentCapable, refusalLine, startIntentFeed, statesByTarget }
-  from "./intent-feed.js";
+  from "./intent-binding.js";
 import { notebookCapable } from "./notebook.js";
 import { SETTINGS_EVENT, currentDrumFactor } from "./settings.js";
 

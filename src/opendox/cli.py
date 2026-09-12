@@ -864,7 +864,7 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     `argparse` refuses a duplicate subcommand name outright, and refusing the
     contributed one is the right direction of that refusal.
 
-    The IN-TREE PROFILE (`profile_openxfactory.SUBCOMMAND_EXTENSIONS`) is
+    The HOST-REGISTERED PROFILE (`profile_openxfactory.SUBCOMMAND_EXTENSIONS`) is
     registered here too, at the ordinal its column has always occupied, and NOT
     passed in by `main()`. `build_parser()` names the whole of THIS assembly's
     command line — which is what every caller, every golden and every existing

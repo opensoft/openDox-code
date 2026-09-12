@@ -64,7 +64,8 @@
 #       its two importers (`dispose.js`, `wheel.js`) are fixed at slice S2,
 #       not by any census reclassification here.
 #
-# Totals after Q2's reclassification (unchanged from the note otherwise):
+# Totals after Q2's reclassification, AS MEASURED AT a99eba03 (unchanged
+# from the note otherwise):
 #   A  20 files (18 hand-authored + 2 vendored), 11,702 lines
 #   B  4 files, 1,597 lines
 #   C  14 files (13 + explorer.js), 11,854 lines (11,575 + 279)
@@ -81,6 +82,33 @@
 # an ID, not a `/actions/...` path -- assertion 2's patterns do not match it.
 #   A  21 files, 12,284 lines (11,702 + 422 + 127 app.js growth + 33 review round)
 #   total 43 files, 31,167 lines (30,585 + 422 + 127 + 33); B/C/? unchanged
+#
+# AMENDMENT (S2, opensoft/openDox-code 330cf816, merged into this leg after
+# a99eba03): a 43rd file BY ITS OWN COUNT ALONE, `views/intent-binding.js`
+# (class A, 114 lines), lands after this fixture's own `measured_at` head --
+# written the same way the S3 paragraph above was, each slice branching from
+# a99eba03 independently and counting its own addition against that shared
+# base, not against the other's. Assertion 1's ratchet
+# (`test_every_web_file_is_classified_exactly_once`) is unmarked, so the row
+# is added here rather than left for a future slice -- the ratchet does not
+# wait for a census refresh. Not folded into the totals above, which record
+# what the note's own § 3.2 table measured at S1 authoring time; the row
+# itself, not this comment block, is what the test reads.
+#   A (post-S2 alone) 21 files, 11,816 lines (11,702 + 114)
+#
+# RECONCILED (both slices landed in the same tree, this merge -- opensoft/
+# openDox-code#14 head 28de9c3): the two additions are disjoint files, so
+# the combined tree carries BOTH `views/view_extension.js` AND
+# `views/intent-binding.js`. `views/dispose.js` and `views/wheel.js`, the two
+# existing files S2 also touched, are unchanged in `loc` (427 and 1,702
+# respectively, both branches) -- S2's edit to each nets zero lines, so
+# neither shifts class B's or class C's totals. Combined, against the one
+# shared a99eba03 base:
+#   A  22 files, 12,398 lines (11,702 + 127 app.js growth + 455
+#      view_extension.js [422 + 33 review round] + 114 intent-binding.js)
+#   total 44 files, 31,281 lines (30,585 + 127 + 455 + 114); B 4 files,
+#   1,597 lines; C 14 files, 11,854 lines; ? 4 files, 5,432 lines -- B/C/?
+#   all unchanged from the a99eba03 baseline
 
 schema_version: 1
 kind: web-boundary-census
@@ -217,6 +245,11 @@ files:
     class: A
     loc: 58
     note: "el()/txt()/basename()/heat bands; no import, no literal, no route"
+
+  - path: views/intent-binding.js
+    class: A
+    loc: 114
+    note: "S2's optional contributed binding (RULED Q5); a single top-level-awaited dynamic import() of the RULED-absent intent-feed.js, never a static import -- no governance word, no owned route, no class-B import; added after this census's own measured head (a99eba03) by opensoft/openDox-code 330cf816, loc as amended in the leg PR (a comment reworded so the file does not misreport its own removed import to this suite's own assertion-3 regex)"
 
   - path: views/lens-model.js
     class: "?"
