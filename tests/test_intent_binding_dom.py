@@ -58,6 +58,10 @@ WEB = ROOT / "src" / "opendox" / "web"
 WHEEL_CLOSURE = (
     "wheel.js", "wheel-model.js", "helpers.js", "dispose.js",
     "intent-binding.js", "notebook.js", "settings.js",
+    # § 3.4 slice S7: the wheel and its model read the registered domain's
+    # vocabulary through `display.js`, which is import-free by design -- the
+    # closure gains a leaf, not a branch.
+    "display.js",
 )
 
 # A minimal FAKE intent-feed.js — standing in for openxFactory's real

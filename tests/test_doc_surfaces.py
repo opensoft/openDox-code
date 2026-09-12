@@ -199,7 +199,9 @@ def rendered(tmp_path_factory):
     if NODE is None:
         pytest.skip("node not available for the JS renderer probe")
     tmp_path = tmp_path_factory.mktemp("doc-surfaces")
-    for src in (DOCS_JS, LINEAGE_JS, HELPERS_JS):
+    # `display.js` joins at § 3.4 slice S7: both views read their vocabulary
+    # through it, and it imports nothing itself.
+    for src in (DOCS_JS, LINEAGE_JS, HELPERS_JS, DOCS_JS.parent / "display.js"):
         shutil.copy(src, tmp_path / src.name)
     # ESM without renaming: the views import "./helpers.js" by name
     (tmp_path / "package.json").write_text('{"type": "module"}', encoding="utf-8")
