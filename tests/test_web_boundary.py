@@ -377,6 +377,44 @@ def test_no_ownership_violation_outside_class_b() -> None:
     assert not violations, f"{len(violations)} route-ownership violation(s):\n" + "\n".join(violations)
 
 
+def test_the_route_ownership_exceptions_are_real_and_still_present() -> None:
+    """Assertion 2's exception list cannot outlive its cause, on the same
+    reasoning `declared_transitional_rows` already stands on (note § 4.5
+    point 2's own last paragraph, applied to the declaration this time
+    instead of to the class-A/C sweep): a stale exception that keeps
+    excluding a route nobody re-measures is how a real breach hides behind a
+    label the site no longer earns. This module's own comment above
+    `route_ownership_exceptions` in the fixture says "each route is checked
+    to be really present in the file it exempts" -- this test is that check,
+    not just the claim of it.
+
+    Unmarked and passing: bookkeeping on the fixture, not a measurement of
+    the boundary defect.
+    """
+    for exception in _ROUTE_EXCEPTIONS:
+        path = exception["path"]
+        row = _ROWS_BY_PATH.get(path)
+        assert row is not None, (
+            f"route_ownership_exceptions names {path}, which carries no census row"
+        )
+        assert exception.get("reason"), f"{path}'s route exception carries no reason"
+        assert exception.get("until"), (
+            f"{path}'s route exception names nothing that would discharge it; "
+            f"an exception with no exit is a permanent one wearing a label"
+        )
+        routes = exception.get("routes")
+        assert routes, f"{path}'s route exception declares no routes at all"
+        text = (WEB_ROOT / path).read_text(encoding="utf-8")
+        for route in routes:
+            quoted = (f'"{route}"' in text) or (f"'{route}'" in text)
+            assert quoted, (
+                f"{path}'s route exception names {route!r}, which is not actually "
+                f"present in the file as a string literal any more -- the "
+                f"exception has outlived its site and is now excluding nothing, "
+                f"or excluding the wrong thing"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Assertion 3 -- every relative import resolves, and no class-A/C file
 # imports a class-B module (note § 4.5 point 3). Catches § 1.2(b) -- the
