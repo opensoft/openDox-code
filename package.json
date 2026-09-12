@@ -1,0 +1,6 @@
+{
+  "name": "opendox-code-web-tests",
+  "private": true,
+  "type": "module",
+  "description": "No published Node package here -- this file exists so Node's module loader has an explicit, version-independent answer for the format of src/opendox/web/**/*.js (native `export`/`import` syntax, no bundler). Without it, an ambiguous `.js` file's format is decided by Node's `--experimental-detect-module` heuristic (default on since Node ~20.10, unflagged by Node 22+): it currently reparses these files as ES modules and warns 'To eliminate this warning, add \"type\": \"module\"' -- this file is that fix, applied instead of relying on the heuristic staying on by default. tests/test_view_registry.py drives the real registry under node; deliberately placed at the repository root rather than inside src/opendox/web/, which tests/fixtures/web_boundary_census.yaml classifies file-by-file and which this is not part of."
+}

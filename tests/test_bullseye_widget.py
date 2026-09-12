@@ -897,7 +897,7 @@ def test_the_lens_screen_takes_the_page_and_scrolls_its_own_panes():
     app = (WEB / "app.js").read_text(encoding="utf-8")
 
     # the shell marks the screen, and only for the lens
-    assert 'classList.toggle("lensfull", target.view === "view-lens")' in app
+    assert 'classList.toggle("lensfull", target.region === "view-lens")' in app
 
     # the tiles are hidden there
     assert re.search(r"\.wrap\.lensfull\s*>\s*#stats\s*\{[^}]*display:\s*none", css)
@@ -1778,11 +1778,11 @@ def test_a_reload_bearing_control_returns_you_to_the_view_you_were_on():
     app = (WEB / "app.js").read_text(encoding="utf-8")
     # remembered on EVERY activation, so it is right however the tab changed —
     # a click, a keyboard arrow, or a programmatic `goto` from a wheel verb
-    assert "storeTab(target.view);" in app
+    assert "storeTab(target.region);" in app
     show = app.split("function show(target, focusTab) {")[1].split("\n  }")[0]
     assert "storeTab" in show
     # …and restored only to a view this plane actually has
-    assert "const remembered = TABS.find((t) => t.view === storedTab());" in app
+    assert "const remembered = TABS.find((t) => t.region === storedTab());" in app
     assert "show(remembered || TABS[0], false);" in app
     # through the SAME guarded seam every other stored preference uses: under
     # blocked site data the getter itself throws, and a preference that cannot

@@ -82,6 +82,20 @@ jobs:
       # `test_intent_tray_dom.py` / `test_wheel_verbs_dom.py`: it is a DOM
       # probe of a `web/` view, and un-narrowing that class of test is
       # slice S8's job, not S2's.
+      #
+      # § 3.4 SLICE S3 adds `tests/test_view_registry.py`, on exactly the same
+      # footing as its three neighbours and for the same reason: it asserts a
+      # SEAM — that a contributed panel is collected, refused or absent by the
+      # rules `route_extension.collect_bindings` already holds for routes — and
+      # it is the only place slice S3's ruled contract is executed rather than
+      # described. `--noconftest` safe and needs no consumer: the Python half
+      # imports `opendox.view_extension` alone, and the JavaScript half drives
+      # the real `views/view_extension.js` under the `node` the runner already
+      # has (skipped, never failed, where node is absent). S3's registry test
+      # also carries its own `package.json` fix (opensoft/openDox-code#14,
+      # Copilot re-review): the repository ships no other Node tooling, so
+      # `type: module` is declared explicitly rather than left to Node's
+      # default-on `--experimental-detect-module` heuristic.
       - name: pytest
         run: >-
           python -m pytest -q
@@ -90,4 +104,5 @@ jobs:
           tests/test_profile_registration.py
           tests/test_web_boundary.py
           tests/test_intent_binding_shape.py
+          tests/test_view_registry.py
           --noconftest

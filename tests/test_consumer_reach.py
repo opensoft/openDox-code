@@ -114,6 +114,14 @@ NEUTRAL_MODULES = (
     # because openXdox PINS openDox (§ 4.2, RULED OQ-2).
     "opendox.domain_profile",
     "opendox.profile_proxy",
+    # § 3.4 slice S3, the view registry. Listed here for the reason this list
+    # gives itself — "a module added to this package's import surface is added
+    # to this census" — and it belongs at the top of the list rather than in
+    # `STILL_REACHING`: it reads the host's `VIEW_EXTENSIONS` facet through
+    # `opendox.profile_proxy` and imports NOTHING from `openxdox`. The column
+    # that CONTRIBUTES a view imports this module, not the other way round,
+    # which is the lawful direction because openXdox pins openDox.
+    "opendox.view_extension",
 )
 
 #: Modules that STILL require the consumer at import time, with the reason. They

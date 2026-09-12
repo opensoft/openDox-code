@@ -72,15 +72,43 @@
 #   ?  4 files (5 - explorer.js), 5,432 lines (5,711 - 279)
 #   total 42 files, 30,585 lines -- unchanged (a reclassification, not a move)
 #
+# S3 ADDITION (opensoft/openDox-code#14, slice S3's own leg): a 43rd file
+# arrives, `views/view_extension.js` (422 lines) -- the client-side view
+# registry. The note's own census could carry no row for it because the note
+# measured the tree at `a99eba03`, before this file existed. Class A: no
+# import (so it cannot violate assertion 3), no governance literal (out of
+# assertion 4's scope regardless, which is class C plus declared tails), and
+# its one route-shaped string, `'gate.bar'` (an example in a doc comment), is
+# an ID, not a `/actions/...` path -- assertion 2's patterns do not match it.
+#   A  21 files, 12,284 lines (11,702 + 422 + 127 app.js growth + 33 review round)
+#   total 43 files, 31,167 lines (30,585 + 422 + 127 + 33); B/C/? unchanged
+#
 # AMENDMENT (S2, opensoft/openDox-code 330cf816, merged into this leg after
-# a99eba03): a 43rd file, `views/intent-binding.js` (class A, 114 lines),
-# lands after this fixture's own `measured_at` head. Assertion 1's ratchet
+# a99eba03): a 43rd file BY ITS OWN COUNT ALONE, `views/intent-binding.js`
+# (class A, 114 lines), lands after this fixture's own `measured_at` head --
+# written the same way the S3 paragraph above was, each slice branching from
+# a99eba03 independently and counting its own addition against that shared
+# base, not against the other's. Assertion 1's ratchet
 # (`test_every_web_file_is_classified_exactly_once`) is unmarked, so the row
 # is added here rather than left for a future slice -- the ratchet does not
 # wait for a census refresh. Not folded into the totals above, which record
 # what the note's own § 3.2 table measured at S1 authoring time; the row
 # itself, not this comment block, is what the test reads.
-#   A (post-S2) 21 files, 11,816 lines
+#   A (post-S2 alone) 21 files, 11,816 lines (11,702 + 114)
+#
+# RECONCILED (both slices landed in the same tree, this merge -- opensoft/
+# openDox-code#14 head 28de9c3): the two additions are disjoint files, so
+# the combined tree carries BOTH `views/view_extension.js` AND
+# `views/intent-binding.js`. `views/dispose.js` and `views/wheel.js`, the two
+# existing files S2 also touched, are unchanged in `loc` (427 and 1,702
+# respectively, both branches) -- S2's edit to each nets zero lines, so
+# neither shifts class B's or class C's totals. Combined, against the one
+# shared a99eba03 base:
+#   A  22 files, 12,398 lines (11,702 + 127 app.js growth + 455
+#      view_extension.js [422 + 33 review round] + 114 intent-binding.js)
+#   total 44 files, 31,281 lines (30,585 + 127 + 455 + 114); B 4 files,
+#   1,597 lines; C 14 files, 11,854 lines; ? 4 files, 5,432 lines -- B/C/?
+#   all unchanged from the a99eba03 baseline
 
 schema_version: 1
 kind: web-boundary-census
@@ -91,8 +119,8 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 files:
   - path: app.js
     class: A
-    loc: 1155
-    note: "the shell; imports 20 view modules; its only class-B import is gate.js at :43 (discharged by S3's view registry)"
+    loc: 1282
+    note: "the shell; imports 20 view modules; its only class-B import is gate.js at :43 (discharged by S3's view registry -- loc grew 1155 -> 1282 with the registry wiring, S3)"
 
   - path: index.html
     class: C
@@ -293,6 +321,11 @@ files:
     class: B
     loc: 614
     note: "FIRST_EDIT_ROUTE/ABANDON_SESSION_ROUTE/SHARE_SESSION_ROUTE/OPEN_PR_ROUTE, all under the gate prefix"
+
+  - path: views/view_extension.js
+    class: A
+    loc: 455
+    note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' in a doc comment is a documentation example of an id, not a route literal, so assertion 2 does not match it. loc 422 -> 455 on this PR's own review round (Copilot, PR #14): a malformed contributed_routes now refuses instead of silently disabling the ownership check, and a rejected dynamic import now refuses naming the binding and module instead of leaking a raw error."
 
   - path: views/viewer.js
     class: A
