@@ -303,7 +303,7 @@ export const NEUTRAL_DISPLAY = {
   },
   acts: {
     derive: "derive candidates", brief: "research brief",
-    promote: "promote to selection", propose: "draft a submission",
+    promote: "promote to selection", propose: "start a submission",
   },
   // THE ARTIFACT-FOLDER VOCABULARY, by role — the axis RULED Q1's own argument
   // names ("the profile already has to carry an artifact-vocabulary axis for
@@ -315,9 +315,9 @@ export const NEUTRAL_DISPLAY = {
   // groups by folder and says so.
   artifacts: {
     root: { prefix: null, label: "submission folder" },
-    packet: { prefix: null, label: "packet documents", order: [] },
-    delta: { prefix: null, label: "detail documents" },
-    supporting: { prefix: null, label: "supporting documents" },
+    packet: { prefix: null, label: "packet files", order: [] },
+    delta: { prefix: null, label: "detail files" },
+    supporting: { prefix: null, label: "supporting files" },
   },
 };
 

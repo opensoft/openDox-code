@@ -305,14 +305,14 @@ NEUTRAL_DISPLAY: dict[str, Any] = {
         "derive": "derive candidates",
         "brief": "research brief",
         "promote": "promote to selection",
-        "propose": "draft a submission",
+        "propose": "start a submission",
     },
     "artifacts": {
         "root": {"prefix": None, "label": "submission folder"},
-        "packet": {"prefix": None, "label": "packet documents",
+        "packet": {"prefix": None, "label": "packet files",
                    "order": []},
-        "delta": {"prefix": None, "label": "detail documents"},
-        "supporting": {"prefix": None, "label": "supporting documents"},
+        "delta": {"prefix": None, "label": "detail files"},
+        "supporting": {"prefix": None, "label": "supporting files"},
     },
 }
 
