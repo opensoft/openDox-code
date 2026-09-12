@@ -81,9 +81,33 @@ nothing else:
      presence rather than a declaration, and the fixture's row-level `exempt:`
      not being cross-checked against `declared_exemptions` -- belong to
      assertion 4's own scope and are left to S7, which is the slice that
-     discharges it.)
+     discharges it -- and did; see the S7 block below.)
   4. THE CENSUS DECLARES ITS TOTALS and this module re-derives them, so the
      class arithmetic in the fixture's header cannot drift from its rows.
+
+SLICE S7 (`build/s7-parameterize-class-c`) closes ASSERTION 4 and, with it, the
+last two of S1's four register nits -- the ones item 3 above leaves to "the
+slice that discharges it". Three things changed:
+
+  a. THE ASSERTION IS REWRITTEN TO THE RULE, not to a word search. S1's own
+     "NOT FIXED HERE" note asked for exactly this: "a bare identifier or
+     property access that only READS a snapshot schema key still trips this
+     sweep, even though note § 2.2 rule 3 treats a schema key as distinct from
+     a rendered word ... left for S7 to decide against the real vocabulary
+     sites it is parameterizing." The rule and its three per-language positions
+     are stated above `_js_spans` below, with a REGEX-LITERAL-AWARE scanner
+     replacing the quote-tracking strip for the sweep that has to reach zero.
+     Two declared, checked exemption classes carry what is left: `style_hooks`
+     and `prose_exemptions`, both DATA in the fixture beside their reasons.
+  b. THE EXEMPTION TEST CHECKS A DECLARATION (nit 3): `_declares_identifier`
+     demands `const`/`let`/`var`/`function`/`class` at the head of a line, so an
+     identifier that survives only in a comment -- or as part of a longer name
+     -- no longer answers for one that is gone.
+  c. THE ROW-LEVEL `exempt:` IS CROSS-CHECKED (nit 4): held to SET EQUALITY
+     against `declared_exemptions` per path, with `exempt:` accepting a list
+     because `views/display.js` carries eleven declared seam tables and a
+     scalar would have made ten of them invisible to the check that was
+     supposed to be watching them.
 
 A CREATED file (this module and its fixture): no carve-manifest row (RULED
 OQ-C) -- the front end's package boundary did not exist before this note, so
@@ -132,6 +156,20 @@ _ROUTE_EXCEPTIONS: list[dict] = _CENSUS["route_ownership_exceptions"]
 # instead, so a duplicate row is still caught rather than swallowed by this
 # convenience lookup.
 _ROWS_BY_PATH: dict[str, dict] = {row["path"]: row for row in _ROWS}
+# SLICE S7's two declared exemption classes for assertion 4 (§ 4.5 point 4's
+# "an exemption that is silence is how a literal survives a vocabulary sweep",
+# read the other way round: an exemption that is DECLARED and CHECKED is how a
+# sweep reaches zero honestly). Both are DATA in the fixture, beside a reason,
+# for the same cause as the two lists above.
+#
+# `prose_exemptions` is keyed by (path, literal) rather than by (path, line),
+# which is where openXdox-code's `PROSE_EXEMPT` -- (module, lineno) -- has to
+# be re-audited on every edit that moves a line. A literal is stable under
+# reflow and cannot silently start covering a DIFFERENT string.
+_PROSE_EXEMPTIONS: list[dict] = _CENSUS["prose_exemptions"]
+_PROSE_EXEMPT_BY_PATH: dict[str, set[str]] = {}
+for _row in _PROSE_EXEMPTIONS:
+    _PROSE_EXEMPT_BY_PATH.setdefault(_row["path"], set()).add(_row["literal"])
 
 
 def _real_web_files() -> set[str]:
@@ -600,65 +638,303 @@ def _strip_html_comments(text: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# THE RULE (slice S7). Assertion 4 was a WORD SEARCH over the whole file with
+# comments stripped; it is now a sweep over the positions a governance word can
+# actually reach a human or a domain from, one rule per language. The reason is
+# the one S1's own "NOT FIXED HERE" note left open: "a bare identifier or
+# property access that only READS a snapshot schema key (`s.documents`,
+# `s.clusters`) still trips this sweep, even though note § 2.2 rule 3 treats a
+# schema key as distinct from a rendered word ... left for S7 to decide against
+# the real vocabulary sites it is parameterizing." S7 parameterized them, and
+# this is that decision, written as the rule rather than as a list.
+#
+# THE RULE, in the note's own terms (§ 2.2 rules 2 and 3): a class-C file may
+# carry no governance word in a position a HUMAN READS, and no governance word
+# in a NAME that would have to change if the domain's word changed. Everything
+# else in these files -- an identifier, a property access, a DOM id, a CSS
+# selector, a media feature -- is machinery, and machinery is what § 2.2 rule 3
+# distinguishes from vocabulary in the first place.
+#
+#   `.js`   STRING LITERALS ONLY, with comments AND regex literals excluded,
+#           minus three declared classes: a string in KEY POSITION (it names a
+#           seam, not a word -- openXdox-code's `test_no_hardcoded_status_words`
+#           excludes dict keys for exactly this reason), a declared STYLE HOOK,
+#           and a declared PROSE exemption.
+#   `.html` TEXT NODES plus the five RENDERED attributes. `id`, `class`,
+#           `aria-controls`, `aria-labelledby`, `for`, `name`, `data-*` and
+#           `href` are DOM hooks by construction: `id="tab-docs"` is the handle
+#           `app.js` reaches the button by, and renaming it would rename a seam,
+#           not a word.
+#   `.css`  CUSTOM PROPERTY NAMES and `content:` values, and nothing else --
+#           RULED Q7 (openxFactory#656 comment `5648049748`) in as many words:
+#           *"openDox's declared design tokens (the `--st-*` family, S7) are the
+#           one stable styling surface; nothing else in `styles.css` is."* A
+#           selector is the other end of a class string in a `.js` file and is
+#           held by the STYLE HOOK rule there, at the end that carries the word.
+#
+# WHY A REGEX-LITERAL-AWARE SCANNER. `_strip_comments_for_scan` below tracks
+# quotes but not regex literals, so a `/` inside a character class or a division
+# that looks like one can desynchronise the walk and blank real code or leave a
+# comment unblanked. It survived S1 because S1 only ever asked "does this file
+# still carry a word", which no desynchronisation could make false. A sweep that
+# must reach ZERO cannot be built on it, so the span walk below is the scanner,
+# and `_strip_comments_for_scan` stays exactly where it was, for the assertion
+# that still uses it.
+
+_JS_REGEX_PREFIX = re.compile(
+    r"(?:[=(,:;!&|?{}\[\+\-*%<>~^]|^|\breturn\b|\btypeof\b|\bcase\b|\bin\b|\bof\b"
+    r"|\bnew\b|\bdelete\b|\bvoid\b|\binstanceof\b|\bdo\b|\belse\b|\byield\b"
+    r"|\bawait\b)\s*$"
+)
+
+
+def _js_spans(text: str) -> list[tuple[str, int, int]]:
+    """Every comment, string and regex-literal span in `text`, in order.
+
+    `kind` is one of `comment`, `string`, `regex`; code between spans is not
+    reported. A template literal's `${...}` substitutions are walked THROUGH
+    rather than swallowed, so a governance word interpolated into a template is
+    read as the code it is and a word in the template's own text is read as the
+    string it is.
+    """
+    spans: list[tuple[str, int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            spans.append(("comment", i, j))
+            i = j
+            continue
+        if c == "/" and nxt == "*":
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            spans.append(("comment", i, j))
+            i = j
+            continue
+        if c in "\"'`":
+            quote, j = c, i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == quote:
+                    break
+                if quote == "`" and text[j] == "$" and j + 1 < n and text[j + 1] == "{":
+                    depth, k = 1, j + 2
+                    while k < n and depth:
+                        if text[k] == "{":
+                            depth += 1
+                        elif text[k] == "}":
+                            depth -= 1
+                        k += 1
+                    j = k
+                    continue
+                j += 1
+            end = min(j + 1, n)
+            spans.append(("string", i, end))
+            i = end
+            continue
+        if c == "/":
+            before = text[max(0, i - 40):i]
+            if _JS_REGEX_PREFIX.search(before):
+                j, in_class = i + 1, False
+                while j < n:
+                    ch = text[j]
+                    if ch == "\\":
+                        j += 2
+                        continue
+                    if ch == "[":
+                        in_class = True
+                    elif ch == "]":
+                        in_class = False
+                    elif ch == "/" and not in_class:
+                        break
+                    elif ch == "\n":
+                        break
+                    j += 1
+                if j < n and text[j] == "/":
+                    spans.append(("regex", i, j + 1))
+                    i = j + 1
+                    continue
+        i += 1
+    return spans
+
+
+#: A string literal is in KEY POSITION when the first non-space character after
+#: its closing quote is a `:` AND the last non-space character before its
+#: opening quote is not `?`. The first half covers every object-literal key and
+#: every computed-property key in this bundle; the second excludes a ternary's
+#: first branch (`cond ? "a" : "b"`), which is a value a human reads and whose
+#: `:` would otherwise read as a key's. Checked against the real tree: no
+#: in-scope file carries a labelled statement or a `case "x":`, the two other
+#: productions a bare `:` could close.
+#:
+#: openXdox-code's `tests/test_no_hardcoded_status_words.py` makes the same
+#: exclusion for the same reason -- there over an `ast` walk, here over text,
+#: because there is no JS parser in this leg's dependency set and § 4.5's own
+#: test is written to that constraint.
+def _in_key_position(text: str, start: int, end: int) -> bool:
+    j = end
+    while j < len(text) and text[j] in " \t\n\r":
+        j += 1
+    if j >= len(text) or text[j] != ":":
+        return False
+    before = text[:start].rstrip()
+    return not before.endswith("?")
+
+
+def _style_hook_tokens() -> set[str]:
+    """Every COMPOUND class token declared in `styles.css` as a real selector.
+
+    Compound -- it carries a `-` -- because a bare governance word is ambiguous
+    between a class and a value and the sweep must not guess: `"staged"` could
+    be a class name or the word a card renders, and only one of those is legal.
+    `.lchip-selection` cannot be either.
+    """
+    css = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
+    return {t for t in re.findall(r"\.([A-Za-z_][A-Za-z0-9_-]*)", css) if "-" in t}
+
+
+def _is_declared_style_hook(value: str, hooks: set[str]) -> bool:
+    """True when EVERY governance-word-bearing token of `value` is a declared
+    compound style hook. A class attribute is often several tokens
+    (`"swb-pane swb-pane-docs"`), and a leading `.` makes it a selector string
+    (`".swb-pane-docs"`, handed to `querySelector`); both are the same hook.
+    """
+    tokens = value.split()
+    if not tokens:
+        return False
+    for token in tokens:
+        bare = token[1:] if token.startswith(".") else token
+        if not _GOVERNANCE_WORD_PATTERN.search(token):
+            continue
+        if bare not in hooks:
+            return False
+    return True
+
+
+_HTML_RENDERED_ATTRS = ("placeholder", "title", "alt", "aria-label", "value")
+
+
+def _html_read_positions(text: str) -> list[tuple[int, str]]:
+    """(offset, text) for every TEXT NODE and every rendered attribute value."""
+    out: list[tuple[int, str]] = []
+    stripped = _strip_html_comments(text)
+    for m in re.finditer(r">([^<]*)<", stripped):
+        out.append((m.start(1), m.group(1)))
+    attrs = "|".join(_HTML_RENDERED_ATTRS)
+    for m in re.finditer(rf'\b(?:{attrs})\s*=\s*"([^"]*)"', stripped):
+        out.append((m.start(1), m.group(1)))
+    return out
+
+
+def _css_read_positions(text: str) -> list[tuple[int, str]]:
+    """(offset, text) for every custom-property NAME and every `content:` value."""
+    stripped = _strip_comments_for_scan(text, "styles.css")
+    out = [(m.start(), m.group(0)) for m in re.finditer(r"--[A-Za-z0-9_-]+", stripped)]
+    out += [(m.start(1), m.group(1)) for m in re.finditer(r"content\s*:\s*([^;]*);", stripped)]
+    return out
+
+
 def _governance_literal_violations() -> list[str]:
+    hooks = _style_hook_tokens()
     violations = []
     for row in _assertion_4_scope():
         path = row["path"]
-        text = _strip_comments_for_scan(
-            (WEB_ROOT / path).read_text(encoding="utf-8"), path
-        )
-        for m in _GOVERNANCE_WORD_PATTERN.finditer(text):
-            violations.append(f"{path}:{_line_of(text, m.start())} carries {m.group(1)!r}")
+        raw = (WEB_ROOT / path).read_text(encoding="utf-8")
+        prose = _PROSE_EXEMPT_BY_PATH.get(path, set())
+        if path.endswith(".js"):
+            for kind, start, end in _js_spans(raw):
+                if kind != "string":
+                    continue
+                value = raw[start + 1:end - 1]
+                if not _GOVERNANCE_WORD_PATTERN.search(value):
+                    continue
+                if _in_key_position(raw, start, end):
+                    continue
+                if _is_declared_style_hook(value, hooks):
+                    continue
+                if value in prose:
+                    continue
+                violations.append(
+                    f"{path}:{_line_of(raw, start)} carries {value[:70]!r}")
+        elif path.endswith(".html"):
+            for offset, value in _html_read_positions(raw):
+                if not _GOVERNANCE_WORD_PATTERN.search(value):
+                    continue
+                if value in prose:
+                    continue
+                violations.append(
+                    f"{path}:{_line_of(raw, offset)} renders {value.strip()[:70]!r}")
+        elif path.endswith(".css"):
+            for offset, value in _css_read_positions(raw):
+                if not _GOVERNANCE_WORD_PATTERN.search(value):
+                    continue
+                if value in prose:
+                    continue
+                violations.append(
+                    f"{path}:{_line_of(raw, offset)} names {value.strip()[:70]!r}")
+        else:  # pragma: no cover -- the census admits only these three kinds
+            raise AssertionError(f"no assertion-4 rule for {path}")
     return violations
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "docs/front-end-package-boundary.md § 2.2 rule 2 / § 4.5 point 4 "
-        "(opensoft/openDox-spec #8 -> a44ac06d): the 14 class-C files (13 in "
-        "the note's own § 3.1 count, +1 for views/explorer.js under Q2's "
-        "ruling) and the FOUR declared class-A tails (views/docs.js, "
-        "views/grouping.js, views/repo-selector-model.js, and -- added by "
-        "slice S4 -- views/staging-workbench-model.js, whose class-C substance "
-        "STATUS_BRAINSTORM / BRAINSTORM_AREA / STAGING_AREA is what § 3.2's "
-        "own row says is left once its six class-B route constants travel; a "
-        "tail rather than a reclassification, so the file enters this sweep "
-        "for S7 instead of escaping it unremarked) carry the "
-        "registered profile's vocabulary as LITERALS -- COLUMN_KEYS, "
-        "WHEEL_KEYS/WHEEL_LABELS, board.js's four columns, styles.css's "
-        "four --st-* tokens, and more (every in-scope file trips at least "
-        "one hit today IN CODE, once `//`/`/* */`/`<!-- -->` prose comments "
-        "are excluded from the sweep by `_strip_comments_for_scan` -- added "
-        "on this PR's review, opensoft/openDox-code#13, after Copilot caught "
-        "the unstripped sweep counting explanatory comments too, e.g. "
-        "views/model.js's own \"docs -> clusters -> possibles -> staged "
-        "picks -> proposals -> realized\" pipeline sentence). The note "
-        "assigns closure to slice S7 (parameterize class C from the "
-        "registered domain profile). A bare identifier or property access "
-        "that only reads a snapshot schema key (`s.documents`, `s.clusters` "
-        "and their kind) still trips this sweep and is NOT excluded here -- "
-        "left for S7 (or a further amendment) to decide against the real "
-        "sites it parameterizes, the same fidelity-over-tidiness call "
-        "assertions 2 and 3 already make about their own scope."
-    ),
-)
+# S1's ORIGINAL INSTRUMENT, kept and still measured. It is the coarse word
+# search this assertion used to BE, and `test_the_rule_and_the_instrument_agree`
+# below holds the two together: the rule may only ever be narrower than the
+# instrument, never blind to a file the instrument still sees nothing in.
+def _instrument_hits(path: str) -> int:
+    text = _strip_comments_for_scan(
+        (WEB_ROOT / path).read_text(encoding="utf-8"), path)
+    return len(_GOVERNANCE_WORD_PATTERN.findall(text))
+
+
 def test_no_class_c_file_carries_a_governance_literal() -> None:
+    """ASSERTION 4, CLOSED BY SLICE S7 -- the `xfail(strict=True)` marker came
+    off in the commit that closed it, which is what `strict=True` is for.
+
+    Every governance word a class-C file used to spell is now a read of the
+    display facet BY ROLE (`docs/front-end-package-boundary.md` § 4.3), and the
+    two positions where a word survives are DECLARED in the census fixture and
+    checked by the two tests below: `style_hooks` (compound class tokens, each
+    proven a real selector) and `prose_exemptions` (keyed by path and by the
+    exact literal, each proven present).
+    """
     violations = _governance_literal_violations()
     assert not violations, (
         f"{len(violations)} governance-literal violation(s) (showing up to 20 of them):\n"
         + "\n".join(violations[:20])
-    )
+        + "\n\nEach of these is a word a human reads. Ask the display facet for "
+        "it BY ROLE -- `display.one(role)`, `display.status(vocabulary, role)`, "
+        "`display.area(role)` -- or, if it really is plain English that happens "
+        "to spell a watched word, declare it under `prose_exemptions` in "
+        "tests/fixtures/web_boundary_census.yaml beside its reason.")
 
 
 # ---------------------------------------------------------------------------
-# Companion check -- the two declared exemptions are REAL and OUT OF SCOPE
-# (note § 2.2 rule 3: "an exemption that is silence is how a literal
-# survives a vocabulary sweep"). NOT one of the note's four numbered
-# assertions; passes today and stays unmarked -- it is bookkeeping on the
-# fixture, not a measurement of the boundary defect.
+# Companion checks -- the declared exemptions are REAL, and the sweep above is
+# narrower than S1's instrument without being blind. NOT among the note's four
+# numbered assertions; they pass today and stay unmarked -- bookkeeping on the
+# fixture and on the rule, not a measurement of the boundary defect.
 # ---------------------------------------------------------------------------
+
+#: `const X`, `let X`, `var X`, `export const X`, `function X` or a class field
+#: `X:` at the head of a line -- the productions that DECLARE a name in this
+#: bundle. S1's own REGISTER entry names this as defect (a): "the exemption test
+#: checks TEXT PRESENCE, not a DECLARATION", so an exemption naming an
+#: identifier that only appears inside a comment -- or inside the word
+#: `SNAPSHOT_FIELDS_OLD` -- passed. It does not now.
+def _declares_identifier(text: str, identifier: str) -> bool:
+    pattern = re.compile(
+        r"^\s*(?:export\s+)?(?:const|let|var|function|class)\s+"
+        + re.escape(identifier) + r"\b",
+        re.M)
+    return bool(pattern.search(text))
+
 
 def test_declared_governance_literal_exemptions_are_real_and_out_of_scope() -> None:
     in_scope_paths = {row["path"] for row in _assertion_4_scope()}
@@ -672,7 +948,131 @@ def test_declared_governance_literal_exemptions_are_real_and_out_of_scope() -> N
         )
         assert exemption.get("reason"), f"declared exemption for {path} carries no reason"
         text = (WEB_ROOT / path).read_text(encoding="utf-8")
-        assert exemption["identifier"] in text, (
-            f"declared exemption names {exemption['identifier']!r}, which does not "
-            f"appear in {path} -- the exemption is stale"
+        assert _declares_identifier(text, exemption["identifier"]), (
+            f"declared exemption names {exemption['identifier']!r}, which {path} does "
+            f"not DECLARE -- only mentioning it (in a comment, or as part of a longer "
+            f"name) is not an exemption, it is a stale one. S1's REGISTER, defect (a)."
         )
+
+
+def test_every_row_level_exempt_matches_the_declared_exemptions_for_that_path() -> None:
+    """S1's REGISTER, defect (b): the census row's own `exempt:` was never
+    cross-checked against `declared_exemptions`, so the row could name one
+    identifier while the list named another -- or none -- and both halves of
+    the fixture would read as if the file were accounted for.
+
+    They are held to SET EQUALITY per path here. `exempt:` accepts a list,
+    because `views/display.js` carries eleven declared seam tables and a scalar
+    would have made ten of them invisible to this check.
+    """
+    declared: dict[str, set[str]] = {}
+    for exemption in _EXEMPTIONS:
+        declared.setdefault(exemption["path"], set()).add(exemption["identifier"])
+    rows: dict[str, set[str]] = {}
+    for row in _ROWS:
+        if "exempt" not in row:
+            continue
+        value = row["exempt"]
+        names = set(value) if isinstance(value, list) else {value}
+        rows[row["path"]] = names
+    assert rows == declared, (
+        "the census rows' `exempt:` and `declared_exemptions` disagree:\n"
+        + "\n".join(
+            f"  {path}: row {sorted(rows.get(path, set()))} "
+            f"vs list {sorted(declared.get(path, set()))}"
+            for path in sorted(set(rows) | set(declared))
+            if rows.get(path, set()) != declared.get(path, set())))
+
+
+def test_every_declared_style_hook_is_a_real_selector() -> None:
+    """The census enumerates the hooks that carry a governance word so a
+    reviewer can see them; the sweep derives the legal set from `styles.css`.
+    This holds the enumeration honest -- a hook that stops being a selector
+    stops being legal whether or not anyone remembers to edit the list."""
+    hooks = _style_hook_tokens()
+    declared = _CENSUS["style_hooks"]["carrying_a_governance_word"]
+    missing = [h for h in declared if h not in hooks]
+    assert not missing, (
+        f"{missing} are declared as style hooks carrying a governance word, but "
+        f"styles.css declares no `.<token>` selector for them -- the hook is gone "
+        f"and the exemption it justified is stale.")
+    assert all(_GOVERNANCE_WORD_PATTERN.search(h) for h in declared), (
+        "a hook that carries no governance word does not belong on this list: it "
+        "is exempt by construction and listing it makes the list read as longer "
+        "than the surface it describes.")
+
+
+def test_every_prose_exemption_is_present_and_in_scope() -> None:
+    """Keyed by (path, literal) and checked PRESENT, so a reflow cannot move an
+    exemption onto a different string and a deleted sentence cannot leave a
+    standing licence behind."""
+    in_scope_paths = {row["path"] for row in _assertion_4_scope()}
+    for exemption in _PROSE_EXEMPTIONS:
+        path, literal = exemption["path"], exemption["literal"]
+        assert path in in_scope_paths, (
+            f"{path} is not in assertion 4's scope, so a prose exemption for it "
+            f"licenses nothing and only makes the fixture read as if it did.")
+        assert exemption.get("reason"), f"prose exemption for {path} carries no reason"
+        assert _GOVERNANCE_WORD_PATTERN.search(literal), (
+            f"{literal!r} carries no governance word, so it needs no exemption.")
+        text = (WEB_ROOT / path).read_text(encoding="utf-8")
+        assert literal in text, (
+            f"{path} no longer carries {literal!r} -- the prose exemption is stale, "
+            f"and a stale exemption is a standing licence for a string nobody wrote.")
+
+
+def test_the_rule_and_the_instrument_agree() -> None:
+    """The rule may be NARROWER than S1's instrument -- that is the whole point
+    of S7 rewriting it -- but it may not be blind: a file the instrument still
+    sees hits in must be a file the rule has a POSITION rule for, and every
+    in-scope file must still be reachable by both. This is what stops a future
+    edit narrowing the rule until it measures nothing, which is the failure a
+    sweep that reaches zero is most exposed to.
+    """
+    scope = _assertion_4_scope()
+    assert scope, "assertion 4's scope is empty -- the census lost its class-C rows"
+    assert len(scope) == 18, (
+        f"assertion 4 scopes {len(scope)} files; the note's § 3.2 count is 18 "
+        f"(14 class-C + 4 declared class-A tails)")
+    # every in-scope file is one of the three languages the rule speaks
+    for row in scope:
+        assert row["path"].endswith((".js", ".html", ".css")), row["path"]
+    # and the instrument still finds the words -- in comments, in identifiers,
+    # in selectors -- which is exactly what the rule now declines to count.
+    still_seen = [row["path"] for row in scope if _instrument_hits(row["path"])]
+    assert len(still_seen) >= 14, (
+        f"only {len(still_seen)} of {len(scope)} in-scope files still trip S1's "
+        f"coarse instrument. If the words have genuinely left the tree the rule "
+        f"is no longer measuring anything and this companion should be retired "
+        f"deliberately, not discovered later.")
+
+
+def test_every_in_scope_file_reads_the_display_facet() -> None:
+    """§ 4.3's own success condition, stated as a test: a class-C file that
+    carries no governance literal AND asks the facet for nothing has not been
+    parameterized -- it has been emptied, or it never rendered a word at all
+    and should not be in this scope.
+
+    The two files the rule reaches through another end are named here with
+    their reason: `styles.css` has no import mechanism and takes its four token
+    VALUES from `app.js`'s `applyTokens`, and `index.html` ships its labels
+    empty and takes them from `app.js`'s `applyShellVocabulary`. Both are the
+    shell reaching IN, which is § 4.3 step 3's own shape.
+    """
+    through_the_shell = {
+        "styles.css": "--st-",
+        "index.html": 'id="tab-',
+    }
+    missing = []
+    for row in _assertion_4_scope():
+        path = row["path"]
+        text = (WEB_ROOT / path).read_text(encoding="utf-8")
+        if path in through_the_shell:
+            assert through_the_shell[path] in text, path
+            continue
+        if 'from "./display.js"' not in text and "display" not in text:
+            missing.append(path)
+    assert not missing, (
+        f"{missing} carry no governance literal and read no display facet -- a "
+        f"file in assertion 4's scope renders a station's words or does not "
+        f"belong in it (docs/front-end-package-boundary.md § 4.3 step 4).")
