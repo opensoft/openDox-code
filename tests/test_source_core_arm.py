@@ -12,13 +12,25 @@ consumer layer was a route-ownership defect, not a layering one.
 WHAT THIS FILE IS FOR. The boundary note (openDox-spec
 `docs/front-end-package-boundary.md` § 5 row S6) asks the slice for
 "`serve_projection.py`, `serve.py` (+ their tests)". The assertions the route
-already had live in `tests/test_source_dot_directories.py` (which travelled here
-from openXdox-code with the route) and in five carved suites that drive the
-whole server over a socket — and NONE of them runs, at this leg or the one they
-came from: § 1.2(d)'s finding, RULED Q-L5 (b′) / Q-L8 (b′) the narrowing that
-records it, and § 5 row S8 the slice that lifts it. A slice that moved a route
-and left its only proof in the non-running half would be a slice whose claim
-rests on a commit message.
+already had live in SIX suites at openXdox-code — `test_source_dot_directories.py`
+whole, plus thirteen functions across `test_renderer.py`,
+`test_explorer_viewer.py`, `test_session_snapshot.py`,
+`test_doxbench_transport.py` and `test_repo_selector.py` — and NONE of them
+runs, at that leg or this one: § 1.2(d)'s finding, RULED Q-L5 (b′) / Q-L8 (b′)
+the narrowing that records it, and § 5 row S8 the slice that lifts it.
+
+THEY STAY THERE, and not for want of trying. Each has a carve-manifest row
+naming `openxdox_code`, so moving one is a RE-DESTINATION of the row rather
+than a declared edit to an arrived file, which Q-L1's annotation form
+(`edits: [{class, lines[], note}]`) cannot express — openXdox-code `657c821`
+records the attempt and its withdrawal on the floor's own remediation rule.
+Every one of them already reads `from opendox import serve as serve_mod`, so
+none is orphaned by the route moving; S8 re-homes all 48 with the manifest act
+that pass will need.
+
+A slice that moved a route and left its only proof in the non-running half
+would be a slice whose claim rests on a commit message. This module is that
+proof.
 
 So this module is the RUNNABLE half, in the shape its four neighbours on
 `validate`'s explicit list already use (`test_leg_shape.py`,
@@ -60,10 +72,11 @@ WHAT IT HOLDS, and why each is here rather than implied:
    column's, reached through the late seam `serve_workbench.py` already uses at
    five sites. A second copy of the check beside it is the fork
    `route_extension.py`:89 names; that is what this asserts against, and it is
-   also what carries the dot-directory refusals of
-   `tests/test_source_dot_directories.py` (defect 10) across the move without
-   re-stating them: they are `resolve_within`'s, and the arm inherits every one
-   of them by calling it and nothing else.
+   also what carries openXdox-code's `tests/test_source_dot_directories.py`
+   (T092 defect 10: `/source/.git/config` answering 200 with a remote's
+   embedded PAT) across the move without re-stating it at a leg that cannot
+   run it. Those refusals are `resolve_within`'s, and the arm inherits every
+   one of them by calling that one authority and nothing else.
 6. READ-ONLY, AND THE REFUSALS ARE THE ONES IT HAD. Three distinct answers, each
    asserted on its own text: `send_error(404, "no source path")` for the bare
    route, a bare `send_response(404)` + divergence headers + `Content-Length: 0`
@@ -268,7 +281,8 @@ def test_the_containment_rule_is_the_one_authority_and_is_not_re_implemented():
         "resolve_source_path is a delegation and must stay one. A second copy "
         "of the containment rule here is the fork route_extension.py:89 names "
         "— and it is what would silently drop the dot-directory refusals "
-        "(tests/test_source_dot_directories.py, T092 defect 10), which are "
+        "(openXdox-code tests/test_source_dot_directories.py, T092 defect "
+        "10), which are "
         "resolve_within's and are inherited only by calling it")
 
 
