@@ -70,6 +70,17 @@
 #   C  14 files (13 + explorer.js), 11,854 lines (11,575 + 279)
 #   ?  4 files (5 - explorer.js), 5,432 lines (5,711 - 279)
 #   total 42 files, 30,585 lines -- unchanged (a reclassification, not a move)
+#
+# S3 ADDITION (opensoft/openDox-code#14, slice S3's own leg): a 43rd file
+# arrives, `views/view_extension.js` (422 lines) -- the client-side view
+# registry. The note's own census could carry no row for it because the note
+# measured the tree at `a99eba03`, before this file existed. Class A: no
+# import (so it cannot violate assertion 3), no governance literal (out of
+# assertion 4's scope regardless, which is class C plus declared tails), and
+# its one route-shaped string, `'gate.bar'` (an example in a doc comment), is
+# an ID, not a `/actions/...` path -- assertion 2's patterns do not match it.
+#   A  21 files, 12,251 lines (11,702 + 422 + 127 app.js growth)
+#   total 43 files, 31,134 lines (30,585 + 422 + 127); B/C/? unchanged
 
 schema_version: 1
 kind: web-boundary-census
@@ -80,8 +91,8 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 files:
   - path: app.js
     class: A
-    loc: 1155
-    note: "the shell; imports 20 view modules; its only class-B import is gate.js at :43 (discharged by S3's view registry)"
+    loc: 1282
+    note: "the shell; imports 20 view modules; its only class-B import is gate.js at :43 (discharged by S3's view registry -- loc grew 1155 -> 1282 with the registry wiring, S3)"
 
   - path: index.html
     class: C
@@ -277,6 +288,11 @@ files:
     class: B
     loc: 614
     note: "FIRST_EDIT_ROUTE/ABANDON_SESSION_ROUTE/SHARE_SESSION_ROUTE/OPEN_PR_ROUTE, all under the gate prefix"
+
+  - path: views/view_extension.js
+    class: A
+    loc: 422
+    note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' at :126/:374 is a documentation example of an id, not a route literal, so assertion 2 does not match it."
 
   - path: views/viewer.js
     class: A
