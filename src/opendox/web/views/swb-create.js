@@ -29,9 +29,21 @@
 import { el } from "./helpers.js";
 import { panelEntry } from "./dispose.js";
 import {
-  CONTINUATIONS, CREATE_ROUTE, consoleHeaders, createDocumentCommand,
+  CONTINUATIONS, consoleHeaders, createDocumentCommand,
   createRequest, withConsoleRepair,
 } from "./staging-workbench-model.js";
+
+// THE CREATE-DOCUMENT GATE ROUTE, DECLARED WHERE IT IS CALLED (§ 3.4 slice S4).
+// It stood at `views/staging-workbench-model.js`:543 at the carve commit and
+// this module imported it from there — a class-B file reaching into the pure
+// model for a route only this file ever POSTs. RULED Q3 (openxFactory#656
+// comment `5642758731`, Brett Heap, 2026-09-12): "a route constant travels with
+// the binding that calls it, never with the model that happens to declare it."
+// Still a CONSTANT and never a literal in the transport, so the wire contract
+// keeps the single definition the node harness and the Python route tests read
+// — in the class-B module the gate column owns, which is where it can travel
+// with the binding at slice S5.
+export const CREATE_ROUTE = "/actions/gate/create-document";
 
 export function createGateLive(caps) {
   return !!(caps && caps.actions && caps.actions.gate);

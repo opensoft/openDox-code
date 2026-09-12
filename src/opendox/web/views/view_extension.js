@@ -60,9 +60,15 @@ export const VIEW_CLASSES = ["A", "B", "C", "?"];
 // `index.html` and against the Python half, so the three never drift apart.
 //
 // `viewer-gatebar` is the viewer's own gate-bar host (`viewer.js` builds the
-// div and calls `mountGate`). `wheel-intent` and `dispose-intent` are slice
-// S2's, declared NOW so S2's optional intent-chip bindings fold in without
-// re-opening this file: § 6 Q5 rules that "the chips become an OPTIONAL
+// div and calls `mountGate`). `lens-gate` and `repo-projects` are slice S4's,
+// added when the two new class-B bindings that mount into them arrived:
+// `lens-gate` is the lens plan panel's execute box (`views/gate-lens.js`) and
+// `repo-projects` is the selector's project-commission slot
+// (`views/gate-projects.js`). Both are "shell" for the same reason
+// `viewer-gatebar` is — the host is built by the view at mount time and handed
+// over, so `index.html` has no element to declare. `wheel-intent` and
+// `dispose-intent` are slice S2's, declared NOW so S2's optional intent-chip
+// bindings fold in without re-opening this file: § 6 Q5 rules that "the chips become an OPTIONAL
 // contributed binding — absent, the wheel and the tray render without them",
 // and `optional: true` plus `lookupView()` is exactly that shape. Declaring a
 // region costs nothing; an undeclared one costs a slice.
@@ -79,6 +85,8 @@ export const REGIONS = {
   "viewer-gatebar": "shell",
   "wheel-intent": "shell",
   "dispose-intent": "shell",
+  "lens-gate": "shell",
+  "repo-projects": "shell",
 };
 
 export const MANIFEST_KIND = "opendox.view-manifest";

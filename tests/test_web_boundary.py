@@ -51,6 +51,40 @@ insertion and no installed consumer. `PyYAML` is already a runtime
 dependency (`pyproject.toml`'s `[project] dependencies`), not a test-only
 addition made here.
 
+AMENDED BY SLICE S4 -- "split the three RULED `SPLIT` files" (RULED Q3, same
+comment; leg branch `build/s4-split-route-tails`). Four things changed here and
+nothing else:
+
+  1. ASSERTION 1 GREW ITS POST-S4 CUTOFF, which is the half of note § 4.5
+     point 1 that S1 could not yet enforce: "after S4 the assertion fails on any
+     row still `?` OR still `SPLIT` -- EXCEPT `views/lens.js`'s `?`, named
+     here". S4 is the slice that performs the split, so S4 is the slice that
+     owns the cutoff. The one exception is DECLARED DATA
+     (`declared_transitional_rows`), never a literal in this module, for the
+     note's own reason: "a permanent UNDECLARED 'undecided' is an escape hatch,
+     not a boundary; a permanent DECLARED one, cited to the ruling gap that
+     causes it, is how this census stays honest about what it does not yet
+     know."
+  2. ASSERTION 2 GREW ITS OWN DECLARED EXCEPTION, likewise as data
+     (`route_ownership_exceptions`): `views/lens.js`'s two openxFactory-lane
+     sites are "excluded from the in-scope grep until a future ruling folds
+     lens.js back in ... they never entered it" (§ 4.5 point 2, last paragraph).
+     Every other site the assertion was tolerating stays in scope and stays
+     measured.
+  3. THE THREE MARKERS GAINED `raises=AssertionError`. An `xfail(strict=True)`
+     with no `raises` tolerates ANY exception, so a `KeyError` from a malformed
+     fixture, or an `OSError` from a renamed file, would read as the expected
+     failure and keep the check green. These three markers stand for a MEASURED
+     defect -- an assertion that fails -- and now say so; anything else is a
+     broken test and fails as one. (Register nit 1 of the four S1 left; nit 2 is
+     the cutoff above. The other two -- the exemption test checking text
+     presence rather than a declaration, and the fixture's row-level `exempt:`
+     not being cross-checked against `declared_exemptions` -- belong to
+     assertion 4's own scope and are left to S7, which is the slice that
+     discharges it.)
+  4. THE CENSUS DECLARES ITS TOTALS and this module re-derives them, so the
+     class arithmetic in the fixture's header cannot drift from its rows.
+
 A CREATED file (this module and its fixture): no carve-manifest row (RULED
 OQ-C) -- the front end's package boundary did not exist before this note, so
 there is nothing for either file to have been carved FROM.
@@ -70,6 +104,14 @@ CENSUS_PATH = Path(__file__).resolve().parent / "fixtures" / "web_boundary_censu
 
 VALID_CLASSES = {"A", "B", "C", "?"}
 
+# The classes note § 4.5 point 1 calls transitional and forbids after slice S4.
+# "SPLIT" is named here as the note names it even though this fixture never
+# spelled it (S1 collapsed both into `"?"`, whose own legend says so): a row
+# that reintroduced it would already fail the `VALID_CLASSES` check above, and
+# stating the rule over BOTH words keeps this module readable against the note
+# rather than against one fixture's spelling choice.
+TRANSITIONAL_CLASSES = {"?", "SPLIT"}
+
 
 def _load_census() -> dict:
     with CENSUS_PATH.open(encoding="utf-8") as fh:
@@ -79,6 +121,12 @@ def _load_census() -> dict:
 _CENSUS = _load_census()
 _ROWS: list[dict] = _CENSUS["files"]
 _EXEMPTIONS: list[dict] = _CENSUS["declared_exemptions"]
+_TOTALS: dict[str, dict] = _CENSUS["totals"]
+# Assertion 1's declared, ruled-later exceptions (note § 4.5 point 1) and
+# assertion 2's own (point 2). Both are DATA, so adding one is a reviewed diff
+# in the fixture beside the reason, never a literal buried in this module.
+_TRANSITIONAL_EXCEPTIONS: list[dict] = _CENSUS["declared_transitional_rows"]
+_ROUTE_EXCEPTIONS: list[dict] = _CENSUS["route_ownership_exceptions"]
 # Duplicates collapse silently here (a dict can only hold one value per key);
 # `test_every_web_file_is_classified_exactly_once` checks the RAW list
 # instead, so a duplicate row is still caught rather than swallowed by this
@@ -92,9 +140,13 @@ def _real_web_files() -> set[str]:
 
 def _assertion_4_scope() -> list[dict]:
     """The 14 class-C files (13 in the note's own § 3.1 total, +1 for
-    `views/explorer.js` under Q2's ruling) plus the three declared class-A
-    tails (note § 2.2 rule 3): `views/docs.js`, `views/grouping.js`,
-    `views/repo-selector-model.js`."""
+    `views/explorer.js` under Q2's ruling) plus the declared class-A tails
+    (note § 2.2 rule 3): `views/docs.js`, `views/grouping.js`,
+    `views/repo-selector-model.js` -- and, since slice S4,
+    `views/staging-workbench-model.js`, whose class-C substance
+    (`STATUS_BRAINSTORM` / `BRAINSTORM_AREA` / `STAGING_AREA`, § 3.2's own
+    reading of the row) is what is left once its six class-B route constants
+    travel. Four tails, 18 files in scope; all of it S7's."""
     return [row for row in _ROWS if row["class"] == "C" or row.get("tail")]
 
 
@@ -148,6 +200,75 @@ def test_every_web_file_is_classified_exactly_once() -> None:
         f"census `loc` drifted from the tree (path, declared, actual): {mismatched_loc}"
     )
 
+    # THE POST-S4 CUTOFF (note § 4.5 point 1, and slice S4 is the slice that
+    # earns the right to enforce it): "`?` and `SPLIT` are classes the census
+    # may carry only until S4 ... after S4 the assertion fails on any row still
+    # `?` OR still `SPLIT` -- EXCEPT `views/lens.js`'s `?`, named here". The
+    # exception is read from the fixture, so the census declares its own one
+    # loose end and this module only enforces that there is nothing else.
+    declared_transitional = {e["path"] for e in _TRANSITIONAL_EXCEPTIONS}
+    still_transitional = sorted(
+        row["path"] for row in _ROWS
+        if row["class"] in TRANSITIONAL_CLASSES
+        and row["path"] not in declared_transitional
+    )
+    assert not still_transitional, (
+        f"{len(still_transitional)} row(s) still carry a TRANSITIONAL class "
+        f"after slice S4: {still_transitional}. § 4.5 point 1: `?` and `SPLIT` "
+        f"are classes the census may carry only until S4, and S4 is the slice "
+        f"that splits all three of them (§ 5) -- so a transitional row still "
+        f"standing fails exactly like an undeclared row would. A row that "
+        f"genuinely cannot be classified yet is DECLARED in the census's "
+        f"`declared_transitional_rows`, with the ruling gap that causes it and "
+        f"what would discharge it; a permanent UNDECLARED 'undecided' is an "
+        f"escape hatch, not a boundary."
+    )
+
+
+def test_the_declared_transitional_rows_are_real_and_still_transitional() -> None:
+    """Assertion 1's exception list cannot outlive its cause (note § 4.5 point
+    1's own reasoning about a DECLARED exception, applied to the declaration).
+
+    Unmarked and passing: bookkeeping on the fixture, not a measurement of the
+    boundary defect.
+    """
+    for exception in _TRANSITIONAL_EXCEPTIONS:
+        path = exception["path"]
+        row = _ROWS_BY_PATH.get(path)
+        assert row is not None, (
+            f"declared transitional exception names {path}, which carries no "
+            f"census row"
+        )
+        assert row["class"] in TRANSITIONAL_CLASSES, (
+            f"{path} is declared a transitional exception but its census row is "
+            f"class {row['class']!r} -- the exception is STALE, and a stale one "
+            f"is how the next `?` row slips through behind it"
+        )
+        assert row["class"] == exception["class"], (
+            f"{path}'s declared exception names class {exception['class']!r} and "
+            f"its row carries {row['class']!r}"
+        )
+        assert exception.get("reason"), f"{path}'s transitional exception carries no reason"
+        assert exception.get("until"), (
+            f"{path}'s transitional exception names nothing that would discharge "
+            f"it; an exception with no exit is a permanent one wearing a label"
+        )
+
+
+def test_the_declared_totals_are_re_derived_from_the_rows() -> None:
+    """The census states its own per-class shape and it must be the shape of
+    its rows -- so the header arithmetic every slice quotes cannot drift from
+    the data underneath it. Unmarked: arithmetic, not a defect measurement."""
+    derived: dict[str, dict[str, int]] = {}
+    for row in _ROWS:
+        entry = derived.setdefault(row["class"], {"files": 0, "loc": 0})
+        entry["files"] += 1
+        entry["loc"] += row["loc"]
+    assert derived == _TOTALS, (
+        f"the census's declared `totals:` disagree with its own rows.\n"
+        f"declared: {_TOTALS}\nderived:  {derived}"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Assertion 2 -- no file OUTSIDE class B names a route another column
@@ -192,14 +313,36 @@ def _line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
+def _excepted_routes(path: str) -> set[str]:
+    """The routes DECLARED out of this file's in-scope grep (note § 4.5 point
+    2's own standing exception, added at slice S4). Keyed by route and never by
+    line: "they never entered it", so the exclusion has to survive every edit
+    above the site."""
+    excepted: set[str] = set()
+    for exception in _ROUTE_EXCEPTIONS:
+        if exception["path"] == path:
+            excepted.update(exception["routes"])
+    return excepted
+
+
 def _route_ownership_violations() -> list[str]:
     violations = []
     for row in _ROWS:
         if row["class"] == "B":
             continue  # exempt by construction
+        excepted = _excepted_routes(row["path"])
         text = (WEB_ROOT / row["path"]).read_text(encoding="utf-8")
         for owner, pattern in _OWNED_ROUTE_PATTERNS.items():
             for m in pattern.finditer(text):
+                # The match carries its delimiters (`"/actions/dtn-seed"`), and
+                # the gate-prefix pattern matches a PREFIX rather than a whole
+                # route -- so the exception is tested against the matched text
+                # stripped of quotes, which is the whole route for every
+                # exception this census declares or can declare (a prefix-only
+                # exception would have to be spelled as the prefix).
+                literal = m.group(0).strip("\"'")
+                if literal in excepted:
+                    continue
                 site = f"{row['path']}:{_line_of(text, m.start())}"
                 violations.append(f"{site} names {m.group(0)} ({owner})")
     return violations
@@ -207,47 +350,95 @@ def _route_ownership_violations() -> list[str]:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason=(
         "docs/front-end-package-boundary.md § 4.5 point 2 (opensoft/openDox-spec "
-        "#8 -> a44ac06d): 16 sites outside class B name a route another column "
-        "declares. RE-DERIVED AT SLICE S6 (RULED Q4, opensoft/openxFactory#656 "
-        "comment 5642758731): it was 20 (18 at S1, +2 from S3's CORE_VIEWS "
-        "entry), and the FOUR /source sites CLEAR HERE -- app.js:195/196, "
-        "views/viewer.js:314, views/wheel.js:97 -- not because any of those "
-        "four files changed (none did) but because the route they name is "
-        "openDox's own fixed core arm now, so naming it is the boundary "
-        "working. The remaining 16, measured on this branch: "
-        "TWELVE are the SPLIT-file sites slice S4 closes -- "
-        "views/lens-model.js:1036/1037 and views/staging-workbench-model.js:"
-        "543/817/818/821/822/826 (the gate prefix), views/repo-selector.js:"
-        "39/43 (the gate prefix), :46 (openxFactory's apply-register-edits "
-        "lane, which leaves the bundle entirely) and :33 (/snapshot-index.json, "
-        "still openXdox's -- Q4 moved the /source pair and nothing else). "
-        "TWO are app.js:586/598, S3's `gate.bar` CORE_VIEWS entry and its "
-        "`routes: [\"/actions/gate/ratify\"]` -- a real breach by this "
-        "assertion's own rule while the entry sits in app.js (class A) rather "
-        "than views/gate.js (class B, exempt by construction); TRANSITIONAL, "
-        "closed at S5 when the binding moves behind a host-supplied "
-        "contribution and the entry leaves app.js entirely. "
-        "TWO are views/lens.js:41/45, this assertion's own STANDING DECLARED "
-        "exception (§ 4.5 point 2, last paragraph): none of Q1-Q5 rules on "
-        "lens.js's two openxFactory-lane routes, so they do not clear on any "
-        "slice's schedule and only a future ruling closes them. They are "
-        "counted here rather than excluded from the grep -- S1's own "
-        "'fidelity over tidiness' choice, kept -- which is why the marker "
-        "stays after S4 and S5 too and only the ruling that resolves lens.js "
-        "can take it off. "
-        "The marker therefore STAYS at S6: § 5's row for this slice promises "
-        "assertion 2 green for views/viewer.js, which it is, not the assertion "
-        "green outright, which is S5's row and — on this tree's own "
-        "measurement — not even S5's while lens.js stands. strict=True is what "
-        "makes that honest: the moment the residue actually reaches zero this "
-        "goes XPASS and red until the marker comes off."
+        "#8 -> a44ac06d): 6 sites outside class B name a route another column "
+        "declares, MEASURED WITH BOTH S4 AND S6 APPLIED (this branch carries "
+        "S4; S6 landed to main at opensoft/openDox-code#16 first, so this "
+        "count is the first to combine them). THE ARITHMETIC: 18 at S1 -> 20 "
+        "at S3 (which added app.js's `gate.bar` entry and closed none) -> 12 "
+        "measured after S4 alone, 10 in scope (S4 gives this assertion the "
+        "DECLARED EXCEPTION the note's own last paragraph states for "
+        "views/lens.js, and CLEARS ALL TWELVE SPLIT-FILE SITES the note's "
+        "point-2 table assigns to it -- views/lens-model.js:1036/1037, "
+        "views/repo-selector.js:33/39/43/46, "
+        "views/staging-workbench-model.js:543/817/818/821/822/826 -- every "
+        "one of those constants now sits in a class-B file, exempt by "
+        "construction, which is RULED Q3 in force rather than described) -> 8 "
+        "measured, 6 in scope with S6 ALSO applied (RULED Q4, "
+        "opensoft/openxFactory#656 comment 5642758731): the four openXdox "
+        "projection sites -- app.js:195/196, views/viewer.js:314, "
+        "views/wheel.js:97 -- CLEAR HERE too, not because any of those four "
+        "files changed (none did on this branch) but because the route they "
+        "name is openDox's own fixed core arm now, so naming it is the "
+        "boundary working, not breaking -- the same discharge S6's own note "
+        "records, reached here by merge rather than by that slice's own "
+        "commit. WHAT IS LEFT, measured on this branch: 6, all of them the "
+        "gate prefix and ALL of them in app.js's CORE arm -- 589/601 the "
+        "`gate.bar` entry (S3, the first of the pair a `//` comment citing "
+        "the second's real `routes:` array, both matching the same way) and "
+        "624/625/630 the `gate.lens` and `gate.projects` entries (S4) -- each "
+        "a class-B binding's `routes:` declaration, which view_extension.py "
+        "calls the thing that makes Q3 'checkable instead of aspirational', "
+        "and each a real breach by this assertion's own rule only while the "
+        "entry sits in app.js (class A) rather than in the class-B module it "
+        "names. All six are TRANSITIONAL and close together at slice S5, when "
+        "the class-B files move behind a host-supplied contribution and all "
+        "three entries leave app.js for contributedViewBindings(). NOT IN "
+        "SCOPE, by declaration rather than by silence: views/lens.js's two "
+        "openxFactory-lane sites, `/actions/dtn-seed` (line 40) and "
+        "`/actions/staging-seed` (line 44) -- named in "
+        "`route_ownership_exceptions` in the census, with the ruling gap "
+        "beside them -- none of Q1-Q5 rules on that file, so they clear on no "
+        "slice's schedule and 'they never entered it'. They are EXCLUDED from "
+        "the count above (not merely uncounted by silence), which is why 8 "
+        "measured resolves to 6 in scope rather than 8. This marker therefore "
+        "comes off at S5, once the remaining six close; unmark only once "
+        "verified green."
     ),
 )
 def test_no_ownership_violation_outside_class_b() -> None:
     violations = _route_ownership_violations()
     assert not violations, f"{len(violations)} route-ownership violation(s):\n" + "\n".join(violations)
+
+
+def test_the_route_ownership_exceptions_are_real_and_still_present() -> None:
+    """Assertion 2's exception list cannot outlive its cause, on the same
+    reasoning `declared_transitional_rows` already stands on (note § 4.5
+    point 2's own last paragraph, applied to the declaration this time
+    instead of to the class-A/C sweep): a stale exception that keeps
+    excluding a route nobody re-measures is how a real breach hides behind a
+    label the site no longer earns. This module's own comment above
+    `route_ownership_exceptions` in the fixture says "each route is checked
+    to be really present in the file it exempts" -- this test is that check,
+    not just the claim of it.
+
+    Unmarked and passing: bookkeeping on the fixture, not a measurement of
+    the boundary defect.
+    """
+    for exception in _ROUTE_EXCEPTIONS:
+        path = exception["path"]
+        row = _ROWS_BY_PATH.get(path)
+        assert row is not None, (
+            f"route_ownership_exceptions names {path}, which carries no census row"
+        )
+        assert exception.get("reason"), f"{path}'s route exception carries no reason"
+        assert exception.get("until"), (
+            f"{path}'s route exception names nothing that would discharge it; "
+            f"an exception with no exit is a permanent one wearing a label"
+        )
+        routes = exception.get("routes")
+        assert routes, f"{path}'s route exception declares no routes at all"
+        text = (WEB_ROOT / path).read_text(encoding="utf-8")
+        for route in routes:
+            quoted = (f'"{route}"' in text) or (f"'{route}'" in text)
+            assert quoted, (
+                f"{path}'s route exception names {route!r}, which is not actually "
+                f"present in the file as a string literal any more -- the "
+                f"exception has outlived its site and is now excluding nothing, "
+                f"or excluding the wrong thing"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -307,28 +498,29 @@ def _import_violations() -> list[str]:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason=(
         "docs/front-end-package-boundary.md § 1.2(b) / § 4.5 point 3 "
-        "(opensoft/openDox-spec #8 -> a44ac06d): 6 sites today (was 7; slice "
-        "S3 -- opensoft/openDox-code#14 -- CLOSES app.js:43 -> views/gate.js, "
-        "the shell's one direct class-B import, now a registry lookup, "
-        "exactly the edge § 4.1 names) -- 2 "
-        "UNRESOLVED (views/dispose.js:26 and views/wheel.js:75-76 import "
-        "views/intent-feed.js, RULED not_moved and absent from this leg, "
-        "docs/opendox-carve-manifest.yaml:1807-1810 RULED OQ-F) and 4 "
-        "CLASS-BOUNDARY remaining (app.js:45 -> "
-        "views/swb-session.js, views/staging-workbench.js -> "
-        "views/swb-create.js and -> views/swb-session.js, "
-        "views/wheel.js:73-74 -> views/dispose.js -- all class A/C "
-        "importing class B). The note's closing paragraph assigns closure "
-        "to slice S2, which is the intent-feed edge only (the 2 unresolved "
-        "sites); the remaining 4 class-boundary sites are the same shape "
-        "S5's gate-loop contribution closes, per § 4.1/§ 5, not S2 -- S3 "
-        "closes the fifth (app.js:43) on its own account, ahead of S5, "
-        "because the view registry is exactly the seam that makes doing so "
-        "early possible. This assertion therefore stays red after S2 and S3 "
-        "alone -- flagged here rather than narrowed to fit the note's own "
-        "summary."
+        "(opensoft/openDox-spec #8 -> a44ac06d): 4 sites today, all "
+        "CLASS-BOUNDARY -- app.js -> views/swb-session.js, "
+        "views/staging-workbench.js -> views/swb-create.js and -> "
+        "views/swb-session.js, views/wheel.js -> views/dispose.js (all class "
+        "A/C importing class B). THE ARITHMETIC: 7 at S1 -> 6 once S3 "
+        "(opensoft/openDox-code#14) closed app.js:43 -> views/gate.js, the "
+        "shell's one direct class-B import, now a registry lookup and exactly "
+        "the edge § 4.1 names -> 4 once S2 (opensoft/openDox-code#15) closed "
+        "the two UNRESOLVED intent-feed imports its own optional binding "
+        "replaced (RULED Q5; the manifest row stands, RULED OQ-F). The count "
+        "was last restated on the S3 branch before that merge and read 6; "
+        "re-measured here rather than left stale, which is the only change "
+        "slice S4 makes to this marker besides `raises=`. S4 ADDS NONE: its "
+        "three new class-B modules are reached through the shell's resolved "
+        "mounts and one late dynamic import, never a static `from` clause, so "
+        "no class-A or class-C file gained a class-B import. The four that "
+        "remain are the gate loop's own, closed at S5 when its files move "
+        "behind a host-supplied contribution -- the note's closing paragraph "
+        "assigns this assertion to S2, which was the intent-feed edge only; "
+        "flagged here rather than narrowed to fit the note's summary."
     ),
 )
 def test_every_relative_import_resolves_and_stays_in_class() -> None:
@@ -494,12 +686,18 @@ def _governance_literal_violations() -> list[str]:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason=(
         "docs/front-end-package-boundary.md § 2.2 rule 2 / § 4.5 point 4 "
         "(opensoft/openDox-spec #8 -> a44ac06d): the 14 class-C files (13 in "
         "the note's own § 3.1 count, +1 for views/explorer.js under Q2's "
-        "ruling) and the three declared class-A tails (views/docs.js, "
-        "views/grouping.js, views/repo-selector-model.js) carry the "
+        "ruling) and the FOUR declared class-A tails (views/docs.js, "
+        "views/grouping.js, views/repo-selector-model.js, and -- added by "
+        "slice S4 -- views/staging-workbench-model.js, whose class-C substance "
+        "STATUS_BRAINSTORM / BRAINSTORM_AREA / STAGING_AREA is what § 3.2's "
+        "own row says is left once its six class-B route constants travel; a "
+        "tail rather than a reclassification, so the file enters this sweep "
+        "for S7 instead of escaping it unremarked) carry the "
         "registered profile's vocabulary as LITERALS -- COLUMN_KEYS, "
         "WHEEL_KEYS/WHEEL_LABELS, board.js's four columns, styles.css's "
         "four --st-* tokens, and more (every in-scope file trips at least "

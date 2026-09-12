@@ -154,6 +154,11 @@ VIEW_CLASSES: tuple[str, ...] = ("A", "B", "C", "?")
 #:           binding — it has no standing element, so `index.html` cannot
 #:           declare it. `viewer-gatebar` is the viewer's own gate-bar host
 #:           (`views/viewer.js`:342 builds the `div` and calls `mountGate`);
+#:           `lens-gate` and `repo-projects` are slice S4's, added with the two
+#:           class-B bindings that mount into them — the lens plan panel's
+#:           execute box (`views/gate-lens.js`) and the selector's
+#:           project-commission slot (`views/gate-projects.js`), each a host the
+#:           view builds and hands over exactly as the viewer does;
 #:           the two `*-intent` regions are slice S2's, declared HERE and now so
 #:           that S2's optional intent-chip bindings fold into this registry
 #:           without re-opening it (§ 6 Q5: "S2 makes the chips an OPTIONAL
@@ -173,6 +178,8 @@ REGIONS: dict[str, str] = {
     "viewer-gatebar": "shell",
     "wheel-intent": "shell",
     "dispose-intent": "shell",
+    "lens-gate": "shell",
+    "repo-projects": "shell",
 }
 
 #: The facet name a host's profile carries, beside `ROUTE_EXTENSIONS` and
