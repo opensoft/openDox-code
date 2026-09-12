@@ -75,6 +75,33 @@ export const STATUS_VOCABULARIES = ["document", "change", "candidate"];
 export const STATUS_ROLES = ["captured", "organized", "proposed", "ratified",
                             "promoted", "superseded", "retired", "out-of-band"];
 
+// THE SAME EIGHT AS NAMED CONSTANTS, because three of them — `ratified`,
+// `superseded`, `retired` — are spelled identically to the openxFactory words
+// they name the role OF. That is the lifecycle-state column's own coincidence
+// (openXdox-spec `docs/domain-profile-design-note.md` § 6) and not something to
+// respell: a role is a role because of where it sits, not because of how it
+// looks. A view therefore names the role through this table and carries no
+// literal, so the governance-literal sweep never has to decide whether a given
+// `"ratified"` was the neutral role or the domain's word — the question does
+// not arise, which is a better answer than an exemption.
+export const STATUS_ROLE = {
+  CAPTURED: "captured",
+  ORGANIZED: "organized",
+  PROPOSED: "proposed",
+  RATIFIED: "ratified",
+  PROMOTED: "promoted",
+  SUPERSEDED: "superseded",
+  RETIRED: "retired",
+  OUT_OF_BAND: "out-of-band",
+};
+
+// The three status VOCABULARIES as named constants, for the same reason.
+export const VOCABULARY = {
+  DOCUMENT: "document",
+  CHANGE: "change",
+  CANDIDATE: "candidate",
+};
+
 // ---------------------------------------------------------------------------
 // SNAPSHOT_FIELDS — § 2.2 rule 3's OTHER half, and a DECLARED exemption from
 // the governance-literal sweep (`declared_exemptions` in the census fixture).
@@ -102,13 +129,45 @@ export const SNAPSHOT_FIELDS = {
   completion: { field: "changes", status: "archived" },
 };
 
+// ACT_IDS — the gate column's own verb KEYS, declared here for the same reason
+// `SNAPSHOT_FIELDS` is and carried in the census under the same § 2.2 rule 3
+// exemption. An act id is a SEAM KEY, not a rendered word: `views/wheel-model.js`
+// declares which verb row a wheel offers and the CONTRIBUTED gate column
+// dispatches on the id, so the two ends must spell it identically — exactly as a
+// route pattern must. openXdox-spec's `gate-action-record.schema.yaml`:165 is
+// where the enum is declared; these are the five this bundle's own views name.
+// What a human SEES is never one of these: the label beside each row comes from
+// `display.act(role)` and is the registered domain's word.
+export const ACT_IDS = {
+  derive: "derive-possibles",
+  brief: "research-brief",
+  promote: "promote-to-staging",
+  propose: "propose",
+  demote: "demote",
+};
+
+// TILE_KINDS — the `/actions/notebook` payload's own tile-kind keys, by stage
+// role. A third SEAM KEY table on the same § 2.2 rule 3 footing as
+// `SNAPSHOT_FIELDS` and `ACT_IDS`: openDox's `notebook_action.py` declares the
+// enum (`TILE_KINDS`) and the browser must spell it identically, while what a
+// human reads beside the button is `display.one(role)`. Only the three
+// topic-bearing stations carry one — a single source document is not a set, and
+// the completed station is out by design ("the action is for live governance
+// material").
+export const TILE_KINDS = {
+  grouping: "cluster",
+  selection: "staged",
+  submission: "proposal",
+};
+
 // openDox's OWN words. Kept BYTE-FOR-BYTE in step with
 // `display_profile.NEUTRAL_DISPLAY`; `tests/test_display_facet.py` parses both
 // and refuses a difference.
 export const NEUTRAL_DISPLAY = {
   stages: {
     source: { one: "source item", many: "source items",
-              short: "sources", label: "source items", gate: null },
+              short: "sources", label: "source items",
+              gate: "declared topics" },
     grouping: { one: "group", many: "groups",
                 short: "groups", label: "groups", gate: null },
     candidate: { one: "candidate", many: "candidates",
@@ -143,9 +202,25 @@ export const NEUTRAL_DISPLAY = {
   },
   acts: {
     derive: "derive candidates", brief: "research brief",
-    promote: "promote to selection",
+    promote: "promote to selection", propose: "draft a submission",
+  },
+  // THE ARTIFACT-FOLDER VOCABULARY, by role — the axis RULED Q1's own argument
+  // names ("the profile already has to carry an artifact-vocabulary axis for
+  // outline-model.js") and the one § 2.1 calls `views/explorer.js`'s "only
+  // domain content". `root` is the folder a submission's files live under;
+  // `packet` is its ORDERED front matter; `delta` and `supporting` are the two
+  // subfolders the explorer groups by. Every prefix is null in the neutral
+  // vocabulary: a product told no corpus layout has none, so the explorer
+  // groups by folder and says so.
+  artifacts: {
+    root: { prefix: null, label: "submission folder" },
+    packet: { prefix: null, label: "packet documents", order: [] },
+    delta: { prefix: null, label: "detail documents" },
+    supporting: { prefix: null, label: "supporting documents" },
   },
 };
+
+export const ARTIFACT_ROLES = ["root", "packet", "delta", "supporting"];
 
 export const DISPLAY_KIND = "opendox.display-facet";
 export const DISPLAY_SCHEMA_VERSION = 1;
@@ -219,6 +294,11 @@ export class Display {
       facet.tokens && typeof facet.tokens === "object" ? facet.tokens : null);
     this._acts = Object.assign({}, NEUTRAL_DISPLAY.acts,
       facet.acts && typeof facet.acts === "object" ? facet.acts : null);
+    this._artifacts = {};
+    for (const role of ARTIFACT_ROLES) {
+      this._artifacts[role] = Object.assign(
+        { role: role }, pick(facet.artifacts, NEUTRAL_DISPLAY.artifacts, role));
+    }
   }
 
   // ---- stages ----
@@ -312,6 +392,16 @@ export class Display {
       element.style.setProperty("--st-" + role, this.token(role));
     }
   }
+
+  // ---- artifact-folder vocabulary (RULED Q1's axis) ----
+  artifact(role) {
+    const entry = this._artifacts[role];
+    if (!entry) refuseRole("artifact", role, ARTIFACT_ROLES);
+    return entry;
+  }
+
+  // The ordered packet documents, or [] where the domain declares none.
+  packetOrder() { return this.artifact("packet").order || []; }
 
   // ---- acts ----
   act(role) {

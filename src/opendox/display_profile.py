@@ -18,9 +18,10 @@ five steps:
     4. A class-C module resolves BY ROLE, NOT BY STRING.
     5. Refusal, not a default.
 
-This module is step 2's server half. `views/display.js` is its client half and
-`views/snapshot-schema.js` is the OTHER half of § 2.2 rule 3 — the snapshot's
-own field names, which are openDox's schema and not a domain's vocabulary.
+This module is step 2's server half; `views/display.js` is its client half. Both
+carry `STAGE_FIELDS` / `SNAPSHOT_FIELDS`, which is § 2.2 rule 3's OTHER half —
+the snapshot's own field names, openDox's schema and not a domain's vocabulary,
+declared once so that no class-C file has to spell one.
 
 RESOLVE BY ROLE, NOT BY STRING — the rule this module exists to make possible.
 openXdox-spec `docs/domain-profile-design-note.md` § 6 states it for the Python
@@ -105,6 +106,7 @@ from typing import Any, Iterable, Mapping
 
 __all__ = [
     "AREA_ROLES",
+    "ARTIFACT_ROLES",
     "DISPLAY_KIND",
     "DISPLAY_SCHEMA_VERSION",
     "NEUTRAL_DISPLAY",
@@ -210,7 +212,8 @@ STAGE_FIELDS: tuple[tuple[str, str, str | None], ...] = (
 NEUTRAL_DISPLAY: dict[str, Any] = {
     "stages": {
         "source": {"one": "source item", "many": "source items",
-                   "short": "sources", "label": "source items", "gate": None},
+                   "short": "sources", "label": "source items",
+                   "gate": "declared topics"},
         "grouping": {"one": "group", "many": "groups",
                      "short": "groups", "label": "groups", "gate": None},
         "candidate": {"one": "candidate", "many": "candidates",
@@ -261,8 +264,27 @@ NEUTRAL_DISPLAY: dict[str, Any] = {
         "derive": "derive candidates",
         "brief": "research brief",
         "promote": "promote to selection",
+        "propose": "draft a submission",
+    },
+    "artifacts": {
+        "root": {"prefix": None, "label": "submission folder"},
+        "packet": {"prefix": None, "label": "packet documents",
+                   "order": []},
+        "delta": {"prefix": None, "label": "detail documents"},
+        "supporting": {"prefix": None, "label": "supporting documents"},
     },
 }
+
+#: THE ARTIFACT-FOLDER VOCABULARY, by role — the axis RULED Q1's own argument
+#: names ("the profile already has to carry an artifact-vocabulary axis for
+#: `outline-model.js`") and the one § 2.1 says is `views/explorer.js`'s "only
+#: domain content". `root` is the folder prefix a submission's files live under;
+#: `packet` is its ORDERED front matter (openxFactory: `proposal.md`,
+#: `design.md`, `tasks.md`); `delta` and `supporting` are the two subfolders the
+#: explorer groups by. Every prefix is `None` in the neutral vocabulary, because
+#: a product told no corpus layout has none — the explorer then groups by folder
+#: and says so, which is the honest answer.
+ARTIFACT_ROLES: tuple[str, ...] = ("root", "packet", "delta", "supporting")
 
 #: A design token's value: an explicit six-digit hex colour. Narrow on purpose —
 #: the value is written into a CSS custom property on `:root` at boot, so a
@@ -366,7 +388,8 @@ def normalize_display(declared: Any) -> dict[str, Any]:
         return _copy_display(NEUTRAL_DISPLAY)
     table = _mapping(declared, where="the facet itself")
     _unknown_roles(table.keys(),
-                   ("stages", "statuses", "areas", "tokens", "acts"),
+                   ("stages", "statuses", "areas", "tokens", "acts",
+                    "artifacts"),
                    where="the facet itself")
     out = _copy_display(NEUTRAL_DISPLAY)
 
@@ -428,6 +451,29 @@ def normalize_display(declared: Any) -> dict[str, Any]:
                 "injection point into the shell's own stylesheet.")
         out["tokens"][role] = value
 
+    artifacts = _mapping(table.get("artifacts", {}), where="artifacts")
+    _unknown_roles(artifacts.keys(), ARTIFACT_ROLES, where="artifacts")
+    for role, entry in artifacts.items():
+        fields = _mapping(entry, where=f"artifacts.{role}")
+        _unknown_roles(fields.keys(), ("prefix", "label", "order"),
+                       where=f"artifacts.{role}")
+        if "label" in fields:
+            out["artifacts"][role]["label"] = _text(
+                fields["label"], where=f"artifacts.{role}.label")
+        if "prefix" in fields:
+            out["artifacts"][role]["prefix"] = _text(
+                fields["prefix"], where=f"artifacts.{role}.prefix",
+                allow_none=True)
+        if "order" in fields:
+            order = fields["order"]
+            if not isinstance(order, (list, tuple)):
+                raise DisplayFacetError(
+                    f"the host profile's {PROFILE_FACET} facet gives "
+                    f"artifacts.{role}.order {order!r}; an ORDER is a list of "
+                    "file names, read left to right.")
+            out["artifacts"][role]["order"] = [
+                _text(name, where=f"artifacts.{role}.order") for name in order]
+
     acts = _mapping(table.get("acts", {}), where="acts")
     _unknown_roles(acts.keys(), tuple(NEUTRAL_DISPLAY["acts"]), where="acts")
     for role, word in acts.items():
@@ -451,6 +497,8 @@ def _copy_display(source: Mapping[str, Any]) -> dict[str, Any]:
                   for role, entry in source["areas"].items()},
         "tokens": dict(source["tokens"]),
         "acts": dict(source["acts"]),
+        "artifacts": {role: dict(entry)
+                      for role, entry in source["artifacts"].items()},
     }
 
 
@@ -483,6 +531,7 @@ def display_manifest(declared: Any, *, host_profile: str | None = None
         "fields": {role: {"field": field, "status": status}
                    for role, field, status in STAGE_FIELDS},
         "area_order": list(AREA_ROLES),
+        "artifact_roles": list(ARTIFACT_ROLES),
         "token_roles": list(TOKEN_ROLES),
         **normalize_display(declared),
     }

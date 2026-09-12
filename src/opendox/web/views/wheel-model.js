@@ -17,21 +17,28 @@
 //                            rule (register empty), never confusable with
 //                            indexed data
 //
-// Six wheels in funnel order: documents -> clusters -> possibles -> staged ->
-// active -> archived. Every relation is read from snapshot fields the
-// generator already materializes (document_edges, claiming_clusters, pick,
-// lineage.staged_picks, origin_staging_id); nothing is re-derived from text.
+// Six wheels in funnel order, and SLICE S7 MAKES THEM SIX ROLES rather than one
+// domain's six words (docs/front-end-package-boundary.md § 4.3 step 4; § 3.2's
+// own reading of this file was "`WHEEL_KEYS` :25 and `WHEEL_LABELS` :27-34 --
+// the six stage names, spelled twice"):
+//
+//   source -> grouping -> candidate -> selection -> submission -> completion
+//
+// A wheel KEY is a role, so every index, every degree map, every adjacency key
+// and every edge endpoint in this module is neutral; the LABEL a chip renders
+// comes from the registered profile through `display.short(role)`, which is why
+// `WHEEL_LABELS` is gone rather than moved — a second copy of the vocabulary
+// keyed by wheel would be exactly the literal table this slice removes.
+//
+// Every relation is read from snapshot fields the generator already
+// materializes (document_edges, claiming_clusters, pick, lineage.staged_picks,
+// origin_staging_id); nothing is re-derived from text. The SNAPSHOT FIELD each
+// wheel reads is declared once, in `display.js`'s `SNAPSHOT_FIELDS` (§ 2.2 rule
+// 3), and reached here through `display.items(snapshot, role)`.
 
-export const WHEEL_KEYS = ["documents", "clusters", "possibles", "staged", "active", "archived"];
+import { ACT_IDS, STAGE_ROLES, neutralDisplay } from "./display.js";
 
-export const WHEEL_LABELS = {
-  documents: "documents",
-  clusters: "clusters",
-  possibles: "possibles",
-  staged: "staged",
-  active: "active",
-  archived: "archived",
-};
+export const WHEEL_KEYS = STAGE_ROLES;
 
 const MAX_DEMO_POSSIBLES = 6;
 
@@ -83,35 +90,39 @@ function possibleEdgeClass(p) {
 }
 
 // One wheel-item list per wheel key, derived from the snapshot collections.
-function buildItems({ documents, clusters, possibles, stagedTopics, active, archived }) {
+function buildItems({ display, sources, groups, candidates, selections,
+                     submissions, completions }) {
+  const [SOURCE, GROUPING, CANDIDATE, SELECTION, SUBMISSION, COMPLETION] =
+    STAGE_ROLES;
+  const change = (c) => ({
+    id: c.id, label: c.id, sub: ((c.files || []).length) + " files", ref: c,
+  });
   return {
-    documents: documents.map((d) => ({
+    [SOURCE]: sources.map((d) => ({
       id: d.id, label: basename(d.id), sub: d.status || "", ref: d,
     })),
-    clusters: clusters.map((c) => ({
+    [GROUPING]: groups.map((c) => ({
       id: c.id, label: c.name || c.id,
-      sub: (c.tallies?.document_links || 0) + " docs", ref: c,
+      sub: (c.tallies?.document_links || 0) + " "
+        + display.count(SOURCE, c.tallies?.document_links || 0), ref: c,
     })),
-    possibles: possibles.map((p) => ({
+    [CANDIDATE]: candidates.map((p) => ({
       id: p.id, label: p.title || p.id,
       sub: possibleSub(p),
       demo: !!p.demo, derivedPending: isUndisposedDerived(p), ref: p,
     })),
-    staged: stagedTopics.map((t) => ({
+    [SELECTION]: selections.map((t) => ({
       id: t.staging_id, label: t.staging_id,
       sub: ((t.files || []).length) + " files", ref: t,
     })),
-    active: active.map((c) => ({
-      id: c.id, label: c.id, sub: ((c.files || []).length) + " files", ref: c,
-    })),
-    archived: archived.map((c) => ({
-      id: c.id, label: c.id, sub: ((c.files || []).length) + " files", ref: c,
-    })),
+    [SUBMISSION]: submissions.map(change),
+    [COMPLETION]: completions.map(change),
   };
 }
 
 // Every cross-wheel edge, resolved through the per-wheel id indexes.
-function buildEdges({ clusters, possibles, changes, index, changeWheel }) {
+function buildEdges({ groups, candidates, changes, index, changeWheel }) {
+  const [SOURCE, GROUPING, CANDIDATE, SELECTION] = STAGE_ROLES;
   const edges = [];
   function link(fromKey, fromId, toKey, toId, cls) {
     const fi = index[fromKey]?.get(fromId);
@@ -119,35 +130,35 @@ function buildEdges({ clusters, possibles, changes, index, changeWheel }) {
     if (fi === undefined || ti === undefined) return;
     edges.push({ from: [fromKey, fi], to: [toKey, ti], cls });
   }
-  // documents -> clusters: the Topics-derived member edges (indexed).
-  for (const c of clusters) {
+  // source -> grouping: the Topics-derived member edges (indexed).
+  for (const c of groups) {
     for (const e of c.document_edges || []) {
-      link("documents", e.document, "clusters", c.id, "indexed");
+      link(SOURCE, e.document, GROUPING, c.id, "indexed");
     }
   }
-  // clusters -> possibles: many-to-many claims, class-coded.
-  for (const p of possibles) {
+  // grouping -> candidate: many-to-many claims, class-coded.
+  for (const p of candidates) {
     const cls = possibleEdgeClass(p);
     for (const cid of p.claiming_clusters || []) {
-      link("clusters", cid, "possibles", p.id, cls);
+      link(GROUPING, cid, CANDIDATE, p.id, cls);
     }
   }
-  // possibles -> staged: the organize-gate pick edge (a pick is a human act;
-  // a demo possible never carries one).
-  for (const p of possibles) {
+  // candidate -> selection: the select-gate pick edge (a pick is a human act;
+  // a demo candidate never carries one).
+  for (const p of candidates) {
     const sid = p.pick?.staging_id;
-    if (sid) link("possibles", p.id, "staged", sid, "indexed");
+    if (sid) link(CANDIDATE, p.id, SELECTION, sid, "indexed");
   }
-  // clusters -> staged: the lineage staged_picks (topic-matched progression).
-  for (const c of clusters) {
+  // grouping -> selection: the lineage staged_picks (topic-matched progression).
+  for (const c of groups) {
     for (const sid of c.lineage?.staged_picks || []) {
-      link("clusters", c.id, "staged", sid, "indexed");
+      link(GROUPING, c.id, SELECTION, sid, "indexed");
     }
   }
-  // staged -> active/archived: the change's recorded origin staging id.
+  // selection -> submission/completion: the change's recorded origin staging id.
   for (const c of changes) {
     if (c.origin_staging_id) {
-      link("staged", c.origin_staging_id, changeWheel.get(c.id), c.id, "indexed");
+      link(SELECTION, c.origin_staging_id, changeWheel.get(c.id), c.id, "indexed");
     }
   }
   return edges;
@@ -176,35 +187,39 @@ function buildDegreesAndAdjacency(items, edges) {
   return { degrees, adjacency };
 }
 
-export function buildWheelModel(snapshot) {
+export function buildWheelModel(snapshot, display) {
+  const d = display || neutralDisplay();
+  const [SOURCE, GROUPING, CANDIDATE, SELECTION, SUBMISSION, COMPLETION] =
+    STAGE_ROLES;
   const s = snapshot || {};
-  const documents = s.documents || [];
-  const clusters = s.clusters || [];
-  const realPossibles = s.possibles || [];
-  const stagedTopics = s.staged_topics || [];
-  const changes = s.changes || [];
+  const sources = d.items(s, SOURCE);
+  const groups = d.items(s, GROUPING);
+  const realCandidates = d.items(s, CANDIDATE);
+  const selections = d.items(s, SELECTION);
+  const changes = (s[d.field(SUBMISSION)]) || [];
 
-  const demoMode = realPossibles.length === 0;
-  const possibles = demoMode ? synthesizeDemoPossibles(clusters) : realPossibles;
+  const demoMode = realCandidates.length === 0;
+  const candidates = demoMode ? synthesizeDemoPossibles(groups) : realCandidates;
 
-  const active = changes.filter((c) => c.status === "active");
-  const archived = changes.filter((c) => c.status === "archived");
+  const submissions = d.items(s, SUBMISSION);
+  const completions = d.items(s, COMPLETION);
 
-  const items = buildItems({ documents, clusters, possibles, stagedTopics, active, archived });
+  const items = buildItems({ display: d, sources, groups, candidates,
+                             selections, submissions, completions });
 
   const index = {};
   for (const key of WHEEL_KEYS) {
     index[key] = new Map(items[key].map((it, i) => [it.id, i]));
   }
   const changeWheel = new Map();
-  active.forEach((c) => changeWheel.set(c.id, "active"));
-  archived.forEach((c) => changeWheel.set(c.id, "archived"));
+  submissions.forEach((c) => changeWheel.set(c.id, SUBMISSION));
+  completions.forEach((c) => changeWheel.set(c.id, COMPLETION));
 
-  const edges = buildEdges({ clusters, possibles, changes, index, changeWheel });
+  const edges = buildEdges({ groups, candidates, changes, index, changeWheel });
   const { degrees, adjacency } = buildDegreesAndAdjacency(items, edges);
 
   const wheels = WHEEL_KEYS.map((key) => ({
-    key, label: WHEEL_LABELS[key], items: items[key], degrees: degrees[key],
+    key, label: d.short(key), items: items[key], degrees: degrees[key],
   }));
   return { wheels, edges, adjacency, demoMode };
 }
@@ -628,20 +643,25 @@ const openRepoRow = {
   visible: (item, env) => !!env.composed && !!jumpRepository(item),
 };
 
+// KEYED BY ROLE since slice S7, like every other per-wheel table in this
+// module. A row's `id` is the gate column's own SEAM KEY (`display.js`'s
+// declared `ACT_IDS`) and is spelled identically on both sides of the seam; a
+// row's `label` is what a human READS, so where it carries a domain noun it is
+// a function of the display facet, resolved per render in `actionsFor`.
 export const WHEEL_ACTIONS = {
-  documents: [{
+  [STAGE_ROLES[0]]: [{
     id: "read",
     label: "\u25a4 read",
   }, openRepoRow],
-  clusters: [
+  [STAGE_ROLES[1]]: [
     { id: "lens", label: "\u25ce lens" },
     { id: "canvas", label: "\u25a6 canvas" },
     {
       // commissions a CLUSTER-SCOPED run of the ratified derivation lane. The
       // console derives nothing: it records who asked, and the lane's own
       // contract (ai-derived, pending_review, human disposition) is unchanged.
-      id: "derive-possibles",
-      label: "\u2726 derive possibles",
+      id: ACT_IDS.derive,
+      label: (d) => "\u2726 " + d.act("derive"),
       visible: gatedAndNotYetActed,
     },
     notebookRow,
@@ -652,13 +672,13 @@ export const WHEEL_ACTIONS = {
   // rail's tray (a possible is disposed, not worked), but a possible IS
   // topic-bearing \u2014 its cited evidence and its claiming clusters' members are a
   // document set at a scope \u2014 so the read-only workbench applies to it.
-  possibles: [
+  [STAGE_ROLES[2]]: [
     {
       // commissions the organization of an ACCEPTED possible into a staging
       // fragment. Offered only when the tile looks promotable; the engine
       // re-checks the register and is the authority.
-      id: "promote-to-staging",
-      label: "▲ promote to staging",
+      id: ACT_IDS.promote,
+      label: (d) => "▲ " + d.act("promote"),
       visible: (item, env) => gatedAndNotYetActed(item, env) && isPromotableTile(item),
     },
     {
@@ -666,8 +686,8 @@ export const WHEEL_ACTIONS = {
       // possible is disposed; the ENGINE deliberately carries no state guard at
       // all (FR-018a), so engine-permissive / view-tidy is intentional here and
       // the two must not be conflated.
-      id: "research-brief",
-      label: "✻ research brief",
+      id: ACT_IDS.brief,
+      label: (d) => "✻ " + d.act("brief"),
       visible: (item, env) => gatedAndNotYetActed(item, env)
         && !item?.demo && !hasClosingVerdict(item)
         && (tileState(item) === "latent" || !!item?.derivedPending),
@@ -675,15 +695,15 @@ export const WHEEL_ACTIONS = {
     workbenchRow,
     openRepoRow,
   ],
-  staged: [
+  [STAGE_ROLES[3]]: [
     // the SAME read verb as the documents wheel (one id, one label, one mounter):
     // on a staged tile it opens the topic's PRIMARY fragment
     // (`primaryFragmentPath`), the file whose text the expanded tile also
     // summarises. Read-only, so it carries no gate.
     { id: "read", label: "\u25a4 read" },
     {
-      id: "propose",
-      label: "\u25b6 draft proposal",
+      id: ACT_IDS.propose,
+      label: (d) => "\u25b6 " + d.act("propose"),
       // add-propose-verb: the same capability gate as the dispose tray, and it
       // retires for the session once the commission is recorded.
       visible: (item, env) => !!env.gate && !env.commissioned,
@@ -702,8 +722,8 @@ export const WHEEL_ACTIONS = {
     // repository's document.
     workbenchRow,
   ],
-  active: [
-    // review the proposal packet: the change's own files, grouped by
+  [STAGE_ROLES[4]]: [
+    // review the submission packet: the change's own files, grouped by
     // `packetGroups`, each one a jump into the read-only viewer. Read-only, so no
     // gate \u2014 the active wheel now has a verb even on the deployed static image.
     { id: "packet", label: "\u25a9 packet" },
@@ -719,14 +739,14 @@ export const WHEEL_ACTIONS = {
       // Retirement matters more here than anywhere else: demote carries NO
       // engine-side duplicate guard, so this is the only thing standing between
       // an accidental double-click and a second full artifact set.
-      id: "demote",
+      id: ACT_IDS.demote,
       label: "\u25c0 demote",
       visible: gatedAndNotYetActed,
     },
     notebookRow,
     openRepoRow,
   ],
-  archived: [{
+  [STAGE_ROLES[5]]: [{
     id: "landed",
     label: "\u2713 landed",
   }, openRepoRow],
@@ -758,10 +778,16 @@ function commissionedFor(value, verbId) {
 export function actionsFor(wheelKey, item, env) {
   if (!item) return [];
   const e = env || {};
+  // A row whose label carries a domain noun declares it as a function of the
+  // display facet (slice S7); a glyph-only row keeps its string. `env.display`
+  // is the live vocabulary the shell handed down, and the neutral one when a
+  // caller (a node harness) supplies none.
+  const d = e.display || neutralDisplay();
   return (WHEEL_ACTIONS[wheelKey] || [])
     .filter((a) => !a.visible
       || a.visible(item, { ...e, commissioned: commissionedFor(e.commissioned, a.id) }))
-    .map((a) => ({ id: a.id, label: a.label }));
+    .map((a) => ({ id: a.id,
+                   label: typeof a.label === "function" ? a.label(d) : a.label }));
 }
 
 // Is a MOUNTED action row out of date against what the table now offers?
@@ -1085,7 +1111,12 @@ export function healthBlock(health) {
 // named `spec.md`), then everything else the folder carries. Paths are shown
 // RELATIVE to the change folder when the snapshot records one. Pure: the flyout's
 // DOM and the openDoc jump are wheel.js's.
-const PACKET_DOCS = ["proposal.md", "design.md", "tasks.md"];
+// THE PACKET'S ORDERED FRONT MATTER comes from the display facet's artifact
+// axis (slice S7, RULED Q1's "artifact-vocabulary axis"): openxFactory declares
+// `proposal.md`, `design.md`, `tasks.md`; a domain that declares none gets an
+// empty order and every file falls to the folder's own grouping, which is the
+// honest answer for a product told no corpus convention.
+const packetDocs = (display) => display.packetOrder();
 
 function packetRelative(path, folder) {
   const p = String(path);
@@ -1093,19 +1124,21 @@ function packetRelative(path, folder) {
   return f && p.startsWith(f + "/") ? p.slice(f.length + 1) : basename(p);
 }
 
-export function packetGroups(files, folder) {
+export function packetGroups(files, folder, display) {
+  const d = display || neutralDisplay();
+  const order = packetDocs(d);
   const docs = [], deltas = [], other = [];
   for (const raw of files || []) {
     const path = String(raw);
     const name = packetRelative(path, folder);
-    if (PACKET_DOCS.includes(basename(path))) docs.push({ path, name });
+    if (order.includes(basename(path))) docs.push({ path, name });
     else if (isSpecDeltaPath(path)) deltas.push({ path, name: capabilityOf(path) || name });
     else other.push({ path, name });
   }
-  docs.sort((a, b) => PACKET_DOCS.indexOf(basename(a.path)) - PACKET_DOCS.indexOf(basename(b.path)));
+  docs.sort((a, b) => order.indexOf(basename(a.path)) - order.indexOf(basename(b.path)));
   return [
-    { label: "packet", files: docs },
-    { label: "spec deltas", files: deltas },
+    { label: d.artifact("packet").label, files: docs },
+    { label: d.artifact("delta").label, files: deltas },
     { label: "other files", files: other },
   ].filter((g) => g.files.length);
 }

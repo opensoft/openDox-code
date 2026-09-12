@@ -532,12 +532,16 @@ const CORE_VIEWS = [
     module: "./views/funnel.js", entry: "renderFunnel", view_class: "C",
     mount: (root, snap, ctx) => renderFunnel(root, snap, {
       onOpenTile: ctx.explorer.openTile, notebook: ctx.notebook,
+      // THE VOCABULARY (§ 3.4 slice S7) — every class-C view below takes it
+      // the same way, off the one context object the shell builds per render.
+      display: ctx.display,
       signal: ctx.signal }) },
   { id: "wheel.deck", control: "tab-wheel", region: "view-wheel",
     module: "./views/wheel.js", entry: "renderWheel", view_class: "C",
     mount: (root, snap, ctx) => renderWheel(root, snap,
       { caps: ctx.caps, nav: ctx.nav, notebook: ctx.notebook,
         sourceBase: ctx.sourceBase, composed: ctx.composed,
+        display: ctx.display,
         // THE CONTRIBUTED DISPOSE COLUMN, already resolved (§ 3.4 slice S5).
         // `views/wheel.js` is class C and imported eight names out of
         // `views/dispose.js` — one of § 4.5 assertion 3's four breaches; it
@@ -546,10 +550,13 @@ const CORE_VIEWS = [
         signal: ctx.signal }) },
   { id: "board.pipeline", control: "tab-board", region: "view-board",
     module: "./views/board.js", entry: "renderBoard", view_class: "C",
-    mount: (root, snap, ctx) => renderBoard(root, snap, { onOpenTile: ctx.explorer.openTile, notebook: ctx.notebook }) },
+    mount: (root, snap, ctx) => renderBoard(root, snap, {
+      onOpenTile: ctx.explorer.openTile, notebook: ctx.notebook,
+      display: ctx.display }) },
   { id: "canvas.cluster", control: "tab-canvas", region: "view-canvas",
     module: "./views/canvas.js", entry: "renderCanvas", view_class: "C",
-    mount: (root, snap, ctx) => renderCanvas(root, snap, { notebook: ctx.notebook }) },
+    mount: (root, snap, ctx) => renderCanvas(root, snap, {
+      notebook: ctx.notebook, display: ctx.display }) },
   { id: "lens.keyword", control: "tab-lens", region: "view-lens",
     module: "./views/lens.js", entry: "renderLens", view_class: "?",
     // D21: the lens receives the UNNARROWED composed snapshot as well as the
@@ -585,6 +592,7 @@ const CORE_VIEWS = [
       // the `gate.lens` binding's entry, or null where no gate column is
       // registered — the plan panel then stays plan-only (§ 3.4 slice S4)
       mountLensGate: ctx.mountLensGate,
+      display: ctx.display,
     }) },
   // The doc list's rows open the SAME read-only explorer/viewer overlay the
   // wheel's `read` verb and the workbench's docs rows open (T092 acceptance
@@ -593,10 +601,12 @@ const CORE_VIEWS = [
   // calls back here; `ctx.nav.openDoc` is the one entry point.
   { id: "docs.list", control: "tab-docs", region: "view-docs",
     module: "./views/docs.js", entry: "renderDocs", view_class: "A",
-    mount: (root, snap, ctx) => renderDocs(root, snap, { onOpenDoc: ctx.nav.openDoc }) },
+    mount: (root, snap, ctx) => renderDocs(root, snap, {
+      onOpenDoc: ctx.nav.openDoc, display: ctx.display }) },
   { id: "lineage.readiness", control: "tab-lineage", region: "view-lineage",
     module: "./views/lineage.js", entry: "renderLineage", view_class: "C",
-    mount: (root, snap) => renderLineage(root, snap) },
+    mount: (root, snap, ctx) => renderLineage(root, snap,
+      { display: ctx.display }) },
   // THE THREE CLASS-B BINDINGS ARE GONE FROM HERE — § 3.4 slice S5, and this
   // is the test of whether the seam was drawn in the right place.
   //
