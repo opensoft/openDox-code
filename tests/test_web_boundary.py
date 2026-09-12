@@ -169,8 +169,21 @@ _OWNED_ROUTE_PATTERNS = {
     "openxFactory's adapter lanes (serve_openxfactory_lanes.py)": re.compile(
         r'["\']/actions/(?:dtn-seed|staging-seed|apply-register-edits)["\']'
     ),
+    # `/source` AND `/source/` LEFT THIS PATTERN AT SLICE S6 — RULED Q4 (Brett
+    # Heap, 2026-09-12, opensoft/openxFactory#656 comment 5642758731):
+    # "`/source/` is openDox's, and openXdox's projection binding keeps only
+    # `/snapshot-index.json` and the three `/projections/*` routes." The pair is
+    # a FIXED CORE ARM of `opendox/serve.py` now (`SOURCE_PREFIX`,
+    # `BARE_SOURCE_ROUTE`, `_serve_source`, `_refuse_bare_source`), so a class-A
+    # or class-C file addressing it is no longer naming ANOTHER column's route —
+    # it is naming its own product's. That is why S6 discharges four sites
+    # without editing one line of the four files that carry them (§ 5 row S6:
+    # "`views/viewer.js` and `views/wheel.js`:97 become clean"): the note's
+    # remedy for the census's ONE class-A breach was always to move the ROUTE,
+    # not the file. The § 3.3 ownership table this dict transcribes is amended
+    # by the same ruling; the note's own § 3.3 predates it.
     "openXdox's projection routes (serve_projection.py)": re.compile(
-        r'["\']/(?:snapshot-index\.json|source/?|projections/(?:evidence|workbench|role-authority))["\']'
+        r'["\']/(?:snapshot-index\.json|projections/(?:evidence|workbench|role-authority))["\']'
     ),
 }
 
@@ -196,28 +209,40 @@ def _route_ownership_violations() -> list[str]:
     strict=True,
     reason=(
         "docs/front-end-package-boundary.md § 4.5 point 2 (opensoft/openDox-spec "
-        "#8 -> a44ac06d): 20 sites outside class B name a route another column "
-        "declares (was 18 before slice S3; S3 -- opensoft/openDox-code#14 -- "
-        "adds 2 and closes none) -- 12 the gate prefix (app.js:586/598 NEW: "
-        "the `gate.bar` CORE_VIEWS entry's `routes: [\"/actions/gate/ratify\"]`, "
-        "RULED Q3 'a route constant travels with the binding that calls it' -- "
-        "a real breach by this assertion's own rule while the entry sits in "
-        "app.js (class A) rather than views/gate.js (class B, exempt by "
-        "construction); TRANSITIONAL, closed at slice S5 when the binding "
-        "moves behind a host-supplied contribution and this entry leaves "
-        "app.js entirely; views/lens-model.js:1036/1037, "
-        "views/repo-selector.js:39/43, views/staging-workbench-model.js:543/"
-        "817/818/821/822/826), 3 openxFactory's adapter lanes "
-        "(views/lens.js:41/45, views/repo-selector.js:46, unchanged), 5 "
-        "openXdox's projection routes (app.js:195/196, shifted from :183/184 "
-        "by S3's own unrelated edits earlier in the file -- same two "
-        "`/source/` literals, untouched; views/repo-selector.js:33, "
-        "views/viewer.js:314, views/wheel.js:97). The note's § 4.5 closing "
-        "paragraph assigns closure to slices S5 and S6; its own per-site "
-        "table (point 2) instead reads S4 for 14 of the original 18 and S6 "
-        "for the remaining 4 -- the two do not fully agree, flagged here "
-        "rather than silently reconciled. Unmark only once verified green, "
-        "whichever slice(s) actually close it."
+        "#8 -> a44ac06d): 16 sites outside class B name a route another column "
+        "declares. RE-DERIVED AT SLICE S6 (RULED Q4, opensoft/openxFactory#656 "
+        "comment 5642758731): it was 20 (18 at S1, +2 from S3's CORE_VIEWS "
+        "entry), and the FOUR /source sites CLEAR HERE -- app.js:195/196, "
+        "views/viewer.js:314, views/wheel.js:97 -- not because any of those "
+        "four files changed (none did) but because the route they name is "
+        "openDox's own fixed core arm now, so naming it is the boundary "
+        "working. The remaining 16, measured on this branch: "
+        "TWELVE are the SPLIT-file sites slice S4 closes -- "
+        "views/lens-model.js:1036/1037 and views/staging-workbench-model.js:"
+        "543/817/818/821/822/826 (the gate prefix), views/repo-selector.js:"
+        "39/43 (the gate prefix), :46 (openxFactory's apply-register-edits "
+        "lane, which leaves the bundle entirely) and :33 (/snapshot-index.json, "
+        "still openXdox's -- Q4 moved the /source pair and nothing else). "
+        "TWO are app.js:586/598, S3's `gate.bar` CORE_VIEWS entry and its "
+        "`routes: [\"/actions/gate/ratify\"]` -- a real breach by this "
+        "assertion's own rule while the entry sits in app.js (class A) rather "
+        "than views/gate.js (class B, exempt by construction); TRANSITIONAL, "
+        "closed at S5 when the binding moves behind a host-supplied "
+        "contribution and the entry leaves app.js entirely. "
+        "TWO are views/lens.js:41/45, this assertion's own STANDING DECLARED "
+        "exception (§ 4.5 point 2, last paragraph): none of Q1-Q5 rules on "
+        "lens.js's two openxFactory-lane routes, so they do not clear on any "
+        "slice's schedule and only a future ruling closes them. They are "
+        "counted here rather than excluded from the grep -- S1's own "
+        "'fidelity over tidiness' choice, kept -- which is why the marker "
+        "stays after S4 and S5 too and only the ruling that resolves lens.js "
+        "can take it off. "
+        "The marker therefore STAYS at S6: § 5's row for this slice promises "
+        "assertion 2 green for views/viewer.js, which it is, not the assertion "
+        "green outright, which is S5's row and — on this tree's own "
+        "measurement — not even S5's while lens.js stands. strict=True is what "
+        "makes that honest: the moment the residue actually reaches zero this "
+        "goes XPASS and red until the marker comes off."
     ),
 )
 def test_no_ownership_violation_outside_class_b() -> None:
