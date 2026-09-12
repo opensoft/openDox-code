@@ -1,0 +1,314 @@
+# The declared census for `docs/front-end-package-boundary.md`
+# (opensoft/openDox-spec #8 -> a44ac06d) § 3.2, read by
+# `tests/test_web_boundary.py` -- slice S1, "declare the census and measure
+# the defect" (opensoft/openxFactory#656 comment 5642758731, 2026-09-12,
+# "RULED, same sitting -> START S1-S3 NOW, with the note amended to carry
+# these rulings").
+#
+# Every file under `src/opendox/web/` (measured at openDox-code `main`
+# `a99eba03e31a0aee1cc15a061fdf718cc88a2c44`, the same head the note itself
+# measured) appears here EXACTLY ONCE, `path` relative to that directory.
+# `tests/test_web_boundary.py::test_every_web_file_is_classified_exactly_once`
+# is the ratchet: a new file with no row here fails it immediately (the note
+# § 4.5 point 1) -- that is the whole point of a DECLARED census over an
+# inferred one.
+#
+# Classes, per the note's § 2.1:
+#   A   openDox core.  Names no governance status or stage word, and
+#       addresses no route another column declares.
+#   B   the gate loop. Its SUBJECT is a gate act; its binding belongs to
+#       openXdox through the seam § 4 describes. Exempt, by construction,
+#       from the route-ownership assertion (#2 below) -- a gate-loop file
+#       naming a gate route is the boundary working, not breaking.
+#   C   a stage-named region. Structurally neutral; its NAMES are one
+#       domain's mapping and must be parameterized from the registered
+#       domain profile (S7), never a literal.
+#   "?" transitional. A SPLIT file carrying more than one class's substance
+#       (class-A or class-C substance AND a class-B, or openxFactory-adapter,
+#       tail). Legitimate ONLY until slice S4 does the split -- after S4 a
+#       "?" row still standing fails the census assertion, because a
+#       permanent "undecided" is an escape hatch, not a boundary (note § 4.5
+#       point 1).
+#
+# `tail` (optional): set on a class-A row whose file ALSO carries a rendered
+# label or a corpus path (note § 2.2 rule 3) -- the identifier is named so S7
+# has a starting point. `note` (optional): free-text provenance, echoing the
+# note's own `evidence` column.
+#
+# RULINGS APPLIED HERE, from opensoft/openxFactory#656 comment 5642758731
+# (Brett Heap, 2026-09-12T02:07:53Z, "RULED -- § 3.4 front-end package
+# boundary, the five open questions ... every recommended answer adopted"),
+# amending the note's own § 3.2 table:
+#
+#   Q1  views/docs.js stays class A, its area map (`AREA_ORDER`) carried as
+#       a declared C tail, parameterized at S7. No census change from the
+#       note's own (recommendation-written) table.
+#   Q2  views/explorer.js is class C OUTRIGHT -- reclassified here from the
+#       note's "?" to "C": neither it nor the drill banner is class B, and
+#       explorer.js's only domain content is the artifact-folder vocabulary
+#       (a projection, not a split file). This is the one row this fixture
+#       changes from the note's own table.
+#   Q3  views/repo-selector.js SPLITS (picker + refresh -> A; the two
+#       `/actions/gate/*` project commissions -> a contributed binding at
+#       S4/S5; `/actions/apply-register-edits` leaves the bundle entirely)
+#       -- stays "?" here because the split itself is slice S4's act, not
+#       S1's; § 4.5 point 1 keeps "?" legitimate until then. The same rule
+#       (“a route constant travels with the binding that calls it, never
+#       with the model that declares it”) leaves `views/lens-model.js` and
+#       `views/staging-workbench-model.js` at "?" for the same reason.
+#   Q4  `/source/` is openDox's; discharged at slice S6 by moving the ROUTE
+#       (`openxdox/serve_projection.py`), not by reclassifying `views/viewer.js`
+#       here -- it stays class A, its one ownership breach carried as a
+#       `note`.
+#   Q5  views/intent-feed.js keeps RULED OQ-F (`not_moved`, openxFactory's);
+#       its two importers (`dispose.js`, `wheel.js`) are fixed at slice S2,
+#       not by any census reclassification here.
+#
+# Totals after Q2's reclassification (unchanged from the note otherwise):
+#   A  20 files (18 hand-authored + 2 vendored), 11,702 lines
+#   B  4 files, 1,597 lines
+#   C  14 files (13 + explorer.js), 11,854 lines (11,575 + 279)
+#   ?  4 files (5 - explorer.js), 5,432 lines (5,711 - 279)
+#   total 42 files, 30,585 lines -- unchanged (a reclassification, not a move)
+
+schema_version: 1
+kind: web-boundary-census
+source_note: "opensoft/openDox-spec docs/front-end-package-boundary.md @ a44ac06d"
+ruling_comment: "opensoft/openxFactory#656 comment 5642758731 (2026-09-12T02:07:53Z)"
+measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c44"
+
+files:
+  - path: app.js
+    class: A
+    loc: 1155
+    note: "the shell; imports 20 view modules; its only class-B import is gate.js at :43 (discharged by S3's view registry)"
+
+  - path: index.html
+    class: C
+    loc: 119
+    note: "seven tab labels are stage names; mounts are id=view-<stage>"
+
+  - path: styles.css
+    class: C
+    loc: 2574
+    note: "four --st-brainstorm/--st-staged/--st-proposal/--st-realized status colour tokens (16 definitions); :1278-1295 styles intent-feed's chips"
+
+  - path: vendor/markdown-it.min.js
+    class: A
+    loc: 2
+    note: "vendored MIT Markdown renderer; viewer.js's only external dependency; html option disabled"
+
+  - path: vendor/.gitkeep
+    class: A
+    loc: 0
+    note: "directory keeper"
+
+  - path: views/account-menu.js
+    class: A
+    loc: 181
+    note: "header menu; only import is helpers.js"
+
+  - path: views/board.js
+    class: C
+    loc: 247
+    note: "four lifecycle columns; 25 governance literals"
+
+  - path: views/bullseye.js
+    class: A
+    loc: 398
+    note: "pure shared bullseye SVG; zero governance literals"
+
+  - path: views/canvas-model.js
+    class: C
+    loc: 215
+    note: "cluster canvas derivation; cluster/possible/supersede are governance nouns"
+
+  - path: views/canvas.js
+    class: C
+    loc: 404
+    note: "renders canvas-model.js's output; 7 governance literals"
+
+  - path: views/composed-model.js
+    class: A
+    loc: 329
+    exempt: COMPOSED_COLLECTIONS
+    note: "declared exempt (note § 2.2 rule 3) -- see declared_exemptions below"
+
+  - path: views/dispose.js
+    class: B
+    loc: 427
+    note: "GATE_DISPOSE_ROUTE :28 and GATE_PROPOSE_ROUTE :29 both under serve_gate.ACTIONS_GATE_PREFIX"
+
+  - path: views/doc-wheel.js
+    class: C
+    loc: 491
+    note: "docs-pane wheel; imports wheel-model.js"
+
+  - path: views/docs.js
+    class: A
+    loc: 189
+    tail: AREA_ORDER
+    note: "Q1: stays openDox/class A; AREA_ORDER :18 hardcodes ideation/brainstorm and ideation/staging, parameterized at S7"
+
+  - path: views/doxbench-chat-model.js
+    class: A
+    loc: 1097
+    note: "pure browser-session chat state; import-free"
+
+  - path: views/doxbench-chat.js
+    class: A
+    loc: 1828
+    note: "doxBench chat rail; imports only the pure chat model"
+
+  - path: views/doxbench-editor.js
+    class: A
+    loc: 2966
+    note: "doxBench authoring canvas; imports viewer.js and doxbench-state.js only"
+
+  - path: views/doxbench-save.js
+    class: A
+    loc: 509
+    note: "ordered Save orchestration; import-free"
+
+  - path: views/doxbench-state.js
+    class: A
+    loc: 1049
+    exempt: SCOPE_KINDS
+    note: "declared exempt (note § 2.2 rule 3) -- see declared_exemptions below"
+
+  - path: views/edit.js
+    class: A
+    loc: 48
+    note: "select-to-edit transport; ACTIONS_EDIT_ROUTE answered by openDox's own serve.py"
+
+  - path: views/explorer.js
+    class: C
+    loc: 279
+    note: "Q2 RULING: class C outright (was \"?\" in the note's own table) -- a projection whose only domain content is the artifact-folder vocabulary; classifyChangeFile; reads staged_topics[].files / changes[].files"
+
+  - path: views/funnel.js
+    class: C
+    loc: 538
+    note: "realization funnel; imports model.js's COLUMN_KEYS; 10 governance literals"
+
+  - path: views/gate.js
+    class: B
+    loc: 184
+    note: "GATE_ACTIONS = [demote,edit,ratify,kickoff]; GATE_RATIFY_ROUTE :120 under the gate prefix"
+
+  - path: views/grouping.js
+    class: A
+    loc: 246
+    tail: TALLY_FIELDS
+    note: "TALLY_FIELDS :34-41 pairs each schema key with a rendered label; :51-52 test c.status === active/archived; parameterized at S7"
+
+  - path: views/helpers.js
+    class: A
+    loc: 58
+    note: "el()/txt()/basename()/heat bands; no import, no literal, no route"
+
+  - path: views/lens-model.js
+    class: "?"
+    loc: 1070
+    note: "pure and import-free (class-A substance) but LENS_SAVE_ROUTE :1036 and LENS_CLUSTER_ROUTE :1037 are class-B tails; splits at S4 (Q3's rule extended)"
+
+  - path: views/lens.js
+    class: "?"
+    loc: 1524
+    note: "VOCABULARIES :57 is a class-C vocabulary table; DTN_SEED_ROUTE :41 and STAGING_SEED_ROUTE :45 answered only by openxFactory's adapter; splits at S4"
+
+  - path: views/lineage.js
+    class: C
+    loc: 140
+    note: "stats strip and lineage/readiness overlay; 10 governance literals"
+
+  - path: views/model.js
+    class: C
+    loc: 126
+    note: "COLUMN_KEYS = [docs,clusters,possibles,staged,proposals,realized]; densest file in the tree"
+
+  - path: views/notebook.js
+    class: A
+    loc: 109
+    note: "open in NotebookLM tile action; both routes are openDox's serve.py"
+
+  - path: views/outline-model.js
+    class: C
+    loc: 404
+    note: "staged-topic outline model; REQUIRED_SECTIONS/QUESTION_SUBFIELDS/TEMPLATE_ORDER"
+
+  - path: views/repo-selector-model.js
+    class: A
+    loc: 537
+    tail: STATIONS
+    note: "STATIONS :517-522 pairs each schema key with a rendered label; parameterized at S7"
+
+  - path: views/repo-selector.js
+    class: "?"
+    loc: 889
+    note: "Q3 RULING: SPLITS -- picker+refresh -> A, two gate commissions -> contributed binding (S4/S5), apply-register-edits leaves the bundle; stays \"?\" until S4 does the split"
+
+  - path: views/settings.js
+    class: A
+    loc: 234
+    note: "theme/localStorage preference store; pure frontend, no data path"
+
+  - path: views/staging-workbench-model.js
+    class: "?"
+    loc: 1949
+    note: "pure workbench scope derivation carrying SIX class-B route constants (:543,:817,:818,:821,:822,:826); splits at S4"
+
+  - path: views/staging-workbench.js
+    class: C
+    loc: 3315
+    note: "full-screen workbench scoped to one topic-bearing tile"
+
+  - path: views/swb-create.js
+    class: B
+    loc: 372
+    note: "CREATE_ROUTE = /actions/gate/create-document (from staging-workbench-model.js:543)"
+
+  - path: views/swb-model-intake.js
+    class: A
+    loc: 364
+    note: "model-intake dialog; all routes answered by openDox's serve_workbench.py"
+
+  - path: views/swb-session.js
+    class: B
+    loc: 614
+    note: "FIRST_EDIT_ROUTE/ABANDON_SESSION_ROUTE/SHARE_SESSION_ROUTE/OPEN_PR_ROUTE, all under the gate prefix"
+
+  - path: views/viewer.js
+    class: A
+    loc: 403
+    note: "Q4: stays class A; its content comes from /source/, openXdox's TODAY -- the one § 2.2 rule 1 breach the census carries, discharged by slice S6 (route moves, file does not)"
+
+  - path: views/wheel-model.js
+    class: C
+    loc: 1300
+    note: "WHEEL_KEYS :25 and WHEEL_LABELS :27-34 -- six stage names, spelled twice"
+
+  - path: views/wheel.js
+    class: C
+    loc: 1702
+    note: "THE WHEEL; imports dispose.js (class B) and intent-feed.js (absent, RULED openxFactory); SOURCE_ROUTE :97"
+
+# The two identifiers § 2.2 rule 3 declares EXEMPT from the governance-literal
+# sweep (assertion 4) -- carried here WITH THE REASON, per the note's own
+# instruction ("an exemption that is silence is how a literal survives a
+# vocabulary sweep"). Both live in plain class-A files (no `tail`), so they
+# are already outside assertion 4's scope by construction; this list is the
+# DECLARED record of why, checked for real by
+# `test_declared_governance_literal_exemptions_are_real_and_out_of_scope`.
+declared_exemptions:
+  - path: views/composed-model.js
+    identifier: COMPOSED_COLLECTIONS
+    reason: >-
+      six SNAPSHOT FIELD NAMES (documents, clusters, possibles, staged_topics,
+      changes, keyword_index), never rendered -- a schema key, not a stage
+      name (note § 2.2 rule 3).
+  - path: views/doxbench-state.js
+    identifier: SCOPE_KINDS
+    reason: >-
+      the three tile kinds a workbench session may be scoped to -- a state
+      key, never a label (note § 2.2 rule 3).
