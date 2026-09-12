@@ -11,6 +11,26 @@
 // innerHTML is only ever assigned a literal empty string to clear.
 
 import { el, readinessHeat } from "./helpers.js";
+import {
+  STAGE_ROLES, STATUS_ROLE, VOCABULARY, neutralDisplay,
+} from "./display.js";
+
+const [SOURCE, GROUPING, CANDIDATE, SELECTION, SUBMISSION, COMPLETION] =
+  STAGE_ROLES;
+
+// The three lineage chips keep their landed style hooks (RULED Q7: the `--st-*`
+// family is the one stable styling surface, and a chip class is not part of it).
+const CHIP_CLASS = {
+  [SELECTION]: "lchip-selection",
+  [SUBMISSION]: "lchip-submission",
+  [COMPLETION]: "lchip-completion",
+};
+
+// The per-render vocabulary (§ 3.4 slice S7).
+let vocab = neutralDisplay();
+
+// A tile heading is sentence-cased; the facet declares words, not capitals.
+const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
 // ---- stats strip (always-visible tiles) ----
 function tile(root, k, v, unit, s) {
@@ -59,10 +79,12 @@ export function renderStats(root, snapshot) {
   // real lifecycle-stage distribution over the whole corpus (#18): the old
   // "Brainstorms / active ideation docs" tile counted only the two
   // brainstorm-stage docs and mislabelled the rest out of existence.
-  const active = changes.filter((c) => c.status === "active").length;
-  const archived = changes.filter((c) => c.status === "archived").length;
-  const picked = possibles.filter((p) => p.state === "picked").length;
-  const latent = possibles.filter((p) => p.state === "latent").length;
+  const active = vocab.items(snapshot, SUBMISSION).length;
+  const archived = vocab.items(snapshot, COMPLETION).length;
+  const picked = possibles.filter(
+    (p) => p.state === vocab.registerState(STATUS_ROLE.PROPOSED)).length;
+  const latent = possibles.filter(
+    (p) => p.state === vocab.registerState(STATUS_ROLE.CAPTURED)).length;
   // The tile row is the PIPELINE in order — corpus, clusters, possibles,
   // staged, proposals, archived, the SAME order and the same six stages the
   // wheel's columns and the funnel's lanes use — and it sits above the view it
@@ -73,14 +95,16 @@ export function renderStats(root, snapshot) {
   // caption; it is a stage of its own.
   const ready = staged.filter(
     (s) => (s.health || {}).status === "ready").length;
-  tile(root, "Documents", docs.length, "", stageSubline(docs));
-  tile(root, "Topic clusters", clusters.length, "",
-    (clusters.length === 1 ? "cluster" : "clusters") + " derived");
-  tile(root, "Possibles", possibles.length, "", picked + " picked · " + latent + " latent");
-  tile(root, "Staged topics", staged.length, "",
-    ready + " ready to propose");
-  tile(root, "Active proposals", active, "", "in flight");
-  tile(root, "Archived changes", archived, "", "realized");
+  tile(root, cap(vocab.label(SOURCE)), docs.length, "", stageSubline(docs));
+  tile(root, cap(vocab.label(GROUPING)), clusters.length, "",
+    vocab.count(GROUPING, clusters.length) + " derived");
+  tile(root, cap(vocab.label(CANDIDATE)), possibles.length, "",
+    picked + " " + vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.PROPOSED)
+    + " · " + latent + " " + vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.CAPTURED));
+  tile(root, cap(vocab.label(SELECTION)), staged.length, "",
+    ready + " ready to " + (vocab.gate(SELECTION) || "advance"));
+  tile(root, cap(vocab.label(SUBMISSION)), active, "", "in flight");
+  tile(root, cap(vocab.label(COMPLETION)), archived, "", vocab.short(COMPLETION));
 }
 
 // ---- cluster lineage strips ----
@@ -101,7 +125,8 @@ function clusterBlock(c) {
   const t = c.tallies || {};
   block.appendChild(el("div", "meta",
     (t.document_links != null ? t.document_links : (c.document_edges || []).length) + " doc links · " +
-    (t.possible_links != null ? t.possible_links : 0) + " possible links"));
+    (t.possible_links != null ? t.possible_links : 0) + " "
+    + vocab.one(CANDIDATE) + " links"));
 
   const heat = readinessHeat(c.readiness);
   if (heat) block.appendChild(heat);
@@ -112,22 +137,25 @@ function clusterBlock(c) {
 
   const lin = c.lineage || {};
   const rows = [
-    lineageRow("staged picks", lin.staged_picks, "staged"),
-    lineageRow("proposals", lin.proposals, "proposal"),
-    lineageRow("realized", lin.realized, "realized"),
+    lineageRow(vocab.label(SELECTION), lin.staged_picks, CHIP_CLASS[SELECTION]),
+    lineageRow(vocab.label(SUBMISSION), lin.proposals, CHIP_CLASS[SUBMISSION]),
+    lineageRow(vocab.label(COMPLETION), lin.realized, CHIP_CLASS[COMPLETION]),
   ].filter(Boolean);
   if (rows.length) rows.forEach((r) => block.appendChild(r));
   else block.appendChild(el("div", "meta", "no downstream lineage yet"));
   return block;
 }
 
-export function renderLineage(root, snapshot) {
+export function renderLineage(root, snapshot, opts) {
+  vocab = opts?.display || neutralDisplay();
   const clusters = snapshot.clusters || [];
   root.innerHTML = "";
   const legend = el("div", "legend");
   legend.appendChild(el("span", "g",
-    "downstream progression per cluster — staged picks → proposals → realized — " +
-    "with readiness and conflict flags rendered verbatim from the cross-reference index when present"));
+    "downstream progression per " + vocab.one(GROUPING) + " — "
+    + [SELECTION, SUBMISSION, COMPLETION].map((r) => vocab.label(r)).join(" → ")
+    + " — with readiness and conflict flags rendered verbatim from the "
+    + "cross-reference index when present"));
   root.appendChild(legend);
 
   // The cluster blocks live in a single scroll region (the v4 layout contract:
@@ -135,6 +163,9 @@ export function renderLineage(root, snapshot) {
   // legend stays put while the list scrolls instead of the whole page.
   const list = el("div", "lineage-list");
   for (const c of clusters) list.appendChild(clusterBlock(c));
-  if (!clusters.length) list.appendChild(el("div", "empty", "no clusters in the snapshot"));
+  if (!clusters.length) {
+    list.appendChild(el("div", "empty",
+      "no " + vocab.many(GROUPING) + " in the snapshot"));
+  }
   root.appendChild(list);
 }

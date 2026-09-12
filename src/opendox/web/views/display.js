@@ -207,6 +207,26 @@ export const DRILL_KINDS = {
   completion: "realized",
 };
 
+// DRAFT_PATHS — the cluster canvas's draft file-name prefixes. A cross-PROCESS
+// path contract: `src/opendox/canvas_drafts.py` builds the same names on the
+// server ("MUST match canvas-model.js"), so the two must spell them identically
+// or a drafted file lands where nothing reads it. A seam key by the same test
+// as `SNAPSHOT_FIELDS`: never rendered as a word, only composed into a path the
+// human is shown alongside the draft it names.
+export const DRAFT_PATHS = { candidate: "possible-", supersede: "supersede-" };
+
+// THE STAGING TEMPLATE'S CANONICAL HEADING ORDER — the last member of § 2.2
+// rule 3's schema family, mirrored from `display_profile.SECTION_ORDER` and
+// carried on the payload (`sections`) so a host may override it.
+// `views/outline-model.js` MATCHES these needles against headings a human
+// already wrote, to decide which existing section a new one goes next to; it
+// never renders one. openDox ships the order it has always shipped, so no
+// install loses its outline ordering to a facet nobody has declared yet.
+export const SECTION_ORDER = [
+  "last proposal attempt", "claims", "why", "what changes", "impact",
+  "idea notes", "conflicts", "open questions", "exit",
+];
+
 // openDox's OWN words. Kept BYTE-FOR-BYTE in step with
 // `display_profile.NEUTRAL_DISPLAY`; `tests/test_display_facet.py` parses both
 // and refuses a difference.
@@ -325,6 +345,8 @@ export class Display {
         pick(facet.stages, NEUTRAL_DISPLAY.stages, role),
         this.fields[role]);
     }
+    this._sections = Array.isArray(facet.sections) && facet.sections.length
+      ? facet.sections.slice() : SECTION_ORDER.slice();
     this._values = {};
     for (const name of Object.keys(SNAPSHOT_VALUES)) {
       const declared = facet.values && facet.values[name];
@@ -406,6 +428,9 @@ export class Display {
     if (word === undefined) refuseRole(name + " value", role, Object.keys(table));
     return word;
   }
+
+  // The staging template's canonical heading order — matched, never rendered.
+  sections() { return this._sections; }
 
   // ---- statuses ----
   status(vocabulary, role) {

@@ -1,3 +1,14 @@
+import { DRAFT_PATHS, STAGE_ROLES, neutralDisplay } from "./display.js";
+
+const [SOURCE, GROUPING, CANDIDATE] = STAGE_ROLES;
+
+// The register's SEEDED default state — "the seeded default, and the ONLY
+// promotable state" (the possibles register's own enum). A schema value this
+// module WRITES into a draft, never a word it renders; `latent` carries no
+// governance vocabulary of its own, and the rendered word for the same state is
+// `display.status(VOCABULARY.CANDIDATE, STATUS_ROLE.CAPTURED)`.
+const REGISTER_SEED_STATE = "latent";
+
 // Per-cluster cluster-canvas view-model (D12). PURE: no DOM, no I/O, no
 // external imports — imported by canvas.js in the browser AND unit-tested from
 // Python via node (tests/ideation-dashboard/test_canvas.py), exactly like
@@ -32,9 +43,14 @@ export function esc(s) {
 }
 
 // The one wording the browser preview and the boundary-written draft share.
-// canvas_drafts.SUPERSEDE_REASON MUST produce the identical string.
-export function supersedeReason(chosenId) {
-  return "Option-set sibling " + chosenId + " was chosen at the cluster canvas.";
+// `canvas_drafts.supersede_reason()` MUST produce the identical string, and
+// since slice S7 BOTH sides read the domain's word for the grouping station out
+// of the same display facet — the browser from `ctx.display`, the server from
+// `display_profile` — so the two stay identical under any vocabulary.
+export function supersedeReason(chosenId, display) {
+  const d = display || neutralDisplay();
+  return "Option-set sibling " + chosenId + " was chosen at the "
+    + d.one(GROUPING) + " canvas.";
 }
 
 // Where a committed draft lands — a run-local drafts dir under the boundary's
@@ -124,7 +140,7 @@ export function buildCanvasModel(snapshot, clusterId) {
   // GAP PROMPTS — two actionable-slot derivations, both from the snapshot:
   //   unclaimed-member : a member document no possible of this cluster pins as
   //                      evidence (a latent feat waiting to be named).
-  //   unsupported-possible : a possible of this cluster with no evidence pin
+  //   unsupported-candidate : a candidate of this cluster with no evidence pin
   //                      (a claim with no document backing).
   const gaps = [];
   for (const m of members) {
@@ -139,10 +155,10 @@ export function buildCanvasModel(snapshot, clusterId) {
   for (const p of possibles) {
     if (!(p.supporting_evidence || []).length) {
       gaps.push({
-        kind: "unsupported-possible",
+        kind: "unsupported-candidate",
         possibleId: p.id,
         possibleTitle: p.title || p.id,
-        state: p.state || "latent",
+        state: p.state || REGISTER_SEED_STATE,
       });
     }
   }
@@ -172,21 +188,23 @@ export function buildCanvasModel(snapshot, clusterId) {
 // (the chosen member's id). Pure — the browser shows this as confirmation; the
 // actual boundary-written artifact is canvas_drafts.build_supersede_draft, which
 // this must agree with (test_canvas.py locks the reason string).
-export function supersedePlan(snapshot, clusterId, optionSetId, chosenId) {
+export function supersedePlan(snapshot, clusterId, optionSetId, chosenId, display) {
   const model = buildCanvasModel(snapshot, clusterId);
   if (!model) return null;
   const os = model.optionSets.find((o) => o.id === optionSetId);
   if (!os) return null;
   const siblings = os.members
     .filter((p) => p.id !== chosenId)
-    .map((p) => ({ id: p.id, title: p.title || p.id, fromState: p.state || "latent" }));
+    .map((p) => ({ id: p.id, title: p.title || p.id,
+                   fromState: p.state || REGISTER_SEED_STATE }));
   return {
     optionSetId,
     chosenId,
     siblings,
-    reason: supersedeReason(chosenId),
+    reason: supersedeReason(chosenId, display),
     citation: chosenId,
-    landsAt: DRAFTS_DIR + "supersede-" + optionSetId + "-" + chosenId + ".register.yaml",
+    landsAt: DRAFTS_DIR + DRAFT_PATHS.supersede + optionSetId + "-" + chosenId
+      + ".register.yaml",
   };
 }
 
@@ -206,10 +224,10 @@ export function composerPlan(snapshot, clusterId, input) {
     id,
     title: (inp.title || "").trim(),
     claim: (inp.claim || "").trim(),
-    state: "latent",
+    state: REGISTER_SEED_STATE,
     clusterId,
     provenanceDoc,
     evidenceCount: attached.length,
-    landsAt: DRAFTS_DIR + "possible-" + (id || "unnamed") + ".register.yaml",
+    landsAt: DRAFTS_DIR + DRAFT_PATHS.candidate + (id || "unnamed") + ".register.yaml",
   };
 }

@@ -43,13 +43,20 @@ import {
   nextExpanded, isExpandedTile, EXPANDED, SPRING,
 } from "./wheel-model.js";
 import { el } from "./helpers.js";
+import { STAGE_ROLES, neutralDisplay } from "./display.js";
+
+const [SOURCE] = STAGE_ROLES;
+
+// The per-render vocabulary (§ 3.4 slice S7): `renderDocWheel` is the entry
+// point and every helper runs inside it.
+let vocab = neutralDisplay();
 
 // `key` is the wheel identity `nextExpanded` reduces over. This drum has one
 // column, so one constant name is the whole namespace.
 export const DOC_WHEEL = Object.freeze({
   drumF: 0.4,
   tileH: 56,   // matches .wheeltile's CSS height, as the deck's TILE_H does
-  key: "docs",
+  key: SOURCE,
 });
 
 // Below this the pane is mid-layout (display:none, a pane not yet sized, the
@@ -95,9 +102,10 @@ const SAVE_CONTEXT_ONLY =
 const SAVE_NOT_LOADED =
   "load this document for editing before saving it";
 const SAVE_NOTHING_TO_DO =
-  "this document has no unsaved changes";
+  "this document has nothing unsaved";
 
 export function renderDocWheel(host, entries, opts = {}) {
+  vocab = opts.display || neutralDisplay();
   const onSelect = typeof opts.onSelect === "function" ? opts.onSelect : null;
   // `onRead` is the verb's contract name; `onOpen` is the retired Phase A
   // spelling, still accepted so a caller that has not been re-pointed keeps its
@@ -121,12 +129,12 @@ export function renderDocWheel(host, entries, opts = {}) {
 
   if (!entries.length) {
     host.appendChild(el("div", "swb-empty",
-      "this scope resolves no documents in the snapshot"));
+      "this scope resolves no " + vocab.many(SOURCE) + " in the snapshot"));
     return { destroy() {}, focused: () => null };
   }
 
   host.setAttribute("role", "listbox");
-  host.setAttribute("aria-label", "documents in this scope");
+  host.setAttribute("aria-label", vocab.many(SOURCE) + " in this scope");
   host.tabIndex = 0;
 
   const port = el("div", "swb-docwheelport");

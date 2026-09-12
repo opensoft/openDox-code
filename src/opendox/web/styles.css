@@ -488,9 +488,9 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .lineage-row { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; font-size: 12px; align-items: center; }
 .lineage-row .lk { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .lchip { font-family: var(--mono); font-size: 11px; background: var(--faint); border: 1px solid var(--border); border-radius: 3px; padding: 1px 7px; }
-.lchip.staged { border-color: var(--st-staged); }
-.lchip.proposal { border-color: var(--st-proposal); }
-.lchip.realized { border-color: var(--st-realized); }
+.lchip.lchip-selection { border-color: var(--st-staged); }
+.lchip.lchip-submission { border-color: var(--st-proposal); }
+.lchip.lchip-completion { border-color: var(--st-realized); }
 
 /* muted single-line status caption (loading/select-to-edit messages) */
 .docstatus { color: var(--muted); font-size: 12px; padding: 6px 0; }

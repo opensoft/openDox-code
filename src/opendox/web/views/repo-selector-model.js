@@ -1,3 +1,5 @@
+import { neutralDisplay } from "./display.js";
+
 // Repository-selector VIEW MODEL (openxFactory change add-dashboard-repo-selector,
 // tasks 3.2/3.5 and Brett's 2026-07-26 rulings). PURE derivation over the
 // snapshot INDEX — no DOM, no fetch, no imports — so it is copied ALONE into a
@@ -514,17 +516,28 @@ export function hintLabel(option) {
 // Which funnel stations this snapshot has NO data for. Sparse is rendered, never
 // refused: an install repository carrying only OpenSpec changes shows active and
 // archived and says, explicitly, that the middle is empty in THIS repository.
-export const STATIONS = [
-  ["documents", "ideation documents"],
-  ["clusters", "topic clusters"],
-  ["possibles", "possibles"],
-  ["staged_topics", "staged topics"],
-  ["changes", "OpenSpec changes"],
-];
+// PARAMETERIZED AT § 3.4 SLICE S7. § 3.2 declared this file class A with a C
+// TAIL — "`STATIONS` :517-522 pairs each schema key with a RENDERED label" —
+// and the display facet already declares both halves of that pairing. The
+// stations are the SPINE, deduplicated by snapshot FIELD: the two change
+// stations read one collection, so a repository carrying no changes at all
+// reports ONE empty station and not two.
+export function stations(display) {
+  const d = display || neutralDisplay();
+  const seen = new Set();
+  const out = [];
+  for (const stage of d.stages()) {
+    if (seen.has(stage.field)) continue;
+    seen.add(stage.field);
+    out.push([stage.field, d.label(stage.role)]);
+  }
+  return out;
+}
 
-export function emptyStations(snapshot) {
+export function emptyStations(snapshot, display) {
   const snap = snapshot || {};
-  return STATIONS.filter(([key]) => !(Array.isArray(snap[key]) && snap[key].length))
+  return stations(display)
+    .filter(([key]) => !(Array.isArray(snap[key]) && snap[key].length))
     .map(([key, label]) => ({ key, label }));
 }
 

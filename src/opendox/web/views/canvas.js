@@ -167,7 +167,8 @@ function possiblesRail(model, ctx) {
       const choose = el("button", "cbtn", "choose this — draft sibling supersession");
       choose.type = "button";
       choose.addEventListener("click", () => {
-        const plan = supersedePlan(ctx.snapshot, model.cluster.id, os.id, p.id);
+        const plan = supersedePlan(ctx.snapshot, model.cluster.id, os.id, p.id,
+          vocab);
         ctx.confirmSupersede(plan);
       });
       body.appendChild(choose);

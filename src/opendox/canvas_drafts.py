@@ -53,8 +53,18 @@ _ENTRY_ORDER = (
 
 def supersede_reason(chosen_id: str) -> str:
     """The one wording shared with canvas-model.js `supersedeReason` (locked by a
-    cross-check in test_canvas.py)."""
-    return f"Option-set sibling {chosen_id} was chosen at the cluster canvas."
+    cross-check in test_canvas.py).
+
+    PARAMETERIZED AT § 3.4 SLICE S7. The sentence names the GROUPING station, and
+    that station's word is the registered domain's. Both sides now read it from
+    the same display facet — the browser from `ctx.display`, this side from
+    `display_profile` — so the two stay byte-identical under any vocabulary
+    instead of being locked to one domain's spelling in two places.
+    """
+    from opendox import display_profile
+    facet = display_profile.display_manifest(display_profile.host_display())
+    grouping = facet["stages"]["grouping"]["one"]
+    return f"Option-set sibling {chosen_id} was chosen at the {grouping} canvas."
 
 
 # --------------------------- snapshot lookups ---------------------------

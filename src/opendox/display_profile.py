@@ -111,6 +111,7 @@ __all__ = [
     "DISPLAY_SCHEMA_VERSION",
     "NEUTRAL_DISPLAY",
     "PROFILE_FACET",
+    "SECTION_ORDER",
     "SNAPSHOT_VALUES",
     "STAGE_FIELDS",
     "STAGE_ROLES",
@@ -229,6 +230,19 @@ SNAPSHOT_VALUES: dict[str, dict[str, str]] = {
     "register_state": {"captured": "latent", "proposed": "picked",
                        "retired": "rejected", "superseded": "superseded"},
 }
+
+#: THE STAGING TEMPLATE'S CANONICAL HEADING ORDER — the last member of § 2.2
+#: rule 3's schema family, and here for the same reason `SNAPSHOT_VALUES` is.
+#: `views/outline-model.js` MATCHES these needles against the headings a human
+#: already wrote, to decide which existing section a new one goes next to; it
+#: never renders one. A domain whose staging template is shaped differently
+#: overrides the list on the facet, and openDox ships the order it has always
+#: shipped so that no install loses its outline ordering to a facet nobody has
+#: declared yet.
+SECTION_ORDER: tuple[str, ...] = (
+    "last proposal attempt", "claims", "why", "what changes", "impact",
+    "idea notes", "conflicts", "open questions", "exit",
+)
 
 #: openDox's OWN words — the neutral product's plain vocabulary for its own
 #: shape, rendered when no host declares a `DISPLAY` facet. NOT openxFactory's
@@ -415,7 +429,7 @@ def normalize_display(declared: Any) -> dict[str, Any]:
     table = _mapping(declared, where="the facet itself")
     _unknown_roles(table.keys(),
                    ("stages", "statuses", "areas", "tokens", "acts",
-                    "artifacts", "values"),
+                    "artifacts", "values", "sections"),
                    where="the facet itself")
     out = _copy_display(NEUTRAL_DISPLAY)
 
@@ -528,6 +542,22 @@ def _copy_display(source: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _section_order(declared: Any) -> list[str]:
+    """The staging template's heading order, host-overridden where declared."""
+    if declared is None:
+        return list(SECTION_ORDER)
+    table = _mapping(declared, where="the facet itself")
+    order = table.get("sections")
+    if order is None:
+        return list(SECTION_ORDER)
+    if not isinstance(order, (list, tuple)):
+        raise DisplayFacetError(
+            f"the host profile's {PROFILE_FACET} facet gives sections "
+            f"{order!r}; the staging template's heading order is a list of "
+            "lowercase needles, read left to right.")
+    return [_text(needle, where="sections") for needle in order]
+
+
 def _snapshot_values(declared: Any) -> dict[str, dict[str, str]]:
     """The snapshot's enum values, host-overridden per role where declared.
 
@@ -580,6 +610,7 @@ def display_manifest(declared: Any, *, host_profile: str | None = None
                    for role, field, status in STAGE_FIELDS},
         "values": _snapshot_values(declared),
         "area_order": list(AREA_ROLES),
+        "sections": _section_order(declared),
         "artifact_roles": list(ARTIFACT_ROLES),
         "token_roles": list(TOKEN_ROLES),
         **normalize_display(declared),
