@@ -49,10 +49,27 @@ jobs:
       # place the ruled contract is executed rather than described. It is
       # `--noconftest` safe and needs no consumer, for the same reason and by
       # the same means as its two neighbours.
+      #
+      # `docs/front-end-package-boundary.md` § 3.4 slice S2 (RULED Q5,
+      # openxFactory#656 comment 5642758731) adds
+      # `tests/test_intent_binding_shape.py` on the same footing again: a
+      # text/regex SHAPE assertion over dispose.js, wheel.js and the new
+      # intent-binding.js (there is no JS parser in this leg's dependency
+      # set, and the note's own § 4.5 test is written to the same
+      # constraint) proving the two views no longer name the absent
+      # `views/intent-feed.js` (RULED OQ-F `not_moved`) in a static import.
+      # `--noconftest` safe and needs no consumer — it reads three files as
+      # text and nothing else. The BEHAVIOURAL probe of the same seam
+      # (`tests/test_intent_binding_dom.py`, node-driven) stays off this
+      # list on the same footing as its narrowed siblings
+      # `test_intent_tray_dom.py` / `test_wheel_verbs_dom.py`: it is a DOM
+      # probe of a `web/` view, and un-narrowing that class of test is
+      # slice S8's job, not S2's.
       - name: pytest
         run: >-
           python -m pytest -q
           tests/test_leg_shape.py
           tests/test_consumer_reach.py
           tests/test_profile_registration.py
+          tests/test_intent_binding_shape.py
           --noconftest
