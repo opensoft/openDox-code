@@ -419,6 +419,37 @@ class _ProfileWithoutTheFacet:
     ROUTE_EXTENSIONS = ("the host's routes",)
 
 
+@pytest.fixture(autouse=True)
+def _empty_registry():
+    """Every test in this module starts with NO registration, and PUTS BACK
+    whatever it found — mirrors `test_profile_registration.py`'s fixture of the
+    same name (Copilot review thread on this PR, `tests/test_view_registry.py
+    :438`).
+
+    The root `conftest.py` registers an empty `_SuiteProfile` AT COLLECTION
+    TIME, because a test process is a host like any other. Under a normal
+    invocation that registration is already live before any test below runs,
+    so `registered()`'s `domain_profile.register()` raised `AlreadyRegistered`
+    against the suite's own profile, and
+    `test_no_host_at_all_refuses_rather_than_answering_empty`'s
+    `assert not domain_profile.is_registered()` saw it registered and failed —
+    this module never cleared the ambient registration before asserting
+    against a clean slate.
+
+    THE RESTORE IS NOT COSMETIC, for the reason `test_profile_registration.py`
+    gives: a bare teardown that only unregistered would strip the conftest
+    profile for the rest of the session, and every later test anywhere in the
+    process that reaches a composition point would then raise
+    `ProfileNotRegistered` for a reason that has nothing to do with it.
+    """
+    previous = domain_profile.current() if domain_profile.is_registered() else None
+    domain_profile.unregister()
+    yield
+    domain_profile.unregister()
+    if previous is not None:
+        domain_profile.register(previous)
+
+
 @pytest.fixture
 def registered():
     """Register, yield the proxy, and ALWAYS unregister.
@@ -595,6 +626,21 @@ def test_app_js_declares_the_gate_bar_as_an_optional_class_b_binding():
     assert 'module: "./views/gate.js", entry: "mountGateBar", view_class: "B"' in source
     assert 'routes: ["/actions/gate/ratify"]' in source
     assert "optional: true" in source
+
+
+def test_app_js_mounts_the_gate_bar_through_its_declared_entry():
+    """The viewer's `mountGate` adapter must call the RESOLVED binding's own
+    declared `entry` export, not a name this file happens to remember (Copilot
+    review thread on this PR, `app.js:994`). `resolveView()` already validates
+    that `binding.entry` names a callable export of `binding.module`; a
+    contributed `gate.bar` binding can declare any entry name and export a
+    DIFFERENT callable under it, and a hardcoded `mountGateBar` would then
+    either mount the wrong function or throw on `undefined`. The negative
+    assertion is the regression guard: the fix is a one-token change a later
+    edit could silently revert back to the hardcoded name."""
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "gateView.exports[gateView.binding.entry](host, gctx, { caps })" in source
+    assert "gateView.exports.mountGateBar(host, gctx, { caps })" not in source
 
 
 def test_app_js_wires_the_doc_list_through_the_registry():
