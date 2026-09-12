@@ -338,8 +338,24 @@ export function contributedViewBindings(capabilities) {
 // against the same facts.
 export function manifestRoutes(capabilities) {
   const manifest = capabilities && capabilities.views;
-  const routes = manifest && manifest.contributed_routes;
-  return Array.isArray(routes) ? routes : [];
+  // ABSENT MEANS AN EMPTY COLUMN, exactly `contributedViewBindings`' own
+  // reading of no manifest at all. MALFORMED DOES NOT: `view_manifest()`
+  // always emits `contributed_routes` as an array (Copilot, PR #14), so a
+  // manifest that is PRESENT but carries anything else there is not making a
+  // true claim of "no contributed routes" — it is malformed, and reading it
+  // as `[]` would silently disable every binding's § 2.2 rule 1 check rather
+  // than fail closed the way this seam promises for anything it cannot
+  // reason about.
+  if (manifest === undefined || manifest === null) return [];
+  const routes = manifest.contributed_routes;
+  if (!Array.isArray(routes)) {
+    refuse("the /capabilities `views` payload declares contributed_routes "
+      + JSON.stringify(routes) + ", not an array: view_manifest() always "
+      + "emits this field as one, and a manifest that cannot be trusted for "
+      + "contributed_routes cannot be trusted for the ownership check that "
+      + "field exists to carry.");
+  }
+  return routes;
 }
 
 // An OPTIONAL reach: the binding, or null. This is `consumer_reach`'s posture
@@ -382,7 +398,24 @@ export async function resolveView(bindings, id) {
   const binding = lookupView(bindings, id);
   if (!binding) return null;
   const bundleRoot = new URL("../", import.meta.url);
-  const exports = await import(new URL(binding.module, bundleRoot).href);
+  // A REJECTED IMPORT IS A REFUSAL TOO, and one this seam names rather than
+  // lets pass through raw (Copilot, PR #14): a missing file, a syntax error
+  // or a circular import all reject `import()` with a native error carrying
+  // no binding or module context, and the app would report a generic
+  // snapshot failure instead of the "which binding, which module" every
+  // other defect in this function states. `viewBinding()` already bounds
+  // `module` to a bundle-relative './…js' specifier that cannot climb out of
+  // the bundle, so what fails here is the file not being THERE, not the path
+  // being unsafe.
+  let exports;
+  try {
+    exports = await import(new URL(binding.module, bundleRoot).href);
+  } catch (e) {
+    refuse("view binding " + JSON.stringify(binding.id) + " names module "
+      + JSON.stringify(binding.module) + ", which failed to load: "
+      + (e && e.message ? e.message : String(e)) + ". A binding that cannot "
+      + "be mounted must not look registered.");
+  }
   // PRESENT IS NOT MOUNTABLE. Checking only that the name exists lets a module
   // export a string, an object or a `null` under it and still hand back a
   // binding that looks resolved; the mount call then throws a raw `TypeError`

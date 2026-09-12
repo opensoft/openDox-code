@@ -79,8 +79,8 @@
 # assertion 4's scope regardless, which is class C plus declared tails), and
 # its one route-shaped string, `'gate.bar'` (an example in a doc comment), is
 # an ID, not a `/actions/...` path -- assertion 2's patterns do not match it.
-#   A  21 files, 12,251 lines (11,702 + 422 + 127 app.js growth)
-#   total 43 files, 31,134 lines (30,585 + 422 + 127); B/C/? unchanged
+#   A  21 files, 12,284 lines (11,702 + 422 + 127 app.js growth + 33 review round)
+#   total 43 files, 31,167 lines (30,585 + 422 + 127 + 33); B/C/? unchanged
 
 schema_version: 1
 kind: web-boundary-census
@@ -291,8 +291,8 @@ files:
 
   - path: views/view_extension.js
     class: A
-    loc: 422
-    note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' at :126/:374 is a documentation example of an id, not a route literal, so assertion 2 does not match it."
+    loc: 455
+    note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' in a doc comment is a documentation example of an id, not a route literal, so assertion 2 does not match it. loc 422 -> 455 on this PR's own review round (Copilot, PR #14): a malformed contributed_routes now refuses instead of silently disabling the ownership check, and a rejected dynamic import now refuses naming the binding and module instead of leaking a raw error."
 
   - path: views/viewer.js
     class: A

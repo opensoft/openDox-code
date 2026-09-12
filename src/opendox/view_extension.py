@@ -201,6 +201,18 @@ _ID = re.compile(r"^[a-z0-9]+(?:[-.][a-z0-9]+)*$")
 #: own refusal rather than that test's coverage.
 _MODULE = re.compile(r"^\./[A-Za-z0-9_./-]+\.js$")
 
+#: An export name, held to the SAME grammar `views/view_extension.js`'s
+#: `viewBinding()` checks (Copilot, PR #14): `str.isidentifier()` and this
+#: bundle's client both claimed to validate "a JS export name" and actually
+#: validated two different things — Python's accepts Unicode names (`café`)
+#: the browser's ASCII-only check then refuses, and rejects ASCII names the
+#: browser accepts (`$mount`, `$` is not a Python identifier character at
+#: all). A binding this module publishes and the client then refuses is
+#: § 4.1's seam failing at the one place a shared vocabulary was the entire
+#: point, so both halves compile the one pattern below rather than each
+#: half asking its own language what an identifier is.
+_ENTRY = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+
 
 class ViewBindingError(ValueError):
     """A binding that cannot be mounted, refused where it is DECLARED.
@@ -272,13 +284,15 @@ class ViewBinding:
             raise ViewBindingError(
                 f"view binding {self.id!r} names module {self.module!r}, which "
                 "climbs out of the bundle with '..'")
-        if not isinstance(self.entry, str) or not self.entry.isidentifier():
+        if not isinstance(self.entry, str) or not _ENTRY.match(self.entry):
             raise ViewBindingError(
                 f"view binding {self.id!r} names entry {self.entry!r}: an entry "
                 "is the NAME of an export on the binding's module, never a "
                 "callable — the same discipline `RouteBinding.handler` keeps, "
                 "and for the same reason: the manifest crosses a process "
-                "boundary as JSON")
+                "boundary as JSON. Held to the JS-compatible identifier "
+                "grammar `views/view_extension.js` checks, not Python's own "
+                "`str.isidentifier()` (§ 4.1: one vocabulary, both halves)")
         if self.entry.startswith("__"):
             raise ViewBindingError(
                 f"view binding {self.id!r} names entry {self.entry!r}: a dunder "
@@ -463,7 +477,24 @@ def collect_view_bindings(extensions, *,
             raise ViewBindingError(
                 f"{extension!r} does not conform to ViewExtension: it must "
                 f"declare {list(MEMBERS)}")
-        declared = extension.views()
+        # `isinstance(extension, ViewExtension)` ONLY CHECKS THAT `views`
+        # EXISTS — `runtime_checkable` verifies membership, never callability
+        # or a method's return shape (Copilot, PR #14: `views = 1` and
+        # `views()` returning `None` both pass the check above and then raise
+        # a raw `TypeError` two lines down, never the `ViewBindingError` every
+        # other declaration defect in this module promises). Checked here,
+        # explicitly, rather than trusted to the Protocol.
+        views_member = getattr(extension, "views", None)
+        if not callable(views_member):
+            raise ViewBindingError(
+                f"{extension!r} does not conform to ViewExtension: views is "
+                f"{views_member!r}, which is not callable")
+        declared = views_member()
+        if not isinstance(declared, (list, tuple)):
+            raise ViewBindingError(
+                f"{extension!r}.views() returned {declared!r}: the protocol "
+                "promises tuple[ViewBinding, ...], and a value this module "
+                "cannot iterate more than once safely is not that")
         for binding in declared:
             if not isinstance(binding, ViewBinding):
                 raise ViewBindingError(

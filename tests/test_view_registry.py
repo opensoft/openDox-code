@@ -202,6 +202,28 @@ def test_a_well_formed_binding_is_frozen_and_carries_its_slot():
         binding.id = "other"          # frozen dataclass
 
 
+@pytest.mark.parametrize("entry", ["$mount", "_mount", "mount$panel"])
+def test_the_entry_grammar_accepts_what_the_js_client_accepts(entry):
+    # Copilot, PR #14: `str.isidentifier()` accepts Unicode names the browser's
+    # ASCII-only regex refuses, and rejects `$`-bearing ASCII names
+    # `views/view_extension.js`'s `viewBinding()` accepts — so a binding could
+    # be published here and refused there, or refused here and never published
+    # at all for a name the client would have happily loaded. `$mount` is
+    # accepted by JS `[A-Za-z_$][A-Za-z0-9_$]*` and rejected by
+    # `"$mount".isidentifier()`; this asserts the PYTHON side now agrees.
+    assert _binding(entry=entry).entry == entry
+
+
+def test_the_entry_grammar_refuses_what_the_js_client_refuses():
+    # `"café"` IS a valid Python identifier (accented Unicode letters are
+    # allowed) and is NOT matched by the client's ASCII-only
+    # `/^[A-Za-z_$][A-Za-z0-9_$]*$/` — the other half of the same drift.
+    assert "café".isidentifier()
+    with pytest.raises(ViewBindingError) as excinfo:
+        _binding(entry="café")
+    assert "the NAME of an export" in str(excinfo.value)
+
+
 def test_the_manifest_entry_is_json_and_drops_nothing():
     entry = _binding(routes=("/actions/gate/ratify",), optional=True,
                      view_class="B", region="viewer-gatebar",
@@ -234,6 +256,39 @@ def test_an_extension_contributing_something_else_refuses():
     with pytest.raises(ViewBindingError) as excinfo:
         collect_view_bindings([Wrong()])
     assert "not a ViewBinding" in str(excinfo.value)
+
+
+def test_a_views_member_that_is_not_callable_refuses_rather_than_raising_typeerror():
+    # `isinstance(extension, ViewExtension)` is a `runtime_checkable` Protocol
+    # check, which verifies only that the NAME `views` exists — never that it
+    # is callable (Copilot, PR #14). Before this test's fix, `views = 1` passed
+    # that check and then raised a raw `'int' object is not callable`
+    # `TypeError` two lines later, never the `ViewBindingError` this module
+    # promises for every declaration defect.
+    class NotCallable:
+        views = 1
+
+    with pytest.raises(ViewBindingError) as excinfo:
+        collect_view_bindings([NotCallable()])
+    assert "not callable" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("returned", [None, 42, iter(())])
+def test_a_views_call_that_returns_something_unusable_refuses(returned):
+    # The Protocol promises `tuple[ViewBinding, ...]`; before this test's fix,
+    # `views()` returning `None` raised a raw `'NoneType' object is not
+    # iterable` `TypeError` at the `for binding in declared:` loop (Copilot,
+    # PR #14, same finding as the callable check above — a member existing is
+    # not a member behaving). A bare iterator is refused too, not accepted:
+    # this module walks it once for validation, and an extension consulted
+    # again later would see it already exhausted.
+    class Unusable:
+        def views(self):
+            return returned
+
+    with pytest.raises(ViewBindingError) as excinfo:
+        collect_view_bindings([Unusable()])
+    assert "views()" in str(excinfo.value)
 
 
 def test_two_bindings_in_one_slot_refuse_and_name_both_modules():
@@ -621,6 +676,44 @@ console.log(JSON.stringify(out));
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_manifest_routes_refuses_a_malformed_contributed_routes_field(tmp_path):
+    # `view_manifest()` always emits `contributed_routes` as an array
+    # (`view_extension.py::view_manifest`); before this test's fix, a PRESENT
+    # manifest carrying anything else there was read back as `[]` here --
+    # silently disabling every binding's § 2.2 rule 1 ownership check rather
+    # than refusing a payload this seam cannot reason about (Copilot, PR #14).
+    # ABSENCE of the whole manifest still means an empty column, not a
+    # refusal -- `contributedViewBindings`'s own rule, held here too.
+    result = _run_node(f"""
+import {{ manifestRoutes }} from {json.dumps(REGISTRY_JS.as_uri())};
+const out = {{}};
+out.absent = manifestRoutes({{}}).length;
+out.nullCaps = manifestRoutes(null).length;
+out.valid = manifestRoutes(
+  {{ views: {{ contributed_routes: [{{ pattern: "/x", is_prefix: false }}] }} }}
+).length;
+for (const [name, routes] of [
+  ["string", "/actions/gate/"],
+  ["object", {{ pattern: "/x" }}],
+  ["missing", undefined],
+]) {{
+  try {{
+    manifestRoutes({{ views: {{ contributed_routes: routes }} }});
+    out[name] = "not refused";
+  }} catch (e) {{ out[name] = e.name; out[name + "Message"] = e.message; }}
+}}
+console.log(JSON.stringify(out));
+""", tmp_path)
+    assert result["absent"] == 0
+    assert result["nullCaps"] == 0
+    assert result["valid"] == 1
+    assert result["string"] == "ViewBindingError"
+    assert result["object"] == "ViewBindingError"
+    assert result["missing"] == "ViewBindingError"
+    assert "contributed_routes" in result["stringMessage"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
 def test_js_refuses_a_contributed_entry_carrying_the_core_arms_own_fields(
         tmp_path):
     # `mount` and `control` ARE THE CORE ARM'S. A contributed entry arrives as
@@ -710,6 +803,39 @@ console.log(JSON.stringify({{
 """, tmp_path)
     assert result == {"id": "docs.list", "region": "view-docs",
                       "entry": "function"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_resolve_view_refuses_a_binding_whose_module_fails_to_load(tmp_path):
+    # A REJECTED `import()` IS A REFUSAL TOO. Before this test's fix, a binding
+    # naming a module that is not there rejected with a native error carrying
+    # no binding or module context -- the app reports a generic snapshot
+    # failure instead of the "which binding, which module" every other defect
+    # in this function states (Copilot, PR #14).
+    manifest = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "kind": MANIFEST_KIND,
+        "contributed_routes": [],
+        "views": [{"id": "fixture.missing", "region": "view-docs",
+                   "module": "./views/does-not-exist.js", "entry": "mountPanel",
+                   "view_class": "A", "routes": [], "requires": [],
+                   "optional": False}],
+    }
+    result = _run_node(f"""
+import {{ collectViewBindings, contributedViewBindings, resolveView }}
+  from {json.dumps(REGISTRY_JS.as_uri())};
+const views = collectViewBindings(
+  [{{ views: () => contributedViewBindings({{ views: {json.dumps(manifest)} }}) }}]);
+const out = {{}};
+try {{
+  await resolveView(views, "fixture.missing");
+  out.result = "not refused";
+}} catch (e) {{ out.result = e.name; out.message = e.message; }}
+console.log(JSON.stringify(out));
+""", tmp_path)
+    assert result["result"] == "ViewBindingError"
+    assert "fixture.missing" in result["message"]
+    assert "./views/does-not-exist.js" in result["message"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
