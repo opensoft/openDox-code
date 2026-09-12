@@ -68,9 +68,13 @@ _FAKE_INTENT_FEED = """\
 export function intentCapable(caps) {
   return !!(caps && caps.actions && caps.actions.intent);
 }
-export function feedActor() { return "fake-actor"; }
+export function feedActor(caps) {
+  return "fake-actor:" + ((caps && caps.marker) || "no-marker");
+}
 export function refusalLine(rec) { return "fake-refusal:" + rec.state; }
-export function startIntentFeed() { return { subscribe() {}, stop() {} }; }
+export function startIntentFeed(opts) {
+  return { subscribe() {}, stop() {}, marker: (opts && opts.marker) || "no-marker" };
+}
 export function statesByTarget(rows) {
   return new Map((rows || []).map((r) => [r.id, "fake:" + r.id]));
 }
@@ -280,13 +284,16 @@ import {
 
 const rec = { state: "accepted" };
 const rows = [{ id: "t1" }, { id: "t2" }];
-const started = startIntentFeed({ some: "opts" });
+const caps = { actions: { intent: true }, marker: "caps-m1" };
+const opts = { some: "opts", marker: "opts-m2" };
+const started = startIntentFeed(opts);
 const emitted = await emitIntent({ verb: "propose" });
 console.log(JSON.stringify({
-  feedActor: feedActor({ actions: { intent: true } }),
+  feedActor: feedActor(caps),
   refusalLine: refusalLine(rec),
   startedIsNull: started === null,
   startedHasSubscribe: !!(started && typeof started.subscribe === "function"),
+  startedMarker: started ? started.marker : null,
   states: Array.from(statesByTarget(rows).entries()),
   emitted,
 }));
@@ -314,11 +321,20 @@ def test_the_remaining_forwards_reach_the_contributed_module(tmp_path):
     """The same five, with the fake `intent-feed.js` contributed: each
     answer comes from the FAKE module, not from intent-binding.js's own
     fallback — `states` in particular is keyed from `rows`, which only the
-    contributed `statesByTarget` (not the absent-case empty Map) can produce."""
+    contributed `statesByTarget` (not the absent-case empty Map) can produce.
+
+    PR REVIEW FIX (opensoft/openDox-code#15, Copilot): the fakes for
+    `feedActor` and `startIntentFeed` also carry their OWN caller-supplied
+    marker (`caps.marker` / `opts.marker`) into their answer, so this
+    assertion fails if intent-binding.js ever forwarded either call with the
+    wrong argument, or none at all — the earlier constant-valued fakes could
+    not have caught a dropped or substituted `caps`/`opts` no matter what
+    intent-binding.js actually passed through."""
     r = _run(tmp_path, _FORWARDS_PROBE, contribute_intent_feed=True)
-    assert r["feedActor"] == "fake-actor"
+    assert r["feedActor"] == "fake-actor:caps-m1"
     assert r["refusalLine"] == "fake-refusal:accepted"
     assert r["startedIsNull"] is False
     assert r["startedHasSubscribe"] is True
+    assert r["startedMarker"] == "opts-m2"
     assert r["states"] == [["t1", "fake:t1"], ["t2", "fake:t2"]]
     assert r["emitted"] == {"state": "pending", "message": "fake-queued:propose"}
