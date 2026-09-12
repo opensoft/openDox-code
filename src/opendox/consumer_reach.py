@@ -416,7 +416,7 @@ generator = module(
 #: a mixin base and stopped re-exporting its names.
 serve_projection = module(
     "serve_projection",
-    reason="the snapshot, index and /source routes are openXdox's column "
+    reason="the snapshot and index routes are openXdox's column "
            "(design.md § D3); this core dispatches them through the § 2.4 "
            "route extension point instead of inheriting them")
 
@@ -440,15 +440,16 @@ is_rfc3339_datetime = function(generator, "is_rfc3339_datetime")
 #: travelled to the projection column with its neighbours.
 hosted_ref_refused = function(serve_projection, "hosted_ref_refused")
 
-#: `serve_projection.resolve_source_path` — the CONTAINMENT check, and the one
-#: name `serve.py` re-exported that has a reader OUTSIDE `serve.py`:
-#: `notebook_action.py`:52 imports it `from .serve` and :139 re-checks every
-#: resolved document through it before a notebook action may name a path. So the
-#: name stays bound in `serve.py` when the other five re-exports go, and it is
-#: bound to this stand-in: same callable, same root-confinement, resolved on
-#: first CALL. Dropping it would have moved a path-containment check into an
-#: ImportError, which is the one class of removal this slice must not make.
-resolve_source_path = function(serve_projection, "resolve_source_path")
+#: `resolve_source_path` STOOD HERE and is `serve.py`'s own definition since
+#: § 3.4 slice S6 (RULED Q4, openxFactory#656 comment 5642758731). It is the
+#: single-root entry point to the `/source` pass-through's containment, and that
+#: pass-through is now a FIXED CORE ARM of the neutral product — so a stand-in
+#: forwarding into the layer that PINS openDox was the wrong shape for it. The
+#: RULE has not moved: `snapshot_registry.resolve_within` is still the consumer's
+#: and is still what the entry point calls, through `serve.py`'s `registry_mod`
+#: binding below — the same seam `serve_workbench.py` reaches it by at five
+#: sites. `notebook_action.py`:52 still imports the name `from .serve`, and now
+#: gets a real function rather than a forwarder.
 
 #: `corpus_root.SCANNED_ROOTS` — the one CONSTANT reach, and the family's
 #: narrowest member. `cli.py:228` iterates it to name the roots a rejected
@@ -472,15 +473,22 @@ LateGateRoutes = route_column(serve_gate, "GateRoutes",
                               ("_handle_gate_action", "_log_gate_failure"))
 
 #: `serve_projection.ProjectionRoutes` as a mixin base — `DashboardHandler`'s
-#: fourth base until slice 2b. Eight methods: the three the § 2.4 bindings name
-#: (`_serve_index`, `_serve_source`, `_refuse_bare_source`), `_serve_snapshot`
-#: — which `serve.py`'s own CORE arm calls, because `/snapshot.json`'s handler
-#: travelled with its neighbours while its arm stayed core — and the four those
-#: four call between them.
+#: fourth base until slice 2b. FIVE methods since § 3.4 slice S6: the one the
+#: § 2.4 binding names (`_serve_index`), `_serve_snapshot` — which `serve.py`'s
+#: own CORE arm calls, because `/snapshot.json`'s handler travelled with its
+#: neighbours while its arm stayed core — and the three those two call between
+#: them.
+#:
+#: IT WAS EIGHT UNTIL S6 (RULED Q4, openxFactory#656 comment 5642758731).
+#: `_keyed_source`, `_serve_source` and `_refuse_bare_source` are `serve.py`'s
+#: own methods now, because the route they answer is the neutral product's own
+#: fixed core arm. `_hosted_entry_refused` stays HERE and is still forwarded:
+#: `_serve_snapshot` calls it too, and it is FR-048's hosted-plane confinement,
+#: which is the projection column's rule — the route moved, the rule did not.
 LateProjectionRoutes = route_column(
     serve_projection, "ProjectionRoutes",
     ("_query_key", "_read_snapshot", "_serve_snapshot", "_hosted_entry_refused",
-     "_serve_index", "_keyed_source", "_serve_source", "_refuse_bare_source"))
+     "_serve_index"))
 
 __all__ = [
     "CONSUMER_PACKAGE",
@@ -498,7 +506,6 @@ __all__ = [
     "LateGateRoutes",
     "LateProjectionRoutes",
     "module",
-    "resolve_source_path",
     "route_column",
     "scanned_roots",
     "serve_gate",

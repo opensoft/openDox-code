@@ -290,8 +290,21 @@ _OWNED_ROUTE_PATTERNS = {
     "openxFactory's adapter lanes (serve_openxfactory_lanes.py)": re.compile(
         r'["\']/actions/(?:dtn-seed|staging-seed|apply-register-edits)["\']'
     ),
+    # `/source` AND `/source/` LEFT THIS PATTERN AT SLICE S6 — RULED Q4 (Brett
+    # Heap, 2026-09-12, opensoft/openxFactory#656 comment 5642758731):
+    # "`/source/` is openDox's, and openXdox's projection binding keeps only
+    # `/snapshot-index.json` and the three `/projections/*` routes." The pair is
+    # a FIXED CORE ARM of `opendox/serve.py` now (`SOURCE_PREFIX`,
+    # `BARE_SOURCE_ROUTE`, `_serve_source`, `_refuse_bare_source`), so a class-A
+    # or class-C file addressing it is no longer naming ANOTHER column's route —
+    # it is naming its own product's. That is why S6 discharges four sites
+    # without editing one line of the four files that carry them (§ 5 row S6:
+    # "`views/viewer.js` and `views/wheel.js`:97 become clean"): the note's
+    # remedy for the census's ONE class-A breach was always to move the ROUTE,
+    # not the file. The § 3.3 ownership table this dict transcribes is amended
+    # by the same ruling; the note's own § 3.3 predates it.
     "openXdox's projection routes (serve_projection.py)": re.compile(
-        r'["\']/(?:snapshot-index\.json|source/?|projections/(?:evidence|workbench|role-authority))["\']'
+        r'["\']/(?:snapshot-index\.json|projections/(?:evidence|workbench|role-authority))["\']'
     ),
 }
 
@@ -335,38 +348,80 @@ def _route_ownership_violations() -> list[str]:
     return violations
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "docs/front-end-package-boundary.md § 4.5 point 2 (opensoft/openDox-spec "
-        "#8 -> a44ac06d): 4 sites outside class B name a route another column "
-        "declares. THE ARITHMETIC, since every slice so far has moved it: 18 at "
-        "S1 -> 20 at S3 (which added app.js's `gate.bar` entry and closed none) "
-        "-> 12 measured after S4 -> 10 in scope (S4 also gives this assertion "
-        "the DECLARED EXCEPTION the note's own last paragraph states for "
-        "views/lens.js:41/45) -> 4 HERE. SLICE S5 CLEARED ALL SIX GATE-PREFIX "
-        "SITES, and every one of them was in app.js's CORE arm: the `gate.bar` "
-        "entry (S3) and the `gate.lens` / `gate.projects` entries (S4), each a "
-        "class-B binding's `routes:` declaration sitting in a class-A file. "
-        "They closed the way the marker predicted -- the six class-B modules "
-        "LEFT this bundle for openXdox-code's package data and their bindings "
-        "arrive through contributedViewBindings() (RULED Q5, openxFactory#656 "
-        "comment 5648044785), so app.js carries no gate route literal at all. "
-        "WHAT IS LEFT is one family and it is not this slice's: 4 of openXdox's "
-        "projection routes -- app.js:205/:206, views/viewer.js:314, "
-        "views/wheel.js:131, the `/source/` sites RULED Q4 re-homes at slice S6 "
-        "(openDox-code#16, openXdox-code#17, both in flight on their own "
-        "branches and not in this stack). NOT IN SCOPE, by declaration rather "
-        "than by silence: views/lens.js's two openxFactory-lane sites "
-        "(`route_ownership_exceptions` in the census) -- none of Q1-Q5 rules on "
-        "that file, so they clear on no slice's schedule. This marker therefore "
-        "comes off at S6; unmark only once verified green."
-    ),
-)
+# ASSERTION 2 IS GREEN. The `xfail(strict=True)` that stood here from slice S1
+# comes off at slice S5, which is the slice its own last revision named — and it
+# comes off because the count is ZERO, measured, not because the marker was
+# tidied away.
+#
+# THE ARITHMETIC, since every slice moved it: 18 at S1 -> 20 at S3 (which added
+# `app.js`'s `gate.bar` entry and closed none) -> 12 measured after S4, 10 in
+# scope (S4 CLEARS ALL TWELVE SPLIT-FILE SITES the note's point-2 table assigns
+# to it — `views/lens-model.js`:1036/1037, `views/repo-selector.js`:33/39/43/46,
+# `views/staging-workbench-model.js`:543/817/818/821/822/826 — every one of
+# those constants now sitting in a class-B file, exempt by construction, which
+# is RULED Q3 in force rather than described; and S4 gives this assertion the
+# DECLARED EXCEPTION the note's own last paragraph states for `views/lens.js`)
+# -> 8 measured, 6 in scope once S6 is also applied (RULED Q4, openxFactory#656
+# comment `5642758731`: the four openXdox projection sites clear because
+# `/source/` is openDox's own fixed core arm now, so naming it is the boundary
+# working rather than breaking — no file changed, the ROUTE moved) -> 0 HERE.
+#
+# THE LAST SIX WERE ALL ONE FAMILY AND ALL IN ONE PLACE: `app.js`'s CORE arm,
+# the `gate.bar` entry (S3) and the `gate.lens` / `gate.projects` entries (S4),
+# each a class-B binding's `routes:` declaration sitting in a class-A file —
+# "a real breach by this assertion's own rule only while the entry sits in
+# app.js rather than in the class-B module it names", as the census row said of
+# them. They closed the way that row predicted: the six class-B modules LEFT
+# this bundle for openXdox-code's package data and their bindings arrive
+# through `contributedViewBindings()` (RULED Q5, openxFactory#656 comment
+# `5648044785`), so `app.js` carries no gate route literal at all.
+#
+# NOT IN SCOPE, by declaration rather than by silence: `views/lens.js`'s two
+# openxFactory-lane sites, `/actions/dtn-seed` and `/actions/staging-seed`,
+# declared in the census's `route_ownership_exceptions` with the ruling gap
+# beside them. None of Q1–Q5 rules on that file, so they clear on no slice's
+# schedule — "they never entered it".
 def test_no_ownership_violation_outside_class_b() -> None:
     violations = _route_ownership_violations()
     assert not violations, f"{len(violations)} route-ownership violation(s):\n" + "\n".join(violations)
+
+
+def test_the_route_ownership_exceptions_are_real_and_still_present() -> None:
+    """Assertion 2's exception list cannot outlive its cause, on the same
+    reasoning `declared_transitional_rows` already stands on (note § 4.5
+    point 2's own last paragraph, applied to the declaration this time
+    instead of to the class-A/C sweep): a stale exception that keeps
+    excluding a route nobody re-measures is how a real breach hides behind a
+    label the site no longer earns. This module's own comment above
+    `route_ownership_exceptions` in the fixture says "each route is checked
+    to be really present in the file it exempts" -- this test is that check,
+    not just the claim of it.
+
+    Unmarked and passing: bookkeeping on the fixture, not a measurement of
+    the boundary defect.
+    """
+    for exception in _ROUTE_EXCEPTIONS:
+        path = exception["path"]
+        row = _ROWS_BY_PATH.get(path)
+        assert row is not None, (
+            f"route_ownership_exceptions names {path}, which carries no census row"
+        )
+        assert exception.get("reason"), f"{path}'s route exception carries no reason"
+        assert exception.get("until"), (
+            f"{path}'s route exception names nothing that would discharge it; "
+            f"an exception with no exit is a permanent one wearing a label"
+        )
+        routes = exception.get("routes")
+        assert routes, f"{path}'s route exception declares no routes at all"
+        text = (WEB_ROOT / path).read_text(encoding="utf-8")
+        for route in routes:
+            quoted = (f'"{route}"' in text) or (f"'{route}'" in text)
+            assert quoted, (
+                f"{path}'s route exception names {route!r}, which is not actually "
+                f"present in the file as a string literal any more -- the "
+                f"exception has outlived its site and is now excluding nothing, "
+                f"or excluding the wrong thing"
+            )
 
 
 # ---------------------------------------------------------------------------
