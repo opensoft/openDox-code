@@ -22,7 +22,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TESTS_ROOT = HERE.parent
-REPO_ROOT = HERE.parent.parent
+REPO_ROOT = HERE.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(TESTS_ROOT))
 
