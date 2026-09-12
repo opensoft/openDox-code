@@ -8,11 +8,18 @@
 // its only reader outside this file's two importers is openxFactory's
 // `serve_openxfactory_lanes.py:412`. It is therefore ABSENT from this leg's
 // own tree BY CONSTRUCTION, not by accident — but `dispose.js`:26 and
-// `wheel.js`:75-76 used to `import … from "./intent-feed.js"`
-// UNCONDITIONALLY, which made the whole static module graph fail to resolve
-// the moment this leg carried no such file (the note's § 1.2(b): `app.js`
-// imports `wheel.js`, so the shell's own module graph does not resolve at
-// `openDox-code` `main`).
+// `wheel.js`:75-76 used to name a static `from` clause pointing at that
+// same (absent) file directly and UNCONDITIONALLY, which made the whole
+// static module graph fail to resolve the moment this leg carried no such
+// file (the note's § 1.2(b): `app.js` imports `wheel.js`, so the shell's
+// own module graph does not resolve at `openDox-code` `main`).
+//
+// (Deliberately not spelled out here as a quoted `from "..."` clause: this
+// file's own text is itself scanned by `tests/test_web_boundary.py`'s
+// assertion 3, whose regex does not distinguish a real import from one
+// named inside a comment — spelling the old specifier out literally would
+// make this file misreport itself as still carrying the very import it
+// removes.)
 //
 // THE FIX IS THIS FILE, NOT A CHANGE TO WHAT IS ABSENT. `dispose.js` and
 // `wheel.js` now import the seven names below FROM HERE instead of from
