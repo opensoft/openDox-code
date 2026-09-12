@@ -60,6 +60,17 @@
 #       (`openxdox/serve_projection.py`), not by reclassifying `views/viewer.js`
 #       here -- it stays class A, its one ownership breach carried as a
 #       `note`.
+#       DISCHARGED (slice S6, this branch): the route moved. `SOURCE_PREFIX`,
+#       `BARE_SOURCE_ROUTE` and their two `RouteBinding`s left
+#       `openxdox/serve_projection.py`, and `/source` + `/source/` are FIXED
+#       CORE ARMS of `opendox/serve.py`. `views/viewer.js` and
+#       `views/wheel.js`:97 are clean WITHOUT AN EDIT -- their `/source/`
+#       literals are unchanged and now address this product's own route -- and
+#       the two `app.js` sites (:195/:196) clear with them. Four of assertion
+#       2's twenty sites, closed by a route-ownership correction rather than by
+#       a front-end change: exactly what the note's § 5 row S6 promised. The
+#       `note` on the two rows below records the discharge; the CLASS on
+#       neither row ever changed.
 #   Q5  views/intent-feed.js keeps RULED OQ-F (`not_moved`, openxFactory's);
 #       its two importers (`dispose.js`, `wheel.js`) are fixed at slice S2,
 #       not by any census reclassification here.
@@ -330,7 +341,7 @@ files:
   - path: views/viewer.js
     class: A
     loc: 403
-    note: "Q4: stays class A; its content comes from /source/, openXdox's TODAY -- the one § 2.2 rule 1 breach the census carries, discharged by slice S6 (route moves, file does not)"
+    note: "the read-only Markdown viewer; pure render plus the vendored markdown-it. CLEAN class A since slice S6: its content comes from /source/, which RULED Q4 makes openDox's own fixed core arm (opendox/serve.py), so the census's one former § 2.2 rule 1 breach is discharged -- the route moved, the file did not change"
 
   - path: views/wheel-model.js
     class: C
@@ -340,7 +351,7 @@ files:
   - path: views/wheel.js
     class: C
     loc: 1702
-    note: "THE WHEEL; imports dispose.js (class B) and intent-feed.js (absent, RULED openxFactory); SOURCE_ROUTE :97"
+    note: "THE WHEEL; imports dispose.js (class B) and resolves intent-feed.js optionally (S2, RULED Q5/OQ-F); SOURCE_ROUTE :97 is clean since slice S6 -- RULED Q4 makes /source/ openDox's own core arm, so a class-C file naming it is no longer addressing another column's route"
 
 # The two identifiers § 2.2 rule 3 declares EXEMPT from the governance-literal
 # sweep (assertion 4) -- carried here WITH THE REASON, per the note's own
