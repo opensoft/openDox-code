@@ -101,6 +101,33 @@ export const REGIONS = {
   "workbench-session": "shell",
 };
 
+// THE CONTEXT OBJECT'S DECLARED KEYS — what a binding mounted at a region may
+// read off the third argument of `mount(host, snapshot, ctx)` (RULED Q3,
+// openxFactory#656 comment `5648044785`). Declared for the same reason REGIONS
+// is: the counterpart note's § 3 asks what a contributed binding "may assume
+// about the shell … the context object's shape", and a shape that is only ever
+// an object literal in `app.js` is an assumption rather than a contract.
+//
+// `display` is SLICE S7's ONE ADDITION (§ 4.3 step 3: "`app.js` puts that facet
+// in the context object every binding already receives"). It is the vocabulary
+// reader of `views/display.js`, built from `/capabilities`' `display` block:
+// `ctx.display.label(role)`, `.one(role)`, `.many(role)`, `.status(vocabulary,
+// role)`, `.area(role)`, `.token(role)`, `.items(snapshot, role)` — every one
+// of them resolved BY ROLE and never by a word. A contributed column renders
+// the registered domain's vocabulary by reading it, exactly as openDox's own
+// class-C views do, and inherits the neutral words when no host declares any.
+//
+// The Python half carries the same table (`view_extension.CTX_KEYS`) and
+// `tests/test_display_facet.py` holds the two against each other, as
+// `tests/test_view_registry.py` already does for REGIONS.
+export const CTX_KEYS = {
+  caps: "the capability probe, composed-stripped where the render is composed",
+  views: "the collected view registry — `lookupView(ctx.views, id)`",
+  nav: "the shell's cross-view navigation verbs, or null outside a tab",
+  display: "the registered domain's vocabulary, resolved BY ROLE (slice S7)",
+  signal: "the render's AbortSignal, for any listener bound outside own root",
+};
+
 export const MANIFEST_KIND = "opendox.view-manifest";
 export const MANIFEST_SCHEMA_VERSION = 1;
 

@@ -99,6 +99,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Protocol, runtime_checkable
 
 __all__ = [
+    "CTX_KEYS",
     "MANIFEST_KIND",
     "MANIFEST_SCHEMA_VERSION",
     "REGIONS",
@@ -208,6 +209,29 @@ REGIONS: dict[str, str] = {
 #: own precedent (`lens-gate` and `repo-projects` arrived the same way one slice
 #: ago) and on this table's own argument: "Declaring a region costs nothing and
 #: refuses nothing; an undeclared one is what costs a slice."
+
+#: THE CONTEXT OBJECT'S DECLARED KEYS — what a binding mounted at a region may
+#: read off the third argument of `mount(host, snapshot, ctx)` (RULED Q3,
+#: openxFactory#656 comment `5648044785`). Mirrored in
+#: `web/views/view_extension.js` and held against it by
+#: `tests/test_display_facet.py`, exactly as REGIONS is.
+#:
+#: `display` is SLICE S7's ONE ADDITION — § 4.3 step 3, "`app.js` puts that
+#: facet in the context object every binding already receives". It is the
+#: vocabulary reader of `web/views/display.js`, built from the `display` block
+#: `serve.build_server()` publishes on `/capabilities`, and every read on it is
+#: BY ROLE: `.label(role)`, `.one(role)`, `.many(role)`, `.status(vocabulary,
+#: role)`, `.area(role)`, `.token(role)`, `.items(snapshot, role)`. A
+#: contributed column reads the registered domain's words the same way openDox's
+#: own class-C views do, and inherits openDox's neutral words when no host
+#: declares any.
+CTX_KEYS: dict[str, str] = {
+    "caps": "the capability probe, composed-stripped where the render is composed",
+    "views": "the collected view registry — `lookupView(ctx.views, id)`",
+    "nav": "the shell's cross-view navigation verbs, or null outside a tab",
+    "display": "the registered domain's vocabulary, resolved BY ROLE (slice S7)",
+    "signal": "the render's AbortSignal, for any listener bound outside own root",
+}
 
 #: The facet name a host's profile carries, beside `ROUTE_EXTENSIONS` and
 #: `SUBCOMMAND_EXTENSIONS` — ONE composite profile, one registration, three

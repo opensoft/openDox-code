@@ -149,6 +149,9 @@ from opendox import defaults  # noqa: E402
 # `/capabilities`, the one line slice S3 built both ends of and left for the
 # slice at which a contribution first exists to deliver.
 from opendox import view_extension  # noqa: E402
+# § 3.4 slice S7: and the DISPLAY FACET beside it, on the same payload and for
+# the same stated reason — § 4.3 step 2, "no new route and no second fetch".
+from opendox import display_profile  # noqa: E402
 
 registry_mod = consumer_reach.snapshot_registry  # noqa: E402
 # THE BY-FUNCTION SPLIT (`split-opendox-two-layer-product` § 2.4, PRs 2 and 3
@@ -1573,6 +1576,37 @@ def build_server(
             view_extensions, contributed_routes=route_bindings),
         contributed_routes=route_bindings,
         host_facet="declared" if view_extensions else "absent",
+        host_profile=getattr(profile_openxfactory, "__name__", None),
+    )
+
+    # ---- THE DISPLAY FACET, PUBLISHED (§ 3.4 slice S7) ----------------------
+    #
+    # § 4.3 STEP 2, VERBATIM: "`serve.py` exposes the profile's DISPLAY FACET —
+    # the stage keys with their labels, the status vocabulary, the
+    # artifact-folder words — on the existing `/capabilities` payload (already
+    # fetched once at load by `views/notebook.js`'s `probeCapabilities`), so no
+    # new route and no second fetch." One more facet of the ONE registered
+    # profile, read through the SAME lazy proxy as `ROUTE_EXTENSIONS` and
+    # `VIEW_EXTENSIONS` three statements above.
+    #
+    # WHY IT RIDES BESIDE `views` RATHER THAN INSIDE IT: the two answer
+    # different questions of the same host. `views` is WHICH PANELS a consumer
+    # column contributes; `display` is WHAT THIS DOMAIN CALLS THINGS, which
+    # every class-C file in openDox's OWN core arm reads whether or not any
+    # column is contributed. A student install has no `views` and still has a
+    # funnel to label.
+    #
+    # ABSENT IS NEUTRAL AND NAMED, never openxFactory's words: a host with no
+    # `DISPLAY` facet gets `host_facet: "absent"` with its profile NAMED and
+    # openDox's own neutral vocabulary in the payload, so the shell comes up
+    # saying `sources → groups → candidates → …` — visibly un-domained rather
+    # than invisibly re-domained. `display_profile`'s module docstring carries
+    # the argument for departing from § 4.3 point 5's "refusal, not a default"
+    # here and nowhere else. MALFORMED still fails closed: a facet that IS
+    # declared and does not conform raises `DisplayFacetError` HERE, where the
+    # server is built, naming the role, the field and the value.
+    capabilities["display"] = display_profile.display_manifest(
+        display_profile.host_display(profile_openxfactory),
         host_profile=getattr(profile_openxfactory, "__name__", None),
     )
 

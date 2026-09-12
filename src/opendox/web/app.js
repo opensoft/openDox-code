@@ -54,6 +54,13 @@ import {
   ViewBindingError, collectViewBindings, contributedViewBindings,
   manifestRoutes, mountContributedViews, resolveView,
 } from "./views/view_extension.js";
+// THE VOCABULARY, resolved once per render and handed down through `ctx`
+// (§ 3.4 slice S7, § 4.3 step 3). Every class-C view in this bundle reads its
+// stage names, status words, corpus areas and design tokens off this object BY
+// ROLE, so none of them carries one domain's word as a literal. Absent host
+// facet — which is every host today, and every static served image — gives
+// openDox's own neutral vocabulary, not openxFactory's words.
+import { readDisplay } from "./views/display.js";
 import { mountStagingWorkbench } from "./views/staging-workbench.js";
 // THE SECOND CLASS-A -> CLASS-B IMPORT IS GONE TOO (§ 3.4 slice S5, RULED Q10).
 // This line was `import { firstEditTransport } from ./views/swb-session.js` —
@@ -1010,6 +1017,21 @@ async function render() {
     // are the same object, so the list is one object named twice — harmless,
     // and cheaper than deciding which of the two this render produced.
     const consoleRepair = createConsoleRepair([probedCaps, caps]);
+    // THE VOCABULARY, READ ONCE PER RENDER (§ 3.4 slice S7, § 4.3 steps 2-4).
+    // The display facet rides on the payload already fetched two statements
+    // above — "no new route and no second fetch" — and is handed to every view
+    // through `ctx.display` below. A view asks for a stage, a status, a corpus
+    // area or a design token BY ROLE and is given the registered domain's own
+    // word for it; with no host facet it is given openDox's neutral one.
+    //
+    // THE FOUR DESIGN TOKENS ARE SET HERE, ON `:root`, BEFORE ANYTHING MOUNTS.
+    // § 4.3 point 4: "`styles.css`'s four `--st-*` tokens become profile-keyed
+    // custom properties set on `:root` at boot." `styles.css` declares
+    // `--st-<role>` for each of the four roles and this line supplies the
+    // values, so the stylesheet names a position and the profile names a
+    // colour. Before `render()` is re-entered the values are simply set again.
+    const display = readDisplay(probedCaps);
+    display.applyTokens(document.documentElement);
     // THE VIEW REGISTRY, COLLECTED ONCE PER RENDER (§ 3.4 slice S3, § 4.1).
     // The core arm openDox supplies, then the consumer column the host
     // contributed — the same order and the same single collection
@@ -1083,10 +1105,10 @@ async function render() {
     // regions and are mounted by the callers that build their hosts, which is
     // exactly the exception Q1 preserves; the pass exists for the NEXT column.
     const contributedMounts = await mountContributedViews(
-      views, snapshot, { caps, nav: null, views },
+      views, snapshot, { caps, nav: null, views, display },
       { capabilities: probedCaps });
     const explorer = mountExplorer(explorerRoot, snapshot, {
-      signal,
+      signal, display,
       onOpenFile: (entry, pane, tile) => {
         const sourceKey = sourceKeyFor(entry);
         return renderViewer(pane, {
@@ -1284,7 +1306,7 @@ async function render() {
       document.getElementById("staging-workbench-root"), snapshot,
       { onOpenDoc: (path, doc) =>
           explorer.openDoc(path, doc, workbenchSourceKey),
-        caps, active, index, signal,
+        caps, active, index, signal, display,
         // the unstripped probe, read by the workbench's `openDraft` alone
         createCaps: probedCaps,
         // the console-token re-read, forwarded to the two write transports so a
@@ -1345,6 +1367,11 @@ async function render() {
     };
     tabs = initTabs(snapshot, {
       explorer, notebook, caps, nav, composed, sourceBase: sourceBaseFor(active),
+      // THE ONE KEY SLICE S7 ADDS TO `ctx` (§ 4.3 step 3). Declared in
+      // `view_extension.js`'s CTX_KEYS beside the regions table, so a
+      // contributed binding reads the shell's vocabulary through the contract
+      // rather than through this file. Every class-C view below reads it.
+      display,
       // THE COLLECTED REGISTRY, handed to every view (§ 3.4 slice S3). The tab
       // router derives the tab strip from it, and a view that needs an OPTIONAL
       // contributed panel asks for it by id — `lookupView(ctx.views, "…")`,
@@ -1402,7 +1429,7 @@ async function render() {
     // refresh reloads it too (the data changed, so every view must re-derive); a
     // FAILED refresh reports inline and leaves this view exactly as it is.
     repoSelector = mountRepoSelector(document.getElementById("repopicker"), {
-      index, active, snapshot, caps, projects,
+      index, active, snapshot, caps, projects, display,
       // the `gate.projects` binding's entry, or null where no gate column is
       // registered — the selector then renders picker + refresh only, which is
       // the whole of what § 3.4 slice S4 leaves in class A
