@@ -400,8 +400,19 @@ export class Display {
       this._areas[role] = Object.assign(
         { role: role }, pick(facet.areas, NEUTRAL_DISPLAY.areas, role));
     }
-    this._tokens = Object.assign({}, NEUTRAL_DISPLAY.tokens,
-      facet.tokens && typeof facet.tokens === "object" ? facet.tokens : null);
+    const declaredTokens = facet.tokens && typeof facet.tokens === "object"
+      ? facet.tokens : null;
+    this._tokens = Object.assign({}, NEUTRAL_DISPLAY.tokens, declaredTokens);
+    // WHICH of the four the HOST actually declared. `applyTokens` writes only
+    // these, because `styles.css` restates all four PER THEME (light, the dark
+    // media query, and the two explicit `data-theme` choices) and an inline
+    // custom property on `:root` outranks every one of those rules. Writing the
+    // neutral values unconditionally would therefore pin one theme's colours
+    // onto every install that declares no tokens — which is every install in
+    // the estate today — and silently end dark mode for all of them.
+    this._declaredTokens = declaredTokens
+      ? TOKEN_ROLES.filter((role) => typeof declaredTokens[role] === "string")
+      : [];
     this._acts = Object.assign({}, NEUTRAL_DISPLAY.acts,
       facet.acts && typeof facet.acts === "object" ? facet.acts : null);
     this._artifacts = {};
@@ -511,14 +522,18 @@ export class Display {
     return "var(--st-" + role + ")";
   }
 
-  // Set the four tokens as custom properties on the given element (`:root` at
-  // boot). § 4.3 point 4's own words: "`styles.css`'s four `--st-*` tokens
-  // become profile-keyed custom properties set on `:root` at boot."
+  // Set the HOST-DECLARED tokens as custom properties on the given element
+  // (`:root` at boot). § 4.3 point 4's own words: "`styles.css`'s four `--st-*`
+  // tokens become profile-keyed custom properties set on `:root` at boot" — and
+  // the stylesheet declares `--st-<role>` for each of the four, per theme, so a
+  // role the profile does not override keeps the theme-aware default rather
+  // than being overwritten by an inline copy of one theme's value.
   applyTokens(element) {
     if (!element || !element.style) return;
-    for (const role of TOKEN_ROLES) {
+    for (const role of this._declaredTokens) {
       element.style.setProperty("--st-" + role, this.token(role));
     }
+    return this._declaredTokens.slice();
   }
 
   // ---- artifact-folder vocabulary (RULED Q1's axis) ----

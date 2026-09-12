@@ -60,7 +60,7 @@ import {
 // ROLE, so none of them carries one domain's word as a literal. Absent host
 // facet — which is every host today, and every static served image — gives
 // openDox's own neutral vocabulary, not openxFactory's words.
-import { readDisplay } from "./views/display.js";
+import { readDisplay, STAGE_ROLES } from "./views/display.js";
 import { mountStagingWorkbench } from "./views/staging-workbench.js";
 // THE SECOND CLASS-A -> CLASS-B IMPORT IS GONE TOO (§ 3.4 slice S5, RULED Q10).
 // This line was `import { firstEditTransport } from ./views/swb-session.js` —
@@ -537,6 +537,51 @@ function initTheme() {
 // `onOpenTile` is the funnel/board tiles' drill-down entrypoint (T017):
 // staged/proposal/realized cards call it with (kind, id); the explorer
 // resolves the snapshot-only folder listing and renders the overlay.
+// THE SHELL'S OWN CHROME, IN THE REGISTERED DOMAIN'S WORDS (§ 3.4 slice S7).
+// `index.html` ships every one of these EMPTY: a static default beside a
+// dynamic setter is two authorities for one string, and the one that renders
+// first is the one that survives a domain rename unnoticed. Five of the seven
+// tabs name openDox's own instruments and read the same in any domain; two name
+// a STATION and are spelled by the profile.
+//
+// This is the whole of the shell's vocabulary surface. Every other word on the
+// page is a view's, and every view takes the facet through `ctx.display`.
+function applyShellVocabulary(display) {
+  const [SOURCE, GROUPING, CANDIDATE, , SUBMISSION] = STAGE_ROLES;
+  const labels = {
+    "tab-funnel": "realization funnel",
+    "tab-wheel": "the wheel",
+    "tab-board": "pipeline board",
+    "tab-canvas": display.one(GROUPING) + " canvas",
+    "tab-lens": "keyword lens",
+    "tab-docs": display.short(SOURCE) + " list",
+    "tab-lineage": "lineage & readiness",
+  };
+  for (const [id, text] of Object.entries(labels)) {
+    const node = document.getElementById(id);
+    if (node) node.textContent = text;
+  }
+  // The global search reaches three stations, so it names all three.
+  const search = document.getElementById("globalsearch");
+  if (search) {
+    const caption = "search " + [SOURCE, GROUPING, SUBMISSION]
+      .map((role) => display.short(role)).join(", ") + "…";
+    search.placeholder = caption;
+    search.setAttribute("aria-label", caption);
+  }
+  // The one sentence in the About dialog that names stations. The rest of that
+  // paragraph is about `snapshot.json` and is the same in every domain.
+  const about = document.getElementById("aboutlinks");
+  if (about) {
+    about.textContent =
+      display.one(GROUPING) + "↔" + display.one(CANDIDATE) + " links are "
+      + "many-to-many: one document's `Topics:` list feeds several "
+      + display.many(GROUPING) + " and one " + display.one(CANDIDATE)
+      + " can be claimed by several " + display.many(GROUPING)
+      + " (dashed violet edges).";
+  }
+}
+
 const CORE_VIEWS = [
   { id: "funnel.realization", control: "tab-funnel", region: "view-funnel",
     module: "./views/funnel.js", entry: "renderFunnel", view_class: "C",
@@ -1055,6 +1100,7 @@ async function render() {
     // colour. Before `render()` is re-entered the values are simply set again.
     const display = readDisplay(probedCaps);
     display.applyTokens(document.documentElement);
+    applyShellVocabulary(display);
     // THE VIEW REGISTRY, COLLECTED ONCE PER RENDER (§ 3.4 slice S3, § 4.1).
     // The core arm openDox supplies, then the consumer column the host
     // contributed — the same order and the same single collection

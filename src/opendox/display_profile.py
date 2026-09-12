@@ -174,12 +174,13 @@ STATUS_ROLES: tuple[str, ...] = (
 #: claim — and it is openDox's own, so it carries a label and never a prefix.
 AREA_ROLES: tuple[str, ...] = ("captured", "organized", "proposed", "reference")
 
-#: THE FOUR DESIGN TOKENS, by role. `styles.css`:18-21 defines
+#: THE FOUR DESIGN TOKENS, by role. `styles.css` used to define
 #: `--st-brainstorm` / `--st-staged` / `--st-proposal` / `--st-realized` — four
-#: names that spell one domain's stages into the ONE styling surface RULED Q7
+#: names that spelled one domain's stages into the ONE styling surface RULED Q7
 #: (openxFactory#656 comment `5648049748`) calls stable: *"openDox's declared
 #: design tokens (the `--st-*` family, S7) are the one stable styling surface;
-#: nothing else in `styles.css` is."* The names become roles; the VALUES stay
+#: nothing else in `styles.css` is."* Slice S7 renamed them `--st-<role>` for
+#: each of the four below. The names become roles; the VALUES stay
 #: openDox's, because a colour is not a domain's word — a host may override
 #: them and none has to.
 TOKEN_ROLES: tuple[str, ...] = ("captured", "organized", "proposed", "completion")

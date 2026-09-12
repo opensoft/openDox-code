@@ -15,10 +15,25 @@
   --faint-ink: #8A93A0;
   --border: #DDE2E9;
   --faint: #EEF1F5;
-  --st-brainstorm: #7A5AD0;
-  --st-staged: #0D9488;
-  --st-proposal: #B96A1B;
-  --st-realized: #3B6FD4;
+  /* THE FOUR STATUS TOKENS ARE NAMED BY ROLE (§ 3.4 slice S7, RULED Q7 —
+     opensoft/openxFactory#656 comment `5648049748`: the `--st-*` family is
+     "the one stable styling surface"). They were `--st-brainstorm`,
+     `--st-staged`, `--st-proposal` and `--st-realized` — one domain's four
+     words, in a stylesheet every install ships — and they are now the four
+     roles `views/display.js` declares (`TOKEN_ROLES`): the position a colour
+     marks, not the word one domain gives that position.
+
+     THE VALUES HERE ARE STILL THE DEFAULTS, and they are PER THEME: the three
+     blocks below restate them for the dark media query, for an explicit dark
+     choice and for an explicit light one. `display.applyTokens(:root)` sets a
+     custom property inline only for a role the HOST actually declared,
+     precisely so an install that declares no tokens keeps all four theme
+     variants instead of having the light values pinned onto `:root` and every
+     dark rule shadowed by them. */
+  --st-captured: #7A5AD0;
+  --st-organized: #0D9488;
+  --st-proposed: #B96A1B;
+  --st-completion: #3B6FD4;
   --good: #2E7D43;
   --good-bg: #E4F1E8;
   --blocked: #B0433C;
@@ -27,7 +42,7 @@
   --edge-flow: #B4BCC7;
   /* A chosen-by-the-human SELECTION. Deliberately its own hue: every other
      accent already means a stage, and `--edge-pick` is the same teal as
-     `--st-staged`, so a selected dot drawn in it was indistinguishable from
+     `--st-organized`, so a selected dot drawn in it was indistinguishable from
      an unselected one (measured rgb(31,168,152) both). */
   --picked: #C2185B;
   /* The lens's per-term HUE is chosen in code; its saturation and lightness
@@ -52,10 +67,10 @@
     --faint-ink: #6E7885;
     --border: #2C323C;
     --faint: #22262E;
-    --st-brainstorm: #9678DE;
-    --st-staged: #1FA898;
-    --st-proposal: #C0742A;
-    --st-realized: #5E8BE0;
+    --st-captured: #9678DE;
+    --st-organized: #1FA898;
+    --st-proposed: #C0742A;
+    --st-completion: #5E8BE0;
     --good: #4CAF6E;
     --good-bg: #1E3226;
     --blocked: #E06A5F;
@@ -76,10 +91,10 @@
   --faint-ink: #6E7885;
   --border: #2C323C;
   --faint: #22262E;
-  --st-brainstorm: #9678DE;
-  --st-staged: #1FA898;
-  --st-proposal: #C0742A;
-  --st-realized: #5E8BE0;
+  --st-captured: #9678DE;
+  --st-organized: #1FA898;
+  --st-proposed: #C0742A;
+  --st-completion: #5E8BE0;
   --good: #4CAF6E;
   --good-bg: #1E3226;
   --blocked: #E06A5F;
@@ -96,10 +111,10 @@
   --faint-ink: #8A93A0;
   --border: #DDE2E9;
   --faint: #EEF1F5;
-  --st-brainstorm: #7A5AD0;
-  --st-staged: #0D9488;
-  --st-proposal: #B96A1B;
-  --st-realized: #3B6FD4;
+  --st-captured: #7A5AD0;
+  --st-organized: #0D9488;
+  --st-proposed: #B96A1B;
+  --st-completion: #3B6FD4;
   --good: #2E7D43;
   --good-bg: #E4F1E8;
   --blocked: #B0433C;
@@ -253,12 +268,12 @@ button.filtereye:disabled { opacity: 0.4; cursor: default; }
   font-family: var(--mono); font-size: 11px; cursor: pointer; color: var(--muted);
   background: var(--faint); border: 1px solid var(--border); border-radius: 3px; padding: 3px 9px;
 }
-.repobtn:hover { border-color: var(--st-staged); color: var(--st-staged); }
+.repobtn:hover { border-color: var(--st-organized); color: var(--st-organized); }
 .repobtn:disabled { opacity: 0.6; cursor: progress; }
 .repohint {
   font-family: var(--mono); font-size: 11px; cursor: pointer;
-  color: var(--st-proposal); background: transparent;
-  border: 1px dashed var(--st-proposal); border-radius: 3px; padding: 2px 7px;
+  color: var(--st-proposed); background: transparent;
+  border: 1px dashed var(--st-proposed); border-radius: 3px; padding: 2px 7px;
 }
 .repohint[hidden] { display: none; }
 .repopick-msg { color: var(--blocked); font-size: 11px; }
@@ -267,24 +282,24 @@ button.filtereye:disabled { opacity: 0.4; cursor: default; }
   font-family: var(--mono); font-size: 11px; color: var(--muted);
   margin-left: auto; font-variant-numeric: tabular-nums;
 }
-.freshness.fallback { color: var(--st-proposal); font-weight: 600; }
+.freshness.fallback { color: var(--st-proposed); font-weight: 600; }
 .freshness:empty { display: none; }
 
 /* The stale-fallback banner: loud by design (D6) — the degradation must never
    be silent — plus the sparse-station note (D10), which says what is absent in
    the selected repository rather than leaving a blank region. */
 .stalebanner {
-  border: 1px solid var(--st-proposal); border-left-width: 4px; border-radius: 4px;
+  border: 1px solid var(--st-proposed); border-left-width: 4px; border-radius: 4px;
   background: var(--faint); padding: 7px 10px; margin: 6px 0 4px; font-size: 12px;
 }
 .stalebanner[hidden] { display: none; }
-.stalebanner-line { color: var(--st-proposal); }
+.stalebanner-line { color: var(--st-proposed); }
 .stalebanner-line.sparse { color: var(--muted); margin-top: 3px; }
 .themebtn {
   font-family: var(--mono); font-size: 11px; cursor: pointer; color: var(--muted);
   background: var(--faint); border: 1px solid var(--border); border-radius: 3px; padding: 3px 9px;
 }
-.themebtn:hover { border-color: var(--st-staged); color: var(--st-staged); }
+.themebtn:hover { border-color: var(--st-organized); color: var(--st-organized); }
 
 /* The stage tiles head the wheel's columns, so they share its grid: six equal
    columns and the deck's own 14px gap (Brett, 2026-08-08). The wheel fits its
@@ -302,13 +317,13 @@ button.filtereye:disabled { opacity: 0.4; cursor: default; }
   padding: 8px 14px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
   flex: 0 0 auto; white-space: nowrap;
 }
-.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--st-staged); font-weight: 700; }
-.tab:focus-visible, .card:focus-visible { outline: 2px solid var(--st-realized); outline-offset: 2px; }
+.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--st-organized); font-weight: 700; }
+.tab:focus-visible, .card:focus-visible { outline: 2px solid var(--st-completion); outline-offset: 2px; }
 
 .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: var(--muted); margin: 0 0 14px; align-items: center; }
 .legend .g { display: inline-flex; align-items: center; gap: 6px; }
 .edge-key { width: 22px; height: 2px; display: inline-block; }
-.edge-key.dashed { height: 0; border-top: 2px dashed var(--st-brainstorm); background: none; }
+.edge-key.dashed { height: 0; border-top: 2px dashed var(--st-captured); background: none; }
 
 /* The horizontal scroll wrapper for the wide funnel/board/canvas. As a view's
    flex scroll region it also owns the region's height (`min-height: 0`). The
@@ -323,12 +338,12 @@ svg.edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-eve
 svg.edges path { fill: none; stroke-width: 1.6; opacity: 0.85; transition: opacity 120ms, stroke-width 120ms; }
 svg.edges path.pick { stroke: var(--edge-pick); }
 svg.edges path.flow { stroke: var(--edge-flow); }
-svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opacity: 0.45; }
+svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacity: 0.45; }
 .funnel-inner.focused svg.edges path { opacity: 0.08; }
 .funnel-inner.focused svg.edges path.hot { opacity: 1; stroke-width: 2.4; }
 .funnel-inner.focused .card { opacity: 0.3; }
 .funnel-inner.focused .card.hot { opacity: 1; }
-.card.pinned { outline: 2px solid var(--st-staged); outline-offset: 1px; }
+.card.pinned { outline: 2px solid var(--st-organized); outline-offset: 1px; }
 .funnel-inner.focused .card.pinned { opacity: 1; }
 @media (prefers-reduced-motion: reduce) {
   svg.edges path, .card { transition: none; }
@@ -349,10 +364,10 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   padding: 7px 10px 7px 12px; transition: border-color 120ms, opacity 120ms;
 }
 .card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; border-radius: 5px 0 0 5px; background: var(--stripe, transparent); }
-.card.stage-brainstorm { --stripe: var(--st-brainstorm); }
-.card.stage-staged { --stripe: var(--st-staged); }
-.card.stage-proposal { --stripe: var(--st-proposal); }
-.card.stage-realized { --stripe: var(--st-realized); }
+.card.stage-brainstorm { --stripe: var(--st-captured); }
+.card.stage-staged { --stripe: var(--st-organized); }
+.card.stage-proposal { --stripe: var(--st-proposed); }
+.card.stage-realized { --stripe: var(--st-completion); }
 .card:hover { border-color: var(--faint-ink); }
 .card .title { font-weight: 600; font-size: 13px; text-wrap: balance; }
 .card .meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
@@ -367,14 +382,14 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .tile-candidate .dot { flex: none; width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; }
 .tile-candidate.latent { border-style: dashed; }
 .tile-candidate.latent .dot { border: 1.5px dashed var(--faint-ink); background: transparent; }
-.tile-candidate.picked .dot { background: var(--st-staged); }
+.tile-candidate.picked .dot { background: var(--st-organized); }
 .tile-candidate.rejected .dot { background: var(--blocked); }
 .tile-candidate.rejected .title { color: var(--muted); }
 .tile-candidate.superseded .dot { background: transparent; border: 1.5px solid var(--faint-ink); }
 .tile-candidate.superseded .title { text-decoration: line-through; color: var(--muted); font-weight: 400; }
 .tile-candidate .title { font-size: 12.5px; font-weight: 500; }
 .tile-candidate .meta { font-size: 11px; }
-.tile-candidate.shared { border-color: var(--st-brainstorm); }
+.tile-candidate.shared { border-color: var(--st-captured); }
 
 .pill {
   display: inline-flex; align-items: center; gap: 4px; border-radius: 3px; padding: 1px 6px;
@@ -390,12 +405,12 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .heat { display: inline-flex; align-items: center; gap: 5px; margin-top: 5px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
 .heat .cell { width: 14px; height: 8px; border-radius: 2px; background: var(--faint); border: 1px solid var(--border); }
 .heat .cell.hot { background: var(--good); border-color: var(--good); }
-.heat .cell.warm { background: var(--st-proposal); border-color: var(--st-proposal); }
+.heat .cell.warm { background: var(--st-proposed); border-color: var(--st-proposed); }
 .heat .cell.cold { background: var(--blocked); border-color: var(--blocked); }
 
 /* progress bar for change task_progress */
 .progress { margin-top: 5px; height: 6px; background: var(--faint); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
-.progress > span { display: block; height: 100%; background: var(--st-realized); }
+.progress > span { display: block; height: 100%; background: var(--st-completion); }
 
 /* The board fills the view height; the first grid row (the four columns) takes
    the flexible space and the "everything else" footer sits in the auto row
@@ -423,7 +438,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   font-family: var(--mono); font-size: 11px; padding: 3px 10px; cursor: pointer;
   background: var(--faint); color: var(--muted); border: 1px solid var(--border); border-radius: 3px;
 }
-.vbtn[aria-pressed="true"] { color: var(--ink); border-color: var(--st-staged); font-weight: 700; }
+.vbtn[aria-pressed="true"] { color: var(--ink); border-color: var(--st-organized); font-weight: 700; }
 /* Six-column docs-first funnel is the structural default (spec: primary view
    SHALL be six-column). The five-column collapse is the opt-in modifier, so a
    renderer grown from this skeleton cannot silently regress to five columns by
@@ -434,7 +449,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   grid-template-columns: 1.05fr 1.35fr 1.15fr 1.35fr 1.05fr;
 }
 .card.stage-doc { --stripe: var(--faint-ink); }
-.card.stage-doc.shared { border-color: var(--st-brainstorm); }
+.card.stage-doc.shared { border-color: var(--st-captured); }
 
 .doclist { display: flex; flex-direction: column; gap: 6px; max-width: 900px; overflow-y: auto; padding-right: 2px; }
 .docgroup { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 10px 0 2px; }
@@ -448,7 +463,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
    its file, so the overlay's rows keep the hover they had. */
 .docrow-open, .explorer-row { cursor: pointer; }
 .docrow-open:hover, .explorer-row:hover { border-color: var(--faint-ink); }
-.docrow-open:focus-visible { outline: 2px solid var(--st-realized); outline-offset: 1px; }
+.docrow-open:focus-visible { outline: 2px solid var(--st-completion); outline-offset: 1px; }
 .docrow .name { font-family: var(--mono); font-size: 12px; }
 .docrow .where { font-size: 11px; color: var(--muted); margin-top: 1px; }
 .docrow .chips { margin-left: auto; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
@@ -488,9 +503,9 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .lineage-row { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; font-size: 12px; align-items: center; }
 .lineage-row .lk { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .lchip { font-family: var(--mono); font-size: 11px; background: var(--faint); border: 1px solid var(--border); border-radius: 3px; padding: 1px 7px; }
-.lchip.lchip-selection { border-color: var(--st-staged); }
-.lchip.lchip-submission { border-color: var(--st-proposal); }
-.lchip.lchip-completion { border-color: var(--st-realized); }
+.lchip.lchip-selection { border-color: var(--st-organized); }
+.lchip.lchip-submission { border-color: var(--st-proposed); }
+.lchip.lchip-completion { border-color: var(--st-completion); }
 
 /* muted single-line status caption (loading/select-to-edit messages) */
 .docstatus { color: var(--muted); font-size: 12px; padding: 6px 0; }
@@ -502,7 +517,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   display: block; margin-top: 6px; font-family: var(--mono); font-size: 10.5px; cursor: pointer;
   color: var(--muted); background: var(--faint); border: 1px solid var(--border); border-radius: 3px; padding: 2px 7px;
 }
-.openbtn:hover { border-color: var(--st-staged); color: var(--st-staged); }
+.openbtn:hover { border-color: var(--st-organized); color: var(--st-organized); }
 
 /* "Open in NotebookLM" tile action (v2 local-backend seam). Mounted only when
    the /capabilities probe reports the action available (loopback local backend
@@ -548,7 +563,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .explorer-body { display: grid; grid-template-columns: minmax(260px, 380px) 1fr; gap: 0; min-height: 0; flex: 1; }
 .explorer-list { padding: 12px 14px; overflow-y: auto; border-right: 1px solid var(--border); max-width: none; }
 .explorer-row { cursor: pointer; }
-.explorer-row:focus-visible { outline: 2px solid var(--st-realized); outline-offset: 2px; }
+.explorer-row:focus-visible { outline: 2px solid var(--st-completion); outline-offset: 2px; }
 .explorer-viewer { padding: 14px 18px; overflow-y: auto; }
 
 /* read-only Markdown viewer (T018) */
@@ -565,7 +580,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   font-family: var(--mono); font-size: 11px; cursor: pointer; color: var(--muted);
   background: var(--faint); border: 1px solid var(--border); border-radius: 3px; padding: 2px 8px; margin-left: auto;
 }
-.editbtn:hover { border-color: var(--st-staged); color: var(--st-staged); }
+.editbtn:hover { border-color: var(--st-organized); color: var(--st-organized); }
 .markdown-body { font-size: 13.5px; line-height: 1.6; }
 .markdown-body :is(h1, h2, h3, h4) { font-family: var(--mono); line-height: 1.3; margin: 1.1em 0 0.4em; }
 .markdown-body h1 { font-size: 19px; }
@@ -583,7 +598,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .markdown-body blockquote {
   margin: 0.6em 0; padding: 2px 12px; border-left: 3px solid var(--border); color: var(--muted);
 }
-.markdown-body a { color: var(--st-realized); }
+.markdown-body a { color: var(--st-completion); }
 @media (max-width: 860px) {
   .explorer-body { grid-template-columns: 1fr; }
   .explorer-list { border-right: none; border-bottom: 1px solid var(--border); max-height: 40%; }
@@ -601,7 +616,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 3px 9px;
 }
 .cpick:hover { border-color: var(--faint-ink); }
-.cpick[aria-pressed="true"] { color: var(--ink); border-color: var(--st-realized); background: var(--faint); }
+.cpick[aria-pressed="true"] { color: var(--ink); border-color: var(--st-completion); background: var(--faint); }
 .canvas { display: grid; grid-template-columns: 1fr 1.15fr 1.15fr; gap: 18px; min-width: 1080px; height: 100%; align-items: stretch; }
 .pane { display: flex; flex-direction: column; gap: 8px; }
 /* each canvas pane owns its vertical scroll, bounded by the flex view height */
@@ -618,7 +633,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .pane-h .n { background: var(--faint); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; font-variant-numeric: tabular-nums; }
 .member .summ { font-size: 11.5px; color: var(--muted); margin: 3px 0 4px; }
 .member .pill { margin-right: 5px; }
-.passage { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--st-brainstorm); border-radius: 5px; padding: 7px 10px; }
+.passage { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--st-captured); border-radius: 5px; padding: 7px 10px; }
 .passage .ptitle { font-size: 12.5px; font-weight: 600; }
 .passage .src { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 4px; }
 .gapslot { border: 1.5px dashed var(--blocked); border-radius: 5px; padding: 8px 10px; }
@@ -627,23 +642,23 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .optset { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: var(--faint); display: flex; flex-direction: column; gap: 6px; }
 .optset .oh { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .cbtn { font-family: var(--mono); font-size: 10.5px; font-weight: 600; cursor: pointer; background: none; border: 1px solid var(--border); border-radius: 3px; padding: 3px 8px; color: var(--muted); text-align: left; }
-.cbtn:hover:not(:disabled) { border-color: var(--st-staged); color: var(--st-staged); }
+.cbtn:hover:not(:disabled) { border-color: var(--st-organized); color: var(--st-organized); }
 .cbtn:disabled { opacity: 0.55; cursor: default; }
 .lineage-strip { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 4px; }
 .lineage-strip > .lk { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .canvas-status { font-family: var(--mono); font-size: 11px; color: var(--muted); min-height: 15px; margin: 10px 0 0; }
 
 /* ---- canvas composer + draft confirmation (T021) ---- */
-.composer { border: 1px solid var(--st-staged); border-radius: 6px; padding: 9px 11px; background: var(--panel); display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
-.composer .ch { font-family: var(--mono); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--st-staged); }
+.composer { border: 1px solid var(--st-organized); border-radius: 6px; padding: 9px 11px; background: var(--panel); display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.composer .ch { font-family: var(--mono); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--st-organized); }
 .composer input, .composer textarea { font-family: var(--sans); font-size: 12px; color: var(--ink); background: var(--faint); border: 1px solid var(--border); border-radius: 3px; padding: 4px 8px; width: 100%; resize: vertical; box-sizing: border-box; }
 .composer .attach { display: flex; flex-direction: column; gap: 3px; }
 .composer .attach-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; cursor: pointer; }
-.composer .attach-row input { width: 14px; height: 14px; flex: none; accent-color: var(--st-staged); }
+.composer .attach-row input { width: 14px; height: 14px; flex: none; accent-color: var(--st-organized); }
 .canvas-ai-note { font-size: 10.5px; color: var(--faint-ink); font-style: italic; margin-top: 6px; }
 .canvas-confirm { margin-top: 12px; }
-.draft-confirm { border: 1.5px dashed var(--st-realized); border-radius: 6px; padding: 10px 12px; background: var(--panel); }
-.draft-confirm .dc-h { font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--st-realized); margin-bottom: 5px; }
+.draft-confirm { border: 1.5px dashed var(--st-completion); border-radius: 6px; padding: 10px 12px; background: var(--panel); }
+.draft-confirm .dc-h { font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--st-completion); margin-bottom: 5px; }
 .draft-confirm .dc-line { font-family: var(--mono); font-size: 11px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .draft-confirm .dc-note { font-size: 11px; color: var(--muted); margin-top: 6px; }
 
@@ -706,19 +721,19 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 }
 .lens .pane-rail { min-height: 0; overflow-y: auto; padding-right: 2px; }
 .kwrow { display: flex; align-items: center; gap: 7px; background: var(--panel); border: 1px solid var(--border); border-radius: 5px; padding: 6px 9px; cursor: pointer; }
-.kwrow input { accent-color: var(--st-staged); width: 14px; height: 14px; flex: none; margin: 0; }
+.kwrow input { accent-color: var(--st-organized); width: 14px; height: 14px; flex: none; margin: 0; }
 .kwrow .kw { font-family: var(--mono); font-size: 12px; }
 .kwrow .cnt { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--faint); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; }
 .kwrow .pinbtn { background: none; border: none; cursor: pointer; font-size: 12px; color: var(--faint-ink); padding: 0 2px; }
-.kwrow .pinbtn:hover { color: var(--st-proposal); }
-.kwrow .pinbtn.pinned { color: var(--st-proposal); }
+.kwrow .pinbtn:hover { color: var(--st-proposed); }
+.kwrow .pinbtn.pinned { color: var(--st-proposed); }
 .kwhint { font-size: 10.5px; color: var(--faint-ink); margin: -3px 0 2px 30px; }
 .bullseye { display: block; width: 100%; max-width: 540px; margin: 0 auto; }
 .bullseye .ring { fill: none; stroke: var(--border); }
 .bullseye .zone0 { fill: var(--faint); opacity: 0.55; }
 .bullseye .sector { stroke: var(--border); stroke-dasharray: 3 3; }
-.bullseye .dot { fill: var(--st-staged); cursor: pointer; }
-.bullseye .dot.inferred { fill: none; stroke: var(--st-staged); stroke-width: 1.5; }
+.bullseye .dot { fill: var(--st-organized); cursor: pointer; }
+.bullseye .dot.inferred { fill: none; stroke: var(--st-organized); stroke-width: 1.5; }
 .bullseye .dot:hover { stroke: var(--ink); stroke-width: 2; }
 .bullseye text { font-family: var(--mono); fill: var(--muted); }
 .bullseye .ringlab { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -769,11 +784,11 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
    reveal the CLI action descriptor (the command a human runs); nothing
    executes server-side. */
 .viewer-gate { margin: 8px 0; }
-.gatebar { border: 1px solid var(--st-proposal); border-radius: 6px; padding: 8px 10px; background: var(--faint); }
-.gatebar-title { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--st-proposal); margin-bottom: 6px; }
+.gatebar { border: 1px solid var(--st-proposed); border-radius: 6px; padding: 8px 10px; background: var(--faint); }
+.gatebar-title { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--st-proposed); margin-bottom: 6px; }
 .gatebar-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .gatebtn { font-family: var(--sans); font-size: 11.5px; padding: 4px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--ink); cursor: pointer; }
-.gatebtn:hover { border-color: var(--st-proposal); }
+.gatebtn:hover { border-color: var(--st-proposed); }
 .gatebar-cmd { font-family: var(--mono); font-size: 11px; color: var(--ink); background: var(--panel); border: 1px dashed var(--border); border-radius: 5px; padding: 7px 9px; margin-top: 7px; user-select: all; word-break: break-all; }
 
 /* ============================================================================
@@ -788,7 +803,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
   padding: 4px 9px; min-width: 210px;
 }
-.search:focus-visible { outline: 2px solid var(--st-realized); outline-offset: 1px; border-color: var(--st-realized); }
+.search:focus-visible { outline: 2px solid var(--st-completion); outline-offset: 1px; border-color: var(--st-completion); }
 .filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 0 0 12px; }
 .filterbar label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); display: inline-flex; align-items: center; gap: 5px; }
 .filterbar select, .filterbar input {
@@ -797,7 +812,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 }
 .filterbar .count { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .filterbar select:focus-visible, .filterbar input:focus-visible, .kwfilter:focus-visible {
-  outline: 2px solid var(--st-realized); outline-offset: 1px;
+  outline: 2px solid var(--st-completion); outline-offset: 1px;
 }
 /* #13 lens keyword-rail text filter */
 .kwfilter {
@@ -811,8 +826,8 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 /* #8 always-visible staleness stamp — amber past 24h, red past 72h (age is
    computed client-side from generation.generated_at). */
 .asof .stampdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--good); margin-right: 5px; vertical-align: middle; }
-.asof.stale-amber { color: var(--st-proposal); }
-.asof.stale-amber .stampdot { background: var(--st-proposal); }
+.asof.stale-amber { color: var(--st-proposed); }
+.asof.stale-amber .stampdot { background: var(--st-proposed); }
 .asof.stale-red { color: var(--blocked); font-weight: 600; }
 .asof.stale-red .stampdot { background: var(--blocked); }
 
@@ -828,7 +843,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .singleton-group > summary::before { content: "\25B8"; color: var(--faint-ink); }
 .singleton-group[open] > summary::before { content: "\25BE"; }
 .singleton-group[open] > summary { color: var(--ink); border-bottom: 1px solid var(--border); }
-.singleton-group:focus-within > summary, .singleton-group > summary:focus-visible { outline: 2px solid var(--st-realized); outline-offset: 2px; }
+.singleton-group:focus-within > summary, .singleton-group > summary:focus-visible { outline: 2px solid var(--st-completion); outline-offset: 2px; }
 .singleton-group .col-stack { padding: 6px; }
 
 /* #20 stripped external-image placeholder + user-initiated click-to-load */
@@ -838,24 +853,24 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   border: 1px dashed var(--border); border-radius: 4px; padding: 3px 8px;
 }
 .ext-img-load {
-  font-family: var(--mono); font-size: 11px; cursor: pointer; color: var(--st-realized);
+  font-family: var(--mono); font-size: 11px; cursor: pointer; color: var(--st-completion);
   background: var(--panel); border: 1px solid var(--border); border-radius: 3px; padding: 1px 7px;
 }
-.ext-img-load:hover { border-color: var(--st-realized); }
+.ext-img-load:hover { border-color: var(--st-completion); }
 .ext-img-loaded { max-width: 100%; height: auto; }
 
 /* #19 in-page reason form replacing the lens window.prompt override capture */
 .reason-form {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   margin: 6px 0; padding: 7px 9px; background: var(--panel);
-  border: 1px solid var(--st-staged); border-radius: 5px;
+  border: 1px solid var(--st-organized); border-radius: 5px;
 }
 .reason-form .rf-label { flex-basis: 100%; font-size: 11px; color: var(--muted); }
 .reason-form input {
   flex: 1 1 160px; font-family: var(--sans); font-size: 12px; color: var(--ink);
   background: var(--faint); border: 1px solid var(--border); border-radius: 3px; padding: 4px 8px;
 }
-.reason-form input:focus-visible { outline: 2px solid var(--st-realized); outline-offset: 1px; }
+.reason-form input:focus-visible { outline: 2px solid var(--st-completion); outline-offset: 1px; }
 
 /* #18 board "everything else" footer link into the doc list */
 .board-else {
@@ -866,7 +881,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 
 /* ==== THE WHEEL (locked interaction spec, Track C, 2026-07-16) ============
    Six wheels in funnel order crossed by one brass focus line. Teal =
-   --st-staged, brass = --st-proposal (theme-aware via the existing vars).
+   --st-organized, brass = --st-proposed (theme-aware via the existing vars).
    Thread classes drive styling: solid teal = indexed, dashed teal =
    inferred, dashed brass = synthesized/demo. */
 .wheelbar { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
@@ -874,9 +889,9 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   border: 1px solid var(--border); background: var(--panel); color: var(--ink);
   border-radius: 6px; padding: 2px 10px; cursor: pointer; font-size: 14px;
 }
-.wheelnav:hover { border-color: var(--st-staged); }
+.wheelnav:hover { border-color: var(--st-organized); }
 .wheelhint { color: var(--faint-ink); font-size: 11px; flex: 1; }
-.wheeldemo-note { color: var(--st-proposal); font-size: 11px; }
+.wheeldemo-note { color: var(--st-proposed); font-size: 11px; }
 
 .wheelport {
   --wheel-scale: 1;  /* geometry multiplier; JS reads it for the reel math */
@@ -897,7 +912,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 :fullscreen .wheeldeck { gap: 28px; justify-content: center; }
 :fullscreen .wheelwin { height: calc(100vh - 170px); }
 :fullscreen .wheelcol.wheelhidden .wheelrail { height: calc(100vh - 170px); }
-.wheelport:focus-visible { border-color: var(--st-staged); }
+.wheelport:focus-visible { border-color: var(--st-organized); }
 .wheeldeck {
   display: flex; gap: 14px; padding: 0;
   transition: transform 220ms ease;
@@ -917,16 +932,16 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   pointer-events: none; z-index: 5;
 }
 .wheelthread { fill: none; }
-.thread-indexed { stroke: var(--st-staged); stroke-width: 1.6; opacity: 0.75; }
-.thread-inferred { stroke: var(--st-staged); stroke-width: 1.3; stroke-dasharray: 5 4; opacity: 0.6; }
-.thread-synthesized { stroke: var(--st-proposal); stroke-width: 1.3; stroke-dasharray: 3 4; opacity: 0.6; }
+.thread-indexed { stroke: var(--st-organized); stroke-width: 1.6; opacity: 0.75; }
+.thread-inferred { stroke: var(--st-organized); stroke-width: 1.3; stroke-dasharray: 5 4; opacity: 0.6; }
+.thread-synthesized { stroke: var(--st-proposed); stroke-width: 1.3; stroke-dasharray: 3 4; opacity: 0.6; }
 /* second-degree connectors (Brett 2026-07-25: always-on second-degree,
    dimmed) — one hop beyond the focused tile's direct links, always drawn,
    noticeably fainter/thinner than a first-degree thread: a low-opacity
    hairline, never dashed (dashes already mean "inferred"/"synthesized" data
-   provenance here, which a second-degree hop says nothing about). --st-staged
+   provenance here, which a second-degree hop says nothing about). --st-organized
    is themed in both light and dark already, so one rule covers both. */
-.thread-seconddeg { stroke: var(--st-staged); stroke-width: 0.75; opacity: 0.25; }
+.thread-seconddeg { stroke: var(--st-organized); stroke-width: 0.75; opacity: 0.25; }
 
 .wheelcol {
   flex: 0 0 calc(220px * var(--wheel-scale, 1));
@@ -990,10 +1005,10 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   border: 1px dashed var(--border); background: var(--faint); color: var(--muted);
   border-radius: 999px; padding: 2px 10px; font-size: 11px; cursor: pointer;
 }
-.wheeldockchip:hover { border-color: var(--st-staged); color: var(--ink); }
+.wheeldockchip:hover { border-color: var(--st-organized); color: var(--ink); }
 
 @keyframes wheelpulse {
-  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--st-staged) 55%, transparent); }
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--st-organized) 55%, transparent); }
   100% { box-shadow: 0 0 0 12px transparent; }
 }
 .wheelcol.wheelpulse { animation: wheelpulse 700ms ease-out 2; border-radius: 8px; }
@@ -1013,7 +1028,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   transition: border-color 120ms ease; will-change: transform, opacity;
   transform-origin: center;
 }
-.wheeltile:hover { border-color: var(--st-staged); }
+.wheeltile:hover { border-color: var(--st-organized); }
 /* OFF-WINDOW TILES (T092 acceptance sweep, defect 6). The drum lays ~31 tiles
    per column and the window holds 7; the rest are placed over the page header,
    the stat tiles and the tab strip. `.wheelport`'s overflow and `.wheelwin`'s
@@ -1029,25 +1044,25 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
    floating chrome instead of half-hiding a neighbour's sub-line. */
 .wheeltile.wheelrailcovered { pointer-events: none; }
 .wheeltile.wheelfocused {
-  border-color: var(--st-proposal); background: var(--panel);
+  border-color: var(--st-proposed); background: var(--panel);
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
 }
-.wheeltile.wheellinked { border-color: var(--st-staged); }        /* teal edge only */
+.wheeltile.wheellinked { border-color: var(--st-organized); }        /* teal edge only */
 /* second-degree tile (Brett 2026-07-25: always-on second-degree, dimmed): a
    faint edging only — much fainter than the full teal `.wheellinked` border,
    so a second-degree hit reads as a hint, not a connection. Never overrides
    `.wheellinked` (a tile cannot be both — secondItems excludes anything
    already first-degree) or the focused/demo/derived borders, which paint
    after this rule in source order below. */
-.wheeltile.wheel-seconddeg { border-color: color-mix(in srgb, var(--st-staged) 30%, var(--border)); }
+.wheeltile.wheel-seconddeg { border-color: color-mix(in srgb, var(--st-organized) 30%, var(--border)); }
 /* Blank filler slots: the drum always renders full — empty positions past a
    sparse wheel's items get quiet slot chrome (no content, no interaction). */
 .wheeltile.wheelblank {
   pointer-events: none; background: var(--faint);
   border-color: var(--border); box-shadow: none;
 }
-.wheeltile.wheel-demo { border-style: dashed; border-color: var(--st-proposal); }
-.wheeltile.wheel-derived { border-style: dashed; border-color: var(--st-staged); }
+.wheeltile.wheel-demo { border-style: dashed; border-color: var(--st-proposed); }
+.wheeltile.wheel-derived { border-style: dashed; border-color: var(--st-organized); }
 .wheellabel {
   font-size: calc(12px * var(--wheel-scale, 1)); line-height: 1.25; overflow: hidden;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; /* two-line label */
@@ -1072,7 +1087,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .wheeltile.wheelexpanded {
   height: calc(var(--wheel-expanded-h) * var(--wheel-scale, 1));
   justify-content: flex-start; gap: 3px; padding: 8px 8px 6px;
-  border-color: var(--st-proposal); background: var(--panel);
+  border-color: var(--st-proposed); background: var(--panel);
   box-shadow: 0 6px 22px rgba(0, 0, 0, 0.24);
   transition: height 170ms ease, border-color 120ms ease;
 }
@@ -1122,10 +1137,10 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   color: var(--muted); background: var(--faint);
 }
 .wheelchip {
-  border: 1px solid var(--st-staged); background: transparent; cursor: pointer;
-  color: var(--st-staged); border-radius: 999px; padding: 0 7px; font-size: 10px;
+  border: 1px solid var(--st-organized); background: transparent; cursor: pointer;
+  color: var(--st-organized); border-radius: 999px; padding: 0 7px; font-size: 10px;
 }
-.wheelchip:hover { background: var(--st-staged); color: var(--panel); }
+.wheelchip:hover { background: var(--st-organized); color: var(--panel); }
 /* ...and the chips carry that solid backdrop in EVERY posture, not only the
    expanded one (T092 acceptance sweep, defect 14b). A focused tile's rail floats
    over the next reel tile whatever the reel is doing; a translucent chip over a
@@ -1146,9 +1161,9 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .dispose-accepted:hover { background: var(--good); color: var(--panel); }
 .dispose-rejected { border-color: var(--blocked); color: var(--blocked); }
 .dispose-rejected:hover { background: var(--blocked); color: var(--panel); }
-.dispose-deferred:hover { border-color: var(--st-proposal); color: var(--st-proposal); }
-.dispose-propose { border-color: var(--st-proposal); color: var(--st-proposal); }
-.dispose-propose:hover:not(:disabled) { background: var(--st-proposal); color: var(--panel); }
+.dispose-deferred:hover { border-color: var(--st-proposed); color: var(--st-proposed); }
+.dispose-propose { border-color: var(--st-proposed); color: var(--st-proposed); }
+.dispose-propose:hover:not(:disabled) { background: var(--st-proposed); color: var(--panel); }
 .dispose-propose:disabled { opacity: 0.55; cursor: default; }
 /* the IN-TILE mount (mountProposeButton `compact`): smaller chrome so the verb
    fits the expanded tile's action row, which the tile's own transform magnifies */
@@ -1161,10 +1176,10 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
    writes anything. Two of them share one row (clusters), so they shrink to fit
    rather than wrapping the tile taller. */
 .wheelnavbtn {
-  border-color: var(--st-staged); color: var(--st-staged);
+  border-color: var(--st-organized); color: var(--st-organized);
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.wheelnavbtn:hover:not(:disabled) { background: var(--st-staged); color: var(--panel); }
+.wheelnavbtn:hover:not(:disabled) { background: var(--st-organized); color: var(--panel); }
 .wheelnavbtn:disabled { opacity: 0.5; cursor: default; }
 /* the IN-TILE mount of the SHARED "Open in NotebookLM" action (clusters ·
    staged · active): the card affordance's block wrap dissolves into the action
@@ -1191,7 +1206,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
    so light/dark need one rule set. */
 .wheelfly {
   position: fixed; z-index: 30; width: 320px; max-height: 52vh; overflow-y: auto;
-  background: var(--panel); border: 1px solid var(--st-proposal);
+  background: var(--panel); border: 1px solid var(--st-proposed);
   border-radius: 10px; box-shadow: 0 8px 26px rgba(0, 0, 0, 0.28);
   font-size: 11px; color: var(--ink);
 }
@@ -1201,7 +1216,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   background: var(--panel); border-radius: 10px 10px 0 0;
 }
 .wheelfly-title {
-  flex: 1; font-family: var(--mono); font-size: 11px; color: var(--st-proposal);
+  flex: 1; font-family: var(--mono); font-size: 11px; color: var(--st-proposed);
   word-break: break-word;
 }
 .wheelfly-close { border: none; background: none; color: var(--faint-ink); cursor: pointer; font-size: 11px; }
@@ -1210,7 +1225,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .wheelfly-line { color: var(--muted); }
 .wheelfly-kind {
   margin-top: 5px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.06em;
-  color: var(--st-staged); text-transform: uppercase;
+  color: var(--st-organized); text-transform: uppercase;
   border-top: 1px solid var(--faint); padding-top: 4px;
 }
 .wheelfly-req { color: var(--ink); padding-left: 8px; text-indent: -8px; }
@@ -1222,11 +1237,11 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
    (the teal reading colour of the in-tile read verbs — it only reads) */
 .wheelfly-file {
   text-align: left; border: 1px solid var(--border); border-radius: 6px;
-  background: var(--surface); color: var(--st-staged); cursor: pointer;
+  background: var(--surface); color: var(--st-organized); cursor: pointer;
   font-family: var(--mono); font-size: 10px; padding: 2px 7px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.wheelfly-file:hover:not(:disabled) { background: var(--st-staged); color: var(--panel); }
+.wheelfly-file:hover:not(:disabled) { background: var(--st-organized); color: var(--panel); }
 .wheelfly-file:disabled { opacity: 0.5; cursor: default; color: var(--muted); }
 .wheelfly-note { color: var(--faint-ink); }
 .wheelfly-err { margin-top: 5px; color: var(--blocked); }
@@ -1239,10 +1254,10 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 /* the HOSTED plane's per-tile intent indicator (add-ideation-intent-plane task
    4.4): the same decorate-never-mutate posture as `.wheelapplied`, on a plane
    where the decision travelled as a request the apply lane still owns. */
-.wheeltile.wheelintent { border-style: dashed; border-color: var(--st-proposal); }
+.wheeltile.wheelintent { border-style: dashed; border-color: var(--st-proposed); }
 .wheeltile.wheelintent::after {
   content: "intent: " attr(data-intent);
-  font-size: 9px; color: var(--st-proposal);
+  font-size: 9px; color: var(--st-proposed);
 }
 .wheeltile.wheelintent[data-intent="applied"] { border-color: var(--good); }
 .wheeltile.wheelintent[data-intent="applied"]::after { color: var(--good); }
@@ -1270,7 +1285,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 /* the HOSTED plane's other outcomes (task 4.4): submitted-not-yet-decided,
    recorded-but-not-dispatched, and never-sent-at-all. Distinct from a refusal
    on purpose - only one of the three is a verdict on the decision. */
-.is-queued .refusalpanel-kind { background: var(--faint); color: var(--st-proposal); }
+.is-queued .refusalpanel-kind { background: var(--faint); color: var(--st-proposed); }
 .is-stalled .refusalpanel-kind { background: var(--faint); color: var(--blocked); }
 .is-error .refusalpanel-kind { background: var(--faint); color: var(--faint-ink); }
 .refusalpanel-msg { color: var(--ink); }
@@ -1288,7 +1303,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   border-radius: 999px; padding: 0 6px; border: 1px solid transparent;
   background: var(--faint); color: var(--muted); white-space: nowrap;
 }
-.intentchip-pending { color: var(--st-proposal); border-color: var(--st-proposal); }
+.intentchip-pending { color: var(--st-proposed); border-color: var(--st-proposed); }
 .intentchip-applied { background: var(--good-bg); color: var(--good); }
 .intentchip-refused { background: var(--blocked-bg); color: var(--blocked); }
 .intentchip-stalled { color: var(--blocked); border-color: var(--blocked); }
@@ -1303,7 +1318,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
    panel themes correctly in light, dark, and auto without a second rule set
    (same approach as .refusalpanel). */
 .settingsbtn { padding: 3px 7px; }
-.settingsbtn[aria-expanded="true"] { border-color: var(--st-staged); color: var(--st-staged); }
+.settingsbtn[aria-expanded="true"] { border-color: var(--st-organized); color: var(--st-organized); }
 .settingspanel {
   position: fixed; top: 60px; left: 16px; z-index: 40; width: 306px;
   background: var(--panel); color: var(--ink);
@@ -1321,18 +1336,18 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .settingspanel-close { border: none; background: none; color: var(--faint-ink); cursor: pointer; font-size: 11px; }
 .settingsrow { display: flex; align-items: center; gap: 8px; padding: 9px 10px 0; flex-wrap: wrap; }
 .settingslabel { flex: 1 0 100%; font-family: var(--mono); font-size: 11px; color: var(--ink); }
-.settingsrange { flex: 1 1 130px; min-width: 0; margin: 0; accent-color: var(--st-staged); cursor: pointer; }
+.settingsrange { flex: 1 1 130px; min-width: 0; margin: 0; accent-color: var(--st-organized); cursor: pointer; }
 .settingsval {
   flex: none; min-width: 44px; text-align: right; font-family: var(--mono);
-  font-variant-numeric: tabular-nums; color: var(--st-staged); font-weight: 700;
+  font-variant-numeric: tabular-nums; color: var(--st-organized); font-weight: 700;
 }
 .settingsreset {
   flex: none; font-family: var(--mono); font-size: 10px; cursor: pointer; color: var(--muted);
   background: var(--faint); border: 1px solid var(--border); border-radius: 3px; padding: 2px 7px;
 }
-.settingsreset:hover { border-color: var(--st-staged); color: var(--st-staged); }
+.settingsreset:hover { border-color: var(--st-organized); color: var(--st-organized); }
 .settingsnote { margin: 6px 10px 9px; color: var(--muted); font-size: 10px; line-height: 1.35; }
-.settingspanel :focus-visible { outline: 2px solid var(--st-realized); outline-offset: 2px; }
+.settingspanel :focus-visible { outline: 2px solid var(--st-completion); outline-offset: 2px; }
 
 /* ---- account menu (header user icon, views/account-menu.js) ----------------
    The user-account button reuses .themebtn's chrome (same header button family)
@@ -1344,7 +1359,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
    (hosted mode) a logout that delegates to the gateway; it authorizes nothing.
    (add-dashboard-account-menu) */
 .accountbtn { padding: 3px 7px; }
-.accountbtn[aria-expanded="true"] { border-color: var(--st-staged); color: var(--st-staged); }
+.accountbtn[aria-expanded="true"] { border-color: var(--st-organized); color: var(--st-organized); }
 .accountmenu {
   position: fixed; top: 60px; left: 16px; z-index: 40; width: 240px;
   background: var(--panel); color: var(--ink);
@@ -1368,8 +1383,8 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   color: var(--muted); text-decoration: none;
   background: var(--faint); border: 1px solid var(--border); border-radius: 3px; padding: 3px 9px;
 }
-.accountmenu-logout:hover { border-color: var(--st-staged); color: var(--st-staged); }
-.accountmenu :focus-visible { outline: 2px solid var(--st-realized); outline-offset: 2px; }
+.accountmenu-logout:hover { border-color: var(--st-organized); color: var(--st-organized); }
+.accountmenu :focus-visible { outline: 2px solid var(--st-completion); outline-offset: 2px; }
 
 /* ---- staged tile health chrome (add-staging-workbench D10) ------------------
    Two levels, verbatim from the snapshot's `health` object (pure helpers in
@@ -1383,7 +1398,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   font-size: calc(10px * var(--wheel-scale, 1)); line-height: 1;
 }
 .wheelhealth-ready { color: var(--good); }
-.wheelhealth-developing { color: var(--st-proposal); }
+.wheelhealth-developing { color: var(--st-proposed); }
 .wheelhealth-stub { color: var(--faint-ink); }
 .wheelhealth-block {
   width: 100%; text-align: left; overflow-y: auto;
@@ -1443,7 +1458,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   background: var(--faint); border: 1px solid var(--border); border-radius: 3px;
   padding: 3px 9px; flex: none;
 }
-.swb-close:hover { border-color: var(--st-staged); color: var(--st-staged); }
+.swb-close:hover { border-color: var(--st-organized); color: var(--st-organized); }
 .swb-tabs {
   display: flex; gap: 6px; padding: 8px 16px 0; background: var(--panel);
   border-bottom: 1px solid var(--border); flex: none;
@@ -1455,7 +1470,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 }
 .swb-tab:hover { color: var(--ink); }
 .swb-tab-active {
-  color: var(--st-staged); border-color: var(--border);
+  color: var(--st-organized); border-color: var(--border);
   background: var(--surface); font-weight: 700;
 }
 .swb-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px; }
@@ -1471,15 +1486,15 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .swb-sectionnote { font-size: 10.5px; color: var(--faint-ink); }
 /* the possible's INHERITED section: visibly a different class of membership —
    an inference from the claiming clusters, never cited evidence */
-.swb-inheritedhead .swb-sectionlabel { color: var(--st-proposal); }
-.swb-inheritedhead { border-bottom-style: dashed; border-bottom-color: var(--st-proposal); }
+.swb-inheritedhead .swb-sectionlabel { color: var(--st-proposed); }
+.swb-inheritedhead { border-bottom-style: dashed; border-bottom-color: var(--st-proposed); }
 .swb-row {
   display: flex; align-items: center; gap: 14px; padding: 5px 6px;
   border: 1px solid var(--faint); border-radius: 6px; background: var(--panel);
 }
 .swb-row[role="button"] { cursor: pointer; }
-.swb-row[role="button"]:hover { border-color: var(--st-staged); }
-.swb-row:focus-visible { outline: 2px solid var(--st-realized); outline-offset: 2px; }
+.swb-row[role="button"]:hover { border-color: var(--st-organized); }
+.swb-row:focus-visible { outline: 2px solid var(--st-completion); outline-offset: 2px; }
 .swb-unresolved { border-style: dashed; }
 .swb-rowinfo { flex: 1; min-width: 0; }
 .swb-name { font-family: var(--mono); font-size: 12px; font-weight: 600; }
@@ -1489,7 +1504,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   height: 7px; border-radius: 999px; background: var(--faint);
   border: 1px solid var(--border); overflow: hidden;
 }
-.swb-bar-fill { height: 100%; background: var(--st-staged); border-radius: 999px; }
+.swb-bar-fill { height: 100%; background: var(--st-organized); border-radius: 999px; }
 .swb-signals { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 9.5px; color: var(--muted); font-family: var(--mono); }
 .swb-score { font-weight: 700; color: var(--ink); }
 .swb-nobar { flex: 0 0 320px; font-size: 10px; color: var(--faint-ink); font-style: italic; }
@@ -1501,7 +1516,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px;
   font-size: 11px; background: var(--panel);
 }
-.swb-kw:hover { border-color: var(--st-staged); }
+.swb-kw:hover { border-color: var(--st-organized); }
 .swb-kwname { font-family: var(--mono); }
 .swb-kwcount { font-size: 9.5px; color: var(--faint-ink); }
 .swb-matrix { margin-top: 4px; }
@@ -1525,7 +1540,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .swb-cslot:empty { display: none; }
 .swb-cform {
   display: flex; flex-direction: column; gap: 6px; margin-top: 6px;
-  border: 1px solid var(--st-staged); border-radius: 6px; padding: 10px 12px;
+  border: 1px solid var(--st-organized); border-radius: 6px; padding: 10px 12px;
   background: var(--panel);
 }
 .swb-ch { font-family: var(--mono); font-size: 11.5px; font-weight: 700; }
@@ -1541,7 +1556,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 }
 .swb-cactions { display: flex; gap: 8px; }
 .swb-cresult:empty { display: none; }
-.swb-clanded { border-left: 3px solid var(--st-realized); padding-left: 8px; }
+.swb-clanded { border-left: 3px solid var(--st-completion); padding-left: 8px; }
 .swb-crefused { border-left: 3px solid var(--blocked); padding-left: 8px; }
 .swb-cdescriptor {
   display: flex; flex-direction: column; gap: 4px;
@@ -1579,16 +1594,16 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 }
 /* a DRAFT view is the one posture that must never be mistaken for `main` */
 .swb-posture.is-draft {
-  color: var(--st-proposal); border-color: var(--st-proposal); font-weight: 700;
+  color: var(--st-proposed); border-color: var(--st-proposed); font-weight: 700;
 }
-.swb-posture.is-live { color: var(--st-staged); border-color: var(--st-staged); }
+.swb-posture.is-live { color: var(--st-organized); border-color: var(--st-organized); }
 .swb-sessionhost { display: flex; flex-direction: column; gap: 6px; }
 .swb-sessionhost:empty { display: none; }
 .swb-sessionactions { display: flex; flex-wrap: wrap; gap: 6px; }
 .swb-sessionbtn { white-space: nowrap; }
 .swb-sessionbtn:disabled { opacity: 0.5; cursor: not-allowed; }
 .swb-sessiondescriptors { display: flex; flex-direction: column; gap: 6px; }
-.swb-notice { color: var(--st-staged); }
+.swb-notice { color: var(--st-organized); }
 .swb-outline { border: 1px solid var(--faint); border-radius: 6px; padding: 10px 14px; background: var(--panel); }
 .swb-outline-empty { padding: 12px 4px; }
 /* the create gesture (design D6, extended to every ring sector by Brett's
@@ -1598,9 +1613,9 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .bullseye .bullseye-centre,
 .bullseye .bullseye-sector { fill: transparent; pointer-events: all; cursor: pointer; }
 .bullseye .bullseye-centre:hover,
-.bullseye .bullseye-sector:hover { fill: var(--st-staged); fill-opacity: 0.12; }
+.bullseye .bullseye-sector:hover { fill: var(--st-organized); fill-opacity: 0.12; }
 .bullseye .bullseye-centre:focus-visible,
-.bullseye .bullseye-sector:focus-visible { outline: 2px solid var(--st-realized); }
+.bullseye .bullseye-sector:focus-visible { outline: 2px solid var(--st-completion); }
 
 /* ============================================================================
    doxBench authoring canvas (010-doxbench-editor-chat, T038): the third
@@ -1679,7 +1694,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
 .doxbench-save-note[hidden] { display: none; }
 .doxbench-unload-note[hidden] { display: none; }
 .doxbench-status { font-size: 10.5px; color: var(--faint-ink); flex: 1; }
-.doxbench-status.is-dirty { color: var(--st-proposal); font-weight: 600; }
+.doxbench-status.is-dirty { color: var(--st-proposed); font-weight: 600; }
 /* Amendment 1 (2026-08-21): Unload shares the slot with the Save/Cancel pair and
    is never on screen beside them, so it takes the same look — the slot's
    occupancy is what changes, not its shape. */
@@ -1689,7 +1704,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   padding: 2px 9px;
 }
 .doxbench-cancel:hover, .doxbench-unload:hover {
-  border-color: var(--st-staged); color: var(--st-staged);
+  border-color: var(--st-organized); color: var(--st-organized);
 }
 .doxbench-cancel:disabled, .doxbench-save:disabled,
 .doxbench-unload:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -1701,7 +1716,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   border: 1px solid var(--border); border-radius: 5px; padding: 8px 10px;
   min-height: 110px; resize: vertical;
 }
-.doxbench-textarea:focus-visible { outline: 2px solid var(--st-realized); outline-offset: 1px; }
+.doxbench-textarea:focus-visible { outline: 2px solid var(--st-completion); outline-offset: 1px; }
 .doxbench-preview {
   flex: 1; min-height: 70px; overflow-y: auto; font-size: 12.5px; color: var(--ink);
   border: 1px dashed var(--border); border-radius: 5px; padding: 8px 10px;
@@ -1712,7 +1727,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
    Discard and Cancel are the two keyboard-reachable choices. */
 .doxbench-guard {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px;
-  padding: 8px 10px; background: var(--faint); border: 1px solid var(--st-proposal);
+  padding: 8px 10px; background: var(--faint); border: 1px solid var(--st-proposed);
   border-radius: 5px;
 }
 .doxbench-guard[hidden] { display: none; }
@@ -1723,7 +1738,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   padding: 3px 10px;
 }
 .doxbench-guard-discard:hover, .doxbench-guard-cancel:hover {
-  border-color: var(--st-proposal); color: var(--st-proposal);
+  border-color: var(--st-proposed); color: var(--st-proposed);
 }
 .doxbench-guard-save:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -2125,7 +2140,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
      disagree by 18px per tile and the reel would drift apart. */
   --wheel-scale: 1;
 }
-.swb-docwheel:focus-visible { outline: 2px solid var(--st-staged); outline-offset: -2px; }
+.swb-docwheel:focus-visible { outline: 2px solid var(--st-organized); outline-offset: -2px; }
 .swb-docwheelport { position: absolute; inset: 0; }
 /* The deck's tile is a fixed 196px in a six-column deck; here one reel owns the
    pane, so the tile spans it. */
@@ -2152,11 +2167,11 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
    named both: one says "this is in the chat context", the other says "this must
    be saved". Driven off live buffer state; never written into the snapshot. */
 .swb-doctile.swb-docloaded {
-  border-color: var(--st-staged); box-shadow: inset 0 0 0 1px var(--st-staged);
+  border-color: var(--st-organized); box-shadow: inset 0 0 0 1px var(--st-organized);
 }
 .swb-doctile.swb-docneedssave {
-  border-color: var(--st-proposal); background: var(--faint);
-  box-shadow: inset 0 0 0 2px var(--st-proposal);
+  border-color: var(--st-proposed); background: var(--faint);
+  box-shadow: inset 0 0 0 2px var(--st-proposed);
 }
 /* Where a tile verb's outcome lands — a refused load (the measured loaded-set
    bound) or a Save the governed pipeline declined. */
@@ -2165,7 +2180,7 @@ svg.edges path.topic { stroke: var(--st-brainstorm); stroke-dasharray: 4 3; opac
   padding: 4px 8px; border-top: 1px solid var(--border);
 }
 .swb-row-selected {
-  outline: 2px solid var(--st-staged); outline-offset: -2px;
+  outline: 2px solid var(--st-organized); outline-offset: -2px;
   background: var(--faint);
 }
 .swb-abstracttitle { font-family: var(--mono); font-size: 12.5px; font-weight: 700; }
@@ -2516,7 +2531,7 @@ tr.lit > td { background: rgba(127, 127, 127, 0.16); }
    engine's create-only refusal states it after (Brett, 2026-08-10). A notice,
    not an error: a second document on a shared topic is ordinary. */
 .swb-draftexisting {
-  border: 1px solid var(--border); border-left: 3px solid var(--st-staged);
+  border: 1px solid var(--border); border-left: 3px solid var(--st-organized);
   border-radius: 5px; padding: 7px 10px; font-size: 12px;
   display: flex; flex-direction: column; gap: 3px;
   /* NOT CRUSHABLE. A notice that shrinks to its own padding has stopped being a

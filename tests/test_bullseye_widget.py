@@ -1274,7 +1274,8 @@ def test_the_hovered_dot_pulses_and_the_selected_dot_has_its_own_colour():
 
     # the selection colour is its OWN token, defined in every theme block.
     # It was first drawn in `--edge-pick`, which is the same teal as
-    # `--st-staged`: measured rgb(31,168,152) for both a selected and an
+    # `--st-organized` (`--st-staged` before slice S7 named the four tokens by
+    # role): measured rgb(31,168,152) for both a selected and an
     # unselected dot, i.e. no change at all.
     assert "--picked:" in css
     assert css.count("--picked:") >= 3          # :root + both dark paths
