@@ -714,6 +714,14 @@ function initTabs(snapshot, ctx, signal) {
       controllers[target.region] = target.mount(
         document.getElementById(target.region), snapshot, ctx);
       rendered.add(target.region);
+      // RULED Q1's GENERIC PASS, for THIS region, now that its core renderer
+      // has run and cleared the root (Copilot review, round 2). Before the
+      // hook the pass ran once before every core mount, so a contributed panel
+      // in a tab rendered later was mounted and then erased by that tab's own
+      // first render. The hook is fire-and-forget by design: `show()` is a
+      // click handler and the panel appends into a region that is already on
+      // the page.
+      ctx.onRegionRendered?.(target.region);
     } else if (controllers[target.region]?.redraw) {
       controllers[target.region].redraw();
     }
@@ -1106,9 +1114,31 @@ async function render() {
     // drawn to prevent. The gate column's own six bindings are all `shell`
     // regions and are mounted by the callers that build their hosts, which is
     // exactly the exception Q1 preserves; the pass exists for the NEXT column.
-    const contributedMounts = await mountContributedViews(
-      views, snapshot, { caps, nav: null, views },
-      { capabilities: probedCaps });
+    //
+    // AFTER THE CORE RENDER OF EACH REGION, NEVER ONCE BEFORE THEM ALL (Copilot
+    // review, round 2). Every `dom` region is a root a core renderer owns and
+    // CLEARS: `renderWheel` and `renderFunnel` assign `root.innerHTML = ""`,
+    // `mountExplorer` clears its container, and the tab router renders a
+    // non-initial tab LAZILY on first activation — minutes after load. A single
+    // pass here mounted contributed panels into roots that were about to be
+    // emptied and never remounted them, so a valid contributed binding would
+    // have been mounted and then erased with nothing refused and nothing said.
+    // The pass is therefore run PER REGION by the caller that just rendered it:
+    // `mountContributedInto` below, called after `mountExplorer`, after
+    // `mountStagingWorkbench`, and by the tab router's `onRegionRendered` hook
+    // on each tab's first render.
+    // THE CONTEXT IS THE SAME MINIMAL ONE THE PASS ALWAYS HANDED DOWN — RULED
+    // Q3's `mount(host, snapshot, ctx)` with the capability probe and the
+    // registry, and nothing of this shell's internals. What changed here is
+    // WHEN the pass runs, not what a contributed binding is given.
+    const contributedMounts = [];
+    const mountContributedInto = async (regions) => {
+      const mounted = await mountContributedViews(
+        views, snapshot, { caps, nav: null, views },
+        { capabilities: probedCaps, regions });
+      contributedMounts.push(...mounted);
+      return mounted;
+    };
     const explorer = mountExplorer(explorerRoot, snapshot, {
       signal,
       onOpenFile: (entry, pane, tile) => {
@@ -1132,6 +1162,9 @@ async function render() {
         });
       },
     });
+    // `explorer-root` is rendered: its contributed bindings can mount into a
+    // root that will not be cleared out from under them.
+    await mountContributedInto(["explorer-root"]);
     // When the capability probe reports the notebook action
     // available, tiles grow an "Open in NotebookLM" affordance; otherwise the
     // controller's button() returns null and nothing renders — the served/local
@@ -1330,6 +1363,8 @@ async function render() {
         sourceBase: workbenchSourceBase, edit: workbenchEdit,
         onScopeOpened: routeWorkbenchScope, onSessionRekey: rekeyToSession,
         onSessionEnded: resetEndedSession });
+    // `staging-workbench-root` is rendered: same reading as the explorer's.
+    await mountContributedInto(["staging-workbench-root"]);
     // The wheel's read-only verbs (documents read · clusters lens/canvas): app.js
     // owns every cross-view jump, so the wheel declares the verb and calls back
     // here. `tabs` is assigned just below; the callbacks only run on a click.
@@ -1415,6 +1450,17 @@ async function render() {
       // D21 — the repository lens's seams: the whole aggregate to lens over,
       // the current visible set, the write-through, and the drill-in.
       rawSnapshot, visible: view ? view.visible : null,
+      // EACH TAB'S CONTRIBUTED PANELS, MOUNTED AFTER THAT TAB RENDERS. The tab
+      // router renders a region lazily, on first activation, and the renderer
+      // clears the root; this hook is how the generic pass reaches a region
+      // whose core render happens minutes after load (Copilot review, round 2).
+      // `show()` is synchronous — it is a click handler — so the pass is
+      // started and not awaited, and its refusal is reported through the same
+      // frame the initial render uses rather than becoming an unhandled
+      // rejection.
+      onRegionRendered: (region) => {
+        mountContributedInto([region]).catch(reportAssemblyFailure);
+      },
       // handed to every view that binds outside its own root
       signal,
       onVisible: (repositories) => {
@@ -1459,25 +1505,36 @@ async function render() {
     }
     if (status) status.remove();
   } catch (err) {
+    reportAssemblyFailure(err);
+  }
+
+  // RULED Q11 (openxFactory#656 comment `5648065587`, Brett Heap, 2026-09-12):
+  // "the shell catches `ViewBindingError` SEPARATELY and shows a registry
+  // refusal naming the binding, the rule and the value; a registry refusal is
+  // no longer framed as a snapshot defect."
+  //
+  // WHAT WAS WRONG. Every refusal the view registry raises — a slot collision,
+  // a module that will not load, an entry that is not a function, an undeclared
+  // export reached, an unmet required capability, a manifest that is not a
+  // manifest — was caught by this one handler and reported as "Could not load
+  // the snapshot … regenerate it and reload". The seam's own carefully-composed
+  // sentence was parenthesised inside advice that does not apply, and a column
+  // debugging its own contribution was told to regenerate a snapshot that is
+  // fine. The messages were right; the frame was wrong.
+  //
+  // Matched by `instanceof` AND by name: the class is this bundle's own, so
+  // `instanceof` holds for every refusal raised through it, and the name check
+  // keeps the frame right for a refusal that crossed a realm (a worker, a test
+  // harness) where the constructor identity does not survive.
+  //
+  // A NAMED FUNCTION, because the generic mount pass now also runs LATE — on a
+  // tab's first render, from a click handler that cannot await it (Copilot
+  // review, round 2). A contributed binding refused at that moment must reach
+  // the same surface, in the same frame, as one refused during the initial
+  // render; the alternative is an unhandled rejection in the console and a tab
+  // that silently lacks its panel.
+  function reportAssemblyFailure(err) {
     if (!status) return;
-    // RULED Q11 (openxFactory#656 comment `5648065587`, Brett Heap,
-    // 2026-09-12): "the shell catches `ViewBindingError` SEPARATELY and shows a
-    // registry refusal naming the binding, the rule and the value; a registry
-    // refusal is no longer framed as a snapshot defect."
-    //
-    // WHAT WAS WRONG. Every refusal the view registry raises — a slot
-    // collision, a module that will not load, an entry that is not a function,
-    // an undeclared export reached, an unmet required capability, a manifest
-    // that is not a manifest — was caught by this one handler and reported as
-    // "Could not load the snapshot … regenerate it and reload". The seam's own
-    // carefully-composed sentence was parenthesised inside advice that does not
-    // apply, and a column debugging its own contribution was told to regenerate
-    // a snapshot that is fine. The messages were right; the frame was wrong.
-    //
-    // Matched by `instanceof` AND by name: the class is this bundle's own, so
-    // `instanceof` holds for every refusal raised through it, and the name
-    // check keeps the frame right for a refusal that crossed a realm (a worker,
-    // a test harness) where the constructor identity does not survive.
     const registryRefusal = err instanceof ViewBindingError
       || (err && err.name === "ViewBindingError");
     status.textContent = registryRefusal

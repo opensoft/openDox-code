@@ -100,12 +100,20 @@ const NO_DISPOSE_COLUMN = Object.freeze({
   panelEntry: () => null,
 });
 
-//: The column this render was handed, installed by `renderWheel` before any
-//: mounter can fire. Module-level because `ACTION_MOUNTERS` below is a
-//: module-level table of arrow functions the action row looks verbs up in —
-//: threading a per-render object through it would mean giving every mounter a
-//: ninth parameter that only exists to be forwarded.
-let disposeColumn = NO_DISPOSE_COLUMN;
+//: THE COLUMN TRAVELS IN `opts`, NOT IN A MODULE VARIABLE (Copilot review of
+//: openDox-code#20, round 2). It was a module-level `let` that `renderWheel`
+//: assigned, on the argument that `ACTION_MOUNTERS` is a module-level table and
+//: threading the column through it would be a parameter that exists only to be
+//: forwarded. That argument was wrong about the hazard it was trading against:
+//: the table is module-level, but every mounter is CALLED from inside a render
+//: closure and the table's own `opts` is built there. A module variable, by
+//: contrast, is shared by every live render — a second `renderWheel` (a
+//: snapshot refresh, a drill-in composed render whose tiles are deliberately
+//: NOT gate-bearing) overwrites the column the first render's in-flight
+//: completion callbacks still read, and the first wheel then applies the second
+//: render's verbs. `opts` already carries `label`, `actionId`, `wheelKey`,
+//: `nav` and `notebook`; the column joins them, and the mounters read it from
+//: there.
 // `emitIntent` and `renderIntentChips` join this import for the CONTRIBUTED
 // tray's sake — RULED counterpart Q6 (opensoft/openxFactory#656 comment
 // `5649094228`, Brett Heap, 2026-09-12): a contributed view module may import
@@ -175,17 +183,17 @@ const summaryCache = new Map();
 // /source pass-through above, parsed by the pure `landedFromDeltas`; `packet`
 // opens the same kind of flyout straight from snapshot data.
 const ACTION_MOUNTERS = {
-  propose: (row, item, opts) => disposeColumn.mountProposeButton(row, item, { ...opts, compact: true }),
+  propose: (row, item, opts) => opts.dispose.mountProposeButton(row, item, { ...opts, compact: true }),
   // 011 add-wheel-action-verbs: one generic mounter, four verbs. `actionId` is
   // the verb, so the mounter needs no per-verb branch here.
   "promote-to-staging": (row, item, opts) =>
-    disposeColumn.mountWheelVerb(row, item, { ...opts, verb: "promote-to-staging" }),
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "promote-to-staging" }),
   "research-brief": (row, item, opts) =>
-    disposeColumn.mountWheelVerb(row, item, { ...opts, verb: "research-brief" }),
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "research-brief" }),
   "derive-possibles": (row, item, opts) =>
-    disposeColumn.mountWheelVerb(row, item, { ...opts, verb: "derive-possibles" }),
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "derive-possibles" }),
   demote: (row, item, opts) =>
-    disposeColumn.mountWheelVerb(row, item, { ...opts, verb: "demote" }),
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "demote" }),
   // add-project-merged-projection (D10): the composed view's ONE verb — jump
   // to the tile's member repository (store the key + reload, the ratified
   // selector posture). Pure navigation; nothing is recorded or persisted.
@@ -398,11 +406,12 @@ function threadPath(x0, y0, x1, y1) {
 }
 
 export function renderWheel(root, snapshot, ctx) {
-  // THE CONTRIBUTED DISPOSE COLUMN, installed before anything can mount. The
-  // shell resolved the `gate.dispose` binding and handed its declared namespace
-  // down; absent, the null column above makes every gate affordance unoffered
-  // rather than undefined.
-  disposeColumn = ctx?.dispose || NO_DISPOSE_COLUMN;
+  // THE CONTRIBUTED DISPOSE COLUMN, bound to THIS render. The shell resolved
+  // the `gate.dispose` binding and handed its declared namespace down; absent,
+  // the null column above makes every gate affordance unoffered rather than
+  // undefined. A `const` in the render closure and not a module variable: two
+  // live renders must not share it (Copilot review, round 2).
+  const disposeColumn = ctx?.dispose || NO_DISPOSE_COLUMN;
   const signal = ctx?.signal;
   const caps = ctx?.caps || null;
   // Cross-view navigation callbacks from the app shell (app.js): openDoc(path,
@@ -1268,6 +1277,10 @@ export function renderWheel(root, snapshot, ctx) {
         mount(row, item, {
           label: spec.label,
           actionId: spec.id,
+          // THIS render's contributed column (Copilot review, round 2): the
+          // mounter table is module-level, so the column reaches it the way
+          // every other per-render fact does.
+          dispose: disposeColumn,
           wheelKey: w.key,
           nav,
           notebook,

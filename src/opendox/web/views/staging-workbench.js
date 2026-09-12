@@ -129,13 +129,17 @@ const NO_SESSION_COLUMN = Object.freeze({
   openedSessions: () => [],
   sessionOpened: () => null,
 });
-//: Installed by `mountStagingWorkbench` before any affordance can mount; module
-//: level for the reason `views/wheel.js` gives of its own column — the call
-//: sites are spread across a 3,300-line overlay and threading a per-render
-//: object through every one of them would be a parameter that exists only to be
-//: forwarded.
-let createColumn = NO_CREATE_COLUMN;
-let sessionColumn = NO_SESSION_COLUMN;
+//: THE COLUMNS ARE PER-MOUNT LOCALS, NOT MODULE STATE (Copilot review of
+//: openDox-code#20, round 2). They were module-level `let`s that
+//: `mountStagingWorkbench` assigned, on the argument that the call sites are
+//: spread across a 3,300-line overlay. They are — and every one of them is
+//: INSIDE `mountStagingWorkbench`, so a `const` in that function reaches all of
+//: them and threads nothing. What module state bought instead was a hazard: two
+//: live workbenches (the overlay is mounted again on a re-render, and the
+//: canvas mounts its own) share one pair of columns, so the second mount
+//: silently rebinds the columns every closure of the first is still calling
+//: through — a late create response or a redraw from the first workbench then
+//: runs the second's contributed actions.
 import { primaryFragmentPath } from "./wheel-model.js";
 import { insertSection, outlineModel } from "./outline-model.js";
 import { renderViewer } from "./viewer.js";
@@ -1540,13 +1544,14 @@ export function mountStagingWorkbench(container, snapshot,
   // may temporarily adopt a branch snapshot inside the workbench. Reopening
   // from that wheel must therefore start from the shell state again; otherwise
   // the retained branch projection can be rendered with a newly reset main key.
-  // THE CONTRIBUTED WORKBENCH GATE COLUMNS, installed before anything mounts.
-  // `gate` is what `app.js` resolved off the `gate.workbench.create` and
+  // THE CONTRIBUTED WORKBENCH GATE COLUMNS, bound to THIS mount. `gate` is what
+  // `app.js` resolved off the `gate.workbench.create` and
   // `gate.workbench.session` bindings; either half null is "no gate column
   // here", which the null objects above turn into "not offered" rather than
-  // "undefined".
-  createColumn = gate?.create || NO_CREATE_COLUMN;
-  sessionColumn = gate?.session || NO_SESSION_COLUMN;
+  // "undefined". `const` in the mount closure and not module state: two live
+  // workbenches must not share a column (Copilot review, round 2).
+  const createColumn = gate?.create || NO_CREATE_COLUMN;
+  const sessionColumn = gate?.session || NO_SESSION_COLUMN;
   let shellSnapshot = snapshot;
   let shellActive = active;
   let shellIndex = index;

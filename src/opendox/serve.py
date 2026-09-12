@@ -1567,12 +1567,21 @@ def build_server(
     # facet gets `host_facet: "absent"` with its profile NAMED, never a refusal,
     # because every host has yet to grow the facet and refusing would be a flag
     # day imposed by the seam that exists to avoid one.
-    view_extensions = view_extension.host_view_extensions(profile_openxfactory)
+    #
+    # PRESENCE, NOT TRUTHINESS (Copilot review, round 2). `host_view_facet`
+    # answers BOTH halves in one read: a host that declares `VIEW_EXTENSIONS =
+    # ()` is "declared" with an empty column, and a host that never grew the
+    # facet is "absent" — the same empty tuple, two different facts, and a
+    # conditional on the tuple's TRUTHINESS reported both as the second. That is
+    # the diagnostic this manifest exists to carry, so it is read the way it is
+    # written.
+    host_facet, view_extensions = view_extension.host_view_facet(
+        profile_openxfactory)
     capabilities["views"] = view_extension.view_manifest(
         view_extension.collect_view_bindings(
             view_extensions, contributed_routes=route_bindings),
         contributed_routes=route_bindings,
-        host_facet="declared" if view_extensions else "absent",
+        host_facet=host_facet,
         host_profile=getattr(profile_openxfactory, "__name__", None),
     )
 

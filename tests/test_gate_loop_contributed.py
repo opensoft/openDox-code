@@ -48,7 +48,7 @@ import yaml
 
 from opendox.view_extension import (
     REGIONS, ViewBinding, ViewBindingError, collect_view_bindings, dom_regions,
-    view_manifest,
+    host_view_extensions, host_view_facet, view_manifest,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -278,6 +278,37 @@ console.log(JSON.stringify({{ refused }}));
     assert "must not look registered" in result["refused"]
 
 
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_a_declared_export_that_is_not_callable_refuses_at_resolve(
+        tmp_path) -> None:
+    """PRESENT IS NOT USABLE (Copilot review of this PR, round 2). RULED Q2
+    validates a declared export "the way `entry` is", and `entry` is checked
+    PRESENT and CALLABLE. Checking the name alone let a column publish
+    `firstEditTransport` as a string and still resolve; `app.js` reaches that
+    export through the registry in order to CALL it, so the defect would have
+    surfaced as a raw `TypeError` inside a click handler — the dangling reach
+    this seam exists to replace, one field over."""
+    web = _temp_bundle(tmp_path, {
+        "panel.js": ("export function mount() {}\n"
+                     "export const firstEditTransport = \"not a function\";\n"),
+    })
+    result = _run_node(f"""
+import {{ collectViewBindings, resolveView }}
+  from {json.dumps((web / "views" / "view_extension.js").as_uri())};
+const bindings = collectViewBindings([{{ views: () => [{{
+  id: "panel.one", region: "page-overlay", module: "./views/panel.js",
+  entry: "mount", view_class: "B",
+  exports: ["mount", "firstEditTransport"], optional: true }}] }}]);
+let refused = null;
+try {{ await resolveView(bindings, "panel.one"); }}
+catch (e) {{ refused = e.message; }}
+console.log(JSON.stringify({{ refused }}));
+""", tmp_path)
+    assert "declares export \"firstEditTransport\"" in result["refused"]
+    assert "exports as string rather than a function" in result["refused"]
+    assert "5648049748" in result["refused"]
+
+
 # ---------------------------------------------------------------------------
 # RULED Q4 — `requires`, evaluated
 # ---------------------------------------------------------------------------
@@ -331,6 +362,48 @@ console.log(JSON.stringify(out));
     assert "panel.one" in result["required_off"]
     assert "actions.gate" in result["required_off"]
     assert result["required_live"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_an_inherited_property_can_never_meet_a_requirement(tmp_path) -> None:
+    """FAIL CLOSED ON A PAYLOAD THIS SHELL DID NOT WRITE (Copilot review of
+    this PR, round 2). An ordinary property read walks the prototype chain, so
+    `requires: ["toString"]` resolved to a function, answered truthy and MET a
+    requirement no `/capabilities` payload carries — and so would
+    `constructor`, `valueOf` and `hasOwnProperty` itself. A requirement is a
+    gate; a gate that a malformed or hostile manifest can open by naming a
+    language builtin is not one."""
+    web = _temp_bundle(tmp_path, {"panel.js": "export function mount() { return 1; }\n"})
+    result = _run_node(f"""
+import {{ collectViewBindings, probeCapabilityPath, unmetRequirement,
+          resolveView }}
+  from {json.dumps((web / "views" / "view_extension.js").as_uri())};
+const spec = (over) => ({{
+  id: "panel.one", region: "page-overlay", module: "./views/panel.js",
+  entry: "mount", view_class: "B", optional: true, ...over }});
+const caps = {{ actions: {{ gate: true }} }};
+const inherited = collectViewBindings([
+  {{ views: () => [spec({{ requires: ["toString"] }})] }}]);
+const nested = collectViewBindings([
+  {{ views: () => [spec({{ requires: ["actions.hasOwnProperty"] }})] }}]);
+console.log(JSON.stringify({{
+  probe_inherited: probeCapabilityPath(caps, "toString") ?? null,
+  probe_nested: probeCapabilityPath(caps, "actions.constructor") ?? null,
+  probe_own: probeCapabilityPath(caps, "actions.gate"),
+  unmet_inherited: unmetRequirement(inherited[0], caps),
+  unmet_nested: unmetRequirement(nested[0], caps),
+  resolved: await resolveView(inherited, "panel.one", {{ capabilities: caps }}),
+}}));
+""", tmp_path)
+    assert result["probe_inherited"] is None
+    assert result["probe_nested"] is None
+    assert result["probe_own"] is True
+    # `value` is `undefined` and JSON drops the key: "the path is not carried
+    # at all", which is the honest reading of an inherited member.
+    assert result["unmet_inherited"] == {"path": "toString"}
+    assert result["unmet_nested"] == {"path": "actions.hasOwnProperty"}
+    # and the binding that named it does not mount: an unmet OPTIONAL absence.
+    assert result["resolved"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +474,129 @@ console.log(JSON.stringify({{
                                  result["reason"][0][2]]]
     assert "panel.unmet" in result["reason"][0][2]
     assert "actions.gate" in result["reason"][0][2]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_the_pass_mounts_each_binding_s_own_module_not_the_first_id_match(
+        tmp_path) -> None:
+    """IDS ARE UNIQUE PER REGION, NOT GLOBALLY (Copilot review of this PR,
+    round 2). `collectViewBindings` keys its collision check on the SLOT —
+    `region + id` — so two columns may each contribute a `gate.bar` into their
+    own region and neither is refused. The pass re-resolved each binding by
+    `binding.id`, and `lookupView()` answers the FIRST match: the second
+    region's panel mounted the FIRST binding's module and entry, with nothing
+    refused and nothing logged. The pass holds the binding; it resolves THAT
+    one."""
+    web = _temp_bundle(tmp_path, {
+        "one.js": "export function mount(host) { host.by = 'one'; return 'one'; }\n",
+        "two.js": "export function mount(host) { host.by = 'two'; return 'two'; }\n",
+    })
+    result = _run_node(f"""
+import {{ collectViewBindings, mountContributedViews, lookupView }}
+  from {json.dumps((web / "views" / "view_extension.js").as_uri())};
+const hosts = {{}};
+for (const id of ["view-docs", "explorer-root"]) {{
+  hosts[id] = {{ id, by: null, appendChild() {{}} }};
+}}
+const doc = {{ getElementById: (id) => hosts[id] || null,
+               createElement: () => ({{ setAttribute() {{}}, appendChild() {{}} }}) }};
+const bindings = collectViewBindings([{{ views: () => [
+  {{ id: "panel", region: "view-docs", module: "./views/one.js",
+     entry: "mount", view_class: "B", optional: true }},
+  {{ id: "panel", region: "explorer-root", module: "./views/two.js",
+     entry: "mount", view_class: "B", optional: true }},
+]}}]);
+const results = await mountContributedViews(bindings, null, {{}},
+                                            {{ document: doc }});
+console.log(JSON.stringify({{
+  collected: bindings.length,
+  lookup_module: lookupView(bindings, "panel").module,
+  mounted: results.map((r) => [r.binding.region, r.binding.module, r.mounted]),
+  by: {{ docs: hosts["view-docs"].by, explorer: hosts["explorer-root"].by }},
+}}));
+""", tmp_path)
+    # the registry PERMITS the pair: the slot, not the id, is the unique key
+    assert result["collected"] == 2
+    assert result["lookup_module"] == "./views/one.js"
+    # and each region got ITS OWN module's entry
+    assert result["mounted"] == [["view-docs", "./views/one.js", "one"],
+                                 ["explorer-root", "./views/two.js", "two"]]
+    assert result["by"] == {"docs": "one", "explorer": "two"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_the_pass_is_bounded_to_the_regions_the_caller_just_rendered(
+        tmp_path) -> None:
+    """`regions` is WHEN, expressed as WHICH (Copilot review of this PR, round
+    2). A caller that has just rendered one region's root asks the pass for that
+    region and gets exactly it; a caller that asks for nothing — a probe — still
+    gets every `dom`-region binding."""
+    web = _temp_bundle(tmp_path, {
+        "panel.js": "export function mount(host) { host.hit = true; return 'ok'; }\n",
+    })
+    result = _run_node(f"""
+import {{ collectViewBindings, mountContributedViews }}
+  from {json.dumps((web / "views" / "view_extension.js").as_uri())};
+const hosts = {{}};
+for (const id of ["view-docs", "explorer-root"]) {{
+  hosts[id] = {{ id, hit: false, appendChild() {{}} }};
+}}
+const doc = {{ getElementById: (id) => hosts[id] || null,
+               createElement: () => ({{ setAttribute() {{}}, appendChild() {{}} }}) }};
+const spec = (id, region) => ({{
+  id, region, module: "./views/panel.js", entry: "mount", view_class: "B",
+  optional: true }});
+const bindings = collectViewBindings([{{ views: () => [
+  spec("panel.docs", "view-docs"), spec("panel.explorer", "explorer-root"),
+]}}]);
+const one = await mountContributedViews(bindings, null, {{}},
+  {{ document: doc, regions: ["explorer-root"] }});
+const after = {{ docs: hosts["view-docs"].hit,
+                 explorer: hosts["explorer-root"].hit }};
+const all = await mountContributedViews(bindings, null, {{}}, {{ document: doc }});
+console.log(JSON.stringify({{
+  bounded: one.map((r) => r.binding.id), after,
+  unbounded: all.map((r) => r.binding.id),
+}}));
+""", tmp_path)
+    assert result["bounded"] == ["panel.explorer"]
+    assert result["after"] == {"docs": False, "explorer": True}
+    assert result["unbounded"] == ["panel.docs", "panel.explorer"]
+
+
+def test_the_generic_pass_runs_after_each_core_render_not_once_before_them(
+        ) -> None:
+    """EVERY `dom` REGION IS A ROOT A CORE RENDERER CLEARS (Copilot review of
+    this PR, round 2). `renderWheel` and `renderFunnel` assign
+    `root.innerHTML = ""`, `mountExplorer` clears its container, and the tab
+    router renders a non-initial tab lazily on first activation — so one pass
+    before the core mounts mounted contributed panels into roots that were
+    about to be emptied, and never remounted them. The pass is run per region,
+    by the caller that just rendered that region."""
+    app = _app()
+    # the roots really are cleared by their own renderers
+    assert 'root.innerHTML = "";' in (VIEWS / "wheel.js").read_text(
+        encoding="utf-8")
+    assert 'root.innerHTML = "";' in (VIEWS / "funnel.js").read_text(
+        encoding="utf-8")
+    # ONE runner, bounded by region every time it is called
+    assert "const mountContributedInto = async (regions) => {" in app
+    assert "{ capabilities: probedCaps, regions }" in app
+    calls = re.findall(r"mountContributedInto\(\[([^\]]*)\]\)", app)
+    assert calls == ['"explorer-root"', '"staging-workbench-root"', "region"], calls
+    # and each of the two eager ones comes AFTER its core mount
+    assert app.index("mountExplorer(explorerRoot") < app.index(
+        'mountContributedInto(["explorer-root"])')
+    assert app.index("mountStagingWorkbench(") < app.index(
+        'mountContributedInto(["staging-workbench-root"])')
+    # the tab router fires the hook after the LAZY first render of a region
+    router = re.search(r"if \(!rendered\.has\(target\.region\)\) \{(.*?)\n    \}",
+                       app, re.S).group(1)
+    assert "target.mount(" in router
+    assert "rendered.add(target.region);" in router
+    assert "ctx.onRegionRendered?.(target.region);" in router
+    assert router.index("target.mount(") < router.index("ctx.onRegionRendered")
+    assert "onRegionRendered: (region) => {" in app
 
 
 # ---------------------------------------------------------------------------
@@ -489,8 +685,18 @@ def test_a_registry_refusal_is_not_framed_as_a_snapshot_defect() -> None:
     assert "The snapshot is fine — the assembly is not" in app
     # the snapshot frame SURVIVES for everything that is not a registry refusal
     assert "Could not load the snapshot (" in app
-    assert "ViewBindingError" in re.search(
+    # THE RENDER'S CATCH REACHES THE FRAME, and the frame is now a NAMED
+    # function because the generic mount pass also runs from a click handler
+    # that cannot await it (Copilot review, round 2): a binding refused on a
+    # tab's first render must reach the same surface as one refused during the
+    # initial render, not an unhandled rejection in the console.
+    assert "reportAssemblyFailure(err)" in re.search(
         r"\} catch \(err\) \{(.*?)\n  \}", app, re.S).group(1)
+    assert "function reportAssemblyFailure(err) {" in app
+    assert "ViewBindingError" in re.search(
+        r"function reportAssemblyFailure\(err\) \{(.*?)\n  \}",
+        app, re.S).group(1)
+    assert ".catch(reportAssemblyFailure)" in app
 
 
 # ---------------------------------------------------------------------------
@@ -523,11 +729,49 @@ def test_the_serve_publishes_the_manifest_on_capabilities() -> None:
     EXISTS to deliver, joins them."""
     serve = (ROOT / "src" / "opendox" / "serve.py").read_text(encoding="utf-8")
     assert 'capabilities["views"] = view_extension.view_manifest(' in serve
-    assert "view_extension.host_view_extensions(profile_openxfactory)" in serve
+    # PRESENCE, NOT TRUTHINESS (Copilot review, round 2): the facet's state and
+    # its value come out of ONE read, so a host declaring `VIEW_EXTENSIONS = ()`
+    # is reported as "declared" with an empty column rather than as a host that
+    # never grew the facet.
+    assert "view_extension.host_view_facet(" in serve
+    assert "host_facet=host_facet" in serve
+    assert '"declared" if view_extensions else "absent"' not in serve
     assert "view_extension.collect_view_bindings(" in serve
     # the SAME contributed routes the server was assembled with, so both halves
     # of the seam check § 2.2 rule 1 against the same facts
     assert "contributed_routes=route_bindings" in serve
+
+
+@pytest.mark.parametrize("declared,expected", [
+    (None, "absent"),                      # no facet at all
+    ((), "declared"),                      # the facet, declaring nothing
+    (("x",), "declared"),                  # the facet, contributing
+])
+def test_the_facets_presence_is_not_its_truthiness(declared, expected) -> None:
+    """`view_manifest` promises the column debugging its own contribution three
+    distinguishable facts: no host, a host with no facet, and a host whose facet
+    contributes nothing. `"declared" if view_extensions else "absent"` collapsed
+    the last two into one (Copilot review of this PR, round 2), which is exactly
+    the silence `host_view_extensions`' own docstring argues against."""
+    class _Profile:
+        pass
+    profile = _Profile()
+    if declared is not None:
+        profile.VIEW_EXTENSIONS = declared
+    facet, extensions = host_view_facet(profile)
+    assert facet == expected
+    assert extensions == (declared or ())
+    # and the older reader still answers exactly what it always answered
+    assert host_view_extensions(profile) == extensions
+
+
+def test_a_profile_declaring_the_facet_as_none_reads_as_absent() -> None:
+    """`None` is a host spelling "I contribute no views", and `tuple(None)`
+    would raise where this seam's whole posture is that an absence is not a
+    defect."""
+    class _Profile:
+        VIEW_EXTENSIONS = None
+    assert host_view_facet(_Profile()) == ("absent", ())
 
 
 def test_the_census_totals_and_the_class_b_remainder() -> None:

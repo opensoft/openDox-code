@@ -459,12 +459,22 @@ export function manifestRoutes(capabilities) {
 // unmet requirement is. Only a TRUTHY value meets one; `false`, `null`, `0` and
 // `""` are all "off", because every capability this payload carries is a
 // verdict and a falsy verdict is a no.
+//
+// AN OWN PROPERTY OR NOTHING (Copilot review, round 2). An ordinary property
+// read walks the prototype chain, so `requires: ["toString"]` resolved to a
+// function, answered truthy, and MET a requirement no `/capabilities` payload
+// ever carried — as would `constructor`, `valueOf` and every other
+// `Object.prototype` member. The payload is JSON this shell did not write and a
+// requirement is a gate, so the probe reads only what the object itself
+// carries: a malformed or hostile manifest fails CLOSED, which is the posture
+// every other refusal in this file takes.
 export function probeCapabilityPath(capabilities, path) {
   let cursor = capabilities;
   for (const segment of String(path).split(".")) {
     if (cursor === null || cursor === undefined || typeof cursor !== "object") {
       return undefined;
     }
+    if (!Object.prototype.hasOwnProperty.call(cursor, segment)) return undefined;
     cursor = cursor[segment];
   }
   return cursor;
@@ -536,6 +546,23 @@ export function requireView(bindings, id) {
 export async function resolveView(bindings, id, options) {
   const binding = lookupView(bindings, id);
   if (!binding) return null;
+  return resolveBinding(binding, options);
+}
+
+// The same resolution, given the BINDING ITSELF rather than an id to look one
+// up by — the form a caller that is already holding a binding must use.
+//
+// WHY IT IS SEPARATE (Copilot review, round 2). Bindings are unique by SLOT,
+// `region + id` (`viewBinding()`), so the registry deliberately permits one id
+// in two regions — two columns may each contribute a `gate.bar` into their own
+// region and neither is a collision. `lookupView()` answers by id alone and
+// returns the FIRST match, so the generic mount pass, iterating the bindings
+// and re-resolving each by `binding.id`, would have mounted the FIRST
+// binding's module and entry into the SECOND binding's region: a panel
+// rendering another column's module, with nothing refused and nothing logged.
+// The pass holds the binding already; it resolves THAT one.
+export async function resolveBinding(binding, options) {
+  if (!binding) return null;
   // RULED Q4, at the ONE place every named reader already goes through. A
   // caller that passes `capabilities` gets the requirement evaluated here:
   // an unmet requirement on an OPTIONAL binding answers `null`, which every
@@ -600,6 +627,29 @@ export async function resolveView(bindings, id, options) {
         + JSON.stringify(name) + ", which " + JSON.stringify(binding.module)
         + " does not export. A binding whose declared namespace is not the "
         + "module's namespace must not look registered.");
+    }
+    // PRESENT IS NOT USABLE, one field over (Copilot review, round 2). RULED Q2
+    // is "validated the way `entry` is", and `entry` is checked PRESENT and
+    // CALLABLE two statements above — so a declared export is held to both.
+    // Checking only the name let a module export `firstEditTransport` as a
+    // string and still resolve: `app.js` reaches it through the registry and
+    // calls it, and the defect would surface as a raw `TypeError` inside a
+    // click handler, which is the "dangling import a thousand lines from the
+    // call" this whole seam exists to replace.
+    //
+    // A DECLARED EXPORT IS A CALL, and that is what the tuple means: every name
+    // the six gate bindings declare is a mounter, a transport or a predicate.
+    // Data a contributed column must publish travels on the BINDING (`routes`,
+    // `requires`) or out of a mount, both of which are declared surfaces this
+    // seam already validates; a constant smuggled through the namespace would
+    // be a third, undeclared one.
+    if (typeof exports[name] !== "function") {
+      refuse("view binding " + JSON.stringify(binding.id) + " declares export "
+        + JSON.stringify(name) + ", which " + JSON.stringify(binding.module)
+        + " exports as " + typeof exports[name] + " rather than a function. "
+        + "RULED Q2 (openxFactory#656 comment 5648049748) validates a declared "
+        + "export the way `entry` is validated, and the shell REACHES a "
+        + "declared export in order to call it.");
     }
   }
   return { binding, exports: declaredNamespace(binding, exports) };
@@ -695,6 +745,18 @@ export function regionHost(binding, doc) {
 // be teaching the shell a second shape, which is the coupling the registry
 // exists to end.
 //
+// WHEN IT RUNS IS PART OF THE CONTRACT, and `regions` is how the caller says
+// so (Copilot review of openDox-code#20, round 2). Every `dom` region is a root
+// a CORE renderer owns and CLEARS on its own render — `renderWheel` and
+// `renderFunnel` assign `root.innerHTML = ""`, `mountExplorer` clears its
+// container, and the tab router renders a non-initial tab LAZILY, on first
+// activation, long after page load. One pass before the core mounts therefore
+// mounted contributed panels into roots that were about to be emptied, and a
+// panel in a tab the human had not opened yet was erased the moment they
+// opened it. So the pass is run PER REGION, by the caller that just rendered
+// that region: `regions` bounds it to those, and a caller that passes none
+// gets every `dom`-region binding, which is what a probe wants.
+//
 // WHAT IT RETURNS: one record per contributed binding it considered, so a
 // caller can assert what mounted, what was skipped and why. `mounted` is the
 // entry's own return value (a controller, an element, or undefined) — the pass
@@ -703,8 +765,10 @@ export async function mountContributedViews(bindings, snapshot, ctx, options) {
   const o = options || {};
   const doc = o.document || (typeof document === "undefined" ? null : document);
   const capabilities = o.capabilities;
+  const only = o.regions ? new Set(o.regions) : null;
   const results = [];
   for (const binding of bindings || []) {
+    if (only && !only.has(binding.region)) continue;
     // The CORE arm is the shell's own and mounts through the tab router; a core
     // binding is the one that carries a `mount` function, which a contributed
     // one can never have (`contributedViewBindings` refuses the field where the
@@ -732,7 +796,10 @@ export async function mountContributedViews(bindings, snapshot, ctx, options) {
       results.push({ binding, mounted: null, skipped: "no-host" });
       continue;
     }
-    const resolved = await resolveView(bindings, binding.id);
+    // THE EXACT BINDING, never a re-lookup by id (Copilot review, round 2):
+    // ids are unique per REGION, not globally, so `resolveView(bindings, id)`
+    // could answer a different region's binding.
+    const resolved = await resolveBinding(binding);
     if (!resolved) {
       results.push({ binding, mounted: null, skipped: "absent" });
       continue;

@@ -181,15 +181,15 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 # shape and `test_the_declared_totals_are_re_derived_from_the_rows` can refuse a
 # drift between the two. Measured at slice S4 (see the S4 block above).
 totals:
-  A: {files: 25, loc: 16742}
+  A: {files: 25, loc: 16866}
   B: {files: 1, loc: 73}
-  C: {files: 14, loc: 11990}
+  C: {files: 14, loc: 12008}
   "?": {files: 1, loc: 1435}
 files:
   - path: app.js
     class: A
-    loc: 1492
-    note: "the shell; its only class-B import was gate.js at :43 (discharged by S3's view registry -- loc 1155 -> 1282 with the registry wiring, S3; 1282 -> 1337 with S4's two new gate bindings and the two mounts it hands down). Carries SIX transitional route-ownership sites, all in the CORE arm's class-B binding entries and all cleared at S5 when those entries leave for contributedViewBindings(): gate.bar's one route (S3) and gate.lens's and gate.projects's two each (S4). Declaring them is RULED Q3 working -- view_extension.py: 'a binding that declares the routes it calls is what makes that ruling checkable instead of aspirational' -- and it is a real breach by assertion 2's own rule only while the entry sits in app.js (class A) rather than in the class-B module (exempt by construction)"
+    loc: 1549
+    note: "the shell; its only class-B import was gate.js at :43 (discharged by S3's view registry -- loc 1155 -> 1282 with the registry wiring, S3; 1282 -> 1337 with S4's two new gate bindings and the two mounts it hands down). Carries SIX transitional route-ownership sites, all in the CORE arm's class-B binding entries and all cleared at S5 when those entries leave for contributedViewBindings(): gate.bar's one route (S3) and gate.lens's and gate.projects's two each (S4). Declaring them is RULED Q3 working -- view_extension.py: 'a binding that declares the routes it calls is what makes that ruling checkable instead of aspirational' -- and it is a real breach by assertion 2's own rule only while the entry sits in app.js (class A) rather than in the class-B module (exempt by construction) loc 1492 -> 1549 on this PR's round-2 review (Copilot): RULED Q1's generic pass is no longer ONE pass before every core mount — every `dom` region is a root its core renderer CLEARS, so the pass is run per region by the caller that just rendered it (after mountExplorer, after mountStagingWorkbench, and through the tab router's onRegionRendered hook on a tab's first render), and the Q11 refusal frame became a named function so a late refusal reaches the same surface."
 
   - path: index.html
     class: C
@@ -369,8 +369,8 @@ files:
 
   - path: views/staging-workbench.js
     class: C
-    loc: 3397
-    note: "full-screen workbench scoped to one topic-bearing tile"
+    loc: 3402
+    note: "full-screen workbench scoped to one topic-bearing tile loc 3397 -> 3402 on this PR's round-2 review (Copilot): the two contributed columns are per-mount `const`s inside mountStagingWorkbench rather than module-level `let`s, so two live workbenches cannot share them."
 
   - path: views/swb-model-intake.js
     class: A
@@ -379,8 +379,8 @@ files:
 
   - path: views/view_extension.js
     class: A
-    loc: 757
-    note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' in a doc comment is a documentation example of an id, not a route literal, so assertion 2 does not match it. loc 422 -> 455 on this PR's own review round (Copilot, PR #14): a malformed contributed_routes now refuses instead of silently disabling the ownership check, and a rejected dynamic import now refuses naming the binding and module instead of leaking a raw error. loc 463 -> 499 on this fix (Copilot, PR #16, view_extension.js:358): manifestRoutes() and ownershipBreach() now share one shape check, refusing a contributed-routes entry missing a string pattern or carrying a non-boolean is_prefix at whichever of the two sees it first, instead of the array-only check at manifestRoutes() and a truthy is_prefix read at ownershipBreach() silently letting a malformed entry through as if it were not a prefix match."
+    loc: 824
+    note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' in a doc comment is a documentation example of an id, not a route literal, so assertion 2 does not match it. loc 422 -> 455 on this PR's own review round (Copilot, PR #14): a malformed contributed_routes now refuses instead of silently disabling the ownership check, and a rejected dynamic import now refuses naming the binding and module instead of leaking a raw error. loc 463 -> 499 on this fix (Copilot, PR #16, view_extension.js:358): manifestRoutes() and ownershipBreach() now share one shape check, refusing a contributed-routes entry missing a string pattern or carrying a non-boolean is_prefix at whichever of the two sees it first, instead of the array-only check at manifestRoutes() and a truthy is_prefix read at ownershipBreach() silently letting a malformed entry through as if it were not a prefix match. loc 757 -> 824 on this PR's round-2 review (Copilot): probeCapabilityPath reads OWN properties only (an inherited `toString` met a requirement); every DECLARED export is checked callable the way `entry` is (RULED Q2); resolveBinding() resolves the binding a caller already holds, so the generic pass cannot mount a same-id binding from another region; and the pass takes a `regions` bound."
 
   - path: views/viewer.js
     class: A
@@ -394,8 +394,8 @@ files:
 
   - path: views/wheel.js
     class: C
-    loc: 1756
-    note: "THE WHEEL; imports dispose.js (class B) and intent-feed.js (absent, RULED openxFactory); SOURCE_ROUTE :97"
+    loc: 1769
+    note: "THE WHEEL; imports dispose.js (class B) and intent-feed.js (absent, RULED openxFactory); SOURCE_ROUTE :97 loc 1756 -> 1769 on this PR's round-2 review (Copilot): the contributed dispose column is a per-render `const` reaching ACTION_MOUNTERS through `opts.dispose` rather than a module-level `let` two live renders would share."
 
 # ASSERTION 1's ONE DECLARED, RULED-LATER EXCEPTION (note § 4.5 point 1). After
 # slice S4 the census assertion fails on any row still "?" OR still "SPLIT" --
