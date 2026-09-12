@@ -191,7 +191,7 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 # shape and `test_the_declared_totals_are_re_derived_from_the_rows` can refuse a
 # drift between the two. Measured at slice S4 (see the S4 block above).
 totals:
-  A: {files: 25, loc: 16293}
+  A: {files: 25, loc: 16329}
   B: {files: 7, loc: 2174}
   C: {files: 14, loc: 11854}
   "?": {files: 1, loc: 1435}
@@ -420,8 +420,8 @@ files:
 
   - path: views/view_extension.js
     class: A
-    loc: 463
-    note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' in a doc comment is a documentation example of an id, not a route literal, so assertion 2 does not match it. loc 422 -> 455 on this PR's own review round (Copilot, PR #14): a malformed contributed_routes now refuses instead of silently disabling the ownership check, and a rejected dynamic import now refuses naming the binding and module instead of leaking a raw error. loc 455 -> 463 on S4: two new REGIONS entries (lens-gate, repo-projects) for the two new class-B bindings' shell mounts, and the doc comment naming them."
+    loc: 499
+    note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' in a doc comment is a documentation example of an id, not a route literal, so assertion 2 does not match it. loc 422 -> 455 on this PR's own review round (Copilot, PR #14): a malformed contributed_routes now refuses instead of silently disabling the ownership check, and a rejected dynamic import now refuses naming the binding and module instead of leaking a raw error. loc 455 -> 463 on S4: two new REGIONS entries (lens-gate, repo-projects) for the two new class-B bindings' shell mounts, and the doc comment naming them. loc 463 -> 499 on this fix (Copilot, PR #16, view_extension.js:358): manifestRoutes() and ownershipBreach() now share one shape check, refusing a contributed-routes entry missing a string pattern or carrying a non-boolean is_prefix at whichever of the two sees it first, instead of the array-only check at manifestRoutes() and a truthy is_prefix read at ownershipBreach() silently letting a malformed entry through as if it were not a prefix match."
 
   - path: views/viewer.js
     class: A
