@@ -539,3 +539,79 @@ def test_the_census_totals_and_the_class_b_remainder() -> None:
                      if row["class"] == "B")
     assert class_b == ["views/projection-index.js"], class_b
     assert census["totals"]["B"]["files"] == 1
+
+
+# ---------------------------------------------------------------------------
+# RULED counterpart Q6 — the SHELL's half: what a contributed module may not
+# import, the shell hands it.
+#
+# RULED counterpart Q6 (opensoft/openxFactory#656 comment `5649094228`, Brett
+# Heap, 2026-09-12): "what a CONTRIBUTED view module may IMPORT from openDox's
+# bundle: `./views/helpers.js` and NOTHING ELSE. Every other need reaches the
+# binding through its `ctx` (Q1-Q4) or its own package (Q5)."
+#
+# The bindings enforce the rule on openXdox's side. THIS side has the other
+# obligation: every name the four modules used to import statically has to
+# arrive on the ctx the shell composes, or the rule turns a working affordance
+# into a refusal. Each assertion below names the site that supplies it.
+# ---------------------------------------------------------------------------
+
+def test_the_shell_hands_the_lens_gate_the_model_it_no_longer_imports() -> None:
+    """`views/gate-lens.js` imported `{ clusterRequest, recipeRequest }` from
+    `views/lens-model.js`. It is openXdox's package data now, so the adapter
+    that composes its context supplies the model namespace instead — in
+    `app.js`, where the binding's context is already being built, so
+    `views/lens.js` (which builds `lctx`) needs no change at all."""
+    app = _app()
+    assert 'import * as lensModel from "./views/lens-model.js";' in app
+    assert re.search(
+        r"mountLensGate: lensGateView\s*\n\s*\? \(host, lctx\) =>\s*\n\s*"
+        r"lensGateView\.exports\[lensGateView\.binding\.entry\]\(\s*\n\s*"
+        r"host, snapshot, \{ \.\.\.lctx, model: lensModel \}\)", app), app
+
+
+def test_the_shell_hands_the_workbench_column_the_model_it_no_longer_imports() -> None:
+    """`views/swb-create.js` and `views/swb-session.js` took five and nine names
+    from `views/staging-workbench-model.js`. The overlay that mounts them hands
+    the namespace down at every call site that carries a ctx, and `app.js` hands
+    it to `firstEditTransport` — RULED Q10's non-mount export, reached through
+    the registry, whose ctx is the options object it already takes."""
+    workbench = (VIEWS / "staging-workbench.js").read_text(encoding="utf-8")
+    assert ('import * as workbenchModel from "./staging-workbench-model.js";'
+            in workbench)
+    # the create column's shared options builder, the session mount, and the
+    # doxBench create dialog's own literal context
+    assert workbench.count("model: workbenchModel,") == 3, workbench.count(
+        "model: workbenchModel,")
+    app = _app()
+    assert ('import * as workbenchModel from "./views/staging-workbench-model.js";'
+            in app)
+    assert "{ caps, repair: consoleRepair, model: workbenchModel }" in app
+
+
+def test_the_shell_hands_the_dispose_tray_the_intent_transport() -> None:
+    """`views/dispose.js` imported `{ emitIntent, renderIntentChips }` from
+    `views/intent-binding.js` and fell back to `emitIntent` when the hosted
+    context carried no emitter. A fallback into a module a contributed binding
+    may not import is a refusal, not a default, so `views/wheel.js` — which
+    starts the feed and builds the hosted context — supplies both."""
+    wheel = (VIEWS / "wheel.js").read_text(encoding="utf-8")
+    assert re.search(r"import \{ emitIntent, feedActor, intentCapable, "
+                     r"refusalLine, renderIntentChips,\s*\n\s*startIntentFeed, "
+                     r'statesByTarget \}\s*\n\s*from "\./intent-binding\.js";',
+                     wheel), wheel
+    assert "emit: emitIntent," in wheel
+    assert "renderChips: renderIntentChips," in wheel
+
+
+def test_no_shell_file_reaches_into_the_contributed_column_to_supply_it() -> None:
+    """The shell supplies the contributed column through ctx and NEVER by
+    importing one of the six modules back — that would be § 4.5 assertion 3's
+    breach reopened from the other side, one slice after it closed."""
+    gone = ("gate.js", "dispose.js", "swb-create.js", "swb-session.js",
+            "gate-lens.js", "gate-projects.js")
+    for path in [APP_JS, *sorted(VIEWS.glob("*.js"))]:
+        text = path.read_text(encoding="utf-8")
+        for module in gone:
+            assert not re.search(rf'^import .*from "\./(?:views/)?{re.escape(module)}"',
+                                 text, re.M), (path.name, module)
