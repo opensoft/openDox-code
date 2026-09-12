@@ -183,7 +183,7 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 totals:
   A: {files: 26, loc: 17491}
   B: {files: 1, loc: 73}
-  C: {files: 14, loc: 12308}
+  C: {files: 14, loc: 12361}
   "?": {files: 1, loc: 1435}
   "?": {files: 1, loc: 1435}
 files:
@@ -376,7 +376,7 @@ files:
 
   - path: views/staging-workbench.js
     class: C
-    loc: 3397
+    loc: 3450
     note: "full-screen workbench scoped to one topic-bearing tile"
 
   - path: views/swb-model-intake.js

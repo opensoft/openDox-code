@@ -782,7 +782,7 @@ def test_the_index_header_says_it_describes_the_stored_bytes(tab):
 def test_a_pre_template_fragment_renders_what_it_has(tab):
     assert [r["title"] for r in tab["pre"]["rows"]] == ["Background", "Why"]
     # its `xspec:`-fenced section is classified from the marker, not sniffed
-    assert [r["chip"] for r in tab["pre"]["rows"]] == ["added", "proposal element"]
+    assert [r["chip"] for r in tab["pre"]["rows"]] == ["added", "marked element"]
     assert tab["pre"]["viewerBody"] == 1
 
 
