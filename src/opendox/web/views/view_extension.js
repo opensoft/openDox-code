@@ -616,11 +616,23 @@ export async function resolveView(bindings, id, options) {
 // which is what every core-arm binding declares, because the core arm's modules
 // are imported statically by the shell that owns them.
 //
-// SYMBOLS AND `then` PASS THROUGH AS ABSENT rather than refusing: a Proxy is
-// probed for `Symbol.toStringTag` by `String()`, and any object returned from
-// an async function is probed for `then` by the await that receives it. A
-// refusal from either would be this seam refusing the language rather than a
-// caller.
+// SYMBOLS AND `then` PASS THROUGH rather than refusing: a Proxy is probed for
+// `Symbol.toStringTag` by `String()`, and any object returned from an async
+// function is probed for `then` by the await that receives it. A refusal from
+// either would be this seam refusing the language rather than a caller.
+//
+// ONE TRAP, `get`, AND THAT IS A LANGUAGE CONSTRAINT RATHER THAN A CHOICE. A
+// module namespace object's exports are NON-CONFIGURABLE own properties, so the
+// Proxy invariants forbid `has`, `ownKeys` and `getOwnPropertyDescriptor` from
+// hiding one: a `has` trap answering false for a name the target really carries
+// throws `TypeError: trap returned falsish for property … which exists in the
+// proxy target as non-configurable`, which would be this seam breaking the
+// caller instead of refusing it. `in` and `Object.keys()` therefore still see
+// the module's whole namespace, and REACHING for an undeclared name is what
+// refuses — which is exactly what RULED Q2 says is the defect: "an undeclared
+// reach (today `isGateBearing`, app.js:939) is a refusal". An export is
+// writable on a namespace object, so the `get` invariant does not bind and the
+// refusal is lawful.
 function declaredNamespace(binding, exports) {
   const allowed = new Set(binding.exports.length
     ? binding.exports : [binding.entry]);
@@ -637,18 +649,6 @@ function declaredNamespace(binding, exports) {
           + "module NAMESPACE, DECLARED — an undeclared reach is a refusal.");
       }
       return Reflect.get(target, property, receiver);
-    },
-    has(target, property) {
-      if (typeof property === "symbol") return Reflect.has(target, property);
-      return allowed.has(property) && Reflect.has(target, property);
-    },
-    ownKeys(target) {
-      return Reflect.ownKeys(target).filter(
-        (key) => typeof key === "symbol" || allowed.has(key));
-    },
-    getOwnPropertyDescriptor(target, property) {
-      if (typeof property !== "symbol" && !allowed.has(property)) return undefined;
-      return Reflect.getOwnPropertyDescriptor(target, property);
     },
   });
 }
