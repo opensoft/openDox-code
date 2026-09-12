@@ -64,12 +64,23 @@
 #       its two importers (`dispose.js`, `wheel.js`) are fixed at slice S2,
 #       not by any census reclassification here.
 #
-# Totals after Q2's reclassification (unchanged from the note otherwise):
+# Totals after Q2's reclassification, AS MEASURED AT a99eba03 (unchanged
+# from the note otherwise):
 #   A  20 files (18 hand-authored + 2 vendored), 11,702 lines
 #   B  4 files, 1,597 lines
 #   C  14 files (13 + explorer.js), 11,854 lines (11,575 + 279)
 #   ?  4 files (5 - explorer.js), 5,432 lines (5,711 - 279)
 #   total 42 files, 30,585 lines -- unchanged (a reclassification, not a move)
+#
+# AMENDMENT (S2, opensoft/openDox-code 330cf816, merged into this leg after
+# a99eba03): a 43rd file, `views/intent-binding.js` (class A, 114 lines),
+# lands after this fixture's own `measured_at` head. Assertion 1's ratchet
+# (`test_every_web_file_is_classified_exactly_once`) is unmarked, so the row
+# is added here rather than left for a future slice -- the ratchet does not
+# wait for a census refresh. Not folded into the totals above, which record
+# what the note's own § 3.2 table measured at S1 authoring time; the row
+# itself, not this comment block, is what the test reads.
+#   A (post-S2) 21 files, 11,816 lines
 
 schema_version: 1
 kind: web-boundary-census
@@ -206,6 +217,11 @@ files:
     class: A
     loc: 58
     note: "el()/txt()/basename()/heat bands; no import, no literal, no route"
+
+  - path: views/intent-binding.js
+    class: A
+    loc: 114
+    note: "S2's optional contributed binding (RULED Q5); a single top-level-awaited dynamic import() of the RULED-absent intent-feed.js, never a static import -- no governance word, no owned route, no class-B import; added after this census's own measured head (a99eba03) by opensoft/openDox-code 330cf816, loc as amended in the leg PR (a comment reworded so the file does not misreport its own removed import to this suite's own assertion-3 regex)"
 
   - path: views/lens-model.js
     class: "?"

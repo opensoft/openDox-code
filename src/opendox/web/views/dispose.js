@@ -23,7 +23,7 @@
 // consults, and the tile shows the verdict with a regenerate hint.
 
 import { el } from "./helpers.js";
-import { emitIntent, renderIntentChips } from "./intent-feed.js";
+import { emitIntent, renderIntentChips } from "./intent-binding.js";
 
 export const GATE_DISPOSE_ROUTE = "/actions/gate/dispose-possible";
 export const GATE_PROPOSE_ROUTE = "/actions/gate/propose";
