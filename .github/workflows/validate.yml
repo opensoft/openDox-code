@@ -96,6 +96,22 @@ jobs:
       # Copilot re-review): the repository ships no other Node tooling, so
       # `type: module` is declared explicitly rather than left to Node's
       # default-on `--experimental-detect-module` heuristic.
+      # § 3.4 SLICE S4 adds `tests/test_split_route_tails.py`, on the same
+      # footing as its five neighbours. S4 splits the three RULED SPLIT files
+      # (RULED Q3, `#656` comment `5642758731`: "a route constant travels with
+      # the binding that calls it, never with the model that happens to declare
+      # it"), and `tests/test_web_boundary.py` alone cannot tell that slice
+      # apart from a slice that DELETED the thirteen route constants: its
+      # census assertion measures that no file outside class B names another
+      # column's route, which is equally true of a bundle whose gate verbs no
+      # longer work. This file measures the other half — each constant declared
+      # in the class-B file that CALLS it, the binding entries in `app.js` and
+      # the modules they name declaring the same routes, no class-A/C file
+      # reaching the three new modules through a static import, and the three
+      # modules actually performing their verbs. `--noconftest` safe and needs
+      # no consumer: it reads bundle files as text and drives the real ones
+      # under the `node` the runner already has (skipped, never failed, where
+      # node is absent), exactly as `tests/test_view_registry.py` does.
       - name: pytest
         run: >-
           python -m pytest -q
@@ -105,4 +121,5 @@ jobs:
           tests/test_web_boundary.py
           tests/test_intent_binding_shape.py
           tests/test_view_registry.py
+          tests/test_split_route_tails.py
           --noconftest
