@@ -340,36 +340,28 @@ def _route_ownership_violations() -> list[str]:
     raises=AssertionError,
     reason=(
         "docs/front-end-package-boundary.md § 4.5 point 2 (opensoft/openDox-spec "
-        "#8 -> a44ac06d): 10 sites outside class B name a route another column "
-        "declares. THE ARITHMETIC, since every slice so far has moved it: 18 "
-        "at S1 -> 20 at S3 (which added app.js's `gate.bar` entry and closed "
-        "none) -> 12 measured after S4 -> 10 in scope, because S4 also gives "
-        "this assertion the DECLARED EXCEPTION the note's own last paragraph "
-        "states for views/lens.js:41/45. S4 CLEARED ALL TWELVE SPLIT-FILE "
-        "SITES the note's point-2 table assigns to it (views/lens-model.js:"
-        "1036/1037, views/repo-selector.js:33/39/43/46, "
-        "views/staging-workbench-model.js:543/817/818/821/822/826): every one "
-        "of those constants now sits in a class-B file, exempt by construction "
-        "-- which is RULED Q3 in force rather than described. WHAT IS LEFT, "
-        "and whose it is: 6 the gate prefix, ALL of them in app.js's CORE arm "
-        "-- :589/:601 the `gate.bar` entry (S3) and :624/:625/:630 the "
-        "`gate.lens` and `gate.projects` entries (S4) -- each a class-B "
-        "binding's `routes:` declaration, which view_extension.py calls the "
-        "thing that makes Q3 'checkable instead of aspirational', and each a "
-        "real breach by this assertion's own rule only while the entry sits "
-        "in app.js (class A) rather than in the class-B module it names. All "
-        "six are TRANSITIONAL and close together at slice S5, when the class-B "
-        "files move behind a host-supplied contribution and all three entries "
-        "leave app.js for contributedViewBindings(). Plus 4 openXdox's "
-        "projection routes -- app.js:195/196, views/viewer.js:314, "
-        "views/wheel.js:97, the `/source/` sites RULED Q4 re-homes at slice "
-        "S6. NOT IN SCOPE, by declaration rather than by silence: "
-        "views/lens.js's two openxFactory-lane sites "
-        "(`route_ownership_exceptions` in the census, with the ruling gap "
-        "beside them) -- none of Q1-Q5 rules on that file, so they clear on no "
-        "slice's schedule and 'they never entered it'. This marker therefore "
-        "comes off at S6, once BOTH remaining families are closed; unmark only "
-        "once verified green."
+        "#8 -> a44ac06d): 4 sites outside class B name a route another column "
+        "declares. THE ARITHMETIC, since every slice so far has moved it: 18 at "
+        "S1 -> 20 at S3 (which added app.js's `gate.bar` entry and closed none) "
+        "-> 12 measured after S4 -> 10 in scope (S4 also gives this assertion "
+        "the DECLARED EXCEPTION the note's own last paragraph states for "
+        "views/lens.js:41/45) -> 4 HERE. SLICE S5 CLEARED ALL SIX GATE-PREFIX "
+        "SITES, and every one of them was in app.js's CORE arm: the `gate.bar` "
+        "entry (S3) and the `gate.lens` / `gate.projects` entries (S4), each a "
+        "class-B binding's `routes:` declaration sitting in a class-A file. "
+        "They closed the way the marker predicted -- the six class-B modules "
+        "LEFT this bundle for openXdox-code's package data and their bindings "
+        "arrive through contributedViewBindings() (RULED Q5, openxFactory#656 "
+        "comment 5648044785), so app.js carries no gate route literal at all. "
+        "WHAT IS LEFT is one family and it is not this slice's: 4 of openXdox's "
+        "projection routes -- app.js:205/:206, views/viewer.js:314, "
+        "views/wheel.js:131, the `/source/` sites RULED Q4 re-homes at slice S6 "
+        "(openDox-code#16, openXdox-code#17, both in flight on their own "
+        "branches and not in this stack). NOT IN SCOPE, by declaration rather "
+        "than by silence: views/lens.js's two openxFactory-lane sites "
+        "(`route_ownership_exceptions` in the census) -- none of Q1-Q5 rules on "
+        "that file, so they clear on no slice's schedule. This marker therefore "
+        "comes off at S6; unmark only once verified green."
     ),
 )
 def test_no_ownership_violation_outside_class_b() -> None:
@@ -432,33 +424,33 @@ def _import_violations() -> list[str]:
     return violations
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "docs/front-end-package-boundary.md § 1.2(b) / § 4.5 point 3 "
-        "(opensoft/openDox-spec #8 -> a44ac06d): 4 sites today, all "
-        "CLASS-BOUNDARY -- app.js -> views/swb-session.js, "
-        "views/staging-workbench.js -> views/swb-create.js and -> "
-        "views/swb-session.js, views/wheel.js -> views/dispose.js (all class "
-        "A/C importing class B). THE ARITHMETIC: 7 at S1 -> 6 once S3 "
-        "(opensoft/openDox-code#14) closed app.js:43 -> views/gate.js, the "
-        "shell's one direct class-B import, now a registry lookup and exactly "
-        "the edge § 4.1 names -> 4 once S2 (opensoft/openDox-code#15) closed "
-        "the two UNRESOLVED intent-feed imports its own optional binding "
-        "replaced (RULED Q5; the manifest row stands, RULED OQ-F). The count "
-        "was last restated on the S3 branch before that merge and read 6; "
-        "re-measured here rather than left stale, which is the only change "
-        "slice S4 makes to this marker besides `raises=`. S4 ADDS NONE: its "
-        "three new class-B modules are reached through the shell's resolved "
-        "mounts and one late dynamic import, never a static `from` clause, so "
-        "no class-A or class-C file gained a class-B import. The four that "
-        "remain are the gate loop's own, closed at S5 when its files move "
-        "behind a host-supplied contribution -- the note's closing paragraph "
-        "assigns this assertion to S2, which was the intent-feed edge only; "
-        "flagged here rather than narrowed to fit the note's summary."
-    ),
-)
+# THE MARKER IS OFF -- SLICE S5 DISCHARGED THIS ASSERTION (note § 4.5's own
+# closing paragraph: "Assertions 2, 3 and 4 carry the marker at S1, and each is
+# unmarked by the slice that discharges it: 3 by S2, 2 by S5 and S6, 4 by S7").
+#
+# THE ARITHMETIC, since every slice so far has moved it: 7 at S1 -> 6 once S3
+# (opensoft/openDox-code#14) closed `app.js`:43 -> `views/gate.js` -> 4 once S2
+# (#15) closed the two UNRESOLVED intent-feed imports -> 0 HERE. The four this
+# slice closed were the gate loop's own, and they closed the way the note said
+# they would -- by the modules LEAVING, not by the importers being rewritten
+# around them:
+#
+#   app.js                     -> views/swb-session.js   (`firstEditTransport`,
+#                                                         RULED Q10)
+#   views/staging-workbench.js -> views/swb-create.js    (RULED Q5 + Q3)
+#   views/staging-workbench.js -> views/swb-session.js   (RULED Q5 + Q3)
+#   views/wheel.js             -> views/dispose.js       (RULED Q5 + Q2)
+#
+# Each importer now reads the DECLARED NAMESPACE of a contributed binding the
+# shell resolved (RULED Q2's `exports` tuple), handed down already-bound, with a
+# null column making every affordance unoffered where openXdox is not
+# registered. The six modules are openXdox-code's package data
+# (`src/openxdox/web/views/`), placed into this bundle at assembly (RULED Q5).
+#
+# `strict=True` IS WHY THIS IS SAFE TO UNMARK AND NOT A CHOICE: leaving the
+# marker on a passing assertion is an XPASS and turns the required check RED, so
+# the marker had to come off in the same commit that closed the last breach --
+# which is precisely the rot the marker exists to prevent, working.
 def test_every_relative_import_resolves_and_stays_in_class() -> None:
     violations = _import_violations()
     assert not violations, f"{len(violations)} import violation(s):\n" + "\n".join(violations)
