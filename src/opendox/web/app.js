@@ -1267,8 +1267,13 @@ async function render() {
       // Slice S4's two resolved class-B mounts, handed down already-bound so no
       // class-A or class-C view imports a class-B module to reach them. Null
       // where the column that supplies them is not installed.
+      // The DECLARED entry, never a hardcoded export name (S3's own Copilot
+      // re-review fix, applied to S4's two mounts for the same reason: a
+      // contributed binding names its entry in the manifest, and reading
+      // anything else here would silently ignore the name it declared).
       mountLensGate: lensGateView
-        ? (host, lctx) => lensGateView.exports.mountLensGate(host, lctx)
+        ? (host, lctx) =>
+            lensGateView.exports[lensGateView.binding.entry](host, lctx)
         : null,
       // the UNSTRIPPED probe and the serve's own writable repository — read by
       // exactly one affordance (see `createCaps` at the lens's mount)
@@ -1309,7 +1314,8 @@ async function render() {
       // registered — the selector then renders picker + refresh only, which is
       // the whole of what § 3.4 slice S4 leaves in class A
       mountProjectGate: projectGateView
-        ? (host, pctx) => projectGateView.exports.mountProjectCommissions(host, pctx)
+        ? (host, pctx) =>
+            projectGateView.exports[projectGateView.binding.entry](host, pctx)
         : null,
       onSelect: (key) => { storeKey(key); render(); },
       onRefreshed: () => render(),
