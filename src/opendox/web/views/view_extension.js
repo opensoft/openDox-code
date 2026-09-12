@@ -310,6 +310,26 @@ export function contributedViewBindings(capabilities) {
   if (!Array.isArray(views)) {
     refuse("the /capabilities `views` payload carries no views array");
   }
+  // `mount` AND `control` ARE THE CORE ARM'S AND A CONTRIBUTED ENTRY MAY NOT
+  // CARRY THEM — refused here rather than ignored, because ignoring them is a
+  // crash with a delay on it. `control` is what makes a binding a TAB, and a
+  // contributed entry cannot have the `mount` FUNCTION the tab router calls
+  // (it arrived as JSON, and `view_manifest()` emits neither field), so a
+  // manifest naming a control would put an entry in the tab strip whose
+  // `mount` is `undefined` and crash on the click that selects it. A binding
+  // this seam cannot mount must not look registered — `resolveView`'s own rule,
+  // applied one step earlier, where the payload is read.
+  for (const spec of views) {
+    const named = ["mount", "control"].find(
+      (field) => spec && spec[field] !== undefined);
+    if (named) {
+      refuse("the /capabilities `views` payload declares " + named + " on "
+        + JSON.stringify(spec && spec.id) + ": `mount` and `control` belong to "
+        + "the shell's own core arm and cannot cross the process boundary. A "
+        + "contributed binding names a module and an entry and is loaded "
+        + "through resolveView().");
+    }
+  }
   return views.map(viewBinding);
 }
 
@@ -363,11 +383,26 @@ export async function resolveView(bindings, id) {
   if (!binding) return null;
   const bundleRoot = new URL("../", import.meta.url);
   const exports = await import(new URL(binding.module, bundleRoot).href);
+  // PRESENT IS NOT MOUNTABLE. Checking only that the name exists lets a module
+  // export a string, an object or a `null` under it and still hand back a
+  // binding that looks resolved; the mount call then throws a raw `TypeError`
+  // from inside whatever tried to use it, which is precisely the "dangling
+  // import a thousand lines from the call" this seam exists to replace. The
+  // refusal says which of the two it is, because "not exported" and "exported
+  // as something that cannot be called" are different defects in the
+  // contributing column.
   if (!(binding.entry in exports)) {
     refuse("view binding " + JSON.stringify(binding.id) + " names entry "
       + JSON.stringify(binding.entry) + ", which "
       + JSON.stringify(binding.module) + " does not export. A binding that "
       + "cannot be mounted must not look registered.");
+  }
+  if (typeof exports[binding.entry] !== "function") {
+    refuse("view binding " + JSON.stringify(binding.id) + " names entry "
+      + JSON.stringify(binding.entry) + ", which " + JSON.stringify(binding.module)
+      + " exports as " + typeof exports[binding.entry] + " rather than a "
+      + "function. An entry is the export that MOUNTS the panel; a binding "
+      + "that cannot be mounted must not look registered.");
   }
   return { binding, exports };
 }

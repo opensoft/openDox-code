@@ -249,7 +249,12 @@ class ViewBinding:
                 f"view binding id {self.id!r} must be a dotted lowercase slug "
                 "(e.g. 'gate.bar'): the id travels into JSON, into a DOM "
                 "attribute and into a refusal message")
-        if self.region not in REGIONS:
+        # THE TYPE IS CHECKED BEFORE THE MEMBERSHIP, and the order is the
+        # finding: `REGIONS` is a dict, so `<unhashable> not in REGIONS` raises
+        # `TypeError` from the hash and the caller never sees the refusal this
+        # module promises for every declaration defect. A seam whose refusal
+        # depends on the TYPE of what it is refusing is not a seam.
+        if not isinstance(self.region, str) or self.region not in REGIONS:
             raise ViewBindingError(
                 f"view binding {self.id!r} names region {self.region!r}, which "
                 f"the shell does not declare (declared: {sorted(REGIONS)}). A "
@@ -279,7 +284,12 @@ class ViewBinding:
                 f"view binding {self.id!r} names entry {self.entry!r}: a dunder "
                 "reaches the object protocol rather than the module's own "
                 "surface")
-        if self.view_class not in VIEW_CLASSES:
+        # Guarded for the region's reason above. A tuple membership test does
+        # not hash and so cannot raise today — but the guard states the rule
+        # rather than relying on `VIEW_CLASSES` staying a tuple, which is
+        # exactly the kind of quiet dependency the boundary work exists to end.
+        if not isinstance(self.view_class, str) \
+                or self.view_class not in VIEW_CLASSES:
             raise ViewBindingError(
                 f"view binding {self.id!r} declares class {self.view_class!r}, "
                 f"not one of {list(VIEW_CLASSES)} (§ 2.1: A openDox core, "

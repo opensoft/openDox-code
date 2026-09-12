@@ -177,6 +177,24 @@ def test_a_malformed_binding_refuses_and_the_message_says_why(over, fragment):
     assert fragment in str(excinfo.value)
 
 
+@pytest.mark.parametrize("field,value", [
+    ("region", ["view-docs"]),          # a list: unhashable
+    ("region", {"view-docs": 1}),       # a dict: unhashable
+    ("view_class", ["A"]),
+])
+def test_a_declaration_defect_refuses_even_when_the_value_is_unhashable(
+        field, value):
+    # THE REFUSAL MUST NOT DEPEND ON THE TYPE OF WHAT IT REFUSES. `REGIONS` is a
+    # dict, so `<unhashable> not in REGIONS` raises `TypeError` out of the hash
+    # BEFORE the `ViewBindingError` this module promises for every declaration
+    # defect — a caller written to catch the one refusal class would see an
+    # exception it never agreed to handle. Copilot found this on PR #14; the
+    # guard is an `isinstance` before every membership test, and this is the
+    # test that keeps it there.
+    with pytest.raises(ViewBindingError):
+        _binding(**{field: value})
+
+
 def test_a_well_formed_binding_is_frozen_and_carries_its_slot():
     binding = _binding()
     assert binding.slot == ("view-docs", "docs.list")
@@ -600,6 +618,70 @@ console.log(JSON.stringify(out));
     assert result == {"absent": 0, "nullCaps": 0, "wrongKind": "ViewBindingError",
                       "wrongVersion": "ViewBindingError",
                       "noViews": "ViewBindingError"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_refuses_a_contributed_entry_carrying_the_core_arms_own_fields(
+        tmp_path):
+    # `mount` and `control` ARE THE CORE ARM'S. A contributed entry arrives as
+    # JSON and cannot carry a function, so a manifest declaring `control` would
+    # put an entry in the TAB STRIP whose `mount` is `undefined` — the tab
+    # renders, and the click that selects it throws. Copilot found this on
+    # PR #14. `view_manifest()` emits neither field, so no honest payload is
+    # refused by this; a payload that carries one is malformed, and malformed
+    # REFUSES while absent is an empty column.
+    entry = _binding().as_manifest_entry()
+    result = _run_node(f"""
+import {{ contributedViewBindings }} from {json.dumps(REGISTRY_JS.as_uri())};
+const base = {json.dumps(entry)};
+const out = {{}};
+out.clean = contributedViewBindings({{ views: {{
+  schema_version: {MANIFEST_SCHEMA_VERSION}, kind: {json.dumps(MANIFEST_KIND)},
+  views: [base] }} }}).length;
+for (const [name, extra] of [
+  ["control", {{ control: "tab-docs" }}],
+  ["mount", {{ mount: "renderDocs" }}],
+]) {{
+  try {{
+    contributedViewBindings({{ views: {{
+      schema_version: {MANIFEST_SCHEMA_VERSION},
+      kind: {json.dumps(MANIFEST_KIND)},
+      views: [{{ ...base, ...extra }}] }} }});
+    out[name] = "not refused";
+  }} catch (e) {{ out[name] = e.name; out[name + "Message"] = e.message; }}
+}}
+console.log(JSON.stringify(out));
+""", tmp_path)
+    assert result["clean"] == 1
+    assert result["control"] == "ViewBindingError"
+    assert result["mount"] == "ViewBindingError"
+    assert "core arm" in result["controlMessage"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_refuses_an_entry_exported_as_something_that_cannot_be_called(
+        tmp_path):
+    # PRESENT IS NOT MOUNTABLE. A module may export the named entry as a string,
+    # an object or a `null`; checking only that the NAME exists hands back a
+    # binding that looks resolved and throws a raw `TypeError` from inside
+    # whatever tried to mount it — the dangling-import failure mode this seam
+    # exists to replace. Copilot found this on PR #14.
+    web = _temp_bundle(tmp_path)
+    (web / "views" / "panel.js").write_text(
+        'export const mountPanel = "not a function";\n', encoding="utf-8")
+    registry = (web / "views" / "view_extension.js").as_uri()
+    result = _run_node(f"""
+import {{ collectViewBindings, resolveView }} from {json.dumps(registry)};
+const spec = {{ id: "panel.one", region: "view-docs",
+  module: "./views/panel.js", entry: "mountPanel", view_class: "A" }};
+const views = collectViewBindings([{{ views: () => [spec] }}]);
+const out = {{}};
+try {{ await resolveView(views, "panel.one"); out.resolved = "not refused"; }}
+catch (e) {{ out.resolved = e.name; out.message = e.message; }}
+console.log(JSON.stringify(out));
+""", tmp_path)
+    assert result["resolved"] == "ViewBindingError"
+    assert "rather than a function" in result["message"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
