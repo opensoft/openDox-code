@@ -540,7 +540,9 @@ export const BRAINSTORM_AREA = "ideation/brainstorm/";
 export const STAGING_AREA = "ideation/staging/";
 export const CREATE_TABS = ["docs", "lens", "outline"];
 export const STATUS_BRAINSTORM = "brainstorm";
-export const CREATE_ROUTE = "/actions/gate/create-document";
+// `CREATE_ROUTE` stood on the next line at the carve commit (:543) and is
+// `views/swb-create.js`'s now — RULED Q3 (§ 3.4 slice S4): the dialog that
+// POSTs it is the binding that calls it, and this module never did.
 export const CREATE_CLI = "python3 src/opendox/cli.py";
 
 // A staged scope writes into its OWN topic folder; a cluster or a possible has
@@ -811,19 +813,23 @@ export function existingOnTopic(snapshot, topics, area) {
 
 export const MAIN_REF = "main";
 
-// The three routes the session surface addresses. Constants HERE (never literals
-// in the transport) so the wire contract has one definition the Python route
-// tests read too.
-export const EDIT_DOCUMENT_ROUTE = "/actions/gate/edit-document";
-export const OPEN_PR_ROUTE = "/actions/gate/open-pr";
-// 010-doxbench-editor-chat T080: the first-Save gate verb. A CANVAS seam, not
-// a session-bar affordance -- deliberately absent from SESSION_AFFORDANCES.
-export const FIRST_EDIT_ROUTE = "/actions/gate/first-edit";
-export const ABANDON_SESSION_ROUTE = "/actions/gate/abandon-session";
-// add-doxbench-editing-phase-b §12: the SHARE route, beside open-pr's because it
-// is the same class of act (a remote write with the engineer's own credential)
-// with the pull request removed.
-export const SHARE_SESSION_ROUTE = "/actions/gate/share-session";
+// THE FIVE SESSION ROUTES ARE NOT DECLARED HERE ANY MORE (§ 3.4 slice S4).
+// `EDIT_DOCUMENT_ROUTE` (:817), `OPEN_PR_ROUTE` (:818), `FIRST_EDIT_ROUTE`
+// (:821), `ABANDON_SESSION_ROUTE` (:822) and `SHARE_SESSION_ROUTE` (:826) stood
+// here at the carve commit, together with the `SESSION_ROUTES` table and
+// `sessionRoute()` that read them. Every one of them is called from
+// `views/swb-session.js` — the class-B module that owns the three live session
+// verbs and the doxBench Save — and from nowhere else, so RULED Q3
+// (openxFactory#656 comment `5642758731`, Brett Heap, 2026-09-12) sends them
+// there: "a route constant travels with the binding that calls it, never with
+// the model that happens to declare it." The reason they were HERE is still
+// honoured and is now honoured in the right place: they remain CONSTANTS, never
+// literals in the transport, with one definition the node harness and the
+// Python route tests can read — in `swb-session.js` instead of this file.
+//
+// The AFFORDANCE ids (`SESSION_EDIT` and its kind), the VERB names, the labels
+// and every request builder stay here: they are the workbench's own vocabulary
+// and its pure derivations, which is the substance § 2.1 leaves with the model.
 
 // THE HUMAN-CONSOLE HEADER (FR-019's third clause; PR #49 review finding 2).
 // The serve mints a token at start-up and publishes it on `/capabilities`, the
@@ -953,14 +959,6 @@ export const LIVE_SESSION_AFFORDANCES = [SESSION_EDIT, SESSION_SHARE,
                                          SESSION_SAVE, SESSION_ABANDON];
 export const DESCRIPTOR_ONLY_AFFORDANCES = [SESSION_REFRESH_NOTEBOOK];
 
-const SESSION_ROUTES = {
-  [SESSION_EDIT]: EDIT_DOCUMENT_ROUTE,
-  [SESSION_SAVE]: OPEN_PR_ROUTE,
-  [SESSION_ABANDON]: ABANDON_SESSION_ROUTE,
-  [SESSION_SHARE]: SHARE_SESSION_ROUTE,
-  [SESSION_FIRST_EDIT]: FIRST_EDIT_ROUTE,
-};
-
 // affordance -> the gate verb it IS, which is also the `cli.py gate <verb>` name
 // (FR-020's parity is one vocabulary, not two).
 export const SESSION_VERBS = {
@@ -982,10 +980,6 @@ export const SESSION_LABELS = {
 
 export const NOTEBOOK_SYNC_CLI = "python3 scripts/sync-notebooklm-books.py";
 export const WORKSPACE_ROOT_PLACEHOLDER = "<workspace root>";
-
-export function sessionRoute(affordance) {
-  return SESSION_ROUTES[asId(affordance)] || null;
-}
 
 // FR-025's two continuations and the ONLY two — spelled from the same tokens
 // `branch_session.CONTINUATIONS` declares, because the report the human is

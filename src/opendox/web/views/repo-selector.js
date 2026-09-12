@@ -3,11 +3,35 @@
 // that switches the ACTIVE (repository, ref) snapshot and asks the serving side
 // for fresher data.
 //
-// TWO same-origin backend routes, both answered by serve.py and both absent from
-// a static image (which is exactly how the whole control degrades away):
-//   GET  /snapshot-index.json  — the roster + per-entry freshness
-//   POST /actions/refresh      — ONE affordance, the BINDING chosen by the plane
-//                                (served: re-fetch; local: regenerate)
+// SPLIT AT § 3.4 SLICE S4 (RULED Q3, openxFactory#656 comment `5642758731`,
+// Brett Heap, 2026-09-12: "a route constant travels with the binding that calls
+// it, never with the model that happens to declare it"). This file used to
+// address ALL THREE COLUMNS from one place — openDox's, openXdox's and
+// openxFactory's own — which openDox-spec `docs/front-end-package-boundary.md`
+// § 3.2 records as the reason it was RULED SPLIT. What is left here is class A:
+//
+//   GET  /project-register.json  — openDox's own register projection, read by
+//                                  the project picker (`serve_project.py`)
+//   POST /actions/refresh        — ONE affordance, the BINDING chosen by the
+//                                  plane (served: re-fetch; local: regenerate),
+//                                  declared by BOTH legs (§ 3.3's table)
+//
+// and both are absent from a static image, which is exactly how the whole
+// control degrades away. What LEFT, and where to:
+//
+//   /snapshot-index.json         — openXdox's projection: `views/projection-index.js`,
+//                                  reached LATE and REFUSABLY by `fetchIndex` below
+//   the two /actions/gate/* project commissions
+//                                — `views/gate-projects.js`, the class-B binding
+//                                  the shell resolves and hands in as
+//                                  `mountProjectGate`
+//   /actions/apply-register-edits
+//                                — openxFactory's own fulfilment lane, which
+//                                  RULING DQ-1 keeps at openxFactory: it LEFT
+//                                  THE BUNDLE ENTIRELY, with the "⟳ apply N
+//                                  pending" button that reached it. See the note
+//                                  at `mountRepoSelector` for what that means
+//                                  for a commissioned-but-unfulfilled register.
 // The bundle NEVER addresses the external data source: the serving side performs
 // that fetch (design D5), so the grep-proven no-external-URL boundary in
 // tests/ideation-dashboard/test_renderer.py survives this change unedited.
@@ -30,20 +54,11 @@ import {
 } from "./repo-selector-model.js";
 import { VIEW_SHARED, VIEW_UNION } from "./composed-model.js";
 
-export const SNAPSHOT_INDEX_ROUTE = "/snapshot-index.json";
 export const ACTIONS_REFRESH_ROUTE = "/actions/refresh";
 // add-project-scoped-selection: the register projection the project picker
-// reads, and the create-project commission route. Both degrade away exactly
-// like the index: a static image 404s them and the selector renders unscoped.
+// reads. openDox's own (`serve_project.py`), and it degrades away exactly like
+// the index: a static image 404s it and the selector renders unscoped.
 export const PROJECT_REGISTER_PROJECTION_ROUTE = "/project-register.json";
-export const ACTIONS_CREATE_PROJECT_ROUTE = "/actions/gate/create-project";
-// add-opendox-project-header (D15/D16): the membership-edit commission route
-// the filter popover's add line and trash controls POST to. Same degrade
-// contract as its siblings.
-export const ACTIONS_EDIT_PROJECT_ROUTE = "/actions/gate/edit-project";
-// add-register-edit-lane: the apply button's route — the serve runs the
-// fulfilment lane once (loopback + gate only).
-export const ACTIONS_APPLY_REGISTER_EDITS_ROUTE = "/actions/apply-register-edits";
 // The viewer's project scope survives the reload a selection triggers. It is
 // THIRD-PARTY DATA on the way back in: it only ever filters client-side
 // (membership-checked against the loaded projection) and never reaches a URL.
@@ -62,19 +77,40 @@ function el(tag, cls, text) {
   return node;
 }
 
-// Fetch the snapshot index. ANY failure (a static image 404s this route, an old
-// server does not know it, file:// throws) resolves to null — the caller then
-// renders exactly today's single-snapshot dashboard. Never throws.
-export async function fetchIndex(injectedFetch) {
-  try {
-    const response = injectedFetch
-      ? await injectedFetch(SNAPSHOT_INDEX_ROUTE, { cache: "no-store" })
-      : await fetch(SNAPSHOT_INDEX_ROUTE, { cache: "no-store" });
-    if (!response?.ok) return null;
-    return await response.json();
-  } catch {
-    return null;
+// THE PROJECTION COLUMN, REACHED LATE (§ 3.4 slice S4, § 4.2). The snapshot
+// index is `/snapshot-index.json`, which `openxdox/serve_projection.py` declares
+// and contributes — another column's route, so § 2.2 rule 1 keeps it out of this
+// class-A file. `views/projection-index.js` owns the constant and the fetch, and
+// this is the "small, local, late-and-refusable guard directly against the
+// module's own presence" § 4.2 establishes for exactly this shape: a dynamic
+// import(), never a static one, resolved ONCE and remembered. An absent
+// projection column answers null, which is the outcome `fetchIndex` has always
+// promised for a route nothing serves.
+//
+// `undefined` means "not yet asked"; `null` means "asked, and there is no
+// projection column here" — two states, so a leg without the module pays for
+// one rejected import and not one per poll.
+let PROJECTION_COLUMN;
+
+async function projectionColumn() {
+  if (PROJECTION_COLUMN === undefined) {
+    try {
+      PROJECTION_COLUMN = await import("./projection-index.js");
+    } catch {
+      PROJECTION_COLUMN = null;
+    }
   }
+  return PROJECTION_COLUMN;
+}
+
+// Fetch the snapshot index. ANY failure (a static image 404s this route, an old
+// server does not know it, file:// throws, no projection column is installed)
+// resolves to null — the caller then renders exactly today's single-snapshot
+// dashboard. Never throws.
+export async function fetchIndex(injectedFetch) {
+  const column = await projectionColumn();
+  if (!column) return null;
+  return column.fetchSnapshotIndex(injectedFetch);
 }
 
 // POST the refresh. Resolves to the backend's freshness result, or throws an
@@ -186,118 +222,13 @@ export function refreshBinding(caps) {
   return caps?.refresh?.binding || null;
 }
 
-// The create-project affordance (add-project-scoped-selection): a COMMISSION,
-// never a write — the POST records a project-register-edit descriptor + gate
-// record and the aggregation-owned register is edited only by the fulfilment.
-// Mounted only under the gate capability WITH a served register projection.
-// Member candidates are ALL roster repositories: membership is multi-parent
-// (Brett's 2026-08-06 ruling), so a repository already in a project is a
-// legal member of a new one — projects are named views, not owners.
-// Refusals render textContent-only; a successful commission retires the
-// form for the session (the engine's duplicate guard is the backstop).
-//
-// REHOMED by add-opendox-project-header (D13): no standalone button — the
-// project dropdown's "New Project" line opens the form through the returned
-// opener.
-function mountCreateProject(wrap, status, roster, projects, o, addPendingOption) {
-  const seen = new Set();
-  const candidates = [];
-  for (const option of roster) {
-    if (option.kind !== "repository") continue;
-    if (seen.has(option.repository)) continue;
-    seen.add(option.repository);
-    candidates.push(option.repository);
-  }
-
-  // A LABELED PANEL, not a bare strip (Brett's 2026-08-06 annotation: "which
-  // is this? i do not know how to use this widget") — a heading names the
-  // act, the field and the member list carry captions, and the buttons say
-  // what happens (a recorded commission, not a direct write).
-  const form = el("span", "projectform projectpanel");
-  form.hidden = true;
-  form.appendChild(el("span", "panelhead", "New Project"));
-  form.appendChild(el("span", "panelnote",
-    "records a project-register commission — the project appears as pending "
-    + "until a session fulfils it"));
-
-  const nameField = el("label", "panelfield");
-  nameField.appendChild(el("span", "panellabel", "project name"));
-  const name = el("input", "projectname");
-  name.type = "text";
-  name.placeholder = "e.g. Field Pilots";
-  name.setAttribute("aria-label", "new project name");
-  nameField.appendChild(name);
-  form.appendChild(nameField);
-
-  form.appendChild(el("span", "panellabel", "member repositories"));
-  const memberList = el("span", "panelmembers");
-  const boxes = [];
-  for (const repo of candidates) {
-    const label = el("label", "projectmember");
-    const box = el("input");
-    box.type = "checkbox";
-    box.value = repo;
-    label.appendChild(box);
-    label.appendChild(el("span", null, repo));
-    boxes.push(box);
-    memberList.appendChild(label);
-  }
-  if (!candidates.length) {
-    memberList.appendChild(el("span", "projectform-note",
-      "no published repositories to choose from"));
-  }
-  memberList.appendChild(el("span", "projectform-note",
-    "optional — an empty project is fine; add repositories later from the "
-    + "filter"));
-  form.appendChild(memberList);
-
-  const buttonRow = el("span", "panelbuttons");
-  const submit = el("button", "repobtn", "commission project");
-  submit.type = "button";
-  buttonRow.appendChild(submit);
-  const cancel = el("button", "repobtn projectcancel", "cancel");
-  cancel.type = "button";
-  cancel.addEventListener("click", () => { form.hidden = true; });
-  buttonRow.appendChild(cancel);
-  form.appendChild(buttonRow);
-
-  submit.addEventListener("click", async () => {
-    const members = boxes.filter((b) => b.checked).map((b) => b.value);
-    status.textContent = "";
-    submit.disabled = true;
-    try {
-      const opts = {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.value, repositories: members }),
-      };
-      const response = o.fetcher
-        ? await o.fetcher(ACTIONS_CREATE_PROJECT_ROUTE, opts)
-        : await fetch(ACTIONS_CREATE_PROJECT_ROUTE, opts);
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data?.ok !== true) {
-        submit.disabled = false;
-        status.textContent = "create-project refused: "
-          + (data?.message || data?.error || ("HTTP " + response.status));
-        return;
-      }
-      form.hidden = true;                   // retired for the session
-      status.textContent = "project-register edit recorded (" + data.job + ")";
-      // the commission appears in the dropdown immediately as a pending entry
-      // (D-e) — the register itself changes only when the fulfilment lands
-      if (addPendingOption) addPendingOption(name.value || data.project_id);
-    } catch (err) {
-      submit.disabled = false;
-      status.textContent = "create-project failed: " + (err?.message || "error");
-    }
-  });
-
-  wrap.appendChild(form);
-  return () => {                             // the "New Project…" opener (D13)
-    form.hidden = false;
-    name.focus();
-  };
-}
+// THE CREATE-PROJECT FORM IS `views/gate-projects.js`'S NOW (§ 3.4 slice S4).
+// `mountCreateProject` stood here and POSTed the create-project commission
+// route from a class-A file; RULED Q3 sends both the route and the form that
+// raises it to the class-B binding the gate column owns. The shell resolves that
+// binding and hands its mount in as `mountProjectGate`; the dropdown's "New
+// Project…" line calls the opener it returns. Absent — a student install — the
+// line is disabled and there is no form, no 404 and no dead control.
 
 // The repo FILTER (add-opendox-project-header D14/D16): one icon, one
 // popover scoped to the CURRENT project, working like the project dropdown
@@ -315,7 +246,13 @@ function mountProjectFilter(project, roster, pendingEdits, opts) {
   const holder = el("span", "repofilter");
   if (!project) return holder;
   const o = opts || {};
-  const gated = gateCapable(o.caps);
+  // Gated is the AND of "the backend says the gate capability is live" and "the
+  // gate column is registered here" (§ 3.4 slice S4) — never either alone, the
+  // same conjunction `views/intent-binding.js` states for its own optional
+  // binding. `o.gate` is the shell-resolved `gate.projects` controller; absent,
+  // the add line and the trash controls are not rendered at all and the rows
+  // stay selectable, which is the gate-off posture D16 already described.
+  const gated = gateCapable(o.caps) && !!o.gate;
   // reread per render: a same-page commission appends to `pendingEdits`,
   // and edits QUEUE (topic D18) — the overlay is the NET of every queued row
   const currentPendingEdit = () => netPendingEdit(pendingEdits, project);
@@ -354,33 +291,21 @@ function mountProjectFilter(project, roster, pendingEdits, opts) {
     button.setAttribute("aria-expanded", pop.hidden ? "false" : "true");
   });
 
-  async function commissionEdit(body, control, restore) {
-    o.status.textContent = "";
-    try {
-      const fetchOpts = {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project_id: project.id, ...body }),
-      };
-      const response = o.fetcher
-        ? await o.fetcher(ACTIONS_EDIT_PROJECT_ROUTE, fetchOpts)
-        : await fetch(ACTIONS_EDIT_PROJECT_ROUTE, fetchOpts);
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data?.ok !== true) {
-        if (restore) restore();
-        o.status.textContent = "edit-project refused: "
-          + (data?.message || data?.error || ("HTTP " + response.status));
-        return;
-      }
-      o.status.textContent = "membership edit recorded (" + data.job + ")";
-      // badge immediately (D-e): re-render with this edit pending
-      pendingEdits = (pendingEdits || []).concat([{
-        projectId: project.id, add: data.add, remove: data.remove }]);
-      renderRows();
-    } catch (err) {
-      if (restore) restore();
-      o.status.textContent = "edit-project failed: " + (err?.message || "error");
-    }
+  // THE COMMISSION ITSELF IS THE GATE COLUMN'S (§ 3.4 slice S4). This view owns
+  // the CONTROL — which row, which repository, armed or not — and hands the act
+  // to the `gate.projects` binding, which owns the route, the POST and the
+  // refusal text. What stays here is what the popover must do with the answer:
+  // badge the accepted edit immediately (D-e) and re-render.
+  function commissionEdit(body, restore) {
+    if (!o.gate) return;
+    o.gate.commissionEdit(project.id, body, {
+      restore,
+      onRecorded: (data) => {
+        pendingEdits = (pendingEdits || []).concat([{
+          projectId: project.id, add: data.add, remove: data.remove }]);
+        renderRows();
+      },
+    });
   }
 
   // D16's first line, refined by Brett's 2026-08-06 annotation: ONE dropdown
@@ -406,7 +331,7 @@ function mountProjectFilter(project, roster, pendingEdits, opts) {
     select.addEventListener("change", () => {
       const chosen = select.value;
       select.value = "";                  // the placeholder line returns
-      if (chosen) commissionEdit({ add: [chosen] }, select, null);
+      if (chosen) commissionEdit({ add: [chosen] }, null);
     });
     pop.appendChild(select);
   }
@@ -574,7 +499,7 @@ function mountProjectFilter(project, roster, pendingEdits, opts) {
             return;
           }
           trash.disabled = true;
-          commissionEdit({ remove: [row.repository] }, trash, () => {
+          commissionEdit({ remove: [row.repository] }, () => {
             trash.disabled = false;
             armed = false;
             trash.textContent = "\ud83d\uddd1";
@@ -606,6 +531,24 @@ function mountProjectFilter(project, roster, pendingEdits, opts) {
 // `onSelect(key)` is the caller's "load that snapshot" hook; `onRefreshed(result)`
 // runs after a successful refresh. Both `fetchIndex`/`postRefresh` are injectable
 // for tests, and `schedule` replaces setInterval so the poll is testable.
+//
+// `mountProjectGate` is the `gate.projects` binding's entry, already resolved by
+// the shell (§ 3.4 slice S4) or null. Present, the project commissions are
+// available: the dropdown's "New Project…" line opens the create form and the
+// filter's add line and trash controls raise membership edits. Null — a student
+// install, or any plane with no gate column — and none of that renders, with no
+// 404 and no dead control, which is RULING C2 one tier out.
+//
+// WHAT LEFT WITH SLICE S4 AND IS NOT REPLACED HERE: the "⟳ apply N pending"
+// button. It POSTed openxFactory's own fulfilment lane, which RULING DQ-1 keeps
+// at openxFactory ("a front end that hardcodes them ships one repository's lanes
+// to every install", § 3.3), so RULED Q3 has it leave the bundle entirely rather
+// than move to a class. Commissions still RECORD and still badge as pending
+// exactly as before — what no longer exists in this bundle is the button that
+// ran the fulfilment; openxFactory runs its own lane, and if it wants the button
+// back it contributes one through the S3 registry the way S2's intent chips
+// return. `onRefreshed` therefore has exactly one caller again: a successful
+// refresh.
 export function mountRepoSelector(host, opts) {
   const o = opts || {};
   const post = o.post || postRefresh;
@@ -669,6 +612,16 @@ export function mountRepoSelector(host, opts) {
     let scope = defaultProjectScope(projects, storedProjectScope(o.storage));
     const currentProject = () => projects.find((p) => p.id === scope) || null;
 
+    // The `gate.projects` controller, declared before the first render because
+    // the filter's own gate verdict reads it (§ 3.4 slice S4). `available` is
+    // knowable up front — the capability the probe reported AND a binding the
+    // shell resolved — while `commissionEdit` is only needed at click time, by
+    // which point the mount below has filled it in.
+    const projectGate = {
+      available: gateCapable(caps) && !!o.projects && !!o.mountProjectGate,
+      commissionEdit: null,
+    };
+
     // ---- the repo FILTER (D14): one icon, one popover, the current
     // project's members; re-rendered whenever the project changes ----
     let filterWrap = null;
@@ -679,6 +632,7 @@ export function mountRepoSelector(host, opts) {
       const view = projectViewState(project, o.storage, active);
       const next = mountProjectFilter(project, roster, pendingEdits, {
         active, caps, status, projects, fetcher: o.fetcher,
+        gate: projectGate.available ? projectGate : null,
         visible: view.visible, viewMode: view.mode,
         onSelect: (key) => o.onSelect?.(key),
         onView: (state) => {
@@ -716,7 +670,8 @@ export function mountRepoSelector(host, opts) {
       picker.setAttribute("aria-label", "current project");
       const newRow = el("option", "projectnew", "New Project…");
       newRow.value = "__new__";
-      if (!gateCapable(caps)) newRow.disabled = true;   // creating is a gate act
+      // creating is a gate act, AND it needs the column that performs it
+      if (!projectGate.available) newRow.disabled = true;
       picker.appendChild(newRow);
       for (const project of projects) {
         const opt = el("option", null, project.name);
@@ -776,46 +731,16 @@ export function mountRepoSelector(host, opts) {
     // hint. Re-derived and re-rendered, so it appears on the next poll and on
     // the shell's own nudge after a session opens.
     rosterChanged = () => { roster = buildRoster(index); renderFilter(); };
-    if (gateCapable(caps) && o.projects) {
-      openCreateForm = mountCreateProject(wrap, status, roster, projects, o,
-                                          addPendingOption);
-      // add-register-edit-lane: the UPDATE button — visible whenever
-      // recorded commissions await fulfilment; the serve runs the lane once
-      // and the shell reloads onto the new register truth.
-      const pendingCount = pendingProjects.length + pendingEdits.length;
-      if (pendingCount) {
-        const apply = el("button", "repobtn applybtn",
-          "⟳ apply " + pendingCount + " pending");
-        apply.type = "button";
-        apply.title = "fulfil the recorded project-register commissions now "
-          + "(validate, deliver, commit, push)";
-        apply.addEventListener("click", async () => {
-          apply.disabled = true;
-          status.textContent = "applying…";
-          try {
-            const response = o.fetcher
-              ? await o.fetcher(ACTIONS_APPLY_REGISTER_EDITS_ROUTE, { method: "POST" })
-              : await fetch(ACTIONS_APPLY_REGISTER_EDITS_ROUTE, { method: "POST" });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok || data?.ok !== true) {
-              apply.disabled = false;
-              status.textContent = "apply failed: "
-                + (data?.error || ("HTTP " + response.status))
-                + (data?.skipped?.length
-                    ? " — skipped: " + data.skipped.map((s) => s[1] + " (" + s[2] + ")").join("; ")
-                    : "");
-              return;
-            }
-            status.textContent = "applied " + (data.applied?.length || 0)
-              + (data.skipped?.length ? (", skipped " + data.skipped.length) : "");
-            if (typeof o.onRefreshed === "function") o.onRefreshed(data);
-          } catch (err) {
-            apply.disabled = false;
-            status.textContent = "apply failed: " + (err?.message || "error");
-          }
-        });
-        wrap.appendChild(apply);
-      }
+    if (projectGate.available) {
+      // The contributed binding mounts into the slot the selector built for it
+      // and hands back the two acts this view triggers. Mounted HERE, in the
+      // position the create form has always occupied, so the header's DOM order
+      // is unchanged by the split.
+      const controller = o.mountProjectGate(wrap, {
+        roster, status, fetcher: o.fetcher, addPendingOption,
+      });
+      openCreateForm = controller.openCreateForm;
+      projectGate.commissionEdit = controller.commissionEdit;
     }
   }
   if (refreshCapable(caps)) {

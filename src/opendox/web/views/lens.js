@@ -27,7 +27,6 @@
 import {
   buildLensModel, docSummaries, railStats, termMatches,
   savePlan, clusterPlan, WORKBENCH_DIR,
-  recipeRequest, clusterRequest, LENS_SAVE_ROUTE, LENS_CLUSTER_ROUTE,
 } from "./lens-model.js";
 // The SVG bullseye renderer lives in ONE place (add-workbench-bullseye-and-create
 // design D1): this view and the staging workbench's lens panel consume the same
@@ -173,13 +172,22 @@ function renderPlan(container, plan, opts) {
   }
   box.appendChild(el("div", "dc-line", "lands at: " + plan.landsAt));
   if (plan.pendingNote) box.appendChild(el("div", "dc-note", plan.pendingNote));
-  // GATE SEAM (add-lens-gate-verbs): when the local gate capability is live
-  // (loopback + real checkout + resolved actor), the plan gains an execute
-  // affordance that posts to the verb route. On the deployed static image the
-  // capability is absent, so this whole block is skipped and the panel stays
-  // plan-only — byte-for-byte the read-only posture that ships today.
-  if (gateLive(o.caps)) {
-    mountExecute(box, plan, o);
+  // GATE SEAM (add-lens-gate-verbs, re-drawn by § 3.4 slice S4): when the local
+  // gate capability is live (loopback + real checkout + resolved actor) AND the
+  // gate column is registered, the plan gains an execute affordance that posts
+  // to the verb route. Both halves, never either alone — the same AND
+  // `views/intent-binding.js` states for its own optional binding: the backend
+  // may claim the capability where no binding is contributed, and this leg may
+  // carry the binding where no backend answers it.
+  //
+  // `mountLensGate` is the `gate.lens` binding's entry, RESOLVED BY THE SHELL
+  // (`app.js`, through `resolveView`) and handed down already-bound; this view
+  // imports no class-B module and names no route the gate column declares
+  // (RULED Q3, § 4.1/§ 4.2). Absent — a student install, or the deployed static
+  // image whose `/capabilities` 404s — the panel stays plan-only, byte-for-byte
+  // the read-only posture that shipped before the seam existed.
+  if (gateLive(o.caps) && o.mountLensGate) {
+    o.mountLensGate(box, { plan, caps: o.caps, fetcher: o.fetcher });
   } else {
     box.appendChild(el("div", "dc-note",
       "The tested engine (lens.py) materialises this through the boundary; the " +
@@ -208,115 +216,12 @@ async function postPlan(route, body, fetcher) {
   }
 }
 
-// Render the landing confirmation (success) or the engine's refusal verbatim.
-// textContent-bound like every other value here.
-function renderOutcome(container, result) {
-  container.innerHTML = "";
-  if (result && result.ok) {
-    const ok = el("div", "dc-landed");
-    ok.appendChild(el("div", "dc-h", "landed ✓ — recorded gate dispatch"));
-    ok.appendChild(el("div", "dc-line", "manifest: " + result.manifest));
-    if (result.pending_entry) {
-      ok.appendChild(el("div", "dc-line", "pending entry: " + result.pending_entry));
-    }
-    ok.appendChild(el("div", "dc-line", "gate-action record: " + result.record));
-    if (result.note) ok.appendChild(el("div", "dc-note", result.note));
-    container.appendChild(ok);
-  } else {
-    const refused = el("div", "dc-refused");
-    refused.appendChild(el("div", "dc-h", "refused ✕"));
-    refused.appendChild(el("div", "dc-line", (result && result.message) || "gate action failed"));
-    container.appendChild(refused);
-  }
-}
-
-// The execute button + its result area. A save-recipe plan posts immediately;
-// an add-as-cluster plan first collects the human-seen organizer evidence (the
-// engine refuses an incomplete submission, and that refusal renders here).
-function mountExecute(box, plan, o) {
-  const result = el("div", "dc-result");
-  result.setAttribute("aria-live", "polite");
-  const bar = el("div", "dc-exec");
-  const run = el("button", "cbtn",
-    plan.kind === "add-as-cluster" ? "execute → add as cluster" : "execute → save recipe");
-  run.type = "button";
-  run.title = "EXECUTES via the local gate route (actor: " + ((o.caps && o.caps.actor) || "local") + ")";
-
-  async function dispatch(body, route) {
-    run.disabled = true;
-    const payload = await postPlan(route, body, o.fetcher);
-    renderOutcome(result, payload);
-    if (!(payload && payload.ok)) run.disabled = false;  // let a refused plan be retried
-  }
-
-  run.addEventListener("click", () => {
-    if (plan.kind === "add-as-cluster") {
-      renderEvidenceForm(result, (o.caps && o.caps.actor) || "", (evidence) => {
-        dispatch(clusterRequest(plan, evidence), LENS_CLUSTER_ROUTE);
-      });
-    } else {
-      dispatch(recipeRequest(plan), LENS_SAVE_ROUTE);
-    }
-  });
-  bar.appendChild(run);
-  box.appendChild(bar);
-  box.appendChild(result);
-}
-
-// The human-seen organizer evidence form (add-as-cluster only). Collects the
-// full contract the engine requires; a blank/short field is NOT pre-validated —
-// the engine refuses and the reason renders verbatim (single source of truth).
-function renderEvidenceForm(container, actor, onSubmit) {
-  function clear() {
-    container.innerHTML = "";
-  }
-  clear();
-  const form = el("div", "reason-form evidence-form");
-  form.appendChild(el("span", "rf-label",
-    "human-seen evidence (organizer contract — the engine refuses an incomplete one):"));
-  const fields = [
-    ["proposer", "proposer", actor],
-    ["revision", "committed revision (40/64-hex)", ""],
-    ["path", "source path", ""],
-    ["section", "section", ""],
-    ["passage_sha256", "passage sha256 (64-hex)", ""],
-    ["rationale", "rationale", ""],
-    ["confidence", "confidence 0–1", ""],
-    ["alternatives", "alternatives (comma-separated; may be empty)", ""],
-  ];
-  const inputs = {};
-  for (const [key, label, value] of fields) {
-    const input = document.createElement("input");
-    input.type = "text";
-    input.value = value || "";
-    input.setAttribute("aria-label", label);
-    input.setAttribute("placeholder", label);
-    inputs[key] = input;
-    form.appendChild(input);
-  }
-  const submit = el("button", "cbtn", "execute");
-  submit.type = "button";
-  const cancel = el("button", "cbtn", "cancel");
-  cancel.type = "button";
-  submit.addEventListener("click", () => {
-    const alts = inputs.alternatives.value.split(",").map((s) => s.trim()).filter((s) => s);
-    const conf = parseFloat(inputs.confidence.value);
-    onSubmit({
-      proposer: inputs.proposer.value.trim(),
-      revision: inputs.revision.value.trim(),
-      path: inputs.path.value.trim(),
-      section: inputs.section.value.trim(),
-      passage_sha256: inputs.passage_sha256.value.trim(),
-      rationale: inputs.rationale.value.trim(),
-      confidence: Number.isNaN(conf) ? inputs.confidence.value.trim() : conf,
-      alternatives: alts,
-    });
-  });
-  cancel.addEventListener("click", clear);
-  form.appendChild(submit);
-  form.appendChild(cancel);
-  container.appendChild(form);
-}
+// The execute affordance, the human-seen organizer evidence form and the
+// outcome panel that used to sit here are `views/gate-lens.js`'s now (§ 3.4
+// slice S4, RULED Q3): they are what CALLS the two gate routes, so they travel
+// with the binding that owns them. What stays is `postPlan` above — still used
+// by this view's own two openxFactory-lane drafting routes, which no ruling in
+// this round places (§ 6: none of Q1–Q5 rules on this file).
 
 // ---- pane 1: keyword rail (check = stratify, pin = require) ----
 
@@ -1104,6 +1009,10 @@ export function renderLens(root, snapshot, opts) {
   const createCaps = options.createCaps || caps;
   const writableRepository = options.writableRepository || null;
   const fetcher = options.fetcher || null;
+  // The `gate.lens` binding's entry, already resolved by the shell (§ 3.4 slice
+  // S4). Null where no gate column is registered, which is exactly what a
+  // student install is — the plan panel then renders plan-only.
+  const mountLensGate = options.mountLensGate || null;
   root.innerHTML = "";
 
   // D21 — the vocabulary. `composedSnapshot` is the UNNARROWED composed
@@ -1469,14 +1378,16 @@ export function renderLens(root, snapshot, opts) {
       save.type = "button";
       save.addEventListener("click", () => {
         const model = buildLensModel(snapshot, query());
-        renderPlan(confirm, savePlan(model, repository, ctx.setName()), { caps, fetcher });
+        renderPlan(confirm, savePlan(model, repository, ctx.setName()),
+                   { caps, fetcher, mountLensGate });
       });
       const cluster = el("button", "cbtn",
         "→ add as cluster (workbench set + human-seen proposal)");
       cluster.type = "button";
       cluster.addEventListener("click", () => {
         const model = buildLensModel(snapshot, query());
-        renderPlan(confirm, clusterPlan(model, repository, ctx.setName()), { caps, fetcher });
+        renderPlan(confirm, clusterPlan(model, repository, ctx.setName()),
+                   { caps, fetcher, mountLensGate });
       });
       box.appendChild(save);
       box.appendChild(cluster);

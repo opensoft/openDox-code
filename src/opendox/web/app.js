@@ -560,6 +560,9 @@ const CORE_VIEWS = [
       // else on the composed view changes.
       createCaps: ctx.probedCaps,
       writableRepository: ctx.writableRepository,
+      // the `gate.lens` binding's entry, or null where no gate column is
+      // registered — the plan panel then stays plan-only (§ 3.4 slice S4)
+      mountLensGate: ctx.mountLensGate,
     }) },
   // The doc list's rows open the SAME read-only explorer/viewer overlay the
   // wheel's `read` verb and the workbench's docs rows open (T092 acceptance
@@ -597,6 +600,35 @@ const CORE_VIEWS = [
     module: "./views/gate.js", entry: "mountGateBar", view_class: "B",
     routes: ["/actions/gate/ratify"], requires: ["actions.gate"],
     optional: true },
+  // THE LENS'S TWO GATE VERBS and THE PROJECT COMMISSIONS — slice S4's two new
+  // class-B bindings, on exactly the footing `gate.bar` above already stands on
+  // and for the same three reasons. RULED Q3 (openxFactory#656 comment
+  // `5642758731`): "a route constant travels with the binding that calls it,
+  // never with the model that happens to declare it" — so the ten gate-prefix
+  // constants that stood in `views/lens-model.js`, `views/repo-selector.js` and
+  // `views/staging-workbench-model.js` are now declared in class-B files, and
+  // the two bindings below declare the four of them that needed a new home as
+  // their OWN, in the one place the registry can check.
+  //
+  // `optional: true` is the whole point: a shell assembled without either one
+  // renders the lens plan panel plan-only and the selector with no project
+  // commissions — no gate form, no add row, no trash control, and no 404.
+  //
+  // BOTH ENTRIES ARE TRANSITIONAL, like `gate.bar`. They sit in the CORE arm
+  // because at this slice no column contributes anything; slice S5 moves the
+  // class-B files behind a contribution openXdox supplies, at which point these
+  // three entries are deleted and the identical bindings arrive through
+  // `contributedViewBindings()`. Nothing else in this file changes when they do.
+  { id: "gate.lens", region: "lens-gate",
+    module: "./views/gate-lens.js", entry: "mountLensGate", view_class: "B",
+    routes: ["/actions/gate/lens-save-recipe",
+             "/actions/gate/lens-add-as-cluster"],
+    requires: ["actions.gate"], optional: true },
+  { id: "gate.projects", region: "repo-projects",
+    module: "./views/gate-projects.js", entry: "mountProjectCommissions",
+    view_class: "B",
+    routes: ["/actions/gate/create-project", "/actions/gate/edit-project"],
+    requires: ["actions.gate"], optional: true },
 ];
 
 // Tab router with the WAI-ARIA roving-tabindex pattern (a11y #19): only the
@@ -978,6 +1010,11 @@ async function render() {
        { views: () => contributedViewBindings(probedCaps) }],
       { contributedRoutes: manifestRoutes(probedCaps) });
     gateView = await resolveView(views, "gate.bar");
+    // Slice S4's two, resolved once per render exactly as the gate bar is. Null
+    // is the honest answer for a shell with no gate column, and each consumer
+    // below treats it as "plan-only" / "no commissions" rather than as an error.
+    const lensGateView = await resolveView(views, "gate.lens");
+    const projectGateView = await resolveView(views, "gate.projects");
     const explorer = mountExplorer(explorerRoot, snapshot, {
       signal,
       onOpenFile: (entry, pane, tile) => {
@@ -1227,6 +1264,12 @@ async function render() {
       // `dispose-intent` are declared regions already, so S2 adds an optional
       // binding and two `lookupView` calls and touches nothing here.
       views,
+      // Slice S4's two resolved class-B mounts, handed down already-bound so no
+      // class-A or class-C view imports a class-B module to reach them. Null
+      // where the column that supplies them is not installed.
+      mountLensGate: lensGateView
+        ? (host, lctx) => lensGateView.exports.mountLensGate(host, lctx)
+        : null,
       // the UNSTRIPPED probe and the serve's own writable repository — read by
       // exactly one affordance (see `createCaps` at the lens's mount)
       probedCaps,
@@ -1262,6 +1305,12 @@ async function render() {
     // FAILED refresh reports inline and leaves this view exactly as it is.
     repoSelector = mountRepoSelector(document.getElementById("repopicker"), {
       index, active, snapshot, caps, projects,
+      // the `gate.projects` binding's entry, or null where no gate column is
+      // registered — the selector then renders picker + refresh only, which is
+      // the whole of what § 3.4 slice S4 leaves in class A
+      mountProjectGate: projectGateView
+        ? (host, pctx) => projectGateView.exports.mountProjectCommissions(host, pctx)
+        : null,
       onSelect: (key) => { storeKey(key); render(); },
       onRefreshed: () => render(),
     });

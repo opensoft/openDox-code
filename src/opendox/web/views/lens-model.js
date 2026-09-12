@@ -1030,11 +1030,16 @@ export function clusterPlan(model, repository, name) {
   return plan;
 }
 
-// The two gate routes the lens verbs post to (add-lens-gate-verbs). Mirrors the
-// dispose/propose route constants — the deployed static image never serves
-// these; the plan panel probes the gate capability before revealing execute.
-export const LENS_SAVE_ROUTE = "/actions/gate/lens-save-recipe";
-export const LENS_CLUSTER_ROUTE = "/actions/gate/lens-add-as-cluster";
+// THE TWO GATE ROUTES THE LENS VERBS POST TO ARE NOT DECLARED HERE ANY MORE
+// (§ 3.4 slice S4). `LENS_SAVE_ROUTE` and `LENS_CLUSTER_ROUTE` stood at :1036
+// and :1037 of this file at the carve commit and were called from `lens.js`'s
+// execute affordance, never from this module — RULED Q3 (openxFactory#656
+// comment `5642758731`, Brett Heap, 2026-09-12): "a route constant travels
+// with the binding that calls it, never with the model that happens to declare
+// it." Both now live in `views/gate-lens.js`, the class-B binding that calls
+// them, and this module is class A outright: pure, import-free, addressing no
+// route any column declares. The two body builders below stay — they are pure
+// derivations over a plan, which is exactly the substance this module is for.
 
 // The request body a save-recipe / add-as-cluster plan posts to its verb route.
 // PURE: derives the recipe (checked/pinned) + the reasoned overrides from the

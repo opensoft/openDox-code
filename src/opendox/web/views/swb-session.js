@@ -73,9 +73,56 @@ import {
   SESSION_FIRST_EDIT, SESSION_REFRESH_NOTEBOOK, SESSION_SAVE, SESSION_SHARE,
   SESSION_VERBS,
   consoleHeaders, firstEditBody, firstEditVerdict, notebookRefreshCommand,
-  sessionActionsLive, sessionCommand, sessionRequest, sessionRoute,
+  sessionActionsLive, sessionCommand, sessionRequest,
   sessionSurfaceHidden, withConsoleRepair,
 } from "./staging-workbench-model.js";
+
+// ---- THE FIVE SESSION GATE ROUTES, DECLARED WHERE THEY ARE CALLED ---------
+//
+// § 3.4 slice S4. All five stood in `views/staging-workbench-model.js` at the
+// carve commit — :817, :818, :821, :822, :826 — with the lookup table and
+// `sessionRoute()` beside them, and every one of them is POSTed from this file
+// and from nowhere else. RULED Q3 (openxFactory#656 comment `5642758731`, Brett
+// Heap, 2026-09-12): "a route constant travels with the binding that calls it,
+// never with the model that happens to declare it."
+//
+// THE REASON THEY WERE CONSTANTS IS UNCHANGED and is now served in the right
+// place: constants here, never literals in the transport, so the wire contract
+// has ONE definition the node harness and the Python route tests read — and it
+// is a definition that can travel with the binding at slice S5 instead of being
+// stranded in a pure model the gate column does not own.
+export const EDIT_DOCUMENT_ROUTE = "/actions/gate/edit-document";
+export const OPEN_PR_ROUTE = "/actions/gate/open-pr";
+// 010-doxbench-editor-chat T080: the first-Save gate verb. A CANVAS seam, not
+// a session-bar affordance -- deliberately absent from SESSION_AFFORDANCES.
+export const FIRST_EDIT_ROUTE = "/actions/gate/first-edit";
+export const ABANDON_SESSION_ROUTE = "/actions/gate/abandon-session";
+// add-doxbench-editing-phase-b §12: the SHARE route, beside open-pr's because it
+// is the same class of act (a remote write with the engineer's own credential)
+// with the pull request removed.
+export const SHARE_SESSION_ROUTE = "/actions/gate/share-session";
+
+// The routes this module declares to the registry at slice S5, in one place so
+// the binding entry and this file cannot drift apart.
+export const SESSION_GATE_ROUTES = [
+  EDIT_DOCUMENT_ROUTE, OPEN_PR_ROUTE, FIRST_EDIT_ROUTE,
+  ABANDON_SESSION_ROUTE, SHARE_SESSION_ROUTE,
+];
+
+const SESSION_ROUTES = {
+  [SESSION_EDIT]: EDIT_DOCUMENT_ROUTE,
+  [SESSION_SAVE]: OPEN_PR_ROUTE,
+  [SESSION_ABANDON]: ABANDON_SESSION_ROUTE,
+  [SESSION_SHARE]: SHARE_SESSION_ROUTE,
+  [SESSION_FIRST_EDIT]: FIRST_EDIT_ROUTE,
+};
+
+// The model's own `asId` is private to it and stayed there; this is the same
+// one-line normalization, so an affordance arriving as null or a number reads
+// as "no route" rather than as a key lookup on a coerced value.
+export function sessionRoute(affordance) {
+  return SESSION_ROUTES[affordance == null ? "" : String(affordance)] || null;
+}
 
 // ---- the page-lifetime overlays --------------------------------------------
 //

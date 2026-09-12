@@ -28,7 +28,10 @@
 #       tail). Legitimate ONLY until slice S4 does the split -- after S4 a
 #       "?" row still standing fails the census assertion, because a
 #       permanent "undecided" is an escape hatch, not a boundary (note § 4.5
-#       point 1).
+#       point 1). THAT CUTOFF IS NOW IN FORCE (slice S4 landed it): see
+#       `declared_transitional_rows` at the foot of this file, which is the
+#       ONE declared exception the note names and the only way a "?" (or a
+#       "SPLIT") row may still stand.
 #
 # `tail` (optional): set on a class-A row whose file ALSO carries a rendered
 # label or a corpus path (note § 2.2 rule 3) -- the identifier is named so S7
@@ -110,17 +113,84 @@
 #   1,597 lines; C 14 files, 11,854 lines; ? 4 files, 5,432 lines -- B/C/?
 #   all unchanged from the a99eba03 baseline
 
+# § 3.4 SLICE S4 -- "SPLIT THE THREE RULED `SPLIT` FILES" (this fixture's own
+# amendment; leg branch `build/s4-split-route-tails`). RULED Q3, openxFactory#656
+# comment `5642758731` (Brett Heap, 2026-09-12): "a route constant travels with
+# the binding that calls it, never with the model that happens to declare it."
+# THIRTEEN ROUTE TAILS MOVED, and with them three census rows:
+#
+#   views/lens-model.js            "?" -> A  (1070 -> 1075 lines)
+#       LENS_SAVE_ROUTE :1036 and LENS_CLUSTER_ROUTE :1037 -> views/gate-lens.js
+#       (NEW, class B), with the execute affordance, the organizer-evidence form
+#       and the outcome panel that call them. The model is pure and import-free
+#       again and names no route any column declares.
+#   views/repo-selector.js         "?" -> A  (889 -> 814 lines)
+#       :33 /snapshot-index.json  -> views/projection-index.js (NEW, class B),
+#           reached LATE and REFUSABLY by `fetchIndex` (note § 4.2's own guard,
+#           not a ViewBinding -- an index fetch mounts no panel)
+#       :34 /actions/refresh      stays: BOTH legs declare a handler (§ 3.3)
+#       :38 /project-register.json stays: openDox's own (`serve_project.py`)
+#       :39 /actions/gate/create-project and :43 /actions/gate/edit-project
+#           -> views/gate-projects.js (NEW, class B), ONE binding with the
+#           create form and the membership-edit commission
+#       :46 /actions/apply-register-edits -> LEFT THE BUNDLE ENTIRELY with the
+#           "apply N pending" button that reached it. RULING DQ-1 keeps that
+#           lane at openxFactory and § 2.2 rule 1 says no class here can ever
+#           own it.
+#   views/staging-workbench-model.js  "?" -> A (C tail)  (1949 -> 1943 lines)
+#       :543 CREATE_ROUTE -> views/swb-create.js (already class B, already the
+#           only caller); :817/:818/:821/:822/:826 and the SESSION_ROUTES table
+#           and sessionRoute() -> views/swb-session.js (likewise). No new file:
+#           the two class-B modules that CALL them already existed.
+#       The `tail:` is new and is the note's own reading of this row (§ 3.2:
+#       "plus STATUS_BRAINSTORM / BRAINSTORM_AREA / STAGING_AREA (class-C)") --
+#       so the file leaves "?" for A and its class-C substance enters assertion
+#       4's scope for S7 rather than escaping the sweep unremarked.
+#
+# views/lens.js IS OUT OF SCOPE and stays "?" -- none of Q1-Q5 rules on its two
+# openxFactory-lane routes (§ 5's S4 row says so in terms). It is assertion 1's
+# ONE declared, ruled-later exception (`declared_transitional_rows` below) and
+# its two lane sites are assertion 2's own (`route_ownership_exceptions`). Its
+# S1 note said "splits at S4", which contradicted § 5's S4 row; corrected here.
+#
+# THE POST-S4 CENSUS, measured on the leg branch (44 -> 47 files, three of them
+# created by this slice):
+#   A  25 files, 16,287 lines   (22 + lens-model 1,075 + repo-selector 814
+#                                + staging-workbench-model 1,943, and app.js
+#                                1,282 -> 1,331, view_extension.js 455 -> 463)
+#   B   7 files,  2,174 lines   (4 + gate-lens 204 + gate-projects 241
+#                                + projection-index 73, and swb-create
+#                                372 -> 384, swb-session 614 -> 661)
+#   C  14 files, 11,854 lines   (unchanged -- S4 touched no class-C file)
+#   ?   1 file,   1,435 lines   (views/lens.js alone, 1,524 -> 1,435)
+#   total 47 files, 31,750 lines
+# Those numbers are DECLARED in `totals:` below and CHECKED, never transcribed:
+# `loc` per row is held against the tree by assertion 1, and the class totals
+# are re-derived from the rows by
+# `test_the_declared_totals_are_re_derived_from_the_rows`. Slice S1's own header
+# block above records what the same measurement said before this slice.
+
+
 schema_version: 1
 kind: web-boundary-census
 source_note: "opensoft/openDox-spec docs/front-end-package-boundary.md @ a44ac06d"
 ruling_comment: "opensoft/openxFactory#656 comment 5642758731 (2026-09-12T02:07:53Z)"
 measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c44"
 
+# The per-class totals of the rows below, DECLARED so the census states its own
+# shape and `test_the_declared_totals_are_re_derived_from_the_rows` can refuse a
+# drift between the two. Measured at slice S4 (see the S4 block above).
+totals:
+  A: {files: 25, loc: 16287}
+  B: {files: 7, loc: 2174}
+  C: {files: 14, loc: 11854}
+  "?": {files: 1, loc: 1435}
+
 files:
   - path: app.js
     class: A
-    loc: 1282
-    note: "the shell; imports 20 view modules; its only class-B import is gate.js at :43 (discharged by S3's view registry -- loc grew 1155 -> 1282 with the registry wiring, S3)"
+    loc: 1331
+    note: "the shell; its only class-B import was gate.js at :43 (discharged by S3's view registry -- loc 1155 -> 1282 with the registry wiring, S3; 1282 -> 1331 with S4's two new gate bindings and the two mounts it hands down). Carries SIX transitional route-ownership sites, all in the CORE arm's class-B binding entries and all cleared at S5 when those entries leave for contributedViewBindings(): gate.bar's one route (S3) and gate.lens's and gate.projects's two each (S4). Declaring them is RULED Q3 working -- view_extension.py: 'a binding that declares the routes it calls is what makes that ruling checkable instead of aspirational' -- and it is a real breach by assertion 2's own rule only while the entry sits in app.js (class A) rather than in the class-B module (exempt by construction)"
 
   - path: index.html
     class: C
@@ -230,6 +300,16 @@ files:
     loc: 538
     note: "realization funnel; imports model.js's COLUMN_KEYS; 10 governance literals"
 
+  - path: views/gate-lens.js
+    class: B
+    loc: 204
+    note: "S4 ADDITION (RULED Q3): the lens's two gate verbs. Declares LENS_SAVE_ROUTE and LENS_CLUSTER_ROUTE -- which stood at views/lens-model.js:1036/:1037 and were called from views/lens.js, never from the model -- together with the execute affordance, the human-seen organizer evidence form and the outcome panel that call them. Class B by \u00a7 2.1's own test: delete the gate column and it has nothing left to render. Reached by views/lens.js only as a shell-resolved mount (gate.lens), never an import"
+
+  - path: views/gate-projects.js
+    class: B
+    loc: 241
+    note: "S4 ADDITION (RULED Q3): the project commissions. Declares ACTIONS_CREATE_PROJECT_ROUTE and ACTIONS_EDIT_PROJECT_ROUTE -- views/repo-selector.js:39/:43 -- with the create-project form and the membership-edit commission that POST them. The PICKER did not travel (\u00a7 6 Q3: 'moving it whole puts the project picker -- the student's way to choose what they are working on -- behind the gate column'). Reached by views/repo-selector.js only as a shell-resolved mount (gate.projects), never an import"
+
   - path: views/gate.js
     class: B
     loc: 184
@@ -252,14 +332,14 @@ files:
     note: "S2's optional contributed binding (RULED Q5); a single top-level-awaited dynamic import() of the RULED-absent intent-feed.js, never a static import -- no governance word, no owned route, no class-B import; added after this census's own measured head (a99eba03) by opensoft/openDox-code 330cf816, loc as amended in the leg PR (a comment reworded so the file does not misreport its own removed import to this suite's own assertion-3 regex)"
 
   - path: views/lens-model.js
-    class: "?"
-    loc: 1070
-    note: "pure and import-free (class-A substance) but LENS_SAVE_ROUTE :1036 and LENS_CLUSTER_ROUTE :1037 are class-B tails; splits at S4 (Q3's rule extended)"
+    class: A
+    loc: 1075
+    note: "SPLIT AT S4 (RULED Q3): LENS_SAVE_ROUTE :1036 and LENS_CLUSTER_ROUTE :1037 travelled to views/gate-lens.js, the class-B binding that calls them. What is left is what the note always called this file -- pure, import-free, zero governance literals, and now naming no route another column declares"
 
   - path: views/lens.js
     class: "?"
-    loc: 1524
-    note: "VOCABULARIES :57 is a class-C vocabulary table; DTN_SEED_ROUTE :41 and STAGING_SEED_ROUTE :45 answered only by openxFactory's adapter; splits at S4"
+    loc: 1435
+    note: "VOCABULARIES is a class-C vocabulary table; DTN_SEED_ROUTE and STAGING_SEED_ROUTE are answered ONLY by openxFactory's adapter (a THIRD column, note \u00a7 3.3). OUT OF SCOPE FOR S4 and still \"?\": none of Q1-Q5 rules on it (\u00a7 5's S4 row: 'lens.js is OUT OF SCOPE ... it stays \"?\" as assertion 1's one declared, ruled-later exception'). The S1 note read 'splits at S4', which contradicted that row; corrected by S4, which is the slice that would have had to do the splitting. Its two lane sites are assertion 2's own declared exception. loc 1524 -> 1435: the execute affordance, the organizer-evidence form and the outcome panel left for views/gate-lens.js with the two gate routes they called"
 
   - path: views/lineage.js
     class: C
@@ -281,6 +361,11 @@ files:
     loc: 404
     note: "staged-topic outline model; REQUIRED_SECTIONS/QUESTION_SUBFIELDS/TEMPLATE_ORDER"
 
+  - path: views/projection-index.js
+    class: B
+    loc: 73
+    note: "S4 ADDITION: the openXdox PROJECTION column's one read. Declares SNAPSHOT_INDEX_ROUTE and fetchSnapshotIndex -- views/repo-selector.js:33, which openxdox/serve_projection.py:56 declares and contributes (\u00a7 3.3's ownership table). CLASS B WITH A CAVEAT STATED, not by silence: \u00a7 2.1 names class B 'the gate loop' and this is a GET of a projection, but what assertion 2 exempts is class B's LAST clause -- 'its BINDING belongs to openXdox-code through the seam \u00a7 4 describes' -- which is exactly true here and is what makes the old site a breach in the first place. The census has no fourth letter for the projection column, so this row takes the class whose exemption it actually earns. REGISTERED for the note's owner: \u00a7 2.1's class-B headline is narrower than the property \u00a7 4.5 assertion 2 exempts on. Reached by views/repo-selector.js through a LATE dynamic import (\u00a7 4.2's narrower guard, not a ViewBinding -- an index fetch mounts no panel and occupies no region)"
+
   - path: views/repo-selector-model.js
     class: A
     loc: 537
@@ -288,9 +373,9 @@ files:
     note: "STATIONS :517-522 pairs each schema key with a rendered label; parameterized at S7"
 
   - path: views/repo-selector.js
-    class: "?"
-    loc: 889
-    note: "Q3 RULING: SPLITS -- picker+refresh -> A, two gate commissions -> contributed binding (S4/S5), apply-register-edits leaves the bundle; stays \"?\" until S4 does the split"
+    class: A
+    loc: 814
+    note: "SPLIT AT S4 (RULED Q3), exactly as the ruling states it: the picker and the refresh affordance are class A and stay; /snapshot-index.json :33 went to views/projection-index.js (reached late through a dynamic import, note \u00a7 4.2); /actions/gate/create-project :39 and /actions/gate/edit-project :43 went to views/gate-projects.js with the create form and the membership commission; /actions/apply-register-edits :46 LEFT THE BUNDLE with the apply button that reached it (RULING DQ-1 keeps that lane at openxFactory). What remains names /project-register.json (openDox's) and /actions/refresh (both legs declare a handler, \u00a7 3.3) and nothing else"
 
   - path: views/settings.js
     class: A
@@ -298,9 +383,10 @@ files:
     note: "theme/localStorage preference store; pure frontend, no data path"
 
   - path: views/staging-workbench-model.js
-    class: "?"
-    loc: 1949
-    note: "pure workbench scope derivation carrying SIX class-B route constants (:543,:817,:818,:821,:822,:826); splits at S4"
+    class: A
+    loc: 1943
+    tail: STATUS_BRAINSTORM
+    note: "SPLIT AT S4 (RULED Q3): all six class-B route constants left for the two class-B files that already called them and imported them -- CREATE_ROUTE :543 to views/swb-create.js, and EDIT_DOCUMENT_ROUTE :817 / OPEN_PR_ROUTE :818 / FIRST_EDIT_ROUTE :821 / ABANDON_SESSION_ROUTE :822 / SHARE_SESSION_ROUTE :826, with the SESSION_ROUTES table and sessionRoute(), to views/swb-session.js. What is left is the pure scope derivation, the affordance ids, the verbs, the labels and the request builders. The `tail:` is the note's own reading of the row (\u00a7 3.2: 'plus STATUS_BRAINSTORM / BRAINSTORM_AREA / STAGING_AREA (class-C)'): class-A substance with a class-C vocabulary tail, parameterized at S7 like the other three tails rather than escaping assertion 4's sweep"
 
   - path: views/staging-workbench.js
     class: C
@@ -309,8 +395,8 @@ files:
 
   - path: views/swb-create.js
     class: B
-    loc: 372
-    note: "CREATE_ROUTE = /actions/gate/create-document (from staging-workbench-model.js:543)"
+    loc: 384
+    note: "CREATE_ROUTE is DECLARED HERE since S4 (RULED Q3) -- it stood at staging-workbench-model.js:543 and this file was always its only caller"
 
   - path: views/swb-model-intake.js
     class: A
@@ -319,12 +405,12 @@ files:
 
   - path: views/swb-session.js
     class: B
-    loc: 614
-    note: "FIRST_EDIT_ROUTE/ABANDON_SESSION_ROUTE/SHARE_SESSION_ROUTE/OPEN_PR_ROUTE, all under the gate prefix"
+    loc: 661
+    note: "EDIT_DOCUMENT_ROUTE/OPEN_PR_ROUTE/FIRST_EDIT_ROUTE/ABANDON_SESSION_ROUTE/SHARE_SESSION_ROUTE, all under the gate prefix and all DECLARED HERE since S4 (RULED Q3), with the SESSION_ROUTES table and sessionRoute() that read them; they stood at staging-workbench-model.js:817-:826 and this file was always their only caller"
 
   - path: views/view_extension.js
     class: A
-    loc: 455
+    loc: 463
     note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' in a doc comment is a documentation example of an id, not a route literal, so assertion 2 does not match it. loc 422 -> 455 on this PR's own review round (Copilot, PR #14): a malformed contributed_routes now refuses instead of silently disabling the ownership check, and a rejected dynamic import now refuses naming the binding and module instead of leaking a raw error."
 
   - path: views/viewer.js
@@ -341,6 +427,56 @@ files:
     class: C
     loc: 1702
     note: "THE WHEEL; imports dispose.js (class B) and intent-feed.js (absent, RULED openxFactory); SOURCE_ROUTE :97"
+
+# ASSERTION 1's ONE DECLARED, RULED-LATER EXCEPTION (note § 4.5 point 1). After
+# slice S4 the census assertion fails on any row still "?" OR still "SPLIT" --
+# "a permanent UNDECLARED 'undecided' is an escape hatch, not a boundary; a
+# permanent DECLARED one, cited to the ruling gap that causes it, is how this
+# census stays honest about what it does not yet know". This list is that
+# declaration, and it is the ONLY way a transitional row may still stand.
+# `until` names what would discharge it, so the exception cannot quietly
+# outlive its cause.
+declared_transitional_rows:
+  - path: views/lens.js
+    class: "?"
+    until: "a future ruling on views/lens.js's two openxFactory-lane routes"
+    reason: >-
+      none of Q1-Q5 rules on this file (openxFactory#656 comment 5642758731):
+      DTN_SEED_ROUTE and STAGING_SEED_ROUTE are answered ONLY by openxFactory's
+      own adapter, a THIRD column (note § 3.3), and RULING DQ-1 keeps that
+      column at openxFactory. It is out of scope for this ruling round, NOT
+      undecided by omission -- § 5's S4 row says so in terms ("lens.js is OUT OF
+      SCOPE ... it stays `?` as assertion 1's one declared, ruled-later
+      exception") -- and it stays "?" until a later ruling names its
+      destination.
+
+# ASSERTION 2's OWN STANDING, DECLARED EXCEPTION (note § 4.5 point 2, last
+# paragraph): "lens.js's two openxFactory-lane sites are this assertion's own
+# standing, declared exception -- the same idiom assertion 4 uses for its two
+# schema-key exemptions: named here, with the reason beside it, EXCLUDED FROM
+# THE IN-SCOPE GREP until a future ruling folds lens.js back in. This is why
+# S5's and S6's xfail(strict=True) removal still leaves the test green: the
+# marker comes off because every OTHER site it was tolerating is fixed, not
+# because lens.js's two sites started passing the grep -- they never entered
+# it."
+#
+# Keyed by (path, route) and NEVER by line number: a line number in a declared
+# exception rots the first time anything above it moves, and this file's own
+# S1 rows already carried five stale ones. Each route is checked to be really
+# present in the file it exempts, so the exception cannot outlive the site.
+route_ownership_exceptions:
+  - path: views/lens.js
+    routes:
+      - "/actions/dtn-seed"
+      - "/actions/staging-seed"
+    until: "a future ruling on views/lens.js's two openxFactory-lane routes"
+    reason: >-
+      the same ruling gap `declared_transitional_rows` names: none of Q1-Q5
+      rules on views/lens.js, so its two openxFactory-lane sites do not clear on
+      any slice's schedule (note § 4.5 point 2's own table: "future ruling",
+      not S4/S5/S6). A THIRD undeclared "?" row or an unresolved SPLIT row
+      appearing later still fails immediately, the same ratchet assertion 1
+      enforces.
 
 # The two identifiers § 2.2 rule 3 declares EXEMPT from the governance-literal
 # sweep (assertion 4) -- carried here WITH THE REASON, per the note's own
