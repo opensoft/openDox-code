@@ -112,6 +112,24 @@ jobs:
       # no consumer: it reads bundle files as text and drives the real ones
       # under the `node` the runner already has (skipped, never failed, where
       # node is absent), exactly as `tests/test_view_registry.py` does.
+      #
+      # § 3.4 SLICE S6 adds `tests/test_source_core_arm.py`, and it is the
+      # slice's only running proof. RULED Q4 (openxFactory#656 comment
+      # 5642758731) makes the read-only `/source` pass-through openDox's OWN
+      # fixed core arm rather than a binding contributed by the layer that pins
+      # openDox; the assertions that already covered the route drive a whole
+      # server over a socket and cannot run at either leg (§ 1.2(d), and this
+      # narrowing itself), so a source-level SHAPE assertion is what is
+      # available until S8 lifts them — and it is not nothing: the route's
+      # ownership, its exact-before-prefix dispatch order, its single
+      # containment authority, its two content types and its three distinct
+      # refusals are all properties of the text. `--noconftest` safe: it parses
+      # `src/opendox/serve.py` and reads the live `opendox.consumer_reach`
+      # (whose whole point is that importing it resolves nothing), and it
+      # imports `opendox.serve` nowhere — that module still cannot be imported
+      # at either leg, which is precisely what `tests/test_consumer_reach.py`'s
+      # `STILL_REACHING` records. It carries NO `xfail`: nothing it measures is
+      # a defect awaiting a later slice.
       - name: pytest
         run: >-
           python -m pytest -q
@@ -122,4 +140,5 @@ jobs:
           tests/test_intent_binding_shape.py
           tests/test_view_registry.py
           tests/test_split_route_tails.py
+          tests/test_source_core_arm.py
           --noconftest
