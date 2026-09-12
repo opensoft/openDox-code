@@ -739,6 +739,15 @@ def test_js_manifest_routes_refuses_a_malformed_contributed_routes_field(tmp_pat
     # than refusing a payload this seam cannot reason about (Copilot, PR #14).
     # ABSENCE of the whole manifest still means an empty column, not a
     # refusal -- `contributedViewBindings`'s own rule, held here too.
+    #
+    # entryMissingPattern / entryNonBooleanIsPrefix are the FOLLOW-UP fix
+    # (Copilot, PR #16, `view_extension.js:358`): the array check alone let a
+    # well-formed ARRAY carrying one malformed ENTRY through unexamined,
+    # because nothing read that entry's `pattern` or `is_prefix` until some
+    # binding's route happened to reach it inside `ownershipBreach()`.
+    # `manifestRoutes()` now validates every entry's shape itself, at the one
+    # place the whole manifest is read, through the same `requireRouteShape()`
+    # helper `ownershipBreach()` uses.
     result = _run_node(f"""
 import {{ manifestRoutes }} from {json.dumps(REGISTRY_JS.as_uri())};
 const out = {{}};
@@ -751,6 +760,8 @@ for (const [name, routes] of [
   ["string", "/actions/gate/"],
   ["object", {{ pattern: "/x" }}],
   ["missing", undefined],
+  ["entryMissingPattern", [{{ is_prefix: false }}]],
+  ["entryNonBooleanIsPrefix", [{{ pattern: "/x", is_prefix: "true" }}]],
 ]) {{
   try {{
     manifestRoutes({{ views: {{ contributed_routes: routes }} }});
@@ -766,6 +777,56 @@ console.log(JSON.stringify(out));
     assert result["object"] == "ViewBindingError"
     assert result["missing"] == "ViewBindingError"
     assert "contributed_routes" in result["stringMessage"]
+    assert result["entryMissingPattern"] == "ViewBindingError"
+    assert "string pattern" in result["entryMissingPatternMessage"]
+    assert result["entryNonBooleanIsPrefix"] == "ViewBindingError"
+    assert "is_prefix" in result["entryNonBooleanIsPrefixMessage"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_ownership_check_refuses_a_non_boolean_is_prefix_rather_than_coercing_it(
+        tmp_path):
+    # The other half of the same finding (Copilot, PR #16,
+    # `view_extension.js:358`): `ownershipBreach()` used to read `is_prefix`
+    # with a truthy check (`claimed.is_prefix && route.startsWith(pattern)`),
+    # so a MISSING or otherwise non-boolean `is_prefix` was read as "not a
+    # prefix" and a genuine ownership breach could ride through unexamined
+    # instead of the manifest refusing outright. `requireRouteShape()` now
+    # refuses any non-boolean `is_prefix` before the comparison ever runs --
+    # and a well-formed boolean, true or false, still resolves exactly as
+    # before (the fix must not over-refuse a payload this seam CAN reason
+    # about).
+    result = _run_node(f"""
+import {{ collectViewBindings }} from {json.dumps(REGISTRY_JS.as_uri())};
+const spec = {{ id: "docs.list", region: "view-docs",
+                module: "./views/docs.js", entry: "renderDocs",
+                view_class: "A", routes: ["/actions/gate/ratify"] }};
+const out = {{}};
+for (const [name, contributedRoutes] of [
+  ["missingIsPrefix", [{{ pattern: "/actions/gate/" }}]],
+  ["stringIsPrefix", [{{ pattern: "/actions/gate/", is_prefix: "true" }}]],
+]) {{
+  try {{
+    collectViewBindings([{{ views: () => [spec] }}], {{ contributedRoutes }});
+    out[name] = "not refused";
+  }} catch (e) {{ out[name] = e.name; out[name + "Message"] = e.message; }}
+}}
+try {{
+  collectViewBindings([{{ views: () => [spec] }}],
+    {{ contributedRoutes: [{{ pattern: "/actions/gate/", is_prefix: true }}] }});
+  out.trueIsPrefix = "not refused";
+}} catch (e) {{ out.trueIsPrefix = e.name; }}
+out.falseIsPrefix = collectViewBindings([{{ views: () => [spec] }}],
+  {{ contributedRoutes: [
+    {{ pattern: "/actions/gate/ratify-other", is_prefix: false }}] }}).length;
+console.log(JSON.stringify(out));
+""", tmp_path)
+    assert result["missingIsPrefix"] == "ViewBindingError"
+    assert "is_prefix" in result["missingIsPrefixMessage"]
+    assert result["stringIsPrefix"] == "ViewBindingError"
+    assert "is_prefix" in result["stringIsPrefixMessage"]
+    assert result["trueIsPrefix"] == "ViewBindingError"
+    assert result["falseIsPrefix"] == 1
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
