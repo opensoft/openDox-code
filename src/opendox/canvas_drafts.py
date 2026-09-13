@@ -61,10 +61,38 @@ def supersede_reason(chosen_id: str) -> str:
     `display_profile` — so the two stay byte-identical under any vocabulary
     instead of being locked to one domain's spelling in two places.
     """
+    return (f"Option-set sibling {chosen_id} was chosen at the "
+            f"{_facet()['stages']['grouping']['one']} canvas.")
+
+
+def _facet() -> dict:
+    """The registered domain's display facet, resolved at CALL time.
+
+    Never at import time, and never cached: the whole value of the lazy profile
+    proxy is that importing this module cannot fail for want of a host, and a
+    module-level read would give it back.
+    """
     from opendox import display_profile
-    facet = display_profile.display_manifest(display_profile.host_display())
-    grouping = facet["stages"]["grouping"]["one"]
-    return f"Option-set sibling {chosen_id} was chosen at the {grouping} canvas."
+    return display_profile.display_manifest(display_profile.host_display())
+
+
+def register_state(role: str) -> str:
+    """The wire value `possibles[].state` carries for `role` (slice S7,
+    Copilot round 3).
+
+    THE DRAFT BUILDERS WRITE THE SAME ENUM THE BROWSER MATCHES ON. `states`
+    below used to be the literals `"superseded"` and `"latent"`, which is the
+    one place a host override of `values.register_state` would have split the
+    two halves apart: the browser would match the declared vocabulary while
+    this side wrote openDox's, and a newly drafted possible would be invisible
+    to the very install that created it. Both ends read one facet now.
+    """
+    values = _facet()["values"]["register_state"]
+    if role not in values:
+        raise KeyError(
+            f"no register state is declared for the role {role!r}; the declared "
+            f"roles are {tuple(values)!r}")
+    return values[role]
 
 
 # --------------------------- snapshot lookups ---------------------------
@@ -153,7 +181,7 @@ def build_supersede_draft(snapshot: dict, option_set_id: str, chosen_id: str) ->
             "id": p.get("id"),
             "title": p.get("title") or p.get("id"),
             "claim": p.get("claim") or p.get("title") or p.get("id"),
-            "state": "superseded",
+            "state": register_state("superseded"),
             "reason": supersede_reason(chosen_id),
             "citation": chosen_id,
             "provenance": provenance,
@@ -196,7 +224,7 @@ def build_composer_draft(
         "id": id.strip(),
         "title": title.strip(),
         "claim": claim.strip(),
-        "state": "latent",
+        "state": register_state("captured"),
         "provenance": provenance,
         "claiming_clusters": [cluster_id],
         "supporting_evidence": pins or None,

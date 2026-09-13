@@ -40,6 +40,12 @@ import { ACT_IDS, STAGE_ROLES, STATUS_ROLE, neutralDisplay } from "./display.js"
 
 export const WHEEL_KEYS = STAGE_ROLES;
 
+// The candidate station's role, named once for the synthesized-placeholder
+// title below, and a sentence-case helper: the facet declares words, not
+// capitals.
+const CANDIDATE_ROLE = STAGE_ROLES[2];
+const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+
 const MAX_DEMO_POSSIBLES = 6;
 
 function basename(path) {
@@ -68,7 +74,9 @@ export function synthesizeDemoPossibles(clusters, display) {
   });
   return ranked.slice(0, MAX_DEMO_POSSIBLES).map((c) => ({
     id: "demo-" + c.id,
-    title: "Possible: " + (c.name || c.id),
+    // THE DOMAIN'S NOUN, not openDox's (Copilot round 3). A synthesized
+    // placeholder names the station it stands in.
+    title: cap(d.one(CANDIDATE_ROLE)) + ": " + (c.name || c.id),
     // the SEEDED register state, by role (§ 2.2 rule 3's enum half) — a value
     // the wheel MATCHES against `possibles[].state`, never one it renders
     state: d.registerState(STATUS_ROLE.CAPTURED),
@@ -78,10 +86,13 @@ export function synthesizeDemoPossibles(clusters, display) {
 }
 
 // The possibles tile's sub-line, by precedence: demo > pending review > state.
-function possibleSub(p) {
+// THE SUB-LINE IS A WORD, NOT AN ENUM (Copilot round 3). `p.state` is the
+// value the tile MATCHES on; what a human reads under the title is the
+// registered domain's candidate-status word for the role that value carries.
+function possibleSub(p, display) {
   if (p.demo) return "demo";
   if (isUndisposedDerived(p)) return "pending review";
-  return p.state || "";
+  return p.state ? (display || neutralDisplay()).registerStateWord(p.state) : "";
 }
 
 // Edge class for a cluster->possible claim (the distinct-class rule):
@@ -111,7 +122,7 @@ function buildItems({ display, sources, groups, candidates, selections,
     })),
     [CANDIDATE]: candidates.map((p) => ({
       id: p.id, label: p.title || p.id,
-      sub: possibleSub(p),
+      sub: possibleSub(p, display),
       demo: !!p.demo, derivedPending: isUndisposedDerived(p), ref: p,
     })),
     [SELECTION]: selections.map((t) => ({

@@ -327,6 +327,18 @@ export const NEUTRAL_DISPLAY = {
 
 export const ARTIFACT_ROLES = ["root", "packet", "delta", "supporting"];
 
+// WHICH CHANGE STATUS ROLE EACH CHANGE STATION CARRIES. The eighth and last
+// seam table, and the only one that relates two role families rather than a
+// role to a key: `changes[].status` is declared on the STATIONS
+// (`SNAPSHOT_FIELDS`'s `status` field), so the word a human reads for a change
+// is found by asking which station it sits in. The relation is openDox's own
+// and does not move with a domain: a change at the submission station is open,
+// one at the completion station is completed.
+export const CHANGE_STATUS_ROLE = {
+  [STAGE_ROLES[4]]: STATUS_ROLE.PROPOSED,
+  [STAGE_ROLES[5]]: STATUS_ROLE.PROMOTED,
+};
+
 export const DISPLAY_KIND = "opendox.display-facet";
 export const DISPLAY_SCHEMA_VERSION = 1;
 
@@ -489,6 +501,41 @@ export class Display {
       if (table[role] === value) return role;
     }
     return null;
+  }
+
+  // THE RENDERED WORD FOR A SNAPSHOT ENUM VALUE — the pair `registerRole` and
+  // `documentStageRole` exist FOR (Copilot rounds 3-4). A view that showed a
+  // human `possibles[].state` or `documents[].stage` straight was showing
+  // SCHEMA, and an override of the enum changed the schema and not the word.
+  // These three do the whole hop in one call: value -> role -> the registered
+  // domain's word, with the RAW VALUE returned where no declared role carries
+  // it, because an enum value this shell has never been told about is the
+  // generator's news and rendering it verbatim is the honest answer.
+  documentStageWord(value) {
+    const role = this.documentStageRole(value);
+    return role ? this.status(VOCABULARY.DOCUMENT, role) : value;
+  }
+
+  registerStateWord(value) {
+    const role = this.registerRole(value);
+    return role ? this.status(VOCABULARY.CANDIDATE, role) : value;
+  }
+
+  // `changes[].status` is not a `SNAPSHOT_VALUES` table: it is declared on the
+  // two change STATIONS (`SNAPSHOT_FIELDS`'s `status`), because which station a
+  // change belongs to IS its status. The station-to-status-role relation is
+  // openDox's own and fixed — a change at the submission station is the
+  // `proposed` change status, one at the completion station the `promoted` one
+  // — so it is declared once in `CHANGE_STATUS_ROLE` and read here.
+  changeStatusWord(value) {
+    for (const role of this.stageOrder) {
+      const stage = this.stage(role);
+      if (stage.status && stage.status === value) {
+        const statusRole = CHANGE_STATUS_ROLE[role];
+        if (statusRole) return this.status(VOCABULARY.CHANGE, statusRole);
+      }
+    }
+    return value;
   }
 
   _value(name, role) {

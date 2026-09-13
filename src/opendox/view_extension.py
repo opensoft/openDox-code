@@ -111,6 +111,7 @@ __all__ = [
     "dom_regions",
     "host_view_extensions",
     "host_view_facet",
+    "host_profile_name",
     "view_manifest",
 ]
 
@@ -709,6 +710,43 @@ def host_view_facet(profile: Any = None) -> tuple[str, tuple[Any, ...]]:
     if declared is _NO_FACET or declared is None:
         return "absent", ()
     return "declared", tuple(declared)
+
+
+def host_profile_name(profile: Any = None) -> str | None:
+    """The registered host profile's most nameable name, or `None`.
+
+    THE NAME NEVER COMES OFF A DUNDER (Copilot review of openDox-code#20,
+    round 3). `build_server()` read `getattr(profile_openxfactory, "__name__",
+    None)`, which could only ever answer the default: `_LateProfile.__getattr__`
+    refuses every dunder BY DESIGN, so that `copy`, `pickle`, `inspect` and
+    pytest's assertion rewriting cannot fire the composition point simply by
+    probing an object. The manifest's `host_profile` was therefore blank in
+    every payload — and it is half of the named absence `host_view_facet` exists
+    to carry, since "a host IS registered and does not contribute panels" is a
+    different fact from "no host at all" only if the host can be named.
+
+    Resolved the way `profile_proxy`'s own refusal resolves it — through
+    `domain_profile.name_of()` — because the two accessors of ONE registration
+    must name a profile the same way.
+
+    NEVER RAISES, and that is the whole posture of this half of the seam: a
+    diagnostic that refuses to be computed is worse than a diagnostic that is
+    absent, and `ProfileNotRegistered` reaches `build_server()` three statements
+    earlier at the read that is entitled to raise it.
+    """
+    if profile is None:
+        from opendox.profile_proxy import profile_openxfactory
+        profile = profile_openxfactory
+    from opendox import domain_profile
+    resolve = getattr(profile, "resolve", None)
+    try:
+        resolved = resolve() if callable(resolve) else profile
+    except Exception:      # noqa: BLE001 — a diagnostic must not out-raise
+        return None
+    try:
+        return domain_profile.name_of(resolved)
+    except Exception:      # noqa: BLE001
+        return None
 
 
 def view_manifest(bindings: Iterable[ViewBinding], *,

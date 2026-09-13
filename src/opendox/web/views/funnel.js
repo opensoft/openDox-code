@@ -92,7 +92,11 @@ function docCard(node) {
   card.dataset.hay = [d.path, d.stage, ...(d.topics || [])].filter(Boolean).join(" ").toLowerCase();
   card.appendChild(el("div", "id", basename(d.path)));
   const topicN = (d.topics || []).length;
-  card.appendChild(el("div", "meta", (d.stage || "") + " · " + topicN + " topic" + (topicN === 1 ? "" : "s")));
+  // THE CARD'S META READS THE DOMAIN'S WORD (Copilot round 4); `dataset.stage`
+  // above keeps the raw enum, because that is what the filter matches on.
+  card.appendChild(el("div", "meta",
+    (d.stage ? vocab.documentStageWord(d.stage) : "")
+    + " · " + topicN + " topic" + (topicN === 1 ? "" : "s")));
   return card;
 }
 
@@ -212,7 +216,11 @@ function changeCard(node, stageClass, onOpenTile, kind, notebook) {
   card.tabIndex = 0;
   card.dataset.node = "";
   card.appendChild(el("div", "id", c.id));
-  card.appendChild(el("span", "pill stage", c.status || ""));
+  // `changes[].status` is a SEAM VALUE declared on the two change stations, so
+  // the pill reads the change vocabulary's word for the station the change sits
+  // in (Copilot round 3) and never the enum itself.
+  card.appendChild(el("span", "pill stage",
+    c.status ? vocab.changeStatusWord(c.status) : ""));
   if (c.ratification) {
     card.appendChild(el("div", "meta", vocab.status(VOCABULARY.CHANGE, STATUS_ROLE.RATIFIED) + " "
       + c.ratification.date + " · " + c.ratification.ratifier));
@@ -490,7 +498,10 @@ export function renderFunnel(root, snapshot, opts) {
     [["ideation", "ideation only (default)"], ["all", "show full corpus"]]);
   const docStages = [...new Set(docNodes.map((n) => n.document.stage).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
-  const stageCtl = selectControl("stage", [["", "all"], ...docStages.map((s) => [s, s])]);
+  // VALUE raw, LABEL through the facet — `docCardVisible` compares
+  // `card.dataset.stage` against this value (Copilot round 4).
+  const stageCtl = selectControl("stage",
+    [["", "all"], ...docStages.map((s) => [s, vocab.documentStageWord(s)])]);
   const docCount = el("span", "count");
   filterbar.appendChild(scopeCtl.wrap);
   filterbar.appendChild(stageCtl.wrap);

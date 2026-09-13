@@ -167,7 +167,10 @@ export function renderDocWheel(host, entries, opts = {}) {
     // The sub-line carries what the section headings used to say. An inherited
     // document is not this tile's own and must keep saying so.
     const bits = [entry.section];
-    if (entry.stage) bits.push(entry.stage);
+    // THE WORD, NOT THE ENUM (Copilot round 3). `entry.stage` is the raw
+    // `documents[].stage` the tile also MATCHES on; only the sub-line's text
+    // goes through the facet.
+    if (entry.stage) bits.push(vocab.documentStageWord(entry.stage));
     if (entry.kind) bits.push(entry.kind);
     const sub = el("span", "wheelsub", bits.filter(Boolean).join(" · "));
     // The completeness score sits where the deck's tiles show link degree, and

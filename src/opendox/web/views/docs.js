@@ -78,7 +78,10 @@ function docRow(d, onOpen) {
   const row = el("div", "docrow");
   const info = el("span");
   info.appendChild(el("span", "name", basename(d.path)));
-  const where = [dirOf(d.path), d.stage, d.kind].filter(Boolean).join(" · ");
+  // THE STAGE READS AS THE DOMAIN'S WORD (Copilot round 3); the raw value
+  // stays the filter's key, below.
+  const where = [dirOf(d.path), d.stage ? vocab.documentStageWord(d.stage) : "",
+                 d.kind].filter(Boolean).join(" · ");
   info.appendChild(el("div", "where", where));
   row.appendChild(info);
   const chips = el("span", "chips");
@@ -156,7 +159,11 @@ export function renderDocs(root, snapshot, opts) {
   const state = { stage: "", area: "", sort: "path", search: "" };
 
   const bar = el("div", "filterbar");
-  const stageCtl = selectControl("stage", [["", "all"], ...stages.map((s) => [s, s])]);
+  // THE OPTION VALUE STAYS THE RAW ENUM — it is what `state.stage` compares
+  // against `d.stage` — and only the LABEL goes through the facet (Copilot
+  // round 3). Keeping the two apart is the whole of § 2.2 rule 3 at a filter.
+  const stageCtl = selectControl("stage",
+    [["", "all"], ...stages.map((s) => [s, vocab.documentStageWord(s)])]);
   const areaCtl = selectControl("area", [["", "all"], ...areas.map((a) => [a, a])]);
   const sortOptions = [["path", "path"], ["stage", "stage"]];
   if (hasDates) sortOptions.push(["recency", "recency"]);

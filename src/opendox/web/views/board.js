@@ -188,8 +188,12 @@ function elseFooter(documents, onOpenDocList) {
   if (!elsewhere.length) return null;
   const byStage = new Map();
   for (const d of elsewhere) byStage.set(d.stage || "—", (byStage.get(d.stage || "—") || 0) + 1);
+  // GROUPED BY VALUE, RENDERED BY ROLE (Copilot round 3): the key is the
+  // snapshot's own `documents[].stage` and only the word beside the count goes
+  // through the facet, so a value no declared role carries still reads as the
+  // host wrote it.
   const breakdown = [...byStage.entries()].sort((a, b) => b[1] - a[1])
-    .map(([s, n]) => s + " " + n).join(" · ");
+    .map(([s, n]) => vocab.documentStageWord(s) + " " + n).join(" · ");
   const foot = el("div", "board-else");
   foot.appendChild(el("b", null, String(elsewhere.length)));
   foot.appendChild(txt(" document" + (elsewhere.length === 1 ? "" : "s")

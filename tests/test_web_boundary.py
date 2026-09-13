@@ -137,9 +137,41 @@ VALID_CLASSES = {"A", "B", "C", "?"}
 TRANSITIONAL_CLASSES = {"?", "SPLIT"}
 
 
+class _NoDuplicateKeys(yaml.SafeLoader):
+    """`yaml.safe_load` with duplicate mapping keys REFUSED (Copilot round 3).
+
+    The standard loader silently keeps the LAST value for a repeated key, so a
+    fixture that declared `"?"` twice under `totals:` read as unambiguous while
+    carrying two different claims — and a future drift between them could hide
+    behind whichever one the loader happened to keep. This census is a
+    DECLARATION; a declaration that says two things is worse than one that says
+    nothing, which is the same argument § 2.2 rule 3 makes about a silent
+    exemption. It happened twice on this branch, both times as a merge
+    artefact, which is exactly the class of defect a loader can catch and a
+    reviewer cannot.
+    """
+
+
+def _refuse_duplicate_keys(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping", node.start_mark,
+                f"found a duplicate key {key!r}", key_node.start_mark)
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_NoDuplicateKeys.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    lambda loader, node: _refuse_duplicate_keys(loader, node))
+
+
 def _load_census() -> dict:
     with CENSUS_PATH.open(encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+        return yaml.load(fh, Loader=_NoDuplicateKeys)
 
 
 _CENSUS = _load_census()

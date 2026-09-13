@@ -133,7 +133,8 @@ function evidencePane(model) {
       slot.appendChild(el("div", "title", "gap: " + vocab.one(CANDIDATE)
         + " has no document support"));
       slot.appendChild(el("div", "meta",
-        "“" + g.possibleTitle + "” (" + g.state + ") pins no passage — pin evidence from a member doc."));
+        "“" + g.possibleTitle + "” (" + vocab.registerStateWord(g.state)
+        + ") pins no passage — pin evidence from a member doc."));
     }
     pane.appendChild(slot);
   }
@@ -278,7 +279,7 @@ function composerForm(model, ctx) {
     const evidenceDocuments = checks.filter((c) => c.checked).map((c) => c.value);
     const plan = composerPlan(ctx.snapshot, model.cluster.id, {
       id: name.value, title: title.value, claim: claim.value, evidenceDocuments,
-    });
+    }, vocab);
     ctx.confirmComposer(plan);
   });
   box.appendChild(draftBtn);
@@ -303,8 +304,11 @@ function renderConfirm(container, plan, kind) {
       " sibling" + (plan.siblings.length === 1 ? "" : "s")));
     for (const s of plan.siblings) {
       box.appendChild(el("div", "dc-line", "  • " + s.title + " (" + s.id
-        + "): " + s.fromState + " → "
-        + vocab.registerState(STATUS_ROLE.SUPERSEDED)));
+        // BOTH SIDES OF THE ARROW ARE WORDS (Copilot round 4): the
+        // destination already resolved through the facet and the origin was
+        // still the raw enum, so a host override read half schema.
+        + "): " + (s.fromWord || vocab.registerStateWord(s.fromState)) + " → "
+        + vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.SUPERSEDED)));
     }
     box.appendChild(el("div", "dc-line", "reason: " + plan.reason));
     box.appendChild(el("div", "dc-line", "citation: " + plan.citation));
@@ -332,7 +336,7 @@ export function renderCanvas(root, snapshot, opts) {
   vocab = options.display || neutralDisplay();
   const notebook = options.notebook || null;
   root.innerHTML = "";
-  const clusters = listCanvasClusters(snapshot);
+  const clusters = listCanvasClusters(snapshot, vocab);
 
   if (!clusters.length) {
     root.appendChild(el("div", "empty",
@@ -423,7 +427,7 @@ export function renderCanvas(root, snapshot, opts) {
 
   function select(clusterId) {
     selected = clusterId;
-    const model = buildCanvasModel(snapshot, clusterId);
+    const model = buildCanvasModel(snapshot, clusterId, vocab);
     for (const [id, b] of buttons) b.setAttribute("aria-pressed", String(id === clusterId));
     cname.textContent = model.cluster.name || model.cluster.id;
     nbHolder.textContent = "";  // clear (textContent, never innerHTML)

@@ -191,16 +191,15 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 # shape and `test_the_declared_totals_are_re_derived_from_the_rows` can refuse a
 # drift between the two. Measured at slice S4 (see the S4 block above).
 totals:
-  A: {files: 26, loc: 17706}
+  A: {files: 26, loc: 17822}
   B: {files: 1, loc: 73}
-  C: {files: 14, loc: 12466}
-  "?": {files: 1, loc: 1435}
+  C: {files: 14, loc: 12528}
   "?": {files: 1, loc: 1435}
 files:
   - path: app.js
     class: A
-    loc: 1640
-    note: "the shell; its only class-B import was gate.js at :43 (discharged by S3's view registry -- loc 1155 -> 1282 with the registry wiring, S3; 1282 -> 1337 with S4's two new gate bindings and the two mounts it hands down). Carries SIX transitional route-ownership sites, all in the CORE arm's class-B binding entries and all cleared at S5 when those entries leave for contributedViewBindings(): gate.bar's one route (S3) and gate.lens's and gate.projects's two each (S4). Declaring them is RULED Q3 working -- view_extension.py: 'a binding that declares the routes it calls is what makes that ruling checkable instead of aspirational' -- and it is a real breach by assertion 2's own rule only while the entry sits in app.js (class A) rather than in the class-B module (exempt by construction) loc 1492 -> 1549 on this PR's round-2 review (Copilot): RULED Q1's generic pass is no longer ONE pass before every core mount — every `dom` region is a root its core renderer CLEARS, so the pass is run per region by the caller that just rendered it (after mountExplorer, after mountStagingWorkbench, and through the tab router's onRegionRendered hook on a tab's first render), and the Q11 refusal frame became a named function so a late refusal reaches the same surface."
+    loc: 1685
+    note: "the shell; its only class-B import was gate.js at :43 (discharged by S3's view registry -- loc 1155 -> 1282 with the registry wiring, S3; 1282 -> 1337 with S4's two new gate bindings and the two mounts it hands down). Carries SIX transitional route-ownership sites, all in the CORE arm's class-B binding entries and all cleared at S5 when those entries leave for contributedViewBindings(): gate.bar's one route (S3) and gate.lens's and gate.projects's two each (S4). Declaring them is RULED Q3 working -- view_extension.py: 'a binding that declares the routes it calls is what makes that ruling checkable instead of aspirational' -- and it is a real breach by assertion 2's own rule only while the entry sits in app.js (class A) rather than in the class-B module (exempt by construction) loc 1492 -> 1549 on this PR's round-2 review (Copilot): RULED Q1's generic pass is no longer ONE pass before every core mount — every `dom` region is a root its core renderer CLEARS, so the pass is run per region by the caller that just rendered it (after mountExplorer, after mountStagingWorkbench, and through the tab router's onRegionRendered hook on a tab's first render), and the Q11 refusal frame became a named function so a late refusal reaches the same surface. loc 1549 -> 1584 on round 3 (Copilot): the per-region pass is bound to THIS render's signal (a pass started from a tab's first render must not mount a stale snapshot into the next render's region), and the Q11 refusal frame re-inserts `#loadstatus` where a successful render removed it, so a late assembly refusal is visible instead of dropped."
 
   - path: index.html
     class: C
@@ -229,7 +228,7 @@ files:
 
   - path: views/board.js
     class: C
-    loc: 302
+    loc: 306
     note: "four lifecycle columns; 25 governance literals"
 
   - path: views/bullseye.js
@@ -239,12 +238,12 @@ files:
 
   - path: views/canvas-model.js
     class: C
-    loc: 233
+    loc: 247
     note: "cluster canvas derivation; cluster/possible/supersede are governance nouns"
 
   - path: views/canvas.js
     class: C
-    loc: 454
+    loc: 458
     note: "renders canvas-model.js's output; 7 governance literals"
 
   - path: views/composed-model.js
@@ -255,7 +254,7 @@ files:
 
   - path: views/display.js
     class: A
-    loc: 614
+    loc: 661
     exempt: [SNAPSHOT_FIELDS, ACT_IDS, TILE_KINDS, SCOPE_KINDS, TAB_IDS,
              SESSION_SCOPE_KINDS, SESSION_BRANCH_NAMESPACES, SNAPSHOT_VALUES,
              DRILL_KINDS, DRAFT_PATHS, SECTION_ORDER]
@@ -263,12 +262,12 @@ files:
 
   - path: views/doc-wheel.js
     class: C
-    loc: 499
+    loc: 502
     note: "docs-pane wheel; imports wheel-model.js"
 
   - path: views/docs.js
     class: A
-    loc: 197
+    loc: 204
     tail: areaOrder
     note: "Q1: stays openDox/class A; AREA_ORDER :18 hardcoded ideation/brainstorm and ideation/staging. PARAMETERIZED AT S7: the area map is the profile's, read through display.areas() / display.areaOf(path), and the tail is now the derived `areaOrder` / `areaOf` pair that reads it"
 
@@ -310,7 +309,7 @@ files:
 
   - path: views/funnel.js
     class: C
-    loc: 591
+    loc: 602
     note: "realization funnel; imports model.js's COLUMN_KEYS; 10 governance literals"
 
   - path: views/grouping.js
@@ -341,7 +340,7 @@ files:
 
   - path: views/lineage.js
     class: C
-    loc: 171
+    loc: 186
     note: "stats strip and lineage/readiness overlay; 10 governance literals"
 
   - path: views/model.js
@@ -398,8 +397,8 @@ files:
 
   - path: views/view_extension.js
     class: A
-    loc: 851
-    note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' in a doc comment is a documentation example of an id, not a route literal, so assertion 2 does not match it. loc 422 -> 455 on this PR's own review round (Copilot, PR #14): a malformed contributed_routes now refuses instead of silently disabling the ownership check, and a rejected dynamic import now refuses naming the binding and module instead of leaking a raw error. loc 455 -> 463 on S4: two new REGIONS entries (lens-gate, repo-projects) for the two new class-B bindings' shell mounts, and the doc comment naming them. loc 463 -> 499 on this fix (Copilot, PR #16, view_extension.js:358): manifestRoutes() and ownershipBreach() now share one shape check, refusing a contributed-routes entry missing a string pattern or carrying a non-boolean is_prefix at whichever of the two sees it first, instead of the array-only check at manifestRoutes() and a truthy is_prefix read at ownershipBreach() silently letting a malformed entry through as if it were not a prefix match. loc 499 -> 757 on S5: RULED Q2's declared namespace and its Proxy, RULED Q4's capability probe and refusal, and RULED Q1's generic mount pass. loc 757 -> 824 on S5's round-2 review (Copilot): probeCapabilityPath reads OWN properties only (an inherited `toString` met a requirement); every DECLARED export is checked callable the way `entry` is (RULED Q2); resolveBinding() resolves the binding a caller already holds, so the generic pass cannot mount a same-id binding from another region; and the pass takes a `regions` bound."
+    loc: 868
+    note: "S3 ADDITION: the client-side view registry -- ViewBinding/collectViewBindings, route_extension.py's shape mirrored in JS (openDox-spec § 4.1). No import, no governance literal; 'gate.bar' in a doc comment is a documentation example of an id, not a route literal, so assertion 2 does not match it. loc 422 -> 455 on this PR's own review round (Copilot, PR #14): a malformed contributed_routes now refuses instead of silently disabling the ownership check, and a rejected dynamic import now refuses naming the binding and module instead of leaking a raw error. loc 455 -> 463 on S4: two new REGIONS entries (lens-gate, repo-projects) for the two new class-B bindings' shell mounts, and the doc comment naming them. loc 463 -> 499 on this fix (Copilot, PR #16, view_extension.js:358): manifestRoutes() and ownershipBreach() now share one shape check, refusing a contributed-routes entry missing a string pattern or carrying a non-boolean is_prefix at whichever of the two sees it first, instead of the array-only check at manifestRoutes() and a truthy is_prefix read at ownershipBreach() silently letting a malformed entry through as if it were not a prefix match. loc 499 -> 757 on S5: RULED Q2's declared namespace and its Proxy, RULED Q4's capability probe and refusal, and RULED Q1's generic mount pass. loc 757 -> 824 on S5's round-2 review (Copilot): probeCapabilityPath reads OWN properties only (an inherited `toString` met a requirement); every DECLARED export is checked callable the way `entry` is (RULED Q2); resolveBinding() resolves the binding a caller already holds, so the generic pass cannot mount a same-id binding from another region; and the pass takes a `regions` bound. loc 824 -> 841 on round 3 (Copilot): mountContributedViews reads an abort `signal` before it considers a binding and again after the import, which are the two moments an abort can land."
 
   - path: views/viewer.js
     class: A
@@ -408,7 +407,7 @@ files:
 
   - path: views/wheel-model.js
     class: C
-    loc: 1347
+    loc: 1358
     note: "WHEEL_KEYS :25 and WHEEL_LABELS :27-34 -- six stage names, spelled twice"
 
   - path: views/wheel.js

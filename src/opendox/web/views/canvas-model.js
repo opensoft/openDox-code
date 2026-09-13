@@ -1,4 +1,6 @@
-import { DRAFT_PATHS, STAGE_ROLES, neutralDisplay } from "./display.js";
+import {
+  DRAFT_PATHS, STAGE_ROLES, STATUS_ROLE, neutralDisplay,
+} from "./display.js";
 
 const [SOURCE, GROUPING, CANDIDATE] = STAGE_ROLES;
 
@@ -7,7 +9,15 @@ const [SOURCE, GROUPING, CANDIDATE] = STAGE_ROLES;
 // module WRITES into a draft, never a word it renders; `latent` carries no
 // governance vocabulary of its own, and the rendered word for the same state is
 // `display.status(VOCABULARY.CANDIDATE, STATUS_ROLE.CAPTURED)`.
-const REGISTER_SEED_STATE = "latent";
+// PARAMETERIZED AT SLICE S7, ROUND 4 (Copilot). It was the literal `"latent"`,
+// on the argument that a value this module WRITES is schema rather than
+// vocabulary — which is true, and is exactly why it has to come off the facet:
+// `values.register_state.captured` is host-overridable, so a literal here wrote
+// one enum while the browser matched another and `canvas_drafts.py` wrote a
+// third. All three read one declaration now (`canvas_drafts.register_state`
+// is the server half).
+const seedState = (display) =>
+  (display || neutralDisplay()).registerState(STATUS_ROLE.CAPTURED);
 
 // Per-cluster cluster-canvas view-model (D12). PURE: no DOM, no I/O, no
 // external imports — imported by canvas.js in the browser AND unit-tested from
@@ -73,10 +83,10 @@ function clusterPossibles(snapshot, clusterId) {
 // A lightweight per-cluster summary for the canvas picker (deterministic,
 // snapshot order). memberCount/possibleCount from the tallies verbatim; gapCount
 // is derived here so the picker can flag clusters that need work.
-export function listCanvasClusters(snapshot) {
+export function listCanvasClusters(snapshot, display) {
   const s = snapshot || {};
   return (s.clusters || []).map((c) => {
-    const model = buildCanvasModel(s, c.id);
+    const model = buildCanvasModel(s, c.id, display);
     return {
       id: c.id,
       name: c.name || c.id,
@@ -90,7 +100,7 @@ export function listCanvasClusters(snapshot) {
 
 // The full per-cluster canvas model. Returns null when the cluster is absent
 // (a stale selection after regeneration) so the view degrades, never throws.
-export function buildCanvasModel(snapshot, clusterId) {
+export function buildCanvasModel(snapshot, clusterId, display) {
   const s = snapshot || {};
   const cluster = (s.clusters || []).find((c) => c.id === clusterId);
   if (!cluster) return null;
@@ -158,7 +168,7 @@ export function buildCanvasModel(snapshot, clusterId) {
         kind: "unsupported-candidate",
         possibleId: p.id,
         possibleTitle: p.title || p.id,
-        state: p.state || REGISTER_SEED_STATE,
+        state: p.state || seedState(display),
       });
     }
   }
@@ -189,14 +199,18 @@ export function buildCanvasModel(snapshot, clusterId) {
 // actual boundary-written artifact is canvas_drafts.build_supersede_draft, which
 // this must agree with (test_canvas.py locks the reason string).
 export function supersedePlan(snapshot, clusterId, optionSetId, chosenId, display) {
-  const model = buildCanvasModel(snapshot, clusterId);
+  const model = buildCanvasModel(snapshot, clusterId, display);
   if (!model) return null;
   const os = model.optionSets.find((o) => o.id === optionSetId);
   if (!os) return null;
   const siblings = os.members
     .filter((p) => p.id !== chosenId)
     .map((p) => ({ id: p.id, title: p.title || p.id,
-                   fromState: p.state || REGISTER_SEED_STATE }));
+                   fromState: p.state || seedState(display),
+                   // the WORD for that state, resolved here so the confirmation
+                   // renders vocabulary and not schema (Copilot round 4)
+                   fromWord: (display || neutralDisplay())
+                     .registerStateWord(p.state || seedState(display)) }));
   return {
     optionSetId,
     chosenId,
@@ -211,8 +225,8 @@ export function supersedePlan(snapshot, clusterId, optionSetId, chosenId, displa
 // The on-screen PLAN of a composer draft (T021): a new `latent` possible with
 // provenance and any attached evidence pins. Pure preview; the artifact is
 // canvas_drafts.build_composer_draft.
-export function composerPlan(snapshot, clusterId, input) {
-  const model = buildCanvasModel(snapshot, clusterId);
+export function composerPlan(snapshot, clusterId, input, display) {
+  const model = buildCanvasModel(snapshot, clusterId, display);
   if (!model) return null;
   const inp = input || {};
   const id = String(inp.id || "").trim();
@@ -224,7 +238,7 @@ export function composerPlan(snapshot, clusterId, input) {
     id,
     title: (inp.title || "").trim(),
     claim: (inp.claim || "").trim(),
-    state: REGISTER_SEED_STATE,
+    state: seedState(display),
     clusterId,
     provenanceDoc,
     evidenceCount: attached.length,

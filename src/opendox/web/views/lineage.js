@@ -58,18 +58,32 @@ function tile(root, k, v, unit, s) {
 // real corpus reads "draft 65 · brainstorm 39 · staged 32 · +41 other".
 const STAT_STAGES_NAMED = 3;
 
-export function stageSubline(docs, named = STAT_STAGES_NAMED) {
+// THE STAGE IS GROUPED BY VALUE AND RENDERED BY ROLE (Copilot round 3). The
+// grouping key stays the snapshot's own `documents[].stage` — it is what makes
+// two documents the same stage — and only the WORD beside the count goes
+// through the facet. A value no declared role carries renders verbatim, which
+// is how the eight-stage real corpus keeps reading truthfully: openDox declares
+// roles for two of those eight, and the other six are the host's own words
+// already.
+export function stageSubline(docs, named = STAT_STAGES_NAMED, display) {
+  const d0 = display || vocab;
   const byStage = new Map();
   for (const d of docs) byStage.set(d.stage || "—", (byStage.get(d.stage || "—") || 0) + 1);
   const ordered = [...byStage.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const shown = ordered.length <= named + 1 ? ordered : ordered.slice(0, named);
   const rest = ordered.slice(shown.length).reduce((sum, [, n]) => sum + n, 0);
-  const parts = shown.map(([s, n]) => s + " " + n);
+  const parts = shown.map(([s, n]) => d0.documentStageWord(s) + " " + n);
   if (rest) parts.push("+" + rest + " other");
   return parts.join(" · ");
 }
 
-export function renderStats(root, snapshot) {
+// THE STATS STRIP TAKES THE FACET TOO (Copilot round 3). It is the one
+// always-visible surface in the shell and it used to render before the
+// capability probe resolved, so its labels stayed openDox-neutral for the life
+// of the page however the host spelled its stations. `app.js` now renders it
+// after `readDisplay` and hands the vocabulary down like every other view.
+export function renderStats(root, snapshot, opts) {
+  vocab = opts?.display || vocab;
   const docs = snapshot.documents || [];
   const clusters = snapshot.clusters || [];
   const possibles = snapshot.possibles || [];
@@ -95,7 +109,8 @@ export function renderStats(root, snapshot) {
   // caption; it is a stage of its own.
   const ready = staged.filter(
     (s) => (s.health || {}).status === "ready").length;
-  tile(root, cap(vocab.label(SOURCE)), docs.length, "", stageSubline(docs));
+  tile(root, cap(vocab.label(SOURCE)), docs.length, "",
+    stageSubline(docs, STAT_STAGES_NAMED, vocab));
   tile(root, cap(vocab.label(GROUPING)), clusters.length, "",
     vocab.count(GROUPING, clusters.length) + " derived");
   tile(root, cap(vocab.label(CANDIDATE)), possibles.length, "",
