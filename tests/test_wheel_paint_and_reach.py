@@ -130,6 +130,13 @@ def _run(cases, tmp_path):
     if NODE is None:
         pytest.skip("node not available for the JS derivation probe")
     shutil.copy(WHEEL_MODEL_JS, tmp_path / "wheel-model.mjs")
+    # § 3.4 slice S7: `wheel-model.js` imports `./display.js` for the vocabulary
+    # it no longer spells. The copy keeps that sibling's OWN name (the import
+    # specifier is `./display.js`) and the throwaway directory declares
+    # `type: module`, so node reads the `.js` file as the ES module it is
+    # rather than falling back to CommonJS and failing on `export const`.
+    shutil.copy(WHEEL_MODEL_JS.parent / "display.js", tmp_path / "display.js")
+    (tmp_path / "package.json").write_text('{"type":"module"}', encoding="utf-8")
     harness = (_NODE_HARNESS
                .replace("TILE_H_", str(TILE_H))
                .replace("TILE_W_", str(TILE_W)))

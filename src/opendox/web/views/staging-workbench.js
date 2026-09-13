@@ -80,8 +80,18 @@ import {
   toggleKeyword, createSeed, createOffered, rewritableDocuments, sessionPosture,
   sessionSurfaceHidden, presentationPosture,
   documentAbstract, docWheelEntries, existingOnTopic,
-  abstractRegionState, abstractSubjectDigest,
+  abstractRegionState, abstractSubjectDigest, setDisplay,
 } from "./staging-workbench-model.js";
+// § 3.4 SLICE S7 — the registered domain's words, by role. `neutralDisplay()`
+// until the shell hands the facet down at mount, so a module-scope table built
+// before the probe resolves reads openDox's own vocabulary rather than nothing.
+import {
+  SCOPE_KINDS, STAGE_ROLES, STATUS_ROLE, TAB_IDS, VOCABULARY, neutralDisplay,
+} from "./display.js";
+
+const [SOURCE, GROUPING, CANDIDATE, SELECTION] = STAGE_ROLES;
+
+let vocab = neutralDisplay();
 // THE MODEL, AS A NAMESPACE, BECAUSE THE CONTRIBUTED COLUMN REACHES IT THROUGH
 // `ctx` — RULED counterpart Q6 (opensoft/openxFactory#656 comment `5649094228`,
 // Brett Heap, 2026-09-12): "what a CONTRIBUTED view module may IMPORT from
@@ -160,29 +170,48 @@ function basename(path) {
   return String(path).split("/").at(-1) || String(path);
 }
 
-const TAB_DEFS = [
-  { key: "docs", label: "docs" },
-  { key: "lens", label: "lens" },
-  { key: "outline", label: "outline" },
+// THE TAB KEY IS A SEAM KEY AND THE TAB LABEL IS THE DOMAIN'S WORD (slice S7).
+// `lens` and `outline` are openDox's own two instruments and are named the same
+// in every domain; the first tab shows the station's items, so it is labelled
+// with the station's own short word.
+const tabDefs = () => [
+  { key: TAB_IDS.source, label: vocab.short(SOURCE) },
+  { key: TAB_IDS.lens, label: TAB_IDS.lens },
+  { key: TAB_IDS.outline, label: TAB_IDS.outline },
 ];
 
-const KIND_LABELS = { cluster: "cluster", possible: "possible", staged: "staged topic" };
+const kindLabels = () => ({
+  [SCOPE_KINDS.grouping]: vocab.one(GROUPING),
+  [SCOPE_KINDS.candidate]: vocab.one(CANDIDATE),
+  [SCOPE_KINDS.selection]: vocab.one(SELECTION),
+});
 
 // A staging seed is always a STAGED topic in the TILE vocabulary — the key its
 // save resolves a session through, and the key its create promotes it to once
 // the tile exists. ONE spelling for both: the last time this vocabulary was
 // applied in two places it diverged, the scope was dropped from the wire, and
 // the create silently took its pre-session path (#152).
-const DRAFT_TILE_KIND = "staged";
+const DRAFT_TILE_KIND = SCOPE_KINDS.selection;
 
 // The per-tab create labels (add-workbench-bullseye-and-create task 5.4–5.6).
 // Each names what THAT tab's seeding actually produces, so the affordance never
 // promises a document the seed does not describe.
-const CREATE_LABELS = {
-  docs: "＋ new document in this scope",
-  lens: "＋ new document from the checked set",
-  outline: "＋ new fragment in this topic",
-};
+// THE DOCS PANE'S OWN SELECTOR. `.swb-pane-<tab id>` is built from the tab key
+// at :2025 and declared in `styles.css` (`.swb-pane-docs, .swb-pane-lens`), so
+// the selector is composed from the SAME seam key rather than spelled twice —
+// a style hook, never a word, and RULED Q7 keeps the hook stable.
+const PANE_DOCS_SELECTOR = ".swb-pane-" + TAB_IDS.source;
+
+// The two-pane context region, named after the two tabs it holds so assistive
+// navigation lands on it by the words the tabs actually carry.
+const contextRegionLabel = () =>
+  vocab.short(SOURCE) + " and " + TAB_IDS.lens + " context";
+
+const createLabels = () => ({
+  [TAB_IDS.source]: "＋ new document in this scope",
+  [TAB_IDS.lens]: "＋ new document from the checked set",
+  [TAB_IDS.outline]: "＋ new fragment in this " + vocab.one(SELECTION),
+});
 
 // ---- the docs panel (task 4.3) ------------------------------------------------
 
@@ -481,7 +510,11 @@ function renderAbstract(host, doc, ctx) {
     }
     return;
   }
-  const meta = [model.stage, model.kind].filter(Boolean).join(" · ");
+  // THE ABSTRACT'S STAGE IS A WORD (Copilot round 7): `documentAbstract`
+  // carries `doc.stage` verbatim -- the snapshot's enum -- and this panel was
+  // the one workbench surface still rendering it beside the facet's words.
+  const meta = [model.stage ? vocab.documentStageWord(model.stage) : null,
+                model.kind].filter(Boolean).join(" · ");
   if (meta) body.appendChild(el("div", "swb-abstractmeta", meta));
   if (model.note) {
     body.appendChild(el("div", "swb-empty", model.note));
@@ -567,7 +600,7 @@ function renderDocsPanel(pane, scope, onOpen, create, verbs, abstractSeam) {
   if (create) {
     const actions = el("div", "swb-actions");
     pane.appendChild(actions);
-    create.mount(actions, "docs");
+    create.mount(actions, TAB_IDS.source);
   }
 
   // THE VERTICAL SPLIT (operator annotation vibe_1785602331813_gvku9sh2s):
@@ -1133,7 +1166,7 @@ function renderLensPanel(pane, snapshot, scope, session, create) {
     if (!model.matrix.length) {
       const tr = el("tr");
       const td = el("td", "swb-empty", model.checked.length
-        ? "no scoped documents match the checked keywords"
+        ? "no scoped " + vocab.many(SOURCE) + " match the checked keywords"
         : "check a keyword to stratify this scope");
       td.setAttribute("colspan", String(model.checked.length + 3));
       tr.appendChild(td);
@@ -1177,16 +1210,23 @@ function outlineStateLine(model) {
       + "question carries its four sub-fields";
   }
   if (model.state === "pre-template") {
-    return "staged before the outline template — it carries none of the required "
-      + "sections yet, which is the opt-in posture, not a fault. The shape is "
-      + "earned when the topic is next worked, never by opening it here.";
+    return "a " + vocab.one(SELECTION) + " from before the outline template — "
+      + "it carries none of the required sections yet, which is the opt-in "
+      + "posture, not a fault. The shape is earned when it is next worked, "
+      + "never by opening it here.";
   }
   return "partly templated — the sections below are what the fragment carries; "
     + "the rest are still to be written when the topic is next worked";
 }
 
+// A SECTION'S ROLE, SPELLED NEUTRALLY (slice S7). `views/outline-model.js`
+// renamed the marker-fenced role `proposal-element` -> `marked-element` when it
+// was parameterized: the role is "this section carries an `xspec:` marker
+// fence", which is openDox's own outline grammar and not any domain's word for
+// a submission. The label follows the role, so no vocabulary is involved and
+// none is invented.
 const OUTLINE_ROLE_LABELS = {
-  required: "required", added: "added", "proposal-element": "proposal element",
+  required: "required", added: "added", "marked-element": "marked element",
 };
 
 // The provenance line stamped on a section this affordance adds. UTC, because
@@ -1438,9 +1478,11 @@ function renderOutlinePanel(pane, snapshot, scope, create, sourceBase, edit, sec
     create.mount(actions, "outline");
   }
   if (!scope.outline) {
-    outlineEmpty(pane, scope.kind === "possible"
-      ? "this possible has no outline yet — it has not been picked into a staging topic"
-      : "this scope carries no outline material — outlines belong to staged topics");
+    outlineEmpty(pane, scope.kind === SCOPE_KINDS.candidate
+      ? "this " + vocab.one(CANDIDATE) + " has no outline yet — it has not been "
+        + "picked into a " + vocab.one(SELECTION)
+      : "this scope carries no outline material — outlines belong to "
+        + vocab.many(SELECTION));
     return;
   }
   // the SAME deterministic fragment selection the staged wheel's read verb and
@@ -1538,6 +1580,15 @@ export function mountStagingWorkbench(container, snapshot,
                                         // `{ create, session }`, either half
                                         // null where openXdox is not registered
                                         gate,
+                                        // § 3.4 slice S7: the REGISTERED
+                                        // DOMAIN'S VOCABULARY, resolved once
+                                        // by the shell off `/capabilities`
+                                        // and handed down through `ctx`. No
+                                        // facet declared (a student install,
+                                        // or the static bundle whose
+                                        // `/capabilities` 404s) means
+                                        // openDox's own neutral words.
+                                        display,
                                         sourceBase, edit, onSessionRekey,
                                         onSessionEnded, onScopeOpened } = {}) {
   // The wheel behind this overlay stays on the shell snapshot while a create
@@ -1552,6 +1603,11 @@ export function mountStagingWorkbench(container, snapshot,
   // workbenches must not share a column (Copilot review, round 2).
   const createColumn = gate?.create || NO_CREATE_COLUMN;
   const sessionColumn = gate?.session || NO_SESSION_COLUMN;
+  // THE VOCABULARY, INSTALLED BEFORE ANYTHING RENDERS (slice S7) — into this
+  // module AND into the pure model it derives through, which is why the model
+  // exports `setDisplay` rather than taking the facet on every signature.
+  vocab = display || neutralDisplay();
+  setDisplay(vocab);
   let shellSnapshot = snapshot;
   let shellActive = active;
   let shellIndex = index;
@@ -1637,7 +1693,7 @@ export function mountStagingWorkbench(container, snapshot,
   // names, so assistive navigation lands on them by name; the pending chat
   // rail will be the third when its wave arrives.
   context.setAttribute("role", "region");
-  context.setAttribute("aria-label", "docs and lens context");
+  context.setAttribute("aria-label", contextRegionLabel());
   canvas.setAttribute("role", "region");
   canvas.setAttribute("aria-label", "doxBench authoring canvas");
   // T055 (FR-003): the THIRD region the `.has-rail` modifier was reserved
@@ -1678,7 +1734,7 @@ export function mountStagingWorkbench(container, snapshot,
   // Pure DOM + one class on `regions`: no layout arithmetic in JS, so the
   // stylesheet stays the single authority on geometry.
   const EXPANDABLE = [
-    { key: "context", node: context, label: "docs and lens context" },
+    { key: "context", node: context, label: contextRegionLabel() },
     { key: "rail", node: rail, label: "chat rail" },
     { key: "canvas", node: canvas, label: "authoring canvas" },
   ];
@@ -1738,14 +1794,14 @@ export function mountStagingWorkbench(container, snapshot,
 
   let lastFocused = null;
   let scope = null;
-  let activeTab = "docs";
+  let activeTab = TAB_IDS.source;
   // THE LENS SESSION (design D4): the checked-keyword selection lives HERE, at
   // the shell's scope lifetime, beside activeTab — so a tab switch preserves it
   // and only a new scope (or a close-and-reopen) reseeds from the scope's own
   // keywords. `lensSessionSeed` owns that rule and is unit-tested pure.
   let lensSession = null;
   const tabButtons = new Map();
-  for (const def of TAB_DEFS) {
+  for (const def of tabDefs()) {
     const btn = el("button", "swb-tab", def.label);
     btn.type = "button";
     btn.setAttribute("role", "tab");
@@ -1762,7 +1818,7 @@ export function mountStagingWorkbench(container, snapshot,
     // consumed so they never scroll the page instead.
     btn.addEventListener("keydown", (ev) => {
       const steps = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
-      const order = TAB_DEFS.map((d) => d.key);
+      const order = tabDefs().map((d) => d.key);
       let next = null;
       if (ev.key in steps) {
         const at = order.indexOf(activeTab);
@@ -1814,7 +1870,7 @@ export function mountStagingWorkbench(container, snapshot,
     options(extra) {
       return {
         caps, fetcher, repair: consoleRepair, slot: (extra || {}).slot,
-        label: CREATE_LABELS[activeTab],
+        label: createLabels()[activeTab],
         // RULED counterpart Q6: openDox's model, handed to the contributed
         // binding rather than imported by it.
         model: workbenchModel,
@@ -1857,13 +1913,13 @@ export function mountStagingWorkbench(container, snapshot,
       // seed travels as `ctx.seed`.
       return createColumn.mountCreateAffordance(host, shellSnapshot,
         { ...this.options(extra), seed: this.seed(tab, extra),
-          label: CREATE_LABELS[tab] });
+          label: createLabels()[tab] });
     },
     open(host, tab, extra) {
       if (!this.offered(tab)) return null;
       return createColumn.openCreateDialog(host, shellSnapshot,
         { ...this.options(extra), seed: this.seed(tab, extra),
-          label: CREATE_LABELS[tab] });
+          label: createLabels()[tab] });
     },
   };
 
@@ -2007,7 +2063,7 @@ export function mountStagingWorkbench(container, snapshot,
     // rebuilds the wheel, so the previous pane's reconcile is dropped with it
     // and the new one is adopted here.
     reconcileDocsSelection = null;
-    if (activeTab === "docs") {
+    if (activeTab === TAB_IDS.source) {
       reconcileDocsSelection = renderDocsPanel(pane, scope, onOpenDoc
         ? (row) => onOpenDoc(row.path, row.doc) : null, create,
         docTileVerbs(), docsAbstractSeam());
@@ -2034,7 +2090,7 @@ export function mountStagingWorkbench(container, snapshot,
       return;
     }
     title.textContent = scope.title;
-    subtitle.textContent = (KIND_LABELS[scope.kind] || scope.kind) + " · " +
+    subtitle.textContent = (kindLabels()[scope.kind] || scope.kind) + " · " +
       scope.id + " · " + scope.counts.documents + " document" +
       (scope.counts.documents === 1 ? "" : "s") +
       (scope.counts.inherited ? " (" + scope.counts.inherited + " inherited)" : "");
@@ -2514,7 +2570,7 @@ export function mountStagingWorkbench(container, snapshot,
   // the expanded tile's Save reachability from the live state.
   function refreshDocTiles() {
     const pane = body.querySelector
-      ? body.querySelector(".swb-pane-docs")
+      ? body.querySelector(PANE_DOCS_SELECTOR)
       : null;
     if (pane && typeof pane.__docWheelRefresh === "function") {
       pane.__docWheelRefresh();
@@ -2985,14 +3041,14 @@ export function mountStagingWorkbench(container, snapshot,
     index = shellIndex;
     sourceBase = shellSourceBase;
     scope = workbenchScope(snapshot, kind, id);
-    activeTab = "docs";
+    activeTab = TAB_IDS.source;
     lensSession = null;   // a fresh open is a fresh selection (design D4)
     overlay.hidden = false;
     if (!scope) {
       // a stale click after regeneration, or a synthesized demo possible: say
       // so plainly rather than rendering an empty scope as if it were real
       title.textContent = "doxBench";
-      subtitle.textContent = (KIND_LABELS[kind] || kind) + " · " + id;
+      subtitle.textContent = (kindLabels()[kind] || kind) + " · " + id;
       body.innerHTML = "";
       body.appendChild(el("div", "swb-empty",
         "this tile does not resolve in the snapshot — regenerate and reload"));
@@ -3032,7 +3088,7 @@ export function mountStagingWorkbench(container, snapshot,
     index = shellIndex;
     sourceBase = shellSourceBase;
     scope = null;                 // a draft has no tile; the seed IS the scope
-    activeTab = "docs";
+    activeTab = TAB_IDS.source;
     lensSession = null;
     overlay.hidden = false;
     title.textContent = "doxBench — new document";
@@ -3067,7 +3123,7 @@ export function mountStagingWorkbench(container, snapshot,
         "this view is read-only, so a document cannot be created from it — a "
         + "merged project composes several repositories and a document is "
         + "created IN a repository. Switch to the one that owns this material "
-        + "and draft there; nothing was lost."));
+        + "and write there; nothing was lost."));
       closeBtn.focus();
       return;
     }
@@ -3239,7 +3295,7 @@ export function mountStagingWorkbench(container, snapshot,
       if (adopted.index) index = adopted.index;
       if (adopted.sourceBase) sourceBase = adopted.sourceBase;
       scope = promoted;
-      activeTab = "docs";
+      activeTab = TAB_IDS.source;
       releaseHeldTabs();
       drawHead();
       drawSession();
@@ -3363,7 +3419,8 @@ export function mountStagingWorkbench(container, snapshot,
         box.appendChild(el("div", "swb-dxnote",
           "Nothing here blocks you: a second document on a shared topic is "
           + "ordinary. But if one of these IS what you are about to write, "
-          + "rewrite that one instead — open it from the docs pane on its "
+          + "rewrite that one instead — open it from the "
+          + vocab.short(SOURCE) + " pane on its "
           + "session branch — and if the name collides, change Title or Area "
           + "on `details` first."));
         bodyPane.appendChild(box);

@@ -64,11 +64,23 @@ import { actionRowIsStale,
   buildWheelModel, connectionsOf, secondDegreeOf, gatherOf,
   alignTarget, filledGroupCentre, computeReorder,
   SPRING, REEL, tileScale, linkedDrawDistance, actionsFor,
-  nextExpanded, isExpandedTile, EXPANDED, WHEEL_KEYS, WHEEL_LABELS,
+  nextExpanded, isExpandedTile, EXPANDED, WHEEL_KEYS,
   tileBox, inReelWindow, drumProject, threadAnchorX, endpointScale, badgeRailBand, bandsOverlap,
   LANDED_KINDS, landedFromDeltas, specDeltaPaths,
   primaryFragmentPath, fragmentSummary, packetGroups,
   healthIndicator, healthBlock, jumpRepository } from "./wheel-model.js";
+import {
+  ACT_IDS, SCOPE_KINDS, STAGE_ROLES, TILE_KINDS, neutralDisplay,
+} from "./display.js";
+
+const [SOURCE, GROUPING, CANDIDATE, SELECTION, SUBMISSION, COMPLETION] =
+  STAGE_ROLES;
+
+// THE PER-RENDER VOCABULARY (§ 3.4 slice S7), held for the same reason
+// `views/funnel.js` holds one: `renderWheel` is this module's entry point and
+// every helper and closure below runs inside it. Neutral until a render
+// supplies the facet the shell read off `/capabilities`.
+let vocab = neutralDisplay();
 import { el } from "./helpers.js";
 // THE DISPOSE COLUMN IS NOT IMPORTED HERE ANY MORE (§ 3.4 slice S5).
 //
@@ -186,14 +198,21 @@ const ACTION_MOUNTERS = {
   propose: (row, item, opts) => opts.dispose.mountProposeButton(row, item, { ...opts, compact: true }),
   // 011 add-wheel-action-verbs: one generic mounter, four verbs. `actionId` is
   // the verb, so the mounter needs no per-verb branch here.
-  "promote-to-staging": (row, item, opts) =>
-    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "promote-to-staging" }),
-  "research-brief": (row, item, opts) =>
-    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "research-brief" }),
-  "derive-possibles": (row, item, opts) =>
-    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "derive-possibles" }),
-  demote: (row, item, opts) =>
-    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "demote" }),
+  // THE COLUMN COMES OFF `opts`, NOT OFF THE RENDER CLOSURE. `disposeColumn` is
+  // a `const` inside `renderWheel` (Copilot round 2 on S5 leg B: two live
+  // renders must not share a column), and this table is MODULE scope — naming
+  // it here would be a ReferenceError the first time a human pressed a verb.
+  // The act ids are `display.js`'s declared seam table (slice S7): the
+  // CONTRIBUTED column dispatches on the id, so the two ends must spell it
+  // identically, and what a human reads is `display.act(role)`.
+  [ACT_IDS.promote]: (row, item, opts) =>
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: ACT_IDS.promote }),
+  [ACT_IDS.brief]: (row, item, opts) =>
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: ACT_IDS.brief }),
+  [ACT_IDS.derive]: (row, item, opts) =>
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: ACT_IDS.derive }),
+  [ACT_IDS.demote]: (row, item, opts) =>
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: ACT_IDS.demote }),
   // add-project-merged-projection (D10): the composed view's ONE verb — jump
   // to the tile's member repository (store the key + reload, the ratified
   // selector posture). Pure navigation; nothing is recorded or persisted.
@@ -202,7 +221,7 @@ const ACTION_MOUNTERS = {
     const btn = el("button", "disposebtn dispose-intile wheelnavbtn",
       "⤴ open in " + repository);
     btn.type = "button";
-    btn.title = "switch the active snapshot to this tile's repository";
+    btn.title = "switch the rendered snapshot to this tile's repository";
     btn.addEventListener("click", (ev) => {
       ev.stopPropagation();
       opts.nav?.openRepository?.(repository);
@@ -214,24 +233,26 @@ const ACTION_MOUNTERS = {
     const path = readPathOf(opts.wheelKey, item);
     return mountNavButton(row, {
       label: opts.label,
-      title: opts.wheelKey === "staged"
+      title: opts.wheelKey === SELECTION
         ? "open this topic's primary fragment in the read-only source viewer"
         : "open this document in the read-only source viewer",
       // no resolvable path (a staged topic with no markdown fragment) is the same
       // posture as no nav callbacks: DISABLED, never a live button that no-ops
       run: path && opts.nav?.openDoc &&
         (() => opts.nav.openDoc(
-          path, opts.wheelKey === "documents" ? item.ref : null, item.ref)),
+          path, opts.wheelKey === SOURCE ? item.ref : null, item.ref)),
     });
   },
   lens: (row, item, opts) => mountNavButton(row, {
     label: opts.label,
-    title: "open the keyword lens with this cluster's declared topics checked",
+    title: "open the keyword lens with this " + vocab.one(GROUPING)
+      + "'s declared topics checked",
     run: opts.nav?.openLens && (() => opts.nav.openLens(item.ref?.topics || [], item.id)),
   }),
   canvas: (row, item, opts) => mountNavButton(row, {
     label: opts.label,
-    title: "open the cluster canvas on this cluster",
+    title: "open the " + vocab.one(GROUPING) + " canvas on this "
+      + vocab.one(GROUPING),
     run: opts.nav?.openCanvas && (() => opts.nav.openCanvas(item.id)),
   }),
   landed: (row, item, opts) => mountFlyoutButton(row, item, opts),
@@ -254,18 +275,24 @@ const ACTION_MOUNTERS = {
 // wheels (the workbenchScope derivation's own kind vocabulary). documents /
 // active / archived are absent by design: their tiles are not topic-bearing,
 // and the pure table offers them no row anyway.
-const WORKBENCH_TILE_KINDS = { clusters: "cluster", possibles: "possible", staged: "staged" };
+const WORKBENCH_TILE_KINDS = {
+  [GROUPING]: SCOPE_KINDS.grouping,
+  [CANDIDATE]: SCOPE_KINDS.candidate,
+  [SELECTION]: SCOPE_KINDS.selection,
+};
 
 // The two flyout verbs' chrome, by action id: the button's tooltip and the
 // pending label it wears while a read is in flight ("" = no read, so no pending
 // state — `packet` renders straight from the snapshot).
 const FLYOUT_VERBS = {
   landed: {
-    title: "what landed: the archived change's spec-delta requirements",
+    title: (d) => "what landed: this " + d.one(COMPLETION)
+      + "'s " + d.artifact("delta").label,
     pending: "reading…",
   },
   packet: {
-    title: "review the proposal packet: proposal, design, tasks, and spec deltas",
+    title: (d) => "review this " + d.one(SUBMISSION) + "'s "
+      + d.artifact("packet").label + " and " + d.artifact("delta").label,
     pending: "",
   },
 };
@@ -276,14 +303,18 @@ const FLYOUT_VERBS = {
 // change id — see buildItems in wheel-model.js), so no per-wheel id plumbing is
 // needed. documents/archived are absent by design: the action is SET-level and
 // realized changes are deliberately out of scope.
-const NOTEBOOK_TILE_KINDS = { clusters: "cluster", staged: "staged", active: "proposal" };
+const NOTEBOOK_TILE_KINDS = {
+  [GROUPING]: TILE_KINDS[GROUPING],
+  [SELECTION]: TILE_KINDS[SELECTION],
+  [SUBMISSION]: TILE_KINDS[SUBMISSION],
+};
 
 // The repo-relative path the `read` verb opens, per wheel. A DOCUMENT tile is a
 // document: the catalogued path when the snapshot carries one, else the item id
 // (which IS the path for documents). A STAGED tile is a topic FOLDER: the verb
 // opens its primary fragment (the pure path selector), and there may be none.
 function readPathOf(wheelKey, item) {
-  if (wheelKey === "staged") return primaryFragmentPath(item?.id, item?.ref?.files);
+  if (wheelKey === SELECTION) return primaryFragmentPath(item?.id, item?.ref?.files);
   return item?.ref?.path || item?.id || "";
 }
 
@@ -310,7 +341,10 @@ function mountFlyoutButton(row, item, opts) {
   const btn = el("button", "disposebtn dispose-intile wheelnavbtn",
     opts.label || opts.actionId || "open");
   btn.type = "button";
-  btn.title = verb.title || "";
+  // A flyout verb's tooltip carries domain nouns, so it is declared as a
+  // function of the display facet and resolved here, per render.
+  btn.title = typeof verb.title === "function" ? verb.title(vocab)
+    : (verb.title || "");
   btn.addEventListener("click", async (ev) => {
     ev.stopPropagation();
     if (!opts.showFlyout) return;
@@ -428,7 +462,8 @@ export function renderWheel(root, snapshot, ctx) {
   const composed = !!ctx?.composed;
   // The active (repository, ref) source base for this render (see `sourceBase`).
   if (ctx?.sourceBase) sourceBase = ctx.sourceBase;
-  const model = buildWheelModel(snapshot);
+  vocab = ctx?.display || neutralDisplay();
+  const model = buildWheelModel(snapshot, vocab);
   const reduceMotion = typeof matchMedia === "function" &&
     matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -574,7 +609,8 @@ export function renderWheel(root, snapshot, ctx) {
   bar.append(prev, hint, next, full);
   if (model.demoMode) {
     bar.appendChild(el("span", "wheeldemo-note",
-      "possibles are synthesized demo placeholders (register empty) — dashed brass, never indexed data"));
+      vocab.many(CANDIDATE) + " are synthesized demo placeholders (register "
+      + "empty) — dashed brass, never indexed data"));
   }
   root.appendChild(bar);
 
@@ -654,9 +690,9 @@ export function renderWheel(root, snapshot, ctx) {
     dock.innerHTML = "";
     for (const key of WHEEL_KEYS) {
       if (!hidden.has(key)) continue;
-      const chip = el("button", "wheeldockchip", WHEEL_LABELS[key]);
+      const chip = el("button", "wheeldockchip", vocab.short(key));
       chip.type = "button";
-      chip.title = "show the " + WHEEL_LABELS[key] + " column";
+      chip.title = "show the " + vocab.short(key) + " column";
       chip.addEventListener("click", () => setHidden(key, false));
       dock.appendChild(chip);
     }
@@ -842,10 +878,12 @@ export function renderWheel(root, snapshot, ctx) {
       const requested = result.files.length + result.failed;
       if (!requested) {
         body.appendChild(el("div", "wheelfly-note",
-          "this archived change records no spec deltas"));
+          "this " + vocab.one(COMPLETION) + " records no "
+          + vocab.artifact("delta").label));
       } else if (summary.files.length) {
         body.appendChild(el("div", "wheelfly-note",
-          "no requirement headings in this change's spec deltas"));
+          "no requirement headings in this item's "
+          + vocab.artifact("delta").label));
       }
     }
     // Quiet inline failure — never a thrown error, never a silent empty panel.
@@ -884,7 +922,7 @@ export function renderWheel(root, snapshot, ctx) {
       body.appendChild(el("div", "wheelfly-line",
         "tasks: " + (progress.completed ?? 0) + " / " + progress.total));
     }
-    const groups = packetGroups(change.files, change.folder);
+    const groups = packetGroups(change.files, change.folder, vocab);
     for (const group of groups) {
       body.appendChild(el("div", "wheelfly-kind",
         group.label + " (" + group.files.length + ")"));
@@ -910,7 +948,7 @@ export function renderWheel(root, snapshot, ctx) {
   }
   function showPacket(item, tile) {
     return openFlyout(item, tile, {
-      ariaLabel: "the proposal packet of " + item.id,
+      ariaLabel: vocab.artifact("packet").label + " of " + item.id,
       closeLabel: "close the packet list",
       render: (body) => renderPacketBody(body, item),
     });
@@ -1221,9 +1259,9 @@ export function renderWheel(root, snapshot, ctx) {
   // Which of this feature's verbs has acted on this tile THIS SESSION, if any.
   // Drives the decoration above; never read from the snapshot.
   const WHEEL_VERBS_BY_COLUMN = {
-    possibles: ["promote-to-staging", "research-brief"],
-    clusters: ["derive-possibles"],
-    active: ["demote"],
+    [CANDIDATE]: [ACT_IDS.promote, ACT_IDS.brief],
+    [GROUPING]: [ACT_IDS.derive],
+    [SUBMISSION]: [ACT_IDS.demote],
   };
   function sessionActOn(wheelKey, itemId) {
     for (const verb of WHEEL_VERBS_BY_COLUMN[wheelKey] || []) {
@@ -1253,6 +1291,8 @@ export function renderWheel(root, snapshot, ctx) {
       // the notebook action's OWN capability (the same /capabilities probe, a
       // different flag): it is live only on a loopback local backend with nlm.
       notebook: notebookCapable(caps),
+      // the per-render vocabulary a verb row's label is resolved against
+      display: vocab,
     };
     const specs = actionsFor(w.key, item, env);
     // RECONCILE rather than skip (011 FR-033). An already-mounted row is left
@@ -1312,7 +1352,7 @@ export function renderWheel(root, snapshot, ctx) {
   // re-points the ONE --wheel-expanded-h knob, so the badge rail follows).
   function syncSummary(tile, w, idx, isExpanded) {
     const existing = tile.querySelector(".wheelsummary");
-    if (!isExpanded || w.key !== "staged") {
+    if (!isExpanded || w.key !== SELECTION) {
       if (existing) existing.remove();
       tile.classList.remove("wheel-hassummary");
       return;
@@ -1401,7 +1441,7 @@ export function renderWheel(root, snapshot, ctx) {
     tile.classList.add("wheel-hashealth");
   }
   function syncHealth(tile, w, idx, focused, isExpanded) {
-    if (w.key !== "staged") return; // only staged topics carry a health aggregate
+    if (w.key !== SELECTION) return; // only this station carries a health aggregate
     const item = w.items[idx];
     syncHealthIndicator(tile, item, focused, isExpanded);
     syncHealthBlock(tile, item, isExpanded);
@@ -1485,7 +1525,7 @@ export function renderWheel(root, snapshot, ctx) {
       // demotion is visible without touching the snapshot (FR-034). View state
       // only: nothing is persisted and a reload clears it.
       const appliedVerdict = w.items[idx]
-        ? ((w.key === "possibles" ? disposeColumn.appliedOutcome(w.items[idx].id) : null)
+        ? ((w.key === CANDIDATE ? disposeColumn.appliedOutcome(w.items[idx].id) : null)
            || sessionActOn(w.key, w.items[idx].id))
         : null;
       const isExpanded = !!w.items[idx] && isExpandedTile(expanded, w.key, idx);
@@ -1538,9 +1578,9 @@ export function renderWheel(root, snapshot, ctx) {
       const linked = conns[k];
       if (!linked?.length || k === key) continue;
       any = true;
-      const chip = el("button", "wheelchip", linked.length + " " + WHEEL_LABELS[k]);
+      const chip = el("button", "wheelchip", linked.length + " " + vocab.short(k));
       chip.type = "button";
-      chip.title = "view the " + linked.length + " connected " + WHEEL_LABELS[k];
+      chip.title = "view the " + linked.length + " connected " + vocab.short(k);
       chip.addEventListener("click", (ev) => {
         ev.stopPropagation();
         pageToColumn(k);
@@ -1555,8 +1595,8 @@ export function renderWheel(root, snapshot, ctx) {
     // through intent emission. The two capabilities are mutually exclusive by
     // construction (serve.py: `intent = not loopback`), so exactly one
     // transport is ever handed to the tray.
-    if (key === "possibles" && focus && (disposeColumn.gateCapable(caps) || intentCapable(caps))) {
-      const item = wheelByKey("possibles").items[focus.i];
+    if (key === CANDIDATE && focus && (disposeColumn.gateCapable(caps) || intentCapable(caps))) {
+      const item = wheelByKey(CANDIDATE).items[focus.i];
       const hosted = !disposeColumn.gateCapable(caps) && intentCapable(caps);
       // The session-local applied overlay belongs to the LOCAL executing path;
       // hosted decisions are reported by the feed, so it never suppresses the
@@ -1696,7 +1736,7 @@ export function renderWheel(root, snapshot, ctx) {
 
   // initial focus (locked prototype): the richest DOCUMENT — the one with the
   // highest total degree — centred and aligned, no entry spin.
-  const docsWheel = model.wheels.find((w) => w.key === "documents" && w.items.length);
+  const docsWheel = model.wheels.find((w) => w.key === SOURCE && w.items.length);
   const start = docsWheel || model.wheels.find((w) => w.items.length);
   if (start) {
     let best = 0, bestDegree = -1;

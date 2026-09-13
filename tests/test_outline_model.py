@@ -205,11 +205,15 @@ def test_added_sections_carry_their_provenance():
     assert extra["addedBy"] == "claude-opus-5 · 2026-08-15"
 
 
-def test_an_xspec_marked_section_is_a_proposal_element():
+def test_an_xspec_marked_section_is_a_marked_element():
+    """SLICE S7 renamed this role `proposal-element` -> `marked-element`: the
+    role is "this section carries an `xspec:` marker fence", which is openDox's
+    own outline grammar, and `proposal` was one domain's word for what a marked
+    section becomes. The MEANING is unchanged and `marked` still carries it."""
     model = run_model(
         CONFORMING + "\n## Why\n\n<!-- xspec:candidate id=why -->\n\nBecause.\n")
     why = [s for s in model["sections"] if s["title"] == "Why"][0]
-    assert why["role"] == "proposal-element"
+    assert why["role"] == "marked-element"
     assert why["marked"] is True
 
 

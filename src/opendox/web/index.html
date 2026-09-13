@@ -25,8 +25,12 @@
          left EMPTY when the serving side offers no index — a static image
          then renders exactly today's dashboard. -->
     <span id="repopicker"></span>
-    <input class="search" id="globalsearch" type="search" autocomplete="off"
-           placeholder="search docs, clusters, changes…" aria-label="search docs, clusters, changes…">
+    <!-- § 3.4 slice S7: the placeholder and the label name three STATIONS, so
+         they are the registered domain's words and app.js sets them at boot
+         from the display facet (`applyShellVocabulary`). Nothing is spelled
+         here, because a static default here would be one domain's words
+         shipped to every install. -->
+    <input class="search" id="globalsearch" type="search" autocomplete="off">
     <!-- The freshness header (design D11): repo @ ref · source_revision short
          SHA · generated-at, so "did my doc make it in?" is answerable at a
          glance rather than by reasoning about deployment times. -->
@@ -52,14 +56,22 @@
             aria-controls="accountmenu">👤</button>
   </span>
 
+  <!-- THE SEVEN TAB LABELS (§ 3.4 slice S7) ARE SET BY THE SHELL, not written
+       here. Two of them name a STATION and are the registered domain's words;
+       the other five name openDox's own instruments. All seven are filled by
+       app.js's `applyShellVocabulary` at boot off the display facet, so the
+       labels have ONE authority instead of two — a static default beside a
+       dynamic setter is how "cluster canvas" would have survived a domain that
+       calls it something else. An empty button is the honest placeholder: it
+       carries no domain's word and nothing renders it before the shell runs. -->
   <div class="tabs" role="tablist">
-    <button class="tab" role="tab" id="tab-funnel" aria-selected="true" aria-controls="view-funnel">realization funnel</button>
-    <button class="tab" role="tab" id="tab-wheel" aria-selected="false" aria-controls="view-wheel">the wheel</button>
-    <button class="tab" role="tab" id="tab-board" aria-selected="false" aria-controls="view-board">pipeline board</button>
-    <button class="tab" role="tab" id="tab-canvas" aria-selected="false" aria-controls="view-canvas">cluster canvas</button>
-    <button class="tab" role="tab" id="tab-lens" aria-selected="false" aria-controls="view-lens">keyword lens</button>
-    <button class="tab" role="tab" id="tab-docs" aria-selected="false" aria-controls="view-docs">doc list</button>
-    <button class="tab" role="tab" id="tab-lineage" aria-selected="false" aria-controls="view-lineage">lineage &amp; readiness</button>
+    <button class="tab" role="tab" id="tab-funnel" aria-selected="true" aria-controls="view-funnel"></button>
+    <button class="tab" role="tab" id="tab-wheel" aria-selected="false" aria-controls="view-wheel"></button>
+    <button class="tab" role="tab" id="tab-board" aria-selected="false" aria-controls="view-board"></button>
+    <button class="tab" role="tab" id="tab-canvas" aria-selected="false" aria-controls="view-canvas"></button>
+    <button class="tab" role="tab" id="tab-lens" aria-selected="false" aria-controls="view-lens"></button>
+    <button class="tab" role="tab" id="tab-docs" aria-selected="false" aria-controls="view-docs"></button>
+    <button class="tab" role="tab" id="tab-lineage" aria-selected="false" aria-controls="view-lineage"></button>
   </div>
 
   <!-- The STALE-FALLBACK banner (design D6) and the sparse-station note (D10).
@@ -95,10 +107,8 @@
       A read-only projection of one repository's ideation governance state,
       rendered from a single generated <code>snapshot.json</code>. The funnel reads
       the snapshot's link tallies and readiness verbatim — it never rescans the
-      repository or re-scores anything. Cluster↔possible links are many-to-many:
-      one doc's <code>Topics:</code> list feeds several clusters and one possible
-      can be claimed by several clusters (dashed violet edges). Regenerate the
-      snapshot to refresh; dashboard artifacts are never hand-edited.
+      repository or re-scores anything. <span id="aboutlinks"></span> Regenerate
+      the snapshot to refresh; dashboard artifacts are never hand-edited.
     </p>
     <form method="dialog"><button class="cbtn" type="submit">close</button></form>
   </dialog>

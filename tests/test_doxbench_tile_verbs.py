@@ -285,7 +285,8 @@ def tile_results(tmp_path_factory):
     if NODE is None:
         pytest.skip("node not available for the doxBench tile-verb probe")
     root = tmp_path_factory.mktemp("doxbench-tile-verbs")
-    for name in ("doc-wheel.js", "wheel-model.js", "helpers.js"):
+    # `display.js` joins at § 3.4 slice S7 (the wheel model's vocabulary).
+    for name in ("doc-wheel.js", "wheel-model.js", "helpers.js", "display.js"):
         shutil.copy(VIEWS / name, root / name)
     (root / "package.json").write_text('{"type": "module"}', encoding="utf-8")
     harness = root / "tile-harness.mjs"

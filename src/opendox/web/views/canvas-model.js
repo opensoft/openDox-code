@@ -1,3 +1,24 @@
+import {
+  DRAFT_PATHS, STAGE_ROLES, STATUS_ROLE, neutralDisplay,
+} from "./display.js";
+
+const [SOURCE, GROUPING, CANDIDATE] = STAGE_ROLES;
+
+// The register's SEEDED default state — "the seeded default, and the ONLY
+// promotable state" (the possibles register's own enum). A schema value this
+// module WRITES into a draft, never a word it renders; `latent` carries no
+// governance vocabulary of its own, and the rendered word for the same state is
+// `display.status(VOCABULARY.CANDIDATE, STATUS_ROLE.CAPTURED)`.
+// PARAMETERIZED AT SLICE S7, ROUND 4 (Copilot). It was the literal `"latent"`,
+// on the argument that a value this module WRITES is schema rather than
+// vocabulary — which is true, and is exactly why it has to come off the facet:
+// `values.register_state.captured` is host-overridable, so a literal here wrote
+// one enum while the browser matched another and `canvas_drafts.py` wrote a
+// third. All three read one declaration now (`canvas_drafts.register_state`
+// is the server half).
+const seedState = (display) =>
+  (display || neutralDisplay()).registerState(STATUS_ROLE.CAPTURED);
+
 // Per-cluster cluster-canvas view-model (D12). PURE: no DOM, no I/O, no
 // external imports — imported by canvas.js in the browser AND unit-tested from
 // Python via node (tests/ideation-dashboard/test_canvas.py), exactly like
@@ -32,9 +53,14 @@ export function esc(s) {
 }
 
 // The one wording the browser preview and the boundary-written draft share.
-// canvas_drafts.SUPERSEDE_REASON MUST produce the identical string.
-export function supersedeReason(chosenId) {
-  return "Option-set sibling " + chosenId + " was chosen at the cluster canvas.";
+// `canvas_drafts.supersede_reason()` MUST produce the identical string, and
+// since slice S7 BOTH sides read the domain's word for the grouping station out
+// of the same display facet — the browser from `ctx.display`, the server from
+// `display_profile` — so the two stay identical under any vocabulary.
+export function supersedeReason(chosenId, display) {
+  const d = display || neutralDisplay();
+  return "Option-set sibling " + chosenId + " was chosen at the "
+    + d.one(GROUPING) + " canvas.";
 }
 
 // Where a committed draft lands — a run-local drafts dir under the boundary's
@@ -57,10 +83,10 @@ function clusterPossibles(snapshot, clusterId) {
 // A lightweight per-cluster summary for the canvas picker (deterministic,
 // snapshot order). memberCount/possibleCount from the tallies verbatim; gapCount
 // is derived here so the picker can flag clusters that need work.
-export function listCanvasClusters(snapshot) {
+export function listCanvasClusters(snapshot, display) {
   const s = snapshot || {};
   return (s.clusters || []).map((c) => {
-    const model = buildCanvasModel(s, c.id);
+    const model = buildCanvasModel(s, c.id, display);
     return {
       id: c.id,
       name: c.name || c.id,
@@ -74,7 +100,7 @@ export function listCanvasClusters(snapshot) {
 
 // The full per-cluster canvas model. Returns null when the cluster is absent
 // (a stale selection after regeneration) so the view degrades, never throws.
-export function buildCanvasModel(snapshot, clusterId) {
+export function buildCanvasModel(snapshot, clusterId, display) {
   const s = snapshot || {};
   const cluster = (s.clusters || []).find((c) => c.id === clusterId);
   if (!cluster) return null;
@@ -124,7 +150,7 @@ export function buildCanvasModel(snapshot, clusterId) {
   // GAP PROMPTS — two actionable-slot derivations, both from the snapshot:
   //   unclaimed-member : a member document no possible of this cluster pins as
   //                      evidence (a latent feat waiting to be named).
-  //   unsupported-possible : a possible of this cluster with no evidence pin
+  //   unsupported-candidate : a candidate of this cluster with no evidence pin
   //                      (a claim with no document backing).
   const gaps = [];
   for (const m of members) {
@@ -139,10 +165,10 @@ export function buildCanvasModel(snapshot, clusterId) {
   for (const p of possibles) {
     if (!(p.supporting_evidence || []).length) {
       gaps.push({
-        kind: "unsupported-possible",
+        kind: "unsupported-candidate",
         possibleId: p.id,
         possibleTitle: p.title || p.id,
-        state: p.state || "latent",
+        state: p.state || seedState(display),
       });
     }
   }
@@ -172,29 +198,35 @@ export function buildCanvasModel(snapshot, clusterId) {
 // (the chosen member's id). Pure — the browser shows this as confirmation; the
 // actual boundary-written artifact is canvas_drafts.build_supersede_draft, which
 // this must agree with (test_canvas.py locks the reason string).
-export function supersedePlan(snapshot, clusterId, optionSetId, chosenId) {
-  const model = buildCanvasModel(snapshot, clusterId);
+export function supersedePlan(snapshot, clusterId, optionSetId, chosenId, display) {
+  const model = buildCanvasModel(snapshot, clusterId, display);
   if (!model) return null;
   const os = model.optionSets.find((o) => o.id === optionSetId);
   if (!os) return null;
   const siblings = os.members
     .filter((p) => p.id !== chosenId)
-    .map((p) => ({ id: p.id, title: p.title || p.id, fromState: p.state || "latent" }));
+    .map((p) => ({ id: p.id, title: p.title || p.id,
+                   fromState: p.state || seedState(display),
+                   // the WORD for that state, resolved here so the confirmation
+                   // renders vocabulary and not schema (Copilot round 4)
+                   fromWord: (display || neutralDisplay())
+                     .registerStateWord(p.state || seedState(display)) }));
   return {
     optionSetId,
     chosenId,
     siblings,
-    reason: supersedeReason(chosenId),
+    reason: supersedeReason(chosenId, display),
     citation: chosenId,
-    landsAt: DRAFTS_DIR + "supersede-" + optionSetId + "-" + chosenId + ".register.yaml",
+    landsAt: DRAFTS_DIR + DRAFT_PATHS.supersede + optionSetId + "-" + chosenId
+      + ".register.yaml",
   };
 }
 
 // The on-screen PLAN of a composer draft (T021): a new `latent` possible with
 // provenance and any attached evidence pins. Pure preview; the artifact is
 // canvas_drafts.build_composer_draft.
-export function composerPlan(snapshot, clusterId, input) {
-  const model = buildCanvasModel(snapshot, clusterId);
+export function composerPlan(snapshot, clusterId, input, display) {
+  const model = buildCanvasModel(snapshot, clusterId, display);
   if (!model) return null;
   const inp = input || {};
   const id = String(inp.id || "").trim();
@@ -206,10 +238,10 @@ export function composerPlan(snapshot, clusterId, input) {
     id,
     title: (inp.title || "").trim(),
     claim: (inp.claim || "").trim(),
-    state: "latent",
+    state: seedState(display),
     clusterId,
     provenanceDoc,
     evidenceCount: attached.length,
-    landsAt: DRAFTS_DIR + "possible-" + (id || "unnamed") + ".register.yaml",
+    landsAt: DRAFTS_DIR + DRAFT_PATHS.candidate + (id || "unnamed") + ".register.yaml",
   };
 }

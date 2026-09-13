@@ -306,7 +306,12 @@ def test_the_canvas_region_is_named_without_a_duplicate_visible_heading():
     assert '"doxbench-heading"' not in editor
     # the siblings this idiom is copied from, still named the same way
     shell = _shell()
-    assert 'aria-label", "docs and lens context"' in shell
+    # SLICE S7: the two-pane region is named after the two TABS it holds, and
+    # the first tab's word is the registered domain's (`display.short(role)`),
+    # so the label is COMPOSED rather than spelled -- the idiom this test pins
+    # is `setAttribute("aria-label", <the name>)`, which is intact.
+    assert 'context.setAttribute("aria-label", contextRegionLabel())' in shell
+    assert 'vocab.short(SOURCE) + " and " + TAB_IDS.lens + " context"' in shell
     assert 'aria-label", "doxBench chat rail"' in shell
 
 

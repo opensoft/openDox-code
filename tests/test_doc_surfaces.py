@@ -199,7 +199,9 @@ def rendered(tmp_path_factory):
     if NODE is None:
         pytest.skip("node not available for the JS renderer probe")
     tmp_path = tmp_path_factory.mktemp("doc-surfaces")
-    for src in (DOCS_JS, LINEAGE_JS, HELPERS_JS):
+    # `display.js` joins at § 3.4 slice S7: both views read their vocabulary
+    # through it, and it imports nothing itself.
+    for src in (DOCS_JS, LINEAGE_JS, HELPERS_JS, DOCS_JS.parent / "display.js"):
         shutil.copy(src, tmp_path / src.name)
     # ESM without renaming: the views import "./helpers.js" by name
     (tmp_path / "package.json").write_text('{"type": "module"}', encoding="utf-8")
@@ -289,7 +291,13 @@ def test_the_doc_tab_is_wired_to_the_one_cross_view_jump():
     app = APP_JS.read_text(encoding="utf-8")
     block = app.split('{ id: "docs.list", control: "tab-docs", region: "view-docs",',
                        1)[1].split("},", 1)[0]
-    assert "renderDocs(root, snap, { onOpenDoc: ctx.nav.openDoc })" in block
+    # The binding gained `display: ctx.display` at § 3.4 slice S7, so the exact
+    # source string moved. The PROPERTY this test holds is the cross-view jump —
+    # the doc list reaches app.js's ONE `nav.openDoc`, not a second viewer — and
+    # it is asserted here rather than the whole call's spelling.
+    assert "renderDocs(root, snap, {" in block
+    assert "onOpenDoc: ctx.nav.openDoc" in block
+    assert "renderViewer" not in block
 
 
 # ---------------------------------------------------------------------------

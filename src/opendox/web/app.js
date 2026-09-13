@@ -54,6 +54,13 @@ import {
   ViewBindingError, collectViewBindings, contributedViewBindings,
   manifestRoutes, mountContributedViews, resolveView,
 } from "./views/view_extension.js";
+// THE VOCABULARY, resolved once per render and handed down through `ctx`
+// (§ 3.4 slice S7, § 4.3 step 3). Every class-C view in this bundle reads its
+// stage names, status words, corpus areas and design tokens off this object BY
+// ROLE, so none of them carries one domain's word as a literal. Absent host
+// facet — which is every host today, and every static served image — gives
+// openDox's own neutral vocabulary, not openxFactory's words.
+import { readDisplay, STAGE_ROLES } from "./views/display.js";
 import { mountStagingWorkbench } from "./views/staging-workbench.js";
 // THE SECOND CLASS-A -> CLASS-B IMPORT IS GONE TOO (§ 3.4 slice S5, RULED Q10).
 // This line was `import { firstEditTransport } from ./views/swb-session.js` —
@@ -530,17 +537,66 @@ function initTheme() {
 // `onOpenTile` is the funnel/board tiles' drill-down entrypoint (T017):
 // staged/proposal/realized cards call it with (kind, id); the explorer
 // resolves the snapshot-only folder listing and renders the overlay.
+// THE SHELL'S OWN CHROME, IN THE REGISTERED DOMAIN'S WORDS (§ 3.4 slice S7).
+// `index.html` ships every one of these EMPTY: a static default beside a
+// dynamic setter is two authorities for one string, and the one that renders
+// first is the one that survives a domain rename unnoticed. Five of the seven
+// tabs name openDox's own instruments and read the same in any domain; two name
+// a STATION and are spelled by the profile.
+//
+// This is the whole of the shell's vocabulary surface. Every other word on the
+// page is a view's, and every view takes the facet through `ctx.display`.
+function applyShellVocabulary(display) {
+  const [SOURCE, GROUPING, CANDIDATE, , SUBMISSION] = STAGE_ROLES;
+  const labels = {
+    "tab-funnel": "realization funnel",
+    "tab-wheel": "the wheel",
+    "tab-board": "pipeline board",
+    "tab-canvas": display.one(GROUPING) + " canvas",
+    "tab-lens": "keyword lens",
+    "tab-docs": display.short(SOURCE) + " list",
+    "tab-lineage": "lineage & readiness",
+  };
+  for (const [id, text] of Object.entries(labels)) {
+    const node = document.getElementById(id);
+    if (node) node.textContent = text;
+  }
+  // The global search reaches three stations, so it names all three.
+  const search = document.getElementById("globalsearch");
+  if (search) {
+    const caption = "search " + [SOURCE, GROUPING, SUBMISSION]
+      .map((role) => display.short(role)).join(", ") + "…";
+    search.placeholder = caption;
+    search.setAttribute("aria-label", caption);
+  }
+  // The one sentence in the About dialog that names stations. The rest of that
+  // paragraph is about `snapshot.json` and is the same in every domain.
+  const about = document.getElementById("aboutlinks");
+  if (about) {
+    about.textContent =
+      display.one(GROUPING) + "↔" + display.one(CANDIDATE) + " links are "
+      + "many-to-many: one document's `Topics:` list feeds several "
+      + display.many(GROUPING) + " and one " + display.one(CANDIDATE)
+      + " can be claimed by several " + display.many(GROUPING)
+      + " (dashed violet edges).";
+  }
+}
+
 const CORE_VIEWS = [
   { id: "funnel.realization", control: "tab-funnel", region: "view-funnel",
     module: "./views/funnel.js", entry: "renderFunnel", view_class: "C",
     mount: (root, snap, ctx) => renderFunnel(root, snap, {
       onOpenTile: ctx.explorer.openTile, notebook: ctx.notebook,
+      // THE VOCABULARY (§ 3.4 slice S7) — every class-C view below takes it
+      // the same way, off the one context object the shell builds per render.
+      display: ctx.display,
       signal: ctx.signal }) },
   { id: "wheel.deck", control: "tab-wheel", region: "view-wheel",
     module: "./views/wheel.js", entry: "renderWheel", view_class: "C",
     mount: (root, snap, ctx) => renderWheel(root, snap,
       { caps: ctx.caps, nav: ctx.nav, notebook: ctx.notebook,
         sourceBase: ctx.sourceBase, composed: ctx.composed,
+        display: ctx.display,
         // THE CONTRIBUTED DISPOSE COLUMN, already resolved (§ 3.4 slice S5).
         // `views/wheel.js` is class C and imported eight names out of
         // `views/dispose.js` — one of § 4.5 assertion 3's four breaches; it
@@ -549,10 +605,16 @@ const CORE_VIEWS = [
         signal: ctx.signal }) },
   { id: "board.pipeline", control: "tab-board", region: "view-board",
     module: "./views/board.js", entry: "renderBoard", view_class: "C",
-    mount: (root, snap, ctx) => renderBoard(root, snap, { onOpenTile: ctx.explorer.openTile, notebook: ctx.notebook }) },
+    mount: (root, snap, ctx) => renderBoard(root, snap, {
+      onOpenTile: ctx.explorer.openTile, notebook: ctx.notebook,
+      // the board's ONE cross-view jump, performed by the shell rather than by
+      // the view reaching for another view's tab button by DOM id (slice S7)
+      onOpenDocList: ctx.nav.openDocList,
+      display: ctx.display }) },
   { id: "canvas.cluster", control: "tab-canvas", region: "view-canvas",
     module: "./views/canvas.js", entry: "renderCanvas", view_class: "C",
-    mount: (root, snap, ctx) => renderCanvas(root, snap, { notebook: ctx.notebook }) },
+    mount: (root, snap, ctx) => renderCanvas(root, snap, {
+      notebook: ctx.notebook, display: ctx.display }) },
   { id: "lens.keyword", control: "tab-lens", region: "view-lens",
     module: "./views/lens.js", entry: "renderLens", view_class: "?",
     // D21: the lens receives the UNNARROWED composed snapshot as well as the
@@ -588,6 +650,7 @@ const CORE_VIEWS = [
       // the `gate.lens` binding's entry, or null where no gate column is
       // registered — the plan panel then stays plan-only (§ 3.4 slice S4)
       mountLensGate: ctx.mountLensGate,
+      display: ctx.display,
     }) },
   // The doc list's rows open the SAME read-only explorer/viewer overlay the
   // wheel's `read` verb and the workbench's docs rows open (T092 acceptance
@@ -596,10 +659,12 @@ const CORE_VIEWS = [
   // calls back here; `ctx.nav.openDoc` is the one entry point.
   { id: "docs.list", control: "tab-docs", region: "view-docs",
     module: "./views/docs.js", entry: "renderDocs", view_class: "A",
-    mount: (root, snap, ctx) => renderDocs(root, snap, { onOpenDoc: ctx.nav.openDoc }) },
+    mount: (root, snap, ctx) => renderDocs(root, snap, {
+      onOpenDoc: ctx.nav.openDoc, display: ctx.display }) },
   { id: "lineage.readiness", control: "tab-lineage", region: "view-lineage",
     module: "./views/lineage.js", entry: "renderLineage", view_class: "C",
-    mount: (root, snap) => renderLineage(root, snap) },
+    mount: (root, snap, ctx) => renderLineage(root, snap,
+      { display: ctx.display }) },
   // THE THREE CLASS-B BINDINGS ARE GONE FROM HERE — § 3.4 slice S5, and this
   // is the test of whether the seam was drawn in the right place.
   //
@@ -995,7 +1060,14 @@ async function render() {
     // view-model module remains available to any view that wants a roll-up,
     // and the retired-everywhere guard in test_grouping.py pins that no
     // mount returns.
-    renderStats(document.getElementById("stats"), snapshot);
+    // THE STATS STRIP IS RENDERED AFTER THE FACET RESOLVES, not here (§ 3.4
+    // slice S7, Copilot round 3). It used to draw in this synchronous block —
+    // before `probeCapabilities()` is awaited and therefore before
+    // `readDisplay` — so the ONE always-visible surface in the shell kept
+    // openDox's neutral words for the life of the page however the host spelled
+    // its stations, while every other view (all of which mount after the probe)
+    // read the declared vocabulary. It now mounts on the same footing as its
+    // neighbours; see `renderStats(...)` below `applyShellVocabulary`.
     const explorerRoot = document.getElementById("explorer-root");
     // The explorer (T017) has no compile-time dependency on the viewer
     // (T018); app.js is what wires a selected file to renderViewer (D15
@@ -1053,6 +1125,25 @@ async function render() {
     // are the same object, so the list is one object named twice — harmless,
     // and cheaper than deciding which of the two this render produced.
     const consoleRepair = createConsoleRepair([probedCaps, caps]);
+    // THE VOCABULARY, READ ONCE PER RENDER (§ 3.4 slice S7, § 4.3 steps 2-4).
+    // The display facet rides on the payload already fetched two statements
+    // above — "no new route and no second fetch" — and is handed to every view
+    // through `ctx.display` below. A view asks for a stage, a status, a corpus
+    // area or a design token BY ROLE and is given the registered domain's own
+    // word for it; with no host facet it is given openDox's neutral one.
+    //
+    // THE FOUR DESIGN TOKENS ARE SET HERE, ON `:root`, BEFORE ANYTHING MOUNTS.
+    // § 4.3 point 4: "`styles.css`'s four `--st-*` tokens become profile-keyed
+    // custom properties set on `:root` at boot." `styles.css` declares
+    // `--st-<role>` for each of the four roles and this line supplies the
+    // values, so the stylesheet names a position and the profile names a
+    // colour. Before `render()` is re-entered the values are simply set again.
+    const display = readDisplay(probedCaps);
+    display.applyTokens(document.documentElement);
+    applyShellVocabulary(display);
+    // …and the always-visible stats strip, on the same footing as every other
+    // view: after the probe, with the vocabulary handed down (Copilot round 3).
+    renderStats(document.getElementById("stats"), snapshot, { display });
     // THE VIEW REGISTRY, COLLECTED ONCE PER RENDER (§ 3.4 slice S3, § 4.1).
     // The core arm openDox supplies, then the consumer column the host
     // contributed — the same order and the same single collection
@@ -1153,13 +1244,15 @@ async function render() {
     // `mountStagingWorkbench`, and by the tab router's `onRegionRendered` hook
     // on each tab's first render.
     // THE CONTEXT IS THE SAME MINIMAL ONE THE PASS ALWAYS HANDED DOWN — RULED
-    // Q3's `mount(host, snapshot, ctx)` with the capability probe and the
-    // registry, and nothing of this shell's internals. What changed here is
-    // WHEN the pass runs, not what a contributed binding is given.
+    // Q3's `mount(host, snapshot, ctx)` with the capability probe, the registry
+    // and (slice S7) the REGISTERED DOMAIN'S VOCABULARY, and nothing of this
+    // shell's internals. A contributed panel renders words beside this bundle's
+    // own and must spell them the same way, which is the whole of why `display`
+    // is a declared `CTX_KEYS` entry rather than something a column re-derives.
     const contributedMounts = [];
     const mountContributedInto = async (regions) => {
       const mounted = await mountContributedViews(
-        views, snapshot, { caps, nav: null, views },
+        views, snapshot, { caps, nav: null, views, display },
         // `signal` is THIS render's scope (Copilot round 3): a pass started
         // from a tab's first render can still be loading a module when a
         // repository switch begins the next render, and a stale pass must not
@@ -1169,7 +1262,7 @@ async function render() {
       return mounted;
     };
     const explorer = mountExplorer(explorerRoot, snapshot, {
-      signal,
+      signal, display,
       onOpenFile: (entry, pane, tile) => {
         const sourceKey = sourceKeyFor(entry);
         return renderViewer(pane, {
@@ -1373,7 +1466,7 @@ async function render() {
       document.getElementById("staging-workbench-root"), snapshot,
       { onOpenDoc: (path, doc) =>
           explorer.openDoc(path, doc, workbenchSourceKey),
-        caps, active, index, signal,
+        caps, active, index, signal, display,
         // the unstripped probe, read by the workbench's `openDraft` alone
         createCaps: probedCaps,
         // the console-token re-read, forwarded to the two write transports so a
@@ -1429,6 +1522,9 @@ async function render() {
       // composed tiles -> the tile's member repository (D10's one verb): store
       // the key at the member's own ref and reload — the ratified selector
       // posture, after which every verb works as on any single-repo view.
+      // board -> the doc list. The board's "open the doc list" footer used to
+      // click `#tab-docs` itself; app.js owns every cross-view jump.
+      openDocList: () => { tabs?.goto("view-docs"); },
       openRepository: (repository) => {
         storeKey({ repository, ref: memberRef(rawSnapshot, repository) });
         render();
@@ -1436,6 +1532,11 @@ async function render() {
     };
     tabs = initTabs(snapshot, {
       explorer, notebook, caps, nav, composed, sourceBase: sourceBaseFor(active),
+      // THE ONE KEY SLICE S7 ADDS TO `ctx` (§ 4.3 step 3). Declared in
+      // `view_extension.js`'s CTX_KEYS beside the regions table, so a
+      // contributed binding reads the shell's vocabulary through the contract
+      // rather than through this file. Every class-C view below reads it.
+      display,
       // THE COLLECTED REGISTRY, handed to every view (§ 3.4 slice S3). The tab
       // router derives the tab strip from it, and a view that needs an OPTIONAL
       // contributed panel asks for it by id — `lookupView(ctx.views, "…")`,
@@ -1513,7 +1614,7 @@ async function render() {
     // refresh reloads it too (the data changed, so every view must re-derive); a
     // FAILED refresh reports inline and leaves this view exactly as it is.
     repoSelector = mountRepoSelector(document.getElementById("repopicker"), {
-      index, active, snapshot, caps, projects,
+      index, active, snapshot, caps, projects, display,
       // the `gate.projects` binding's entry, or null where no gate column is
       // registered — the selector then renders picker + refresh only, which is
       // the whole of what § 3.4 slice S4 leaves in class A

@@ -12,16 +12,21 @@
 // innerHTML is only ever assigned a literal empty string to clear.
 
 import { el, basename } from "./helpers.js";
+import { STAGE_ROLES, neutralDisplay } from "./display.js";
 
-// Fixed bucket order: ideation areas first, then the read-only reference bucket
-// exactly ONCE (the #16 fix — no reliance on document sort order).
-const AREA_ORDER = ["ideation/brainstorm", "ideation/staging", "other (read-only reference)"];
+const [SOURCE] = STAGE_ROLES;
 
-function areaOf(path) {
-  if (path.startsWith("ideation/brainstorm/")) return "ideation/brainstorm";
-  if (path.startsWith("ideation/staging/")) return "ideation/staging";
-  return "other (read-only reference)";
-}
+// THE AREA MAP IS THE PROFILE'S (§ 3.4 slice S7, RULED Q1 — openxFactory#656
+// comment `5642758731`: "openDox, class A, with the area map parameterized").
+// `AREA_ORDER` :18 hardcoded `ideation/brainstorm` and `ideation/staging`,
+// openxFactory's own corpus layout, in the one tile § 3.4 says must reach the
+// student; the bucket order and the prefixes now come from the registered
+// profile's `areas` axis, terminal `reference` bucket last, and a product told
+// no corpus layout lists every document in that bucket rather than inventing
+// folders it has never been given.
+let vocab = neutralDisplay();
+const areaOrder = () => vocab.areas().map((a) => a.label);
+const areaOf = (path) => vocab.areaOf(path).label;
 function dirOf(path) {
   const i = path.lastIndexOf("/");
   return i >= 0 ? path.slice(0, i + 1) : "";
@@ -73,7 +78,10 @@ function docRow(d, onOpen) {
   const row = el("div", "docrow");
   const info = el("span");
   info.appendChild(el("span", "name", basename(d.path)));
-  const where = [dirOf(d.path), d.stage, d.kind].filter(Boolean).join(" · ");
+  // THE STAGE READS AS THE DOMAIN'S WORD (Copilot round 3); the raw value
+  // stays the filter's key, below.
+  const where = [dirOf(d.path), d.stage ? vocab.documentStageWord(d.stage) : "",
+                 d.kind].filter(Boolean).join(" · ");
   info.appendChild(el("div", "where", where));
   row.appendChild(info);
   const chips = el("span", "chips");
@@ -113,7 +121,8 @@ function selectControl(labelText, options) {
 function renderList(list, docs, onOpen) {
   list.innerHTML = "";
   if (!docs.length) {
-    list.appendChild(el("div", "empty", "no documents match the current filters"));
+    list.appendChild(el("div", "empty",
+      "no " + vocab.many(SOURCE) + " match the current filters"));
     return;
   }
   const byArea = new Map();
@@ -123,7 +132,7 @@ function renderList(list, docs, onOpen) {
     byArea.get(a).push(d);
   }
   // one header per area, in the fixed order — the "other" bucket can appear once
-  for (const area of AREA_ORDER) {
+  for (const area of areaOrder()) {
     const group = byArea.get(area);
     if (!group?.length) continue;
     list.appendChild(el("div", "docgroup", area + " (" + group.length + ")"));
@@ -132,6 +141,7 @@ function renderList(list, docs, onOpen) {
 }
 
 export function renderDocs(root, snapshot, opts) {
+  vocab = opts?.display || neutralDisplay();
   const onOpen = (opts || {}).onOpenDoc;
   const documents = snapshot.documents || [];
   root.innerHTML = "";
@@ -143,13 +153,17 @@ export function renderDocs(root, snapshot, opts) {
 
   const stages = [...new Set(documents.map((d) => d.stage).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
-  const areas = AREA_ORDER.filter((a) => documents.some((d) => areaOf(d.path) === a));
+  const areas = areaOrder().filter((a) => documents.some((d) => areaOf(d.path) === a));
   const hasDates = documents.some((d) => docDate(d));
 
   const state = { stage: "", area: "", sort: "path", search: "" };
 
   const bar = el("div", "filterbar");
-  const stageCtl = selectControl("stage", [["", "all"], ...stages.map((s) => [s, s])]);
+  // THE OPTION VALUE STAYS THE RAW ENUM — it is what `state.stage` compares
+  // against `d.stage` — and only the LABEL goes through the facet (Copilot
+  // round 3). Keeping the two apart is the whole of § 2.2 rule 3 at a filter.
+  const stageCtl = selectControl("stage",
+    [["", "all"], ...stages.map((s) => [s, vocab.documentStageWord(s)])]);
   const areaCtl = selectControl("area", [["", "all"], ...areas.map((a) => [a, a])]);
   const sortOptions = [["path", "path"], ["stage", "stage"]];
   if (hasDates) sortOptions.push(["recency", "recency"]);
@@ -174,7 +188,8 @@ export function renderDocs(root, snapshot, opts) {
   function apply() {
     const docs = visible();
     renderList(list, docs, onOpen);
-    count.textContent = docs.length + " of " + documents.length + " docs";
+    count.textContent = docs.length + " of " + documents.length + " "
+      + vocab.short(SOURCE);
   }
 
   stageCtl.sel.addEventListener("change", () => { state.stage = stageCtl.sel.value; apply(); });

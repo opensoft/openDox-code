@@ -782,7 +782,7 @@ def test_the_index_header_says_it_describes_the_stored_bytes(tab):
 def test_a_pre_template_fragment_renders_what_it_has(tab):
     assert [r["title"] for r in tab["pre"]["rows"]] == ["Background", "Why"]
     # its `xspec:`-fenced section is classified from the marker, not sniffed
-    assert [r["chip"] for r in tab["pre"]["rows"]] == ["added", "proposal element"]
+    assert [r["chip"] for r in tab["pre"]["rows"]] == ["added", "marked element"]
     assert tab["pre"]["viewerBody"] == 1
 
 
@@ -861,9 +861,21 @@ def test_this_slice_added_no_write_verb_and_no_transport():
         assert "fetch(" not in source
         assert "/actions/" not in source
         assert "edit-apply" not in source
-    # the pure model stays standalone-importable for the node harness (the same
-    # rule staging-workbench-model.js keeps): it imports nothing at all
-    assert not re.findall(r"^\s*import\s", model, re.MULTILINE)
+    # THE PURE MODEL STAYS STANDALONE-IMPORTABLE for the node harness -- the
+    # same rule `staging-workbench-model.js` keeps, AMENDED AT § 3.4 SLICE S7 to
+    # the shape `views/helpers.js`'s own scope note now records: the five pure
+    # models import EXACTLY ONE sibling, `./display.js`, which is import-free by
+    # design. A harness that copies one of them copies display.js beside it,
+    # which is a two-file closure rather than a one-file one; the property this
+    # assertion exists to hold -- that the model pulls in no DOM, no transport
+    # and no view -- is unchanged and is now stated as the rule rather than as
+    # "nothing at all".
+    imports = re.findall(r'^\s*import\s[^;]*?from\s+"([^"]+)";', model,
+                         re.MULTILINE | re.DOTALL)
+    assert imports == ["./display.js"], (
+        f"outline-model.js imports {imports}; the pure models may import "
+        f"./display.js and nothing else (slice S7, views/helpers.js's scope "
+        f"note).")
 
 
 # ---------------------------------------------------------------------------

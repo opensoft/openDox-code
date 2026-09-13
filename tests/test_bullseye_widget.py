@@ -1274,7 +1274,8 @@ def test_the_hovered_dot_pulses_and_the_selected_dot_has_its_own_colour():
 
     # the selection colour is its OWN token, defined in every theme block.
     # It was first drawn in `--edge-pick`, which is the same teal as
-    # `--st-staged`: measured rgb(31,168,152) for both a selected and an
+    # `--st-organized` (`--st-staged` before slice S7 named the four tokens by
+    # role): measured rgb(31,168,152) for both a selected and an
     # unselected dot, i.e. no change at all.
     assert "--picked:" in css
     assert css.count("--picked:") >= 3          # :root + both dark paths
@@ -2071,10 +2072,22 @@ def test_the_lens_names_its_scope_in_the_tile_vocabulary_so_a_session_opens(tmp_
     assert 'scopeKind: "staged",' in lens
     assert 'scopeKind: "staged-topic"' not in lens
 
+    # THE CANONICAL DECLARATION MOVED (§ 3.4 slice S7): `SESSION_SCOPE_KINDS`
+    # and `SCOPE_KINDS` are seam-key tables and now live together in
+    # `views/display.js`, which the class-C model imports and re-exports. Read
+    # them where they are declared — restoring a duplicate here is precisely
+    # what the move was for.
+    display = (WEB / "views" / "display.js").read_text(encoding="utf-8")
+    scopes = display.split("export const SCOPE_KINDS = {")[1].split("};")[0]
+    kinds = display.split("export const SESSION_SCOPE_KINDS = {")[1].split("};")[0]
+    # the lens's spelling must be a KEY of the map, never one of its values:
+    # `staged` is the TILE spelling (a `SCOPE_KINDS` value), and the session
+    # spelling it maps to is `staged-topic`
+    assert 'selection: "staged"' in scopes
+    assert '[SCOPE_KINDS.selection]: "staged-topic"' in kinds
+    assert '"staged"' not in kinds
+
     model = (WEB / "views" / "staging-workbench-model.js").read_text(encoding="utf-8")
-    kinds = model.split("export const SESSION_SCOPE_KINDS = {")[1].split("};")[0]
-    # the lens's spelling must be a KEY of the map, never one of its values
-    assert "staged: \"staged-topic\"" in kinds
     # and the request builder is what applies it — exactly once
     assert "sessionScopeKind(merged.scopeKind)" in model
     assert model.count("sessionScopeKind(merged.scopeKind)") == 1
