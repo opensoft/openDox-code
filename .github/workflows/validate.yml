@@ -173,6 +173,52 @@ jobs:
       # `views/staging-workbench-model.js` under the `node` the runner already has
       # (skipped, never failed, where node is absent), exactly as
       # `tests/test_view_registry.py` and `tests/test_split_route_tails.py` do.
+      # § 3.4 SLICE S8 UN-NARROWS THIS LIST FOR THE WEB SUITES, which is the
+      # half of RULED Q-L5 (b′) this slice was scoped to lift: the note's § 5
+      # S8 row says the narrowings "lift FOR THE WEB SUITES", and the S2
+      # paragraph above says of the DOM probes that "un-narrowing THAT CLASS OF
+      # TEST is slice S8's job, not S2's". Seventeen carved suites join the ten
+      # shape assertions here — 283 tests become 683 — and every one of them was
+      # run file-by-file under this exact invocation before it was named
+      # (openDox-code `build/s8-receive-web-tests`, measured 2026-09-13 at
+      # python 3.12.3 / pytest 8.4.2).
+      #
+      # WHAT THIS LIST STILL IS NOT: `python -m pytest -q` over the tree. That
+      # is measured and it is NOT S8's to deliver — with the root conftest in
+      # play the tree is 1188 errors and 0 passed, and 1126 of those are ONE
+      # line, `src/opendox/serve.py:192`'s `from ideation_dashboard import
+      # serve_openxfactory_lanes`, reached from the autouse
+      # `declared_human_console` fixture (`tests/session_fixtures.py:413` ->
+      # `opendox.cli` -> `opendox.serve`) that `tests/conftest.py` re-exports for
+      # the whole tree. `tests/test_consumer_reach.py`'s `STILL_REACHING` records
+      # that reach BY NAME and asserts it still fails — "whose rewrite target
+      # exists at neither carve destination" — and RULED Q-L5 (b′)'s own sentence
+      # at the head of this block says the rest of the narrowing stands "until
+      # the BUILD arc (split-opendox § 3.5/3.6) inverts the openDox -> openXdox
+      # dependency". So the remaining narrowing is the BUILD arc's to lift, on
+      # the record, rather than bought here with a `--continue-on-collection-
+      # errors` or an ignore list.
+      #
+      # FOUR SUITES S8 REPAIRED TO GET HERE, all of them the same defect class —
+      # a PATH CONSTANT the carve's `import rewrites` edit never rewrote, each
+      # declared on its own row in the paired openxFactory annotation:
+      # `test_outline_model.py`'s `parents[2]` (the openDox-code #19
+      # conftest-depth defect one file over: 48 failed -> 47 passed),
+      # `test_doxbench_view.py`'s `tests/ideation-dashboard/fixtures/` (73 errors
+      # -> 124 passed), and the three `scripts/ideation_dashboard/<module>.py`
+      # module reads in `test_doxbench_knowledge.py` (21 failed -> 56 passed),
+      # `test_doxbench_document_abstract.py` (2 -> 54 passed) and
+      # `test_doxbench_memory_gateway.py` (12 failed -> 3).
+      #
+      # `--noconftest` STAYS, and it is why this list is a list. The root
+      # conftest's `collect_ignore` and `tests/conftest.py`'s autouse fixtures are
+      # both written for a tree that can import `opendox.serve`; until it can,
+      # a file named here has to stand on its own, and each of the seventeen
+      # does. Five green-under-noconftest suites are deliberately NOT named:
+      # `test_doxbench_bridge_live.py` and `test_openprofiler_broker_e2e.py` are
+      # all-skip without a live bridge, and `test_boundary.py`,
+      # `test_provider_boundary.py` and `test_workbench.py` each carry a
+      # standing red this slice does not own (§ 3 of the S8 inventory).
       - name: pytest
         run: >-
           python -m pytest -q
@@ -186,4 +232,21 @@ jobs:
           tests/test_source_core_arm.py
           tests/test_gate_loop_contributed.py
           tests/test_display_facet.py
+          tests/test_account_menu_dom.py
+          tests/test_doc_wheel.py
+          tests/test_doxbench_accessibility.py
+          tests/test_doxbench_context_panes.py
+          tests/test_doxbench_document_abstract.py
+          tests/test_doxbench_hash.py
+          tests/test_doxbench_knowledge.py
+          tests/test_doxbench_privacy.py
+          tests/test_doxbench_proposal_discard.py
+          tests/test_doxbench_proposals.py
+          tests/test_doxbench_state.py
+          tests/test_doxbench_thread_switch.py
+          tests/test_doxbench_workspace.py
+          tests/test_intent_binding_dom.py
+          tests/test_lens_labels_at_scale.py
+          tests/test_smoke_signals.py
+          tests/test_wheel_paint_and_reach.py
           --noconftest

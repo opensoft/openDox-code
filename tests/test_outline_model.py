@@ -19,7 +19,11 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# ONE LEVEL ABOVE `tests/`, not two — the openDox-code #19 defect, one file
+# over. `parents[2]` resolved OUTSIDE this repository, so node was handed
+# `<parent-of-repo>/src/opendox/web/views/outline-model.js` and every one of
+# this suite's 48 cases died `ERR_MODULE_NOT_FOUND` (§ 3.4 slice S8).
+REPO_ROOT = Path(__file__).resolve().parents[1]
 MODEL_JS = REPO_ROOT / "src/opendox/web/views/outline-model.js"
 NODE = shutil.which("node")
 

@@ -300,10 +300,12 @@ VIEWER_JS = (
 VENDOR_MARKDOWN_JS = (
     REPO_ROOT / "src" / "opendox" / "web" / "vendor" / "markdown-it.min.js"
 )
+# `tests/fixtures/`, not the PRE-CARVE `tests/ideation-dashboard/fixtures/`:
+# the carve placed this suite one directory shallower and its fixture with
+# it, and this constant was never rewritten (§ 3.4 slice S8).
 PREVIEW_CASES_PATH = (
     REPO_ROOT
     / "tests"
-    / "ideation-dashboard"
     / "fixtures"
     / "doxbench_preview_cases.json"
 )

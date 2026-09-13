@@ -29,8 +29,9 @@ from opendox import doxbench_memory_gateway as mg  # noqa: E402
 from opendox import doxbench_packet as pk  # noqa: E402
 from opendox import doxbench_telemetry as tel  # noqa: E402
 
-MODULE_PATH = (REPO_ROOT / "scripts" / "ideation_dashboard"
-               / "doxbench_memory_gateway.py")
+# `src/opendox/`, not the PRE-CARVE `scripts/ideation_dashboard/`
+# (§ 3.4 slice S8).
+MODULE_PATH = REPO_ROOT / "src" / "opendox" / "doxbench_memory_gateway.py"
 SPEC_PATH = REPO_ROOT / "openspec" / "specs" / "memory-gateway" / "spec.md"
 
 

@@ -1674,7 +1674,8 @@ def test_the_serve_declares_the_repository_it_can_write_to():
     `refuse_foreign_repository`. The serve declares it instead, from the same
     authority the refusal uses, so the two cannot disagree.
     """
-    serve = (REPO_ROOT / "scripts" / "ideation_dashboard" / "serve.py").read_text(
+    # `src/opendox/serve.py`, not the PRE-CARVE path (§ 3.4 slice S8).
+    serve = (REPO_ROOT / "src" / "opendox" / "serve.py").read_text(
         encoding="utf-8")
     caps_route = serve.split("if path == CAPABILITIES_ROUTE:")[1].split(
         "if path == WORKBENCH_MODEL_CATALOG_ROUTE:")[0]
