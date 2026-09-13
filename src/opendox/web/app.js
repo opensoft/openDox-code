@@ -1096,6 +1096,17 @@ async function render() {
     const disposeView = await resolveContributed("gate.dispose");
     const createView = await resolveContributed("gate.workbench.create");
     const sessionView = await resolveContributed("gate.workbench.session");
+    // A RENDER THAT LOST ITS SCOPE WHILE RESOLVING STOPS HERE (Copilot review,
+    // round 4). Each resolve above may await a dynamic import, so a repository
+    // switch can begin the next render — and abort this scope — while one is in
+    // flight. Everything below MOUNTS: the page-overlay host, the dispose panel
+    // into it, and every region's core render. The generic pass's own signal
+    // check (round 3) cannot undo a shell mount that already happened, so the
+    // stale render must not reach one. Stopping here is the same rule every
+    // listener this render binds already follows — it honours the signal it was
+    // handed — applied to the one stretch of `render()` that awaits before it
+    // writes to the page.
+    if (signal.aborted) return;
     // THE DECLARED NAMESPACES, handed down already-resolved so that no class-A
     // or class-C module in this bundle imports a class-B one (§ 4.5 assertion
     // 3). Each is the binding's DECLARED namespace and nothing wider: RULED Q2
@@ -1563,6 +1574,13 @@ async function render() {
   // render; the alternative is an unhandled rejection in the console and a tab
   // that silently lacks its panel.
   function reportAssemblyFailure(err) {
+    // AND NOT FROM A RENDER THAT LOST ITS SCOPE (Copilot review, round 4 — the
+    // error path of the same finding). This closure belongs to ONE render, and
+    // the per-region pass hands it rejections that can arrive minutes later. A
+    // refusal from a render the user has already switched away from would be
+    // written over the live render's own surface, describing a column probed
+    // for a repository no longer on screen. The live render reports its own.
+    if (signal.aborted) return;
     // RE-INSERT THE HOST IF A SUCCESSFUL RENDER ALREADY REMOVED IT (Copilot
     // round 3). The initial render ends with `status.remove()`, so a refusal
     // arriving from the per-region pass on a tab's first render — or on any

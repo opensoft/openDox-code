@@ -647,6 +647,33 @@ console.log(JSON.stringify({{
     assert result["mounted"] is False
 
 
+def test_a_render_that_lost_its_scope_while_resolving_mounts_nothing() -> None:
+    """THE SIX CONTRIBUTED RESOLVES AWAIT DYNAMIC IMPORTS, AND EVERYTHING AFTER
+    THEM MOUNTS (Copilot review of this PR, round 4). A repository switch during
+    one of those imports aborts this render's scope, but the old render still
+    resumes after the awaits — and `mountContributedViews`'s own signal check
+    (round 3) cannot undo a shell mount that already happened: the page-overlay
+    host, the dispose panel mounted into it, and every region's core render all
+    run BEFORE the generic pass. So the render that lost its scope stops between
+    the last resolve and the first mount, and its error path stops with it."""
+    app = _app()
+    guard = "if (signal.aborted) return;"
+    assert app.count(guard) == 2, app.count(guard)
+    stop = app.index(guard)
+    # AFTER the last of the six resolves — all six are awaited before the stop,
+    # so none of them is left half-resolved for the next render to inherit
+    assert app.index('await resolveContributed("gate.workbench.session")') < stop
+    # and BEFORE anything this render hands down, hosts, mounts or renders
+    assert stop < app.index("const disposeColumn = disposeView")
+    assert stop < app.index("const pageOverlayHost = ensurePageOverlayHost();")
+    assert stop < app.index("mountExplorer(explorerRoot")
+    # the error path of the same finding: a refusal from a render the user has
+    # already switched away from is dropped, not written over the live one's
+    report = app.index("function reportAssemblyFailure(err) {")
+    assert report < app.index(guard, report) < app.index(
+        "const host = ensureStatusHost();", report)
+
+
 def test_a_late_assembly_refusal_still_has_somewhere_to_be_written() -> None:
     """`render()` ends with `status.remove()`, and every later render then reads
     `null` for `#loadstatus` — so a `ViewBindingError` raised by the per-region
