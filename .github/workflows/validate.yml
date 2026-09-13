@@ -130,6 +130,24 @@ jobs:
       # at either leg, which is precisely what `tests/test_consumer_reach.py`'s
       # `STILL_REACHING` records. It carries NO `xfail`: nothing it measures is
       # a defect awaiting a later slice.
+      # § 3.4 SLICE S5 adds `tests/test_gate_loop_contributed.py`, on the same
+      # footing as its six neighbours. S5 is "contribute the gate loop": the six
+      # class-B modules leave this bundle for openXdox-code's package data and
+      # arrive back as contributed `ViewBinding`s (RULED Q1-Q12,
+      # openxFactory#656 comments 5648044785 / 5648049748 / 5648065587, Brett
+      # Heap, 2026-09-12). `tests/test_web_boundary.py` measures the BOUNDARY
+      # and would be just as green if the gate loop had been DELETED; this file
+      # measures the other half — the seam the modules left through, the
+      # declared namespace bounding what the shell may reach, `requires`
+      # evaluated, the generic mount pass, `ViewBindingError` surfaced
+      # separately, and the slice's own success test: that a student install
+      # comes up with no gate bar, no dispose tray, no session verbs and no 404.
+      #
+      # `--noconftest` safe and needs no consumer: it imports
+      # `opendox.view_extension` alone, reads bundle files as text, and drives
+      # the real `views/view_extension.js` under the `node` the runner already
+      # has (skipped, never failed, where node is absent), exactly as
+      # `tests/test_view_registry.py` and `tests/test_split_route_tails.py` do.
       - name: pytest
         run: >-
           python -m pytest -q
@@ -141,4 +159,5 @@ jobs:
           tests/test_view_registry.py
           tests/test_split_route_tails.py
           tests/test_source_core_arm.py
+          tests/test_gate_loop_contributed.py
           --noconftest

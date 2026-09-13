@@ -116,6 +116,39 @@ py-modules = ["route_extension", "subcommand_extension"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# THE SERVED BUNDLE, PACKAGED — § 3.4 slice S5, and it is a gap this slice had
+# to close to make RULED Q5 true rather than true-in-a-source-checkout.
+#
+# THE MEASUREMENT. `setuptools` puts `*.py` into a wheel and nothing else unless
+# a package declares otherwise, and this file declared nothing, so
+# `pip install opendox` produced a package with NO `opendox/web/` in it at all:
+# no `app.js`, no `index.html`, no `styles.css`, no `views/`. `build_server()`
+# serves ONE directory and its default `--web-dir` is that directory, so an
+# INSTALLED openDox could not serve the dashboard — only a source checkout
+# could. Nothing noticed because every consumer to date has been an editable
+# install, which puts `src/` on the path directly instead of packaging it. It is
+# the same class of defect RULED Q-L8 (a) found in `py-modules` above, one
+# directory over.
+#
+# WHY SLICE S5 IS THE SLICE THAT CLOSES IT. RULED Q5 (openxFactory#656 comment
+# `5648044785`, Brett Heap, 2026-09-12) makes the COMPOSED DEPLOYMENT assemble
+# the bundle: "openXdox ships its view modules as package data; the composed
+# install copies them into openDox's one `--web-dir` at assembly". openXdox's
+# `openxdox.web_assets.install_view_modules(web_dir)` copies INTO this
+# directory — so if a wheel install has no directory to copy into, the primary
+# mechanism of Q5 has nowhere to run and every composed install is forced onto
+# the hosted GET fallback by a packaging omission rather than by a deployment
+# choice.
+#
+# `web/**` and not a list: the bundle is 41 files across one subdirectory and
+# grows by feature, and a hand-kept list would drift the first time a view is
+# added. `tests/test_web_boundary.py`'s census is what holds the DIRECTORY
+# honest — every file under `src/opendox/web/` carries a declared row with a
+# class, and an unrowed file fails immediately — so the glob here ships exactly
+# what that census counts rather than whatever happens to be on disk.
+[tool.setuptools.package-data]
+opendox = ["web/**"]
+
 [tool.pytest.ini_options]
 # The ROOTDIR ANCHOR. With no pytest ini table anywhere, pytest infers a
 # rootdir from the arguments it is handed, so `pytest -q` and `pytest tests/`

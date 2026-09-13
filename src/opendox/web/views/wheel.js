@@ -70,9 +70,59 @@ import { actionRowIsStale,
   primaryFragmentPath, fragmentSummary, packetGroups,
   healthIndicator, healthBlock, jumpRepository } from "./wheel-model.js";
 import { el } from "./helpers.js";
-import { appliedOutcome, commissionedVerb, commissionedWorkflow, gateCapable,
-  mountDisposeTray, mountProposeButton, mountWheelVerb, panelEntry } from "./dispose.js";
-import { feedActor, intentCapable, refusalLine, startIntentFeed, statesByTarget }
+// THE DISPOSE COLUMN IS NOT IMPORTED HERE ANY MORE (§ 3.4 slice S5).
+//
+// This was `import { appliedOutcome, commissionedVerb, commissionedWorkflow,
+// gateCapable, mountDisposeTray, mountProposeButton, mountWheelVerb, panelEntry }
+// from ./dispose.js` — a CLASS-C file importing a CLASS-B module, one of the
+// four breaches openDox-spec `docs/front-end-package-boundary.md` § 4.5
+// assertion 3 measures, and the reason a student install failed to LOAD rather
+// than rendering without the gate loop. `views/dispose.js` has left this bundle:
+// it is openXdox's package data now, contributed as the `gate.dispose` binding
+// (RULED Q5, openxFactory#656 comment `5648044785`).
+//
+// The eight names arrive through the REGISTRY instead: `app.js` resolves the
+// binding once per render and hands its DECLARED NAMESPACE (RULED Q2) down as
+// `ctx.dispose`, which `renderWheel` installs below. Null — no gate column
+// registered — is `NO_DISPOSE_COLUMN`, whose `gateCapable()` answers false, so
+// every affordance this file gates on the capability is simply not offered and
+// nothing here needs a second branch. That is § 4.2's "late, named and
+// refusable" in the browser, and it is the shape `views/intent-binding.js`
+// already established at slice S2.
+const NO_DISPOSE_COLUMN = Object.freeze({
+  appliedOutcome: () => null,
+  commissionedVerb: () => null,
+  commissionedWorkflow: () => null,
+  gateCapable: () => false,
+  mountDisposeTray: () => null,
+  mountProposeButton: () => null,
+  mountWheelVerb: () => null,
+  panelEntry: () => null,
+});
+
+//: THE COLUMN TRAVELS IN `opts`, NOT IN A MODULE VARIABLE (Copilot review of
+//: openDox-code#20, round 2). It was a module-level `let` that `renderWheel`
+//: assigned, on the argument that `ACTION_MOUNTERS` is a module-level table and
+//: threading the column through it would be a parameter that exists only to be
+//: forwarded. That argument was wrong about the hazard it was trading against:
+//: the table is module-level, but every mounter is CALLED from inside a render
+//: closure and the table's own `opts` is built there. A module variable, by
+//: contrast, is shared by every live render — a second `renderWheel` (a
+//: snapshot refresh, a drill-in composed render whose tiles are deliberately
+//: NOT gate-bearing) overwrites the column the first render's in-flight
+//: completion callbacks still read, and the first wheel then applies the second
+//: render's verbs. `opts` already carries `label`, `actionId`, `wheelKey`,
+//: `nav` and `notebook`; the column joins them, and the mounters read it from
+//: there.
+// `emitIntent` and `renderIntentChips` join this import for the CONTRIBUTED
+// tray's sake — RULED counterpart Q6 (opensoft/openxFactory#656 comment
+// `5649094228`, Brett Heap, 2026-09-12): a contributed view module may import
+// `./views/helpers.js` and nothing else, so `views/dispose.js` (openXdox's
+// package data since slice S5) reaches this module's emitter and chip renderer
+// through the `intent` context THIS file already builds for it, and never
+// through a static import of its own.
+import { emitIntent, feedActor, intentCapable, refusalLine, renderIntentChips,
+         startIntentFeed, statesByTarget }
   from "./intent-binding.js";
 import { notebookCapable } from "./notebook.js";
 import { SETTINGS_EVENT, currentDrumFactor } from "./settings.js";
@@ -133,17 +183,17 @@ const summaryCache = new Map();
 // /source pass-through above, parsed by the pure `landedFromDeltas`; `packet`
 // opens the same kind of flyout straight from snapshot data.
 const ACTION_MOUNTERS = {
-  propose: (row, item, opts) => mountProposeButton(row, item, { ...opts, compact: true }),
+  propose: (row, item, opts) => opts.dispose.mountProposeButton(row, item, { ...opts, compact: true }),
   // 011 add-wheel-action-verbs: one generic mounter, four verbs. `actionId` is
   // the verb, so the mounter needs no per-verb branch here.
   "promote-to-staging": (row, item, opts) =>
-    mountWheelVerb(row, item, { ...opts, verb: "promote-to-staging" }),
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "promote-to-staging" }),
   "research-brief": (row, item, opts) =>
-    mountWheelVerb(row, item, { ...opts, verb: "research-brief" }),
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "research-brief" }),
   "derive-possibles": (row, item, opts) =>
-    mountWheelVerb(row, item, { ...opts, verb: "derive-possibles" }),
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "derive-possibles" }),
   demote: (row, item, opts) =>
-    mountWheelVerb(row, item, { ...opts, verb: "demote" }),
+    opts.dispose.mountWheelVerb(row, item, { ...opts, verb: "demote" }),
   // add-project-merged-projection (D10): the composed view's ONE verb — jump
   // to the tile's member repository (store the key + reload, the ratified
   // selector posture). Pure navigation; nothing is recorded or persisted.
@@ -356,6 +406,12 @@ function threadPath(x0, y0, x1, y1) {
 }
 
 export function renderWheel(root, snapshot, ctx) {
+  // THE CONTRIBUTED DISPOSE COLUMN, bound to THIS render. The shell resolved
+  // the `gate.dispose` binding and handed its declared namespace down; absent,
+  // the null column above makes every gate affordance unoffered rather than
+  // undefined. A `const` in the render closure and not a module variable: two
+  // live renders must not share it (Copilot review, round 2).
+  const disposeColumn = ctx?.dispose || NO_DISPOSE_COLUMN;
   const signal = ctx?.signal;
   const caps = ctx?.caps || null;
   // Cross-view navigation callbacks from the app shell (app.js): openDoc(path,
@@ -424,7 +480,7 @@ export function renderWheel(root, snapshot, ctx) {
     actor: feedActor(caps),
     // A stalled row is NOT a refusal - `refusalLine` already writes "not
     // started" for it, and the panel's label has to agree with its own text.
-    onRefusal: (rec) => panelEntry(rec.state === "stalled" ? "stalled" : "refused",
+    onRefusal: (rec) => disposeColumn.panelEntry(rec.state === "stalled" ? "stalled" : "refused",
       refusalLine(rec)),
   }) : null;
   // target id -> the newest feed state for it, rebuilt ONCE per update so the
@@ -1171,7 +1227,7 @@ export function renderWheel(root, snapshot, ctx) {
   };
   function sessionActOn(wheelKey, itemId) {
     for (const verb of WHEEL_VERBS_BY_COLUMN[wheelKey] || []) {
-      if (commissionedVerb(verb, itemId)) return verb;
+      if (disposeColumn.commissionedVerb(verb, itemId)) return verb;
     }
     return null;
   }
@@ -1182,7 +1238,7 @@ export function renderWheel(root, snapshot, ctx) {
     if (!isExpanded) { if (existing) existing.remove(); return; }
     const item = w.items[idx];
     const env = {
-      gate: gateCapable(caps),
+      gate: disposeColumn.gateCapable(caps),
       // add-project-merged-projection (D10): a composed render's tiles offer
       // the open-in-repo jump and nothing gate-bearing (the app shell also
       // strips the acting capabilities, so `gate` above is already false).
@@ -1192,8 +1248,8 @@ export function renderWheel(root, snapshot, ctx) {
       // boolean and means "THIS verb's act is recorded for this tile this
       // session". Retirement REMOVES the row (there is no disabled control
       // left for a keyboard user to meet).
-      commissioned: (verbId) => !!commissionedVerb(verbId, item.id),
-      applied: appliedOutcome(item.id),
+      commissioned: (verbId) => !!disposeColumn.commissionedVerb(verbId, item.id),
+      applied: disposeColumn.appliedOutcome(item.id),
       // the notebook action's OWN capability (the same /capabilities probe, a
       // different flag): it is live only on a loopback local backend with nlm.
       notebook: notebookCapable(caps),
@@ -1221,6 +1277,10 @@ export function renderWheel(root, snapshot, ctx) {
         mount(row, item, {
           label: spec.label,
           actionId: spec.id,
+          // THIS render's contributed column (Copilot review, round 2): the
+          // mounter table is module-level, so the column reaches it the way
+          // every other per-render fact does.
+          dispose: disposeColumn,
           wheelKey: w.key,
           nav,
           notebook,
@@ -1425,7 +1485,7 @@ export function renderWheel(root, snapshot, ctx) {
       // demotion is visible without touching the snapshot (FR-034). View state
       // only: nothing is persisted and a reload clears it.
       const appliedVerdict = w.items[idx]
-        ? ((w.key === "possibles" ? appliedOutcome(w.items[idx].id) : null)
+        ? ((w.key === "possibles" ? disposeColumn.appliedOutcome(w.items[idx].id) : null)
            || sessionActOn(w.key, w.items[idx].id))
         : null;
       const isExpanded = !!w.items[idx] && isExpandedTile(expanded, w.key, idx);
@@ -1495,18 +1555,25 @@ export function renderWheel(root, snapshot, ctx) {
     // through intent emission. The two capabilities are mutually exclusive by
     // construction (serve.py: `intent = not loopback`), so exactly one
     // transport is ever handed to the tray.
-    if (key === "possibles" && focus && (gateCapable(caps) || intentCapable(caps))) {
+    if (key === "possibles" && focus && (disposeColumn.gateCapable(caps) || intentCapable(caps))) {
       const item = wheelByKey("possibles").items[focus.i];
-      const hosted = !gateCapable(caps) && intentCapable(caps);
+      const hosted = !disposeColumn.gateCapable(caps) && intentCapable(caps);
       // The session-local applied overlay belongs to the LOCAL executing path;
       // hosted decisions are reported by the feed, so it never suppresses the
       // hosted tray (a resubmission is the inbox's idempotency problem, and
       // the human can see its own pending chip).
-      if (item?.derivedPending && (hosted || !appliedOutcome(item.id))) {
-        mountDisposeTray(rail, item, {
+      if (item?.derivedPending && (hosted || !disposeColumn.appliedOutcome(item.id))) {
+        disposeColumn.mountDisposeTray(rail, item, {
           onApplied: () => { railKey = ""; drawAll(); },
           onEmitted: () => { railKey = ""; drawAll(); if (intentFeed) intentFeed.refresh(); },
           intent: hosted ? {
+            // RULED counterpart Q6: the EMITTER and the CHIP RENDERER travel
+            // with the rest of the hosted context. The tray used to fall back
+            // to `emitIntent` through an import of its own; a fallback into a
+            // module a contributed binding may not import is a refusal, not a
+            // default, so the transport is supplied here or the tray refuses.
+            emit: emitIntent,
+            renderChips: renderIntentChips,
             // D4: the revision the human is LOOKING at, full and unabbreviated
             // (the header renders a 12-char prefix of this same field).
             snapshotRev: snapshot?.generation?.source_revision || "",

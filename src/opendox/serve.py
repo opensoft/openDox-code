@@ -145,6 +145,10 @@ from opendox import doxbench_telemetry  # noqa: E402
 # drift guard holds the literals together.
 from opendox import consumer_reach  # noqa: E402
 from opendox import defaults  # noqa: E402
+# § 3.4 slice S5: `build_server()` publishes the VIEW MANIFEST on
+# `/capabilities`, the one line slice S3 built both ends of and left for the
+# slice at which a contribution first exists to deliver.
+from opendox import view_extension  # noqa: E402
 
 registry_mod = consumer_reach.snapshot_registry  # noqa: E402
 # THE BY-FUNCTION SPLIT (`split-opendox-two-layer-product` § 2.4, PRs 2 and 3
@@ -1702,6 +1706,66 @@ def build_server(
     # (no writable checkout) means no create is possible, which is the honest
     # reading of a plane that cannot name one.
 
+    # ---- THE VIEW MANIFEST, PUBLISHED (§ 3.4 slice S5) ----------------------
+    #
+    # THE ONE LINE SLICE S3 BUILT BOTH ENDS OF AND DELIBERATELY DID NOT WRITE.
+    # `opendox/view_extension.py` says so of itself: "The ONE line that puts it
+    # there (`capabilities["views"] = view_manifest(...)` in
+    # `serve.build_server`) is NOT written by slice S3 ... S5, the slice at
+    # which a contribution first EXISTS to deliver, joins them in its own
+    # declared-edit window." A contribution exists now — openXdox-code's
+    # `view_extensions.VIEW_EXTENSIONS`, six gate-loop bindings — so the two
+    # ends are joined here.
+    #
+    # NO NEW ROUTE AND NO SECOND FETCH, which is § 4.3's rule for the profile's
+    # display facet applied unchanged: the manifest rides on `/capabilities`,
+    # the payload `views/notebook.js`'s `probeCapabilities()` already fetches
+    # once at load. A shell served as a static image 404s that route and reads
+    # an empty consumer column, which is how a student install comes up with no
+    # gate bar and no 404.
+    #
+    # COLLECTED THE WAY THE ROUTES ARE, three statements above: the host's
+    # contributed extensions through ONE `collect_view_bindings`, checked
+    # against the routes THIS assembly actually contributed — so a class-A or
+    # class-C binding naming `/actions/gate/*` is refused where the server is
+    # built rather than discovered in a browser. Class B is exempt by
+    # construction, which is the boundary working.
+    #
+    # ABSENT IS AN EMPTY COLUMN, MALFORMED FAILS CLOSED, and the asymmetry is
+    # `host_view_extensions`' own: a host registered with no `VIEW_EXTENSIONS`
+    # facet gets `host_facet: "absent"` with its profile NAMED, never a refusal,
+    # because every host has yet to grow the facet and refusing would be a flag
+    # day imposed by the seam that exists to avoid one.
+    #
+    # PRESENCE, NOT TRUTHINESS (Copilot review, round 2). `host_view_facet`
+    # answers BOTH halves in one read: a host that declares `VIEW_EXTENSIONS =
+    # ()` is "declared" with an empty column, and a host that never grew the
+    # facet is "absent" — the same empty tuple, two different facts, and a
+    # conditional on the tuple's TRUTHINESS reported both as the second. That is
+    # the diagnostic this manifest exists to carry, so it is read the way it is
+    # written.
+    host_facet, view_extensions = view_extension.host_view_facet(
+        profile_openxfactory)
+    capabilities["views"] = view_extension.view_manifest(
+        view_extension.collect_view_bindings(
+            view_extensions, contributed_routes=route_bindings),
+        contributed_routes=route_bindings,
+        host_facet=host_facet,
+        # THE PROFILE'S NAME COMES THROUGH THE ESTATE'S OWN NAMER, never off a
+        # dunder (Copilot review, round 3). `getattr(profile_openxfactory,
+        # "__name__", None)` could only ever answer `None`:
+        # `_LateProfile.__getattr__` refuses every dunder BY DESIGN, so that
+        # `copy`, `pickle`, `inspect` and pytest's assertion rewriting cannot
+        # fire the composition point by probing. The manifest's named-absence
+        # contract — "a host IS registered and simply does not contribute
+        # panels, which is a different fact from no host at all" — needs the
+        # name, and it was blank in every payload this serve published.
+        # `view_extension.host_profile_name()` resolves the profile the way
+        # `profile_proxy`'s own refusal does, through
+        # `domain_profile.name_of()`, so both accessors of ONE registration name
+        # a profile the same way.
+        host_profile=view_extension.host_profile_name(profile_openxfactory),
+    )
 
     bound = type("BoundDashboardHandler", (DashboardHandler,), {
         "checkout_root": checkout_root,

@@ -620,27 +620,66 @@ def test_app_js_no_longer_imports_the_gate_module():
     assert "./views/view_extension.js" in imports
 
 
-def test_app_js_declares_the_gate_bar_as_an_optional_class_b_binding():
+def test_app_js_no_longer_declares_the_gate_bar_in_its_core_arm():
+    """AMENDED BY SLICE S5, and the amendment is the proof S3 was right.
+
+    This test asserted the `gate.bar` entry's every field in `app.js`'s CORE
+    arm, and S3's own comment beside that entry said what would happen next:
+    "it is in the CORE arm and that is TRANSITIONAL. `gate.js` is still a file
+    of this bundle; slice S5 moves the four class-B files behind a binding
+    openXdox supplies, at which point this entry is deleted and the identical
+    binding arrives through `contributedViewBindings()`. Nothing else in this
+    file changes when it does -- which is the test of whether the seam was drawn
+    in the right place."
+
+    It has. The entry is gone, `views/gate.js` is gone, and what replaced them
+    is a declaration in openXdox-code's `src/openxdox/view_extensions.py` with
+    the module shipped as that package's data (RULED Q5, openxFactory#656
+    comment 5648044785). So this test now asserts the ABSENCE -- of the entry,
+    of the module, and of any gate route literal anywhere in the shell -- which
+    is the S3 promise discharged rather than an assertion retired.
+    """
     source = APP_JS.read_text(encoding="utf-8")
-    assert 'id: "gate.bar"' in source
-    assert 'module: "./views/gate.js", entry: "mountGateBar", view_class: "B"' in source
-    assert 'routes: ["/actions/gate/ratify"]' in source
-    assert "optional: true" in source
+    assert 'id: "gate.bar"' not in source, (
+        "app.js still declares the `gate.bar` binding in its CORE arm; slice S5 "
+        "moves it to the contributed column")
+    assert not (WEB / "views" / "gate.js").exists(), (
+        "views/gate.js is still in this bundle: slice S5 moves the gate loop's "
+        "six class-B modules to openXdox-code's package data")
+    # NO GATE ROUTE LITERAL SURVIVES IN THE SHELL. § 4.5 assertion 2's six
+    # remaining sites were this entry and slice S4's two, and they closed
+    # together.
+    assert '"/actions/gate/' not in source, (
+        "app.js still names a gate route; every one of them travels with the "
+        "binding that calls it, and every one of those bindings is contributed "
+        "now (RULED Q3, openxFactory#656 comment 5642758731)")
 
 
-def test_app_js_mounts_the_gate_bar_through_its_declared_entry():
+def test_app_js_mounts_a_contributed_binding_through_its_declared_entry():
     """The viewer's `mountGate` adapter must call the RESOLVED binding's own
     declared `entry` export, not a name this file happens to remember (Copilot
-    review thread on this PR, `app.js:994`). `resolveView()` already validates
+    review thread on PR #14, `app.js:994`). `resolveView()` already validates
     that `binding.entry` names a callable export of `binding.module`; a
     contributed `gate.bar` binding can declare any entry name and export a
     DIFFERENT callable under it, and a hardcoded `mountGateBar` would then
     either mount the wrong function or throw on `undefined`. The negative
     assertion is the regression guard: the fix is a one-token change a later
-    edit could silently revert back to the hardcoded name."""
+    edit could silently revert back to the hardcoded name.
+
+    AMENDED BY SLICE S5 for RULED Q3 (openxFactory#656 comment 5648044785):
+    "ONE mount signature, `mount(host, snapshot, ctx)`; the gate bar's
+    `(container, ctx, opts)` is recorded as the one declared exception until S5
+    rewrites it." This is that rewrite -- the viewer's per-artifact context
+    travels as `ctx.gate` and the probe as `ctx.caps`, so the shell now has
+    exactly one mount shape and this file no longer teaches a second one.
+    """
     source = APP_JS.read_text(encoding="utf-8")
-    assert "gateView.exports[gateView.binding.entry](host, gctx, { caps })" in source
-    assert "gateView.exports.mountGateBar(host, gctx, { caps })" not in source
+    assert ("gateView.exports[gateView.binding.entry](\n"
+            "                host, snapshot, { gate: gctx, caps })") in source
+    assert "gateView.exports.mountGateBar(" not in source
+    assert "(host, gctx, { caps })" not in source, (
+        "the gate bar's `(container, ctx, opts)` signature is still here; RULED "
+        "Q3 ends that declared exception at this slice")
 
 
 def test_app_js_wires_the_doc_list_through_the_registry():

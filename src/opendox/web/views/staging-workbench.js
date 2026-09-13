@@ -82,14 +82,64 @@ import {
   documentAbstract, docWheelEntries, existingOnTopic,
   abstractRegionState, abstractSubjectDigest,
 } from "./staging-workbench-model.js";
+// THE MODEL, AS A NAMESPACE, BECAUSE THE CONTRIBUTED COLUMN REACHES IT THROUGH
+// `ctx` — RULED counterpart Q6 (opensoft/openxFactory#656 comment `5649094228`,
+// Brett Heap, 2026-09-12): "what a CONTRIBUTED view module may IMPORT from
+// openDox's bundle: `./views/helpers.js` and NOTHING ELSE. Every other need
+// reaches the binding through its `ctx` (Q1-Q4) or its own package (Q5)."
+//
+// `views/swb-create.js` and `views/swb-session.js` took five and nine names
+// from this model by static import while they lived in this bundle. They are
+// openXdox's package data now, and the model is still openDox's — so the SHELL
+// hands it down at the mount, in the ctx it already builds, and openDox keeps
+// the one definition of its own request bodies. The namespace and not a picked
+// set: the binding declares which names it needs (`CTX_MODEL_REACH`) and
+// refuses by name when one is missing, which is a contract this file cannot
+// improve on by re-listing it.
+import * as workbenchModel from "./staging-workbench-model.js";
 import { renderDocWheel } from "./doc-wheel.js";
 import { buildLensModel } from "./lens-model.js";
 import { renderBullseye } from "./bullseye.js";
-import { mountCreateAffordance, openCreateDialog, createGateLive } from "./swb-create.js";
-import {
-  createdDocuments, documentCreated, endedSessions, mountSessionAffordances,
-  openedSessions, sessionOpened,
-} from "./swb-session.js";
+// THE TWO WORKBENCH CLASS-B MODULES ARE NOT IMPORTED HERE ANY MORE (§ 3.4
+// slice S5). These were `import { mountCreateAffordance, openCreateDialog,
+// createGateLive } from ./swb-create.js` and a six-name import from
+// ./swb-session.js — two of the four breaches openDox-spec
+// `docs/front-end-package-boundary.md` § 4.5 assertion 3 measures, a CLASS-C
+// file statically importing CLASS-B modules, and the reason a student install
+// failed to LOAD rather than coming up without the session verbs.
+//
+// Both modules are openXdox's package data now, contributed as the
+// `gate.workbench.create` and `gate.workbench.session` bindings (RULED Q5,
+// openxFactory#656 comment `5648044785`). `app.js` resolves both once per
+// render and hands their DECLARED NAMESPACES (RULED Q2) down as `gate.create`
+// and `gate.session`; `mountStagingWorkbench` installs them below. Absent, the
+// null columns answer "no gate capability" and "no sessions", so this file's
+// existing capability branches do the whole gating and nothing here needs a
+// second one — § 4.2's "late, named and refusable", in the browser.
+const NO_CREATE_COLUMN = Object.freeze({
+  createGateLive: () => false,
+  mountCreateAffordance: () => null,
+  openCreateDialog: () => null,
+});
+const NO_SESSION_COLUMN = Object.freeze({
+  createdDocuments: () => [],
+  documentCreated: () => null,
+  endedSessions: () => [],
+  mountSessionAffordances: () => null,
+  openedSessions: () => [],
+  sessionOpened: () => null,
+});
+//: THE COLUMNS ARE PER-MOUNT LOCALS, NOT MODULE STATE (Copilot review of
+//: openDox-code#20, round 2). They were module-level `let`s that
+//: `mountStagingWorkbench` assigned, on the argument that the call sites are
+//: spread across a 3,300-line overlay. They are — and every one of them is
+//: INSIDE `mountStagingWorkbench`, so a `const` in that function reaches all of
+//: them and threads nothing. What module state bought instead was a hazard: two
+//: live workbenches (the overlay is mounted again on a re-render, and the
+//: canvas mounts its own) share one pair of columns, so the second mount
+//: silently rebinds the columns every closure of the first is still calling
+//: through — a late create response or a redraw from the first workbench then
+//: runs the second's contributed actions.
 import { primaryFragmentPath } from "./wheel-model.js";
 import { insertSection, outlineModel } from "./outline-model.js";
 import { renderViewer } from "./viewer.js";
@@ -1482,12 +1532,26 @@ export function mountStagingWorkbench(container, snapshot,
                                         // the caller's render scope: this
                                         // overlay binds a document listener
                                         signal,
+                                        // § 3.4 slice S5: the CONTRIBUTED
+                                        // workbench gate column, already
+                                        // resolved by the shell —
+                                        // `{ create, session }`, either half
+                                        // null where openXdox is not registered
+                                        gate,
                                         sourceBase, edit, onSessionRekey,
                                         onSessionEnded, onScopeOpened } = {}) {
   // The wheel behind this overlay stays on the shell snapshot while a create
   // may temporarily adopt a branch snapshot inside the workbench. Reopening
   // from that wheel must therefore start from the shell state again; otherwise
   // the retained branch projection can be rendered with a newly reset main key.
+  // THE CONTRIBUTED WORKBENCH GATE COLUMNS, bound to THIS mount. `gate` is what
+  // `app.js` resolved off the `gate.workbench.create` and
+  // `gate.workbench.session` bindings; either half null is "no gate column
+  // here", which the null objects above turn into "not offered" rather than
+  // "undefined". `const` in the mount closure and not module state: two live
+  // workbenches must not share a column (Copilot review, round 2).
+  const createColumn = gate?.create || NO_CREATE_COLUMN;
+  const sessionColumn = gate?.session || NO_SESSION_COLUMN;
   let shellSnapshot = snapshot;
   let shellActive = active;
   let shellIndex = index;
@@ -1511,7 +1575,7 @@ export function mountStagingWorkbench(container, snapshot,
   // always shown; with the gate on it states the ONE write it can perform and
   // the actor who would perform it — a surface that misdescribes its own
   // authority is worse than one with no pill.
-  const gateOn = createGateLive(caps);
+  const gateOn = createColumn.createGateLive(caps);
   const readonly = el("span", "pill " + (gateOn ? "stage" : "neutral"),
     gateOn ? "gate: create-document" : "read-only");
   readonly.title = gateOn
@@ -1751,6 +1815,9 @@ export function mountStagingWorkbench(container, snapshot,
       return {
         caps, fetcher, repair: consoleRepair, slot: (extra || {}).slot,
         label: CREATE_LABELS[activeTab],
+        // RULED counterpart Q6: openDox's model, handed to the contributed
+        // binding rather than imported by it.
+        model: workbenchModel,
         // task 5.8: land on the document, not on a path string. The snapshot
         // predates the new file, so the viewer resolves it through the same
         // read-only source pass-through every other document read uses.
@@ -1777,8 +1844,8 @@ export function mountStagingWorkbench(container, snapshot,
         //      is ready, then moves both together before opening the document,
         //      WITHOUT widening `main`, which must never carry a draft.
         onSessionOpened: (result) => {
-          sessionOpened(result.ref);
-          documentCreated(result.ref, result.path);
+          sessionColumn.sessionOpened(result.ref);
+          sessionColumn.documentCreated(result.ref, result.path);
           drawSession();
           return rekeyToSession(result.ref);
         },
@@ -1786,13 +1853,17 @@ export function mountStagingWorkbench(container, snapshot,
     },
     mount(host, tab, extra) {
       if (!this.offered(tab)) return null;
-      return mountCreateAffordance(host, this.seed(tab, extra),
-        { ...this.options(extra), label: CREATE_LABELS[tab] });
+      // RULED Q3: ONE mount signature, `mount(host, snapshot, ctx)` — the
+      // seed travels as `ctx.seed`.
+      return createColumn.mountCreateAffordance(host, shellSnapshot,
+        { ...this.options(extra), seed: this.seed(tab, extra),
+          label: CREATE_LABELS[tab] });
     },
     open(host, tab, extra) {
       if (!this.offered(tab)) return null;
-      return openCreateDialog(host, this.seed(tab, extra),
-        { ...this.options(extra), label: CREATE_LABELS[tab] });
+      return createColumn.openCreateDialog(host, shellSnapshot,
+        { ...this.options(extra), seed: this.seed(tab, extra),
+          label: CREATE_LABELS[tab] });
     },
   };
 
@@ -1818,12 +1889,21 @@ export function mountStagingWorkbench(container, snapshot,
       // engine's `discover_tile_inventory` unions, read from the projection the
       // page already holds — no route and no second liveness signal.
       { active, index, snapshot,
-        opened: openedSessions(), ended: endedSessions() });
+        opened: sessionColumn.openedSessions(),
+        ended: sessionColumn.endedSessions() });
     posturechip.textContent = posture.label;
     posturechip.title = posture.detail;
     posturechip.classList.toggle("is-draft", posture.ownTile);
     posturechip.classList.toggle("is-live", posture.live && !posture.ownTile);
-    mountSessionAffordances(sessionhost, {
+    // RULED Q3: ONE mount signature, `mount(host, snapshot, ctx)`. The session
+    // context travels under `ctx.session` and the seams beside it, so neither
+    // set can shadow the other; the old call passed the context second and the
+    // seams third.
+    sessionColumn.mountSessionAffordances(sessionhost, snapshot, {
+      // RULED counterpart Q6: openDox's model, handed to the contributed
+      // binding rather than imported by it.
+      model: workbenchModel,
+      session: {
       scope,
       posture,
       // The edit picker's options: the documents this tile's session MAY rewrite
@@ -1839,8 +1919,9 @@ export function mountStagingWorkbench(container, snapshot,
       // branch, under a gate record that read as authorised. The route refuses it
       // now too (`gate_routes.foreign_document_refusal`) — the picker is UI, the
       // route is the boundary, and they are deliberately the same sentence.
-      documents: rewritableDocuments(scope, createdDocuments(posture.branch)),
-    }, {
+      documents: rewritableDocuments(scope,
+        sessionColumn.createdDocuments(posture.branch)),
+      },
       caps, fetcher, repair: consoleRepair,
       actor: (caps && caps.actor) || null,
       onSessionEnded: async () => {
@@ -1852,7 +1933,8 @@ export function mountStagingWorkbench(container, snapshot,
         // once the end is CONFIRMED (a null next means it did not end).
         const endedBranch = sessionPosture(scope, {
           active, index, snapshot,
-          opened: openedSessions(), ended: endedSessions(),
+          opened: sessionColumn.openedSessions(),
+          ended: sessionColumn.endedSessions(),
         }).branch;
         const next = await onSessionEnded();
         if (!next?.snapshot || !scope) return null;
@@ -2097,12 +2179,13 @@ export function mountStagingWorkbench(container, snapshot,
   // non-destructive refresh cannot drift from what the mount used.
   function canvasProjection() {
     const posture = sessionPosture(scope,
-      { active, index, snapshot, opened: openedSessions(), ended: endedSessions() });
+      { active, index, snapshot, opened: sessionColumn.openedSessions(),
+        ended: sessionColumn.endedSessions() });
     return doxbenchScopeProjection(snapshot, scope.kind, scope.id, {
       repository: active.repository,
       ref: active.ref,
       outlinePathFor: (outline) => primaryFragmentPath(outline.stagingId, outline.files),
-      createdDocuments: createdDocuments(posture.branch),
+      createdDocuments: sessionColumn.createdDocuments(posture.branch),
     });
   }
   function railScopeKey() {
@@ -2576,7 +2659,7 @@ export function mountStagingWorkbench(container, snapshot,
   // canvas mount and by the docs tile's verbs (F3), so the tile can never claim a
   // capability the canvas withheld or deny one it has.
   function canvasOffered() {
-    return !!scope && createGateLive(caps) && !sessionSurfaceHidden(caps)
+    return !!scope && createColumn.createGateLive(caps) && !sessionSurfaceHidden(caps)
       && !!active?.repository && !!active?.ref;
   }
   function drawCanvas() {
@@ -2592,7 +2675,7 @@ export function mountStagingWorkbench(container, snapshot,
     // is LIVE — fed back by the mounted rail's adopted catalog (see the
     // onState wiring below) and reset to zero on rail teardown.
     const plane = presentationPosture({
-      gateLive: createGateLive(caps),
+      gateLive: createColumn.createGateLive(caps),
       surfaceHidden: sessionSurfaceHidden(caps),
       repository: active?.repository,
       ref: active?.ref,
@@ -2726,7 +2809,7 @@ export function mountStagingWorkbench(container, snapshot,
             railCatalogFailure = failure;
             postureIntakeOffered = modelIntakeOffered;
             const refreshed = presentationPosture({
-              gateLive: createGateLive(caps),
+              gateLive: createColumn.createGateLive(caps),
               surfaceHidden: sessionSurfaceHidden(caps),
               repository: active?.repository,
               ref: active?.ref,
@@ -2975,7 +3058,7 @@ export function mountStagingWorkbench(container, snapshot,
     // overlay takes).
     // the SERVE's posture, not the view's projection
     const authoring = createCaps || caps;
-    if (!createGateLive(authoring) || sessionSurfaceHidden(authoring)) {
+    if (!createColumn.createGateLive(authoring) || sessionSurfaceHidden(authoring)) {
       // Defence in depth: the lens no longer OFFERS the jump where it cannot
       // land, so reaching this is a programming error rather than a posture —
       // it still says something true and actionable rather than showing an
@@ -3178,7 +3261,11 @@ export function mountStagingWorkbench(container, snapshot,
 
     function buildDraftPanes() {
       {
-        openCreateDialog(detailsPane, seed, {
+        // RULED Q3: `mount(host, snapshot, ctx)`, the seed under `ctx.seed`.
+        createColumn.openCreateDialog(detailsPane, shellSnapshot, {
+          seed,
+          // RULED counterpart Q6 (see the namespace import at the head).
+          model: workbenchModel,
           caps: authoring, fetcher, repair: consoleRepair,
           label: "create document",
           // SAVE, not create (Brett, 2026-08-10: "it seems to the user that we
@@ -3216,8 +3303,8 @@ export function mountStagingWorkbench(container, snapshot,
             promoteDraftToTile(path);
           },
           onSessionOpened: async (result) => {
-            sessionOpened(result.ref);
-            documentCreated(result.ref, result.path);
+            sessionColumn.sessionOpened(result.ref);
+            sessionColumn.documentCreated(result.ref, result.path);
             drawSession();
             // The re-key itself, WITHOUT the DOM half: `adoptSessionRef` bails
             // on a draft (it guards `!scope`, and a draft has none), so the
