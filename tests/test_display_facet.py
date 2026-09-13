@@ -267,6 +267,21 @@ def test_a_blank_word_is_refused_rather_than_rendered_as_a_blank_surface():
         normalize_display({"stages": {"source": {"one": "   "}}})
 
 
+def test_a_corpus_prefix_without_a_separator_is_refused():
+    """Copilot review. A prefix is matched with `startsWith` and composed into
+    a path: `"ideation/staging"` would claim `ideation/stagingfoo/x.md` for the
+    staging area AND compose `ideation/staging<id>` where a folder was meant.
+    Refused at the declaration rather than normalised silently, because a
+    profile that meant one of those two should say which."""
+    with pytest.raises(DisplayFacetError, match="does not end in"):
+        normalize_display({"areas": {"captured": {"prefix": "ideation/brainstorm"}}})
+    with pytest.raises(DisplayFacetError, match="does not end in"):
+        normalize_display({"artifacts": {"root": {"prefix": "openspec/changes"}}})
+    # …and the well-formed one is taken whole
+    ok = normalize_display({"areas": {"captured": {"prefix": "ideation/brainstorm/"}}})
+    assert ok["areas"]["captured"]["prefix"] == "ideation/brainstorm/"
+
+
 def test_a_role_table_that_is_not_a_mapping_is_refused():
     with pytest.raises(DisplayFacetError):
         normalize_display({"stages": ["source"]})

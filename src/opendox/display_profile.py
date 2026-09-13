@@ -397,6 +397,29 @@ def _text(value: Any, *, where: str, allow_none: bool = False) -> str | None:
     return value
 
 
+def _corpus_prefix(value: Any, *, where: str) -> str | None:
+    """A declared corpus-path prefix, or `None`.
+
+    MUST END IN `/` (Copilot review). A prefix is compared with `startsWith`
+    and composed into a path, so `"ideation/staging"` without the separator
+    both claims `ideation/stagingfoo/x.md` for the staging area and composes
+    `ideation/staging<id>` where a folder was meant. Refused at the declaration
+    rather than normalised silently, because a profile that meant one of those
+    two things should say which, and a shell that guessed would be inventing a
+    corpus layout — the one thing this facet exists to stop it doing.
+    """
+    prefix = _text(value, where=where, allow_none=True)
+    if prefix is not None and not prefix.endswith("/"):
+        raise DisplayFacetError(
+            f"the host profile's {PROFILE_FACET} facet gives {where} the value "
+            f"{prefix!r}, which does not end in `/`. A corpus prefix is matched "
+            "with a prefix test and composed into a path, so without the "
+            "separator it claims sibling folders that merely start with the "
+            "same letters and composes a path where a folder was meant. Declare "
+            f"{prefix + '/'!r}.")
+    return prefix
+
+
 def _mapping(value: Any, *, where: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise DisplayFacetError(
@@ -474,8 +497,8 @@ def normalize_display(declared: Any) -> dict[str, Any]:
             out["areas"][role]["label"] = _text(
                 fields["label"], where=f"areas.{role}.label")
         if "prefix" in fields:
-            prefix = _text(fields["prefix"], where=f"areas.{role}.prefix",
-                           allow_none=True)
+            prefix = _corpus_prefix(fields["prefix"],
+                                    where=f"areas.{role}.prefix")
             if role == "reference" and prefix is not None:
                 raise DisplayFacetError(
                     "the host profile's DISPLAY facet gives areas.reference a "
@@ -507,9 +530,8 @@ def normalize_display(declared: Any) -> dict[str, Any]:
             out["artifacts"][role]["label"] = _text(
                 fields["label"], where=f"artifacts.{role}.label")
         if "prefix" in fields:
-            out["artifacts"][role]["prefix"] = _text(
-                fields["prefix"], where=f"artifacts.{role}.prefix",
-                allow_none=True)
+            out["artifacts"][role]["prefix"] = _corpus_prefix(
+                fields["prefix"], where=f"artifacts.{role}.prefix")
         if "order" in fields:
             order = fields["order"]
             if not isinstance(order, (list, tuple)):
