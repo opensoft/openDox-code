@@ -395,7 +395,13 @@ export class Display {
         pick(facet.stages, NEUTRAL_DISPLAY.stages, role),
         this.fields[role]);
     }
-    this._sections = Array.isArray(facet.sections) && facet.sections.length
+    // AN EMPTY LIST IS A DECLARATION, NOT AN ABSENCE (Copilot round 7).
+    // `display_profile._section_order` PRESERVES an explicitly declared
+    // `sections: []` -- a host saying "my staging template has no canonical
+    // heading order" -- so a truthiness check here would silently restore
+    // openDox's own template and match that host's headings against it.
+    // Absent, or not a list at all, is what falls back.
+    this._sections = Array.isArray(facet.sections)
       ? facet.sections.slice() : SECTION_ORDER.slice();
     this._values = {};
     for (const name of Object.keys(SNAPSHOT_VALUES)) {

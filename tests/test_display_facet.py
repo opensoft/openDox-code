@@ -679,3 +679,261 @@ console.log(JSON.stringify({{
     # a product told no corpus layout defaults to the repository root
     assert out["neutralAreaAfterReset"] == ""
     assert out["declaredArea"] == "ideation/brainstorm/"
+
+
+# ---------------------------------------------------------------------------
+# 7. COPILOT ROUND 7 -- the surfaces the context hop REACHED and the facet's
+#    words did not. Every one of them is the same shape as rounds 3-5: the
+#    value a view MATCHED on went through the facet and the value it SHOWED A
+#    HUMAN did not, or a declaration that says "nothing" was read as "unset".
+# ---------------------------------------------------------------------------
+
+def test_a_declared_empty_section_order_is_a_declaration_not_an_absence():
+    """`_section_order` PRESERVES `sections: []` -- a host saying its staging
+    template has no canonical heading order at all -- so the browser half must
+    not read that as "undeclared" and restore openDox's own template. An empty
+    list means every heading is anchored explicitly; the template's order is
+    openDox's, and matching a host's headings against it is exactly the
+    invisible re-domaining § 4.3 point 5 names."""
+    assert display_profile._section_order({"sections": []}) == []
+    assert display_manifest({"sections": []})["sections"] == []
+    # `sections` is a legal facet key (a declaration, not an unknown role)
+    assert normalize_display({"sections": []}) is not None
+    # and absent still falls back to openDox's own
+    assert display_manifest({})["sections"] == list(SECTION_ORDER)
+    assert display_manifest({"sections": ["frage"]})["sections"] == ["frage"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_browser_half_keeps_a_declared_empty_section_order(tmp_path):
+    """The other half of the test above, and the reason it is a bug rather than
+    a style point: `outline-model.sectionRank` is what DECIDES where an added
+    section goes, so a host that declared no order would have its headings
+    ranked by openDox's template and its material silently reordered."""
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(f"""
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const O = await import(base + "outline-model.js");
+const facet = (sections) => D.readDisplay({{ display: Object.assign(
+  {{ schema_version: 1, kind: "opendox.display-facet" }},
+  sections === undefined ? {{}} : {{ sections }}) }});
+console.log(JSON.stringify({{
+  declaredEmpty: facet([]).sections(),
+  declaredEmptyRank: O.sectionRank("Open questions", facet([])),
+  absent: facet(undefined).sections(),
+  absentRank: O.sectionRank("Open questions", facet(undefined)),
+  declaredOwn: facet(["frage"]).sections(),
+}}));
+""", tmp_path)
+    assert out["declaredEmpty"] == []
+    assert out["declaredEmptyRank"] is None, (
+        "a host that declared no canonical order still had its headings ranked")
+    assert out["absent"] == list(SECTION_ORDER)
+    assert out["absentRank"] is not None
+    assert out["declaredOwn"] == ["frage"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_explorer_names_a_selection_group_from_the_declared_areas(tmp_path):
+    """`resolveExplorerTarget`'s selection tile carried openDox's own corpus
+    layout in its one group label ("topic folder (incl. any openspec/
+    drafts)"). It is the label a human reads above the file list, so it is the
+    facet's business, and § 2.1 calls this module's corpus wording its "only
+    domain content"."""
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(f"""
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const {{ resolveExplorerTarget }} = await import(base + "explorer.js");
+const snap = {{ staged_topics: [{{ staging_id: "topic-x", files: ["a.md"] }}],
+              documents: [{{ path: "a.md", stage: "brainstorm" }}],
+              changes: [] }};
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  areas: {{ organized: {{ prefix: "ideation/staging/", label: "staging topic" }},
+          proposed: {{ prefix: "openspec/changes/", label: "openspec changes" }} }},
+}} }});
+const label = (d) => resolveExplorerTarget(
+  D.DRILL_KINDS.selection, "topic-x", snap, d).groups[0].label;
+console.log(JSON.stringify({{
+  neutral: label(D.neutralDisplay()), declared: label(declared),
+}}));
+""", tmp_path)
+    assert "staging topic" in out["declared"]
+    assert "openspec changes" in out["declared"]
+    assert "openspec/" not in out["neutral"] and "topic folder" not in out["neutral"]
+    assert out["neutral"] != out["declared"]
+
+
+# A minimal DOM -- enough for `helpers.el`, the explorer's overlay and the
+# canvas's composer, and nothing more. Every node records its tag, class, text,
+# attributes, wired listeners and children, so a harness can report the tree as
+# JSON and fire a click. The same idiom as `tests/test_split_route_tails.py`'s.
+_DOM_STUB = r"""
+class Node {
+  constructor(tag) {
+    this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {};
+    this.className = ""; this._text = ""; this.type = ""; this.title = "";
+    this.value = ""; this.checked = false; this.disabled = false;
+    this.hidden = false; this.focused = false; this.tabIndex = -1;
+    this.placeholder = ""; this.rows = 0; this.id = ""; this.dataset = {};
+    this.style = { setProperty() {}, removeProperty() {}, getPropertyValue: () => "" };
+  }
+  get textContent() { return this._text; }
+  set textContent(v) { this._text = String(v); this.children = []; }
+  // `views/explorer.js`'s own `el` escapes its text and assigns it through
+  // innerHTML, so the stub records it as text rather than refusing it.
+  set innerHTML(v) { this._text = String(v); this.children = []; }
+  get innerHTML() { return this._text; }
+  appendChild(c) { this.children.push(c); return c; }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  addEventListener(t, fn) { (this.listeners[t] = this.listeners[t] || []).push(fn); }
+  removeEventListener() {}
+  querySelectorAll() { return []; }
+  focus() { this.focused = true; globalThis.document.activeElement = this; }
+  click() { for (const fn of this.listeners.click || []) fn({}); }
+}
+globalThis.document = {
+  createElement: (tag) => new Node(tag),
+  createTextNode: (text) => Object.assign(new Node("#text"), { _text: String(text) }),
+  createElementNS: (_ns, tag) => new Node(tag),
+  addEventListener() {}, removeEventListener() {}, activeElement: null,
+};
+function flatten(node, out = []) {
+  out.push(node);
+  for (const c of node.children) flatten(c, out);
+  return out;
+}
+function texts(node) {
+  return flatten(node).map((n) => n.textContent).filter(Boolean);
+}
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_explorer_file_rows_show_the_declared_stage_word(tmp_path):
+    """The tile RESOLVED through the facet and then the rows under it spelled
+    the snapshot's `document_stage` enum verbatim in their metadata -- the one
+    surface in this module the context hop threaded past. Driven through the
+    real mount and a real tile open, not through `fileRow` directly, because
+    the bug was the ARGUMENT that was never passed."""
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(_DOM_STUB + f"""
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const {{ mountExplorer }} = await import(base + "explorer.js");
+const snap = {{
+  staged_topics: [{{ staging_id: "topic-x", files: ["a.md"] }}],
+  documents: [{{ path: "a.md", stage: "brainstorm", kind: "note" }}],
+  changes: [],
+}};
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  values: {{ document_stage: {{ captured: "brainstorm" }} }},
+  statuses: {{ document: {{ captured: "jotted" }} }},
+}} }});
+function rowTexts(display) {{
+  const host = new Node("div");
+  const explorer = mountExplorer(host, snap, {{ display }});
+  explorer.openTile(D.DRILL_KINDS.selection, "topic-x");
+  return flatten(host).filter((n) => n.className === "where").map((n) => n.textContent);
+}}
+console.log(JSON.stringify({{
+  neutral: rowTexts(D.neutralDisplay()), declared: rowTexts(declared),
+}}));
+""", tmp_path)
+    assert out["declared"], "the tile rendered no file row at all"
+    assert any("jotted" in t for t in out["declared"]), out["declared"]
+    assert not any("brainstorm" in t for t in out["declared"]), (
+        "the row still spells the snapshot enum a host declared a word for")
+    # the neutral install shows openDox's own word for the same value
+    assert not any("jotted" in t for t in out["neutral"]), out["neutral"]
+    assert any("captured" in t for t in out["neutral"]), out["neutral"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_canvas_confirmation_shows_the_declared_seed_word(tmp_path):
+    """`composerPlan` seeds a drafted possible with the DECLARED enum value, so
+    the confirmation a human reads before committing spelled the schema value
+    while both sides of the supersession arrow beside it read words (round 4).
+    Driven through the real composer button, which is the path that builds the
+    plan."""
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(_DOM_STUB + f"""
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const {{ renderCanvas }} = await import(base + "canvas.js");
+const snap = {{
+  documents: [{{ id: "a.md", path: "a.md" }}],
+  clusters: [{{ id: "c1", name: "C", document_edges: [{{ document: "a.md" }}],
+              tallies: {{ document_links: 1 }} }}],
+  possibles: [], staged_topics: [], changes: [], evidence: [],
+}};
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  values: {{ register_state: {{ captured: "latent" }} }},
+  statuses: {{ candidate: {{ captured: "parked" }} }},
+}} }});
+function confirmLines(display) {{
+  const root = new Node("div");
+  renderCanvas(root, snap, {{ display }});
+  const composer = flatten(root).find((n) => n.className === "composer");
+  if (!composer) throw new Error("no composer in the canvas");
+  const button = flatten(composer).find((n) => n.tag === "button");
+  if (!button) throw new Error("no draft button in the composer");
+  button.click();
+  return flatten(root).filter((n) => n.className === "dc-line")
+    .map((n) => n.textContent);
+}}
+console.log(JSON.stringify({{
+  neutral: confirmLines(D.neutralDisplay()),
+  declared: confirmLines(declared),
+}}));
+""", tmp_path)
+    declared_state = [t for t in out["declared"] if t.startswith("state: ")]
+    assert declared_state, out["declared"]
+    assert declared_state[0] == "state: parked", declared_state
+    neutral_state = [t for t in out["neutral"] if t.startswith("state: ")]
+    assert neutral_state[0] != "state: latent", (
+        "the confirmation still spells the register's enum value")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_funnel_search_matches_the_word_a_human_can_see(tmp_path):
+    """The same family, found beside the four Copilot named: the doc card's
+    meta reads the facet (round 4) and its SEARCH HAYSTACK still carried the
+    raw enum alone, so a human who typed the word on the card matched nothing.
+    The haystack carries both -- the enum, because `dataset.stage` and the
+    column filters match on it, and the word, because that is what is on the
+    screen."""
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(_DOM_STUB + f"""
+// the funnel mounts a real column layout: three browser globals it uses for
+// the sticky header and the column measure, and nothing else.
+globalThis.ResizeObserver = class {{ observe() {{}} disconnect() {{}} }};
+globalThis.requestAnimationFrame = (fn) => fn();
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const {{ renderFunnel }} = await import(base + "funnel.js");
+const snap = {{
+  documents: [{{ id: "a.md", path: "a.md", stage: "brainstorm", topics: [] }}],
+  clusters: [], possibles: [], staged_topics: [], changes: [],
+}};
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  values: {{ document_stage: {{ captured: "brainstorm" }} }},
+  statuses: {{ document: {{ captured: "jotted" }} }},
+}} }});
+function hays(display) {{
+  const root = new Node("div");
+  renderFunnel(root, snap, {{ display }});
+  return flatten(root).filter((n) => n.dataset && n.dataset.hay)
+    .map((n) => n.dataset.hay);
+}}
+console.log(JSON.stringify({{
+  declared: hays(declared), neutral: hays(D.neutralDisplay()),
+}}));
+""", tmp_path)
+    assert out["declared"] == ["a.md brainstorm jotted"]
+    assert out["neutral"] == ["a.md brainstorm captured"]

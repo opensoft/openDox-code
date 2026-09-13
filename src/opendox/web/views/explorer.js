@@ -115,7 +115,18 @@ export function resolveExplorerTarget(kind, id, snapshot, display) {
       subtitle: (d.area("organized").prefix || "") + id + " · " + n
         + " file" + (n === 1 ? "" : "s") +
         (t.target_change ? " · → " + t.target_change : " · no pick yet"),
-      groups: [{ label: "topic folder (incl. any openspec/ drafts)", files }],
+      // THE GROUP LABEL COMES OFF THE DECLARED AREAS (Copilot round 7). It
+      // used to name openDox's own corpus layout ("topic folder (incl. any
+      // openspec/ drafts)"), which stayed on screen whatever the host
+      // declared -- the one human-facing label in this module the context hop
+      // could not reach. The group IS the whole of a selection's folder, so
+      // it is named by the area a selection lives in, and says that anything
+      // drafted toward a submission is in it rather than filed separately.
+      groups: [{
+        label: d.area("organized").label + " (every file, incl. any "
+          + d.area("proposed").label + ")",
+        files,
+      }],
     };
   }
   if (kind === DRILL_KINDS.submission || kind === DRILL_KINDS.completion) {
@@ -143,12 +154,20 @@ export function resolveExplorerTarget(kind, id, snapshot, display) {
 // itself a governed document in `documents[]` (status/kind/summary/topics);
 // files outside that projection (e.g. a change's proposal.md) list by name
 // only — the spec requires headers only for the staged-topic scenario.
-function fileRow(entry, onOpen) {
+// `display` is threaded in (Copilot round 7) because this row's metadata is
+// the LAST human-facing surface in the explorer that still read the raw
+// `document_stage` enum: `resolveExplorerTarget` resolved the tile through the
+// facet and then the rows under it spelled the schema value.
+function fileRow(entry, onOpen, display) {
+  const d = display || neutralDisplay();
   const row = el("div", "docrow explorer-row");
   const info = el("span");
   info.appendChild(el("span", "name", esc(basename(entry.path))));
   const bits = [entry.path];
-  if (entry.doc) bits.push(entry.doc.stage, entry.doc.kind, entry.doc.summary);
+  if (entry.doc) {
+    bits.push(entry.doc.stage ? d.documentStageWord(entry.doc.stage) : null,
+              entry.doc.kind, entry.doc.summary);
+  }
   info.appendChild(el("div", "where", esc(bits.filter(Boolean).join(" · "))));
   row.appendChild(info);
   if (entry.doc && (entry.doc.topics || []).length) {
@@ -263,7 +282,7 @@ export function mountExplorer(container, snapshot, { onOpenFile, signal, display
         for (const entry of group.files) {
           list.appendChild(fileRow(entry, (e) => {
             if (onOpenFile) onOpenFile(e, viewer, currentTile);
-          }));
+          }, display));
         }
       }
     }
@@ -296,7 +315,7 @@ export function mountExplorer(container, snapshot, { onOpenFile, signal, display
     list.appendChild(el("div", "docgroup", "source file (read-only)"));
     list.appendChild(fileRow(entry, (e) => {
       if (onOpenFile) onOpenFile(e, viewer, currentTile);
-    }));
+    }, display));
     overlay.hidden = false;
     closeBtn.focus(); // initial focus lands inside the dialog (a11y #19)
     if (onOpenFile) onOpenFile(entry, viewer, currentTile);
