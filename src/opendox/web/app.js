@@ -51,12 +51,32 @@ import { renderLens } from "./views/lens.js";
 // loop behind a binding openXdox supplies, the binding leaves the core arm and
 // nothing else in this file changes.
 import {
-  collectViewBindings, contributedViewBindings, manifestRoutes, resolveView,
+  ViewBindingError, collectViewBindings, contributedViewBindings,
+  manifestRoutes, mountContributedViews, resolveView,
 } from "./views/view_extension.js";
 import { mountStagingWorkbench } from "./views/staging-workbench.js";
-import { firstEditTransport } from "./views/swb-session.js";
+// THE SECOND CLASS-A -> CLASS-B IMPORT IS GONE TOO (§ 3.4 slice S5, RULED Q10).
+// This line was `import { firstEditTransport } from ./views/swb-session.js` —
+// the shell's LAST static import of a class-B module, and the one § 4.5
+// assertion 3 still measured after S3 closed line 43. RULED Q10 (openxFactory
+// #656 comment `5648065587`, Brett Heap, 2026-09-12): "app.js:57's
+// `firstEditTransport` travels as a DECLARED NON-MOUNT EXPORT of the workbench
+// binding (Q2's `exports` tuple), reached through the registry, with a
+// refusal-shaped fallback when the binding is absent — never a blank." It is
+// resolved in `render()` below, off the `gate.workbench.session` binding, and
+// `refusalTransport` is the fallback.
 import { createModelIntakeTransports } from "./views/swb-model-intake.js";
 import { CONSOLE_TOKEN_FIELD } from "./views/staging-workbench-model.js";
+// THE TWO MODELS THE CONTRIBUTED GATE COLUMN REACHES THROUGH `ctx` — RULED
+// counterpart Q6 (opensoft/openxFactory#656 comment `5649094228`, Brett Heap,
+// 2026-09-12): "what a CONTRIBUTED view module may IMPORT from openDox's
+// bundle: `./views/helpers.js` and NOTHING ELSE. Every other need reaches the
+// binding through its `ctx` (Q1-Q4) or its own package (Q5)." Both namespaces
+// are openDox's own pure models; the shell hands them to the bindings that used
+// to import them (`views/gate-lens.js`, `views/swb-session.js`), at the two
+// sites below where their context is composed.
+import * as lensModel from "./views/lens-model.js";
+import * as workbenchModel from "./views/staging-workbench-model.js";
 import { runSave, savePlanState } from "./views/doxbench-save.js";
 import { contentIdentity } from "./views/doxbench-state.js";
 import { initSettings } from "./views/settings.js";
@@ -521,6 +541,11 @@ const CORE_VIEWS = [
     mount: (root, snap, ctx) => renderWheel(root, snap,
       { caps: ctx.caps, nav: ctx.nav, notebook: ctx.notebook,
         sourceBase: ctx.sourceBase, composed: ctx.composed,
+        // THE CONTRIBUTED DISPOSE COLUMN, already resolved (§ 3.4 slice S5).
+        // `views/wheel.js` is class C and imported eight names out of
+        // `views/dispose.js` — one of § 4.5 assertion 3's four breaches; it
+        // reads them off this namespace now, null where no column supplies it.
+        dispose: ctx.dispose,
         signal: ctx.signal }) },
   { id: "board.pipeline", control: "tab-board", region: "view-board",
     module: "./views/board.js", entry: "renderBoard", view_class: "C",
@@ -575,60 +600,31 @@ const CORE_VIEWS = [
   { id: "lineage.readiness", control: "tab-lineage", region: "view-lineage",
     module: "./views/lineage.js", entry: "renderLineage", view_class: "C",
     mount: (root, snap) => renderLineage(root, snap) },
-  // THE GATE BAR — class B, OPTIONAL, and the proof this slice exists to give.
-  // `app.js`'s line 43 used to import `isGateBearing` and `mountGateBar`
-  // straight out of `views/gate.js`; § 4.1 names that import as the one the
-  // registry replaces, so it is a binding now, resolved rather than imported.
-  // Three properties follow, and each is a thing that was not true before:
+  // THE THREE CLASS-B BINDINGS ARE GONE FROM HERE — § 3.4 slice S5, and this
+  // is the test of whether the seam was drawn in the right place.
   //
-  //   * `optional: true` — a shell assembled WITHOUT it renders the viewer with
-  //     no gate bar instead of failing to load. `views/viewer.js` already
-  //     tolerates a null `mountGate` (`const mountGate = o.mountGate || null`),
-  //     so nothing there changes: the absence was always representable
-  //     downstream and was simply unreachable from here.
-  //   * `routes: ["/actions/gate/ratify"]` — RULED Q3's "a route constant
-  //     travels with the binding that calls it". `gate.js`:120's
-  //     `GATE_RATIFY_ROUTE` is the gate loop's, and it now says so in the one
-  //     place the registry can check.
-  //   * it is in the CORE arm and that is TRANSITIONAL. `gate.js` is still a
-  //     file of this bundle; slice S5 moves the four class-B files behind a
-  //     binding openXdox supplies, at which point this entry is deleted and the
-  //     identical binding arrives through `contributedViewBindings()`. Nothing
-  //     else in this file changes when it does — which is the test of whether
-  //     the seam was drawn in the right place.
-  { id: "gate.bar", region: "viewer-gatebar",
-    module: "./views/gate.js", entry: "mountGateBar", view_class: "B",
-    routes: ["/actions/gate/ratify"], requires: ["actions.gate"],
-    optional: true },
-  // THE LENS'S TWO GATE VERBS and THE PROJECT COMMISSIONS — slice S4's two new
-  // class-B bindings, on exactly the footing `gate.bar` above already stands on
-  // and for the same three reasons. RULED Q3 (openxFactory#656 comment
-  // `5642758731`): "a route constant travels with the binding that calls it,
-  // never with the model that happens to declare it" — so the ten gate-prefix
-  // constants that stood in `views/lens-model.js`, `views/repo-selector.js` and
-  // `views/staging-workbench-model.js` are now declared in class-B files, and
-  // the two bindings below declare the four of them that needed a new home as
-  // their OWN, in the one place the registry can check.
+  // `gate.bar` (slice S3), `gate.lens` and `gate.projects` (slice S4) sat in
+  // this CORE arm and every one of them was marked TRANSITIONAL where it stood:
+  // "slice S5 moves the class-B files behind a contribution openXdox supplies,
+  // at which point these entries are deleted and the identical bindings arrive
+  // through `contributedViewBindings()`. Nothing else in this file changes when
+  // they do." They now arrive that way — declared at
+  // `openXdox-code` `src/openxdox/view_extensions.py`, with their module bytes
+  // shipped as that package's data and placed into this bundle's `views/` at
+  // assembly (RULED Q5, openxFactory#656 comment `5648044785`).
   //
-  // `optional: true` is the whole point: a shell assembled without either one
-  // renders the lens plan panel plan-only and the selector with no project
-  // commissions — no gate form, no add row, no trash control, and no 404.
+  // THE SIX MODULES LEFT THE BUNDLE WITH THEM: `views/gate.js`,
+  // `views/gate-lens.js`, `views/gate-projects.js`, `views/dispose.js`,
+  // `views/swb-create.js` and `views/swb-session.js`. Six is not four because
+  // slice S4 split four of the thirteen gate route constants into two NEW
+  // class-B modules; openDox-spec § 5 row S5 moves "the four class-B files AND
+  // ALL 13 ROUTE CONSTANTS", and `views/gate-lens.js`'s own header says "AT S5
+  // THIS FILE LEAVES THE BUNDLE".
   //
-  // BOTH ENTRIES ARE TRANSITIONAL, like `gate.bar`. They sit in the CORE arm
-  // because at this slice no column contributes anything; slice S5 moves the
-  // class-B files behind a contribution openXdox supplies, at which point these
-  // three entries are deleted and the identical bindings arrive through
-  // `contributedViewBindings()`. Nothing else in this file changes when they do.
-  { id: "gate.lens", region: "lens-gate",
-    module: "./views/gate-lens.js", entry: "mountLensGate", view_class: "B",
-    routes: ["/actions/gate/lens-save-recipe",
-             "/actions/gate/lens-add-as-cluster"],
-    requires: ["actions.gate"], optional: true },
-  { id: "gate.projects", region: "repo-projects",
-    module: "./views/gate-projects.js", entry: "mountProjectCommissions",
-    view_class: "B",
-    routes: ["/actions/gate/create-project", "/actions/gate/edit-project"],
-    requires: ["actions.gate"], optional: true },
+  // WHAT THAT LEAVES HERE: seven core tabs and not one gate route literal.
+  // § 4.5 assertion 2's six remaining gate-prefix sites were exactly these
+  // three entries' `routes:` declarations, and they close together, which is
+  // what the assertion's own marker predicted.
 ];
 
 // Tab router with the WAI-ARIA roving-tabindex pattern (a11y #19): only the
@@ -718,6 +714,14 @@ function initTabs(snapshot, ctx, signal) {
       controllers[target.region] = target.mount(
         document.getElementById(target.region), snapshot, ctx);
       rendered.add(target.region);
+      // RULED Q1's GENERIC PASS, for THIS region, now that its core renderer
+      // has run and cleared the root (Copilot review, round 2). Before the
+      // hook the pass ran once before every core mount, so a contributed panel
+      // in a tab rendered later was mounted and then erased by that tab's own
+      // first render. The hook is fire-and-forget by design: `show()` is a
+      // click handler and the panel appends into a region that is already on
+      // the page.
+      ctx.onRegionRendered?.(target.region);
     } else if (controllers[target.region]?.redraw) {
       controllers[target.region].redraw();
     }
@@ -860,9 +864,68 @@ async function main() {
   await render();
 }
 
+// RULED Q8's HOST. `page-overlay` is the declared `shell` region for
+// page-level panels, and the shell builds it: one element, created once and
+// reused across renders, appended to the document body BY THE SHELL — which is
+// the difference Q8 draws. A contributed column appending to `document.body`
+// itself "is a collision nothing can refuse"; the shell owning one named host
+// and handing it over is a contract.
+const PAGE_OVERLAY_REGION = "page-overlay";
+
+function ensurePageOverlayHost(doc) {
+  const d = doc || document;
+  let host = d.getElementById(PAGE_OVERLAY_REGION);
+  if (host) return host;
+  host = d.createElement("div");
+  host.id = PAGE_OVERLAY_REGION;
+  d.body.appendChild(host);
+  return host;
+}
+
+// RULED Q10's FALLBACK — "never a blank". `firstEditTransport` is the doxBench
+// Save's transport and it is a class-B export: a shell assembled with no gate
+// column has no transport at all, and a Save that silently did nothing would be
+// the worst answer available. This stands in for it and REFUSES in the shape
+// `runSave` already understands, naming the layering rather than the symptom.
+function refusalTransport() {
+  return async () => ({
+    ok: false,
+    error: "no_gate_column",
+    message: "this shell was assembled without the column that contributes the "
+      + "first-edit transport (`gate.workbench.session`), so a governed Save "
+      + "cannot be sent. Run the CLI verb in your pinned checkout, where the "
+      + "authority lives.",
+  });
+}
+
+//: WHERE `#loadstatus` SAT, remembered once, so a late assembly refusal has a
+//: host after a successful render removed it (Copilot review, round 3).
+//: `render()` ends with `status.remove()`, and every later render then reads
+//: `null` from `getElementById` — so a `ViewBindingError` raised by the generic
+//: mount pass on a TAB'S FIRST RENDER, minutes after load, had nowhere to be
+//: written and was invisible. `index.html` is a `moved_verbatim` carve row and
+//: cannot grow a second element, so the shell re-inserts the one it removed, in
+//: the place it removed it from.
+let statusSlot = null;
+
+function ensureStatusHost(doc) {
+  const d = doc || (typeof document === "undefined" ? null : document);
+  if (!d) return null;
+  const live = d.getElementById("loadstatus");
+  if (live && live.isConnected !== false) return live;
+  const node = live || statusSlot?.node;
+  if (!node || !statusSlot?.parent) return node || null;
+  statusSlot.parent.insertBefore(node, statusSlot.next || null);
+  return node;
+}
+
 async function render() {
   const signal = nextRenderScope();
   const status = document.getElementById("loadstatus");
+  if (status && status.parentNode) {
+    statusSlot = { node: status, parent: status.parentNode,
+                   next: status.nextSibling };
+  }
   try {
     // The snapshot INDEX (add-dashboard-repo-selector): the roster the selector
     // renders and the freshness the header shows. Absent (a static image, an
@@ -1009,12 +1072,102 @@ async function render() {
       [{ views: () => CORE_VIEWS },
        { views: () => contributedViewBindings(probedCaps) }],
       { contributedRoutes: manifestRoutes(probedCaps) });
-    gateView = await resolveView(views, "gate.bar");
-    // Slice S4's two, resolved once per render exactly as the gate bar is. Null
-    // is the honest answer for a shell with no gate column, and each consumer
-    // below treats it as "plan-only" / "no commissions" rather than as an error.
-    const lensGateView = await resolveView(views, "gate.lens");
-    const projectGateView = await resolveView(views, "gate.projects");
+    // THE CONTRIBUTED GATE COLUMN, RESOLVED ONCE PER RENDER — six bindings now,
+    // and every resolve carries the capability probe (§ 3.4 slice S5).
+    //
+    // `{ capabilities: probedCaps }` is RULED Q4 (openxFactory#656 comment
+    // `5648049748`) reaching the shell's own named readers: `resolveView`
+    // evaluates the binding's `requires` — DOTTED PATHS into this very payload —
+    // and answers `null` for an unmet requirement on an OPTIONAL binding, which
+    // is what every reader below already treats as "the column that supplies it
+    // is not installed". A REQUIRED binding with an unmet requirement refuses,
+    // naming the binding, the path and the probed value.
+    //
+    // NULL IS THE STUDENT'S INSTALL, and it is the whole slice: no gate column
+    // registered, so no gate bar in the viewer, no dispose tray on a possible,
+    // no session verbs in the workbench, no project commissions in the
+    // selector, the lens plan panel plan-only — and no 404, because nothing
+    // was ever imported.
+    const resolveContributed = (id) =>
+      resolveView(views, id, { capabilities: probedCaps });
+    gateView = await resolveContributed("gate.bar");
+    const lensGateView = await resolveContributed("gate.lens");
+    const projectGateView = await resolveContributed("gate.projects");
+    const disposeView = await resolveContributed("gate.dispose");
+    const createView = await resolveContributed("gate.workbench.create");
+    const sessionView = await resolveContributed("gate.workbench.session");
+    // THE DECLARED NAMESPACES, handed down already-resolved so that no class-A
+    // or class-C module in this bundle imports a class-B one (§ 4.5 assertion
+    // 3). Each is the binding's DECLARED namespace and nothing wider: RULED Q2
+    // bounds what the shell may reach to the `exports` tuple the binding
+    // publishes, and a reach past it refuses by name rather than answering
+    // `undefined` and failing inside a click handler.
+    const disposeColumn = disposeView ? disposeView.exports : null;
+    const workbenchGate = {
+      create: createView ? createView.exports : null,
+      session: sessionView ? sessionView.exports : null,
+    };
+    // RULED Q8's HOST, BUILT BY THE SHELL. `page-overlay` is a `shell` region:
+    // it has no standing element, and `index.html` cannot grow one — that file
+    // is a `moved_verbatim` row of openxFactory's carve manifest whose declared
+    // edit classes (`import rewrites | path constants | adapter calls`) have no
+    // class for an added element. So the shell builds it here, once per page,
+    // and HANDS IT OVER — `page-overlay` is a `shell` region, so RULED Q1's
+    // generic pass deliberately skips it and the CALLER that builds the host is
+    // the caller that mounts into it, which is the gate bar's own pattern.
+    // Today that is the gate column's refusal panel, which used to append
+    // itself to `document.body`, "never a contract surface".
+    //
+    // MOUNTED, NOT MERELY HOSTED (Copilot review, round 1). Building the host
+    // and never calling the binding's entry left `views/dispose.js` with no
+    // `panelHost`, and its `ensurePanel()` REFUSES rather than falling back to
+    // the body — which Q8 forbids — so the first refused gate verb on a
+    // composed install would have thrown instead of showing its refusal. The
+    // declared entry, never a hardcoded export name (slice S3's own re-review
+    // finding).
+    const pageOverlayHost = ensurePageOverlayHost();
+    if (disposeView) {
+      disposeView.exports[disposeView.binding.entry](
+        pageOverlayHost, snapshot, { caps });
+    }
+    // RULED Q1 (openxFactory#656 comment `5648044785`): "the shell MOUNTS
+    // contributed bindings generically: one mount pass over every contributed
+    // binding whose region is a `dom` region; the three `shell` regions stay
+    // caller-driven (the gate bar's pattern)." Before this line a column could
+    // contribute a binding and have nothing ever call it, so every contributed
+    // panel needed an openDox edit to become reachable — the fork the seam was
+    // drawn to prevent. The gate column's own six bindings are all `shell`
+    // regions and are mounted by the callers that build their hosts, which is
+    // exactly the exception Q1 preserves; the pass exists for the NEXT column.
+    //
+    // AFTER THE CORE RENDER OF EACH REGION, NEVER ONCE BEFORE THEM ALL (Copilot
+    // review, round 2). Every `dom` region is a root a core renderer owns and
+    // CLEARS: `renderWheel` and `renderFunnel` assign `root.innerHTML = ""`,
+    // `mountExplorer` clears its container, and the tab router renders a
+    // non-initial tab LAZILY on first activation — minutes after load. A single
+    // pass here mounted contributed panels into roots that were about to be
+    // emptied and never remounted them, so a valid contributed binding would
+    // have been mounted and then erased with nothing refused and nothing said.
+    // The pass is therefore run PER REGION by the caller that just rendered it:
+    // `mountContributedInto` below, called after `mountExplorer`, after
+    // `mountStagingWorkbench`, and by the tab router's `onRegionRendered` hook
+    // on each tab's first render.
+    // THE CONTEXT IS THE SAME MINIMAL ONE THE PASS ALWAYS HANDED DOWN — RULED
+    // Q3's `mount(host, snapshot, ctx)` with the capability probe and the
+    // registry, and nothing of this shell's internals. What changed here is
+    // WHEN the pass runs, not what a contributed binding is given.
+    const contributedMounts = [];
+    const mountContributedInto = async (regions) => {
+      const mounted = await mountContributedViews(
+        views, snapshot, { caps, nav: null, views },
+        // `signal` is THIS render's scope (Copilot round 3): a pass started
+        // from a tab's first render can still be loading a module when a
+        // repository switch begins the next render, and a stale pass must not
+        // mount this render's snapshot into the next one's region.
+        { capabilities: probedCaps, regions, signal });
+      contributedMounts.push(...mounted);
+      return mounted;
+    };
     const explorer = mountExplorer(explorerRoot, snapshot, {
       signal,
       onOpenFile: (entry, pane, tile) => {
@@ -1027,12 +1180,20 @@ async function render() {
           gate: gateContext(tile, entry, sourceKey),
           // Supplied only when a gate binding was collected; absent, the viewer
           // renders the document and no gate bar (see `gateView` above).
+          // RULED Q3: ONE mount signature, `mount(host, snapshot, ctx)`. The
+          // viewer's per-artifact context travels as `ctx.gate` and the probe
+          // as `ctx.caps`; the gate bar's `(container, ctx, opts)` — the one
+          // declared exception the contract note recorded — ends at this slice.
           mountGate: gateView
-            ? (host, gctx) => gateView.exports[gateView.binding.entry](host, gctx, { caps })
+            ? (host, gctx) => gateView.exports[gateView.binding.entry](
+                host, snapshot, { gate: gctx, caps })
             : null,
         });
       },
     });
+    // `explorer-root` is rendered: its contributed bindings can mount into a
+    // root that will not be cleared out from under them.
+    await mountContributedInto(["explorer-root"]);
     // When the capability probe reports the notebook action
     // available, tiles grow an "Open in NotebookLM" affordance; otherwise the
     // controller's button() returns null and nothing renders — the served/local
@@ -1166,9 +1327,18 @@ async function render() {
       // The mechanism itself is pinned where it lives, on `runSave` over a
       // four-buffer state (`test_doxbench_save.py`). The canvas Save sends no
       // `only`, so its behaviour is byte-for-byte what it was.
+      // RULED Q10: reached through the REGISTRY, at this one call site, as a
+      // DECLARED NON-MOUNT EXPORT of the workbench's contributed binding — with
+      // a refusal-shaped fallback when the column is absent.
       save: (request) => runSave(
         savePlanState(request),
-        { transport: firstEditTransport({ caps, repair: consoleRepair }),
+        { transport: workbenchGate.session
+            ? workbenchGate.session.firstEditTransport(
+                // RULED counterpart Q6: this export is reached through the
+                // registry and not through a mount, so openDox's model reaches
+                // it as a field of the options object it already takes.
+                { caps, repair: consoleRepair, model: workbenchModel })
+            : refusalTransport(),
           ...(request && request.only !== undefined
             ? { only: request.only } : {}) }),
       catalog: createDoxBenchCatalogLoader(() => caps?.console_token),
@@ -1211,9 +1381,19 @@ async function render() {
         // discarding what the human typed
         consoleRepair,
         doxbench: doxbenchSeams,
+        // THE CONTRIBUTED WORKBENCH GATE COLUMN, handed down already-resolved
+        // (§ 3.4 slice S5). `views/staging-workbench.js` is class C and used to
+        // import `views/swb-create.js` and `views/swb-session.js` — two class-B
+        // modules — directly, which is two of § 4.5 assertion 3's four
+        // breaches. It now reads what it needs off this object, which is null
+        // in each half where the column is not installed: no create affordance,
+        // no session verbs, and no import to fail.
+        gate: workbenchGate,
         sourceBase: workbenchSourceBase, edit: workbenchEdit,
         onScopeOpened: routeWorkbenchScope, onSessionRekey: rekeyToSession,
         onSessionEnded: resetEndedSession });
+    // `staging-workbench-root` is rendered: same reading as the explorer's.
+    await mountContributedInto(["staging-workbench-root"]);
     // The wheel's read-only verbs (documents read · clusters lens/canvas): app.js
     // owns every cross-view jump, so the wheel declares the verb and calls back
     // here. `tabs` is assigned just below; the callbacks only run on a click.
@@ -1264,6 +1444,10 @@ async function render() {
       // `dispose-intent` are declared regions already, so S2 adds an optional
       // binding and two `lookupView` calls and touches nothing here.
       views,
+      // The contributed DISPOSE column's declared namespace, or null. Read by
+      // the wheel's mount closure above; bounded by RULED Q2's `exports` tuple,
+      // so a reach past the declaration refuses by name.
+      dispose: disposeColumn,
       // Slice S4's two resolved class-B mounts, handed down already-bound so no
       // class-A or class-C view imports a class-B module to reach them. Null
       // where the column that supplies them is not installed.
@@ -1271,9 +1455,18 @@ async function render() {
       // re-review fix, applied to S4's two mounts for the same reason: a
       // contributed binding names its entry in the manifest, and reading
       // anything else here would silently ignore the name it declared).
+      // RULED counterpart Q6 (openxFactory#656 comment `5649094228`, Brett
+      // Heap, 2026-09-12): a contributed view module may import
+      // `./views/helpers.js` and nothing else, so `views/gate-lens.js` —
+      // openXdox's package data since slice S5 — reaches openDox's lens model
+      // through `ctx.model` instead of importing `./lens-model.js`. The
+      // adapter supplies it HERE, where the binding's context is already being
+      // composed, so `views/lens.js` (which builds `lctx`) needs no change and
+      // knows nothing about the contributed column's needs.
       mountLensGate: lensGateView
         ? (host, lctx) =>
-            lensGateView.exports[lensGateView.binding.entry](host, lctx)
+            lensGateView.exports[lensGateView.binding.entry](
+              host, snapshot, { ...lctx, model: lensModel })
         : null,
       // the UNSTRIPPED probe and the serve's own writable repository — read by
       // exactly one affordance (see `createCaps` at the lens's mount)
@@ -1286,6 +1479,17 @@ async function render() {
       // D21 — the repository lens's seams: the whole aggregate to lens over,
       // the current visible set, the write-through, and the drill-in.
       rawSnapshot, visible: view ? view.visible : null,
+      // EACH TAB'S CONTRIBUTED PANELS, MOUNTED AFTER THAT TAB RENDERS. The tab
+      // router renders a region lazily, on first activation, and the renderer
+      // clears the root; this hook is how the generic pass reaches a region
+      // whose core render happens minutes after load (Copilot review, round 2).
+      // `show()` is synchronous — it is a click handler — so the pass is
+      // started and not awaited, and its refusal is reported through the same
+      // frame the initial render uses rather than becoming an unhandled
+      // rejection.
+      onRegionRendered: (region) => {
+        mountContributedInto([region]).catch(reportAssemblyFailure);
+      },
       // handed to every view that binds outside its own root
       signal,
       onVisible: (repositories) => {
@@ -1315,7 +1519,8 @@ async function render() {
       // the whole of what § 3.4 slice S4 leaves in class A
       mountProjectGate: projectGateView
         ? (host, pctx) =>
-            projectGateView.exports[projectGateView.binding.entry](host, pctx)
+            projectGateView.exports[projectGateView.binding.entry](
+              host, snapshot, pctx)
         : null,
       onSelect: (key) => { storeKey(key); render(); },
       onRefreshed: () => render(),
@@ -1329,8 +1534,50 @@ async function render() {
     }
     if (status) status.remove();
   } catch (err) {
-    if (status) status.textContent = "Could not load the snapshot (" + err.message +
-      "). The renderer reads a single generated snapshot; regenerate it and reload.";
+    reportAssemblyFailure(err);
+  }
+
+  // RULED Q11 (openxFactory#656 comment `5648065587`, Brett Heap, 2026-09-12):
+  // "the shell catches `ViewBindingError` SEPARATELY and shows a registry
+  // refusal naming the binding, the rule and the value; a registry refusal is
+  // no longer framed as a snapshot defect."
+  //
+  // WHAT WAS WRONG. Every refusal the view registry raises — a slot collision,
+  // a module that will not load, an entry that is not a function, an undeclared
+  // export reached, an unmet required capability, a manifest that is not a
+  // manifest — was caught by this one handler and reported as "Could not load
+  // the snapshot … regenerate it and reload". The seam's own carefully-composed
+  // sentence was parenthesised inside advice that does not apply, and a column
+  // debugging its own contribution was told to regenerate a snapshot that is
+  // fine. The messages were right; the frame was wrong.
+  //
+  // Matched by `instanceof` AND by name: the class is this bundle's own, so
+  // `instanceof` holds for every refusal raised through it, and the name check
+  // keeps the frame right for a refusal that crossed a realm (a worker, a test
+  // harness) where the constructor identity does not survive.
+  //
+  // A NAMED FUNCTION, because the generic mount pass now also runs LATE — on a
+  // tab's first render, from a click handler that cannot await it (Copilot
+  // review, round 2). A contributed binding refused at that moment must reach
+  // the same surface, in the same frame, as one refused during the initial
+  // render; the alternative is an unhandled rejection in the console and a tab
+  // that silently lacks its panel.
+  function reportAssemblyFailure(err) {
+    // RE-INSERT THE HOST IF A SUCCESSFUL RENDER ALREADY REMOVED IT (Copilot
+    // round 3). The initial render ends with `status.remove()`, so a refusal
+    // arriving from the per-region pass on a tab's first render — or on any
+    // later render, which reads `null` for the element outright — would have
+    // been written into a detached node or dropped entirely.
+    const host = ensureStatusHost();
+    if (!host) return;
+    const registryRefusal = err instanceof ViewBindingError
+      || (err && err.name === "ViewBindingError");
+    host.textContent = registryRefusal
+      ? "This shell was assembled with a contributed view column it cannot use "
+        + "(" + err.message + "). The snapshot is fine — the assembly is not: "
+        + "fix the contributed binding, or serve this bundle without that column."
+      : "Could not load the snapshot (" + err.message +
+        "). The renderer reads a single generated snapshot; regenerate it and reload.";
   }
 }
 

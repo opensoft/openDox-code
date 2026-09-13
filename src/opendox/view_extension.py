@@ -109,6 +109,8 @@ __all__ = [
     "collect_view_bindings",
     "dom_regions",
     "host_view_extensions",
+    "host_view_facet",
+    "host_profile_name",
     "view_manifest",
 ]
 
@@ -180,7 +182,34 @@ REGIONS: dict[str, str] = {
     "dispose-intent": "shell",
     "lens-gate": "shell",
     "repo-projects": "shell",
+    "page-overlay": "shell",
+    "workbench-create": "shell",
+    "workbench-session": "shell",
 }
+#: THE THREE REGIONS SLICE S5 ADDS, and why each is a `shell` one.
+#:
+#: `page-overlay` is RULED Q8 (openxFactory#656 comment `5648049748`, Brett
+#: Heap, 2026-09-12): "a fourth `shell` region, `page-overlay`, is the declared
+#: host for page-level panels (dispose.js's refusal panel); `document.body` is
+#: never a contract surface." The gate column's refusal panel appended a
+#: singleton `aside.refusalpanel` straight to the body — a mount point no region
+#: declared, which is "exactly the silence the REGIONS table exists to end, and
+#: a contributed column appending to the body is a collision nothing can
+#: refuse". The SHELL builds this host and hands it over, which is what makes it
+#: `shell` rather than an `index.html` element: `index.html` is a
+#: `moved_verbatim` row of openxFactory's carve manifest and an added element is
+#: in none of its declared edit classes, so the host is built by `app.js` — and
+#: the region's kind says so honestly rather than declaring a `dom` region whose
+#: element the shell creates at run time.
+#:
+#: `workbench-create` and `workbench-session` are the staging workbench's two
+#: caller-built hosts — the create affordance's slot and the session bar's row,
+#: both built by `views/staging-workbench.js` at mount time and handed over,
+#: exactly as `views/viewer.js` builds `div.viewer-gate` for `viewer-gatebar`.
+#: They are added HERE, with the bindings that mount into them, on slice S4's
+#: own precedent (`lens-gate` and `repo-projects` arrived the same way one slice
+#: ago) and on this table's own argument: "Declaring a region costs nothing and
+#: refuses nothing; an undeclared one is what costs a slice."
 
 #: The facet name a host's profile carries, beside `ROUTE_EXTENSIONS` and
 #: `SUBCOMMAND_EXTENSIONS` — ONE composite profile, one registration, three
@@ -252,6 +281,26 @@ class ViewBinding:
     #: binding's own author knows, and the alternative is grepping a module this
     #: process may not even be able to read.
     routes: tuple[str, ...] = ()
+    #: EVERY EXPORT THE SHELL MAY REACH — RULED Q2 (openxFactory#656 comment
+    #: `5648049748`, Brett Heap, 2026-09-12): "a binding's contract is its
+    #: module NAMESPACE, DECLARED as an `exports` tuple: every export the shell
+    #: may reach is listed on the binding and validated the way `entry` is; an
+    #: undeclared reach (today `isGateBearing`, app.js:939) is a refusal."
+    #:
+    #: WHY A TUPLE AND NOT THE NAMESPACE ITSELF. `resolveView` hands back the
+    #: whole module namespace, and the shell read `gateView.exports.isGateBearing`
+    #: — an export the binding never declared and this seam never validated. A
+    #: contributed column could therefore withdraw an export the shell depends
+    #: on and learn about it from a `TypeError` in a click handler. Declared,
+    #: it is refused where every other declaration defect is refused.
+    #:
+    #: EMPTY MEANS `entry` ALONE, which is the pre-Q2 contract and is what every
+    #: core-arm binding still declares: the core arm's modules are imported
+    #: statically by the shell that owns them, so there is no namespace crossing
+    #: a process boundary to declare. A NON-EMPTY tuple must CONTAIN `entry` —
+    #: the mount is the first member of the namespace the shell may reach, and a
+    #: tuple that omitted it would be declaring a contract its own entry breaks.
+    exports: tuple[str, ...] = ()
     #: Capability keys (`/capabilities`' `actions`) or profile facets the
     #: binding needs. Consulted by the CLIENT at mount; carried here because the
     #: manifest is what the client reads.
@@ -315,6 +364,33 @@ class ViewBinding:
                 f"view binding {self.id!r} declares class {self.view_class!r}, "
                 f"not one of {list(VIEW_CLASSES)} (§ 2.1: A openDox core, "
                 "B the gate loop, C a stage-named region)")
+        if not isinstance(self.exports, tuple):
+            raise ViewBindingError(
+                f"view binding {self.id!r} declares exports {self.exports!r}, "
+                "which is not a tuple — a binding's declared namespace is "
+                "frozen with it")
+        for name in self.exports:
+            # HELD TO `entry`'s OWN GRAMMAR, which is RULED Q2 in one line:
+            # "validated the way `entry` is". Same pattern, same dunder guard,
+            # same reason — the names cross a process boundary as JSON and are
+            # then used to index a module namespace.
+            if not isinstance(name, str) or not _ENTRY.match(name):
+                raise ViewBindingError(
+                    f"view binding {self.id!r} declares export {name!r}: an "
+                    "export is the NAME of an export on the binding's module, "
+                    "held to the same JS-compatible identifier grammar `entry` "
+                    "is (RULED Q2, openxFactory#656 comment 5648049748)")
+            if name.startswith("__"):
+                raise ViewBindingError(
+                    f"view binding {self.id!r} declares export {name!r}: a "
+                    "dunder reaches the object protocol rather than the "
+                    "module's own surface")
+        if self.exports and self.entry not in self.exports:
+            raise ViewBindingError(
+                f"view binding {self.id!r} declares exports {list(self.exports)} "
+                f"that do not include its own entry {self.entry!r}: RULED Q2 "
+                "makes the tuple the WHOLE namespace the shell may reach, and "
+                "the mount is the first member of it")
         if not isinstance(self.routes, tuple):
             raise ViewBindingError(
                 f"view binding {self.id!r} declares routes {self.routes!r}, "
@@ -358,6 +434,7 @@ class ViewBinding:
             "module": self.module,
             "entry": self.entry,
             "view_class": self.view_class,
+            "exports": list(self.exports),
             "routes": list(self.routes),
             "requires": list(self.requires),
             "optional": self.optional,
@@ -572,13 +649,80 @@ def host_view_extensions(profile: Any = None) -> tuple[Any, ...]:
     real proxy at CALL time (never at import time — the whole value of the lazy
     proxy is that importing it cannot fail for want of a host).
     """
+    return host_view_facet(profile)[1]
+
+
+#: The sentinel that is NOT a facet value. `None` cannot serve: a profile is
+#: free to declare `VIEW_EXTENSIONS = None` and that is a MALFORMED declaration
+#: rather than an absent one, which is a distinction this seam exists to keep.
+_NO_FACET = object()
+
+
+def host_view_facet(profile: Any = None) -> tuple[str, tuple[Any, ...]]:
+    """The facet's PRESENCE and its value: `("declared" | "absent", extensions)`.
+
+    PRESENCE IS NOT TRUTHINESS, and reading one for the other loses the very
+    diagnostic `view_manifest` promises (Copilot review of openDox-code#20,
+    round 2). `build_server()` asked `host_facet="declared" if view_extensions
+    else "absent"`, so a host that DECLARES `VIEW_EXTENSIONS = ()` — a column
+    that has grown the facet and contributes nothing on this plane, which is a
+    perfectly ordinary state — was reported to the browser as a host that never
+    grew the facet at all. The two are different facts about the host, exactly
+    as `host_view_extensions`' own docstring argues, and the payload now
+    distinguishes them because it is read by the column debugging its own
+    contribution.
+
+    `declared is None` still answers "absent" ALONGSIDE the missing facet: a
+    profile is entitled to spell "I contribute no views" as `None`, and
+    `tuple(None)` would raise where this function's whole posture is that an
+    absence is not a defect. Anything else declared is tupled, and a value that
+    cannot be tupled raises out of here — a MALFORMED declaration, which is the
+    third fact and is not this function's to soften.
+    """
     if profile is None:
         from opendox.profile_proxy import profile_openxfactory
         profile = profile_openxfactory
-    declared = getattr(profile, PROFILE_FACET, None)
-    if declared is None:
-        return ()
-    return tuple(declared)
+    declared = getattr(profile, PROFILE_FACET, _NO_FACET)
+    if declared is _NO_FACET or declared is None:
+        return "absent", ()
+    return "declared", tuple(declared)
+
+
+def host_profile_name(profile: Any = None) -> str | None:
+    """The registered host profile's most nameable name, or `None`.
+
+    THE NAME NEVER COMES OFF A DUNDER (Copilot review of openDox-code#20,
+    round 3). `build_server()` read `getattr(profile_openxfactory, "__name__",
+    None)`, which could only ever answer the default: `_LateProfile.__getattr__`
+    refuses every dunder BY DESIGN, so that `copy`, `pickle`, `inspect` and
+    pytest's assertion rewriting cannot fire the composition point simply by
+    probing an object. The manifest's `host_profile` was therefore blank in
+    every payload — and it is half of the named absence `host_view_facet` exists
+    to carry, since "a host IS registered and does not contribute panels" is a
+    different fact from "no host at all" only if the host can be named.
+
+    Resolved the way `profile_proxy`'s own refusal resolves it — through
+    `domain_profile.name_of()` — because the two accessors of ONE registration
+    must name a profile the same way.
+
+    NEVER RAISES, and that is the whole posture of this half of the seam: a
+    diagnostic that refuses to be computed is worse than a diagnostic that is
+    absent, and `ProfileNotRegistered` reaches `build_server()` three statements
+    earlier at the read that is entitled to raise it.
+    """
+    if profile is None:
+        from opendox.profile_proxy import profile_openxfactory
+        profile = profile_openxfactory
+    from opendox import domain_profile
+    resolve = getattr(profile, "resolve", None)
+    try:
+        resolved = resolve() if callable(resolve) else profile
+    except Exception:      # noqa: BLE001 — a diagnostic must not out-raise
+        return None
+    try:
+        return domain_profile.name_of(resolved)
+    except Exception:      # noqa: BLE001
+        return None
 
 
 def view_manifest(bindings: Iterable[ViewBinding], *,

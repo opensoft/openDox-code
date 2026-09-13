@@ -1462,7 +1462,6 @@ def test_the_draft_view_has_one_action_called_save_reachable_from_both_tabs():
     """
     css = (WEB / "styles.css").read_text(encoding="utf-8")
     swb = (WEB / "views" / "staging-workbench.js").read_text(encoding="utf-8")
-    create = (WEB / "views" / "swb-create.js").read_text(encoding="utf-8")
 
     # the editor is sized, and the chain that lets it grow is present
     assert ".swb-draftbody {" in css, "the body editor must carry a rule at all"
@@ -1506,13 +1505,16 @@ def test_the_draft_view_has_one_action_called_save_reachable_from_both_tabs():
     assert 'submitLabel: "save",' in swb
     assert "actionsHost: chrome," in swb
     assert ".swb-draftchrome" in css
-    # …and it is the form's own submit, relocated — not a second write path
-    assert "const actions = o.actionsHost || form;" in create
-    assert "actions.appendChild(bar);" in create
-    assert "actions.appendChild(result);" in create
-    assert create.count('method: "POST"') == 1, "still exactly one write"
-    # the TILE path is untouched: there a new document really is being started
-    assert 'o.submitLabel || "create document"' in create
+    # …and it is the form's own submit, relocated — not a second write path:
+    # ASSERTED AT openXdox-code SINCE SLICE S5, because `views/swb-create.js` is
+    # that column's package data now (RULED Q5, openxFactory#656 comment
+    # `5648044785`) and reading it out of `src/opendox/web/views/` would be
+    # asserting against a file this bundle no longer ships. The five statements
+    # that quoted it — the relocated actions host, the two appends, "still
+    # exactly one write", and the tile path's untouched default label — travel
+    # with the module, in `tests/test_gate_loop_views.py`. What stays here is
+    # every statement about `views/staging-workbench.js` and `styles.css`, which
+    # are this bundle's own and are what this test is named for.
 
     # panes built once, toggled — a tab switch discards nothing
     assert "function buildDraftPanes()" in swb

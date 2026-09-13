@@ -87,6 +87,18 @@ export const REGIONS = {
   "dispose-intent": "shell",
   "lens-gate": "shell",
   "repo-projects": "shell",
+  // SLICE S5's THREE. `page-overlay` is RULED Q8 (openxFactory#656 comment
+  // 5648049748): "a fourth `shell` region, `page-overlay`, is the declared host
+  // for page-level panels (dispose.js's refusal panel); `document.body` is never
+  // a contract surface." The SHELL builds this host — `app.js` does, because
+  // `index.html` is a `moved_verbatim` carve row and an added element is in none
+  // of its declared edit classes — and hands it to the binding, which is exactly
+  // what "shell" means here. `workbench-create` and `workbench-session` are the
+  // staging workbench's two caller-built hosts, added with the bindings that
+  // mount into them on slice S4's own precedent (`lens-gate`, `repo-projects`).
+  "page-overlay": "shell",
+  "workbench-create": "shell",
+  "workbench-session": "shell",
 };
 
 export const MANIFEST_KIND = "opendox.view-manifest";
@@ -159,6 +171,28 @@ export function viewBinding(spec) {
       + JSON.stringify(b.view_class) + ", not one of " + VIEW_CLASSES.join("/")
       + " (§ 2.1: A openDox core, B the gate loop, C a stage-named region)");
   }
+  // RULED Q2 (openxFactory#656 comment 5648049748): "a binding's contract is
+  // its module NAMESPACE, DECLARED as an `exports` tuple: every export the
+  // shell may reach is listed on the binding and validated the way `entry` is;
+  // an undeclared reach (today `isGateBearing`, app.js:939) is a refusal."
+  // Empty means `entry` alone — the pre-Q2 contract every core-arm binding
+  // still declares. Non-empty must CONTAIN `entry`: the mount is the first
+  // member of the namespace, and a tuple that omitted it would declare a
+  // contract its own entry breaks.
+  const exported = b.exports === undefined ? [] : b.exports;
+  if (!Array.isArray(exported)
+      || exported.some((name) => typeof name !== "string"
+        || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) || name.startsWith("__"))) {
+    refuse("view binding " + JSON.stringify(b.id) + " declares exports "
+      + JSON.stringify(exported) + ": every entry is the NAME of an export on "
+      + "the binding's module, held to the same grammar `entry` is");
+  }
+  if (exported.length && !exported.includes(b.entry)) {
+    refuse("view binding " + JSON.stringify(b.id) + " declares exports "
+      + JSON.stringify(exported) + " that do not include its own entry "
+      + JSON.stringify(b.entry) + ": RULED Q2 makes the tuple the WHOLE "
+      + "namespace the shell may reach, and the mount is the first member of it.");
+  }
   const routes = b.routes === undefined ? [] : b.routes;
   if (!Array.isArray(routes) || routes.some((r) => typeof r !== "string" || !r.startsWith("/"))) {
     refuse("view binding " + JSON.stringify(b.id) + " declares routes "
@@ -189,6 +223,7 @@ export function viewBinding(spec) {
     module: b.module,
     entry: b.entry,
     view_class: b.view_class,
+    exports: Object.freeze(exported.slice()),
     routes: Object.freeze(routes.slice()),
     requires: Object.freeze(requires.slice()),
     optional,
@@ -402,6 +437,76 @@ export function manifestRoutes(capabilities) {
   return routes;
 }
 
+// ---- RULED Q4: `requires` NAMES DOTTED PATHS INTO THE /capabilities PAYLOAD --
+//
+// openxFactory#656 comment 5648049748, Brett Heap, 2026-09-12: "`requires`
+// names DOTTED PATHS into the `/capabilities` payload; unmet + `optional: true`
+// renders the region empty with a NAMED reason; unmet + required REFUSES,
+// naming the binding, the path and the probed value."
+//
+// THIS IS THE OBLIGATION openDox-spec § 5.1 NAMES MOST DIRECTLY, and until this
+// slice it was the one with no code behind it: the field was declared
+// (`view_extension.py`:248-251), validated, carried into the manifest and
+// mirrored here, and NO LINE OF EITHER HALF READ IT — so "a binding declaring
+// `requires` is declaring an intention the shell does not act on"
+// (openXdox-spec `docs/gate-loop-view-contract.md` § 4.4 @ d73767b7). These
+// three functions are the act.
+//
+// A MISSING PAYLOAD IS AN UNMET REQUIREMENT, NOT AN ERROR. `probeCapabilities()`
+// degrades a failed probe to `{ actions: { notebook: false } }`, and a static
+// served image 404s the route entirely — so `undefined` at the end of the path
+// is the honest answer "this plane does not offer it", which is exactly what an
+// unmet requirement is. Only a TRUTHY value meets one; `false`, `null`, `0` and
+// `""` are all "off", because every capability this payload carries is a
+// verdict and a falsy verdict is a no.
+//
+// AN OWN PROPERTY OR NOTHING (Copilot review, round 2). An ordinary property
+// read walks the prototype chain, so `requires: ["toString"]` resolved to a
+// function, answered truthy, and MET a requirement no `/capabilities` payload
+// ever carried — as would `constructor`, `valueOf` and every other
+// `Object.prototype` member. The payload is JSON this shell did not write and a
+// requirement is a gate, so the probe reads only what the object itself
+// carries: a malformed or hostile manifest fails CLOSED, which is the posture
+// every other refusal in this file takes.
+export function probeCapabilityPath(capabilities, path) {
+  let cursor = capabilities;
+  for (const segment of String(path).split(".")) {
+    if (cursor === null || cursor === undefined || typeof cursor !== "object") {
+      return undefined;
+    }
+    if (!Object.prototype.hasOwnProperty.call(cursor, segment)) return undefined;
+    cursor = cursor[segment];
+  }
+  return cursor;
+}
+
+// The FIRST unmet requirement of a binding, or null. First and not all, for
+// `_route_ownership_breach`'s reason: the caller does nothing different for a
+// second one, and naming one path a human can go and look at beats naming
+// three.
+export function unmetRequirement(binding, capabilities) {
+  for (const path of (binding && binding.requires) || []) {
+    const value = probeCapabilityPath(capabilities, path);
+    if (!value) return { path, value };
+  }
+  return null;
+}
+
+// The sentence a human reads when a binding's `requires` is unmet — the refusal
+// text openDox-spec § 5.1 asks this seam for and § 5 of the contract note
+// records as "there is none". It names the binding, the path and the PROBED
+// VALUE, because "unmet" and "the payload does not carry that key at all" are
+// different facts for the column debugging its own contribution.
+export function requirementRefusal(binding, unmet) {
+  return "view binding " + JSON.stringify(binding.id) + " requires "
+    + JSON.stringify(unmet.path) + ", which this plane's /capabilities payload "
+    + "answers as " + JSON.stringify(unmet.value === undefined ? null : unmet.value)
+    + (unmet.value === undefined ? " (the path is not carried at all)" : "")
+    + ". A binding that is correct to be absent declares `optional: true`; a "
+    + "required one refuses here rather than mounting a panel whose verbs can "
+    + "only be refused.";
+}
+
 // An OPTIONAL reach: the binding, or null. This is `consumer_reach`'s posture
 // in the browser — a reach into a column that may not be installed is LATE and
 // NAMED, and the caller decides what absence means. § 6 Q5's intent chips and
@@ -438,9 +543,40 @@ export function requireView(bindings, id) {
 //
 // The specifier is resolved against the BUNDLE ROOT (`./views/gate.js` is what
 // `app.js` would have written), not against this module's own folder.
-export async function resolveView(bindings, id) {
+export async function resolveView(bindings, id, options) {
   const binding = lookupView(bindings, id);
   if (!binding) return null;
+  return resolveBinding(binding, options);
+}
+
+// The same resolution, given the BINDING ITSELF rather than an id to look one
+// up by — the form a caller that is already holding a binding must use.
+//
+// WHY IT IS SEPARATE (Copilot review, round 2). Bindings are unique by SLOT,
+// `region + id` (`viewBinding()`), so the registry deliberately permits one id
+// in two regions — two columns may each contribute a `gate.bar` into their own
+// region and neither is a collision. `lookupView()` answers by id alone and
+// returns the FIRST match, so the generic mount pass, iterating the bindings
+// and re-resolving each by `binding.id`, would have mounted the FIRST
+// binding's module and entry into the SECOND binding's region: a panel
+// rendering another column's module, with nothing refused and nothing logged.
+// The pass holds the binding already; it resolves THAT one.
+export async function resolveBinding(binding, options) {
+  if (!binding) return null;
+  // RULED Q4, at the ONE place every named reader already goes through. A
+  // caller that passes `capabilities` gets the requirement evaluated here:
+  // an unmet requirement on an OPTIONAL binding answers `null`, which every
+  // reader in this shell already reads as "the column that supplies it is not
+  // installed"; on a REQUIRED one it refuses, naming the binding, the path and
+  // the probed value. A caller that passes none is asking for the binding and
+  // not for the verdict — `collectViewBindings`' own tests do exactly that.
+  if (options && "capabilities" in options) {
+    const unmet = unmetRequirement(binding, options.capabilities);
+    if (unmet) {
+      if (!binding.optional) refuse(requirementRefusal(binding, unmet));
+      return null;
+    }
+  }
   const bundleRoot = new URL("../", import.meta.url);
   // A REJECTED IMPORT IS A REFUSAL TOO, and one this seam names rather than
   // lets pass through raw (Copilot, PR #14): a missing file, a syntax error
@@ -481,7 +617,90 @@ export async function resolveView(bindings, id) {
       + "function. An entry is the export that MOUNTS the panel; a binding "
       + "that cannot be mounted must not look registered.");
   }
-  return { binding, exports };
+  // EVERY DECLARED EXPORT IS CHECKED THE WAY THE ENTRY IS (RULED Q2). A binding
+  // that names an export its module does not have is a binding the shell would
+  // reach for and find `undefined` in — the "dangling import a thousand lines
+  // from the call" this seam replaces, one field over.
+  for (const name of binding.exports) {
+    if (!(name in exports)) {
+      refuse("view binding " + JSON.stringify(binding.id) + " declares export "
+        + JSON.stringify(name) + ", which " + JSON.stringify(binding.module)
+        + " does not export. A binding whose declared namespace is not the "
+        + "module's namespace must not look registered.");
+    }
+    // PRESENT IS NOT USABLE, one field over (Copilot review, round 2). RULED Q2
+    // is "validated the way `entry` is", and `entry` is checked PRESENT and
+    // CALLABLE two statements above — so a declared export is held to both.
+    // Checking only the name let a module export `firstEditTransport` as a
+    // string and still resolve: `app.js` reaches it through the registry and
+    // calls it, and the defect would surface as a raw `TypeError` inside a
+    // click handler, which is the "dangling import a thousand lines from the
+    // call" this whole seam exists to replace.
+    //
+    // A DECLARED EXPORT IS A CALL, and that is what the tuple means: every name
+    // the six gate bindings declare is a mounter, a transport or a predicate.
+    // Data a contributed column must publish travels on the BINDING (`routes`,
+    // `requires`) or out of a mount, both of which are declared surfaces this
+    // seam already validates; a constant smuggled through the namespace would
+    // be a third, undeclared one.
+    if (typeof exports[name] !== "function") {
+      refuse("view binding " + JSON.stringify(binding.id) + " declares export "
+        + JSON.stringify(name) + ", which " + JSON.stringify(binding.module)
+        + " exports as " + typeof exports[name] + " rather than a function. "
+        + "RULED Q2 (openxFactory#656 comment 5648049748) validates a declared "
+        + "export the way `entry` is validated, and the shell REACHES a "
+        + "declared export in order to call it.");
+    }
+  }
+  return { binding, exports: declaredNamespace(binding, exports) };
+}
+
+// THE DECLARED NAMESPACE — RULED Q2's refusal half. `resolveView` used to hand
+// back the module's WHOLE namespace, and `app.js` read `isGateBearing` off it,
+// an export the binding never declared and this seam never validated. The
+// namespace a caller receives is now bounded by the declaration: a reach for a
+// name the binding did not declare REFUSES, naming both, instead of answering
+// `undefined` and failing inside whatever tried to call it.
+//
+// A binding with an EMPTY `exports` keeps the pre-Q2 contract — `entry` alone —
+// which is what every core-arm binding declares, because the core arm's modules
+// are imported statically by the shell that owns them.
+//
+// SYMBOLS AND `then` PASS THROUGH rather than refusing: a Proxy is probed for
+// `Symbol.toStringTag` by `String()`, and any object returned from an async
+// function is probed for `then` by the await that receives it. A refusal from
+// either would be this seam refusing the language rather than a caller.
+//
+// ONE TRAP, `get`, AND THAT IS A LANGUAGE CONSTRAINT RATHER THAN A CHOICE. A
+// module namespace object's exports are NON-CONFIGURABLE own properties, so the
+// Proxy invariants forbid `has`, `ownKeys` and `getOwnPropertyDescriptor` from
+// hiding one: a `has` trap answering false for a name the target really carries
+// throws `TypeError: trap returned falsish for property … which exists in the
+// proxy target as non-configurable`, which would be this seam breaking the
+// caller instead of refusing it. `in` and `Object.keys()` therefore still see
+// the module's whole namespace, and REACHING for an undeclared name is what
+// refuses — which is exactly what RULED Q2 says is the defect: "an undeclared
+// reach (today `isGateBearing`, app.js:939) is a refusal". An export is
+// writable on a namespace object, so the `get` invariant does not bind and the
+// refusal is lawful.
+function declaredNamespace(binding, exports) {
+  const allowed = new Set(binding.exports.length
+    ? binding.exports : [binding.entry]);
+  return new Proxy(exports, {
+    get(target, property, receiver) {
+      if (typeof property === "symbol" || property === "then") {
+        return Reflect.get(target, property, receiver);
+      }
+      if (!allowed.has(property)) {
+        refuse("view binding " + JSON.stringify(binding.id) + " does not "
+          + "declare an export named " + JSON.stringify(String(property))
+          + "; it declares " + JSON.stringify([...allowed]) + ". RULED Q2 "
+          + "(openxFactory#656 comment 5648049748): a binding's contract is its "
+          + "module NAMESPACE, DECLARED — an undeclared reach is a refusal.");
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
 }
 
 // The element a "dom" region mounts into: the shell element whose `id` is the
@@ -496,4 +715,127 @@ export function regionHost(binding, doc) {
       + "binding at mount time");
   }
   return (doc || document).getElementById(binding.region);
+}
+
+
+// ---- RULED Q1: THE SHELL MOUNTS CONTRIBUTED BINDINGS GENERICALLY -----------
+//
+// openxFactory#656 comment 5648044785, Brett Heap, 2026-09-12: "the shell
+// MOUNTS contributed bindings generically: one mount pass over every
+// contributed binding whose region is a `dom` region; the three `shell` regions
+// stay caller-driven (the gate bar's pattern)."
+//
+// WHAT IT REPLACES. Nothing generic mounted a contributed binding: the tab
+// router mounts only bindings that declared a `control`, a contributed entry
+// declaring one is refused where the payload is read, and the one
+// contributed-shaped mount was `resolveView(views, "gate.bar")` BY ID at a
+// single openDox call site. So "a column can contribute a binding today and
+// have nothing ever call it" — and every contributed panel needed an openDox
+// edit to become reachable, "which is the fork the seam was drawn to prevent".
+//
+// WHY `shell` REGIONS ARE NOT IN THE PASS, and it is not an omission: a `shell`
+// region has NO STANDING ELEMENT (`regionHost` refuses to look for one), so the
+// host does not exist until the caller that builds it builds it. The viewer
+// builds the gate bar's host per artifact; the workbench builds its two. A pass
+// that tried to mount them would be mounting into nothing, which is the defect
+// this seam names as "a declared panel silently unmounted".
+//
+// THE SIGNATURE IS RULED Q3's — `mount(host, snapshot, ctx)` — and it is the
+// only one this pass knows. A contributed binding that took anything else would
+// be teaching the shell a second shape, which is the coupling the registry
+// exists to end.
+//
+// WHEN IT RUNS IS PART OF THE CONTRACT, and `regions` is how the caller says
+// so (Copilot review of openDox-code#20, round 2). Every `dom` region is a root
+// a CORE renderer owns and CLEARS on its own render — `renderWheel` and
+// `renderFunnel` assign `root.innerHTML = ""`, `mountExplorer` clears its
+// container, and the tab router renders a non-initial tab LAZILY, on first
+// activation, long after page load. One pass before the core mounts therefore
+// mounted contributed panels into roots that were about to be emptied, and a
+// panel in a tab the human had not opened yet was erased the moment they
+// opened it. So the pass is run PER REGION, by the caller that just rendered
+// that region: `regions` bounds it to those, and a caller that passes none
+// gets every `dom`-region binding, which is what a probe wants.
+//
+// WHAT IT RETURNS: one record per contributed binding it considered, so a
+// caller can assert what mounted, what was skipped and why. `mounted` is the
+// entry's own return value (a controller, an element, or undefined) — the pass
+// does not interpret it.
+export async function mountContributedViews(bindings, snapshot, ctx, options) {
+  const o = options || {};
+  const doc = o.document || (typeof document === "undefined" ? null : document);
+  const capabilities = o.capabilities;
+  const only = o.regions ? new Set(o.regions) : null;
+  // A PASS BELONGS TO THE RENDER THAT STARTED IT (Copilot review of
+  // openDox-code#20, round 3). This function awaits a dynamic import, and a
+  // per-region pass can be started from a tab's first render — a click, minutes
+  // after load — so a repository switch or a refresh can begin a NEW render
+  // while a binding's module is still loading. The old pass would then resume
+  // and mount a stale snapshot into a region the new render owns. `signal` is
+  // the render scope every other listener in this shell is already bound to;
+  // the pass reads it before it considers a binding and again after the import,
+  // which are the two moments an abort can land.
+  const signal = o.signal || null;
+  const aborted = () => !!(signal && signal.aborted);
+  const results = [];
+  for (const binding of bindings || []) {
+    if (aborted()) break;
+    if (only && !only.has(binding.region)) continue;
+    // The CORE arm is the shell's own and mounts through the tab router; a core
+    // binding is the one that carries a `mount` function, which a contributed
+    // one can never have (`contributedViewBindings` refuses the field where the
+    // payload is read).
+    if (typeof binding.mount === "function" || binding.control) continue;
+    if (REGIONS[binding.region] !== "dom") continue;
+    const unmet = capabilities === undefined
+      ? null : unmetRequirement(binding, capabilities);
+    if (unmet) {
+      // RULED Q4: "unmet + `optional: true` renders the region empty with a
+      // NAMED reason; unmet + required REFUSES." The reason is written INTO the
+      // region, because a human looking at an empty panel is the person who
+      // needs it — not the console.
+      if (!binding.optional) refuse(requirementRefusal(binding, unmet));
+      const host = doc ? regionHost(binding, doc) : null;
+      if (host) host.appendChild(regionReason(binding, unmet, doc));
+      results.push({ binding, mounted: null, skipped: "requires", unmet });
+      continue;
+    }
+    const host = doc ? regionHost(binding, doc) : null;
+    if (!host) {
+      // A `dom` region the shell declares and this document does not carry —
+      // an older served `index.html`, or a probe with a partial document. Named,
+      // never silent, and never a throw: the shell renders without the panel.
+      results.push({ binding, mounted: null, skipped: "no-host" });
+      continue;
+    }
+    // THE EXACT BINDING, never a re-lookup by id (Copilot review, round 2):
+    // ids are unique per REGION, not globally, so `resolveView(bindings, id)`
+    // could answer a different region's binding.
+    const resolved = await resolveBinding(binding);
+    if (!resolved) {
+      results.push({ binding, mounted: null, skipped: "absent" });
+      continue;
+    }
+    // The import is the await, so this is the other moment an abort can land.
+    if (aborted()) {
+      results.push({ binding, mounted: null, skipped: "aborted" });
+      break;
+    }
+    results.push({
+      binding,
+      mounted: resolved.exports[binding.entry](host, snapshot, ctx),
+      skipped: null,
+    });
+  }
+  return results;
+}
+
+// The NAMED REASON an unmet optional binding leaves in its region (RULED Q4).
+// `textContent` only — the value came off a payload this shell did not write.
+export function regionReason(binding, unmet, doc) {
+  const node = (doc || document).createElement("p");
+  node.className = "viewrefusal";
+  node.setAttribute("data-view", binding.id);
+  node.textContent = requirementRefusal(binding, unmet);
+  return node;
 }

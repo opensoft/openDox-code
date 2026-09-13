@@ -11,6 +11,23 @@ class B." RULED Q3 (opensoft/openxFactory#656 comment `5642758731`, Brett Heap,
 2026-09-12) states the rule the move obeys: **"a route constant travels with
 the binding that calls it, never with the model that happens to declare it."**
 
+AMENDED BY SLICE S5 -- "contribute the gate loop". S4 was S5's precondition and
+S5 has happened: the six class-B modules S4's ten tails landed in
+(`views/gate.js`, `views/dispose.js`, `views/swb-create.js`,
+`views/swb-session.js`, `views/gate-lens.js`, `views/gate-projects.js`) have
+LEFT this bundle for openXdox-code's package data, declared there as
+`ViewBinding`s (RULED Q5, openxFactory#656 comment `5648044785`). Half of every
+row in `MOVED_TAILS` is therefore no longer a file this leg can read, and this
+suite now says so explicitly rather than failing to open a path: the rows split
+into `IN_BUNDLE_TAILS` (the one projection read slice S6 owns) and
+`CONTRIBUTED_TAILS` (the ten gate ones), and what is asserted about the latter
+is the half that is still THIS leg's -- the origin carries no literal, the
+module is gone, no file of this bundle declares a gate route at all, and no
+binding entry survives in `app.js`'s core arm. The other half -- the binding
+declaring the same routes the module POSTs, and the module still performing the
+verb under `node` -- moved WITH the modules, to openXdox-code's
+`tests/test_gate_loop_views.py`.
+
 WHAT THIS FILE MEASURES AND `tests/test_web_boundary.py` DOES NOT. The census
 test asserts the BOUNDARY -- that no file outside class B names a route another
 column declares -- and it would stay just as green if all thirteen constants
@@ -96,6 +113,31 @@ LEFT_THE_BUNDLE = ("ACTIONS_APPLY_REGISTER_EDITS_ROUTE",
 SPLIT_FILES = ("lens-model.js", "repo-selector.js", "staging-workbench-model.js")
 NEW_MODULES = ("gate-lens.js", "gate-projects.js", "projection-index.js")
 
+# AMENDED BY SLICE S5 -- "contribute the gate loop". S4 put the ten gate-prefix
+# tails into class-B modules; S5 moved those modules OUT OF THIS BUNDLE, to
+# openXdox-code's package data, where they are declared as `ViewBinding`s
+# (RULED Q5, openxFactory#656 comment `5648044785`). So half of every row above
+# is no longer a file this leg can read, and this suite splits accordingly:
+#
+#   IN_BUNDLE      the one tail whose destination stayed -- `projection-index.js`
+#                  is openXdox's PROJECTION column's read, not the gate loop's,
+#                  and slice S6 (not S5) is what re-homes that family.
+#   CONTRIBUTED    the ten gate tails. What this leg can still assert about them
+#                  is the half that matters HERE: the origin is clean, the
+#                  module has left, and no file of this bundle names the route.
+#                  The other half -- that the binding declares it and the module
+#                  still performs the verb -- is openXdox-code's, at
+#                  `tests/test_gate_loop_views.py`.
+IN_BUNDLE_TAILS = [row for row in MOVED_TAILS
+                   if row[3] in ("projection-index.js",)]
+CONTRIBUTED_TAILS = [row for row in MOVED_TAILS
+                     if row[3] not in ("projection-index.js",)]
+#: The six modules slice S5 moved to openXdox-code (four the note's S5 row names
+#: plus the two S4 created, whose own header says "AT S5 THIS FILE LEAVES THE
+#: BUNDLE").
+CONTRIBUTED_MODULES = ("gate.js", "dispose.js", "swb-create.js",
+                       "swb-session.js", "gate-lens.js", "gate-projects.js")
+
 
 def _read(name: str) -> str:
     return (VIEWS / name).read_text(encoding="utf-8")
@@ -109,8 +151,8 @@ def _declares(source: str, constant: str, route: str) -> bool:
 # 1. the move itself: out of the model, into the caller
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("constant,route,origin,destination", MOVED_TAILS,
-                         ids=[t[0] for t in MOVED_TAILS])
+@pytest.mark.parametrize("constant,route,origin,destination", IN_BUNDLE_TAILS,
+                         ids=[t[0] for t in IN_BUNDLE_TAILS])
 def test_each_route_tail_is_declared_in_the_file_that_calls_it(
         constant, route, origin, destination) -> None:
     """RULED Q3, one row at a time. The constant is declared in its
@@ -124,6 +166,26 @@ def test_each_route_tail_is_declared_in_the_file_that_calls_it(
         f"{origin} still carries the literal {route!r}: the tail did not move, "
         f"it was copied"
     )
+
+
+@pytest.mark.parametrize("constant,route,origin,destination", CONTRIBUTED_TAILS,
+                         ids=[t[0] for t in CONTRIBUTED_TAILS])
+def test_each_contributed_route_tail_left_with_its_module(
+        constant, route, origin, destination) -> None:
+    """The same row after slice S5, measured from the side that stayed.
+
+    S4 sent the tail to the class-B module that CALLS it; S5 sent that module to
+    openXdox. Both halves of the move are still checkable here, and they are the
+    two that would tell a reader this bundle had kept a copy: the ORIGIN carries
+    no literal, and the DESTINATION is not a file of this bundle at all.
+    """
+    assert f'"{route}"' not in _read(origin), (
+        f"{origin} still carries the literal {route!r}: the tail did not move, "
+        f"it was copied")
+    assert not (VIEWS / destination).exists(), (
+        f"views/{destination} is still in this bundle: slice S5 moves the gate "
+        f"loop's six class-B modules to openXdox-code's package data, where "
+        f"{constant} is declared on a contributed ViewBinding")
 
 
 def test_the_three_split_files_declare_no_route_constant_that_left() -> None:
@@ -220,58 +282,68 @@ def _app_binding(binding_id: str) -> dict:
     }
 
 
-@pytest.mark.parametrize("binding_id,module,entry,region,declared_in,constant", [
-    ("gate.lens", "./views/gate-lens.js", "mountLensGate", "lens-gate",
-     "gate-lens.js", "LENS_GATE_ROUTES"),
-    ("gate.projects", "./views/gate-projects.js", "mountProjectCommissions",
-     "repo-projects", "gate-projects.js", "PROJECT_GATE_ROUTES"),
-])
-def test_the_binding_entry_and_its_module_declare_the_same_routes(
-        binding_id, module, entry, region, declared_in, constant) -> None:
-    """`view_extension.py`: "a binding that declares the routes it calls is
-    what makes that ruling checkable instead of aspirational". The declaration
-    is necessarily written twice -- once in the manifest entry and once as the
-    constants the module POSTs -- because `app.js` is class A and may not
-    import a class-B module to read them. THIS is what keeps the two copies
-    honest, and it is what S5 will carry over when the entry moves from the
-    core arm into `contributedViewBindings()`."""
-    binding = _app_binding(binding_id)
-    assert binding["module"] == module
-    assert binding["entry"] == entry
-    assert binding["region"] == region
-    assert binding["view_class"] == "B", (
-        f"{binding_id} is not declared class B; class B is the ONLY class "
-        f"exempt from the route-ownership refusal, and a gate binding that "
-        f"declares itself anything else refuses its own assembly"
-    )
-    assert binding["optional"] is True, (
-        f"{binding_id} must be optional: a shell assembled without the gate "
-        f"column has to come up, which is RULING C2 one tier out"
-    )
-    assert binding["routes"] == _js_route_array(_read(declared_in), constant), (
-        f"{binding_id}'s declared routes and {declared_in}'s {constant} have "
-        f"drifted apart"
-    )
+@pytest.mark.parametrize("binding_id", ["gate.bar", "gate.lens", "gate.projects"])
+def test_no_gate_binding_is_declared_in_the_shells_core_arm(binding_id) -> None:
+    """AMENDED BY SLICE S5, and the amendment is what S4's own comment predicted.
+
+    S4 asserted that each of its two binding entries in `app.js`'s CORE arm
+    named the same routes as the module it pointed at -- a declaration
+    "necessarily written twice ... because `app.js` is class A and may not
+    import a class-B module to read them" -- and said in as many words that this
+    is "what S5 will carry over when the entry moves from the core arm into
+    `contributedViewBindings()`". It has moved. Both copies now sit at
+    openXdox-code, one in `src/openxdox/view_extensions.py`'s binding spec and
+    one in the module's own constants, and they are held to each other THERE
+    (`tests/test_gate_loop_views.py::test_every_binding_declares_the_routes_its_module_names`)
+    -- which is a stronger place for the check than here, because both halves
+    are finally in one repository.
+
+    What this leg asserts is the half it owns: not one of the three gate
+    bindings is declared in the shell's core arm any more.
+    """
+    source = APP_JS.read_text(encoding="utf-8")
+    assert f'id: "{binding_id}"' not in source, (
+        f"app.js still declares {binding_id} in CORE_VIEWS; slice S5 moves every "
+        "gate binding to the contributed column")
 
 
-def test_every_moved_gate_route_is_declared_by_some_class_b_module() -> None:
-    """The ten gate-prefix constants § 5's S4 row counts, checked as a SET:
-    each is declared in a class-B file, so the gate loop's route table no
-    longer lives outside class B and S5 can contribute it."""
+def test_no_file_of_this_bundle_declares_a_gate_route() -> None:
+    """The strongest single statement this slice can make, and the one that says
+    the gate loop really left rather than being partly copied.
+
+    S4's version of this test asked whether the ten moved constants were
+    declared by SOME class-B file of this bundle -- the precondition for S5.
+    S5 is the slice after which the answer must be NO for every one of them,
+    from any class: `views/gate.js`, `views/dispose.js`, `views/swb-create.js`,
+    `views/swb-session.js`, `views/gate-lens.js` and `views/gate-projects.js`
+    are openXdox-code's package data now, and a gate route literal surviving
+    anywhere here would be a copy left behind.
+    """
+    survivors = []
+    for path in sorted(p for p in WEB.rglob("*") if p.is_file()
+                       and p.suffix in (".js", ".html", ".css")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in re.finditer(r'"(/actions/gate/[^"]*)"', text):
+            survivors.append(f"{path.relative_to(WEB).as_posix()}: {match.group(1)}")
+    assert survivors == [], (
+        f"{len(survivors)} gate route literal(s) still in this bundle: "
+        f"{survivors}. RULED Q3: a route constant travels with the binding that "
+        "calls it, and every gate binding is contributed at slice S5")
+
+
+@pytest.mark.parametrize("name", CONTRIBUTED_MODULES)
+def test_every_contributed_module_left_this_bundle(name) -> None:
+    """The six files § 5's S5 row moves, checked one at a time so the failure
+    names which one came back."""
+    assert not (VIEWS / name).exists(), (
+        f"views/{name} is still here; slice S5 moves it to openXdox-code's "
+        "`src/openxdox/web/views/`, shipped as package data and copied into this "
+        "bundle at assembly (RULED Q5)")
     census = yaml.safe_load(CENSUS_PATH.read_text(encoding="utf-8"))
-    class_b = [row["path"] for row in census["files"] if row["class"] == "B"]
-    declared: set[str] = set()
-    for path in class_b:
-        for match in re.finditer(r'export const \w+ = "(/actions/gate/[^"]+)";',
-                                 (WEB / path).read_text(encoding="utf-8")):
-            declared.add(match.group(1))
-    moved = {route for _c, route, _o, _d in MOVED_TAILS
-             if route.startswith("/actions/gate/")}
-    assert moved <= declared, f"not declared in any class-B file: {sorted(moved - declared)}"
-    # plus the three that were already there (§ 4.5 point 2: "the three gate
-    # constants declared in class-B files are NOT in the count")
-    assert {"/actions/gate/dispose-possible", "/actions/gate/propose",
-            "/actions/gate/ratify"} <= declared
+    rows = {row["path"] for row in census["files"]}
+    assert f"views/{name}" not in rows, (
+        f"the census still carries a row for views/{name}: a row naming a file "
+        "that is not here fails assertion 1's own stale-row check")
 
 
 @pytest.mark.parametrize("importer", ["app.js", "views/lens.js",
@@ -306,13 +378,18 @@ def test_the_selector_reaches_the_projection_column_late() -> None:
     assert "PROJECTION_COLUMN = null" in source
 
 
-def test_the_census_carries_the_three_new_modules_as_class_b() -> None:
+def test_the_census_carries_the_one_new_module_that_stayed_as_class_b() -> None:
+    """AMENDED BY SLICE S5. Two of S4's three new modules left this bundle with
+    the gate loop; `views/projection-index.js` is openXdox's PROJECTION column's
+    one read, which slice S6 re-homes and this slice does not touch."""
     census = yaml.safe_load(CENSUS_PATH.read_text(encoding="utf-8"))
     rows = {row["path"]: row for row in census["files"]}
-    for name in NEW_MODULES:
-        row = rows.get(f"views/{name}")
-        assert row is not None, f"views/{name} carries no census row"
-        assert row["class"] == "B", f"views/{name} is class {row['class']!r}"
+    row = rows.get("views/projection-index.js")
+    assert row is not None, "views/projection-index.js carries no census row"
+    assert row["class"] == "B", f"it is class {row['class']!r}"
+    for gone in ("gate-lens.js", "gate-projects.js"):
+        assert f"views/{gone}" not in rows, (
+            f"views/{gone} still carries a census row after slice S5 moved it")
 
 
 # ---------------------------------------------------------------------------
@@ -384,139 +461,28 @@ def _run_node(body: str, tmp_path: Path) -> dict:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
-@pytest.mark.parametrize("kind,expected", [
-    ("save-recipe", "/actions/gate/lens-save-recipe"),
-    ("add-as-cluster", "/actions/gate/lens-add-as-cluster"),
-])
-def test_js_the_lens_gate_posts_the_route_its_plan_kind_names(
-        kind, expected, tmp_path) -> None:
-    """The verb still works after the move, and it posts the route the plan
-    kind names -- the behaviour that used to live in `views/lens.js`'s
-    `mountExecute`, now in the binding that owns both routes."""
-    result = _run_node(f"""
-const {{ mountLensGate }} = await import(VIEWS + "gate-lens.js");
-const [calls, fetcher] = recorder({{ payload: {{ ok: true, manifest: "m.yaml",
-                                                record: "r.yaml" }} }});
-const host = document.createElement("div");
-const plan = {{ kind: {json.dumps(kind)}, repository: "openxFactory", name: "lens set",
-               checked: ["a"], pinned: [], members: [], excluded: [] }};
-mountLensGate(host, {{ plan, caps: {{ actor: "brett" }}, fetcher }});
-buttons(host)[0].click();
-await settle();
-// add-as-cluster collects the organizer evidence first: fill it and submit.
-if (calls.length === 0) {{
-  const form = flatten(host).find((n) => n.className
-    && n.className.includes("evidence-form"));
-  for (const input of inputs(form)) input.value = "x";
-  buttons(form).find((b) => b.textContent === "execute").click();
-  await settle();
-}}
-console.log(JSON.stringify({{ calls, texts: texts(host) }}));
-""", tmp_path)
-    assert [c["route"] for c in result["calls"]] == [expected]
-    call = result["calls"][0]
-    assert call["method"] == "POST"
-    assert call["body"]["repository"] == "openxFactory"
-    if kind == "add-as-cluster":
-        assert call["body"]["evidence"]["proposer"] == "x"
-    else:
-        assert "evidence" not in call["body"]
-    assert any("landed" in t for t in result["texts"])
-
-
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
-def test_js_the_lens_gate_renders_the_engines_refusal_and_re_arms(tmp_path) -> None:
-    """"the engine refuses and the reason renders verbatim (single source of
-    truth)" -- and a refused plan stays retryable, which is what the disabled
-    flag coming back off means."""
-    result = _run_node("""
-const { mountLensGate } = await import(VIEWS + "gate-lens.js");
-const [calls, fetcher] = recorder({ ok: false, status: 409,
-  payload: { ok: false, message: "recipe already recorded" } });
-const host = document.createElement("div");
-mountLensGate(host, { plan: { kind: "save-recipe", repository: "r", name: "n",
-                              members: [], excluded: [] },
-                      caps: {}, fetcher });
-const run = buttons(host)[0];
-run.click();
-await settle();
-console.log(JSON.stringify({ calls, texts: texts(host), disabled: run.disabled }));
-""", tmp_path)
-    assert len(result["calls"]) == 1
-    assert "recipe already recorded" in result["texts"]
-    assert result["disabled"] is False
-
-
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
-def test_js_the_project_commissions_post_both_gate_routes(tmp_path) -> None:
-    """One binding, two routes: the create form POSTs the create-project
-    commission and `commissionEdit` POSTs the membership one, carrying the
-    project id the selector holds. The controller's shape is the seam
-    `views/repo-selector.js` reaches through, so it is measured here rather
-    than assumed."""
-    result = _run_node("""
-const { mountProjectCommissions } = await import(VIEWS + "gate-projects.js");
-const [calls, fetcher] = recorder({ payload: { ok: true, job: "J-1",
-                                               add: ["b"], remove: [] } });
-const host = document.createElement("div");
-const status = document.createElement("span");
-const pending = [];
-const gate = mountProjectCommissions(host, {
-  roster: [{ kind: "repository", repository: "openxFactory" },
-           { kind: "repository", repository: "openDox" }],
-  status, fetcher, addPendingOption: (name) => pending.push(name),
-});
-// the create form: opened by the dropdown's "New Project..." line
-const form = flatten(host).find((n) => n.className
-  && n.className.includes("projectform"));
-const hiddenBeforeOpen = form.hidden;
-gate.openCreateForm();
-inputs(form).find((i) => i.tag === "input" && i.type === "text").value = "Field Pilots";
-inputs(form).filter((i) => i.type === "checkbox")[0].checked = true;
-buttons(form).find((b) => b.textContent === "commission project").click();
-await settle();
-// the membership edit: raised by the filter's add row / trash control
-let restored = false;
-await gate.commissionEdit("proj-1", { add: ["openDox"] },
-                          { restore: () => { restored = true; } });
-console.log(JSON.stringify({ calls, pending, hiddenBeforeOpen,
-                             retired: form.hidden, restored,
-                             status: status.textContent }));
-""", tmp_path)
-    assert [c["route"] for c in result["calls"]] == [
-        "/actions/gate/create-project", "/actions/gate/edit-project"]
-    create, edit = result["calls"]
-    assert create["body"] == {"name": "Field Pilots",
-                              "repositories": ["openxFactory"]}
-    assert edit["body"] == {"project_id": "proj-1", "add": ["openDox"]}
-    assert result["hiddenBeforeOpen"] is True    # the form is opened, never shown
-    assert result["retired"] is True             # a landed commission retires it
-    assert result["restored"] is False           # nothing to restore on success
-    assert "membership edit recorded (J-1)" == result["status"]
-
-
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
-def test_js_a_refused_membership_edit_restores_the_control(tmp_path) -> None:
-    """The two-click trash re-arms and the add row's select restores its
-    placeholder -- `restore` is the selector's half of the act, and the
-    binding has to call it on a refusal or a control is left dead."""
-    result = _run_node("""
-const { mountProjectCommissions } = await import(VIEWS + "gate-projects.js");
-const [calls, fetcher] = recorder({ ok: false, status: 403,
-  payload: { ok: false, message: "not a gate actor" } });
-const status = document.createElement("span");
-const gate = mountProjectCommissions(document.createElement("div"),
-                                     { roster: [], status, fetcher });
-let restored = false;
-await gate.commissionEdit("proj-1", { remove: ["openDox"] },
-                          { restore: () => { restored = true; } });
-console.log(JSON.stringify({ calls, restored, status: status.textContent }));
-""", tmp_path)
-    assert result["restored"] is True
-    assert "not a gate actor" in result["status"]
-    assert result["status"].startswith("edit-project refused: ")
-
+# ---------------------------------------------------------------------------
+# THE FIVE NODE PROBES OF `gate-lens.js` AND `gate-projects.js` MOVED WITH THEIR
+# MODULES (slice S5). They drove the real bundle files -- the lens gate posting
+# the route its plan kind names, its refusal render and re-arm, the two project
+# commissions and a refused membership edit restoring its control -- and those
+# files are openXdox-code's package data now (RULED Q5, openxFactory#656 comment
+# `5648044785`). A probe that imported them from `src/opendox/web/views/` would
+# be asserting against a file this bundle no longer ships.
+#
+# THEY WERE PORTED, NOT DELETED, and the port is the point: deleting behavioural
+# coverage in a refactor slice is how a move that passes every shape assertion
+# silently breaks a verb, which is the failure this suite's own header names as
+# "the worst possible outcome of this slice". They run at openXdox-code, against
+# the same real files, in `tests/test_gate_loop_probes.py` -- same harness, same
+# DOM stub, same assertions, and one thing STRONGER: there each probe assembles
+# a COMPOSED bundle first (openDox's own `web/` with that column's six modules
+# placed into it by RULED Q5's assembly hook) and imports the module from there,
+# so the byte measured is the shipped byte in the shipped position.
+#
+# What stays here is everything about the modules this bundle still ships, and
+# the SHAPE assertions above, which are what this leg can still answer.
+# ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
 def test_js_the_snapshot_index_read_degrades_to_null(tmp_path) -> None:

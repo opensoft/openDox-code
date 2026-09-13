@@ -120,7 +120,18 @@ def test_intent_binding_reaches_intent_feed_only_dynamically() -> None:
 
 
 def test_dispose_and_wheel_no_longer_name_intent_feed_directly() -> None:
-    for path in (DISPOSE, WHEEL):
+    """AMENDED BY SLICE S5: `views/dispose.js` left this bundle.
+
+    S2's fix stands and travelled with the module. `dispose.js` is openXdox-code's
+    package data now (RULED Q5, openxFactory#656 comment `5648044785`), and the
+    property this test asserts of it is asserted THERE, at
+    `tests/test_gate_loop_views.py::test_the_bundle_reach_is_exactly_declared`,
+    which holds that module's relative imports to an EXACT declared set —
+    `./helpers.js` and `./intent-binding.js` — so `intent-feed.js` reappearing
+    in it fails as an undeclared reach rather than as a missing string. What
+    stays measurable here is `views/wheel.js`, which stayed.
+    """
+    for path in (WHEEL,):
         text = path.read_text(encoding="utf-8")
         assert "intent-feed.js" not in text, (
             f"{path} still names intent-feed.js directly; the note's "
@@ -132,18 +143,24 @@ def test_dispose_and_wheel_no_longer_name_intent_feed_directly() -> None:
         )
 
 
-def test_dispose_imports_the_intent_names_from_the_binding() -> None:
-    text = DISPOSE.read_text(encoding="utf-8")
-    imports = {specifier: names for names, specifier in _static_imports(text)}
-    assert "./intent-binding.js" in imports, (
-        "dispose.js does not statically import from ./intent-binding.js"
-    )
-    names = set(imports["./intent-binding.js"])
-    assert {"emitIntent", "renderIntentChips"} <= names, (
-        f"dispose.js imports {sorted(names)} from intent-binding.js; "
-        "expected at least emitIntent and renderIntentChips (unchanged from "
-        "its former import of intent-feed.js)"
-    )
+def test_dispose_left_the_bundle_with_its_intent_reach_intact() -> None:
+    """AMENDED BY SLICE S5. This asserted that `views/dispose.js` imported
+    `emitIntent` and `renderIntentChips` from `./intent-binding.js`; the module
+    moved to openXdox-code and the assertion moved with it
+    (`tests/test_gate_loop_views.py`'s `BUNDLE_REACH` table names
+    `./intent-binding.js` for `dispose.js` exactly).
+
+    What this leg can still say — and it is the half that matters here — is that
+    the module is GONE and that `views/intent-binding.js`, which S2 created and
+    S5 does not move, is still here for the contributed module to reach once the
+    assembly places it beside this bundle."""
+    assert not DISPOSE.exists(), (
+        "views/dispose.js is still in this bundle; slice S5 moves the gate "
+        "loop's six class-B modules to openXdox-code's package data")
+    assert BINDING.is_file(), (
+        "views/intent-binding.js is gone: it is class A, it stays, and the "
+        "contributed dispose module imports it by a bundle-relative specifier "
+        "that the composed assembly resolves in place")
 
 
 def test_wheel_imports_the_intent_names_from_the_binding() -> None:
@@ -168,7 +185,11 @@ def test_every_static_relative_import_in_the_touched_files_resolves() -> None:
     # standing in for slice S1's full-tree census test. `intent-binding.js`'s
     # own reference to intent-feed.js is DYNAMIC and is deliberately not
     # required to resolve — that is the seam, not a gap in it.
-    for path in (DISPOSE, WHEEL, BINDING):
+    # SLICE S5: `dispose.js` is no longer one of the files this leg ships, so
+    # the rehearsal is over the two that stayed. Its own imports are held to an
+    # exact declared set at openXdox-code, which is a stronger check than
+    # "resolves" and is made where the file is.
+    for path in (WHEEL, BINDING):
         text = path.read_text(encoding="utf-8")
         for _names, specifier in _static_imports(text):
             target = (path.parent / specifier).resolve()
