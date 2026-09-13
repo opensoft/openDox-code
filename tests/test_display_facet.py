@@ -89,7 +89,7 @@ OPENXFACTORY_WORDS = (
 _SCHEMA_HALF = frozenset({
     "fields", "values", "stage_order", "area_order", "artifact_roles",
     "token_roles", "sections", "kind", "facet", "schema_version",
-    "host_profile", "host_facet",
+    "host_profile", "host_facet", "declared_tokens",
 })
 
 
@@ -530,6 +530,70 @@ console.log(JSON.stringify({
         "a neutral install had its `:root` written, which shadows every dark "
         "and explicit-theme rule in styles.css")
     assert out["declared"] == {"--st-organized": "#123456"}
+
+
+def test_the_payload_names_which_tokens_the_host_declared():
+    """`tokens` cannot answer this and never could: `normalize_display` merges
+    the host's over openDox's, so the served table carries all four keys
+    whether the host declared four, one or none. The provenance is therefore
+    published beside the words (Copilot round 6)."""
+    assert display_manifest(None)["declared_tokens"] == []
+    assert display_manifest({})["declared_tokens"] == []
+    partial = display_manifest({"tokens": {"organized": "#123456"}})
+    assert partial["declared_tokens"] == ["organized"]
+    # …while the table itself still carries all four, because the SHELL needs
+    # a value for every role it may be asked for.
+    assert sorted(partial["tokens"]) == sorted(TOKEN_ROLES)
+    whole = display_manifest({"tokens": {role: "#123456" for role in TOKEN_ROLES}})
+    assert whole["declared_tokens"] == list(TOKEN_ROLES)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_served_payload_writes_only_the_host_declared_tokens(tmp_path):
+    """THE REGRESSION THE PREVIOUS TEST COULD NOT SEE (Copilot round 6).
+
+    `test_only_the_tokens_a_host_declared_are_written_onto_root` hands `Display`
+    a hand-built facet, where a token key IS a host declaration. The payload the
+    server actually serves is not that shape: `display_manifest` has already
+    merged openDox's own tokens in, so every install — including every one in
+    the estate today, none of which declares a DISPLAY facet — would have had
+    all four properties written inline on `:root`, outranking `styles.css`'s
+    per-theme rules and ending dark mode there.
+
+    So this drives the same code path with the REAL payload, built here by the
+    real `display_manifest`, and nothing in between.
+    """
+    payloads = {
+        "absent": {"display": display_manifest(None,
+                                               host_profile="opendox.neutral")},
+        "declared_none": {"display": display_manifest(
+            {"stages": {"grouping": {"one": "cluster", "many": "clusters",
+                                     "short": "clusters", "label": "clusters"}}},
+            host_profile="openxfactory.engineering")},
+        "declared_one": {"display": display_manifest(
+            {"tokens": {"organized": "#123456"}},
+            host_profile="openxfactory.engineering")},
+    }
+    out = _run_node(
+        _import_line() + f"""
+const payloads = {json.dumps(payloads)};
+function apply(payload) {{
+  const written = {{}};
+  const el = {{ style: {{ setProperty: (k, v) => {{ written[k] = v; }} }} }};
+  D.readDisplay(payload).applyTokens(el);
+  return written;
+}}
+const out = {{}};
+for (const [name, payload] of Object.entries(payloads)) out[name] = apply(payload);
+console.log(JSON.stringify(out));
+""", tmp_path)
+    assert out["absent"] == {}, (
+        "the payload a host-less install is served wrote `:root` — every "
+        "install in the estate loses dark mode the moment this lands")
+    assert out["declared_none"] == {}, (
+        "a host that declares a vocabulary but no palette had openDox's own "
+        "four colours pinned inline over its themes")
+    assert out["declared_one"] == {"--st-organized": "#123456"}
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")

@@ -426,9 +426,21 @@ export class Display {
     // neutral values unconditionally would therefore pin one theme's colours
     // onto every install that declares no tokens — which is every install in
     // the estate today — and silently end dark mode for all of them.
-    this._declaredTokens = declaredTokens
-      ? TOKEN_ROLES.filter((role) => typeof declaredTokens[role] === "string")
-      : [];
+    //
+    // READ THE PROVENANCE, NOT THE SHAPE (Copilot round 6). On the payload the
+    // SERVER builds, `tokens` has been merged with openDox's own before it
+    // leaves `display_manifest`, so all four keys are present however few the
+    // host declared — key presence there says nothing, and the guard above was
+    // a guard over a fact the wire had already destroyed. The server therefore
+    // publishes `declared_tokens`, the role names the host itself wrote, and
+    // that is what is honoured whenever it is on the payload. A facet object
+    // handed straight to `Display` — a fixture, a node probe, a test — carries
+    // no provenance list, and there key presence IS the declaration.
+    this._declaredTokens = Array.isArray(facet.declared_tokens)
+      ? TOKEN_ROLES.filter((role) => facet.declared_tokens.indexOf(role) !== -1)
+      : (declaredTokens
+          ? TOKEN_ROLES.filter((role) => typeof declaredTokens[role] === "string")
+          : []);
     this._acts = Object.assign({}, NEUTRAL_DISPLAY.acts,
       facet.acts && typeof facet.acts === "object" ? facet.acts : null);
     this._artifacts = {};
