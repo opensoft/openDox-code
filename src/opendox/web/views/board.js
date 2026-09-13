@@ -84,7 +84,12 @@ function possiblesForDoc(docId, indexes) {
     for (const p of indexes.possiblesByCluster.get(clusterId) || []) seen.set(p.id, p);
   }
   const all = [...seen.values()];
-  return { total: all.length, picked: all.filter((p) => p.state === "picked").length };
+  // THE REGISTER STATE BY ROLE (Copilot review). The badge LABEL reads the
+  // domain's proposed-candidate word; the count behind it compared a literal
+  // `"picked"`, so a profile that renamed `possibles[].state` would have shown
+  // the right word beside a permanent zero.
+  const proposed = vocab.registerState(STATUS_ROLE.PROPOSED);
+  return { total: all.length, picked: all.filter((p) => p.state === proposed).length };
 }
 
 function hay(parts) {

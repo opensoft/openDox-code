@@ -306,6 +306,11 @@ NEUTRAL_DISPLAY: dict[str, Any] = {
         "brief": "research brief",
         "promote": "promote to selection",
         "propose": "start a submission",
+        # THE FIFTH ACT (Copilot review). `ACT_IDS` declares five verb seam
+        # keys and this table declared four, so `display.act("demote")` could
+        # not resolve, the wheel had to keep a hardcoded word, and a host that
+        # declared `acts.demote` was REFUSED as an unknown role. All five now.
+        "demote": "return to the previous station",
     },
     "artifacts": {
         "root": {"prefix": None, "label": "submission folder"},

@@ -136,8 +136,13 @@ function clusterCard(node, notebook) {
 }
 
 function possibleMeta(p, state, shared) {
-  if (state === "picked" && p.pick) {
-    let meta = "picked → " + (p.pick.staging_id || "");
+  // BOTH HALVES BY ROLE (Copilot review): the value MATCHED against
+  // `possibles[].state` and the word RENDERED beside it come off the same
+  // facet, so a profile that renames the proposed register state keeps its
+  // `→ staging_id` metadata instead of falling through to the bare state.
+  if (state === vocab.registerState(STATUS_ROLE.PROPOSED) && p.pick) {
+    let meta = vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.PROPOSED)
+      + " → " + (p.pick.staging_id || "");
     if (p.pick.change_id) meta += " · " + p.pick.change_id;
     return meta;
   }
@@ -153,7 +158,7 @@ function possibleMeta(p, state, shared) {
 
 function possibleCard(node) {
   const p = node.possible;
-  const state = p.state || "latent";
+  const state = p.state || vocab.registerState(STATUS_ROLE.CAPTURED);
   const shared = (p.claiming_clusters || []).length > 1;
   const card = el("div", "card tile-candidate " + state + " stage-brainstorm" + (shared ? " shared" : ""));
   card.id = node.domId;

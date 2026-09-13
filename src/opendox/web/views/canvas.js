@@ -142,14 +142,16 @@ function evidencePane(model) {
 
 // ---- pane 3: possibles rail (T021 makes this interactive) ----
 function possibleCard(p) {
-  const state = p.state || "latent";
+  // THE SEEDED STATE BY ROLE (Copilot review), like the branch below it.
+  const state = p.state || vocab.registerState(STATUS_ROLE.CAPTURED);
   const card = el("div", "card tile-candidate " + state);
   card.appendChild(el("span", "dot"));
   const body = el("div");
   body.appendChild(el("div", "title", p.title || p.id));
   let meta = state;
-  if (state === "picked" && p.pick) {
-    meta = "picked → " + (p.pick.staging_id || "");
+  if (state === vocab.registerState(STATUS_ROLE.PROPOSED) && p.pick) {
+    meta = vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.PROPOSED)
+      + " → " + (p.pick.staging_id || "");
     if (p.pick.change_id) meta += " · " + p.pick.change_id;
   } else if ((state === vocab.registerState(STATUS_ROLE.RETIRED)
               || state === vocab.registerState(STATUS_ROLE.SUPERSEDED))

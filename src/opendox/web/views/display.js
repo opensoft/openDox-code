@@ -304,6 +304,10 @@ export const NEUTRAL_DISPLAY = {
   acts: {
     derive: "derive candidates", brief: "research brief",
     promote: "promote to selection", propose: "start a submission",
+    // THE FIFTH ACT (Copilot review): `ACT_IDS` declares five verb seam keys,
+    // so the vocabulary declares five words. Without it `display.act("demote")`
+    // refused and the wheel kept a hardcoded one.
+    demote: "return to the previous station",
   },
   // THE ARTIFACT-FOLDER VOCABULARY, by role — the axis RULED Q1's own argument
   // names ("the profile already has to carry an artifact-vocabulary axis for

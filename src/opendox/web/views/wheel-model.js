@@ -36,7 +36,7 @@
 // wheel reads is declared once, in `display.js`'s `SNAPSHOT_FIELDS` (§ 2.2 rule
 // 3), and reached here through `display.items(snapshot, role)`.
 
-import { ACT_IDS, STAGE_ROLES, neutralDisplay } from "./display.js";
+import { ACT_IDS, STAGE_ROLES, STATUS_ROLE, neutralDisplay } from "./display.js";
 
 export const WHEEL_KEYS = STAGE_ROLES;
 
@@ -59,7 +59,8 @@ export function isUndisposedDerived(possible) {
 // wheel MAY show synthesized placeholders derived from real clusters — each
 // demo-tagged and threaded in dashed brass, never confusable with indexed
 // data. Deterministic: top clusters by document-link tally, id order tiebreak.
-export function synthesizeDemoPossibles(clusters) {
+export function synthesizeDemoPossibles(clusters, display) {
+  const d = display || neutralDisplay();
   const ranked = [...(clusters || [])].sort((a, b) => {
     const ta = a.tallies?.document_links || 0;
     const tb = b.tallies?.document_links || 0;
@@ -68,7 +69,9 @@ export function synthesizeDemoPossibles(clusters) {
   return ranked.slice(0, MAX_DEMO_POSSIBLES).map((c) => ({
     id: "demo-" + c.id,
     title: "Possible: " + (c.name || c.id),
-    state: "latent",
+    // the SEEDED register state, by role (§ 2.2 rule 3's enum half) — a value
+    // the wheel MATCHES against `possibles[].state`, never one it renders
+    state: d.registerState(STATUS_ROLE.CAPTURED),
     demo: true,
     claiming_clusters: [c.id],
   }));
@@ -199,7 +202,7 @@ export function buildWheelModel(snapshot, display) {
   const changes = (s[d.field(SUBMISSION)]) || [];
 
   const demoMode = realCandidates.length === 0;
-  const candidates = demoMode ? synthesizeDemoPossibles(groups) : realCandidates;
+  const candidates = demoMode ? synthesizeDemoPossibles(groups, d) : realCandidates;
 
   const submissions = d.items(s, SUBMISSION);
   const completions = d.items(s, COMPLETION);
@@ -605,8 +608,16 @@ const gatedAndNotYetActed = (item, env) => !!env.gate && !env.commissioned;
 // item shape (2026-08-02).
 const tileState = (item) => item?.ref?.state;
 
-const isPromotableTile = (item) =>
-  tileState(item) === "latent" && !item?.derivedPending && !item?.demo;
+// THE PROMOTABLE STATE BY ROLE (Copilot review). `"latent"` is a value the
+// display facet's `register_state` may override, so a profile that renamed it
+// would have hidden the promote verb from every real tile — the same defect
+// class as the 2026-08-02 one this predicate's own comment records, one layer
+// up. `env` carries the live vocabulary; a caller that supplies none gets
+// openDox's own.
+const isPromotableTile = (item, env) =>
+  tileState(item) === (env?.display || neutralDisplay())
+    .registerState(STATUS_ROLE.CAPTURED)
+  && !item?.derivedPending && !item?.demo;
 
 // Has a human recorded a CLOSING verdict on this possible?
 //
@@ -679,7 +690,8 @@ export const WHEEL_ACTIONS = {
       // re-checks the register and is the authority.
       id: ACT_IDS.promote,
       label: (d) => "▲ " + d.act("promote"),
-      visible: (item, env) => gatedAndNotYetActed(item, env) && isPromotableTile(item),
+      visible: (item, env) => gatedAndNotYetActed(item, env)
+        && isPromotableTile(item, env),
     },
     {
       // commissions a PRE-VERDICT evidence brief. The view hides it once the
@@ -690,7 +702,9 @@ export const WHEEL_ACTIONS = {
       label: (d) => "✻ " + d.act("brief"),
       visible: (item, env) => gatedAndNotYetActed(item, env)
         && !item?.demo && !hasClosingVerdict(item)
-        && (tileState(item) === "latent" || !!item?.derivedPending),
+        && (tileState(item) === (env?.display || neutralDisplay())
+              .registerState(STATUS_ROLE.CAPTURED)
+            || !!item?.derivedPending),
     },
     workbenchRow,
     openRepoRow,
@@ -740,7 +754,7 @@ export const WHEEL_ACTIONS = {
       // engine-side duplicate guard, so this is the only thing standing between
       // an accidental double-click and a second full artifact set.
       id: ACT_IDS.demote,
-      label: "\u25c0 demote",
+      label: (d) => "\u25c0 " + d.act("demote"),
       visible: gatedAndNotYetActed,
     },
     notebookRow,
