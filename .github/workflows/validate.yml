@@ -241,11 +241,25 @@ jobs:
       # conftest's `collect_ignore` and `tests/conftest.py`'s autouse fixtures are
       # both written for a tree that can import `opendox.serve`; until it can,
       # a file named here has to stand on its own, and each of the seventeen
-      # does. Five green-under-noconftest suites are deliberately NOT named:
-      # `test_doxbench_bridge_live.py` and `test_openprofiler_broker_e2e.py` are
-      # all-skip without a live bridge, and `test_boundary.py`,
-      # `test_provider_boundary.py` and `test_workbench.py` each carry a
-      # standing red this slice does not own (§ 3 of the S8 inventory) —
+      # does.
+      #
+      # FIVE MORE SUITES COLLECT CLEANLY UNDER `--noconftest` AND ARE STILL NOT
+      # NAMED, for two different reasons — collecting is what the tree blocker
+      # denies the rest, and it is not by itself a reason to name a file.
+      # Measured at this head, each run alone under this workflow's own
+      # invocation:
+      #
+      #   ALL-SKIP, so naming them would add no assertion the check can fail on
+      #   and would advertise coverage that is not running:
+      #     tests/test_doxbench_bridge_live.py        8 skipped
+      #     tests/test_openprofiler_broker_e2e.py     3 skipped
+      #
+      #   A STANDING RED THIS SLICE DOES NOT OWN (§ 3 of the S8 inventory), so
+      #   naming one would put the required check red for another act's defect:
+      #     tests/test_boundary.py            1 failed,  27 passed
+      #     tests/test_provider_boundary.py  11 failed,  17 passed
+      #     tests/test_workbench.py           2 failed,  26 passed, 3 skipped
+      #
       # `test_provider_boundary.py`'s is itself a cross-leg reach worth naming:
       # it asserts that seven per-module scan suites still exist BY FILENAME,
       # and the carve sent all seven to openXdox-code.
