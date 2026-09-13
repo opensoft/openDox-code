@@ -89,7 +89,14 @@ function docCard(node) {
   // scoping/search metadata (#13/#14) — read by the visibility filter, never by the model.
   card.dataset.stage = d.stage || "";
   card.dataset.scoped = (isIdeationDoc(d) || (d.topics || []).length) ? "1" : "";
-  card.dataset.hay = [d.path, d.stage, ...(d.topics || [])].filter(Boolean).join(" ").toLowerCase();
+  // THE SEARCH HAYSTACK CARRIES BOTH (Copilot round 7's family): the raw enum,
+  // because `dataset.stage` and the column filters match on it, AND the word
+  // the card actually SHOWS -- a human types what is on the screen, and under
+  // a host override that word was in neither field.
+  card.dataset.hay = [d.path, d.stage,
+                      d.stage ? vocab.documentStageWord(d.stage) : null,
+                      ...(d.topics || [])]
+    .filter(Boolean).join(" ").toLowerCase();
   card.appendChild(el("div", "id", basename(d.path)));
   const topicN = (d.topics || []).length;
   // THE CARD'S META READS THE DOMAIN'S WORD (Copilot round 4); `dataset.stage`

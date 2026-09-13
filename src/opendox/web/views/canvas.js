@@ -319,7 +319,13 @@ function renderConfirm(container, plan, kind) {
     box.appendChild(el("div", "dc-line", "id: " + (plan.id || "(missing)")));
     box.appendChild(el("div", "dc-line", "title: " + (plan.title || "(missing)")));
     box.appendChild(el("div", "dc-line", "claim: " + (plan.claim || "(missing)")));
-    box.appendChild(el("div", "dc-line", "state: " + plan.state));
+    // THE SEED STATE IS A WORD HERE TOO (Copilot round 7): `composerPlan`
+    // seeds the plan with the DECLARED enum value (`seedState` reads
+    // `registerState(CAPTURED)`), so a host override of
+    // `values.register_state.captured` reached this confirmation line raw
+    // while every other canvas state surface read through the facet.
+    box.appendChild(el("div", "dc-line",
+      "state: " + vocab.registerStateWord(plan.state)));
     box.appendChild(el("div", "dc-line", "provenance doc: " + (plan.provenanceDoc || "(none)")));
     box.appendChild(el("div", "dc-line", "attached evidence pins: " + plan.evidenceCount));
     box.appendChild(el("div", "dc-line", "lands at: " + plan.landsAt));

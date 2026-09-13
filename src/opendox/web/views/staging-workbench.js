@@ -510,7 +510,11 @@ function renderAbstract(host, doc, ctx) {
     }
     return;
   }
-  const meta = [model.stage, model.kind].filter(Boolean).join(" · ");
+  // THE ABSTRACT'S STAGE IS A WORD (Copilot round 7): `documentAbstract`
+  // carries `doc.stage` verbatim -- the snapshot's enum -- and this panel was
+  // the one workbench surface still rendering it beside the facet's words.
+  const meta = [model.stage ? vocab.documentStageWord(model.stage) : null,
+                model.kind].filter(Boolean).join(" · ");
   if (meta) body.appendChild(el("div", "swb-abstractmeta", meta));
   if (model.note) {
     body.appendChild(el("div", "swb-empty", model.note));

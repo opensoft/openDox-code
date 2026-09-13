@@ -191,9 +191,9 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 # shape and `test_the_declared_totals_are_re_derived_from_the_rows` can refuse a
 # drift between the two. Measured at slice S4 (see the S4 block above).
 totals:
-  A: {files: 26, loc: 17822}
+  A: {files: 26, loc: 17840}
   B: {files: 1, loc: 73}
-  C: {files: 14, loc: 12528}
+  C: {files: 14, loc: 12564}
   "?": {files: 1, loc: 1435}
 files:
   - path: app.js
@@ -243,7 +243,7 @@ files:
 
   - path: views/canvas.js
     class: C
-    loc: 458
+    loc: 464
     note: "renders canvas-model.js's output; 7 governance literals"
 
   - path: views/composed-model.js
@@ -254,7 +254,7 @@ files:
 
   - path: views/display.js
     class: A
-    loc: 661
+    loc: 679
     exempt: [SNAPSHOT_FIELDS, ACT_IDS, TILE_KINDS, SCOPE_KINDS, TAB_IDS,
              SESSION_SCOPE_KINDS, SESSION_BRANCH_NAMESPACES, SNAPSHOT_VALUES,
              DRILL_KINDS, DRAFT_PATHS, SECTION_ORDER]
@@ -304,12 +304,12 @@ files:
 
   - path: views/explorer.js
     class: C
-    loc: 306
+    loc: 325
     note: "Q2 RULING: class C outright (was \"?\" in the note's own table) -- a projection whose only domain content is the artifact-folder vocabulary; classifyChangeFile; reads staged_topics[].files / changes[].files"
 
   - path: views/funnel.js
     class: C
-    loc: 602
+    loc: 609
     note: "realization funnel; imports model.js's COLUMN_KEYS; 10 governance literals"
 
   - path: views/grouping.js
@@ -387,7 +387,7 @@ files:
 
   - path: views/staging-workbench.js
     class: C
-    loc: 3455
+    loc: 3459
     note: "full-screen workbench scoped to one topic-bearing tile loc 3397 -> 3402 on this PR's round-2 review (Copilot): the two contributed columns are per-mount `const`s inside mountStagingWorkbench rather than module-level `let`s, so two live workbenches cannot share them."
 
   - path: views/swb-model-intake.js

@@ -640,6 +640,33 @@ def _refuse_duplicate_enum_values(name: str, words: Mapping[str, str]) -> None:
         seen[word] = role
 
 
+def _declared_token_roles(declared: Any) -> list[str]:
+    """WHICH of the four design tokens the HOST itself declared.
+
+    The one place in this payload where "declared" and "in effect" must be told
+    apart. Every other table here is a merge — the host's words over openDox's,
+    per role — and the shell simply renders what it is handed. The tokens are
+    not rendered: `views/display.js`'s `applyTokens` writes them as INLINE
+    custom properties on `:root`, and `styles.css` restates all four PER THEME
+    (light, the dark media query, and the two explicit `data-theme` choices). An
+    inline property on `:root` outranks every one of those rules, so writing a
+    token that only LOOKS declared — because the merge filled it from
+    `NEUTRAL_DISPLAY` — pins one theme's palette onto the install and silently
+    ends dark mode there.
+
+    The browser cannot recover this from the payload alone: after the merge the
+    `tokens` table always carries all four keys, whether the host declared four,
+    one, or none. So the provenance travels WITH the words, the way
+    `host_facet`'s named absence does, rather than being inferred from a shape
+    that no longer records it (Copilot round 6).
+    """
+    if declared is None:
+        return []
+    table = _mapping(declared, where="the facet itself")
+    tokens = _mapping(table.get("tokens", {}), where="tokens")
+    return [role for role in TOKEN_ROLES if role in tokens]
+
+
 def display_manifest(declared: Any, *, host_profile: str | None = None
                      ) -> dict[str, Any]:
     """The `display` block of `/capabilities` — the ONE crossing of the boundary.
@@ -658,7 +685,11 @@ def display_manifest(declared: Any, *, host_profile: str | None = None
     profile's name says a host IS registered and simply does not declare a
     vocabulary, which is a different fact from no host at all, and the shell
     then renders openDox's own neutral words rather than a domain's.
+
+    `declared_tokens` is that same named absence at ROLE grain, and only the
+    tokens need it: see `_declared_token_roles`.
     """
+    merged = normalize_display(declared)
     return {
         "schema_version": DISPLAY_SCHEMA_VERSION,
         "kind": DISPLAY_KIND,
@@ -673,5 +704,6 @@ def display_manifest(declared: Any, *, host_profile: str | None = None
         "sections": _section_order(declared),
         "artifact_roles": list(ARTIFACT_ROLES),
         "token_roles": list(TOKEN_ROLES),
-        **normalize_display(declared),
+        "declared_tokens": _declared_token_roles(declared),
+        **merged,
     }
