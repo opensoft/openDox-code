@@ -178,10 +178,13 @@ jobs:
       # S8 row says the narrowings "lift FOR THE WEB SUITES", and the S2
       # paragraph above says of the DOM probes that "un-narrowing THAT CLASS OF
       # TEST is slice S8's job, not S2's". Seventeen carved suites join the ten
-      # shape assertions here — 283 tests become 683 — and every one of them was
+      # shape assertions here — 283 tests become 691 — and every one of them was
       # run file-by-file under this exact invocation before it was named
       # (openDox-code `build/s8-receive-web-tests`, measured 2026-09-13 at
-      # python 3.12.3 / pytest 8.4.2).
+      # python 3.12.3 / pytest 8.4.2). It was 683 when this block was written;
+      # the eight are `tests/test_display_facet.py`'s own, which grew in the S7
+      # BASE this branch has since merged (openDox-code#21 `706b533`) — a figure
+      # that moves with the base is stated with the base that produced it.
       #
       # WHAT THIS LIST STILL IS NOT: `python -m pytest -q` over the tree. That
       # is measured and it is NOT S8's to deliver — with the root conftest in
