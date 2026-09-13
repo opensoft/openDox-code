@@ -1205,6 +1205,17 @@ async function render() {
     // `explorer-root` is rendered: its contributed bindings can mount into a
     // root that will not be cleared out from under them.
     await mountContributedInto(["explorer-root"]);
+    // AND THIS RENDER, TOO, STOPS IF IT LOST ITS SCOPE WHILE MOUNTING (Copilot
+    // review, round 6 — round 4's finding, one await further down). The pass
+    // above awaits a dynamic `import()` per contributed binding, so a
+    // repository switch can abort this scope while one is still in flight. The
+    // pass's OWN signal check (round 3) stops only ITS mounts; the CALLER that
+    // resumes here keeps writing to the page — the staging workbench, the tab
+    // strip, the repository selector — and both paths end at `status.remove()`,
+    // which would strip the NEWER render's loading state. The cancellation
+    // guarantee therefore belongs at the resuming caller, not only in the
+    // callee, exactly as it does after the six resolves above.
+    if (signal.aborted) return;
     // When the capability probe reports the notebook action
     // available, tiles grow an "Open in NotebookLM" affordance; otherwise the
     // controller's button() returns null and nothing renders — the served/local
@@ -1405,6 +1416,11 @@ async function render() {
         onSessionEnded: resetEndedSession });
     // `staging-workbench-root` is rendered: same reading as the explorer's.
     await mountContributedInto(["staging-workbench-root"]);
+    // AND THE SAME STOP AFTER THE WORKBENCH'S PASS (Copilot round 6, the
+    // "analogous await below"): the tab strip, the repository selector and the
+    // `#loadstatus` removal are all below this line, and a render whose
+    // repository is no longer on screen must reach none of them.
+    if (signal.aborted) return;
     // The wheel's read-only verbs (documents read · clusters lens/canvas): app.js
     // owns every cross-view jump, so the wheel declares the verb and calls back
     // here. `tabs` is assigned just below; the callbacks only run on a click.

@@ -722,7 +722,11 @@ def test_a_render_that_lost_its_scope_while_resolving_mounts_nothing() -> None:
     the last resolve and the first mount, and its error path stops with it."""
     app = _app()
     guard = "if (signal.aborted) return;"
-    assert app.count(guard) == 2, app.count(guard)
+    # FOUR scope checks, and the census of them is the point: the stop below,
+    # the two after the generic pass's awaits (round 6, pinned by the test
+    # under this one), and the error path's. Every other await in `render()`
+    # belongs to a human-driven callback, not to the initial mount path.
+    assert app.count(guard) == 4, app.count(guard)
     stop = app.index(guard)
     # AFTER the last of the six resolves — all six are awaited before the stop,
     # so none of them is left half-resolved for the next render to inherit
@@ -736,6 +740,39 @@ def test_a_render_that_lost_its_scope_while_resolving_mounts_nothing() -> None:
     report = app.index("function reportAssemblyFailure(err) {")
     assert report < app.index(guard, report) < app.index(
         "const host = ensureStatusHost();", report)
+
+
+def test_a_render_that_lost_its_scope_while_mounting_writes_nothing_below() -> None:
+    """THE GENERIC PASS IS AWAITED TWICE MORE, AND EVERYTHING BELOW EACH AWAIT
+    WRITES TO THE PAGE (Copilot review of this PR, round 6 — round 4's finding,
+    one and two awaits further down). `mountContributedInto` awaits a dynamic
+    `import()` per contributed binding, and `mountContributedViews`'s own signal
+    check (round 3) stops only ITS mounts, never the CALLER that resumes after
+    it. Below the explorer's pass sit the staging workbench, the tab strip and
+    the repository selector; below the workbench's pass sit the last two of
+    those — and both paths end at `status.remove()`, which would strip the NEWER
+    render's loading state. So the resuming caller stops, at BOTH awaits."""
+    app = _app()
+    guard = "if (signal.aborted) return;"
+    explorer = app.index('await mountContributedInto(["explorer-root"]);')
+    workbench = app.index(
+        'await mountContributedInto(["staging-workbench-root"]);')
+    after_explorer = app.index(guard, explorer)
+    after_workbench = app.index(guard, workbench)
+    # each stop sits between its own pass and the next thing this render writes
+    assert explorer < after_explorer < workbench, (
+        "the explorer pass's scope check is missing, or falls after the "
+        "workbench's own await")
+    assert after_explorer < app.index("mountStagingWorkbench(", explorer)
+    assert workbench < after_workbench < app.index("mountRepoSelector(",
+                                                   workbench)
+    # and both are above the one write that would strip the LIVE render's
+    # loading state rather than this dead one's
+    assert after_workbench < app.index("status.remove();", workbench)
+    # the THIRD call of the same pass is deliberately un-awaited — it runs from
+    # the tab router's click handler — so its scope check is its rejection
+    # path's, which is the round-4 guard at the top of the refusal frame
+    assert "mountContributedInto([region]).catch(reportAssemblyFailure);" in app
 
 
 def test_a_late_assembly_refusal_still_has_somewhere_to_be_written() -> None:
