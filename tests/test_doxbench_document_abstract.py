@@ -41,8 +41,9 @@ from opendox import doxbench_knowledge as kn  # noqa: E402
 from opendox import doxbench_packet as pk  # noqa: E402
 from opendox import doxbench_threads as dt  # noqa: E402
 
-MODULE_PATH = (REPO_ROOT / "scripts" / "ideation_dashboard"
-               / "doxbench_knowledge.py")
+# `src/opendox/`, not the PRE-CARVE `scripts/ideation_dashboard/`
+# (§ 3.4 slice S8).
+MODULE_PATH = REPO_ROOT / "src" / "opendox" / "doxbench_knowledge.py"
 
 # ---------------------------------------------------------------------------
 # the fixture subject: one document, its saved bytes, and the SNAPSHOT'S own

@@ -28,8 +28,9 @@ from conftest import REPO_ROOT  # noqa: F401  (sys.path side effect)
 
 from opendox import doxbench_knowledge as kn  # noqa: E402
 
-MODULE_PATH = (REPO_ROOT / "scripts" / "ideation_dashboard"
-               / "doxbench_knowledge.py")
+# `src/opendox/`, not the PRE-CARVE `scripts/ideation_dashboard/`
+# (§ 3.4 slice S8).
+MODULE_PATH = REPO_ROOT / "src" / "opendox" / "doxbench_knowledge.py"
 
 RATIFIED = ("Status: ratified\n\n"
             "The packet assembler runs its rails before any provider call.\n")
