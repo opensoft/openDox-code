@@ -1751,7 +1751,20 @@ def build_server(
             view_extensions, contributed_routes=route_bindings),
         contributed_routes=route_bindings,
         host_facet=host_facet,
-        host_profile=getattr(profile_openxfactory, "__name__", None),
+        # THE PROFILE'S NAME COMES THROUGH THE ESTATE'S OWN NAMER, never off a
+        # dunder (Copilot review, round 3). `getattr(profile_openxfactory,
+        # "__name__", None)` could only ever answer `None`:
+        # `_LateProfile.__getattr__` refuses every dunder BY DESIGN, so that
+        # `copy`, `pickle`, `inspect` and pytest's assertion rewriting cannot
+        # fire the composition point by probing. The manifest's named-absence
+        # contract — "a host IS registered and simply does not contribute
+        # panels, which is a different fact from no host at all" — needs the
+        # name, and it was blank in every payload this serve published.
+        # `view_extension.host_profile_name()` resolves the profile the way
+        # `profile_proxy`'s own refusal does, through
+        # `domain_profile.name_of()`, so both accessors of ONE registration name
+        # a profile the same way.
+        host_profile=view_extension.host_profile_name(profile_openxfactory),
     )
 
     bound = type("BoundDashboardHandler", (DashboardHandler,), {

@@ -898,9 +898,34 @@ function refusalTransport() {
   });
 }
 
+//: WHERE `#loadstatus` SAT, remembered once, so a late assembly refusal has a
+//: host after a successful render removed it (Copilot review, round 3).
+//: `render()` ends with `status.remove()`, and every later render then reads
+//: `null` from `getElementById` — so a `ViewBindingError` raised by the generic
+//: mount pass on a TAB'S FIRST RENDER, minutes after load, had nowhere to be
+//: written and was invisible. `index.html` is a `moved_verbatim` carve row and
+//: cannot grow a second element, so the shell re-inserts the one it removed, in
+//: the place it removed it from.
+let statusSlot = null;
+
+function ensureStatusHost(doc) {
+  const d = doc || (typeof document === "undefined" ? null : document);
+  if (!d) return null;
+  const live = d.getElementById("loadstatus");
+  if (live && live.isConnected !== false) return live;
+  const node = live || statusSlot?.node;
+  if (!node || !statusSlot?.parent) return node || null;
+  statusSlot.parent.insertBefore(node, statusSlot.next || null);
+  return node;
+}
+
 async function render() {
   const signal = nextRenderScope();
   const status = document.getElementById("loadstatus");
+  if (status && status.parentNode) {
+    statusSlot = { node: status, parent: status.parentNode,
+                   next: status.nextSibling };
+  }
   try {
     // The snapshot INDEX (add-dashboard-repo-selector): the roster the selector
     // renders and the freshness the header shows. Absent (a static image, an
@@ -1135,7 +1160,11 @@ async function render() {
     const mountContributedInto = async (regions) => {
       const mounted = await mountContributedViews(
         views, snapshot, { caps, nav: null, views },
-        { capabilities: probedCaps, regions });
+        // `signal` is THIS render's scope (Copilot round 3): a pass started
+        // from a tab's first render can still be loading a module when a
+        // repository switch begins the next render, and a stale pass must not
+        // mount this render's snapshot into the next one's region.
+        { capabilities: probedCaps, regions, signal });
       contributedMounts.push(...mounted);
       return mounted;
     };
@@ -1534,10 +1563,16 @@ async function render() {
   // render; the alternative is an unhandled rejection in the console and a tab
   // that silently lacks its panel.
   function reportAssemblyFailure(err) {
-    if (!status) return;
+    // RE-INSERT THE HOST IF A SUCCESSFUL RENDER ALREADY REMOVED IT (Copilot
+    // round 3). The initial render ends with `status.remove()`, so a refusal
+    // arriving from the per-region pass on a tab's first render — or on any
+    // later render, which reads `null` for the element outright — would have
+    // been written into a detached node or dropped entirely.
+    const host = ensureStatusHost();
+    if (!host) return;
     const registryRefusal = err instanceof ViewBindingError
       || (err && err.name === "ViewBindingError");
-    status.textContent = registryRefusal
+    host.textContent = registryRefusal
       ? "This shell was assembled with a contributed view column it cannot use "
         + "(" + err.message + "). The snapshot is fine — the assembly is not: "
         + "fix the contributed binding, or serve this bundle without that column."

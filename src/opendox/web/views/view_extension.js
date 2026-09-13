@@ -766,8 +766,20 @@ export async function mountContributedViews(bindings, snapshot, ctx, options) {
   const doc = o.document || (typeof document === "undefined" ? null : document);
   const capabilities = o.capabilities;
   const only = o.regions ? new Set(o.regions) : null;
+  // A PASS BELONGS TO THE RENDER THAT STARTED IT (Copilot review of
+  // openDox-code#20, round 3). This function awaits a dynamic import, and a
+  // per-region pass can be started from a tab's first render — a click, minutes
+  // after load — so a repository switch or a refresh can begin a NEW render
+  // while a binding's module is still loading. The old pass would then resume
+  // and mount a stale snapshot into a region the new render owns. `signal` is
+  // the render scope every other listener in this shell is already bound to;
+  // the pass reads it before it considers a binding and again after the import,
+  // which are the two moments an abort can land.
+  const signal = o.signal || null;
+  const aborted = () => !!(signal && signal.aborted);
   const results = [];
   for (const binding of bindings || []) {
+    if (aborted()) break;
     if (only && !only.has(binding.region)) continue;
     // The CORE arm is the shell's own and mounts through the tab router; a core
     // binding is the one that carries a `mount` function, which a contributed
@@ -803,6 +815,11 @@ export async function mountContributedViews(bindings, snapshot, ctx, options) {
     if (!resolved) {
       results.push({ binding, mounted: null, skipped: "absent" });
       continue;
+    }
+    // The import is the await, so this is the other moment an abort can land.
+    if (aborted()) {
+      results.push({ binding, mounted: null, skipped: "aborted" });
+      break;
     }
     results.push({
       binding,

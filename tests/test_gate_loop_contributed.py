@@ -48,7 +48,7 @@ import yaml
 
 from opendox.view_extension import (
     REGIONS, ViewBinding, ViewBindingError, collect_view_bindings, dom_regions,
-    host_view_extensions, host_view_facet, view_manifest,
+    host_profile_name, host_view_extensions, host_view_facet, view_manifest,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -581,7 +581,8 @@ def test_the_generic_pass_runs_after_each_core_render_not_once_before_them(
         encoding="utf-8")
     # ONE runner, bounded by region every time it is called
     assert "const mountContributedInto = async (regions) => {" in app
-    assert "{ capabilities: probedCaps, regions }" in app
+    # and the pass is bound to THIS render's scope (Copilot round 3)
+    assert "{ capabilities: probedCaps, regions, signal }" in app
     calls = re.findall(r"mountContributedInto\(\[([^\]]*)\]\)", app)
     assert calls == ['"explorer-root"', '"staging-workbench-root"', "region"], calls
     # and each of the two eager ones comes AFTER its core mount
@@ -597,6 +598,73 @@ def test_the_generic_pass_runs_after_each_core_render_not_once_before_them(
     assert "ctx.onRegionRendered?.(target.region);" in router
     assert router.index("target.mount(") < router.index("ctx.onRegionRendered")
     assert "onRegionRendered: (region) => {" in app
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_an_aborted_render_s_pass_mounts_nothing(tmp_path) -> None:
+    """A PASS BELONGS TO THE RENDER THAT STARTED IT (Copilot review of this PR,
+    round 3). The per-region pass awaits a dynamic import and can be started
+    from a tab's FIRST render — a click, minutes after load — so a repository
+    switch or a refresh can begin a new render while a module is still loading.
+    The old pass would then mount its own stale snapshot into a region the new
+    render owns. `signal` is the render scope every other listener in this shell
+    is already bound to."""
+    web = _temp_bundle(tmp_path, {
+        "panel.js": "export function mount(host) { host.hit = true; return 'ok'; }\n",
+    })
+    result = _run_node(f"""
+import {{ collectViewBindings, mountContributedViews }}
+  from {json.dumps((web / "views" / "view_extension.js").as_uri())};
+const hosts = {{ "view-docs": {{ id: "view-docs", hit: false, appendChild() {{}} }} }};
+const doc = {{ getElementById: (id) => hosts[id] || null,
+               createElement: () => ({{ setAttribute() {{}}, appendChild() {{}} }}) }};
+const bindings = collectViewBindings([{{ views: () => [{{
+  id: "panel.one", region: "view-docs", module: "./views/panel.js",
+  entry: "mount", view_class: "B", optional: true }}] }}]);
+// aborted BEFORE the pass: nothing is even considered
+const before = await mountContributedViews(bindings, null, {{}},
+  {{ document: doc, signal: {{ aborted: true }} }});
+const afterAbortEarly = hosts["view-docs"].hit;
+// aborted DURING the pass — between the binding being considered and the
+// module finishing its import, which is the real race
+const live = {{ aborted: false }};
+const during = await mountContributedViews(bindings, null, {{}},
+  {{ document: doc, signal: {{ get aborted() {{ const was = live.aborted;
+                                               live.aborted = true;
+                                               return was; }} }} }});
+console.log(JSON.stringify({{
+  before: before.map((r) => [r.binding.id, r.skipped]),
+  afterAbortEarly,
+  during: during.map((r) => [r.binding.id, r.skipped]),
+  mounted: hosts["view-docs"].hit,
+}}));
+""", tmp_path)
+    # aborted before: the loop breaks with no record at all, and nothing mounted
+    assert result["before"] == []
+    assert result["afterAbortEarly"] is False
+    # aborted during: the binding is RECORDED as skipped, and still not mounted
+    assert result["during"] == [["panel.one", "aborted"]]
+    assert result["mounted"] is False
+
+
+def test_a_late_assembly_refusal_still_has_somewhere_to_be_written() -> None:
+    """`render()` ends with `status.remove()`, and every later render then reads
+    `null` for `#loadstatus` — so a `ViewBindingError` raised by the per-region
+    pass on a tab's FIRST render, minutes after load, had nowhere to go and was
+    invisible (Copilot review of this PR, round 3). `index.html` is a
+    `moved_verbatim` carve row and cannot grow a second element, so the shell
+    remembers where the one it removed sat and puts it back."""
+    app = _app()
+    assert "let statusSlot = null;" in app
+    assert "function ensureStatusHost(doc) {" in app
+    assert "statusSlot.parent.insertBefore(node, statusSlot.next || null);" in app
+    # the frame USES it, and does not write into the detached node
+    frame = re.search(r"function reportAssemblyFailure\(err\) \{(.*?)\n  \}",
+                      app, re.S).group(1)
+    assert "const host = ensureStatusHost();" in frame
+    assert "if (!host) return;" in frame
+    assert "host.textContent = registryRefusal" in frame
+    assert "status.textContent" not in frame
 
 
 # ---------------------------------------------------------------------------
@@ -735,6 +803,12 @@ def test_the_serve_publishes_the_manifest_on_capabilities() -> None:
     # never grew the facet.
     assert "view_extension.host_view_facet(" in serve
     assert "host_facet=host_facet" in serve
+    # THE NAME NEVER COMES OFF A DUNDER (Copilot review, round 3): the lazy
+    # proxy refuses every dunder by design, so `getattr(profile, "__name__",
+    # None)` could only ever answer `None` and the manifest's `host_profile`
+    # was blank in every payload.
+    assert "view_extension.host_profile_name(profile_openxfactory)" in serve
+    assert 'getattr(profile_openxfactory, "__name__"' not in serve
     assert '"declared" if view_extensions else "absent"' not in serve
     assert "view_extension.collect_view_bindings(" in serve
     # the SAME contributed routes the server was assembled with, so both halves
@@ -765,6 +839,41 @@ def test_the_facets_presence_is_not_its_truthiness(declared, expected) -> None:
     assert host_view_extensions(profile) == extensions
 
 
+def test_the_host_profile_is_named_through_the_estates_own_namer() -> None:
+    """`host_profile` is the other half of the named absence, and it was blank.
+    `profile_proxy._LateProfile.__getattr__` raises `AttributeError` for every
+    dunder BY DESIGN — so that `copy`, `pickle`, `inspect` and pytest's
+    assertion rewriting cannot fire the composition point by probing — which
+    means `getattr(proxy, "__name__", None)` could only ever answer the default.
+    The name now comes through `domain_profile.name_of()`, the same namer
+    `profile_proxy`'s own refusal quotes."""
+    from opendox import profile_proxy
+
+    # the defect, still true of the proxy and correctly so
+    assert getattr(profile_proxy.profile_openxfactory, "__name__", None) is None
+
+    class _Module:
+        __name__ = "openxfactory_profile"
+
+    class _Proxy:
+        def __init__(self, answer):
+            self._answer = answer
+
+        def resolve(self):
+            if isinstance(self._answer, Exception):
+                raise self._answer
+            return self._answer
+
+    assert host_profile_name(_Proxy(_Module())) == "openxfactory_profile"
+    # a profile built from a § 4.4 mapping says `mapping_id`
+    mapping = type("_Mapping", (), {"mapping_id": "openxfactory"})()
+    assert host_profile_name(_Proxy(mapping)) == "openxfactory"
+    # an unregistered host: the diagnostic is absent, never a raise
+    assert host_profile_name(_Proxy(RuntimeError("not registered"))) is None
+    # a bare object with no proxy protocol is named directly
+    assert host_profile_name(_Module()) == "openxfactory_profile"
+
+
 def test_a_profile_declaring_the_facet_as_none_reads_as_absent() -> None:
     """`None` is a host spelling "I contribute no views", and `tuple(None)`
     would raise where this seam's whole posture is that an absence is not a
@@ -772,6 +881,31 @@ def test_a_profile_declaring_the_facet_as_none_reads_as_absent() -> None:
     class _Profile:
         VIEW_EXTENSIONS = None
     assert host_view_facet(_Profile()) == ("absent", ())
+
+
+def test_the_bundle_glob_and_the_setuptools_floor_are_one_guarantee() -> None:
+    """`package-data` says `web/**`, and `**` is only RECURSIVE in setuptools
+    62.3.0 and later — before that it globbed like a single `*` and the wheel
+    would ship `app.js` without a single one of the view modules it statically
+    imports (Copilot review of this PR, round 3, raised as a defect; measured
+    and answered here instead).
+
+    The two declarations are ONE guarantee and neither is safe alone, so this
+    test holds them to each other: the pattern must be the recursive one and the
+    build requirement must be at or above the version that made it recursive.
+    Measured on a real build at `setuptools 84.0.0`: 40 entries under
+    `opendox/web/`, 36 of them under `opendox/web/views/` — the whole census
+    except `vendor/.gitkeep`, which `glob` skips as a dotfile and which exists
+    only to keep an otherwise-empty directory in git."""
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'opendox = ["web/**"]' in text, (
+        "the bundle ships by a RECURSIVE glob; a single `*` would package "
+        "app.js without `web/views/`")
+    floor = re.search(r'requires\s*=\s*\["setuptools>=(\d+)', text)
+    assert floor, "the build system must declare a setuptools floor at all"
+    assert int(floor.group(1)) >= 63, (
+        "recursive `**` in `package_data` arrived in setuptools 62.3.0; a floor "
+        "below it would let a build ship a bundle with no view modules")
 
 
 def test_the_census_totals_and_the_class_b_remainder() -> None:
