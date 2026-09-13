@@ -144,11 +144,22 @@ function evidencePane(model) {
 function possibleCard(p) {
   // THE SEEDED STATE BY ROLE (Copilot review), like the branch below it.
   const state = p.state || vocab.registerState(STATUS_ROLE.CAPTURED);
-  const card = el("div", "card tile-candidate " + state);
+  // THE CLASS IS KEYED BY ROLE, NOT BY THE ENUM VALUE (Copilot round 2). The
+  // class used to be the raw `possibles[].state`, so a host that overrode
+  // `register_state` both leaked schema text into the DOM and stopped matching
+  // `styles.css`'s `.tile-candidate.cstate-*` rules. The role travels; the word
+  // does not.
+  const stateRole = vocab.registerRole(state);
+  const card = el("div", "card tile-candidate"
+    + (stateRole ? " cstate-" + stateRole : ""));
   card.appendChild(el("span", "dot"));
   const body = el("div");
   body.appendChild(el("div", "title", p.title || p.id));
-  let meta = state;
+  // THE WORD COMES OFF THE FACET, never off the snapshot (Copilot round 2). An
+  // enum value no declared role carries is rendered verbatim — it is the
+  // generator's news and not a role to invent.
+  let meta = stateRole
+    ? vocab.status(VOCABULARY.CANDIDATE, stateRole) : state;
   if (state === vocab.registerState(STATUS_ROLE.PROPOSED) && p.pick) {
     meta = vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.PROPOSED)
       + " → " + (p.pick.staging_id || "");
@@ -156,7 +167,8 @@ function possibleCard(p) {
   } else if ((state === vocab.registerState(STATUS_ROLE.RETIRED)
               || state === vocab.registerState(STATUS_ROLE.SUPERSEDED))
              && p.reason) {
-    meta = state + " — " + p.reason;
+    meta = (stateRole ? vocab.status(VOCABULARY.CANDIDATE, stateRole) : state)
+      + " — " + p.reason;
   }
   body.appendChild(el("div", "meta", meta));
   card.appendChild(body);

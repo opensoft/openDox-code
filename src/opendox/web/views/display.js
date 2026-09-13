@@ -470,6 +470,27 @@ export class Display {
   documentStage(role) { return this._value("document_stage", role); }
   registerState(role) { return this._value("register_state", role); }
 
+  // THE REVERSE LOOKUP: which ROLE is this snapshot enum value? (Copilot round
+  // 2.) `documents[].stage` and `possibles[].state` arrive from the generator as
+  // VALUES, and a view that rendered one straight — or that composed a CSS class
+  // out of one — would leak schema text and lose its styling the moment a host
+  // overrode the enum. A view resolves the value to a role HERE and then asks
+  // for the word (`status(vocabulary, role)`) and the class (`<prefix>-<role>`)
+  // by that role, so both follow the override together. `null` for a value no
+  // declared role carries, which the caller renders verbatim: an unrecognised
+  // enum value is the generator's news, not a role to invent.
+  registerRole(value) { return this._roleOf("register_state", value); }
+  documentStageRole(value) { return this._roleOf("document_stage", value); }
+
+  _roleOf(name, value) {
+    const table = this._values[name];
+    if (!table) refuseRole("snapshot enum", name, Object.keys(this._values));
+    for (const role of Object.keys(table)) {
+      if (table[role] === value) return role;
+    }
+    return null;
+  }
+
   _value(name, role) {
     const table = this._values[name];
     if (!table) refuseRole("snapshot enum", name, Object.keys(this._values));

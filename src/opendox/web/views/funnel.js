@@ -136,6 +136,13 @@ function clusterCard(node, notebook) {
 }
 
 function possibleMeta(p, state, shared) {
+  // THE RENDERED WORD COMES OFF THE FACET (Copilot round 2): `state` is the
+  // snapshot ENUM, and returning it as user-facing text leaked schema words the
+  // moment a host overrode `register_state`. Resolved to a role first; a value
+  // no declared role carries renders verbatim, because it is the generator's
+  // news and not a role to invent.
+  const role = vocab.registerRole(state);
+  const word = role ? vocab.status(VOCABULARY.CANDIDATE, role) : state;
   // BOTH HALVES BY ROLE (Copilot review): the value MATCHED against
   // `possibles[].state` and the word RENDERED beside it come off the same
   // facet, so a profile that renames the proposed register state keeps its
@@ -148,19 +155,23 @@ function possibleMeta(p, state, shared) {
   }
   if ((state === vocab.registerState(STATUS_ROLE.RETIRED)
        || state === vocab.registerState(STATUS_ROLE.SUPERSEDED))
-      && p.reason) return state + " — " + p.reason;
+      && p.reason) return word + " — " + p.reason;
   if (shared) {
-    return state + " — claimed by " + p.claiming_clusters.length + " "
+    return word + " — claimed by " + p.claiming_clusters.length + " "
       + vocab.count(GROUPING, p.claiming_clusters.length);
   }
-  return state;
+  return word;
 }
 
 function possibleCard(node) {
   const p = node.possible;
   const state = p.state || vocab.registerState(STATUS_ROLE.CAPTURED);
   const shared = (p.claiming_clusters || []).length > 1;
-  const card = el("div", "card tile-candidate " + state + " stage-brainstorm" + (shared ? " shared" : ""));
+  // THE CLASS IS KEYED BY ROLE (Copilot round 2), like the canvas rail's.
+  const stateRole = vocab.registerRole(state);
+  const card = el("div", "card tile-candidate"
+    + (stateRole ? " cstate-" + stateRole : "")
+    + " stage-brainstorm" + (shared ? " shared" : ""));
   card.id = node.domId;
   card.tabIndex = 0;
   card.dataset.node = "";

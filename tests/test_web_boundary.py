@@ -1125,7 +1125,13 @@ def test_every_in_scope_file_reads_the_display_facet() -> None:
         if path in through_the_shell:
             assert through_the_shell[path] in text, path
             continue
-        if 'from "./display.js"' not in text and "display" not in text:
+        # THE SIBLING IMPORT, NOT THE WORD (Copilot round 2). An `or "display"
+        # in text` fallback treated a comment -- or an identifier like
+        # `displayVocabulary` -- as proof that a file reads the facet, which is
+        # the exact class of "an exemption that is silence" this module exists
+        # to refuse. Every in-scope file that is not one of the two the shell
+        # reaches INTO must import `./display.js` itself.
+        if 'from "./display.js"' not in text:
             missing.append(path)
     assert not missing, (
         f"{missing} carry no governance literal and read no display facet -- a "

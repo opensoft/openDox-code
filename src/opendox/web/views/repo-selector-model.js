@@ -541,8 +541,11 @@ export function emptyStations(snapshot, display) {
     .map(([key, label]) => ({ key, label }));
 }
 
-export function sparseNotice(option, snapshot) {
-  const empty = emptyStations(snapshot);
+// THE WRAPPER FORWARDS THE FACET (Copilot round 2). `emptyStations` was made
+// display-aware and this caller was not, so a sparse repository named its
+// stations in openDox's neutral words even where a host had declared its own.
+export function sparseNotice(option, snapshot, display) {
+  const empty = emptyStations(snapshot, display);
   if (!empty.length) return null;
   const repository = (option && option.repository) || snapshot?.repository || "this repository";
   return "no " + empty.map((s) => s.label).join(", no ") + " in " + repository
