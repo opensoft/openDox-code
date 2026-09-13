@@ -605,7 +605,39 @@ def _snapshot_values(declared: Any) -> dict[str, dict[str, str]]:
                        where=f"values.{name}")
         for role, word in words.items():
             out[name][role] = _text(word, where=f"values.{name}.{role}")
+    for name, words in out.items():
+        _refuse_duplicate_enum_values(name, words)
     return out
+
+
+def _refuse_duplicate_enum_values(name: str, words: Mapping[str, str]) -> None:
+    """Two roles may not share one enum value (Copilot round 4).
+
+    THE REVERSE LOOKUP IS WHY. `views/display.js`'s `registerRole(value)` and
+    `documentStageRole(value)` answer the FIRST role whose declared value
+    matches — which is how a view resolves a snapshot value to the word and the
+    class it renders. A host that mapped two roles to one value would therefore
+    have one role's cards silently classified as the other's: the wrong word,
+    the wrong `cstate-<role>` hook, and nothing anywhere saying so.
+
+    Checked AFTER the merge, not on the declaration alone, because the collision
+    that matters is between a declared value and one openDox still ships for
+    another role — a partial override is legal and is exactly how this arises.
+    """
+    seen: dict[str, str] = {}
+    for role, word in words.items():
+        if word in seen:
+            raise DisplayFacetError(
+                f"the host profile's {PROFILE_FACET} facet gives values.{name} "
+                f"the value {word!r} for BOTH the {seen[word]!r} and {role!r} "
+                "roles. The shell resolves a snapshot value back to its role to "
+                "decide which word and which style hook to render, and that "
+                "lookup answers one role — so a shared value silently renders "
+                "one role's items as the other's. Declare a distinct value for "
+                "each role, or leave the one you do not mean to override "
+                "undeclared (a partial declaration is legal, and the roles you "
+                "omit keep openDox's own values).")
+        seen[word] = role
 
 
 def display_manifest(declared: Any, *, host_profile: str | None = None

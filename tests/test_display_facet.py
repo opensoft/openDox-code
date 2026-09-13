@@ -282,6 +282,31 @@ def test_a_corpus_prefix_without_a_separator_is_refused():
     assert ok["areas"]["captured"]["prefix"] == "ideation/brainstorm/"
 
 
+def test_two_roles_may_not_share_one_snapshot_enum_value():
+    """Copilot round 4. The client reverse lookup (`registerRole(value)`)
+    answers the FIRST role whose declared value matches, so a host mapping two
+    roles to one value would have one role's cards silently rendered as the
+    other's — the wrong word AND the wrong `cstate-<role>` hook, with nothing
+    saying so. Refused after the MERGE, not on the declaration alone: the
+    collision that matters is between a declared value and one openDox still
+    ships for another role, which is exactly what a partial override causes."""
+    # `display_manifest`, not `normalize_display`: the enum tables are the
+    # SCHEMA half of the payload and are built by `_snapshot_values`, which is
+    # the manifest's own step. That is also where the merge happens, and the
+    # merge is what this check has to see.
+    with pytest.raises(DisplayFacetError, match="BOTH"):
+        display_manifest({"values": {"register_state": {
+            "captured": "same", "proposed": "same"}}})
+    # the partial-override case: one declared value colliding with a shipped one
+    with pytest.raises(DisplayFacetError, match="BOTH"):
+        display_manifest({"values": {"register_state": {"proposed": "latent"}}})
+    # …and distinct values are taken whole
+    ok = display_manifest({"values": {"register_state": {
+        "captured": "new", "proposed": "chosen"}}})
+    assert ok["values"]["register_state"]["captured"] == "new"
+    assert ok["values"]["register_state"]["proposed"] == "chosen"
+
+
 def test_a_role_table_that_is_not_a_mapping_is_refused():
     with pytest.raises(DisplayFacetError):
         normalize_display({"stages": ["source"]})
