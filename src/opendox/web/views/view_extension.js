@@ -787,8 +787,17 @@ export async function mountContributedViews(bindings, snapshot, ctx, options) {
     // payload is read).
     if (typeof binding.mount === "function" || binding.control) continue;
     if (REGIONS[binding.region] !== "dom") continue;
-    const unmet = capabilities === undefined
-      ? null : unmetRequirement(binding, capabilities);
+    // UNCONDITIONALLY, because a missing payload IS an unmet requirement
+    // (Copilot review of openDox-code#20, round 5). This read used to be
+    // `capabilities === undefined ? null : unmetRequirement(...)`, which made a
+    // caller that omits the payload skip the gate entirely — a REQUIRED binding
+    // with an unmet requirement was imported and mounted, the one outcome RULED
+    // Q4 says must refuse. It also contradicted this file's own contract
+    // fifteen lines into the Q4 block above and the fail-closed posture
+    // `probeCapabilityPath` was rewritten into at round 2: `undefined` at the
+    // end of a path is the honest answer "this plane does not offer it", and
+    // `undefined` for the whole payload says it about every path at once.
+    const unmet = unmetRequirement(binding, capabilities);
     if (unmet) {
       // RULED Q4: "unmet + `optional: true` renders the region empty with a
       // NAMED reason; unmet + required REFUSES." The reason is written INTO the

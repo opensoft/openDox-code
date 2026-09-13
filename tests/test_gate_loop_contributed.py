@@ -477,6 +477,70 @@ console.log(JSON.stringify({{
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_a_pass_with_no_capabilities_payload_refuses_instead_of_mounting(
+        tmp_path) -> None:
+    """A MISSING PAYLOAD IS AN UNMET REQUIREMENT (Copilot review of this PR,
+    round 5). The pass used to read `capabilities === undefined ? null :
+    unmetRequirement(...)`, so a caller that omitted the payload skipped RULED
+    Q4's gate entirely: a REQUIRED binding with an unmet requirement was
+    imported and MOUNTED, the one outcome the ruling says must refuse. That also
+    contradicted the registry's own contract — `probeCapabilityPath` was
+    rewritten at round 2 to fail CLOSED, and `undefined` at the end of a path is
+    the honest answer "this plane does not offer it"; `undefined` for the whole
+    payload says it about every path at once."""
+    web = _temp_bundle(tmp_path, {
+        "panel.js": "export function mount(host) { host.hit = true; return 'ok'; }\n",
+    })
+    result = _run_node(f"""
+import {{ collectViewBindings, mountContributedViews }}
+  from {json.dumps((web / "views" / "view_extension.js").as_uri())};
+const hosts = {{}};
+const doc = {{ getElementById: (id) => hosts[id] || null,
+               createElement: () => ({{ attrs: {{}}, textContent: "",
+                                       className: "",
+                                       setAttribute(k, v) {{ this.attrs[k] = v; }},
+                                       appendChild(c) {{ return c; }} }}) }};
+for (const id of ["view-docs", "explorer-root"]) {{
+  hosts[id] = {{ id, hit: false, appendChild() {{}} }};
+}}
+const spec = (id, region, extra) => ({{
+  id, region, module: "./views/panel.js", entry: "mount",
+  view_class: "B", requires: ["actions.gate"], ...extra }});
+// an OPTIONAL binding: skipped with a named reason, never imported
+const optional = await mountContributedViews(
+  collectViewBindings([{{ views: () => [
+    spec("panel.optional", "view-docs", {{ optional: true }})] }}]),
+  null, {{}}, {{ document: doc }});
+// a REQUIRED binding: refuses, and the refusal names the path
+let refusal = null;
+try {{
+  await mountContributedViews(
+    collectViewBindings([{{ views: () => [
+      spec("panel.required", "explorer-root", {{ optional: false }})] }}]),
+    null, {{}}, {{ document: doc }});
+}} catch (err) {{ refusal = {{ name: err.name, message: err.message }}; }}
+console.log(JSON.stringify({{
+  optional: optional.map((r) => [r.binding.id, r.skipped, r.unmet.path,
+                                 r.unmet.value === undefined]),
+  mountedOptional: hosts["view-docs"].hit,
+  mountedRequired: hosts["explorer-root"].hit,
+  refusal,
+}}));
+""", tmp_path)
+    # the optional one is SKIPPED for `requires`, with the probed value reported
+    # as "not carried at all" rather than as a falsy verdict
+    assert result["optional"] == [["panel.optional", "requires",
+                                   "actions.gate", True]]
+    assert result["mountedOptional"] is False
+    # the required one REFUSES, and nothing of it was mounted
+    assert result["refusal"] is not None
+    assert result["refusal"]["name"] == "ViewBindingError"
+    assert "panel.required" in result["refusal"]["message"]
+    assert "actions.gate" in result["refusal"]["message"]
+    assert result["mountedRequired"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
 def test_js_the_pass_mounts_each_binding_s_own_module_not_the_first_id_match(
         tmp_path) -> None:
     """IDS ARE UNIQUE PER REGION, NOT GLOBALLY (Copilot review of this PR,
