@@ -2874,12 +2874,27 @@ def test_staging_workbench_composes_the_doxbench_canvas_without_new_transport():
     # canvas controller happened to have mounted yet said "no editing capability"
     # on a console that has one (the docs pane is drawn first). One derivation, two
     # readers; every clause of it is unchanged and still asserted here.
+    #
+    # § 3.4 SLICE S5 moved the FIRST clause's source, not the clause: the gate
+    # predicate was `createGateLive`, imported from `views/swb-create.js`, and
+    # that module is openXdox-code's package data now (RULED Q5, openxFactory#656
+    # comment `5648044785`). The shell resolves the `gate.workbench.create`
+    # binding once and reads the same predicate off the contributed column, so
+    # where no column is contributed -- a student install -- `NO_CREATE_COLUMN`
+    # answers false and the canvas is withheld with a stated posture instead of
+    # the whole module failing to load. Every clause of the derivation is
+    # untouched; what moved is the gate predicate's PROVENANCE.
     assert "function canvasOffered() {" in view
     assert (
-        "return !!scope && createGateLive(caps) && !sessionSurfaceHidden(caps)"
+        "return !!scope && createColumn.createGateLive(caps) "
+        "&& !sessionSurfaceHidden(caps)"
         in view
     )
     assert "&& !!active?.repository && !!active?.ref;" in view
+    # …and the column the predicate is read off is the CONTRIBUTED one, with the
+    # null column as the only fallback — never a re-imported module
+    assert "const createColumn = gate?.create || NO_CREATE_COLUMN;" in view
+    assert 'from "./swb-create.js"' not in view
 
     # T023 (+T080 client half, 2026-07-30; PIN EVOLUTION T100 P1-A,
     # 2026-08-01): the composition forwards ONLY the seams app.js injects via
@@ -4127,7 +4142,66 @@ def test_the_shell_explains_unavailable_postures_inline():
 #       every unsaved byte with no dirty check, guard or warning.
 # ==========================================================================
 
-_SHELL_HARNESS = _EDITOR_DOM_SHIM + r"""
+# THE CONTRIBUTED WORKBENCH GATE COLUMN, for the two harnesses that mount the
+# whole shell (§ 3.4 slice S5).
+#
+# `views/swb-create.js` and `views/swb-session.js` left this bundle at slice S5:
+# they are openXdox-code's package data, contributed back as the
+# `gate.workbench.create` and `gate.workbench.session` bindings (RULED Q5,
+# openxFactory#656 comment `5648044785`). `app.js` resolves both once per render
+# and hands their DECLARED NAMESPACES (RULED Q2) to `mountStagingWorkbench` as
+# `gate.create` and `gate.session`; with no column contributed the shell's null
+# columns answer "no gate capability", the canvas is withheld with a stated
+# read-only posture, and these harnesses waited forever for textareas that a
+# student install is correctly not offered.
+#
+# A HOST is what contributes a column, and a harness that mounts the shell is
+# acting as the host — so it contributes one, exactly as `app.js` does, and the
+# composition under test stays the real one.
+#
+# WHAT THIS COLUMN IS AND IS NOT. `createGateLive` is the one predicate the
+# canvas is gated on, and the column answers it off the same `caps` the shell
+# already holds — the shape the contributed module states, whose own copy is
+# asserted where that module lives. Nothing else RENDERS: the create dialog and
+# the session affordance row are the contributed module's surfaces and are
+# measured at openXdox-code, which is why `mountCreateAffordance` and
+# `openCreateDialog` mount nothing here. The session half instead RECORDS the
+# context the shell hands it, because that context carries `onSessionEnded` —
+# the seam the contributed affordance row calls when a human confirms an abandon
+# — and it is the shell's side of that seam this file exists to measure.
+#
+# One column per MOUNT and never a shared one: the shell itself takes its columns
+# as per-mount locals for exactly this reason (a second workbench must not rebind
+# the columns the first one's closures still call through).
+_CONTRIBUTED_GATE = r"""
+function contributedGate() {
+  const state = { sessionCtx: null, sessionMounts: 0 };
+  return {
+    state,
+    column: {
+      create: {
+        createGateLive: (c) => !!(c && c.actions && c.actions.gate),
+        mountCreateAffordance: () => null,
+        openCreateDialog: () => null,
+      },
+      session: {
+        createdDocuments: () => [],
+        documentCreated: () => null,
+        endedSessions: () => [],
+        mountSessionAffordances: (host, snapshot, ctx) => {
+          state.sessionCtx = ctx;
+          state.sessionMounts += 1;
+          return null;
+        },
+        openedSessions: () => [],
+        sessionOpened: () => null,
+      },
+    },
+  };
+}
+"""
+
+_SHELL_HARNESS = _EDITOR_DOM_SHIM + _CONTRIBUTED_GATE + r"""
 import { createRequire } from 'node:module';
 
 globalThis.markdownit = createRequire(import.meta.url)('../vendor/markdown-it.min.js');
@@ -4223,8 +4297,12 @@ const doxbench = {
   },
 };
 
+const firstGate = contributedGate();
 const workbench = mountStagingWorkbench(container, snapshot, {
   caps,
+  // the host's contributed workbench gate column (slice S5) -- see the note
+  // above `_CONTRIBUTED_GATE`
+  gate: firstGate.column,
   fetcher: async () => ({ ok: false }),
   active: { repository: 'fixture-repo', ref: 'main' },
   index: { entries: [] },
@@ -4335,8 +4413,10 @@ const ABANDON_RESULT = {
   torn_down: ['worktree', 'registry-entry', 'notebook'], branch_retained: true,
   record: 'ideation/dashboard/gate-records/draft-topic-x/abandon.yaml',
 };
+const secondGate = contributedGate();
 const second = mountStagingWorkbench(reopened, snapshot, {
   caps,
+  gate: secondGate.column,
   fetcher: async () => ({ status: 200, json: async () => ABANDON_RESULT }),
   active: { repository: 'fixture-repo', ref: SESSION_REF },
   index: { entries: [{ repository: 'fixture-repo', ref: SESSION_REF }] },
@@ -4379,26 +4459,33 @@ const SESSION_RECORD_KEY = scopeStorageKey({
 out.sessionKeyedBeforeEnd = [...storage.values.keys()]
   .filter((k) => k === SESSION_RECORD_KEY).length;
 
-const abandonBtn = inSecond('swb-sessionbtn')
-  ? reopened.walk().filter((n) =>
-      String(n.className).split(' ').includes('swb-sessionbtn'))
-      .find((b) => b.textContent.toLowerCase().includes('abandon'))
-  : null;
-out.abandonOffered = Boolean(abandonBtn && abandonBtn.disabled !== true);
-if (abandonBtn) {
-  await fire(abandonBtn, 'click');
-  const reason = reopened.walk().find(
-    (n) => n.attributes && n.attributes['aria-label'] === 'Reason');
-  if (reason) reason.value = ABANDON_RESULT.reason;
-  const submit = reopened.walk().filter((n) =>
-    String(n.className).split(' ').includes('cbtn'))
-    .find((b) => b.textContent === 'abandon-session');
-  out.abandonSubmitFound = Boolean(submit);
-  if (submit) await fire(submit, 'click');
+// THE ENDING IS DRIVEN THROUGH THE SEAM THE CONTRIBUTED ROW CALLS (slice S5).
+// This clicked `swb-sessionbtn`, filled a `Reason`, clicked `abandon-session`
+// and then read a `swb-clanded` report -- four surfaces every one of which is
+// rendered by `views/swb-session.js`, openXdox-code's package data since slice
+// S5. Driving them here would mean driving a file this bundle does not ship, and
+// re-creating them in this harness would mean inventing that column's UI.
+//
+// They were not deleted: the affordance row's own behaviour travels with the
+// module and is measured where the module lives, on the precedent slices S4 and
+// S5 already set for five node probes and a dispose tray. What is measured HERE
+// is the half this bundle owns and this file is named for -- the SHELL's
+// FR-039 clearing -- and the shell exposes it at exactly one place: the
+// `onSessionEnded` callback on the context it hands the contributed column. The
+// contributed row calls that callback when a human confirms; the harness's own
+// column recorded it at mount; so the ending below runs through the real shell
+// code, entered by the same call, capturing the dying ref, tearing the canvas
+// down and clearing the INJECTED storage seam.
+out.sessionSeamMounts = secondGate.state.sessionMounts;
+out.sessionSeamOffered = Boolean(secondGate.state.sessionCtx
+  && typeof secondGate.state.sessionCtx.onSessionEnded === 'function');
+out.endingReported = false;
+if (out.sessionSeamOffered) {
+  // the shell answers the surviving main view, or null for "it did not end"
+  const survived = await secondGate.state.sessionCtx.onSessionEnded();
   for (let i = 0; i < 60; i += 1) await settle();
+  out.endingReported = Boolean(survived && survived.snapshot);
 }
-out.endingReported = reopened.walk().some((n) =>
-  String(n.className).split(' ').includes('swb-clanded'));
 out.sessionKeyedAfterEnd = [...storage.values.keys()]
   .filter((k) => k === SESSION_RECORD_KEY).length;
 out.storageKeysAfterEnd = [...storage.values.keys()];
@@ -4412,8 +4499,9 @@ out.storageKeysAfterEnd = [...storage.values.keys()];
 const third = document.createElement('div');
 const staleTokenDoxbench = { ...doxbench,
   catalog: async () => ({ failed: 'console_required' }) };
+const thirdGate = contributedGate();
 const thirdMount = mountStagingWorkbench(third, snapshot, {
-  caps, fetcher: async () => ({ ok: false }),
+  caps, gate: thirdGate.column, fetcher: async () => ({ ok: false }),
   active: { repository: 'fixture-repo', ref: 'main' },
   index: { entries: [] }, doxbench: staleTokenDoxbench,
   sourceBase: '/source/', edit: null,
@@ -4561,16 +4649,25 @@ def test_a_session_end_through_the_mounted_shell_clears_the_working_record(
     seam — so under any injected storage (this harness's FakeStorage; the
     editor threads the seam correctly at its own re-key clear,
     doxbench-editor.js) the ended session's record was never removed. The
-    abandon here runs through the REAL mounted shell: the affordance row, the
-    gate verb, the onSessionEnded rebind — and the session-keyed record must
-    be gone afterwards."""
+    abandon here runs through the REAL mounted shell — the shell's own
+    `onSessionEnded`, entered by the same call the contributed abandon row makes
+    (§ 3.4 slice S5; see the `_CONTRIBUTED_GATE` note) — and the session-keyed
+    record must be gone afterwards."""
     assert shell_results["sessionKeyedBeforeEnd"] >= 1, (
         "precondition: the session's working record was persisted")
-    assert shell_results["abandonOffered"] is True, (
-        "precondition: the mounted shell offered the abandon verb")
-    assert shell_results["abandonSubmitFound"] is True
+    # THE PRECONDITIONS ARE THE SEAM'S, not the affordance row's (§ 3.4 slice
+    # S5): the shell must have mounted the contributed session column and put
+    # its own `onSessionEnded` on the context it handed down, which is the one
+    # call the contributed abandon row makes and the only entry point this
+    # behaviour has. The row itself — offered, reasoned, submitted, reported —
+    # is `views/swb-session.js`'s and is measured where that module lives.
+    assert shell_results["sessionSeamMounts"] >= 1, (
+        "precondition: the mounted shell never mounted the session column")
+    assert shell_results["sessionSeamOffered"] is True, (
+        "precondition: the shell handed the column no `onSessionEnded` seam")
     assert shell_results["endingReported"] is True, (
-        "precondition: the ending really landed and was reported")
+        "precondition: the ending really landed — the shell answered with the "
+        "surviving main view rather than the null that means it did not end")
     assert shell_results["sessionKeyedAfterEnd"] == 0, (
         f"the ended session's record survived in the injected storage: "
         f"{shell_results['storageKeysAfterEnd']}")
@@ -4937,7 +5034,7 @@ def test_the_editors_apply_refusals_carry_their_fixed_codes(editor_results):
 # controller rather than from `aria-selected`.
 # ==========================================================================
 
-_SELECTION_HARNESS = _EDITOR_DOM_SHIM + r"""
+_SELECTION_HARNESS = _EDITOR_DOM_SHIM + _CONTRIBUTED_GATE + r"""
 import { createRequire } from 'node:module';
 
 globalThis.markdownit = createRequire(import.meta.url)('../vendor/markdown-it.min.js');
@@ -5004,8 +5101,13 @@ const doxbench = {
   chatTurn: async () => ({ ok: false, status: 502, payload: {} }),
 };
 
+const selectionGate = contributedGate();
 const workbench = mountStagingWorkbench(container, snapshot, {
   caps,
+  // the host's contributed workbench gate column (slice S5) -- see the note
+  // above `_CONTRIBUTED_GATE`. Without one the canvas is correctly withheld and
+  // this harness waits forever for textareas a student install is not offered.
+  gate: selectionGate.column,
   fetcher: async () => ({ ok: false }),
   active: { repository: 'fixture-repo', ref: 'main' },
   index: { entries: [] },

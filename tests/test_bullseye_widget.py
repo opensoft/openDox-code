@@ -44,6 +44,29 @@ LENS_JS = WEB / "views" / "lens.js"
 WORKBENCH_JS = WEB / "views" / "staging-workbench.js"
 NODE = shutil.which("node")
 
+
+def _wheel_action_rows(model: str) -> dict[int, str]:
+    """`wheel-model.js`'s `WHEEL_ACTIONS`, one source block per STATION INDEX.
+
+    The table was keyed by the four station WORDS (`documents:`, `clusters:`,
+    `possibles:`, `staged:` …) and is keyed `[STAGE_ROLES[n]]` since § 3.4 slice
+    S7, like every other per-wheel table in that module: a station is a POSITION
+    on openDox's own six-stage spine, and the word for it belongs to whichever
+    domain registered a display facet. So a block is found by the index the spine
+    declares, which no domain may respell, rather than by a word any domain may.
+    """
+    table = model.split("export const WHEEL_ACTIONS = {", 1)[1].split("\n};", 1)[0]
+    blocks = {}
+    for chunk in table.split("\n  [STAGE_ROLES[")[1:]:
+        index, marker, rest = chunk.partition("]]: [")
+        assert marker, f"unparsable WHEEL_ACTIONS key: {chunk[:40]!r}"
+        blocks[int(index)] = rest
+    assert sorted(blocks) == [0, 1, 2, 3, 4, 5], (
+        f"WHEEL_ACTIONS declares stations {sorted(blocks)}, not the six the "
+        f"spine does")
+    return blocks
+
+
 # A minimal SVG-only DOM: every node records its tag, attributes, text, wired
 # event types, and children, so the harness can report the tree as JSON. The
 # widget touches nothing else (createElementNS + setAttribute + appendChild +
@@ -1316,8 +1339,21 @@ def test_the_drafted_seed_moves_to_doxbench_instead_of_being_copied(tmp_path):
     swb = (WEB / "views" / "staging-workbench.js").read_text(encoding="utf-8")
     assert "function openDraft(seed)" in swb
     # the create dialog now lives on the draft view's `details` tab rather than
-    # filling the overlay body (see the draft-view test below)
-    assert "openCreateDialog(detailsPane, seed" in swb
+    # filling the overlay body (see the draft-view test below), and it is
+    # OPENED THROUGH THE CONTRIBUTED COLUMN since § 3.4 slice S5: `swb-create.js`
+    # is openXdox-code's package data (RULED Q5, openxFactory#656 comment
+    # `5648044785`), so this file resolves `gate.workbench.create`'s declared
+    # namespace at the mount instead of importing the module. RULED Q3 fixed the
+    # mount signature at `mount(host, snapshot, ctx)`, which is why the seed
+    # travels in the context rather than as the second positional argument. Both
+    # halves of the original statement are kept: the host is still the details
+    # pane, and the seed still reaches the dialog.
+    call = swb.split(
+        "createColumn.openCreateDialog(detailsPane, shellSnapshot, {", 1)
+    assert len(call) == 2, (
+        "the draft view no longer opens the create dialog on its details pane")
+    assert "seed," in call[1].split("caps:", 1)[0], \
+        "the seed no longer travels into the create dialog's context"
     assert "return { open, close, openDraft };" in swb
     # an ungated plane says so rather than offering a submit that cannot land
     draft_body = swb.split("function openDraft(seed)")[1].split("\n  }")[0]
@@ -1752,15 +1788,16 @@ def test_a_staged_tile_opens_its_packet_rather_than_repointing_the_dashboard():
     tile IS one repository's document.
     """
     model = (WEB / "views" / "wheel-model.js").read_text(encoding="utf-8")
-    staged = model.split("  staged: [")[1].split("\n  ],")[0]
-    code = "\n".join(ln for ln in staged.splitlines()
+    rows = _wheel_action_rows(model)
+    # SELECTION is the staged wheel's station (`STAGE_ROLES[3]`)
+    code = "\n".join(ln for ln in rows[3].splitlines()
                       if not ln.lstrip().startswith("//"))
     assert "workbenchRow" in code
     assert "openRepoRow" not in code
-    # …and every other wheel keeps it
-    for wheel in ("documents", "clusters", "possibles"):
-        block = model.split("  " + wheel + ": [")[1].split("\n  ],")[0]
-        assert "openRepoRow" in block, wheel
+    # …and every other wheel keeps it. The loop named three stations by word and
+    # names all five by role now, which is what "every other wheel" always said.
+    for role_index in (0, 1, 2, 4, 5):
+        assert "openRepoRow" in rows[role_index], role_index
 
 
 def test_a_reload_bearing_control_returns_you_to_the_view_you_were_on():
@@ -1978,7 +2015,15 @@ def test_the_draft_view_lands_on_an_editable_body_with_its_fields_behind_a_tab()
     # resolves its scope with (2026-08-10) — a literal here would be the same
     # vocabulary applied in two places that dropped the scope in #152
     assert "tile_kind: DRAFT_TILE_KIND," in draft
-    assert 'const DRAFT_TILE_KIND = "staged";' in swb
+    # …and that ONE constant is the seam-key table's entry for the selection
+    # station (§ 3.4 slice S7): `SCOPE_KINDS` moved into `views/display.js` with
+    # its sibling seam tables, so the tile spelling is declared once, BY ROLE,
+    # and read here rather than spelled a second time in this file — which is
+    # the same argument the sentence above makes about the two call sites.
+    assert "const DRAFT_TILE_KIND = SCOPE_KINDS.selection;" in swb
+    display = (WEB / "views" / "display.js").read_text(encoding="utf-8")
+    scopes = display.split("export const SCOPE_KINDS = {")[1].split("};")[0]
+    assert 'selection: "staged"' in scopes
     assert "tile_id: seed.scopeId" in draft
     assert "loaded.content" in draft                 # the created header survives
     # a body that fails after the header lands says exactly that
@@ -1989,10 +2034,20 @@ def test_the_draft_view_lands_on_an_editable_body_with_its_fields_behind_a_tab()
     # `test_the_lens_names_its_scope_in_the_tile_vocabulary_so_a_session_opens`)
     assert 'scopeKind: "staged",' in lens
     assert "scopeId: String(data?.staging_id" in lens
-    # the id is RETURNED by the drafter, not parsed out of the fragment's prose
-    seed_py = (REPO_ROOT / "scripts" / "doc_health" / "staging_seed.py").read_text(
-        encoding="utf-8")
-    assert '"staging_id": self.staging_id' in seed_py
+    # THE DRAFTER'S OWN HALF IS NOT THIS REPOSITORY'S TO ASSERT. The id is
+    # RETURNED by `doc_health.staging_seed` (`"staging_id": self.staging_id`),
+    # and that module is openxFactory's engine: `docs/opendox-carve-manifest.yaml`
+    # files its suite `tests/ideation-dashboard/test_staging_seed.py` as
+    # `disposition: not_moved`, `reason: stays_openxfactory_adapter`, on the
+    # evidence that the subject "lies outside the carve surface entirely and has
+    # no row and no replica". `scripts/doc_health/staging_seed.py` is therefore a
+    # path this leg has never had and will never have — the read above it was a
+    # PRE-CARVE path that had simply not been noticed, because this suite is
+    # narrowed out of `validate` (RULED Q-L5 (b′)) and nobody had run it since.
+    # What stays here is the half this bundle owns, and it is the half the
+    # sentence was actually about: the browser READS `staging_id` off the
+    # drafter's payload (the line above) rather than parsing it out of the
+    # fragment's prose.
 
 
 def test_every_create_field_carries_a_default_so_nothing_blocks_the_create(tmp_path):
