@@ -199,16 +199,40 @@ jobs:
       # the record, rather than bought here with a `--continue-on-collection-
       # errors` or an ignore list.
       #
-      # FOUR SUITES S8 REPAIRED TO GET HERE, all of them the same defect class —
-      # a PATH CONSTANT the carve's `import rewrites` edit never rewrote, each
-      # declared on its own row in the paired openxFactory annotation:
-      # `test_outline_model.py`'s `parents[2]` (the openDox-code #19
-      # conftest-depth defect one file over: 48 failed -> 47 passed),
-      # `test_doxbench_view.py`'s `tests/ideation-dashboard/fixtures/` (73 errors
-      # -> 124 passed), and the three `scripts/ideation_dashboard/<module>.py`
-      # module reads in `test_doxbench_knowledge.py` (21 failed -> 56 passed),
-      # `test_doxbench_document_abstract.py` (2 -> 54 passed) and
-      # `test_doxbench_memory_gateway.py` (12 failed -> 3).
+      # SIX SUITES S8 REPAIRED TO GET HERE (Copilot review of #23, accurate —
+      # this block said four and omitted two), all of them the same defect
+      # class: a PATH CONSTANT the carve's `import rewrites` edit never
+      # rewrote, each declared on its own row in the paired openxFactory
+      # annotation. Measured file-by-file under this workflow's own
+      # invocation, before and after:
+      #
+      #   tests/test_outline_model.py               48 failed  -> 47 passed, 1
+      #       `parents[2]`, the openDox-code #19 conftest-depth defect one file
+      #       over. The one left needs `doc_health`, openxFactory-only.
+      #   tests/test_doxbench_view.py               73 errors  -> 124 passed
+      #       `tests/ideation-dashboard/fixtures/`, the pre-carve location.
+      #   tests/test_doxbench_knowledge.py          21 failed  -> 56 passed
+      #   tests/test_doxbench_document_abstract.py   2 failed  -> 54 passed
+      #   tests/test_doxbench_memory_gateway.py     12 failed  -> 3 failed
+      #       `scripts/ideation_dashboard/<module>.py`, the pre-carve module
+      #       path; the three left read openxFactory's own `openspec/` tree.
+      #   tests/test_bullseye_widget.py              5 failed  -> 4 failed
+      #       the same pre-carve read, for `serve.py`.
+      #
+      # THREE OF THE SIX ARE NAMED IN THE LIST BELOW and three are not, and the
+      # reason is measured rather than asserted. `test_outline_model.py`,
+      # `test_doxbench_memory_gateway.py` and `test_bullseye_widget.py` each
+      # keep a residue this slice does not own (`doc_health` and openxFactory's
+      # `openspec/` tree — the BUILD arc's; and three `test_bullseye_widget.py`
+      # quotations of `views/staging-workbench.js` / `swb-create.js` lines S5
+      # rewrote). `test_doxbench_view.py` is the one worth stating in full: with
+      # ONLY the S8 path repair applied it is 136 PASSED at `main`, and on this
+      # branch it is 124 passed with 11 errors and 1 failure — every one of the
+      # twelve a shell behaviour S5 and S7 changed under a suite nobody has run
+      # since the carve ("timed out waiting for the canvas textareas"). So the
+      # repair is complete and the residue is the authoring slices'; naming the
+      # file here would put the required check red for their defect, and this
+      # block records the measurement instead.
       #
       # `--noconftest` STAYS, and it is why this list is a list. The root
       # conftest's `collect_ignore` and `tests/conftest.py`'s autouse fixtures are
@@ -218,7 +242,10 @@ jobs:
       # `test_doxbench_bridge_live.py` and `test_openprofiler_broker_e2e.py` are
       # all-skip without a live bridge, and `test_boundary.py`,
       # `test_provider_boundary.py` and `test_workbench.py` each carry a
-      # standing red this slice does not own (§ 3 of the S8 inventory).
+      # standing red this slice does not own (§ 3 of the S8 inventory) —
+      # `test_provider_boundary.py`'s is itself a cross-leg reach worth naming:
+      # it asserts that seven per-module scan suites still exist BY FILENAME,
+      # and the carve sent all seven to openXdox-code.
       - name: pytest
         run: >-
           python -m pytest -q
