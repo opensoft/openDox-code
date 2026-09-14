@@ -15,10 +15,9 @@ editable by chat, color this tile so we know is must be saved. also add a save
 button here. So we have read, edit, save and save only active if there are
 changes. the save acts same as the save button that is in the preview panel."
 
-Both are driven against a minimal DOM — the instrument `test_wheel_verbs_dom.py`
-carried here until it was RETIRED on 2026-09-13 (RULED `openxFactory#656`
-comment 5656343213) and `test_staging_workbench.py` carries at the openXdox
-leg — so the behaviour is pinned without a browser.
+Both are driven against a minimal DOM, the same instrument
+`test_wheel_verbs_dom.py` and `test_staging_workbench.py` already use, so the
+behaviour is pinned without a browser.
 """
 
 from __future__ import annotations
