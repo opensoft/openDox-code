@@ -22,11 +22,13 @@ which is what makes the reference OPTIONAL rather than dangling.
 It deliberately does NOT prove the seam RENDERS correctly with and without
 the contribution — that needs a real ECMAScript module loader, which is
 `tests/test_intent_binding_dom.py`'s job (Node, `pytest.mark.skipif` when
-absent, mirroring `tests/test_intent_tray_dom.py`'s own precedent). That file
-is not part of this `--noconftest` list for the same reason its sibling DOM
-probes of this exact pair of views are not (RULED Q-L5 (b′)): it is a
-BEHAVIOURAL probe of a `web/` view, not a shape assertion, and un-narrowing
-that class of test is BUILD-arc work (S8), not this slice's.
+absent, on the precedent `tests/test_intent_tray_dom.py` set — that file was
+RETIRED at this leg on 2026-09-13, RULED `openxFactory#656` comment
+5656343213, so the precedent survives in the harness and not in a file you can
+open here). That file is not part of this `--noconftest` list for the reason
+no DOM probe of a `web/` view is (RULED Q-L5 (b′)): it is a BEHAVIOURAL probe,
+not a shape assertion, and un-narrowing that class of test is BUILD-arc work
+(S8), not this slice's.
 """
 
 from __future__ import annotations

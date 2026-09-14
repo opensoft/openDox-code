@@ -78,10 +78,18 @@ jobs:
       # `--noconftest` safe and needs no consumer — it reads three files as
       # text and nothing else. The BEHAVIOURAL probe of the same seam
       # (`tests/test_intent_binding_dom.py`, node-driven) stays off this
-      # list on the same footing as its narrowed siblings
-      # `test_intent_tray_dom.py` / `test_wheel_verbs_dom.py`: it is a DOM
-      # probe of a `web/` view, and un-narrowing that class of test is
-      # slice S8's job, not S2's.
+      # list because it is a DOM probe of a `web/` view, and un-narrowing
+      # that class of test is slice S8's job, not S2's.
+      #
+      # ITS TWO FORMER SIBLINGS ARE NOT NARROWED, THEY ARE GONE (RULED
+      # `openxFactory#656` comment 5656343213, Brett Heap, 2026-09-13, citing
+      # RULED OQ-F). This sentence used to name `test_intent_tray_dom.py` and
+      # `test_wheel_verbs_dom.py` as the narrowed siblings this probe keeps
+      # company with. Both drove `views/intent-feed.js`, which STAYED at
+      # openxFactory and arrived at NEITHER leg, so both have been RETIRED at
+      # this leg as a declared act — openxFactory's carve manifest carries the
+      # `retired:` block and this repository carries the deletion. There is no
+      # narrowed sibling left to un-narrow there: S8 un-narrows what remains.
       #
       # § 3.4 SLICE S3 adds `tests/test_view_registry.py`, on exactly the same
       # footing as its three neighbours and for the same reason: it asserts a

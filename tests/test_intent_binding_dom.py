@@ -4,21 +4,28 @@ opensoft/openxFactory#656 comment 5642758731; split-opendox-two-layer-product
 § 3.4, slice S2).
 
 Drives the REAL `dispose.js`, `wheel.js` and `intent-binding.js` under node,
-mirroring `tests/test_intent_tray_dom.py`'s and `tests/test_wheel_verbs_dom.py`'s
-own DOM-shim harness for this exact pair of views. Nothing here reads a
+on the DOM-shim harness `tests/test_intent_tray_dom.py` and
+`tests/test_wheel_verbs_dom.py` carried for this exact pair of views — both
+RETIRED at this leg on 2026-09-13 (RULED `openxFactory#656` comment
+5656343213, citing RULED OQ-F: they drove `views/intent-feed.js`, which
+arrived at neither leg), so the instrument survives here and in
+`tests/test_view_registry.py` and the files themselves do not. Nothing here reads a
 module's SOURCE (that is `tests/test_intent_binding_shape.py`'s job); every
 claim below is made by actually loading the module graph and, where useful,
 mounting and inspecting the resulting tree — so a passing test means the
 behaviour exists, not that the code looks right.
 
-NOT PART OF `.github/workflows/validate.yml`'s explicit list. Every existing
-DOM probe of `web/` — including `test_intent_tray_dom.py`, the carried-over
-test of this SAME pair of views — is narrowed out of the required check
-(RULED Q-L5 (b′)) until the BUILD arc inverts the openDox -> openXdox
-dependency; un-narrowing that class of test is slice S8's job, not S2's. This
-file is deliberately on the same footing as its narrowed siblings: present in
-the tree, runnable by hand or by a future un-narrowed `validate`, and skipped
-outright where `node` is not on PATH.
+NOT PART OF `.github/workflows/validate.yml`'s explicit list. Every DOM probe
+of `web/` in this tree is narrowed out of the required check (RULED Q-L5 (b′))
+until the BUILD arc inverts the openDox -> openXdox dependency; un-narrowing
+that class of test is slice S8's job, not S2's. This file is deliberately on
+that footing: present in the tree, runnable by hand or by a future un-narrowed
+`validate`, and skipped outright where `node` is not on PATH. The carried-over
+probe of this SAME pair of views, `test_intent_tray_dom.py`, was one of them
+until 2026-09-13 and is now RETIRED rather than narrowed (RULED
+`openxFactory#656` comment 5656343213) — a reader grepping for it will find it
+in openxFactory's carve manifest and in this repository's history, not in the
+tree.
 """
 
 from __future__ import annotations

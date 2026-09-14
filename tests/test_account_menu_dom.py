@@ -1,7 +1,10 @@
 """DOM behaviour of the user-account menu (add-dashboard-account-menu).
 
 Drives the REAL `account-menu.js` under node against the minimal DOM shim this
-repo already uses for view probes (see test_wheel_verbs_dom.py). Nothing here
+repo already uses for view probes (see `test_intent_binding_dom.py`; the
+original of the pattern, `test_wheel_verbs_dom.py`, was RETIRED at this leg on
+2026-09-13 — RULED `openxFactory#656` comment 5656343213 — because the surface
+it drove arrived at neither leg). Nothing here
 reads the module's SOURCE — every claim is made by mounting, opening, and
 inspecting the resulting tree, so a passing test means the behaviour exists.
 
