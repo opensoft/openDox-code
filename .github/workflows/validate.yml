@@ -79,14 +79,18 @@ jobs:
       # text and nothing else. The BEHAVIOURAL probe of the same seam
       # (`tests/test_intent_binding_dom.py`, node-driven) stays off this
       # list, and NOT for being a node-driven DOM probe of a `web/` view:
-      # three files ON this list are exactly that (opensoft/openDox-code#24,
-      # Copilot). `tests/test_view_registry.py` mounts the real
+      # FOUR files ON this list are exactly that (opensoft/openDox-code#24,
+      # Copilot, twice — the fourth arrived with slice S7 while that pull
+      # request was open). `tests/test_view_registry.py` mounts the real
       # `views/view_extension.js` and `views/docs.js` under node behind a
       # `class Node` stand-in of its own; `tests/test_split_route_tails.py`
       # installs a `globalThis.document`; `tests/test_gate_loop_contributed.py`
-      # mounts contributed panels through the registry. So no sentence of the
-      # form "no DOM probe of a `web/` view is on this list" can be written
-      # here truthfully, and the one that was here is withdrawn.
+      # mounts contributed panels through the registry; and
+      # `tests/test_display_facet.py` (openDox-code#21, § 3.4 slice S7) drives
+      # the real `views/display.js` under the node the runner already has,
+      # skipping where node is absent. So no sentence of the form "no DOM probe
+      # of a `web/` view is on this list" can be written here truthfully, and
+      # the one that was here is withdrawn.
       #
       # WHAT THE LIST ACTUALLY IS. An allow-list, admitted file by file, and
       # every admission above gives the same reason in its own words: the file
