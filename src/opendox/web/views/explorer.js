@@ -1,3 +1,5 @@
+import { DRILL_KINDS, neutralDisplay } from "./display.js";
+
 // Drill-down explorer (T017): pipeline/funnel STAGED, PROPOSAL, and REALIZED
 // tiles open as their underlying artifact folders (FR-008). Snapshot-only —
 // folder listings come from `staged_topics[].files` and `changes[].files`
@@ -41,17 +43,40 @@ function basename(path) {
 // OpenSpec change-folder convention (proposal.md/design.md/tasks.md at the
 // folder root; specs/<capability>/spec.md for spec deltas; supporting-docs/
 // for supporting material). Exported for the node-harness test.
-export function classifyChangeFile(path) {
+export function classifyChangeFile(path, display) {
+  const d = display || neutralDisplay();
   const base = basename(path);
-  if (base === "proposal.md") return "proposal";
-  if (base === "design.md") return "design";
-  if (base === "tasks.md") return "tasks";
-  if (/(^|\/)specs\//.test(path)) return "spec deltas";
-  if (/(^|\/)supporting-docs\//.test(path)) return "supporting docs";
-  return "other";
+  // The ORDERED packet documents are the domain's, off the facet's artifact
+  // axis (RULED Q1's "artifact-vocabulary axis"); each is its own group, named
+  // by its own file name, so the order the domain declares IS the order the
+  // explorer renders. A domain that declares none groups everything below.
+  if (d.packetOrder().includes(base)) return base;
+  const delta = d.artifact("delta");
+  const supporting = d.artifact("supporting");
+  if (delta.prefix && pathHasSegment(path, delta.prefix)) return delta.label;
+  if (supporting.prefix && pathHasSegment(path, supporting.prefix)) {
+    return supporting.label;
+  }
+  return OTHER_GROUP;
 }
 
-const CHANGE_GROUP_ORDER = ["proposal", "design", "tasks", "spec deltas", "supporting docs", "other"];
+// A path carrying `<prefix>` as a whole segment run — `specs/` matches
+// `openspec/changes/x/specs/y/spec.md` and never `myspecs/`.
+function pathHasSegment(path, prefix) {
+  const p = String(path);
+  const needle = String(prefix).replace(/^\/+|\/+$/g, "") + "/";
+  return p.startsWith(needle) || p.includes("/" + needle);
+}
+
+const OTHER_GROUP = "other";
+
+// The group order: the declared packet documents first, in the order the domain
+// declares them, then the two declared subfolders, then everything else.
+function changeGroupOrder(display) {
+  const d = display || neutralDisplay();
+  return [...d.packetOrder(), d.artifact("delta").label,
+          d.artifact("supporting").label, OTHER_GROUP];
+}
 
 function docByPath(snapshot, path, repository, ref) {
   return (snapshot.documents || []).find((d) =>
@@ -77,35 +102,48 @@ function fileEntry(snapshot, path, owner) {
 // Returns null when the tile does not resolve against the snapshot (a stale
 // click after regeneration, or a caller passing an unrecognized kind).
 // DOM-free and pure — unit-tested via node exactly like model.js.
-export function resolveExplorerTarget(kind, id, snapshot) {
+export function resolveExplorerTarget(kind, id, snapshot, display) {
+  const d = display || neutralDisplay();
   const s = snapshot || {};
-  if (kind === "staged") {
+  if (kind === DRILL_KINDS.selection) {
     const t = (s.staged_topics || []).find((x) => x.staging_id === id);
     if (!t) return null;
     const files = (t.files || []).map((path) => fileEntry(s, path, t));
     const n = (t.files || []).length;
     return {
       kind, id, title: id,
-      subtitle: "ideation/staging/" + id + " · " + n + " file" + (n === 1 ? "" : "s") +
+      subtitle: (d.area("organized").prefix || "") + id + " · " + n
+        + " file" + (n === 1 ? "" : "s") +
         (t.target_change ? " · → " + t.target_change : " · no pick yet"),
-      groups: [{ label: "topic folder (incl. any openspec/ drafts)", files }],
+      // THE GROUP LABEL COMES OFF THE DECLARED AREAS (Copilot round 7). It
+      // used to name openDox's own corpus layout ("topic folder (incl. any
+      // openspec/ drafts)"), which stayed on screen whatever the host
+      // declared -- the one human-facing label in this module the context hop
+      // could not reach. The group IS the whole of a selection's folder, so
+      // it is named by the area a selection lives in, and says that anything
+      // drafted toward a submission is in it rather than filed separately.
+      groups: [{
+        label: d.area("organized").label + " (every file, incl. any "
+          + d.area("proposed").label + ")",
+        files,
+      }],
     };
   }
-  if (kind === "proposal" || kind === "realized") {
+  if (kind === DRILL_KINDS.submission || kind === DRILL_KINDS.completion) {
     const c = (s.changes || []).find((x) => x.id === id);
     if (!c) return null;
     const byLabel = new Map();
     for (const path of c.files || []) {
-      const label = classifyChangeFile(path);
+      const label = classifyChangeFile(path, d);
       if (!byLabel.has(label)) byLabel.set(label, []);
       byLabel.get(label).push(fileEntry(s, path, c));
     }
-    const groups = CHANGE_GROUP_ORDER
+    const groups = changeGroupOrder(d)
       .filter((label) => byLabel.has(label))
       .map((label) => ({ label, files: byLabel.get(label) }));
     return {
       kind, id, title: id,
-      subtitle: c.folder || ("openspec/changes/" + id),
+      subtitle: c.folder || ((d.artifact("root").prefix || "") + id),
       groups,
     };
   }
@@ -116,12 +154,20 @@ export function resolveExplorerTarget(kind, id, snapshot) {
 // itself a governed document in `documents[]` (status/kind/summary/topics);
 // files outside that projection (e.g. a change's proposal.md) list by name
 // only — the spec requires headers only for the staged-topic scenario.
-function fileRow(entry, onOpen) {
+// `display` is threaded in (Copilot round 7) because this row's metadata is
+// the LAST human-facing surface in the explorer that still read the raw
+// `document_stage` enum: `resolveExplorerTarget` resolved the tile through the
+// facet and then the rows under it spelled the schema value.
+function fileRow(entry, onOpen, display) {
+  const d = display || neutralDisplay();
   const row = el("div", "docrow explorer-row");
   const info = el("span");
   info.appendChild(el("span", "name", esc(basename(entry.path))));
   const bits = [entry.path];
-  if (entry.doc) bits.push(entry.doc.stage, entry.doc.kind, entry.doc.summary);
+  if (entry.doc) {
+    bits.push(entry.doc.stage ? d.documentStageWord(entry.doc.stage) : null,
+              entry.doc.kind, entry.doc.summary);
+  }
   info.appendChild(el("div", "where", esc(bits.filter(Boolean).join(" · "))));
   row.appendChild(info);
   if (entry.doc && (entry.doc.topics || []).length) {
@@ -145,7 +191,7 @@ function fileRow(entry, onOpen) {
 // Returns `{ openTile(kind, id), close() }` — the entrypoint funnel.js/
 // board.js call when a staged/proposal/realized tile's "open folder"
 // affordance is activated.
-export function mountExplorer(container, snapshot, { onOpenFile, signal } = {}) {
+export function mountExplorer(container, snapshot, { onOpenFile, signal, display } = {}) {
   container.innerHTML = "";
   const overlay = el("div", "explorer-overlay");
   overlay.hidden = true;
@@ -218,7 +264,7 @@ export function mountExplorer(container, snapshot, { onOpenFile, signal } = {}) 
   function openTile(kind, id) {
     lastFocused = document.activeElement; // the tile's "open folder" button
     currentTile = { kind, id };
-    const target = resolveExplorerTarget(kind, id, snapshot);
+    const target = resolveExplorerTarget(kind, id, snapshot, display);
     list.innerHTML = "";
     viewer.innerHTML = "";
     if (!target) {
@@ -236,7 +282,7 @@ export function mountExplorer(container, snapshot, { onOpenFile, signal } = {}) 
         for (const entry of group.files) {
           list.appendChild(fileRow(entry, (e) => {
             if (onOpenFile) onOpenFile(e, viewer, currentTile);
-          }));
+          }, display));
         }
       }
     }
@@ -269,7 +315,7 @@ export function mountExplorer(container, snapshot, { onOpenFile, signal } = {}) 
     list.appendChild(el("div", "docgroup", "source file (read-only)"));
     list.appendChild(fileRow(entry, (e) => {
       if (onOpenFile) onOpenFile(e, viewer, currentTile);
-    }));
+    }, display));
     overlay.hidden = false;
     closeBtn.focus(); // initial focus lands inside the dialog (a11y #19)
     if (onOpenFile) onOpenFile(entry, viewer, currentTile);

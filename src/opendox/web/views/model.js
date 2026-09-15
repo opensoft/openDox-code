@@ -1,18 +1,37 @@
-// Snapshot -> funnel view-model derivation. PURE: no DOM, no I/O, no external
-// imports — it is imported by funnel.js in the browser AND unit-tested from
-// Python via node (tests/ideation-dashboard/test_renderer.py). The renderer
-// reads ONLY the snapshot; this module NEVER re-derives tallies or readiness
-// (those are carried through verbatim from the snapshot fields). It only lays
-// out the six funnel columns and the per-hop edges between snapshot entities.
+// Snapshot -> funnel view-model derivation. PURE: no DOM, no I/O — it is
+// imported by funnel.js in the browser AND unit-tested from Python via node
+// (tests/ideation-dashboard/test_renderer.py). The renderer reads ONLY the
+// snapshot; this module NEVER re-derives tallies or readiness (those are
+// carried through verbatim from the snapshot fields). It only lays out the six
+// funnel columns and the per-hop edges between snapshot entities.
 //
-// Six-column docs-first funnel (spec "Realization funnel model"):
-//   docs -> clusters -> possibles -> staged picks -> proposals -> realized
-// Edge kinds match the mockup's SVG classes:
-//   topic  doc->cluster and cluster->possible (many-to-many Topics claims)
-//   pick   possible->staged (organize-gate pick edge)
-//   flow   staged->change   (proposal/archive gate flow)
+// PARAMETERIZED AT SLICE S7 (docs/front-end-package-boundary.md § 5, § 4.3).
+// This file was the densest in the tree — "28 governance literals in 126
+// lines", § 3.2's own reading — and every one of them was one domain's spelling
+// of a position in a pipeline. The six columns are now the six STAGE ROLES, and
+// the words come from the registered profile's display facet through `ctx`:
+//
+//   source -> grouping -> candidate -> selection -> submission -> completion
+//
+// A column KEY is a role, so a node's `column`, its DOM id prefix and the
+// collapse set are all neutral; a column LABEL and its gate caption are the
+// domain's, read by role. Edge kinds match the mockup's SVG classes and are
+// structure rather than vocabulary, so they stay literal:
+//   topic  source->grouping and grouping->candidate (many-to-many claims)
+//   pick   candidate->selection (the select-gate edge)
+//   flow   selection->submission/completion (the submit/complete gate flow)
+//
+// THE ONE IMPORT is `./display.js`, itself import-free: the vocabulary reader
+// and the snapshot's declared field names. `buildFunnelModel` takes the live
+// `Display` from `ctx` and falls back to openDox's neutral words when a caller
+// (a node harness, a pre-probe render) has none — the fallback is NEUTRAL, not
+// this file's old literals, which is the distinction § 4.3 point 5 protects.
 
-export const COLUMN_KEYS = ["docs", "clusters", "possibles", "staged", "proposals", "realized"];
+import { STAGE_ROLES, neutralDisplay } from "./display.js";
+
+// Kept as an export under its landed name because `funnel.js` and the node
+// harness both read it: the six COLUMN KEYS, which are now the six roles.
+export const COLUMN_KEYS = STAGE_ROLES;
 
 function sanitize(id) {
   return String(id).replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -32,13 +51,18 @@ function domIdFactory() {
   };
 }
 
-export function buildFunnelModel(snapshot) {
+export function buildFunnelModel(snapshot, display) {
+  const d = display || neutralDisplay();
   const s = snapshot || {};
-  const documents = s.documents || [];
-  const clusters = s.clusters || [];
-  const possibles = s.possibles || [];
-  const stagedTopics = s.staged_topics || [];
-  const changes = s.changes || [];
+  const [SOURCE, GROUPING, CANDIDATE, SELECTION, SUBMISSION, COMPLETION] =
+    STAGE_ROLES;
+  // Read through the declared snapshot fields, never through a literal key:
+  // `d.items(s, role)` resolves the field name (and, for the two change
+  // stations, the closed status value) out of the facet's schema half.
+  const sources = d.items(s, SOURCE);
+  const groups = d.items(s, GROUPING);
+  const candidates = d.items(s, CANDIDATE);
+  const selections = d.items(s, SELECTION);
 
   const makeDomId = domIdFactory();
   const registry = new Map(); // `${columnKey}::${snapshotId}` -> node
@@ -53,19 +77,24 @@ export function buildFunnelModel(snapshot) {
     return registry.get(columnKey + "::" + snapshotId) || null;
   }
 
-  const docNodes = documents.map((d) => register("docs", d.id, { document: d }));
-  const clusterNodes = clusters.map((c) => register("clusters", c.id, { cluster: c }));
-  const possibleNodes = possibles.map((p) => register("possibles", p.id, { possible: p }));
-  const stagedNodes = stagedTopics.map((t) => register("staged", t.staging_id, { staged: t }));
+  const sourceNodes = sources.map((x) => register(SOURCE, x.id, { document: x }));
+  const groupNodes = groups.map((c) => register(GROUPING, c.id, { cluster: c }));
+  const candidateNodes = candidates.map(
+    (p) => register(CANDIDATE, p.id, { possible: p }));
+  const selectionNodes = selections.map(
+    (t) => register(SELECTION, t.staging_id, { staged: t }));
 
-  // A change is exactly one node: active -> proposals column, archived -> realized.
-  const proposals = changes.filter((c) => c.status === "active");
-  const realized = changes.filter((c) => c.status === "archived");
-  const proposalNodes = proposals.map((c) => register("proposals", c.id, { change: c }));
-  const realizedNodes = realized.map((c) => register("realized", c.id, { change: c }));
+  // A change is exactly one node: the two change stations are declared on the
+  // SAME snapshot field and split by the status value the facet names.
+  const submissions = d.items(s, SUBMISSION);
+  const completions = d.items(s, COMPLETION);
+  const submissionNodes = submissions.map(
+    (c) => register(SUBMISSION, c.id, { change: c }));
+  const completionNodes = completions.map(
+    (c) => register(COMPLETION, c.id, { change: c }));
   const changeColumn = new Map();
-  proposals.forEach((c) => changeColumn.set(c.id, "proposals"));
-  realized.forEach((c) => changeColumn.set(c.id, "realized"));
+  submissions.forEach((c) => changeColumn.set(c.id, SUBMISSION));
+  completions.forEach((c) => changeColumn.set(c.id, COMPLETION));
 
   const edges = [];
   function link(fromNode, toNode, kind) {
@@ -77,46 +106,55 @@ export function buildFunnelModel(snapshot) {
     }
   }
 
-  // doc -> cluster (topic): strictly the snapshot's Topics-derived document_edges
-  for (const c of clusters) {
+  // source -> grouping (topic): strictly the snapshot's own document_edges
+  for (const c of groups) {
     for (const e of c.document_edges || []) {
-      link(resolve("docs", e.document), resolve("clusters", c.id), "topic");
+      link(resolve(SOURCE, e.document), resolve(GROUPING, c.id), "topic");
     }
   }
-  // cluster -> possible (topic): the many-to-many claiming_clusters edges
-  for (const p of possibles) {
+  // grouping -> candidate (topic): the many-to-many claiming_clusters edges
+  for (const p of candidates) {
     for (const cid of p.claiming_clusters || []) {
-      link(resolve("clusters", cid), resolve("possibles", p.id), "topic");
+      link(resolve(GROUPING, cid), resolve(CANDIDATE, p.id), "topic");
     }
   }
-  // possible -> staged (pick): the organize-gate pick edge
-  for (const p of possibles) {
+  // candidate -> selection (pick): the select-gate edge
+  for (const p of candidates) {
     const sid = p.pick && p.pick.staging_id;
-    if (sid) link(resolve("possibles", p.id), resolve("staged", sid), "pick");
+    if (sid) link(resolve(CANDIDATE, p.id), resolve(SELECTION, sid), "pick");
   }
-  // staged -> change (flow): the proposal/archive gate flow
-  for (const t of stagedTopics) {
+  // selection -> change (flow): the submit/complete gate flow
+  for (const t of selections) {
     const cid = t.target_change;
-    if (cid) link(resolve("staged", t.staging_id), resolve(changeColumn.get(cid), cid), "flow");
+    if (cid) link(resolve(SELECTION, t.staging_id), resolve(changeColumn.get(cid), cid), "flow");
   }
 
-  const columns = [
-    { key: "docs", label: "source docs", gate: "Topics: header", collapsible: true, nodes: docNodes },
-    { key: "clusters", label: "topic cluster", collapsible: false, nodes: clusterNodes },
-    { key: "possibles", label: "possibles", gate: "→ organize gate", collapsible: false, nodes: possibleNodes },
-    { key: "staged", label: "staged picks", gate: "→ proposal gate", collapsible: false, nodes: stagedNodes },
-    { key: "proposals", label: "proposals", gate: "→ archive gate", collapsible: false, nodes: proposalNodes },
-    { key: "realized", label: "realized", collapsible: false, nodes: realizedNodes },
-  ];
+  const nodesByRole = {
+    [SOURCE]: sourceNodes,
+    [GROUPING]: groupNodes,
+    [CANDIDATE]: candidateNodes,
+    [SELECTION]: selectionNodes,
+    [SUBMISSION]: submissionNodes,
+    [COMPLETION]: completionNodes,
+  };
+  // ONLY the first station collapses (the five-column view) — structure, not
+  // vocabulary, so it is derived from the spine's own order.
+  const columns = d.stages().map((stage) => ({
+    key: stage.role,
+    label: stage.label,
+    gate: stage.gate || undefined,
+    collapsible: stage.role === SOURCE,
+    nodes: nodesByRole[stage.role] || [],
+  }));
 
   return { columns, edges, resolve, registry };
 }
 
-// The five-column collapse hides the docs column. Edges touching a hidden column
-// vanish — the SAME rule the CSS collapse enacts (the funnel's offsetParent
-// guard). Exposed purely so the collapse is testable without a DOM.
+// The five-column collapse hides the FIRST station. Edges touching a hidden
+// column vanish — the SAME rule the CSS collapse enacts (the funnel's
+// offsetParent guard). Exposed purely so the collapse is testable without a DOM.
 export function collapsedColumnKeys(collapsed) {
-  return collapsed ? new Set(["docs"]) : new Set();
+  return collapsed ? new Set([STAGE_ROLES[0]]) : new Set();
 }
 
 export function visibleEdges(model, opts) {

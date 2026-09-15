@@ -115,6 +115,12 @@ def abstract(tmp_path_factory):
         pytest.skip("node not available for the document-abstract probe")
     tmp_path = tmp_path_factory.mktemp("doxbench-abstract")
     shutil.copy(MODEL_JS, tmp_path / "staging-workbench-model.mjs")
+    # § 3.4 slice S7: the model imports `./display.js` for the vocabulary it no
+    # longer spells. The sibling keeps its OWN name (that is the import
+    # specifier) and the throwaway directory declares `type: module`, so node
+    # reads the `.js` file as the ES module it is.
+    shutil.copy(MODEL_JS.parent / "display.js", tmp_path / "display.js")
+    (tmp_path / "package.json").write_text('{"type":"module"}', encoding="utf-8")
     harness = tmp_path / "abstract-harness.mjs"
     harness.write_text(_ABSTRACT_HARNESS, encoding="utf-8")
     proc = subprocess.run([NODE, str(harness)], capture_output=True,

@@ -88,6 +88,12 @@ globalThis.document = {
 };
 const { renderDocs } = await import('./docs.js');
 const { renderStats } = await import('./lineage.js');
+// § 3.4 slice S7: both views render the REGISTERED DOMAIN'S words, resolved by
+// role through the display facet. Neither view is handed one here, so both use
+// openDox's own neutral vocabulary -- and the harness reports that same
+// vocabulary beside the tree it rendered, so the assertions below can name a
+// ROLE where they used to spell a word.
+const { neutralDisplay, STAGE_ROLES } = await import('./display.js');
 import { readFileSync } from 'node:fs';
 
 function flatten(node, out) {
@@ -159,6 +165,21 @@ out.stats = flatten(statsRoot, []).filter((n) => classesOf(n).includes('tile'))
     };
     return { k: part('k'), v: part('v'), s: part('s') };
   });
+// THE VOCABULARY THESE TWO VIEWS RENDERED WITH. `sourceLabel` is the station
+// label the stats strip headlines the corpus-wide tile with (`display.label`),
+// and `stageWords` is what each `documents[].stage` VALUE in this fixture is
+// spelled as on screen (`display.documentStageWord`) -- the value stays the
+// grouping key, the word is what a human reads.
+{
+  const vocab = neutralDisplay();
+  const stageValues = [...new Set(snapshot.documents.map((d) => d.stage))];
+  out.vocabulary = {
+    sourceLabel: vocab.label(STAGE_ROLES[0]),
+    stageWords: Object.fromEntries(
+      stageValues.map((value) => [value, vocab.documentStageWord(value)])),
+  };
+}
+
 console.log(JSON.stringify(out));
 """
 
@@ -199,7 +220,9 @@ def rendered(tmp_path_factory):
     if NODE is None:
         pytest.skip("node not available for the JS renderer probe")
     tmp_path = tmp_path_factory.mktemp("doc-surfaces")
-    for src in (DOCS_JS, LINEAGE_JS, HELPERS_JS):
+    # `display.js` joins at § 3.4 slice S7: both views read their vocabulary
+    # through it, and it imports nothing itself.
+    for src in (DOCS_JS, LINEAGE_JS, HELPERS_JS, DOCS_JS.parent / "display.js"):
         shutil.copy(src, tmp_path / src.name)
     # ESM without renaming: the views import "./helpers.js" by name
     (tmp_path / "package.json").write_text('{"type": "module"}', encoding="utf-8")
@@ -289,17 +312,47 @@ def test_the_doc_tab_is_wired_to_the_one_cross_view_jump():
     app = APP_JS.read_text(encoding="utf-8")
     block = app.split('{ id: "docs.list", control: "tab-docs", region: "view-docs",',
                        1)[1].split("},", 1)[0]
-    assert "renderDocs(root, snap, { onOpenDoc: ctx.nav.openDoc })" in block
+    # The binding gained `display: ctx.display` at § 3.4 slice S7, so the exact
+    # source string moved. The PROPERTY this test holds is the cross-view jump —
+    # the doc list reaches app.js's ONE `nav.openDoc`, not a second viewer — and
+    # it is asserted here rather than the whole call's spelling.
+    assert "renderDocs(root, snap, {" in block
+    assert "onOpenDoc: ctx.nav.openDoc" in block
+    assert "renderViewer" not in block
 
 
 # ---------------------------------------------------------------------------
 # defect 15 — the DOCUMENTS stat tile's sub-line does not sum to its headline
 # ---------------------------------------------------------------------------
 
-def _documents_tile(rendered):
+# THE TILE IS FOUND BY ROLE, NOT BY ITS HEADING (§ 3.4 slice S7). This asked for
+# a tile called `Documents`, and `Documents` was openxFactory's word for the
+# first station rendered in openDox's own shell -- exactly the class of literal
+# RULED Q1/Q2 sent through the display facet (`#656` comment `5648049748`).
+# `views/lineage.js` headlines the tile with `cap(display.label(SOURCE))` now, so
+# the tile is located through the same vocabulary the view rendered it with, and
+# this file passes under a domain that calls the station anything at all. What
+# the three assertions below measure -- that the sub-line sums to its headline --
+# is a property of the ARITHMETIC and is untouched by the respelling.
+def _source_tile(rendered):
+    label = rendered["vocabulary"]["sourceLabel"]
+    # `views/lineage.js`'s own `cap`: the facet declares words, not capitals
+    heading = label[:1].upper() + label[1:]
     tiles = {t["k"]: t for t in rendered["stats"]}
-    assert "Documents" in tiles, tiles
-    return tiles["Documents"]
+    assert heading in tiles, (heading, tiles)
+    return tiles[heading]
+
+
+def _stage_word(rendered, stage):
+    """What `documents[].stage` VALUE `stage` is spelled as on screen.
+
+    `display.documentStageWord` resolves the snapshot's closed enum value to a
+    role and answers the registered domain's word for it, returning the value
+    verbatim where no declared role carries it -- which is how this fixture's
+    eight-stage corpus keeps reading truthfully (openDox declares roles for two
+    of the eight).
+    """
+    return rendered["vocabulary"]["stageWords"][stage]
 
 
 def _subline_numbers(sub):
@@ -310,7 +363,7 @@ def test_the_documents_sub_line_sums_to_its_own_headline(rendered):
     """177 over 'draft 65 · staged 32 · brainstorm 39' = 136 silently dropped 41
     documents. Whatever shape the sub-line takes, its numbers must add up to the
     headline it sits under — that is the whole contract."""
-    tile = _documents_tile(rendered)
+    tile = _source_tile(rendered)
     assert tile["v"] == "177"
     assert sum(_subline_numbers(tile["s"])) == 177, \
         f"the sub-line does not sum to the headline: {tile['s']!r}"
@@ -319,13 +372,20 @@ def test_the_documents_sub_line_sums_to_its_own_headline(rendered):
 def test_the_documents_sub_line_accounts_for_the_stages_it_does_not_name(rendered):
     """Partial is allowed — 'say +41 other' — silent is not. Every stage the
     sub-line does not name by itself is carried in an explicit remainder."""
-    tile = _documents_tile(rendered)
+    tile = _source_tile(rendered)
     sub = tile["s"]
-    named = {stage: count for stage, count in STAGE_TALLY.items() if stage in sub}
+    # NAMED BY ITS WORD, COUNTED BY ITS VALUE (§ 3.4 slice S7): the sub-line
+    # groups on the snapshot's own `documents[].stage` and renders the facet's
+    # word for it, so the stage is looked for on screen under the word and the
+    # tally is still read off the value.
+    named = {stage: count for stage, count in STAGE_TALLY.items()
+             if _stage_word(rendered, stage) in sub}
     unnamed = sum(count for stage, count in STAGE_TALLY.items() if stage not in named)
     assert named, "the sub-line names no stage at all"
     for stage, count in named.items():
-        assert f"{stage} {count}" in sub, f"{stage} is named with the wrong count: {sub!r}"
+        word = _stage_word(rendered, stage)
+        assert f"{word} {count}" in sub, \
+            f"{stage} ({word!r}) is named with the wrong count: {sub!r}"
     if unnamed:
         assert f"+{unnamed} other" in sub, \
             f"{unnamed} documents are dropped without a remainder: {sub!r}"
@@ -335,10 +395,11 @@ def test_the_stat_tile_and_the_board_footer_agree(rendered):
     """The sweep's sharpest complaint was self-contradiction: the pipeline
     board's footer does this arithmetic completely one tab away. Both now derive
     from the whole distribution, so the two surfaces cannot disagree."""
-    tile = _documents_tile(rendered)
+    tile = _source_tile(rendered)
     for stage, count in STAGE_TALLY.items():
-        if stage in tile["s"]:
-            assert f"{stage} {count}" in tile["s"]
+        word = _stage_word(rendered, stage)
+        if word in tile["s"]:
+            assert f"{word} {count}" in tile["s"]
     assert sum(_subline_numbers(tile["s"])) == sum(STAGE_TALLY.values())
 
 

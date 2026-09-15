@@ -22,6 +22,12 @@
 // cannot import ./helpers.js; its local el() binds text via textContent (the
 // same DOM-safety discipline), never innerHTML.
 
+import { STAGE_ROLES, neutralDisplay } from "./display.js";
+
+// THE PER-RENDER VOCABULARY (§ 3.4 slice S7). One imported sibling, itself
+// import-free — see `views/helpers.js`'s amended scope note.
+let vocab = neutralDisplay();
+
 function el(tag, cls, text) {
   const node = document.createElement(tag);
   if (cls) node.className = cls;
@@ -31,42 +37,39 @@ function el(tag, cls, text) {
 
 // ---- tallies: the same counts the stats strip shows, summed verbatim ----
 
-const TALLY_FIELDS = [
-  ["documents", "docs"],
-  ["clusters", "clusters"],
-  ["possibles", "possibles"],
-  ["staged_topics", "staged"],
-  ["changes_active", "proposals"],
-  ["changes_archived", "realized"],
-];
+// THE TALLY LINE IS THE SPINE, BY ROLE (§ 3.4 slice S7). § 3.2 declared this
+// file class A with a C TAIL — "`TALLY_FIELDS` :34-41 pairs each schema key
+// with a RENDERED label" — and that pairing is precisely what the display facet
+// declares already: the snapshot FIELD (and, for the two change stations, the
+// closed status value) on its schema half, the rendered short word on its
+// vocabulary half. One tally per stage role, in spine order.
+const tallyKey = (role) => "tally:" + role;
 
 function snapshotTallies(snapshot) {
   const s = snapshot || {};
-  const changes = s.changes || [];
-  return {
-    documents: (s.documents || []).length,
-    clusters: (s.clusters || []).length,
-    possibles: (s.possibles || []).length,
-    staged_topics: (s.staged_topics || []).length,
-    changes_active: changes.filter((c) => c.status === "active").length,
-    changes_archived: changes.filter((c) => c.status === "archived").length,
-  };
+  const out = {};
+  for (const role of STAGE_ROLES) out[tallyKey(role)] = vocab.items(s, role).length;
+  return out;
 }
 
 function zeroTallies() {
   const out = {};
-  for (const [key] of TALLY_FIELDS) out[key] = 0;
+  for (const role of STAGE_ROLES) out[tallyKey(role)] = 0;
   return out;
 }
 
 function sumTallies(list) {
   const out = zeroTallies();
-  for (const t of list) for (const [key] of TALLY_FIELDS) out[key] += t[key] || 0;
+  for (const t of list) {
+    for (const role of STAGE_ROLES) out[tallyKey(role)] += t[tallyKey(role)] || 0;
+  }
   return out;
 }
 
 function tallyLine(tallies) {
-  return TALLY_FIELDS.map(([key, label]) => tallies[key] + " " + label).join(" · ");
+  return STAGE_ROLES
+    .map((role) => tallies[tallyKey(role)] + " " + vocab.short(role))
+    .join(" · ");
 }
 
 // ---- pure derivation: snapshots -> repo/project/group hierarchy ----
@@ -207,6 +210,7 @@ const MODE_RENDERERS = {
 // `.variant`/`.vbtn` control) plus the aggregated roll-up beneath it. Reads
 // ONLY the `snapshots` array passed in — no fetch, no repository scan.
 export function renderGroupingBar(root, snapshots, opts) {
+  vocab = opts?.display || neutralDisplay();
   root.innerHTML = "";
   root.classList.add("rollup");
 
