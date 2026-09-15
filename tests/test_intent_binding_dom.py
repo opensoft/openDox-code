@@ -3,22 +3,49 @@
 opensoft/openxFactory#656 comment 5642758731; split-opendox-two-layer-product
 § 3.4, slice S2).
 
-Drives the REAL `dispose.js`, `wheel.js` and `intent-binding.js` under node,
-mirroring `tests/test_intent_tray_dom.py`'s and `tests/test_wheel_verbs_dom.py`'s
-own DOM-shim harness for this exact pair of views. Nothing here reads a
-module's SOURCE (that is `tests/test_intent_binding_shape.py`'s job); every
-claim below is made by actually loading the module graph and, where useful,
-mounting and inspecting the resulting tree — so a passing test means the
-behaviour exists, not that the code looks right.
+Drives the REAL `wheel.js` and `intent-binding.js` under node — the closure
+`WHEEL_CLOSURE` below names and `_write_tree` copies. (`dispose.js` was the
+third until slice S5 moved it to openXdox-code's package data; it is neither in
+that closure nor in this bundle, and the probes that mounted it went with it,
+as the comments below record.)
 
-NOT PART OF `.github/workflows/validate.yml`'s explicit list. Every existing
-DOM probe of `web/` — including `test_intent_tray_dom.py`, the carried-over
-test of this SAME pair of views — is narrowed out of the required check
-(RULED Q-L5 (b′)) until the BUILD arc inverts the openDox -> openXdox
-dependency; un-narrowing that class of test is slice S8's job, not S2's. This
-file is deliberately on the same footing as its narrowed siblings: present in
-the tree, runnable by hand or by a future un-narrowed `validate`, and skipped
-outright where `node` is not on PATH.
+THE DOM SHIM IS THIS FILE'S OWN: `_DOM_SHIM`, defined in this module below the
+imports, IS the implementation — there is no other to find. The PATTERN came
+from `tests/test_intent_tray_dom.py` and `tests/test_wheel_verbs_dom.py`, which
+carried a shim of this shape for DIFFERENT views — measured in this
+repository's history at `8efb3cf5`, the tray suite copied `views/dispose.js`,
+`views/helpers.js` and `views/intent-feed.js`, and the wheel suite those three
+plus `views/wheel-model.js`, none of them the `views/wheel.js` +
+`views/intent-binding.js` pair this file drives. What is inherited is the
+INSTRUMENT, not the coverage; both were RETIRED at
+this leg on 2026-09-13 (RULED `openxFactory#656` comment 5656343213, citing
+RULED OQ-F: they drove `views/intent-feed.js`, which arrived at neither leg).
+They are named here as the historical source of the shape and nothing else —
+following either name finds openxFactory's carve manifest and this
+repository's history, not a file in the tree.
+
+Nothing here reads a module's SOURCE (that is
+`tests/test_intent_binding_shape.py`'s job); every claim below is made by
+actually loading the module graph and, where useful, mounting and inspecting
+the resulting tree — so a passing test means the behaviour exists, not that the
+code looks right.
+
+NOT PART OF `.github/workflows/validate.yml`'s EXPLICIT LIST, and not for being
+a node-driven DOM probe of a `web/` view (opensoft/openDox-code#24, Copilot):
+`tests/test_view_registry.py`, `tests/test_split_route_tails.py` and
+`tests/test_gate_loop_contributed.py` are all ON that list and all drive real
+`web/` modules under node behind a DOM stand-in of their own. The list is an
+allow-list, admitted file by file, and the reason `validate.yml` records for
+every entry is the same: the file is the SHAPE assertion RULED Q-L5 (b′) leaves
+running while the carved suite waits on the BUILD arc, or without it the
+slice's ruled contract would be only DESCRIBED. Slice S2's contract already has
+its running proof there — `tests/test_intent_binding_shape.py`, which goes red
+if the intent reach is deleted rather than routed through the binding. What
+THIS file adds is the seam's BEHAVIOUR, and three of its six cases have to
+write a stand-in for the never-carried `views/intent-feed.js` to measure it. So
+it sits where S2 left it: present in the tree, runnable by hand or by a future
+un-narrowed `validate`, and skipped outright where `node` is not on PATH.
+Admitting behavioural probes as a CLASS is slice S8's job, not S2's.
 """
 
 from __future__ import annotations

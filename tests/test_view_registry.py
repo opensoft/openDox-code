@@ -44,8 +44,10 @@ WHAT IT HOLDS, and why each is here rather than implied:
    `views/view_extension.js` under node, against the REAL `views/docs.js` for the
    class-A view this slice wires end to end, and against a fixture panel in a
    temp bundle for the contributed-and-mounted path. Nothing here reads a
-   module's source and calls that a behaviour test — `test_wheel_verbs_dom.py`'s
-   rule, and the reason it is worth the subprocess.
+   module's source and calls that a behaviour test — the rule
+   `test_wheel_verbs_dom.py` set before it was RETIRED at this leg on
+   2026-09-13 (RULED `openxFactory#656` comment 5656343213), and the reason it
+   is worth the subprocess.
 
 `--noconftest` SAFE, deliberately: `validate` runs this file in the explicit
 list with conftest collection off (RULED Q-L5 (b')), so nothing here may need a

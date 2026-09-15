@@ -78,10 +78,75 @@ jobs:
       # `--noconftest` safe and needs no consumer — it reads three files as
       # text and nothing else. The BEHAVIOURAL probe of the same seam
       # (`tests/test_intent_binding_dom.py`, node-driven) stays off this
-      # list on the same footing as its narrowed siblings
-      # `test_intent_tray_dom.py` / `test_wheel_verbs_dom.py`: it is a DOM
-      # probe of a `web/` view, and un-narrowing that class of test is
-      # slice S8's job, not S2's.
+      # list, and NOT for being a node-driven DOM probe of a `web/` view:
+      # FOUR files ON this list are exactly that (opensoft/openDox-code#24,
+      # Copilot, twice — the fourth arrived with slice S7 while that pull
+      # request was open). `tests/test_view_registry.py` mounts the real
+      # `views/view_extension.js` and `views/docs.js` under node behind a
+      # `class Node` stand-in of its own; `tests/test_split_route_tails.py`
+      # installs a `globalThis.document`; `tests/test_gate_loop_contributed.py`
+      # mounts contributed panels through the registry; and
+      # `tests/test_display_facet.py` (openDox-code#21, § 3.4 slice S7) drives
+      # the real `views/display.js` under the node the runner already has,
+      # skipping where node is absent. So no sentence of the form "no DOM probe
+      # of a `web/` view is on this list" can be written here truthfully, and
+      # the one that was here is withdrawn.
+      #
+      # WHAT THE LIST ACTUALLY IS. An allow-list, admitted file by file, and
+      # every admission above gives the same reason in its own words: the file
+      # is the SHAPE assertion RULED Q-L5 (b′) leaves running while the carved
+      # suite waits on the BUILD arc, or WITHOUT IT THE SLICE'S RULED CONTRACT
+      # WOULD BE ONLY DESCRIBED — S3's "the only place slice S3's ruled
+      # contract is executed rather than described", S4's and S5's "measures
+      # the other half" (`test_web_boundary.py` would be just as green if the
+      # thing that was supposed to move had been DELETED), S6's "the slice's
+      # only running proof". Slice S2 is in neither position for a second
+      # instrument: `tests/test_intent_binding_shape.py` is already on the
+      # list, and it goes red if S2 had deleted the intent reach instead of
+      # routing it through the binding — it requires all seven exports of
+      # `views/intent-binding.js` and `views/wheel.js`'s static import of five
+      # of them. The DOM probe measures the seam's FORWARDING, which is
+      # coverage S2 wanted rather than the proof S2 owed, and three of its six
+      # cases have to write a stand-in for the never-carried
+      # `views/intent-feed.js` to measure it at all. Admitting behavioural
+      # probes as a CLASS is slice S8's job, not S2's.
+      #
+      # ITS TWO FORMER SIBLINGS ARE NOT NARROWED, THEY ARE GONE (RULED
+      # `openxFactory#656` comment 5656343213, Brett Heap, 2026-09-13, citing
+      # RULED OQ-F). This sentence used to name `test_intent_tray_dom.py` and
+      # `test_wheel_verbs_dom.py` as the narrowed siblings this probe keeps
+      # company with. Both drove `views/intent-feed.js`, which STAYED at
+      # openxFactory and arrived at NEITHER leg, so both have been RETIRED at
+      # this leg as a declared act — openxFactory's carve manifest carries the
+      # `retired:` block and this repository carries the deletion. There is no
+      # narrowed sibling left to un-narrow there: S8 un-narrows what remains.
+      #
+      # TWO SENTENCES ELSEWHERE IN THE TREE STILL NAME THE RETIRED SUITES, AND
+      # THEY STAY — recorded here so the residue is DECLARED rather than found.
+      # `tests/test_account_menu_dom.py`:4 sends a reader to
+      # `test_wheel_verbs_dom.py` for the DOM shim, and
+      # `tests/test_doxbench_tile_verbs.py`:19 names it as an instrument in
+      # use. Both files are `moved_with_declared_edit` carve rows whose ONLY
+      # declared edit is `path constants`, at carve line 30 and carve line 34
+      # respectively, and at a leg every line on which an arrived file differs
+      # from its carve blob has to fall in one of RULING OQ-1's three CLOSED
+      # classes — `import rewrites`, `path constants`, `adapter calls`. A
+      # comment naming a retired sibling is none of the three. The repair was
+      # made and then WITHDRAWN on that ground (`ebf1425`, restored at
+      # `d9b7f0f4`), and the withdrawal is not a guess about the verifier:
+      # `scripts/verify-carve-arrival.py --phase B`, run against a destination
+      # carrying only that one edit, refuses it by name —
+      # "arrival-undeclared-edit — tests/test_account_menu_dom.py was edited at
+      # carve-commit line(s) [4] which the row … does not declare; it declares
+      # [30] under class(es) path constants" — and the same for line [19] of
+      # the other. Filing either under a class it does not belong to would put
+      # a false description in the floor's own record to make a comment read
+      # better (openxFactory `docs/opendox-cutover-runbook.md` § 5.8 step 4:
+      # "AND THE REPAIR STOPS AT A CARVED FILE"). So the repair covers only
+      # the prose THIS LEG OWNS — this workflow, and the files the leg created
+      # under a declared admission. What would move those two sentences: a
+      # ruling widening OQ-1's class vocabulary, or some other act amending
+      # those rows for a reason the vocabulary already covers.
       #
       # § 3.4 SLICE S3 adds `tests/test_view_registry.py`, on exactly the same
       # footing as its three neighbours and for the same reason: it asserts a
