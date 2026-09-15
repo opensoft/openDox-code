@@ -25,10 +25,28 @@ the contribution — that needs a real ECMAScript module loader, which is
 absent, on the precedent `tests/test_intent_tray_dom.py` set — that file was
 RETIRED at this leg on 2026-09-13, RULED `openxFactory#656` comment
 5656343213, so the precedent survives in the harness and not in a file you can
-open here). That file is not part of this `--noconftest` list for the reason
-no DOM probe of a `web/` view is (RULED Q-L5 (b′)): it is a BEHAVIOURAL probe,
-not a shape assertion, and un-narrowing that class of test is BUILD-arc work
-(S8), not this slice's.
+open here).
+
+WHY THAT FILE IS NOT ON THE `--noconftest` LIST AND THIS ONE IS. Stated
+narrowly, because the wide version of the sentence — that no DOM probe of a
+`web/` view is on the list — was false (opensoft/openDox-code#24, Copilot):
+`tests/test_view_registry.py`, `tests/test_split_route_tails.py` and
+`tests/test_gate_loop_contributed.py` are all on it and all drive real `web/`
+modules under node behind a DOM stand-in of their own. The list is an
+allow-list, admitted file by file, and `.github/workflows/validate.yml` records
+the same reason for every entry: the file is the SHAPE assertion RULED Q-L5
+(b′) leaves running while the carved suite waits on the BUILD arc, or without
+it the slice's ruled contract would be only DESCRIBED (S3's "the only place
+slice S3's ruled contract is executed rather than described"; S4's and S5's
+"measures the other half"; S6's "the slice's only running proof"). THIS file is
+the first kind. S2's contract is not left undescribed without the second one:
+delete the intent reach instead of routing it through the binding and
+`test_intent_binding_exports_every_name_the_views_need` and
+`test_wheel_imports_the_intent_names_from_the_binding` below both go red. What
+the DOM probe adds is the seam's FORWARDING, and three of its six cases have to
+write a stand-in for the never-carried `views/intent-feed.js` to measure it.
+Admitting behavioural probes as a CLASS is BUILD-arc work (S8), not this
+slice's.
 """
 
 from __future__ import annotations
