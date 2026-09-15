@@ -12,8 +12,19 @@
 //   * The node-standalone view-model modules (model.js, grouping.js,
 //     explorer.js, canvas-model.js, lens-model.js) are each copied ALONE into a
 //     node test harness and run in isolation, so they cannot import a sibling
-//     (explorer.js is additionally asserted to have ZERO imports). They keep
+//     (explorer.js was additionally asserted to have ZERO imports). They keep
 //     local equivalents.
+//
+//     AMENDED AT § 3.4 SLICE S7. Four of those five are class-C or carry a
+//     declared class-C tail, and a class-C module's vocabulary comes from the
+//     registered domain profile rather than from a literal (the note's § 2.1,
+//     § 4.3) — so it has to reach the facet, and a module that imports NOTHING
+//     cannot. They now import EXACTLY ONE sibling, `./display.js`, which is
+//     itself import-free by design: a harness that copies one of them copies
+//     display.js beside it, which is a two-file harness rather than a one-file
+//     one. They still do not import THIS module. Recorded here rather than
+//     discovered: the harnesses are at openXdox-code, their suites are narrowed
+//     off (RULED Q-L8 (b')), and slice S8 is the slice that re-homes them.
 //   * The textContent-family views (lens.js, canvas.js, gate.js, viewer.js)
 //     keep their own el() with the identical textContent binding discipline.
 

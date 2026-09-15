@@ -23,6 +23,7 @@ behaviour is pinned without a browser.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 
@@ -34,6 +35,30 @@ NODE = shutil.which("node")
 WEB = REPO_ROOT / "src" / "opendox" / "web"
 VIEWS = WEB / "views"
 STYLES = WEB / "styles.css"
+
+# The three sentences `views/doc-wheel.js` states when its Save is unreachable,
+# READ FROM THE MODULE rather than quoted here (§ 3.4 slice S7 -- see
+# `test_save_is_reachable_only_while_that_documents_buffer_is_dirty`). Each is a
+# `const NAME = "…" + "…";` at module scope, so the declaration is found by name
+# and its double-quoted segments are joined the way the JavaScript engine joins
+# them.
+_SAVE_REFUSAL_NAMES = ("SAVE_CONTEXT_ONLY", "SAVE_NOT_LOADED",
+                       "SAVE_NOTHING_TO_DO")
+
+
+def _save_refusals() -> dict[str, str]:
+    source = (VIEWS / "doc-wheel.js").read_text(encoding="utf-8")
+    out = {}
+    for name in _SAVE_REFUSAL_NAMES:
+        match = re.search(r"^const " + name + r"\s*=\s*(.*?);\s*$",
+                          source, re.MULTILINE | re.DOTALL)
+        assert match, f"views/doc-wheel.js declares no {name}"
+        segments = re.findall(r'"((?:[^"\\]|\\.)*)"', match.group(1))
+        assert segments, f"{name} is declared with no string literal"
+        out[name] = "".join(json.loads('"' + segment + '"')
+                            for segment in segments)
+    return out
+
 
 _DOM_SHIM = r"""
 class Node {
@@ -285,7 +310,8 @@ def tile_results(tmp_path_factory):
     if NODE is None:
         pytest.skip("node not available for the doxBench tile-verb probe")
     root = tmp_path_factory.mktemp("doxbench-tile-verbs")
-    for name in ("doc-wheel.js", "wheel-model.js", "helpers.js"):
+    # `display.js` joins at § 3.4 slice S7 (the wheel model's vocabulary).
+    for name in ("doc-wheel.js", "wheel-model.js", "helpers.js", "display.js"):
         shutil.copy(VIEWS / name, root / name)
     (root / "package.json").write_text('{"type": "module"}', encoding="utf-8")
     harness = root / "tile-harness.mjs"
@@ -330,7 +356,22 @@ def test_save_is_reachable_only_while_that_documents_buffer_is_dirty(
     the inert control reaches nothing."""
     clean = tile_results["cleanSave"]
     assert clean["disabled"] is True
-    assert "no unsaved changes" in clean["title"]
+    # THE MODULE'S OWN REFUSAL, READ FROM THE MODULE (§ 3.4 slice S7). This
+    # quoted the sentence, and the sentence moved: "no unsaved changes" carries
+    # `changes`, which `tests/test_web_boundary.py`'s `_STAGE_WORDS` watches, and
+    # `views/doc-wheel.js` is a class-C file that may carry no governance literal
+    # (note § 2.2 rule 2, § 4.5 point 4) -- so the slice respelled it. The
+    # PROPERTY this assertion exists to hold is that the inert Save states THIS
+    # refusal and not one of its two siblings: a clean buffer is a different
+    # condition from read-only context and from not-yet-loaded, and answering
+    # either of those here would be a false statement about the surface's own
+    # authority. So the three are read where they are declared and compared,
+    # which holds under any future respelling and under none of the three
+    # collapsing into another.
+    refusals = _save_refusals()
+    assert clean["title"] == refusals["SAVE_NOTHING_TO_DO"]
+    assert len(set(refusals.values())) == len(refusals), (
+        f"two of doc-wheel.js's save refusals are the same sentence: {refusals}")
     assert tile_results["cleanTileSaved"] == []
 
 

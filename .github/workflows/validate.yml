@@ -148,6 +148,31 @@ jobs:
       # the real `views/view_extension.js` under the `node` the runner already
       # has (skipped, never failed, where node is absent), exactly as
       # `tests/test_view_registry.py` and `tests/test_split_route_tails.py` do.
+      # § 3.4 SLICE S7 adds `tests/test_display_facet.py`, on the same footing as
+      # its seven neighbours. S7 is "parameterize class C": every governance word
+      # in the fourteen class-C files and the four declared class-A tails becomes
+      # a read of the registered domain's DISPLAY facet BY ROLE (RULED Q1/Q2/Q7,
+      # openxFactory#656 comment `5648049748`; openXdox-spec
+      # `docs/domain-profile-design-note.md` § 6's rule and its reason).
+      # `tests/test_web_boundary.py`'s assertion 4 measures the BOUNDARY — that
+      # no governance word survives as a literal — and would be just as green if
+      # every word had been DELETED. This file measures the other half: that the
+      # words come from somewhere, that the somewhere is the ONE registered
+      # profile, that the two halves of the facet (`src/opendox/display_profile.py`
+      # and `src/opendox/web/views/display.js`) declare the same roles in the same
+      # order and the same neutral words, that a declared facet is read or refused
+      # rather than guessed at, and — the slice's own success test — that a
+      # STUDENT INSTALL, whose profile declares no facet, renders openDox's own
+      # neutral vocabulary and no word of openxFactory's anywhere in the payload.
+      # § 4.3 point 5 names the failure it guards: "a fallback to TODAY'S WORDS is
+      # how the literals survive the refactor invisibly."
+      #
+      # `--noconftest` safe and needs no consumer: it imports `opendox`'s own
+      # `display_profile` alone, reads bundle files as text, and drives the real
+      # `views/display.js`, `views/model.js`, `views/wheel-model.js` and
+      # `views/staging-workbench-model.js` under the `node` the runner already has
+      # (skipped, never failed, where node is absent), exactly as
+      # `tests/test_view_registry.py` and `tests/test_split_route_tails.py` do.
       - name: pytest
         run: >-
           python -m pytest -q
@@ -160,4 +185,5 @@ jobs:
           tests/test_split_route_tails.py
           tests/test_source_core_arm.py
           tests/test_gate_loop_contributed.py
+          tests/test_display_facet.py
           --noconftest

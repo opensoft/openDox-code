@@ -22,8 +22,24 @@
 
 import { buildFunnelModel, visibleEdges } from "./model.js";
 import { el, txt, basename, readinessHeat } from "./helpers.js";
+import {
+  DRILL_KINDS, STAGE_ROLES, STATUS_ROLE, TILE_KINDS, VOCABULARY,
+  neutralDisplay,
+} from "./display.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
+
+const [SOURCE, GROUPING, CANDIDATE, SELECTION, SUBMISSION, COMPLETION] =
+  STAGE_ROLES;
+
+// THE PER-RENDER VOCABULARY (§ 3.4 slice S7). `renderFunnel` is this module's
+// one entry point and every helper below is called synchronously from inside
+// it, so the facet the shell handed down through `ctx.display` is held here
+// rather than threaded through ten signatures that exist to build DOM. It is
+// the NEUTRAL vocabulary until a render supplies one, which is what a node
+// harness and a pre-probe render get — openDox's own words, never the words
+// this file used to hardcode.
+let vocab = neutralDisplay();
 
 // A labelled <select>; the change handler is wired by the caller.
 function selectControl(labelText, options) {
@@ -40,9 +56,10 @@ function selectControl(labelText, options) {
   return { wrap, sel };
 }
 
+// A document inside one of the profile's DECLARED corpus areas, as opposed to
+// the terminal reference bucket (RULED Q1: the area map is parameterized).
 function isIdeationDoc(d) {
-  const p = d.path || "";
-  return p.startsWith("ideation/brainstorm/") || p.startsWith("ideation/staging/");
+  return vocab.areaOf(d.path || "").role !== "reference";
 }
 
 // The drill-down affordance (T017/FR-008): only staged/proposal/realized
@@ -72,10 +89,21 @@ function docCard(node) {
   // scoping/search metadata (#13/#14) — read by the visibility filter, never by the model.
   card.dataset.stage = d.stage || "";
   card.dataset.scoped = (isIdeationDoc(d) || (d.topics || []).length) ? "1" : "";
-  card.dataset.hay = [d.path, d.stage, ...(d.topics || [])].filter(Boolean).join(" ").toLowerCase();
+  // THE SEARCH HAYSTACK CARRIES BOTH (Copilot round 7's family): the raw enum,
+  // because `dataset.stage` and the column filters match on it, AND the word
+  // the card actually SHOWS -- a human types what is on the screen, and under
+  // a host override that word was in neither field.
+  card.dataset.hay = [d.path, d.stage,
+                      d.stage ? vocab.documentStageWord(d.stage) : null,
+                      ...(d.topics || [])]
+    .filter(Boolean).join(" ").toLowerCase();
   card.appendChild(el("div", "id", basename(d.path)));
   const topicN = (d.topics || []).length;
-  card.appendChild(el("div", "meta", (d.stage || "") + " · " + topicN + " topic" + (topicN === 1 ? "" : "s")));
+  // THE CARD'S META READS THE DOMAIN'S WORD (Copilot round 4); `dataset.stage`
+  // above keeps the raw enum, because that is what the filter matches on.
+  card.appendChild(el("div", "meta",
+    (d.stage ? vocab.documentStageWord(d.stage) : "")
+    + " · " + topicN + " topic" + (topicN === 1 ? "" : "s")));
   return card;
 }
 
@@ -106,33 +134,55 @@ function clusterCard(node, notebook) {
   const t = c.tallies || {};
   const tally = el("div", "tally");
   tally.appendChild(tallyEntry(t.document_links != null ? t.document_links : memberN, "doc links"));
-  tally.appendChild(tallyEntry(t.possible_links != null ? t.possible_links : 0, "possible links"));
+  tally.appendChild(tallyEntry(t.possible_links != null ? t.possible_links : 0,
+    vocab.one(CANDIDATE) + " links"));
   card.appendChild(tally);
   const heat = readinessHeat(c.readiness);
   if (heat) card.appendChild(heat);
   for (const flag of c.conflict_flags || []) {
     card.appendChild(el("span", "pill blocked", typeof flag === "string" ? flag : (flag.label || "conflict")));
   }
-  maybeNotebookButton(card, notebook, "cluster", c.id);
+  maybeNotebookButton(card, notebook, TILE_KINDS[GROUPING], c.id);
   return card;
 }
 
 function possibleMeta(p, state, shared) {
-  if (state === "picked" && p.pick) {
-    let meta = "picked → " + (p.pick.staging_id || "");
+  // THE RENDERED WORD COMES OFF THE FACET (Copilot round 2): `state` is the
+  // snapshot ENUM, and returning it as user-facing text leaked schema words the
+  // moment a host overrode `register_state`. Resolved to a role first; a value
+  // no declared role carries renders verbatim, because it is the generator's
+  // news and not a role to invent.
+  const role = vocab.registerRole(state);
+  const word = role ? vocab.status(VOCABULARY.CANDIDATE, role) : state;
+  // BOTH HALVES BY ROLE (Copilot review): the value MATCHED against
+  // `possibles[].state` and the word RENDERED beside it come off the same
+  // facet, so a profile that renames the proposed register state keeps its
+  // `→ staging_id` metadata instead of falling through to the bare state.
+  if (state === vocab.registerState(STATUS_ROLE.PROPOSED) && p.pick) {
+    let meta = vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.PROPOSED)
+      + " → " + (p.pick.staging_id || "");
     if (p.pick.change_id) meta += " · " + p.pick.change_id;
     return meta;
   }
-  if ((state === "rejected" || state === "superseded") && p.reason) return state + " — " + p.reason;
-  if (shared) return state + " — claimed by " + p.claiming_clusters.length + " clusters";
-  return state;
+  if ((state === vocab.registerState(STATUS_ROLE.RETIRED)
+       || state === vocab.registerState(STATUS_ROLE.SUPERSEDED))
+      && p.reason) return word + " — " + p.reason;
+  if (shared) {
+    return word + " — claimed by " + p.claiming_clusters.length + " "
+      + vocab.count(GROUPING, p.claiming_clusters.length);
+  }
+  return word;
 }
 
 function possibleCard(node) {
   const p = node.possible;
-  const state = p.state || "latent";
+  const state = p.state || vocab.registerState(STATUS_ROLE.CAPTURED);
   const shared = (p.claiming_clusters || []).length > 1;
-  const card = el("div", "card possible " + state + " stage-brainstorm" + (shared ? " shared" : ""));
+  // THE CLASS IS KEYED BY ROLE (Copilot round 2), like the canvas rail's.
+  const stateRole = vocab.registerRole(state);
+  const card = el("div", "card tile-candidate"
+    + (stateRole ? " cstate-" + stateRole : "")
+    + " stage-brainstorm" + (shared ? " shared" : ""));
   card.id = node.domId;
   card.tabIndex = 0;
   card.dataset.node = "";
@@ -159,8 +209,10 @@ function stagedCard(node, onOpenTile, notebook) {
   }
   card.appendChild(el("div", "meta", meta));
   if (t.readiness_state) card.appendChild(el("span", "pill neutral", t.readiness_state));
-  if (onOpenTile) card.appendChild(openButton("staged", t.staging_id, onOpenTile));
-  maybeNotebookButton(card, notebook, "staged", t.staging_id);
+  if (onOpenTile) {
+    card.appendChild(openButton(DRILL_KINDS[SELECTION], t.staging_id, onOpenTile));
+  }
+  maybeNotebookButton(card, notebook, TILE_KINDS[SELECTION], t.staging_id);
   return card;
 }
 
@@ -171,9 +223,14 @@ function changeCard(node, stageClass, onOpenTile, kind, notebook) {
   card.tabIndex = 0;
   card.dataset.node = "";
   card.appendChild(el("div", "id", c.id));
-  card.appendChild(el("span", "pill stage", c.status || ""));
+  // `changes[].status` is a SEAM VALUE declared on the two change stations, so
+  // the pill reads the change vocabulary's word for the station the change sits
+  // in (Copilot round 3) and never the enum itself.
+  card.appendChild(el("span", "pill stage",
+    c.status ? vocab.changeStatusWord(c.status) : ""));
   if (c.ratification) {
-    card.appendChild(el("div", "meta", "ratified " + c.ratification.date + " · " + c.ratification.ratifier));
+    card.appendChild(el("div", "meta", vocab.status(VOCABULARY.CHANGE, STATUS_ROLE.RATIFIED) + " "
+      + c.ratification.date + " · " + c.ratification.ratifier));
   }
   const tp = c.task_progress;
   if (tp?.total) {
@@ -188,15 +245,20 @@ function changeCard(node, stageClass, onOpenTile, kind, notebook) {
   if (onOpenTile) card.appendChild(openButton(kind, c.id, onOpenTile));
   // only the active-proposal column carries the NotebookLM action (kind guard);
   // realized/archived tiles do not (the action is for live governance material).
-  if (kind === "proposal") maybeNotebookButton(card, notebook, "proposal", c.id);
+  if (kind === DRILL_KINDS[SUBMISSION]) {
+    maybeNotebookButton(card, notebook, TILE_KINDS[SUBMISSION], c.id);
+  }
   return card;
 }
 
+// Keyed by STAGE ROLE since slice S7 (the two change stations keep their own
+// card class and their own notebook tile kind; the completed station has none).
 const CARD_BUILDERS = {
-  possibles: (n) => possibleCard(n),
-  staged: (n, cb, nb) => stagedCard(n, cb, nb),
-  proposals: (n, cb, nb) => changeCard(n, "stage-proposal", cb, "proposal", nb),
-  realized: (n, cb) => changeCard(n, "stage-realized", cb, "realized"),
+  [CANDIDATE]: (n) => possibleCard(n),
+  [SELECTION]: (n, cb, nb) => stagedCard(n, cb, nb),
+  [SUBMISSION]: (n, cb, nb) =>
+    changeCard(n, "stage-proposal", cb, DRILL_KINDS[SUBMISSION], nb),
+  [COMPLETION]: (n, cb) => changeCard(n, "stage-realized", cb, DRILL_KINDS[COMPLETION]),
 };
 
 // #15: multi-member clusters render as cards; one-member clusters fold into a
@@ -210,7 +272,7 @@ function emptyStation(label) {
 }
 
 function buildClusterColumn(stack, nodes, onToggle, notebook, label) {
-  if (!nodes.length) { stack.appendChild(emptyStation(label || "topic clusters")); return; }
+  if (!nodes.length) { stack.appendChild(emptyStation(label || vocab.label(GROUPING))); return; }
   const multi = nodes.filter((n) => (n.cluster.document_edges || []).length > 1);
   const singles = nodes.filter((n) => (n.cluster.document_edges || []).length <= 1);
   for (const n of multi) stack.appendChild(clusterCard(n, notebook));
@@ -245,9 +307,11 @@ function legendEntry(children, styleText) {
 
 function buildLegend() {
   const legend = el("div", "legend");
-  legend.appendChild(legendEntry([legendDot("border:1.5px dashed var(--faint-ink)"), txt(" latent possible")]));
-  legend.appendChild(legendEntry([legendDot("background:var(--st-staged)"), txt(" picked at organize gate")]));
-  const strike = el("span", null, "superseded");
+  legend.appendChild(legendEntry([legendDot("border:1.5px dashed var(--faint-ink)"),
+    txt(" " + vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.CAPTURED) + " " + vocab.one(CANDIDATE))]));
+  legend.appendChild(legendEntry([legendDot("background:" + vocab.tokenVar(STATUS_ROLE.ORGANIZED)),
+    txt(" " + vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.PROPOSED) + " at " + vocab.gate(CANDIDATE))]));
+  const strike = el("span", null, vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.SUPERSEDED));
   strike.style.textDecoration = "line-through";
   legend.appendChild(legendEntry([strike]));
   legend.appendChild(legendEntry([el("span", "edge-key dashed"), txt(" topic claim (many-to-many)")]));
@@ -266,9 +330,11 @@ function buildVariantToggle() {
   const variant = el("div", "variant");
   variant.setAttribute("role", "group");
   variant.setAttribute("aria-label", "Funnel variant");
-  const v6 = el("button", "vbtn", "6 columns · docs → clusters (default)");
+  const v6 = el("button", "vbtn", "6 columns · " + vocab.short(SOURCE) + " → "
+    + vocab.short(GROUPING) + " (default)");
   v6.setAttribute("aria-pressed", "true");
-  const v5 = el("button", "vbtn", "5 columns · clusters only (collapse docs)");
+  const v5 = el("button", "vbtn", "5 columns · " + vocab.short(GROUPING)
+    + " only (collapse " + vocab.short(SOURCE) + ")");
   v5.setAttribute("aria-pressed", "false");
   variant.appendChild(v6);
   variant.appendChild(v5);
@@ -290,7 +356,7 @@ function columnHead(col, onlyDocs) {
 }
 
 function fillDocsStack(stack, nodes, docCards, label) {
-  const station = label || "source docs";
+  const station = label || vocab.label(SOURCE);
   if (!nodes.length) {
     stack.appendChild(emptyStation(station));
     return null;
@@ -325,10 +391,10 @@ function buildColumns(model, inner, onOpenTile, requestDraw, notebook) {
     const { head, n } = columnHead(col, onlyDocs);
     colheads.appendChild(head);
     const stack = el("div", "col-stack" + onlyDocs);
-    if (col.key === "docs") {
+    if (col.key === SOURCE) {
       docHeadN = n;
       docsEmptyNote = fillDocsStack(stack, col.nodes, docCards, col.label);
-    } else if (col.key === "clusters") {
+    } else if (col.key === GROUPING) {
       buildClusterColumn(stack, col.nodes, requestDraw, notebook, col.label);
     } else {
       fillDefaultStack(stack, col, onOpenTile, notebook);
@@ -422,11 +488,12 @@ export function renderFunnel(root, snapshot, opts) {
   const signal = opts?.signal;
   const onOpenTile = opts?.onOpenTile || null;
   const notebook = opts?.notebook || null;
-  const model = buildFunnelModel(snapshot);
+  vocab = opts?.display || neutralDisplay();
+  const model = buildFunnelModel(snapshot, vocab);
   root.innerHTML = "";
 
   const state = { fullCorpus: false, docStage: "", search: "" };
-  const docCol = model.columns.find((c) => c.key === "docs");
+  const docCol = model.columns.find((c) => c.key === SOURCE);
   const docNodes = docCol ? docCol.nodes : [];
 
   const { variant, v6, v5 } = buildVariantToggle();
@@ -434,11 +501,14 @@ export function renderFunnel(root, snapshot, opts) {
 
   // #14 source-docs scope + #13 stage filter
   const filterbar = el("div", "filterbar");
-  const scopeCtl = selectControl("source docs",
+  const scopeCtl = selectControl(vocab.label(SOURCE),
     [["ideation", "ideation only (default)"], ["all", "show full corpus"]]);
   const docStages = [...new Set(docNodes.map((n) => n.document.stage).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
-  const stageCtl = selectControl("stage", [["", "all"], ...docStages.map((s) => [s, s])]);
+  // VALUE raw, LABEL through the facet — `docCardVisible` compares
+  // `card.dataset.stage` against this value (Copilot round 4).
+  const stageCtl = selectControl("stage",
+    [["", "all"], ...docStages.map((s) => [s, vocab.documentStageWord(s)])]);
   const docCount = el("span", "count");
   filterbar.appendChild(scopeCtl.wrap);
   filterbar.appendChild(stageCtl.wrap);
@@ -507,7 +577,8 @@ export function renderFunnel(root, snapshot, opts) {
     }
     if (docHeadN) docHeadN.textContent = String(shown);
     if (docsEmptyNote) docsEmptyNote.hidden = shown > 0;
-    docCount.textContent = shown + " of " + docCards.length + " docs";
+    docCount.textContent = shown + " of " + docCards.length + " "
+      + vocab.short(SOURCE);
     draw();
   }
 

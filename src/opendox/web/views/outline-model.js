@@ -1,3 +1,5 @@
+import { neutralDisplay } from "./display.js";
+
 // The staged-topic outline model (add-staged-topic-outline-template, tasks
 // 3.1-3.2).
 //
@@ -89,7 +91,7 @@ export function outlineSections(text) {
   for (const section of sections) {
     const lower = section.title.toLowerCase();
     const required = REQUIRED_SECTIONS.find((s) => lower.includes(s.needle));
-    section.role = required ? "required" : (section.marked ? "proposal-element" : "added");
+    section.role = required ? "required" : (section.marked ? "marked-element" : "added");
     section.requiredLabel = required ? required.label : null;
     if (!lower.includes("open questions")) section.questions = [];
   }
@@ -149,15 +151,17 @@ export function outlineModel(text) {
 // which existing section a new one goes next to, so an add never reorders
 // material a human already wrote. A heading matching no needle has no canonical
 // place — it is anchored explicitly or appended.
-export const TEMPLATE_ORDER = [
-  "last proposal attempt", "claims", "why", "what changes", "impact",
-  "idea notes", "conflicts", "open questions", "exit",
-];
+// PARAMETERIZED AT § 3.4 SLICE S7. The canonical order is one domain's staging
+// template, so it comes off the registered profile's display facet (openDox
+// ships its own as the default — the list is MATCHED against headings a human
+// wrote, never rendered, so § 2.2 rule 3's schema family is where it belongs).
+export const templateOrder = (display) =>
+  (display || neutralDisplay()).sections();
 
 /** This heading's place in the canonical order, or null when it has none. */
-export function sectionRank(title) {
+export function sectionRank(title, display) {
   const lower = String(title == null ? "" : title).toLowerCase();
-  const at = TEMPLATE_ORDER.findIndex((needle) => lower.includes(needle));
+  const at = templateOrder(display).findIndex((needle) => lower.includes(needle));
   return at < 0 ? null : at;
 }
 
@@ -314,6 +318,9 @@ function sectionEnd(sections, target, total) {
  * line-ending rewrite.
  */
 export function insertSection(text, options = {}) {
+  // The canonical heading order is the registered domain's (slice S7); a caller
+  // that supplies none gets openDox's own shipped order.
+  const display = options.display || null;
   const title = String(options.title == null ? "" : options.title).trim();
   if (!title) return { ok: false, reason: "a section needs a heading" };
   const lines = String(text == null ? "" : text).split(/\r\n|\r|\n/);
@@ -337,10 +344,10 @@ export function insertSection(text, options = {}) {
   // The rank drives BOTH the canonical placement and (on the required route) the
   // duplicate rule — and it is read off the TEMPLATE's heading, never off the
   // caller's free text, so no coincidental substring can reach it.
-  const rank = template ? sectionRank(template.heading) : null;
+  const rank = template ? sectionRank(template.heading, display) : null;
   const clash = sections.find((section) =>
     section.title.trim().toLowerCase() === title.toLowerCase()
-    || (required && rank !== null && sectionRank(section.title) === rank));
+    || (required && rank !== null && sectionRank(section.title, display) === rank));
   if (clash) {
     return { ok: false,
              reason: 'this outline already carries the section "' + clash.title + '"' };
@@ -358,12 +365,12 @@ export function insertSection(text, options = {}) {
     mode = "after";
   } else if (rank !== null) {
     for (const section of sections) {
-      const at = sectionRank(section.title);
+      const at = sectionRank(section.title, display);
       if (at !== null && at < rank) { target = section; mode = "after"; }
     }
     if (!target) {
       target = sections.find((section) => {
-        const at = sectionRank(section.title);
+        const at = sectionRank(section.title, display);
         return at !== null && at > rank;
       }) || null;
       if (target) mode = "before";

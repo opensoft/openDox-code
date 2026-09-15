@@ -132,7 +132,11 @@ def probe(tmp_path_factory):
     # their own names, so the copy has to preserve the graph. A `type: module`
     # package makes node read these `.js` files as the ES modules they are.
     (tmp / "package.json").write_text('{"type":"module"}', encoding="utf-8")
-    for src in (WHEEL_MODEL_JS, MODEL_JS, DOC_WHEEL_JS, VIEWS / "helpers.js"):
+    # `views/display.js` joins the graph at § 3.4 slice S7: the five pure models
+    # each import exactly one sibling now, and it is that one (itself
+    # import-free by design, so the graph gains a leaf and not a branch).
+    for src in (WHEEL_MODEL_JS, MODEL_JS, DOC_WHEEL_JS, VIEWS / "helpers.js",
+                VIEWS / "display.js"):
         if not src.exists():
             pytest.fail(f"{src.name} does not exist yet")
         shutil.copy(src, tmp / src.name)
