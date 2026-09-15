@@ -12,7 +12,12 @@ as the comments below record.)
 THE DOM SHIM IS THIS FILE'S OWN: `_DOM_SHIM`, defined in this module below the
 imports, IS the implementation — there is no other to find. The PATTERN came
 from `tests/test_intent_tray_dom.py` and `tests/test_wheel_verbs_dom.py`, which
-carried a shim of this shape for this exact pair of views; both were RETIRED at
+carried a shim of this shape for DIFFERENT views — measured in this
+repository's history at `8efb3cf5`, the tray suite copied `views/dispose.js`,
+`views/helpers.js` and `views/intent-feed.js`, and the wheel suite those three
+plus `views/wheel-model.js`, none of them the `views/wheel.js` +
+`views/intent-binding.js` pair this file drives. What is inherited is the
+INSTRUMENT, not the coverage; both were RETIRED at
 this leg on 2026-09-13 (RULED `openxFactory#656` comment 5656343213, citing
 RULED OQ-F: they drove `views/intent-feed.js`, which arrived at neither leg).
 They are named here as the historical source of the shape and nothing else —

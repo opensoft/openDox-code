@@ -21,8 +21,12 @@ which is what makes the reference OPTIONAL rather than dangling.
 
 It deliberately does NOT prove the seam RENDERS correctly with and without
 the contribution — that needs a real ECMAScript module loader, which is
-`tests/test_intent_binding_dom.py`'s job (Node, `pytest.mark.skipif` when
-absent, on the precedent `tests/test_intent_tray_dom.py` set — that file was
+`tests/test_intent_binding_dom.py`'s job (Node, and a RUNTIME `pytest.skip`
+inside its `_run` helper when node is absent rather than a
+`pytest.mark.skipif` — the same mechanism the precedent
+`tests/test_intent_tray_dom.py` used, measured at `8efb3cf5`; a marker would
+have to answer at COLLECTION time, and what the probe actually needs to know
+is whether the interpreter it is about to invoke exists. That file was
 RETIRED at this leg on 2026-09-13, RULED `openxFactory#656` comment
 5656343213, so the precedent survives in the harness and not in a file you can
 open here).
