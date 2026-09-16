@@ -496,8 +496,16 @@ def test_the_migrate_preview_runs_the_same_canonical_gate_the_run_does(
         ["runtime", "migrate", "--plan", "--connect-timeout", "0.2"]))
     assert code == 1, evidence
     assert evidence["ok"] is False
-    assert "MigrationError" in evidence["refusal"]
     assert "planned" not in evidence
+    # AND THE GATE IS REACHED WITHOUT THE `runtime` EXTRA. This first asserted
+    # `MigrationError` and went red in the REQUIRED job, which installs
+    # `.[test]` alone: the gate sat behind the deferred `psycopg` import, so
+    # the refusal there was `runtime-extra-missing` and the preview's own
+    # promise was untestable in the one job that matters. The gate now runs
+    # before the driver is imported — asking about the TREE needs neither —
+    # and this assertion is what keeps it there.
+    assert evidence["refusal"] == "MigrationError", evidence
+    assert str(empty) in evidence["message"]
 
 @pytest.mark.parametrize(
     ("verb", "arguments"),

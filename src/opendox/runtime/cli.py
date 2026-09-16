@@ -248,6 +248,20 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     except ConfigurationError as exc:
         return _emit({"verb": "migrate", "refusal": "configuration",
                       "message": str(exc)}, ok=False)
+    # THE CANONICAL GATE RUNS BEFORE THE DATABASE IS EVEN IMPORTED, for both
+    # `--plan` and a real run. `apply()` runs it first "so a tree carrying the
+    # wrong `0001` changes nothing at all", and `--plan` skipped it entirely —
+    # an operator could be shown a plan for a tree the very next command
+    # refuses (Copilot review of openDox-code#25, round 7). Asking about the
+    # TREE needs no driver and no server, so it is asked where the answer
+    # costs nothing and is the same in every environment: the required
+    # `validate` job installs `.[test]` alone, and a gate behind the `runtime`
+    # extra would have been a gate that job could not reach.
+    try:
+        migrations.verify_canonical_digest(settings.migrations_dir)
+    except migrations.MigrationError as exc:
+        return _emit({"verb": "migrate", "refusal": type(exc).__name__,
+                      "message": str(exc)}, ok=False)
     try:
         from opendox.runtime.db import Database
     except ImportError as exc:  # pragma: no cover - the extra is absent
@@ -268,13 +282,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                 runner_db, migrations_dir=settings.migrations_dir,
                 runtime_role=settings.runtime_pg_role)
             if args.plan:
-                # THE CANONICAL GATE RUNS FOR THE PREVIEW TOO. `apply()` runs
-                # it first and refuses a tree whose `0001` is absent or
-                # changed, and `--plan` skipped it — so an operator could be
-                # shown `planned: []` (or a plan) for a tree the very next
-                # command REFUSES, which is the one thing a preview must not
-                # do (Copilot review of openDox-code#25, round 7).
-                migrations.verify_canonical_digest(settings.migrations_dir)
+                # The canonical gate has already run, above, for this path and
+                # for the real one.
                 evidence = {"verb": "migrate",
                             "planned": [m.version for m in runner.plan()],
                             "applied": []}
