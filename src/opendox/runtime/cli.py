@@ -186,7 +186,7 @@ def _settings_or_refusal(args: argparse.Namespace) -> RuntimeSettings | int:
         return load_settings()
     except ConfigurationError as exc:
         return _emit({"verb": args.verb, "refusal": "configuration",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
 
 
 # -- verbs ------------------------------------------------------------------
@@ -231,7 +231,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         digest = migrations.verify_canonical_digest(settings.migrations_dir)
     except migrations.MigrationError as exc:
         return _emit({"verb": "init", "refusal": "canonical-schema",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     pending = [m.version for m in migrations.discover_migrations(settings.migrations_dir)]
     return _emit({"verb": "init",
                   "project_repository_root": str(root),
@@ -252,7 +252,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         dsn = migration_database_url(settings)
     except ConfigurationError as exc:
         return _emit({"verb": "migrate", "refusal": "configuration",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     # THE CANONICAL GATE RUNS BEFORE THE DATABASE IS EVEN IMPORTED, for both
     # `--plan` and a real run. `apply()` runs it first "so a tree carrying the
     # wrong `0001` changes nothing at all", and `--plan` skipped it entirely —
@@ -266,7 +266,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         migrations.verify_canonical_digest(settings.migrations_dir)
     except migrations.MigrationError as exc:
         return _emit({"verb": "migrate", "refusal": type(exc).__name__,
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     try:
         from opendox.runtime.db import Database
     except ImportError as exc:  # pragma: no cover - the extra is absent
@@ -297,7 +297,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                             "applied": runner.apply()}
     except migrations.MigrationError as exc:
         return _emit({"verb": "migrate", "refusal": type(exc).__name__,
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     # EVERY OPERATIONAL FAILURE IS EVIDENCE TOO, not a traceback: a pool
     # timeout, a refused connection, a permission error and a SQL error all
     # reach an operator through the same one redacted object the lifecycle
@@ -391,7 +391,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         settings = load_settings()
     except ConfigurationError as exc:
         return _emit({"verb": "status", "refusal": "configuration",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     report["settings"] = _redacted_settings(settings)
 
     try:
@@ -520,14 +520,14 @@ def cmd_reset(args: argparse.Namespace) -> int:
         dsn = migration_database_url(settings)
     except ConfigurationError as exc:
         return _emit({"verb": "reset", "refusal": "configuration",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     try:
         from psycopg import sql
 
         from opendox.runtime.db import Database
     except ImportError as exc:  # pragma: no cover - the extra is absent
         return _emit({"verb": "reset", "refusal": "runtime-extra-missing",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     try:
         with Database(dsn, application_name="opendox-runtime-reset",
                       checkout_timeout=args.connect_timeout) as db:
@@ -597,9 +597,16 @@ def cmd_reset(args: argparse.Namespace) -> int:
 # so a `str(exc)` here put whatever the driver said straight into the JSON, and
 # a psycopg connection failure says the DSN, password included (Copilot review
 # of openDox-code#26, three times: one thread and two suppressed comments for
-# the same shape in three handlers). `RepositoryActRefused` keeps `str(exc)`
-# deliberately: that message is this act's own, carries no secret by
-# construction, and redacting the stored URL is the act's job, which it does.
+# the same shape in three handlers).
+#
+# AND `RepositoryActRefused` GOES THROUGH IT TOO, which it did not. That
+# message is this act's own and was called secret-free by construction — but it
+# is not: `repository_location` refuses a project id it cannot use as a
+# directory name and ECHOES it, before any database is touched, so
+# `opendox-runtime project create-repository --project-id
+# 'postgresql://u:p@host/x'` printed the password back in the evidence object
+# and into whatever collects it (Copilot review of openDox-code#26, round 10).
+# A message built from caller-supplied text is redacted like any other.
 
 
 def _store_and_settings(args: argparse.Namespace):
@@ -640,7 +647,7 @@ def cmd_create_repository(args: argparse.Namespace) -> int:
                         "initial_commit": created.initial_commit}
     except repository_act.RepositoryActRefused as exc:
         return _emit({"verb": "create-repository", "refusal": "repository",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     except Exception as exc:  # noqa: BLE001 - reported as evidence, not a traceback
         return _emit({"verb": "create-repository",
                       "refusal": type(exc).__name__,
@@ -674,7 +681,7 @@ def cmd_attach_remote(args: argparse.Namespace) -> int:
                                 "push, not a migration"}
     except repository_act.RepositoryActRefused as exc:
         return _emit({"verb": "attach-remote", "refusal": "repository",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     except Exception as exc:  # noqa: BLE001 - same
         return _emit({"verb": "attach-remote", "refusal": type(exc).__name__,
                       "message": _safe_message(exc)}, ok=False)
@@ -699,7 +706,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                         "note": "a push, not a migration (RULING C3)"}
     except repository_act.RepositoryActRefused as exc:
         return _emit({"verb": "push", "refusal": "repository",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     except Exception as exc:  # noqa: BLE001 - same
         return _emit({"verb": "push", "refusal": type(exc).__name__,
                       "message": _safe_message(exc)}, ok=False)

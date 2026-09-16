@@ -657,7 +657,7 @@ def create_project_repository(project_id: str, request: Request,
     except repository_act.RepositoryActRefused as exc:
         raise HTTPException(status_code=409,
                             detail={"code": "repository.refused",
-                                    "message": str(exc)}) from exc
+                                    "message": _refusal_message(exc)}) from exc
     body = _repository_json(created.row)
     body["initial_commit"] = created.initial_commit
     return body
@@ -681,7 +681,7 @@ def attach_project_remote(project_id: str, body: RemoteAttach, store: StoreDep,
     except repository_act.RepositoryActRefused as exc:
         raise HTTPException(status_code=409,
                             detail={"code": "repository.refused",
-                                    "message": str(exc)}) from exc
+                                    "message": _refusal_message(exc)}) from exc
     return _repository_json(row)
 
 
@@ -699,7 +699,7 @@ def push_project_repository(project_id: str, store: StoreDep,
     except repository_act.RepositoryActRefused as exc:
         raise HTTPException(status_code=409,
                             detail={"code": "repository.refused",
-                                    "message": str(exc)}) from exc
+                                    "message": _refusal_message(exc)}) from exc
     # REDACTED HERE TOO. This PR keeps a row written before
     # `refuse_credential_bearing_remote` existed pushable (there is a test for
     # exactly that), so a SUCCESSFUL push of such a row was the one path that
@@ -974,6 +974,22 @@ def _conflict(call: Any) -> Any:
 # ---------------------------------------------------------------------------
 # the application
 # ---------------------------------------------------------------------------
+
+
+def _refusal_message(exc: Exception) -> str:
+    """A repository act's refusal, REDACTED before it becomes a response.
+
+    This act's own messages were treated as secret-free by construction, and
+    they are not: `repository_act.repository_location` refuses a project id it
+    cannot use as a directory name and echoes that id, which comes from the
+    request path — so a caller-chosen id shaped like a DSN came back with its
+    password in the 409 body and in every log that keeps one (Copilot review of
+    openDox-code#26, round 10, and the CLI's three handlers took the same fix).
+    `redact_credentials` is the same predicate the adapter prints through.
+    """
+    from opendox.runtime.local_git_adapter import redact_credentials
+
+    return redact_credentials(str(exc))
 
 
 def build_v1_router() -> APIRouter:

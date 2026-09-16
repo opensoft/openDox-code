@@ -1035,3 +1035,210 @@ def test_the_push_locks_the_map_row_it_checked(
     finally:
         type(store._conn).execute = real_execute
     assert any("for update" in s for s in statements), statements
+
+
+# -- Copilot's tenth round on #26 --------------------------------------------
+
+
+def test_a_bracketed_ipv6_scp_remote_is_refused_like_any_other_userinfo(
+) -> None:
+    """A PIN, not a fix: this round's finding here is measurably wrong.
+
+    The review reports that the SCP detector "excludes `:` from the host, so a
+    valid bracketed-IPv6 SCP remote such as `user@[::1]:repo` bypasses the
+    userinfo refusal". Measured on the landed pattern, it does not: the host
+    class matches the `[`, and the very next character is the `:` the SCP form
+    requires, so the match succeeds and the URL is refused. Every bracketed
+    IPv6 literal opens with a hex group or a colon, so no shape of it can avoid
+    the pattern — and the redacting half matches for the same reason
+    (`test_a_bracketed_ipv6_scp_remote_is_redacted_like_any_other_userinfo`).
+
+    No code changed for that finding. This test is here because a property held
+    BY LUCK is one the next edit can lose.
+    """
+    for url in ("someone@[::1]:repo.git",
+                "git@[2001:db8::1]:opensoft/openDox.git",
+                "user@[fe80::1]:r.git"):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.refuse_credential_bearing_remote(url)
+        assert "user information" in str(caught.value), url
+        assert url not in str(caught.value), url
+
+
+def test_a_space_inside_the_url_no_longer_hides_a_credential_parameter(
+) -> None:
+    """`urlsplit` accepts a raw space inside a URL; the parameter class did not.
+
+    `https://host/x? token=ghp_secret` parses as a query carrying `token`, and
+    the shared predicate saw no parameter at all — so the value was stored in
+    `remote_url` and read back to every authenticated caller (Copilot review of
+    openDox-code#26, round 10). The patterns step over spaces and tabs around a
+    name now.
+    """
+    for url in ("https://example.invalid/x.git? token=ghp_supersecret",
+                "https://example.invalid/x.git?token =ghp_supersecret",
+                "https://example.invalid/x.git?a=1& access_token=ghp_secret"):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.refuse_credential_bearing_remote(url)
+        assert "query or fragment parameter" in str(caught.value), url
+        assert "ghp_" not in str(caught.value), url
+
+
+def test_a_control_character_is_refused_and_a_plain_space_is_not() -> None:
+    """A newline in a remote URL forges a second line in `.git/config`.
+
+    A tab or a carriage return hides the rest of the value from every
+    line-oriented reader of the row. None of them can appear in a URL that was
+    percent-encoded, so they are refused — while a SPACE is not, because the
+    one destination this act deliberately leaves unconstrained is a local path
+    (RULING C3's "a push, not a migration" in a single-node install), and
+    `/srv/my repos/x.git` is a legal one.
+    """
+    for url in ("https://example.invalid/x.git\nurl = https://evil.invalid/y",
+                "https://example.invalid/x.git\ttoken=ghp_supersecret",
+                "https://example.invalid/x.git\rmore"):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.refuse_credential_bearing_remote(url)
+        assert "control character" in str(caught.value), url
+        assert "ghp_" not in str(caught.value), url
+
+    # A local path with a space in it is still attachable.
+    act.refuse_credential_bearing_remote("/srv/my repos/project.git")
+
+
+def test_a_remote_url_longer_than_the_bound_is_refused_unread() -> None:
+    """The credential predicate decodes each name to a fixed point.
+
+    That is quadratic in the name, and `remote_url` is caller-controlled, so a
+    nested `%2525…` chain is work an attacker chooses for this process (Copilot
+    review of openDox-code#26, round 10, suppressed). The bound is stated where
+    the value enters.
+    """
+    long_url = "https://example.invalid/x.git?a=" + ("%25" * 4000)
+    assert len(long_url) > act.MAX_REMOTE_URL_CHARS
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.refuse_credential_bearing_remote(long_url)
+    assert str(act.MAX_REMOTE_URL_CHARS) in str(caught.value)
+    assert "%25" not in str(caught.value)
+    # And a URL at the bound is still measured rather than refused by length.
+    act.refuse_credential_bearing_remote(
+        "https://example.invalid/" + "a" * (act.MAX_REMOTE_URL_CHARS - 25))
+
+
+def test_a_transport_that_runs_a_command_is_refused_where_it_is_stored(
+        store, project, project_repository_root: Path) -> None:
+    """`ext::<command>` is a git transport that EXECUTES its argument.
+
+    In the pushing process — this runtime's own. An owner attaching one would
+    be choosing a command for a server to run, which is not a destination the
+    map can mean (Copilot review of openDox-code#26, round 10).
+    """
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    for url in ("ext::sh -c whoami", "EXT::sh -c whoami", "fd::7/repo"):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.attach_remote(store, project_id=project.id, remote_url=url)
+        assert "runs a command" in str(caught.value), url
+    # And the map is untouched by a refused attach.
+    assert store.repository_for_project(project.id).remote_url is None
+
+
+def test_a_legacy_command_transport_row_is_not_executed_by_the_push(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """The refusal above covers what is STORED; this covers what is PUSHED.
+
+    A row written before that rule — or by a future caller of the store — still
+    reaches the push, and git's `ext::` transport is gated by a CONFIG VALUE
+    the host sets. Measured on git 2.43.0: with `protocol.ext.allow=user` in
+    the repository's own config the helper is executed, and a command-line
+    `-c protocol.ext.allow=never` refuses it (Copilot review of
+    openDox-code#26, round 10). The push carries the policy now instead of
+    assuming it of the machine.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    marker = tmp_path / "EXECUTED"
+    helper = tmp_path / "remote-helper.sh"
+    helper.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+    helper.chmod(0o755)
+    hostile = f"ext::{helper}"
+
+    # A row that predates the refusal, written through the store directly.
+    store.attach_remote(project_id=project.id, remote_url=hostile)
+    _git(created.location, "remote", "add", act.REMOTE_NAME, hostile)
+    # The ambient policy this runtime must not depend on.
+    _git(created.location, "config", "protocol.ext.allow", "user")
+
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "ext" in str(caught.value)
+    assert not marker.exists(), (
+        "the ext:: transport was executed by this runtime's own push")
+
+
+def test_attach_repairs_a_remote_that_carries_two_fetch_urls(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`git remote set-url` cannot write a remote that has several urls.
+
+    Measured on git 2.43.0: it exits non-zero with "could not set
+    'remote.origin.url': has multiple values". So a repository in that state —
+    a legacy remote, a hand-edited config — could not be repaired by the one
+    repair this act offers, while every push was refused because
+    `get-url --push --all` returned two destinations (Copilot review of
+    openDox-code#26, round 10, suppressed twice).
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "of-record.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", "--initial-branch=main",
+                    str(destination)], check=True)
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+    # The state: somebody added a second fetch URL by hand.
+    _git(created.location, "config", "--add", f"remote.{act.REMOTE_NAME}.url",
+         str(tmp_path / "somewhere-else.git"))
+    with pytest.raises(act.RepositoryActRefused):
+        act.push_to_remote(store, project_id=project.id)
+
+    # The repair this act offers, re-run — and it now repairs.
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+    assert _git(created.location, "config", "--get-all",
+                f"remote.{act.REMOTE_NAME}.url") == str(destination)
+    assert act.push_to_remote(store, project_id=project.id) == str(destination)
+
+
+def test_a_pushurl_that_cannot_be_cleared_fails_the_attach(
+        store, project, project_repository_root: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only ONE non-zero status means "there was nothing to unset".
+
+    This ignored every failure, so a locked config, a read-only file or a
+    malformed section left a stale `pushurl` in place while the map row
+    committed and the attach reported success — after which the next push goes
+    to the wrong destination or is refused, which is the state that line exists
+    to clear (Copilot review of openDox-code#26, round 10, suppressed twice).
+    """
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "of-record.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(destination)],
+                   check=True)
+    real_run = lga.GitRunner.run
+
+    def _failing_unset(self, *args: str, **kwargs):
+        if args[:2] == ("config", "--unset-all"):
+            return subprocess.CompletedProcess(
+                ["git", *args], returncode=4, stdout=b"",
+                stderr=b"error: could not lock config file .git/config")
+        return real_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(lga.GitRunner, "run", _failing_unset)
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.attach_remote(store, project_id=project.id,
+                          remote_url=str(destination))
+    assert "could not be attached" in str(caught.value)
+    # And the `5` that means "no such key" is still not a failure.
+    monkeypatch.undo()
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))

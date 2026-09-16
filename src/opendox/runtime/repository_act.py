@@ -86,6 +86,11 @@ from opendox.runtime.local_git_adapter import (
 #: second remote would be a name the map cannot record and the push cannot find.
 REMOTE_NAME = "origin"
 
+#: `git config --unset-all`'s exit status for a key that is not there.
+#: Measured on git 2.43.0, and it is the ONLY non-zero status this module reads
+#: as success: every other one is a config that could not be written.
+_GIT_CONFIG_KEY_ABSENT = 5
+
 #: How long a push may take before it is a refusal. The push runs inside the
 #: caller's database transaction, so an unbounded one holds a connection and a
 #: row lock for as long as the network does.
@@ -100,7 +105,36 @@ PUSH_TIMEOUT_SECONDS = 120.0
 #: remote belong in the environment git already reads them from — a credential
 #: helper, an `ssh` key, a `.netrc` — never in a row.
 _URL_USERINFO = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/@]*@")
+#: A BRACKETED IPv6 HOST ALREADY MATCHES, measured rather than assumed (Copilot
+#: review of openDox-code#26, round 10, which reported that it does not): the
+#: host class excludes `:` so the pattern cannot mistake a `scheme://` for
+#: userinfo, and in `user@[::1]:repo` it matches the `[` and the very next
+#: character is the `:` this form requires. Every bracketed IPv6 literal begins
+#: with a hex group or a colon, so the form cannot avoid it.
+#: `test_a_bracketed_ipv6_scp_remote_is_refused_like_any_other_userinfo` pins
+#: it, because a property held by luck is one a later edit can lose.
 _SCP_USERINFO = re.compile(r"^[^/:@]+@[^/:@]+:")
+
+#: A remote URL longer than this is refused. NOT a style rule: the credential
+#: predicate decodes each parameter name to a fixed point, which is quadratic
+#: in the name's length, and `remote_url` is caller-controlled — so a nested
+#: `%2525…` chain of unbounded length is work an attacker chooses for this
+#: process (Copilot review of openDox-code#26, round 10, suppressed). Two
+#: kilobytes is the conventional URL ceiling and is far above any real remote;
+#: the bound is stated here, where the value enters, rather than inside the
+#: predicate, which also reads git's own bounded stderr.
+MAX_REMOTE_URL_CHARS = 2048
+
+#: Transports whose "URL" is a COMMAND. `ext::<command>` runs it, and
+#: `git-remote-<name>` helpers are resolved off PATH; git gates them behind
+#: `protocol.<name>.allow`, whose default this runtime must not depend on —
+#: measured on git 2.43.0: a direct `git push` to an `ext::` remote is refused
+#: by default AND is executed when the repository or the host sets
+#: `protocol.ext.allow=user` (Copilot review of openDox-code#26, round 10). So
+#: the shape is refused where it would be stored, and the push also carries
+#: `-c protocol.ext.allow=never` so an ambient policy cannot re-enable it for a
+#: row written before this rule.
+_COMMAND_TRANSPORT = re.compile(r"^(?:ext|fd)::", re.IGNORECASE)
 
 
 #: Query or fragment keys that carry a secret. USERINFO IS NOT THE ONLY PLACE:
@@ -151,6 +185,26 @@ def refuse_credential_bearing_remote(remote_url: str) -> None:
             "the remote URL has leading or trailing whitespace. It is not "
             "echoed here because a value that would not parse may still "
             "contain a secret; send the URL with no surrounding whitespace.")
+    if len(remote_url) > MAX_REMOTE_URL_CHARS:
+        raise RepositoryActRefused(
+            f"the remote URL is longer than {MAX_REMOTE_URL_CHARS} characters "
+            "and is refused unread; a remote this long is not a remote, and "
+            "the credential check below is quadratic in what it is given")
+    # A CONTROL CHARACTER IS REFUSED, A PLAIN SPACE IS NOT. A newline in a
+    # remote URL is written into `.git/config` by `git remote add` and can
+    # forge a second configuration line there, and a tab or a carriage return
+    # hides the rest of a value from every line-oriented reader of this row —
+    # none of them can appear in a URL that was percent-encoded. A SPACE can
+    # legally appear in the one destination this act deliberately supports
+    # unconstrained, a local path (`/srv/my repos/x.git`), so it is not refused
+    # here; `local_git_adapter`'s parameter patterns step over whitespace
+    # instead, which is what closes `…/x? token=…` for both halves of the
+    # credential rule (Copilot review of openDox-code#26, round 10).
+    if any(character.isspace() and character != " " for character in remote_url):
+        raise RepositoryActRefused(
+            "the remote URL contains a control character (a newline, tab or "
+            "carriage return). It is not echoed here; percent-encode it or "
+            "send the URL alone.")
     try:
         parts = urllib.parse.urlsplit(remote_url)
         _ = parts.port          # `port` parses lazily and is where it raises
@@ -175,6 +229,30 @@ def refuse_credential_bearing_remote(remote_url: str) -> None:
             "this act the URL alone and let git's own credential machinery "
             "supply the rest.")
 
+
+def refuse_command_executing_remote(remote_url: str) -> None:
+    """Refuse a remote whose "URL" is a COMMAND this process would run.
+
+    `ext::sh -c …` is a git transport that EXECUTES its argument, in the
+    process that pushes — this runtime's own — and `fd::` hands git a
+    descriptor of the caller's choosing. Neither is a destination the map can
+    mean, and an owner attaching one would be choosing a command for a server
+    to run (Copilot review of openDox-code#26, round 10).
+
+    THE AMBIENT POLICY IS NOT THE GUARD. Measured on git 2.43.0: a direct `git
+    push` to an `ext::` remote is refused by default, AND is executed the
+    moment the repository or the host sets `protocol.ext.allow=user`. A
+    runtime whose safety depends on a config value it does not set has no
+    safety, so this refuses the shape where it would be stored and
+    `push_to_remote` passes `-c protocol.ext.allow=never` for rows written
+    before this rule existed.
+    """
+    if _COMMAND_TRANSPORT.match(remote_url.strip()):
+        raise RepositoryActRefused(
+            "the remote URL names a transport that runs a command "
+            "(`ext::` or `fd::`). This act attaches a destination, never an "
+            "executable; use a URL or a filesystem path.")
+
 __all__ = [
     "ADAPTER_NAME",
     "REMOTE_NAME",
@@ -185,6 +263,7 @@ __all__ = [
     "create_repository",
     "initialize_repository",
     "PUSH_TIMEOUT_SECONDS",
+    "refuse_command_executing_remote",
     "refuse_credential_bearing_remote",
     "refuse_unusable_location",
     "push_to_remote",
@@ -413,9 +492,51 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
             raise RepositoryActRefused(
                 f"{location} is not the directory this act created; the path "
                 "changed underneath it and nothing is written")
+        # AND THE HANDLE IS HELD THROUGH THE WHOLE INITIALIZATION, because a
+        # check that is released before the use is a check with a window in
+        # it. The comparison above proved the PATH still named the directory
+        # this act created; the descriptor below names that directory itself,
+        # and git is given the descriptor — so a final component replaced
+        # between this line and `git init` (by a symlink, or by another real
+        # directory) cannot become the place the history is written (Copilot
+        # review of openDox-code#26, round 10). Every git call of this act is
+        # inside the handle's lifetime for the same reason.
+        git = _runner_bound_to(owned, location, executable)
+        return _initialize_with(git, location, project_id=project_id,
+                                actor=actor, branch=branch)
     finally:
         os.close(owned)
-    git = GitRunner(location, executable)
+
+
+def _runner_bound_to(handle: int, location: Path,
+                     executable: str) -> GitRunner:
+    """A runner whose `-C` is the OPEN DIRECTORY, where the OS offers one.
+
+    `/proc/self/fd/<n>` — and `/dev/fd/<n>`, which is the same thing on Linux
+    and the BSD spelling elsewhere — resolves, IN THE CHILD, to the directory
+    the descriptor refers to, whatever has happened to the name since. The
+    descriptor has to be inherited for that to mean anything, which is what
+    `GitRunner.inherit_fd` does; `subprocess` closes inherited descriptors by
+    default. Measured on this container (Linux 6.18, git 2.43.0): with the
+    directory renamed away and a symlink put in its place after the handle was
+    opened, `git -C /proc/self/fd/<n>` still wrote into the real directory and
+    wrote nothing through the link.
+
+    WHERE NEITHER PATH EXISTS the runner falls back to the pathname, which is
+    the behaviour this act had before — the inode comparison above still
+    refuses a path that changed, and this note is here so a reader knows which
+    guarantee holds on which platform rather than assuming the stronger one.
+    """
+    for base in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(base):
+            return GitRunner(Path(base) / str(handle), executable,
+                             inherit_fd=handle)
+    return GitRunner(location, executable)
+
+
+def _initialize_with(git: GitRunner, location: Path, *, project_id: str,
+                     actor: str, branch: str) -> str:
+    """`initialize_repository`'s git half, on a runner its caller chose."""
     try:
         # BARE, and it is the decision `local_git_adapter`'s header argues in
         # full: this repository is storage openDox MANAGES (RULING C3's own
@@ -453,6 +574,7 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
             "the map row is rolled back with the caller's transaction"
         ) from failed
     return commit
+
 
 
 def _local_git_row(store: Any, project_id: str, *,
@@ -496,6 +618,7 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
     push cannot find.
     """
     refuse_credential_bearing_remote(remote_url)
+    refuse_command_executing_remote(remote_url)
     row = _local_git_row(store, project_id, for_update=True)
     remote_name = REMOTE_NAME
     # THE DURABLE FACT IS WRITTEN FIRST, INSIDE THE CALLER'S TRANSACTION, and
@@ -512,7 +635,19 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
     try:
         existing = git.run("remote", "get-url", remote_name)
         if existing.returncode == 0:
-            git.out("remote", "set-url", remote_name, remote_url)
+            # `config --replace-all`, NOT `remote set-url`. Git permits several
+            # `remote.origin.url` entries, and `set-url` on a remote that has
+            # them does not replace the first — measured on git 2.43.0, it
+            # FAILS: "fatal: could not set 'remote.origin.url': has multiple
+            # values". So a repository in that state (a legacy remote, a
+            # hand-edited config) could not be repaired by the one repair this
+            # act offers, while `push_to_remote` refused every push because
+            # `get-url --push --all` returned two destinations (Copilot review
+            # of openDox-code#26, round 10). `--replace-all` collapses every
+            # value to the one URL the map records, which is the state the map
+            # can describe.
+            git.out("config", "--replace-all", f"remote.{remote_name}.url",
+                    remote_url)
         else:
             git.out("remote", "add", remote_name, remote_url)
         # AND EVERY `pushurl` IS CLEARED, because `set-url` writes the FETCH
@@ -520,9 +655,22 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
         # `remote.origin.pushurl` — the very state `push_to_remote` refuses —
         # kept it through this act, so the destination of record could not be
         # repaired by re-attaching, which is the one repair this act offers
-        # (Copilot review of openDox-code#26, round 6). `--unset-all` exits
-        # non-zero when there is nothing to unset, which is not a failure.
-        git.run("config", "--unset-all", f"remote.{remote_name}.pushurl")
+        # (Copilot review of openDox-code#26, round 6).
+        #
+        # AND ONLY *ONE* NON-ZERO STATUS IS "NOTHING TO UNSET". This ignored
+        # every failure, so a locked config, a read-only file or a malformed
+        # section left a stale `pushurl` in place while the map row committed
+        # and the attach reported success — after which the next push goes to
+        # the wrong destination or is refused, which is the state this line
+        # exists to clear (Copilot review of openDox-code#26, round 10,
+        # suppressed twice). Measured on git 2.43.0: `config --unset-all` of an
+        # absent key exits 5, and that is the only status this accepts.
+        cleared = git.run("config", "--unset-all",
+                          f"remote.{remote_name}.pushurl")
+        if cleared.returncode not in (0, _GIT_CONFIG_KEY_ABSENT):
+            raise GitCommandFailed(
+                ("config", "--unset-all", f"remote.{remote_name}.pushurl"),
+                cleared)
     except GitCommandFailed as failed:
         raise RepositoryActRefused(
             f"the remote {remote_name!r} could not be attached to "
@@ -673,7 +821,18 @@ def push_to_remote(store: Any, *, project_id: str,
         # liked. `out_bounded` also refuses every interactive prompt, so a
         # remote that wants a password fails instead of waiting for one that is
         # never coming.
-        git.out_bounded("push", REMOTE_NAME,
+        # `-c protocol.ext.allow=never` BEFORE THE SUBCOMMAND, and it is not
+        # belt and braces for the refusal above: that refusal covers what this
+        # act STORES, and a row written before it — or by a future caller of
+        # the store — still reaches this push. Git's `ext::` transport runs its
+        # argument as a command in THIS process, gated by a config value the
+        # host sets; measured on git 2.43.0, `protocol.ext.allow=user` in the
+        # repository's own config is enough to execute it (Copilot review of
+        # openDox-code#26, round 10). A command-line `-c` outranks every
+        # config file, so the policy travels with the push instead of being
+        # assumed of the machine.
+        git.out_bounded("-c", "protocol.ext.allow=never",
+                        "push", REMOTE_NAME,
                         f"refs/heads/{branch}:refs/heads/{branch}",
                         timeout=PUSH_TIMEOUT_SECONDS)
     except GitCommandFailed as failed:

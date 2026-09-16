@@ -1045,3 +1045,209 @@ def test_a_corpus_that_went_away_is_not_reported_as_a_missing_document(
     with pytest.raises(ca.CorpusRefused) as caught:
         adapter.read(corpus, document)
     assert caught.value.refusal.kind == ca.CORPUS_ABSENT
+
+
+# -- Copilot's tenth round on #26 --------------------------------------------
+
+
+def test_a_bracketed_ipv6_scp_remote_is_redacted_like_any_other_userinfo(
+) -> None:
+    r"""A PIN, not a fix: Copilot's round-10 finding here is measurably wrong.
+
+    The review reports that `user@[::1]:repo` "is not replaced by
+    `<redacted-url>`" because the host class excludes `:`. Measured on the
+    landed pattern, it IS replaced, and by that very exclusion: the host class
+    matches the `[`, the next character is the `:` the SCP form requires, and
+    the trailing `[^\s]*` takes the rest of the run — so the whole remote goes,
+    exactly as `git@host:repo` does. The refusing half
+    (`repository_act._SCP_USERINFO`) matches for the same reason, and every
+    bracketed IPv6 literal begins with a hex group or a colon, so no shape of
+    it can avoid the pattern.
+
+    No code changed for that finding. This test exists because a property a
+    pattern holds BY LUCK is a property the next edit to it can lose, and
+    because the next reader deserves the measurement rather than the review's
+    sentence.
+    """
+    for url in ("someone@[::1]:repo.git",
+                "git@[2001:db8::1]:opensoft/openDox.git",
+                "someone@[fe80::1%25eth0]:r.git".replace("%25", ".")):
+        redacted = lga.redact_credentials(f"fatal: could not read from {url}")
+        assert "someone@" not in redacted and "git@[" not in redacted, url
+        assert "<redacted-url>" in redacted, url
+
+    # The ordinary SCP form and a plain URL are unchanged in their treatment.
+    assert lga.redact_credentials("git@example.invalid:r.git") == "<redacted-url>"
+    plain = "https://example.invalid/r.git?depth=1"
+    assert lga.redact_credentials(plain) == plain
+
+
+def test_whitespace_around_a_parameter_name_does_not_hide_it() -> None:
+    """`urlsplit` accepts a raw space INSIDE a URL; the name class did not.
+
+    `https://host/x? token=ghp_secret` parses as a query carrying `token`, and
+    both halves of the credential rule saw no parameter at all — so the value
+    went into `project_repositories.remote_url` and back out to every
+    authenticated caller (Copilot review of openDox-code#26, round 10). Spaces
+    and tabs are stepped over now rather than admitted into the name.
+    """
+    for url in ("https://example.invalid/r.git? token=ghp_supersecret",
+                "https://example.invalid/r.git?token =ghp_supersecret",
+                "https://example.invalid/r.git?a=1& access_token=ghp_supersecret",
+                "https://example.invalid/r.git#\tprivate_key=ghp_supersecret"):
+        assert lga.names_a_secret_parameter(url), url
+        redacted = lga.redact_credentials(f"fatal: could not read from {url}")
+        assert "ghp_supersecret" not in redacted, url
+        assert "example.invalid" in redacted, url
+
+    # AND THE ROUND-8 CASE STILL HOLDS: `+` is a space in a parameter name and
+    # is not a credential, and asking the question must not raise.
+    assert not lga.names_a_secret_parameter("https://example.invalid/r.git?a+b=1")
+    assert not lga.names_a_secret_parameter("https://example.invalid/r.git?depth=1")
+
+
+def test_a_listing_omits_a_gitlink_because_read_cannot_serve_one(
+        adapter: lga.LocalGitCorpus, repository: Path) -> None:
+    """`ls-tree -r` lists submodule gitlinks, and `read` asks `cat-file blob`.
+
+    So a repository containing a submodule advertised a document this adapter
+    then refused as `DOCUMENT_UNKNOWN` — a listing that contradicts the read
+    beside it, which the interface's contract does not permit (Copilot review
+    of openDox-code#26, round 10, suppressed twice). The listing is filtered to
+    BLOBS; a submodule's content belongs to another repository and inventing a
+    representation for it here would be this adapter answering for a corpus it
+    does not manage.
+    """
+    head = _git(repository, "rev-parse", "HEAD")
+    blob = subprocess.run(["git", "-C", str(repository), "hash-object", "-w",
+                           "--stdin"], input=b"# notes\n", capture_output=True,
+                          check=True).stdout.decode().strip()
+    tree = subprocess.run(["git", "-C", str(repository), "mktree"],
+                          input=(f"100644 blob {blob}\tnotes.md\n"
+                                 f"160000 commit {head}\tsub\n").encode(),
+                          capture_output=True, check=True).stdout.decode().strip()
+    commit = _git(repository, "commit-tree", tree, "-p", head, "-m",
+                  "a tree with a gitlink in it")
+    _git(repository, "update-ref", "refs/heads/main", commit)
+
+    corpus = _resolve(adapter, repository)
+    keys = [document.key for document in adapter.list_documents(corpus)]
+    assert "notes.md" in keys
+    assert "sub" not in keys, (
+        "a gitlink was advertised as a document this adapter cannot read")
+    # And the contract the filter keeps: what the listing omits, the read
+    # refuses — rather than the listing promising what the read denies.
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(corpus, ca.DocumentId(corpus=corpus.ref.name,
+                                           key="sub"))
+    assert caught.value.refusal.kind == ca.DOCUMENT_UNKNOWN
+
+
+def test_a_revision_carrying_a_nul_is_the_protocols_own_refusal(
+        adapter: lga.LocalGitCorpus, repository: Path) -> None:
+    """An embedded NUL makes `subprocess.run` raise before any process exists.
+
+    `GitRunner.run` turns that into `GitCommandFailed` by design, and
+    `_resolve_revision` read a returncode — so a caller-supplied revision with
+    a NUL in it leaked an internal exception in place of `REVISION_UNKNOWN`
+    (Copilot review of openDox-code#26, round 10, suppressed). The same guard
+    round 9 gave a document key.
+    """
+    corpus = _resolve(adapter, repository)
+    document = ca.DocumentId(corpus=corpus.ref.name, key="anything.md")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(corpus, document, revision="main\0extra")
+    assert caught.value.refusal.kind == ca.REVISION_UNKNOWN
+
+
+def test_a_git_that_becomes_unusable_after_resolve_is_a_named_refusal(
+        adapter: lga.LocalGitCorpus, repository: Path, tmp_path: Path) -> None:
+    """`resolve` probes git ONCE, and every later call read a returncode.
+
+    `GitRunner.run` raises `GitCommandFailed` when the executable cannot be
+    started, so a `git` removed, replaced or made unexecutable after resolution
+    leaked that internal signal out of `list_documents`, `read` and `check` —
+    the API's 500 in place of the interface's `CORPUS_UNREADABLE` (Copilot
+    review of openDox-code#26, round 10, suppressed on five call sites). A
+    second adapter over the SAME resolved corpus is that race, made
+    deterministic.
+    """
+    corpus = _resolve(adapter, repository)
+    gone = lga.LocalGitCorpus(executable=str(tmp_path / "git-that-was-removed"))
+    document = ca.DocumentId(corpus=corpus.ref.name, key="anything.md")
+
+    for call in (lambda: gone.list_documents(corpus),
+                 lambda: gone.read(corpus, document),
+                 lambda: gone.check(corpus),
+                 lambda: gone.read(corpus, document, revision="main")):
+        with pytest.raises(ca.CorpusRefused) as caught:
+            call()
+        assert caught.value.refusal.kind in (
+            ca.CORPUS_UNREADABLE, ca.REVISION_UNKNOWN), caught.value.refusal
+
+
+def test_an_unborn_corpus_whose_git_went_away_refuses_rather_than_answering(
+        adapter: lga.LocalGitCorpus, tmp_path: Path) -> None:
+    """The path that answers `()` without asking git anything.
+
+    An unborn corpus's empty listing is the answer a HEALTHY empty repository
+    gives, so it is the one place an unreadable corpus is hardest to tell from
+    a legal one — and `_revalidate`'s own probe could leak the runner's failure
+    instead of refusing (Copilot review of openDox-code#26, round 10).
+    """
+    location = tmp_path / "unborn"
+    location.mkdir()
+    _git(location, "init", "--bare", "--initial-branch=main", ".")
+    corpus = adapter.resolve(ca.CorpusRef(name="unborn", location=str(location)))
+    assert corpus.revision is None
+    assert adapter.list_documents(corpus) == ()
+
+    gone = lga.LocalGitCorpus(executable=str(tmp_path / "git-that-was-removed"))
+    with pytest.raises(ca.CorpusRefused) as caught:
+        gone.list_documents(corpus)
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(),
+                    reason="this platform has no /proc/self/fd, so git cannot "
+                           "be handed an open directory; the pathname "
+                           "fallback and its inode check are what run there")
+def test_the_initialization_is_bound_to_the_directory_it_verified(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check and the use are the same object, not the same NAME.
+
+    `initialize_repository` opened the directory `O_NOFOLLOW`, compared inodes
+    and then CLOSED the handle before handing git the pathname — so a final
+    component replaced between those two steps sent `git init --bare` and the
+    first commit into whatever was put there (Copilot review of
+    openDox-code#26, round 10). git is given `/proc/self/fd/<n>` for the
+    verified descriptor now, and the descriptor is inherited by the child, so
+    the swap below lands nowhere.
+
+    The race is made deterministic by performing the swap at the only moment it
+    could happen: after the handle is verified and before the first git call.
+    """
+    from opendox.runtime import repository_act
+
+    location = tmp_path / "project-raced"
+    decoy = tmp_path / "attackers-tree"
+    decoy.mkdir()
+    real = repository_act._initialize_with
+
+    def _swap_then_initialize(git, where, **kwargs):
+        moved = tmp_path / "the-real-directory"
+        where.rename(moved)                       # the verified directory
+        where.symlink_to(decoy)                   # the name now points at the decoy
+        _swap_then_initialize.moved = moved
+        return real(git, where, **kwargs)
+
+    monkeypatch.setattr(repository_act, "_initialize_with", _swap_then_initialize)
+    commit = repository_act.initialize_repository(
+        location, project_id="project-raced", actor=ACTOR)
+
+    moved = _swap_then_initialize.moved
+    assert (moved / "HEAD").is_file(), (
+        "the history was not written into the directory this act verified")
+    assert _git(moved, "rev-parse", "HEAD") == commit
+    assert not any(decoy.iterdir()), (
+        f"git wrote into the swapped-in path: {sorted(decoy.iterdir())}")

@@ -1145,3 +1145,35 @@ def test_the_store_translates_a_foreign_key_violation_on_a_session(
                              subject="fk-session-store")
     with pytest.raises(identity.NotFoundError):
         store.open_session(user_id=user.id, project_id="no-such-project")
+
+
+def test_a_repository_refusal_reaching_the_api_is_redacted(
+        client, mint_token, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The API returned `str(exc)` for a repository refusal, unredacted.
+
+    Those messages were treated as secret-free by construction, and they are
+    not: `repository_act.repository_location` refuses a project id it cannot
+    use as a directory name and echoes it, and that id comes from the request
+    path (Copilot review of openDox-code#26, round 10; the CLI's three handlers
+    took the same fix). The route cannot be driven to THAT message today — an
+    id with a `/` in it does not route here and the membership check answers
+    first — so the refusal is raised where the act raises it, which is what the
+    handler sees.
+    """
+    from opendox.runtime import repository_act
+
+    token = mint_token(subject="redacted-refusal")
+    project = _project_with(client, token, "redacted-refusal")
+
+    def _refuse_with_a_dsn(*args: object, **kwargs: object):
+        raise repository_act.RepositoryActRefused(
+            "'postgresql://someone:hunter2@db.internal/opendox' is not a "
+            "usable project id for a directory name")
+
+    monkeypatch.setattr(repository_act, "create_repository", _refuse_with_a_dsn)
+    refused = client.post(f"/api/v1/projects/{project['id']}/repository",
+                          headers=_auth(token))
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "repository.refused"
+    assert "hunter2" not in refused.text, refused.text
+    assert "<redacted" in refused.text, refused.text

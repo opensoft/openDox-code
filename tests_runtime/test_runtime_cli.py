@@ -790,3 +790,55 @@ def test_status_keeps_the_connectivity_answer_when_a_later_query_fails(
     assert "permission denied" in evidence["schema_queries"]
     printed = json.dumps(evidence)
     assert "hunter2" not in printed, printed
+
+
+def test_a_repository_refusal_is_redacted_like_every_other_message(
+        monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """`RepositoryActRefused` was trusted to be secret-free, and it is not.
+
+    `repository_act.repository_location` refuses a project id it cannot use as
+    a directory name and ECHOES it, before any database is touched — so a
+    caller-supplied id shaped like a DSN came back with its password in the
+    evidence object, and in whatever collects that (Copilot review of
+    openDox-code#26, round 10). A message built from caller-supplied text is
+    redacted like any other this CLI emits.
+    """
+    import sys
+    import types
+
+    class _Connection:
+        def execute(self, sql: str, params: tuple | None = None) -> None:
+            raise AssertionError("the refusal happens before any statement")
+
+    class _Database:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> "_Database":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        @contextmanager
+        def transaction(self):
+            yield _Connection()
+
+    db_stub = types.ModuleType("opendox.runtime.db")
+    db_stub.Database = _Database                       # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "opendox.runtime.db", db_stub)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                       "postgresql://runtime@127.0.0.1:5432/opendox")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+    monkeypatch.setenv(PREFIX + "PROJECT_REPOSITORY_ROOT", str(tmp_path))
+
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["project", "create-repository",
+         "--project-id", "postgresql://someone:hunter2@db.internal/opendox",
+         "--actor", "Student One"]))
+    assert code == 1, evidence
+    assert evidence["refusal"] == "repository"
+    printed = json.dumps(evidence)
+    assert "hunter2" not in printed, printed
+    assert "<redacted>" in printed, printed

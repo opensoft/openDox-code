@@ -173,6 +173,16 @@ class GitRunner:
 
     root: Path
     executable: str = "git"
+    #: A DIRECTORY FILE DESCRIPTOR THE CHILD INHERITS, for the one caller that
+    #: needs `root` to name an OPEN HANDLE rather than a path a concurrent
+    #: actor can re-point: `repository_act.initialize_repository` verifies the
+    #: directory it created with `O_NOFOLLOW` and then hands git
+    #: `/proc/self/fd/<n>` for that same descriptor, so the check and the use
+    #: are the same object (Copilot review of openDox-code#26, round 10).
+    #: `subprocess` closes inherited descriptors by default, so passing it is
+    #: what makes `/proc/self/fd/<n>` mean anything in the child. `None` — every
+    #: other caller — behaves exactly as before.
+    inherit_fd: int | None = None
 
     def run(self, *args: str, stdin: bytes | None = None,
             env: dict[str, str] | None = None,
@@ -182,7 +192,9 @@ class GitRunner:
         merged = {**os.environ, **(env or {})}
         try:
             return subprocess.run(argv, input=stdin, capture_output=True,
-                                  check=False, env=merged, timeout=timeout)
+                                  check=False, env=merged, timeout=timeout,
+                                  pass_fds=() if self.inherit_fd is None
+                                  else (self.inherit_fd,))
         except (OSError, ValueError) as exc:
             # `ValueError` TOO, and for a caller-controlled reason: a
             # `DocumentId.key`, an `actor` or a `reason` carrying an embedded
@@ -249,6 +261,14 @@ class GitRunner:
 #: Anything shaped like `scheme://…@…` or `user@host:path`. Used to REDACT, not
 #: to validate: a git argument or a git error line can carry a remote URL, and a
 #: remote URL can carry a credential.
+#: A BRACKETED IPv6 HOST NEEDS NO SPECIAL CASE HERE, and that was measured
+#: rather than assumed (Copilot review of openDox-code#26, round 10, which
+#: reported the opposite): the host class excludes `:` so the pattern cannot
+#: swallow a `scheme://`, and in `user@[::1]:repo` it matches the `[` and the
+#: very next character is the `:` the form requires — so the whole run is
+#: replaced, exactly as `git@host:repo` is. `test_a_bracketed_ipv6_scp_remote_
+#: is_redacted_like_any_other_userinfo` pins that for every IPv6 shape, because
+#: a property this pattern holds by luck is a property a later edit can lose.
 _CREDENTIAL_SHAPED = re.compile(
     r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s/@]*@[^\s]*|(?<![\w.])[^\s/:@]+@[^\s/:@]+:[^\s]*")
 
@@ -273,30 +293,50 @@ _SECRET_KEY = re.compile(SECRET_PARAMETER_KEYS, re.IGNORECASE)
 #: refuse, while the value was every bit as much a credential (Copilot review
 #: of openDox-code#26, round 5). The decode is REPEATED until it is stable
 #: (bounded), because `%2574oken` is the same trick applied twice.
+#: AND WHITESPACE AROUND THE NAME IS SKIPPED, in both patterns. The name class
+#: excludes whitespace so that a sentence quoting a URL does not become a
+#: parameter — but `urlsplit` ACCEPTS a raw space inside a URL, so
+#: `https://host/x? token=ghp_secret` and `https://host/x?token =ghp_secret`
+#: parsed as a query carrying `token` while this pattern saw no parameter at
+#: all: neither half of the rule fired, and the value went into
+#: `project_repositories.remote_url` and back out to every authenticated caller
+#: (Copilot review of openDox-code#26, round 10). Spaces and tabs are stepped
+#: over rather than admitted into the name, so the name that is decoded and
+#: judged is the one git would use.
 _ANY_PARAMETER = re.compile(
-    r"(?P<lead>[?&#](?P<name>[^=&#\s]*)=)(?P<value>[^&#\s]*)")
-_ANY_PARAMETER_ANCHORED = re.compile(r"(?:^|[?&#])(?P<name>[^=&#\s]*)=")
+    r"(?P<lead>[?&#][ \t]*(?P<name>[^=&#\s]*)[ \t]*=)(?P<value>[^&#\s]*)")
+_ANY_PARAMETER_ANCHORED = re.compile(
+    r"(?:^|[?&#])[ \t]*(?P<name>[^=&#\s]*)[ \t]*=")
 def _decoded_parameter_name(name: str) -> str:
-    """A parameter name with its percent-encoding removed, decoded to a TRUE
-    fixed point — no pass limit.
+    """A parameter name with its percent-encoding removed, decoded to a fixed
+    point under a bound the NAME'S OWN LENGTH gives.
 
-    The first cut stopped after four passes, which made the docstring's own
-    word false: `?%2525252574oken=…` is still `%74oken` after four and walked
-    past both halves of the rule again (Copilot review of openDox-code#26,
-    round 6). The loop needs no bound to terminate — every pass that changes
-    the string SHORTENS it, because a decoded `%XX` is one character where
-    three were — and the assertion below says so rather than trusting it.
+    The first cut stopped after four passes, which made the docstring's word
+    false: `?%2525252574oken=…` is still `%74oken` after four and walked past
+    both halves of the rule again (Copilot review of openDox-code#26, round 6).
+    The second cut called the loop unbounded and asserted that every pass
+    shortens the string, which `+` → space falsifies (round 8). THIS
+    PARAGRAPH IS THE THIRD AND IT DESCRIBES THE CODE (round 10): the loop runs
+    at most `len(name) + 1` times and stops at the first pass that changes
+    nothing. That bound cannot cut a decode short, because each pass either
+    removes a `%XX` escape — three characters becoming one — or turns a `+`
+    into a space, and neither can be undone by a later pass, so a name of
+    length n reaches its fixed point in at most n passes.
+
+    WORST-CASE WORK IS QUADRATIC IN THE NAME, and that is bounded where the
+    value enters: `repository_act.refuse_credential_bearing_remote` refuses a
+    remote URL longer than `MAX_REMOTE_URL_CHARS` before this is ever reached,
+    so a nested `%2525…` chain cannot be made long enough to matter (Copilot
+    review of openDox-code#26, round 10). The other caller is
+    `redact_credentials` over git's own stderr, which this process bounds by
+    reading a finished command's output.
     """
     # BOUNDED BY THE NAME'S OWN LENGTH, and not by an assertion that every
     # pass shortens it: `unquote_plus` also turns `+` into a SPACE, which
-    # changes the string without shortening it — so a harmless
-    # `...?a+b=1` tripped that assertion and made both the refusal and the
-    # redaction raise, a 500 where the answer was "this is not a credential"
-    # (Copilot review of openDox-code#26, round 8). Termination is still by
-    # construction: a pass either removes at least one `%` escape (three
-    # characters become one) or replaces `+` with a space, and neither can be
-    # undone by a later pass, so the number of passes cannot exceed the
-    # starting length.
+    # changes the string without shortening it — so a harmless `...?a+b=1`
+    # tripped that assertion and made both the refusal and the redaction raise,
+    # a 500 where the answer was "this is not a credential" (Copilot review of
+    # openDox-code#26, round 8). The docstring above argues the termination.
     for _ in range(len(name) + 1):
         once = urllib.parse.unquote_plus(name)
         if once == name:
@@ -491,7 +531,18 @@ class LocalGitCorpus:
             self._revalidate(git, corpus)
             return ()
         try:
-            raw = git.out("ls-tree", "-r", "--name-only", "-z", corpus.revision)
+            # THE FULL FORMAT, NOT `--name-only`, BECAUSE A LISTING AND A READ
+            # HAVE TO AGREE. `ls-tree -r` also returns GITLINK entries (mode
+            # 160000, type `commit`) for a repository that contains a
+            # submodule, and `read` always asks `cat-file blob` — so this
+            # advertised a document that this adapter then refused as
+            # `DOCUMENT_UNKNOWN`, which is a listing the interface's own
+            # contract does not permit (Copilot review of openDox-code#26,
+            # round 10, suppressed twice). Gitlinks are EXCLUDED rather than
+            # given a representation: a submodule's content is another
+            # repository's, and inventing bytes for it here would be this
+            # adapter answering for a corpus it does not manage.
+            raw = git.out("ls-tree", "-r", "-z", corpus.revision)
         except GitCommandFailed as failed:
             raise _refuse(CORPUS_UNREADABLE, corpus.location, str(failed)) from failed
         # `surrogateescape`, NOT strict. `ls-tree -z` returns raw pathname
@@ -502,9 +553,13 @@ class LocalGitCorpus:
         # review of openDox-code#26, round 6). The round-trip is exact: the
         # same bytes go back out through `os.fsencode`-style encoding when the
         # key is handed to git.
-        keys = sorted({name for name
+        # `<mode> SP <type> SP <object> TAB <path>` per NUL-terminated entry —
+        # git's documented `ls-tree` format, so the split is on the TAB and the
+        # type is the second field.
+        keys = sorted({entry.split("\t", 1)[1] for entry
                        in raw.decode("utf-8", "surrogateescape").split("\0")
-                       if name})
+                       if "\t" in entry
+                       and entry.split("\t", 1)[0].split(" ")[1] == "blob"})
         return tuple(DocumentId(corpus=corpus.ref.name, key=key) for key in keys)
 
     # -- read -------------------------------------------------------------
@@ -535,7 +590,9 @@ class LocalGitCorpus:
             # corpus is asked first, and only a corpus that is still readable
             # gets to say the document is unknown.
             self._revalidate(git, corpus)
-            if git.run("cat-file", "-e", f"{at}^{{commit}}").returncode != 0:
+            if self._probe(git, "cat-file", "-e", f"{at}^{{commit}}",
+                           kind=CORPUS_UNREADABLE,
+                           subject=corpus.location).returncode != 0:
                 raise _refuse(
                     CORPUS_UNREADABLE, corpus.location,
                     f"revision {at} is no longer in the object store, so this "
@@ -614,9 +671,10 @@ class LocalGitCorpus:
             # no-finding answer the paragraph above forbids (Copilot review of
             # openDox-code#26, round 6).
             self._revalidate(git, corpus)
-            if corpus.revision is not None and git.run(
-                    "cat-file", "-e",
-                    f"{corpus.revision}^{{commit}}").returncode != 0:
+            if corpus.revision is not None and self._probe(
+                    git, "cat-file", "-e", f"{corpus.revision}^{{commit}}",
+                    kind=CORPUS_UNREADABLE,
+                    subject=corpus.location).returncode != 0:
                 raise _refuse(
                     CORPUS_UNREADABLE, corpus.location,
                     f"the resolved revision {corpus.revision} is no longer in "
@@ -759,6 +817,28 @@ class LocalGitCorpus:
     def _git(self, corpus: ResolvedCorpus) -> GitRunner:
         return GitRunner(Path(corpus.location), self._executable)
 
+    @staticmethod
+    def _probe(git: GitRunner, *args: str, kind: str,
+               subject: str) -> subprocess.CompletedProcess[bytes]:
+        """`git.run`, with the RUNNER's own failure translated to a refusal.
+
+        `GitRunner.run` does not return a failed process when the executable
+        cannot be started — it raises `GitCommandFailed`, deliberately, so that
+        a git which disappears mid-operation is one kind of failure everywhere.
+        Every call below that only read `.returncode` was therefore a path on
+        which that internal exception could escape the adapter: `resolve`
+        probes git once, and a `git` removed, replaced or made unexecutable
+        between that probe and `_head`, `_revalidate`, `_served_ref`,
+        `_resolve_revision` or `check`'s bare-repository question leaked it to
+        the API as a 500 in place of the interface's own refusal (Copilot
+        review of openDox-code#26, round 10, suppressed, five times over).
+        One helper, so a later call cannot forget.
+        """
+        try:
+            return git.run(*args)
+        except GitCommandFailed as failed:
+            raise _refuse(kind, subject, str(failed)) from failed
+
     def _revalidate(self, git: GitRunner, corpus: ResolvedCorpus) -> None:
         """Refuse unless this repository is STILL a readable git repository.
 
@@ -772,7 +852,9 @@ class LocalGitCorpus:
         if not Path(corpus.location).exists():
             raise _refuse(CORPUS_ABSENT, corpus.location,
                           "the repository is no longer at this location")
-        if git.run("rev-parse", "--git-dir").returncode != 0:
+        if self._probe(git, "rev-parse", "--git-dir",
+                       kind=CORPUS_UNREADABLE,
+                       subject=corpus.location).returncode != 0:
             raise _refuse(CORPUS_UNREADABLE, corpus.location,
                           "the location is no longer a readable git "
                           "repository")
@@ -789,7 +871,8 @@ class LocalGitCorpus:
         are different answers"). They are told apart by asking whether HEAD is
         a symbolic ref that simply has no commit yet.
         """
-        completed = git.run("rev-parse", "--verify", "HEAD")
+        completed = self._probe(git, "rev-parse", "--verify", "HEAD",
+                                kind=CORPUS_UNREADABLE, subject=subject)
         if completed.returncode == 0:
             revision = completed.stdout.decode().strip() or None
             if revision is not None:
@@ -801,17 +884,21 @@ class LocalGitCorpus:
                 # refusal arrived later, from `list_documents` or `read`
                 # (Copilot review of openDox-code#26, round 6). `cat-file -e`
                 # asks the object store.
-                if git.run("cat-file", "-e",
-                           f"{revision}^{{commit}}").returncode != 0:
+                if self._probe(git, "cat-file", "-e", f"{revision}^{{commit}}",
+                               kind=CORPUS_UNREADABLE,
+                               subject=subject).returncode != 0:
                     raise _refuse(
                         CORPUS_UNREADABLE, subject,
                         f"HEAD names {revision}, which the object store cannot "
                         "read; the ref survived the commit it points at")
             return revision
-        symbolic = git.run("symbolic-ref", "--quiet", "HEAD")
+        symbolic = self._probe(git, "symbolic-ref", "--quiet", "HEAD",
+                               kind=CORPUS_UNREADABLE, subject=subject)
         if symbolic.returncode == 0:
             ref = symbolic.stdout.decode().strip()
-            if git.run("show-ref", "--verify", "--quiet", ref).returncode != 0:
+            if self._probe(git, "show-ref", "--verify", "--quiet", ref,
+                           kind=CORPUS_UNREADABLE,
+                           subject=subject).returncode != 0:
                 # `show-ref` IS NOT THE DISCRIMINATOR — it exits non-zero for a
                 # branch that has no commit yet AND for one whose ref file is
                 # malformed or whose target object is gone, so treating every
@@ -824,7 +911,9 @@ class LocalGitCorpus:
                 #   broken  -> rc 0, no stdout, "warning: ignoring broken ref"
                 # so git saying nothing at all about the ref is what "the
                 # branch simply has no commit yet" looks like.
-                listed = git.run("for-each-ref", "--format=%(objectname)", ref)
+                listed = self._probe(git, "for-each-ref",
+                                     "--format=%(objectname)", ref,
+                                     kind=CORPUS_UNREADABLE, subject=subject)
                 if (listed.returncode == 0
                         and not listed.stdout.decode().strip()
                         and not listed.stderr.decode().strip()):
@@ -850,7 +939,8 @@ class LocalGitCorpus:
         corpus (Copilot review of openDox-code#26). A DETACHED HEAD has no ref
         to move and is refused rather than guessed at.
         """
-        symbolic = git.run("symbolic-ref", "--quiet", "HEAD")
+        symbolic = self._probe(git, "symbolic-ref", "--quiet", "HEAD",
+                               kind=WRITE_PATH_UNREACHABLE, subject=subject)
         if symbolic.returncode == 0:
             ref = symbolic.stdout.decode().strip()
             # A BRANCH, and not merely a symbolic ref. `symbolic-ref HEAD` can
@@ -879,8 +969,21 @@ class LocalGitCorpus:
         # command does — so resolving "a revision" could perform an unintended
         # git operation (Copilot review of openDox-code#26, round 8). The
         # marker is git's own answer to this, available since 2.24.
-        completed = git.run("rev-parse", "--verify", "--end-of-options",
-                            f"{revision}^{{commit}}")
+        # AND A NUL IS REFUSED BEFORE THE CALL, like a document key's. An
+        # embedded NUL makes `subprocess.run` raise before any process exists,
+        # which `GitRunner.run` turns into `GitCommandFailed` — and this
+        # function read a returncode, so that exception escaped as an internal
+        # error in place of the protocol's `REVISION_UNKNOWN` (Copilot review
+        # of openDox-code#26, round 10, suppressed). `_probe` would translate
+        # it now, but the named refusal is the better answer and it costs one
+        # line.
+        if "\0" in revision:
+            raise _refuse(REVISION_UNKNOWN, subject,
+                          "a revision cannot contain a NUL byte; this "
+                          "repository serves no such revision")
+        completed = self._probe(git, "rev-parse", "--verify",
+                                "--end-of-options", f"{revision}^{{commit}}",
+                                kind=REVISION_UNKNOWN, subject=subject)
         if completed.returncode != 0:
             raise _refuse(REVISION_UNKNOWN, subject,
                           f"this repository cannot serve revision {revision!r}; "
