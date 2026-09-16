@@ -145,8 +145,6 @@ def _display_remote_url(remote_url: str) -> str:
             host = f"{host}:{parts.port}"
         return urlunsplit((parts.scheme, host, parts.path, parts.query,
                            parts.fragment))
-    if "@" in remote_url and ":" in remote_url.split("@", 1)[1]:
-        return remote_url.split("@", 1)[1]
     return remote_url
 
 
@@ -288,8 +286,11 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
                         if existing.returncode == 0 else None)
             if existing.returncode == 0:
                 git.out("remote", "set-url", remote_name, remote_url)
-            else:
+            elif "No such remote" in existing.stderr.decode("utf-8", "replace"):
                 git.out("remote", "add", remote_name, remote_url)
+            else:
+                raise GitCommandFailed(("remote", "get-url", remote_name),
+                                       existing)
             try:
                 return store.attach_remote(project_id=project_id,
                                            remote_url=stored_remote_url)

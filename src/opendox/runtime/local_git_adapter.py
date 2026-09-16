@@ -257,6 +257,10 @@ def repository_lock(git: GitRunner):
     lock = Path(git.out("rev-parse", "--absolute-git-dir").decode().strip()
                 ) / "opendox.lock"
     with lock.open("a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
         if fcntl is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         else:  # pragma: no cover - Windows-only fallback
