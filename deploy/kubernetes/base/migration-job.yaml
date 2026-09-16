@@ -67,22 +67,44 @@ spec:
       initContainers:
         - name: wait-for-postgres
           image: ghcr.io/opensoft/opendox-runtime:0.0.0
+          env:
+            # THE ADDRESS IS OVERLAY-CONFIGURABLE, and an EMPTY HOST means
+            # "there is nothing here to wait for". The base ships Postgres and
+            # the default names its Service, but the base also supports
+            # replacing it with a MANAGED database — in which case that
+            # Service does not exist, and a hard-coded wait spent its whole
+            # budget and failed the Job before the configured DSN was ever
+            # used (Copilot review of openDox-code#25).
+            - name: OPENDOX_MIGRATION_WAIT_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: migration_wait_host
+            - name: OPENDOX_MIGRATION_WAIT_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: migration_wait_port
           command:
             - python3
             - -c
             - |
-              import socket, sys, time
+              import os, socket, sys, time
+              host = os.environ.get("OPENDOX_MIGRATION_WAIT_HOST", "").strip()
+              if not host:
+                  # A managed database: nothing in this cluster to wait for.
+                  sys.exit(0)
+              port = int(os.environ.get("OPENDOX_MIGRATION_WAIT_PORT") or 5432)
               # 120 x 2s = four minutes: longer than a first-start initdb,
               # shorter than a human's patience.
               for _ in range(120):
                   try:
-                      with socket.create_connection(
-                              ("opendox-postgres", 5432), timeout=2):
+                      with socket.create_connection((host, port), timeout=2):
                           sys.exit(0)
                   except OSError:
                       time.sleep(2)
               sys.stderr.write(
-                  "opendox-postgres did not accept connections in 240s\n")
+                  f"{host}:{port} did not accept connections in 240s\n")
               sys.exit(1)
           securityContext:
             allowPrivilegeEscalation: false
@@ -120,8 +142,18 @@ spec:
             - name: OPENDOX_MIGRATIONS_DIR
               value: "migrations"
             # A ROLE NAME, not a credential; see the compose file's note.
+            # FROM THE ConfigMap, because it must MATCH the user in the
+            # `opendox-db-runtime` Secret's DSN — and that DSN is created out
+            # of band, so an overlay that serves as another role and a Job
+            # that narrows `opendox_runtime` would leave the real served role
+            # able to rewrite the migration ledger (Copilot review of
+            # openDox-code#25). One value, one place, named in the runbook
+            # beside the Secret.
             - name: OPENDOX_RUNTIME_PG_ROLE
-              value: "opendox_runtime"
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: runtime_pg_role
           volumeMounts:
             - name: tmp
               mountPath: /tmp

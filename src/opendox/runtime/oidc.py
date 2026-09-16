@@ -205,12 +205,25 @@ class CachingJwks:
                 "the broker's JWKS document could not be parsed") from exc
 
     def keyset(self, *, force_refresh: bool = False) -> PyJWKSet:
-        now = time.monotonic()
+        """The cached key set, refreshed at most once per TTL boundary.
+
+        THE CLOCK IS READ INSIDE THE LOCK, and the stamp is taken AFTER the
+        fetch. Reading `time.monotonic()` before acquiring it meant every
+        caller that crossed a TTL boundary together carried its own pre-lock
+        `now` through the wait and re-evaluated `stale` against it — so each
+        one in turn fetched the JWKS, serially, and the single refresh the
+        cache exists to make became one refresh PER WAITER at exactly the
+        moment the broker is busiest (Copilot review of openDox-code#25). The
+        first waiter now refreshes and the rest see a fresh stamp and take the
+        cached set; stamping after the fetch also means a slow broker does not
+        have its own latency counted against the next TTL.
+        """
         with self._lock:
+            now = time.monotonic()
             stale = (now - self._loaded_monotonic) >= self._ttl
             if force_refresh or self._keyset is None or stale:
                 self._keyset = self._load_keyset()
-                self._loaded_monotonic = now
+                self._loaded_monotonic = time.monotonic()
             return self._keyset
 
     def select_key(self, kid: str | None) -> PyJWK:

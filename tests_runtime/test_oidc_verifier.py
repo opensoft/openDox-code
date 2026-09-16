@@ -280,3 +280,71 @@ def test_the_cooldown_expires_so_a_real_rotation_is_still_picked_up(
     state["served"] = current
     assert verifier.verify(mint_token(subject="rotated-late")).subject == (
         "rotated-late")
+
+
+def test_one_ttl_boundary_causes_one_jwks_refresh_and_not_one_per_waiter(
+        jwks_path: str) -> None:
+    """`now` was read BEFORE the lock and carried through the wait.
+
+    A caller that arrives WHILE another is fetching therefore re-evaluated
+    staleness against a clock from before that fetch — and the stamp it then
+    wrote was that same pre-fetch reading, so the next waiter's own older
+    clock was stale against it too. Each waiter in the queue refreshed the
+    JWKS in turn, serially, and the single refresh the cache exists to make
+    became one refresh PER WAITER at exactly the moment the broker is busiest
+    (Copilot review of openDox-code#25, round 5).
+
+    MEASURED WITH STAGGERED ARRIVALS, and the stagger is the whole test: eight
+    threads that all read the clock at the same instant cannot tell the two
+    shapes apart (they share one `now`, so even the old code refreshed once),
+    which is how the first cut of this test passed against the defect. They
+    arrive one TTL apart instead, inside a fetch long enough to hold them all.
+    """
+    import threading
+    import time
+
+    from opendox.runtime.oidc import CachingJwks, FileJwksSource
+
+    ttl = 0.05
+    fetch_seconds = 1.0
+    waiters = 6
+    stagger = 0.08                   # > ttl, so every arrival is "stale" to the
+                                     # pre-lock clock the old shape read
+
+    class _Counting(FileJwksSource):
+        # `load`, which is the source protocol's one method — an override of a
+        # `fetch` this class does not have would have counted nothing.
+        def __init__(self, path: str) -> None:
+            super().__init__(path)
+            self.loads = 0
+
+        def load(self) -> dict:
+            self.loads += 1
+            time.sleep(fetch_seconds)
+            return super().load()
+
+    source = _Counting(jwks_path)
+    cache = CachingJwks(source, ttl_seconds=ttl)
+    cache.keyset()                                    # the first load
+    assert source.loads == 1
+    time.sleep(ttl * 2)                               # every reader is now stale
+
+    errors: list[BaseException] = []
+
+    def _read() -> None:
+        try:
+            cache.keyset()
+        except BaseException as exc:                  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_read) for _ in range(waiters)]
+    for thread in threads:
+        thread.start()
+        time.sleep(stagger)
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert source.loads == 2, (
+        f"{source.loads - 1} refreshes for one TTL boundary; the cache is "
+        "amplifying broker traffic instead of absorbing it")

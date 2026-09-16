@@ -379,6 +379,18 @@ jobs:
       #              migration Job's readiness wait, `init`'s refusal of a
       #              root that is not a directory, and `serve`'s evidence on
       #              an ordinary shutdown.
+      #  101 passed  at `build/3-5-runtime` `981b1d47` (same day, same python
+      #              and pytest) — the same five modules. Copilot's FIFTH
+      #              review moved four: the schema viewers' switch reaching
+      #              both deployments, the migration Job's overlay-configurable
+      #              readiness address, the narrowed role arriving from the
+      #              ConfigMap, the runbook's namespace before its Secrets, the
+      #              Dockerfile comment that claimed a layer cache it does not
+      #              have, and CI's refusal to let the DB-backed suites skip
+      #              (asserted on `conftest.py`'s source, because this list is
+      #              the hermetic one and that file is not read here). The
+      #              commit above this one is where they landed; this block
+      #              changes no test, so the figure holds at this head too.
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
       #              branch names, the sixth being the adapter conformance
@@ -419,11 +431,21 @@ jobs:
   # file, and it is a separate act with a separate owner — named here so the
   # gap is visible rather than assumed.
   #
+  # AND THAT IS RULED, not deferred by this act's own judgment:
+  # RULED openxFactory#656 comment 5701772032 (Brett Heap, 2026-09-16, by interactive multi-choice)
+  # answers Q-R3 — this job is ADVISORY now and becomes required in a separate
+  # DECLARED act. So the gap above is a scheduled act with an owner, and the
+  # required check stays hermetic in the meantime.
+  #
   # WITHOUT `--noconftest`, because this is the job `tests_runtime/conftest.py`
   # exists for: the per-test schema, the in-fixture RSA key pair and the token
-  # minter. Where `OPENDOX_TEST_DATABASE_URL` is unreachable every DB-backed
-  # case SKIPS with the reason printed — never passes silently and never fails
-  # a developer's tree for not running Postgres.
+  # minter. Where `OPENDOX_TEST_DATABASE_URL` is unreachable a DEVELOPER's tree
+  # skips with the reason printed, and HERE IT FAILS: `CI` is set, and pytest
+  # exits 0 when every collected case is skipped, so a run whose `postgres:16`
+  # service failed to start would otherwise report green having made no
+  # database-backed assertion at all (`conftest._skip_or_fail`; Copilot review
+  # of openDox-code#25, round 5). This job supplies the service, so its absence
+  # here is this job's own defect and is reported as one.
   runtime:
     runs-on: ubuntu-latest
     services:

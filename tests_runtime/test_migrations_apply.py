@@ -513,3 +513,79 @@ def test_a_ledger_that_cannot_be_protected_applies_no_migration_at_all(
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")
+
+
+def test_reset_drops_in_this_schema_only_and_never_through_public(
+        postgres_dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`runtime reset` promises "this schema's coordination state, and nothing
+    else" — and an UNQUALIFIED drop cannot keep that promise.
+
+    `search_path` is `<schema>,public`, so `drop table if exists users` in a
+    schema that has no `users` resolved through the fallback and dropped
+    `public.users`: a confirmed reset of one tenant's schema silently dropping
+    another's table (Copilot review of openDox-code#25, round 5). The same
+    fallback `MigrationRunner.applied` is qualified against, one verb over.
+
+    MEASURED THE WAY THE DEFECT WOULD APPEAR: a table named `users` in
+    `public`, a fresh schema that has none of the coordination tables but one,
+    and a reset whose DSN selects that schema.
+    """
+    import io
+    import json
+    import uuid
+    from contextlib import redirect_stdout
+
+    from opendox.runtime import cli
+    from opendox.runtime.config import PREFIX
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    canary = "public_users_" + uuid.uuid4().hex[:8]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            # The table the search-path fallback would reach. Its own column
+            # name is unique to this test, so nothing here can be confused
+            # with a real `users` table if one is ever left behind.
+            conn.execute(f"create table public.users ({canary} text)")
+            # And ONE coordination table that really is in the schema, so the
+            # run has something of its own to drop and the assertion below is
+            # about WHERE the drop landed, not whether it ran.
+            conn.execute(f"create table {schema}.projects (id text)")
+        try:
+            separator = "&" if "?" in postgres_dsn else "?"
+            # libpq percent-decodes a URI's query, so `%3D` is `=` and `%2C`
+            # is `,`: `options=-csearch_path=<schema>,public`. This is the
+            # shape a tenant-scoped install's DSN has, which is the only way
+            # the fallback is reachable at all.
+            monkeypatch.setenv(
+                PREFIX + "MIGRATION_DATABASE_URL",
+                f"{postgres_dsn}{separator}"
+                f"options=-csearch_path%3D{schema}%2Cpublic")
+            args = cli.build_parser().parse_args(
+                ["runtime", "reset", "--confirm", cli.RESET_CONFIRMATION])
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = args.func(args)
+            evidence = json.loads(buffer.getvalue())
+            assert code == 0, evidence
+            assert evidence["schema"] == schema, (
+                "the evidence must say WHICH schema was dropped from")
+
+            with admin.connection() as conn:
+                surviving = conn.execute(
+                    "select column_name from information_schema.columns "
+                    "where table_schema = 'public' and table_name = 'users'"
+                ).fetchall()
+                assert [row[0] for row in surviving] == [canary], (
+                    "`public.users` was dropped by a reset of another schema")
+                own = conn.execute(
+                    "select table_name from information_schema.tables "
+                    "where table_schema = %s", (schema,)).fetchall()
+                assert own == [], (
+                    f"the reset left {[r[0] for r in own]} in its own schema")
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+                conn.execute("drop table if exists public.users")

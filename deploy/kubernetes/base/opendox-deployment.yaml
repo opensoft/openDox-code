@@ -118,6 +118,13 @@ spec:
               value: "migrations"
             - name: OPENDOX_PROJECT_REPOSITORY_ROOT
               value: "/var/lib/opendox/projects"
+            # The schema viewers' switch — a DECISION, so it comes from the
+            # ConfigMap an overlay edits rather than from this file.
+            - name: OPENDOX_PUBLISH_OPENAPI
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: publish_openapi
           livenessProbe:
             # `/livez` answers before any dependency is reachable, so a broker
             # outage is never mistaken for a dead process and restarted.

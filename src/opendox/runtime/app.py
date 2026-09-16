@@ -342,6 +342,15 @@ drafts = APIRouter(prefix="/drafts", tags=["drafts"],
                    responses=REFUSALS)
 
 
+#: ONE BODY FOR BOTH 404s ON `/users/{id}` — a user that does not exist and a
+#: user this principal may not see. It names no id, because naming one would
+#: put the caller's own probe back in the answer.
+_NO_SUCH_USER: dict[str, Any] = {
+    "code": "coordination.not_found",
+    "message": "no such user is visible to this principal",
+}
+
+
 @users.get("/me")
 def read_me(principal: PrincipalDep) -> dict[str, Any]:
     """The row this token resolved to — the whole of the inversion, visible."""
@@ -381,15 +390,22 @@ def read_user(user_id: str, store: StoreDep,
               principal: PrincipalDep) -> dict[str, Any]:
     """One user, if the principal shares a project with it (or is it).
 
-    A user it may not see is 404, not 403: a 403 would confirm the id exists,
-    which is the enumeration this route was closing.
+    A user it may not see is 404, not 403: a 403 would confirm the id exists.
+
+    AND THE TWO 404s ARE BYTE-IDENTICAL, which the first cut of this handler
+    got wrong in the way that matters: it read the row FIRST, so a missing user
+    came back as `_found`'s `no user with id=…` and a hidden one as `no user …
+    visible to this principal` — the same status with two different bodies,
+    which is the same enumeration oracle wearing a different hat (Copilot
+    review of openDox-code#25). The visibility question is asked FIRST and its
+    refusal is `_NO_SUCH_USER`, the one message both cases get.
     """
-    user = _found(lambda: store.get_user(user_id))
     if not store.user_is_visible_to(user_id, viewer_id=principal.id):
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "coordination.not_found",
-                    "message": f"no user {user_id!r} visible to this principal"})
+        raise HTTPException(status_code=404, detail=_NO_SUCH_USER)
+    try:
+        user = store.get_user(user_id)
+    except identity.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_NO_SUCH_USER) from exc
     return _user_json(user)
 
 

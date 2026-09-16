@@ -66,6 +66,13 @@ services:
       OPENDOX_BIND_PORT: ${OPENDOX_BIND_PORT:-8080}
       OPENDOX_MIGRATIONS_DIR: ${OPENDOX_MIGRATIONS_DIR:-migrations}
       OPENDOX_PROJECT_REPOSITORY_ROOT: ${OPENDOX_PROJECT_REPOSITORY_ROOT:-/var/lib/opendox/projects}
+      # THE SCHEMA VIEWERS' SWITCH REACHES THE CONTAINER. `.env.example`
+      # documents `OPENDOX_PUBLISH_OPENAPI` and the application reads it, and
+      # this service did not pass it — so setting it in the documented `.env`
+      # changed nothing and `/docs` stayed 404 with no way to tell why
+      # (Copilot review of openDox-code#25). The default is the application's
+      # own: OFF.
+      OPENDOX_PUBLISH_OPENAPI: ${OPENDOX_PUBLISH_OPENAPI:-false}
     volumes:
       # RULING C3's per-project plain local git repositories. A NAMED VOLUME
       # and not a bind mount: these are repositories the runtime creates and

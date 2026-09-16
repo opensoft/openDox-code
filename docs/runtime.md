@@ -121,6 +121,14 @@ Reach it over the compose network or with `docker compose exec`.
 ### On Kubernetes
 
 ```sh
+# THE NAMESPACE FIRST. Every command below is `-n opendox`, and on a clean
+# cluster that namespace does not exist until the manifest is applied — which
+# is the LAST line here, so the three `create secret` calls failed with
+# `namespaces "opendox" not found` and the documented install could not
+# proceed (Copilot review of openDox-code#25). It is in the base as
+# `namespace.yaml` too; applying it first is idempotent.
+kubectl apply -f deploy/kubernetes/base/namespace.yaml
+
 # THREE secrets and FOUR keys. The bundled Postgres needs both its own
 # superuser password and the least-privileged role's, because the base creates
 # that role on first start; a secret with only `password` leaves the pod unable
@@ -128,10 +136,21 @@ Reach it over the compose network or with `docker compose exec`.
 kubectl -n opendox create secret generic opendox-postgres \
     --from-literal=password=... \
     --from-literal=runtime-password=...
+# `opendox-db-runtime`'s DSN authenticates as the SERVED role, and that role's
+# NAME is `runtime_pg_role` in the `opendox-runtime-config` ConfigMap. They
+# must be the same role: the migration run narrows the named one's rights on
+# the ledger, so narrowing a role nobody serves as leaves the real served role
+# able to rewrite it. An overlay that changes this DSN's user changes that
+# literal in the same commit.
 kubectl -n opendox create secret generic opendox-db-runtime   --from-literal=dsn=...
 kubectl -n opendox create secret generic opendox-db-migration --from-literal=dsn=...
 kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
 ```
+
+**A managed database instead of the bundled Postgres.** Point both DSNs at it
+and set `migration_wait_host=` (empty) in the `opendox-runtime-config`
+ConfigMap: the migration Job's readiness gate then exits immediately instead of
+waiting four minutes for a Service this cluster does not have.
 
 **Re-running the migration Job.** A Job's pod template is immutable, so a
 second `kubectl apply` after the first run does not start a new migration. Ask
