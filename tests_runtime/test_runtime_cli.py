@@ -455,10 +455,28 @@ def test_serve_emits_evidence_on_an_ordinary_shutdown(
 
     uvicorn_stub = types.ModuleType("uvicorn")
 
-    def _fake_run(app: object, **kwargs: object) -> None:
-        served.update(kwargs)
+    class _Config:
+        def __init__(self, app: object, **kwargs: object) -> None:
+            served.update(kwargs)
 
-    uvicorn_stub.run = _fake_run                       # type: ignore[attr-defined]
+    class _Server:
+        """uvicorn's own shape: `Server(Config(...)).run()`, and `started`.
+
+        `uvicorn.run` SWALLOWS a startup failure — a lifespan that raises is
+        logged and the loop returns — so the verb could not tell "served and
+        stopped" from "never started" (Copilot review of openDox-code#25,
+        round 8). `started` is the flag uvicorn itself sets.
+        """
+
+        def __init__(self, config: object) -> None:
+            self.config = config
+            self.started = False
+
+        def run(self) -> None:
+            self.started = served.pop("_startup_fails", True) is not False
+
+    uvicorn_stub.Config = _Config                      # type: ignore[attr-defined]
+    uvicorn_stub.Server = _Server                      # type: ignore[attr-defined]
     app_stub = types.ModuleType("opendox.runtime.app")
     app_stub.create_app = lambda **kwargs: object()    # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "uvicorn", uvicorn_stub)
@@ -473,6 +491,50 @@ def test_serve_emits_evidence_on_an_ordinary_shutdown(
     assert evidence["verb"] == "serve"
     assert evidence["state"] == "stopped"
     assert evidence["bind_port"] == served["port"]
+
+
+def test_serve_refuses_when_the_applications_startup_never_completed(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """`uvicorn.run` returns NORMALLY when the lifespan raises.
+
+    An unreachable database or a broker that will not answer is logged by
+    uvicorn and the server loop simply returns, so `serve` emitted `ok: true`
+    and exited 0 for a process that never served a request — the lifecycle
+    contract says a failed verb prints a refusal and exits nonzero, and this
+    was the one verb that could not (Copilot review of openDox-code#25,
+    round 8). `Server.started` is uvicorn's own answer.
+    """
+    import sys
+    import types
+
+    uvicorn_stub = types.ModuleType("uvicorn")
+
+    class _Config:
+        def __init__(self, app: object, **kwargs: object) -> None:
+            pass
+
+    class _NeverStarted:
+        def __init__(self, config: object) -> None:
+            self.started = False        # what uvicorn leaves it as
+
+        def run(self) -> None:
+            return None                 # logged the failure, returned normally
+
+    uvicorn_stub.Config = _Config                      # type: ignore[attr-defined]
+    uvicorn_stub.Server = _NeverStarted                # type: ignore[attr-defined]
+    app_stub = types.ModuleType("opendox.runtime.app")
+    app_stub.create_app = lambda **kwargs: object()    # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn_stub)
+    monkeypatch.setitem(sys.modules, "opendox.runtime.app", app_stub)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                       "postgresql://nobody@127.0.0.1:1/none")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+    code, evidence = _run(cli.build_parser().parse_args(["runtime", "serve"]))
+    assert code == 1, evidence
+    assert evidence["ok"] is False
+    assert evidence["refusal"] == "startup-failed"
+    assert "nothing was served" in evidence["message"]
 
 
 # -- Copilot's seventh round on #25 ------------------------------------------

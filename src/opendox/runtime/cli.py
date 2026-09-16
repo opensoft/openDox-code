@@ -321,20 +321,37 @@ def cmd_serve(args: argparse.Namespace) -> int:
                                  "`runtime` extra: pip install '.[runtime]'"},
                      ok=False)
     app = create_app(settings=settings)
-    uvicorn.run(app, host=settings.bind_host, port=settings.bind_port,
-                log_level=args.log_level)
+    # AN EXPLICIT `Server`, BECAUSE `uvicorn.run` SWALLOWS A STARTUP FAILURE.
+    # A lifespan that raises — an unreachable database, a broker that will not
+    # answer — is LOGGED by uvicorn and the server loop simply returns, so the
+    # branch below emitted `ok: true` and exited 0 for a process that never
+    # served a request: the lifecycle contract says a failed verb prints a
+    # refusal and exits nonzero, and this was the one verb that could not
+    # (Copilot review of openDox-code#25, round 8). `Server.started` is
+    # uvicorn's own answer to "did startup complete", and it is False in
+    # exactly that case.
+    server = uvicorn.Server(uvicorn.Config(
+        app, host=settings.bind_host, port=settings.bind_port,
+        log_level=args.log_level))
+    server.run()
+    if not getattr(server, "started", False):
+        return _emit({"verb": "serve", "refusal": "startup-failed",
+                      "bind_host": settings.bind_host,
+                      "bind_port": settings.bind_port,
+                      "message": "the application's startup did not complete, "
+                                 "so nothing was served; uvicorn's log carries "
+                                 "the reason (a dependency the lifespan could "
+                                 "not reach is the usual one)"}, ok=False)
     # EVERY LIFECYCLE VERB EMITS A JSON EVIDENCE OBJECT, INCLUDING THIS ONE.
     # `serve` was the single verb that returned 0 and printed nothing after a
-    # normal `uvicorn.run` shutdown, which made the CLI's own contract false
-    # for the one verb an operator runs longest (Copilot review of
-    # openDox-code#25). A startup failure still raises and is still reported by
-    # `main`'s boundary; this is the ORDINARY exit, and it says what was served
-    # and that it stopped.
+    # normal shutdown, which made the CLI's own contract false for the one verb
+    # an operator runs longest (Copilot review of openDox-code#25). This is the
+    # ORDINARY exit, and it says what was served and that it stopped.
     return _emit({"verb": "serve", "state": "stopped",
                   "bind_host": settings.bind_host,
                   "bind_port": settings.bind_port,
-                  "message": "the server returned from uvicorn.run; the "
-                             "process is exiting normally"}, ok=True)
+                  "message": "the server returned from uvicorn; the process is "
+                             "exiting normally"}, ok=True)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
