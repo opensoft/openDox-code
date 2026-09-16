@@ -412,11 +412,21 @@ jobs:
   # file, and it is a separate act with a separate owner — named here so the
   # gap is visible rather than assumed.
   #
+  # AND THAT IS RULED, not deferred by this act's own judgment:
+  # RULED openxFactory#656 comment 5701772032 (Brett Heap, 2026-09-16, by interactive multi-choice)
+  # answers Q-R3 — this job is ADVISORY now and becomes required in a separate
+  # DECLARED act. So the gap above is a scheduled act with an owner, and the
+  # required check stays hermetic in the meantime.
+  #
   # WITHOUT `--noconftest`, because this is the job `tests_runtime/conftest.py`
   # exists for: the per-test schema, the in-fixture RSA key pair and the token
-  # minter. Where `OPENDOX_TEST_DATABASE_URL` is unreachable every DB-backed
-  # case SKIPS with the reason printed — never passes silently and never fails
-  # a developer's tree for not running Postgres.
+  # minter. Where `OPENDOX_TEST_DATABASE_URL` is unreachable a DEVELOPER's tree
+  # skips with the reason printed, and HERE IT FAILS: `CI` is set, and pytest
+  # exits 0 when every collected case is skipped, so a run whose `postgres:16`
+  # service failed to start would otherwise report green having made no
+  # database-backed assertion at all (`conftest._skip_or_fail`; Copilot review
+  # of openDox-code#25, round 5). This job supplies the service, so its absence
+  # here is this job's own defect and is reported as one.
   runtime:
     runs-on: ubuntu-latest
     services:

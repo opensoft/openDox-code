@@ -37,6 +37,12 @@ point — `build_parser(subcommand_extensions=(RuntimeSubcommand(),))` — and n
 verb is re-authored. That is the seam used for what it is for, without
 pretending the runtime is a layer above.
 
+AND THAT IS THE RULED SHAPE, not this act's preference. RULED openxFactory#656 comment 5701772032 (Brett Heap, 2026-09-16, by interactive multi-choice)
+answers Q-R4: the verbs are wired into `opendox.cli` in the BUILD-arc act that
+repairs `opendox.serve`, and `opendox-runtime` is the spelling until then. So
+the seam above stays a seam and the console script stays the way a reader
+invokes the runtime today; neither is provisional and neither is a fork.
+
 EVERY VERB PRINTS MACHINE-READABLE, REDACTED EVIDENCE and exits nonzero on a
 refusal, which is the Hermes install's lifecycle contract ("Each verb prints
 its redacted machine-readable evidence (JSON) and exits nonzero on a
