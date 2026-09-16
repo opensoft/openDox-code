@@ -110,10 +110,9 @@ TEST_KID = "test-key-1"
 
 @pytest.fixture(scope="session")
 def rsa_key_pair() -> tuple[object, object]:
-    cryptography = pytest.importorskip(
+    pytest.importorskip(
         "cryptography",
         reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
-    del cryptography
     from cryptography.hazmat.primitives.asymmetric import rsa
 
     private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -124,10 +123,8 @@ def rsa_key_pair() -> tuple[object, object]:
 def jwks_path(rsa_key_pair: tuple[object, object], tmp_path_factory) -> str:
     import json
 
-    import jwt
     from jwt.algorithms import RSAAlgorithm
 
-    del jwt
     _private, public = rsa_key_pair
     jwk = json.loads(RSAAlgorithm.to_jwk(public))
     jwk.update({"kid": TEST_KID, "use": "sig", "alg": "RS256"})

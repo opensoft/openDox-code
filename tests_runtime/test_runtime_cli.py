@@ -10,12 +10,20 @@ import argparse
 import io
 import json
 from contextlib import redirect_stdout
+from pathlib import Path
 
 import pytest
 import subcommand_extension
 
 from opendox.runtime import cli, identity, migrations
 from opendox.runtime.config import PREFIX, SECRET_NAMES
+
+# THIS FILE READS `argparse`'s PRIVATE ATTRIBUTES (`parser._actions`,
+# `argparse._SubParsersAction`) ON PURPOSE. argparse publishes no way to ask a
+# built parser which subcommands it declares, and the alternative — asserting
+# against the help text — would pin formatting rather than structure and would
+# go red on a Python release that rewraps a line. The closure these tests keep
+# is over the VERB SET, so it has to read the verbs.
 
 
 def test_the_verb_set_is_closed_and_the_parser_declares_exactly_it() -> None:
@@ -44,7 +52,7 @@ def test_the_registration_object_conforms_to_the_subcommand_seam() -> None:
     assert isinstance(cli.RuntimeSubcommand(),
                       subcommand_extension.SubcommandExtension)
     assert subcommand_extension.MEMBERS == ("register",)
-    source = (cli.__file__ and open(cli.__file__, encoding="utf-8").read()) or ""
+    source = Path(cli.__file__).read_text(encoding="utf-8")
     assert "import subcommand_extension" not in source, (
         "the runtime CLI must not import the seam it conforms to; structural "
         "conformance is the whole reason the seam is a Protocol")
