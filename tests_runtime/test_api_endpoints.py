@@ -10,40 +10,10 @@ where no `OPENDOX_TEST_DATABASE_URL` is reachable.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 
 from opendox.runtime import COLLECTIONS
-from opendox.runtime.config import PREFIX, load_settings
-from tests_runtime.conftest import TEST_AUDIENCE, TEST_ISSUER
-
-
-@pytest.fixture()
-def client(database, postgres_dsn: str, verifier) -> Iterator[object]:
-    """A `TestClient` over the real app, on this test's own schema.
-
-    The application is given its OWN `Database` on the same schema rather than
-    the fixture's: the app's lifespan opens and closes the pool it is handed,
-    and sharing one with the fixture would have the teardown closing a pool the
-    app had already closed.
-    """
-    fastapi_testclient = pytest.importorskip(
-        "fastapi.testclient",
-        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
-    from opendox.runtime.app import create_app
-    from opendox.runtime.db import Database
-
-    settings = load_settings({
-        PREFIX + "DATABASE_URL": postgres_dsn,
-        PREFIX + "OIDC_ISSUER": TEST_ISSUER,
-        PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
-    })
-    app = create_app(settings=settings,
-                     database=Database(postgres_dsn, schema=database.schema),
-                     verifier=verifier)
-    with fastapi_testclient.TestClient(app) as test_client:
-        yield test_client
+from tests_runtime.conftest import TEST_ISSUER
 
 
 def _auth(token: str) -> dict[str, str]:

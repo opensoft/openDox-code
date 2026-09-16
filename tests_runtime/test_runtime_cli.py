@@ -18,18 +18,85 @@ from opendox.runtime import cli, identity, migrations
 from opendox.runtime.config import PREFIX, SECRET_NAMES
 
 
-def test_the_verb_set_is_closed_and_the_parser_declares_exactly_it() -> None:
-    parser = cli.build_parser()
+def _commands(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
     actions = [a for a in parser._actions
                if isinstance(a, argparse._SubParsersAction)]
     assert len(actions) == 1
-    assert list(actions[0].choices) == ["runtime"]
-    runtime_parser = actions[0].choices["runtime"]
-    verbs = [a for a in runtime_parser._actions
+    return actions[0]
+
+
+def _verbs_of(command: argparse.ArgumentParser) -> tuple[str, ...]:
+    verbs = [a for a in command._actions
              if isinstance(a, argparse._SubParsersAction)]
     assert len(verbs) == 1
-    assert tuple(verbs[0].choices) == cli.VERBS
+    return tuple(verbs[0].choices)
+
+
+def test_the_standalone_parser_declares_the_two_commands_and_no_third() -> None:
+    assert list(_commands(cli.build_parser()).choices) == ["runtime", "project"]
+
+
+def test_the_runtime_verb_set_is_closed_and_the_parser_declares_exactly_it() -> None:
+    commands = _commands(cli.build_parser())
+    assert _verbs_of(commands.choices["runtime"]) == cli.VERBS
     assert cli.VERBS == ("init", "migrate", "serve", "status", "reset")
+
+
+def test_the_project_verb_set_is_closed_and_is_section_3_6s_act_and_successors(
+) -> None:
+    commands = _commands(cli.build_parser())
+    assert _verbs_of(commands.choices["project"]) == cli.PROJECT_VERBS
+    assert cli.PROJECT_VERBS == ("create-repository", "attach-remote", "push")
+
+
+def test_the_project_command_collides_with_no_core_subcommand() -> None:
+    """Measured against `src/opendox/cli.py`, not assumed.
+
+    `opendox.cli` cannot be IMPORTED at this leg (its `opendox.serve` reach is
+    what `tests/test_consumer_reach.py::STILL_REACHING` records), so its
+    subcommand names are read out of its source — which is the only way to
+    measure them here, and it is a measurement rather than a claim.
+    """
+    import re
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "src" / "opendox" /
+              "cli.py").read_text(encoding="utf-8")
+    core = set(re.findall(r'sub\.add_parser\(\s*"([a-z-]+)"', source))
+    assert core, "no core subcommands found; the regex has drifted from cli.py"
+    assert "project" not in core, (
+        f"`opendox.cli` already declares a `project` command ({sorted(core)}); "
+        "contributing this name would be a collision")
+
+
+def test_the_project_registration_object_conforms_to_the_subcommand_seam() -> None:
+    assert isinstance(cli.ProjectSubcommand(),
+                      subcommand_extension.SubcommandExtension)
+
+
+def test_registering_the_project_command_through_the_seam_gives_the_same_verbs(
+) -> None:
+    parser = argparse.ArgumentParser(prog="opendox")
+    sub = parser.add_subparsers(dest="command", required=True)
+    subcommand_extension.register_all(
+        (cli.RuntimeSubcommand(), cli.ProjectSubcommand()), sub)
+    contributed = [a for a in parser._actions
+                   if isinstance(a, argparse._SubParsersAction)][0]
+    assert list(contributed.choices) == ["runtime", "project"]
+    assert _verbs_of(contributed.choices["project"]) == cli.PROJECT_VERBS
+
+
+def test_every_project_verb_sets_a_dispatch_function_and_its_own_name() -> None:
+    arguments = {
+        "create-repository": ["--project-id", "p", "--actor", "a"],
+        "attach-remote": ["--project-id", "p", "--remote-url", "u"],
+        "push": ["--project-id", "p"],
+    }
+    for verb in cli.PROJECT_VERBS:
+        args = cli.build_parser().parse_args(["project", verb, *arguments[verb]])
+        assert callable(args.func)
+        assert args.verb == verb
+        assert args.project_id == "p"
 
 
 def test_the_registration_object_conforms_to_the_subcommand_seam() -> None:

@@ -353,8 +353,15 @@ jobs:
       # own. Each of the five does; `tests_runtime/conftest.py` is read only by
       # the `runtime` job.
       #
-      # MEASURED, file by file, under this exact invocation before it was
-      # named (2026-09-16, python 3.12.3 / pytest 8.4.2): 68 passed.
+      # `tests_runtime/test_local_git_adapter.py` is here too, and it is the
+      # strongest placement § 3.6's proof can have: RULING C3's adapter is
+      # checked against `opendox.corpus_adapter.CorpusAdapter` with `isinstance`
+      # in the REQUIRED job, because the adapter and the interface are both
+      # stdlib-only to import. It does shell out to `git` — present on every
+      # GitHub runner — and skips with the reason printed where there is none.
+      #
+      # MEASURED, file by file, under this exact invocation before each was
+      # named (2026-09-16, python 3.12.3 / pytest 8.4.2 / git 2.43.0): 104 passed.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
@@ -363,6 +370,7 @@ jobs:
           tests_runtime/test_runtime_surface.py
           tests_runtime/test_runtime_cli.py
           tests_runtime/test_deploy_shape.py
+          tests_runtime/test_local_git_adapter.py
           --noconftest
 
   # -------------------------------------------------------------------------

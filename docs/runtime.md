@@ -41,7 +41,8 @@ it in by name: a draft is the text that has **not** entered the corpus yet.
 migrations/          0001 pinned canonical, 0002+ additive
 deploy/compose/      docker-compose.yaml, Dockerfile, init-runtime-role.sh, .env.example
 deploy/kubernetes/   base/ + overlays/dev/
-src/opendox/runtime/ config, migrations, identity, db, oidc, app, cli
+src/opendox/runtime/ config, migrations, identity, db, oidc, app, cli,
+                     local_git_adapter, repository_act
 tests_runtime/       the hermetic half (required check) and the DB-backed half
 ```
 
@@ -136,6 +137,63 @@ per-project git repositories read-write and git has no cross-writer protocol
 over a shared filesystem. Scaling first moves those repositories behind a
 remote — which is what C3's "a remote can be attached later" already describes.
 
+## 6a. The repository-creation act (§ 3.6)
+
+`split-opendox-two-layer-product` § 3.6: "**openDox CREATES A REPOSITORY AS A
+FIRST-CLASS ACT**, or the origin complaint returns one level down." So it is a
+verb, not a side effect of creating a project:
+
+```
+POST /api/v1/projects/{id}/repository           # create it
+PUT  /api/v1/projects/{id}/repository/remote    # RULING C3: attach one later
+POST /api/v1/projects/{id}/repository/push      # the move IS a push
+```
+
+```sh
+opendox-runtime project create-repository --project-id <id> --actor 'Name <a@b>'
+opendox-runtime project attach-remote     --project-id <id> --remote-url <url>
+opendox-runtime project push              --project-id <id>
+```
+
+**The act is the PAIR**: the map row and the repository, together or not at
+all. The row is written first, inside the request's transaction, so a
+repository that fails to initialize leaves no row pointing at nothing. The
+window a transaction cannot cover — a process killed between `git init` and the
+commit — leaves a directory with no row, and the next act **refuses and names
+it** rather than adopting a directory nobody can account for.
+
+**The repository is BARE**, at
+`<OPENDOX_PROJECT_REPOSITORY_ROOT>/<project id>`, and its first commit is
+empty. Both are decisions:
+
+* bare, because the corpus is the HISTORY. `LocalGitCorpus.write_back` builds a
+  blob, a tree and a commit with plumbing against a temporary index and moves
+  the branch ref — it writes no file, because `corpus_adapter.write_back`'s
+  contract is that it "never touches the corpus tree". A checkout beside the
+  history would therefore be a second answer to "what does this project
+  contain" that the adapter is forbidden to keep up to date. openDox *manages*
+  this repository (RULING C3's own verb); a human who wants a checkout clones
+  it;
+* empty, because a README this act invented would be content the project's
+  owner did not write, in the one place the product's promise is that the
+  documents are theirs.
+
+**The adapter, for § 3.7.** The conformant implementation is
+`opendox.runtime.local_git_adapter.LocalGitCorpus` — that import path is what
+`split-opendox-two-layer-product` § 3.7's neutral conformance corpus needs, and
+importing it costs the standard library only. It is STRUCTURALLY conformant
+with `opendox.corpus_adapter.CorpusAdapter`: six operations, no seventh,
+nothing inherited, checked with `isinstance` in the required `validate` job.
+`opendox.runtime.repository_act.initialize_repository` builds a corpus to check
+without a database.
+
+One thing the adapter deliberately does not do: refuse a stale write.
+`write_back`'s declared refusal row is `CORPUS_READ_ONLY` and
+`WRITE_PATH_UNREACHABLE` and nothing else, and the closed refusal vocabulary
+has no kind for staleness — so `basis_revision` is recorded as a commit trailer
+and the branch ref moves by compare-and-swap, which means a writer working from
+a superseded revision loses its dispatch rather than overwriting the other one.
+
 ## 7. `reset`, and what "disposable" does and does not cover
 
 `opendox-runtime runtime reset --confirm yes-drop-the-coordination-database`
@@ -158,9 +216,11 @@ deletes the `opendox-project-repositories` claim.
 | `test_runtime_surface.py` | `validate` (required) | `.[test]` |
 | `test_runtime_cli.py` | `validate` (required) | `.[test]` |
 | `test_deploy_shape.py` | `validate` (required) | `.[test]` |
+| `test_local_git_adapter.py` | `validate` (required) | `.[test]` + `git` |
 | `test_migrations_apply.py` | `runtime` | `.[runtime,test]` + Postgres |
 | `test_oidc_verifier.py` | `runtime` | `.[runtime,test]` |
 | `test_api_endpoints.py` | `runtime` | `.[runtime,test]` + Postgres |
+| `test_repository_act.py` | `runtime` | `.[runtime,test]` + Postgres + `git` |
 
 The split is the package's import-weight contract
 (`src/opendox/runtime/__init__.py`), and `test_runtime_surface.py` measures it

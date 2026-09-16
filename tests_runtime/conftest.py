@@ -173,3 +173,71 @@ def verifier(jwks_path: str):
     return TokenVerifier(issuer=TEST_ISSUER, audience=TEST_AUDIENCE,
                          jwks=CachingJwks(FileJwksSource(jwks_path),
                                           ttl_seconds=300))
+
+
+@pytest.fixture()
+def client(database, postgres_dsn: str, verifier):
+    """A `TestClient` over the REAL application, on this test's own schema.
+
+    The application is given its OWN `Database` on the same schema rather than
+    the `database` fixture's: the app's lifespan opens and closes the pool it
+    is handed, and sharing one would have the fixture's teardown closing a pool
+    the app had already closed.
+
+    Shared rather than per-suite because two suites need it —
+    `test_api_endpoints.py` for § 3.5's six collections and
+    `test_repository_act.py` for § 3.6's act.
+    """
+    fastapi_testclient = pytest.importorskip(
+        "fastapi.testclient",
+        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
+    from opendox.runtime.app import create_app
+    from opendox.runtime.config import PREFIX, load_settings
+    from opendox.runtime.db import Database
+
+    settings = load_settings({
+        PREFIX + "DATABASE_URL": postgres_dsn,
+        PREFIX + "OIDC_ISSUER": TEST_ISSUER,
+        PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
+    })
+    app = create_app(settings=settings,
+                     database=Database(postgres_dsn, schema=database.schema),
+                     verifier=verifier)
+    with fastapi_testclient.TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture()
+def project_repository_root(tmp_path):
+    """Where § 3.6's act creates repositories in a test.
+
+    A per-test directory rather than the configured default, so a suite never
+    writes into a developer's real `OPENDOX_PROJECT_REPOSITORY_ROOT`.
+    """
+    root = tmp_path / "projects"
+    root.mkdir()
+    return root
+
+
+@pytest.fixture()
+def client_with_repositories(database, postgres_dsn: str, verifier,
+                             project_repository_root):
+    """`client`, with the repository root pointed at this test's own directory."""
+    fastapi_testclient = pytest.importorskip(
+        "fastapi.testclient",
+        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
+    from opendox.runtime.app import create_app
+    from opendox.runtime.config import PREFIX, load_settings
+    from opendox.runtime.db import Database
+
+    settings = load_settings({
+        PREFIX + "DATABASE_URL": postgres_dsn,
+        PREFIX + "OIDC_ISSUER": TEST_ISSUER,
+        PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
+        PREFIX + "PROJECT_REPOSITORY_ROOT": str(project_repository_root),
+    })
+    app = create_app(settings=settings,
+                     database=Database(postgres_dsn, schema=database.schema),
+                     verifier=verifier)
+    with fastapi_testclient.TestClient(app) as test_client:
+        yield test_client

@@ -40,6 +40,12 @@ remedies, rather than initializing over it or adopting it silently — adopting 
 directory nobody can account for is how a project ends up pointed at somebody
 else's history.
 
+Within the act the ROW is also checked first, because it holds the
+authoritative fact: a project that already has a repository is refused as
+"already mapped" rather than as "there is a directory here", which is only the
+symptom. Nothing has touched the filesystem at that point, so either refusal
+leaves the disk as it found it.
+
 ## What this module does NOT do
 
 It does not write documents. The first document arrives through
@@ -136,6 +142,20 @@ def create_repository(store: Any, *, project_id: str,
             "local git repository and this act creates it by running git")
 
     location = repository_location(root, project_id)
+
+    # THE ROW FIRST, inside the caller's transaction, and first also because it
+    # holds the AUTHORITATIVE fact: a project that is already mapped is refused
+    # as "already mapped" (the store's `ConflictError`) and not as "there is a
+    # directory here", which is a symptom. Measured, not assumed — with the
+    # checks the other way round, `test_a_second_act_on_the_same_project_is_
+    # refused` got the directory's message for a project whose real problem was
+    # its map row.
+    row = store.create_project_repository(
+        project_id=project_id, adapter=ADAPTER_NAME, location=str(location))
+
+    # THEN the orphan check, and still before any filesystem mutation: nothing
+    # below has run, so a refusal here leaves the disk untouched and the row is
+    # rolled back with the caller's transaction.
     if location.exists() and any(location.iterdir()):
         raise RepositoryActRefused(
             f"{location} already exists and is not empty. Either a previous "
@@ -143,10 +163,6 @@ def create_repository(store: Any, *, project_id: str,
             "committing its map row, or this directory belongs to something "
             "else. Remove it, or map the project to it deliberately — this "
             "act will not adopt a directory nobody can account for.")
-
-    # THE ROW FIRST, inside the caller's transaction. See the module header.
-    row = store.create_project_repository(
-        project_id=project_id, adapter=ADAPTER_NAME, location=str(location))
 
     commit = initialize_repository(location, project_id=project_id, actor=actor,
                                    branch=branch, executable=executable)
