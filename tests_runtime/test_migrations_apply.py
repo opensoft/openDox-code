@@ -357,3 +357,78 @@ def test_status_reports_a_reachable_database_and_its_applied_migrations(
     # reads them through the same search path.
     assert report["applied_migrations"] == ["0001", "0002"], report
     assert report["pending_migrations"] == [], report
+
+
+def test_drift_sees_what_plan_cannot(database, tmp_path: Path) -> None:
+    """`plan()` compares VERSIONS. A changed or deleted file is invisible to it
+    and is refused by `apply()`, so readiness that trusted `plan()` alone
+    called a database healthy that the runner would not migrate."""
+    for name in ("0001_identity_and_coordination.sql",
+                 "0002_migration_state.sql"):
+        shutil.copyfile(ROOT / "migrations" / name, tmp_path / name)
+    runner = migrations.MigrationRunner(database, migrations_dir=tmp_path)
+    assert runner.plan() == []
+    assert runner.drift() == []
+
+    edited = tmp_path / "0002_migration_state.sql"
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n-- edited\n",
+                      encoding="utf-8")
+    assert runner.plan() == [], "plan() should still see nothing pending"
+    assert runner.drift() == ["0002:changed"]
+
+    edited.unlink()
+    assert runner.plan() == []
+    assert runner.drift() == ["0002:missing"]
+
+
+def test_a_run_refuses_when_the_ledger_names_a_file_the_tree_lacks(
+        database, tmp_path: Path) -> None:
+    """A deleted migration must not be indistinguishable from a valid no-op."""
+    shutil.copyfile(ROOT / "migrations" / "0001_identity_and_coordination.sql",
+                    tmp_path / "0001_identity_and_coordination.sql")
+    runner = migrations.MigrationRunner(database, migrations_dir=tmp_path)
+    with pytest.raises(migrations.MigrationError) as caught:
+        runner.apply()
+    assert "0002" in str(caught.value)
+    assert "does not contain" in str(caught.value)
+
+
+def test_the_ledger_is_resolved_in_this_schema_and_not_through_public(
+        postgres_dsn: str) -> None:
+    """`search_path` is `<schema>,public`.
+
+    An unqualified `to_regclass` therefore found a ledger in `public` when the
+    selected schema had none, and a FRESH schema was reported fully migrated.
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            # A ledger in `public`, which is what the old lookup would find.
+            conn.execute("create table if not exists public."
+                         f"{migrations.LEDGER_TABLE} (version text primary key, "
+                         "name text not null, checksum text not null, "
+                         "reversible boolean not null default false, "
+                         "applied_at timestamptz not null default now())")
+            conn.execute(
+                f"insert into public.{migrations.LEDGER_TABLE} "
+                "(version, name, checksum) values ('0001','x','y'), "
+                "('0002','x','y') on conflict do nothing")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations")
+                assert runner.applied() == [], (
+                    "the ledger was read through `public`; a fresh schema "
+                    "would be reported fully migrated")
+                assert [m.version for m in runner.plan()] == ["0001", "0002"]
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+                conn.execute(
+                    f"drop table if exists public.{migrations.LEDGER_TABLE}")

@@ -5,6 +5,21 @@
 # A Job and not an initContainer of the Deployment: an initContainer would run
 # on every pod restart with the privileged DSN mounted into the same pod spec
 # as the served application, which is the separation this file exists to keep.
+#
+# IT HAS A FIXED NAME, AND RE-RUNNING IT IS A DELIBERATE ACT. A Job's pod
+# template is immutable, so a second `kubectl apply` of this manifest after the
+# first run does NOT start a new migration — it fails to patch the template and
+# the later migrations are silently not applied (Copilot review of
+# openDox-code#25). That is a property of Jobs, not of this file, and the
+# answer is to say so rather than to pretend an apply loop covers it. The
+# runbook (`docs/runtime.md` § 6) states the re-run:
+#
+#     kubectl -n opendox delete job opendox-migrate --ignore-not-found
+#     kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
+#
+# `ttlSecondsAfterFinished` below lets the cluster reap a finished run on its
+# own, so the delete is usually a no-op; it is in the runbook because "usually"
+# is not a migration guarantee.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -12,6 +27,10 @@ metadata:
   namespace: opendox
 spec:
   backoffLimit: 2
+  # Reaped an hour after it finishes, so the next `kubectl apply` meets no
+  # immutable template. See the note above for why the runbook still names the
+  # explicit delete.
+  ttlSecondsAfterFinished: 3600
   template:
     metadata:
       labels:

@@ -82,6 +82,12 @@ class ConflictError(CoordinationError):
     """A uniqueness or vocabulary rule the caller broke, named."""
 
 
+#: Postgres's SQLSTATE for `foreign_key_violation`. A row naming a user or a
+#: project that does not exist is a NOT-FOUND, not an internal error — and the
+#: pre-check the API makes cannot close the race where the referenced row is
+#: deleted between the read and the insert.
+FOREIGN_KEY_VIOLATION = "23503"
+
 #: Postgres's SQLSTATE for `unique_violation`. Matched by VALUE off the
 #: exception rather than by catching `psycopg.errors.UniqueViolation`, because
 #: this module imports no database driver — see the module docstring — and
@@ -104,7 +110,12 @@ def _conflict_if_duplicate(call: Any, message: str) -> Any:
     try:
         return call()
     except Exception as exc:  # noqa: BLE001
-        if getattr(exc, "sqlstate", None) != UNIQUE_VIOLATION:
+        sqlstate = getattr(exc, "sqlstate", None)
+        if sqlstate == FOREIGN_KEY_VIOLATION:
+            raise NotFoundError(
+                "a row this write references does not exist (or was deleted "
+                "between the check and the insert)") from exc
+        if sqlstate != UNIQUE_VIOLATION:
             raise
         raise ConflictError(message) from exc
 
@@ -329,13 +340,17 @@ class CoordinationStore:
             raise ConflictError(
                 f"role {role!r} is not one of {list(ROLES)}; the vocabulary is "
                 "closed by `memberships_role_check` in the canonical migration")
-        row = self._conn.execute(
-            f"insert into memberships ({_MEMBERSHIP_COLUMNS}) "
-            "values (%s, %s, %s, %s, now()) "
-            "on conflict (user_id, project_id) do update set role = excluded.role "
-            f"returning {_MEMBERSHIP_COLUMNS}",
-            (new_id(), user_id, project_id, role),
-        ).fetchone()
+        row = _conflict_if_duplicate(
+            lambda: self._conn.execute(
+                f"insert into memberships ({_MEMBERSHIP_COLUMNS}) "
+                "values (%s, %s, %s, %s, now()) "
+                "on conflict (user_id, project_id) do update set "
+                "role = excluded.role "
+                f"returning {_MEMBERSHIP_COLUMNS}",
+                (new_id(), user_id, project_id, role),
+            ).fetchone(),
+            f"a membership already exists for user {user_id!r} in project "
+            f"{project_id!r}")
         return Membership(*_one(row, "membership",
                                 f"user_id={user_id!r} project_id={project_id!r}"))
 
@@ -494,16 +509,31 @@ class CoordinationStore:
         return Draft(*_one(row, "draft", f"id={draft_id!r}"))
 
     def list_drafts(self, *, session_id: str | None = None,
+                    session_ids: Sequence[str] | None = None,
                     project_id: str | None = None,
                     limit: int | None = None,
                     after: str | None = None) -> list[Draft]:
+        """One page of drafts, with the SESSION FILTER APPLIED IN THE QUERY.
+
+        `session_ids` exists so a caller that may only see its own sessions
+        does not have to filter a page the LIMIT has already cut — which
+        returned an empty page whenever the global page held nobody else's
+        drafts, and left `after` pagination unable to walk past it. An EMPTY
+        list is "no sessions, therefore no drafts" and is answered without a
+        query; `None` is "do not filter by session".
+        """
+        if session_ids is not None and not session_ids:
+            return []
         rows = self._conn.execute(
             f"select {_DRAFT_COLUMNS} from drafts "
             "where (%s::text is null or session_id = %s) "
+            "and (%s::text[] is null or session_id = any(%s)) "
             "and (%s::text is null or project_id = %s) "
             "and (%s::text is null or id > %s) order by id limit %s",
-            (session_id, session_id, project_id, project_id, after, after,
-             clamp_limit(limit)),
+            (session_id, session_id,
+             list(session_ids) if session_ids is not None else None,
+             list(session_ids) if session_ids is not None else None,
+             project_id, project_id, after, after, clamp_limit(limit)),
         ).fetchall()
         return [Draft(*row) for row in rows]
 

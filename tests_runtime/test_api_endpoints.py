@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from pathlib import Path
 
 from opendox.runtime import COLLECTIONS
 from opendox.runtime.config import PREFIX, load_settings
@@ -521,3 +522,129 @@ def test_readiness_is_ready_once_the_schema_is_applied(client) -> None:
     body = client.get("/readyz").json()
     assert body["status"] == "ready"
     assert body["checks"]["schema"] == "applied"
+
+
+def test_an_unauthenticated_request_opens_no_database_transaction(
+        client, mint_token) -> None:
+    """The cheapest refusal must not depend on the most expensive resource.
+
+    `get_principal` depends on the store, and FastAPI resolves a dependency
+    before it calls the function that asked for it — so an EAGER store took a
+    pooled connection before anybody looked at `Authorization`, and a request
+    with no token failed with a database error whenever Postgres was
+    unreachable or the pool was exhausted.
+    """
+    from opendox.runtime.app import _LazyStore
+
+    opened: list[int] = []
+    original = _LazyStore._open
+
+    def _counting_open(self):  # noqa: ANN001
+        opened.append(1)
+        return original(self)
+
+    _LazyStore._open = _counting_open
+    try:
+        assert client.get("/api/v1/projects").status_code == 401
+        assert opened == [], "an unauthenticated request checked out a connection"
+        assert client.get("/api/v1/projects",
+                          headers=_auth(mint_token(subject="lazy-1"))
+                          ).status_code == 200
+        assert opened, "an authenticated request never opened one"
+    finally:
+        _LazyStore._open = original
+
+
+def test_a_membership_naming_an_unknown_row_is_a_404_and_not_a_500(
+        client, mint_token) -> None:
+    owner = mint_token(subject="fk-owner")
+    project = _project_with(client, owner, "fk-project")
+    me = client.get("/api/v1/users/me", headers=_auth(owner)).json()
+
+    missing_user = client.post(
+        "/api/v1/memberships",
+        json={"user_id": "no-such-user", "project_id": project["id"],
+              "role": "member"}, headers=_auth(owner))
+    assert missing_user.status_code == 404, missing_user.text
+    assert missing_user.json()["detail"]["code"] == "coordination.not_found"
+
+    missing_project = client.post(
+        "/api/v1/memberships",
+        json={"user_id": me["id"], "project_id": "no-such-project",
+              "role": "member"}, headers=_auth(owner))
+    # No membership in that project, so authorization refuses before the row
+    # lookup — which is the correct order and still not a 500.
+    assert missing_project.status_code in (403, 404), missing_project.text
+
+
+def test_draft_pagination_returns_the_principals_drafts_not_an_empty_page(
+        client, mint_token) -> None:
+    """The ownership filter used to be applied AFTER the LIMIT.
+
+    A global page holding only other users' drafts therefore came back empty
+    for a principal who has drafts, and `after` could not walk past it.
+    """
+    owner = mint_token(subject="page-owner")
+    other = mint_token(subject="page-other")
+    project = _project_with(client, owner, "pagination")
+    other_me = client.get("/api/v1/users/me", headers=_auth(other)).json()
+    client.post("/api/v1/memberships",
+                json={"user_id": other_me["id"], "project_id": project["id"],
+                      "role": "member"}, headers=_auth(owner))
+    other_session = client.post("/api/v1/sessions",
+                                json={"project_id": project["id"]},
+                                headers=_auth(other)).json()
+    mine_session = client.post("/api/v1/sessions",
+                               json={"project_id": project["id"]},
+                               headers=_auth(owner)).json()
+    # Twelve of theirs and one of mine; with a page of ten, a post-filter would
+    # very likely return nothing for me.
+    for index in range(12):
+        client.put("/api/v1/drafts",
+                   json={"session_id": other_session["id"],
+                         "project_id": project["id"],
+                         "document_key": f"theirs-{index}.md", "body": "x"},
+                   headers=_auth(other))
+    client.put("/api/v1/drafts",
+               json={"session_id": mine_session["id"],
+                     "project_id": project["id"],
+                     "document_key": "mine.md", "body": "y"},
+               headers=_auth(owner))
+
+    page = client.get("/api/v1/drafts?limit=10", headers=_auth(owner)).json()
+    assert [d["document_key"] for d in page] == ["mine.md"], page
+
+
+def test_readiness_refuses_a_database_whose_migration_file_has_changed(
+        database, postgres_dsn: str, verifier, tmp_path) -> None:
+    """Nothing pending is not the same as matching this tree."""
+    import shutil
+
+    from fastapi.testclient import TestClient
+
+    from opendox.runtime.app import create_app
+    from opendox.runtime.config import PREFIX, load_settings
+    from opendox.runtime.db import Database
+    from tests_runtime.conftest import TEST_AUDIENCE, TEST_ISSUER
+
+    root = Path(__file__).resolve().parents[1] / "migrations"
+    for name in ("0001_identity_and_coordination.sql",
+                 "0002_migration_state.sql"):
+        shutil.copyfile(root / name, tmp_path / name)
+    edited = tmp_path / "0002_migration_state.sql"
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n-- edited\n",
+                      encoding="utf-8")
+
+    settings = load_settings({
+        PREFIX + "DATABASE_URL": postgres_dsn,
+        PREFIX + "OIDC_ISSUER": TEST_ISSUER,
+        PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
+        PREFIX + "MIGRATIONS_DIR": str(tmp_path),
+    })
+    app = create_app(settings=settings,
+                     database=Database(postgres_dsn, schema=database.schema),
+                     verifier=verifier)
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+    assert response.status_code == 503, response.text
+    assert response.json()["checks"]["schema"] == "drifted: 0002:changed"

@@ -303,10 +303,11 @@ def test_the_bundled_postgres_provisions_the_least_privileged_role() -> None:
     schema-owning role, which is the separation the whole layout exists to keep.
     """
     generator = _generator("opendox-postgres-init")
-    assert generator["files"] == [
-        "010-runtime-role.sh=../../compose/init-runtime-role.sh"], (
-        "the Kubernetes base must mount the SAME role-bootstrap script the "
-        "compose package does; a second copy is a second thing to keep in step")
+    assert generator["files"] == ["010-runtime-role.sh=init-runtime-role.sh"], (
+        "the generator source must be INSIDE the kustomization root; "
+        "kustomize's default load restrictor refuses one outside it, and the "
+        "documented `kustomize build` then fails rather than renders")
+    assert (KUBERNETES / "base" / "init-runtime-role.sh").is_file()
     assert (COMPOSE / "init-runtime-role.sh").is_file()
 
     statefulset = _load_yaml(KUBERNETES / "base" / "postgres-statefulset.yaml")
@@ -315,6 +316,61 @@ def test_the_bundled_postgres_provisions_the_least_privileged_role() -> None:
     mounts = {mount["name"]: mount["mountPath"]
               for mount in container["volumeMounts"]}
     assert mounts["init-runtime-role"] == "/docker-entrypoint-initdb.d"
+
+
+def test_the_two_copies_of_the_role_bootstrap_are_byte_identical() -> None:
+    """The duplication kustomize forces, kept honest by a test instead of a path.
+
+    `LoadRestrictionsRootOnly` refuses a generator source outside the
+    kustomization root, so the Kubernetes base cannot read the compose
+    package's script and has to carry its own copy. One source of truth is then
+    something a test enforces rather than something the filesystem does.
+    """
+    compose = (COMPOSE / "init-runtime-role.sh").read_bytes()
+    kubernetes = (KUBERNETES / "base" / "init-runtime-role.sh").read_bytes()
+    assert compose == kubernetes, (
+        "deploy/compose/init-runtime-role.sh and "
+        "deploy/kubernetes/base/init-runtime-role.sh have drifted apart. They "
+        "are one script in two places because kustomize's load restrictor "
+        "requires it; copy one over the other rather than editing either alone.")
+
+
+def test_the_migration_job_says_how_it_is_re_run() -> None:
+    """A Job's pod template is immutable, so `kubectl apply` does not re-run it.
+
+    That is a property of Jobs and not of this manifest, and the answer is to
+    SAY so where an operator will look, rather than to let a second apply
+    silently not migrate.
+    """
+    job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
+    assert job["spec"].get("ttlSecondsAfterFinished"), (
+        "a finished Job with no TTL sits in the namespace and blocks the next "
+        "apply's template patch")
+    manifest = (KUBERNETES / "base" / "migration-job.yaml").read_text(
+        encoding="utf-8")
+    assert "delete job opendox-migrate" in manifest
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    assert "delete job opendox-migrate" in runbook, (
+        "the runbook must state the re-run; the manifest alone is not where an "
+        "operator looks")
+
+
+def test_the_runbook_creates_every_secret_key_the_base_references() -> None:
+    """A secret with one key of two leaves the Postgres pod unable to start."""
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    referenced: set[tuple[str, str]] = set()
+    for _path, document in _kubernetes_documents():
+        for container in _containers(document):
+            for entry in container.get("env", []):
+                ref = (entry.get("valueFrom") or {}).get("secretKeyRef")
+                if ref:
+                    referenced.add((ref["name"], ref["key"]))
+    assert referenced, "no secretKeyRef found; the walk is wrong"
+    for name, key in sorted(referenced):
+        assert name in runbook, f"the runbook never creates secret {name}"
+        assert f"{key}=" in runbook, (
+            f"the runbook creates {name} without the `{key}` key the base "
+            "references")
 
 
 def test_the_neutral_base_leaves_the_broker_empty_rather_than_plausible() -> None:
