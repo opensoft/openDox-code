@@ -136,3 +136,115 @@ def test_a_later_migration_is_applied_in_numeric_order(
             "where table_schema = current_schema() and table_name = 'projects'"
         ).fetchall()
     assert "probe" in {row[0] for row in columns}
+
+
+# ---------------------------------------------------------------------------
+# the review round's own assertions (Copilot review of openDox-code#25)
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_holds_the_advisory_lock_and_a_second_one_waits(
+        postgres_dsn: str) -> None:
+    """Two deploys must not both apply `0001`.
+
+    The gate, the ledger bootstrap, the ledger read and the per-migration
+    transactions are four separate statements; two runs that both saw an empty
+    ledger would both start applying, and one would fail on objects the other
+    had created. This holds the run's advisory lock from ANOTHER session and
+    measures that `apply()` does not proceed until it is released — which is
+    the serialization, not a statement about it.
+    """
+    import threading
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    finished = threading.Event()
+    error: list[BaseException] = []
+
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+        blocker = Database(postgres_dsn, application_name="opendox-test-blocker")
+        try:
+            with blocker, blocker.connection() as held:
+                held.execute("select pg_advisory_lock(%s)",
+                             (migrations.MIGRATION_LOCK_KEY,))
+
+                def _run() -> None:
+                    try:
+                        with Database(postgres_dsn, schema=schema) as db:
+                            migrations.MigrationRunner(
+                                db, migrations_dir=ROOT / "migrations").apply()
+                    except BaseException as exc:  # noqa: BLE001 - reported below
+                        error.append(exc)
+                    finally:
+                        finished.set()
+
+                worker = threading.Thread(target=_run, daemon=True)
+                worker.start()
+                assert not finished.wait(timeout=2.0), (
+                    "the migration run completed while another session held "
+                    f"advisory lock {migrations.MIGRATION_LOCK_KEY}; the run "
+                    "is not serialized")
+                with Database(postgres_dsn, schema=schema) as probe:
+                    assert _tables_in(probe, schema) == set(), (
+                        "the blocked run created objects before taking the lock")
+                held.execute("select pg_advisory_unlock(%s)",
+                             (migrations.MIGRATION_LOCK_KEY,))
+            # The lock is released with the `with` above; the run may proceed.
+            assert finished.wait(timeout=30.0), "the run never completed"
+            worker.join(timeout=30.0)
+            assert not worker.is_alive(), (
+                "the worker outlived the wait; the schema is dropped below and "
+                "a run that outlived it would create its tables in `public`")
+            assert not error, error
+            with Database(postgres_dsn, schema=schema) as db:
+                assert _tables_in(db, schema) == (
+                    set(identity.TABLES) | {migrations.LEDGER_TABLE})
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+
+
+def test_the_lock_is_released_after_a_run(database) -> None:
+    """A released lock is what makes a retry in the same process immediate."""
+    migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations").apply()
+    with database.connection() as conn:
+        held = conn.execute(
+            "select count(*) from pg_locks where locktype = 'advisory' "
+            "and ((classid::bigint << 32) | objid::bigint) = %s",
+            (migrations.MIGRATION_LOCK_KEY,)).fetchone()
+    assert held[0] == 0, "the run left its advisory lock held"
+
+
+def test_a_duplicate_slug_race_is_a_conflict_and_not_a_raw_database_error(
+        database) -> None:
+    """Two transactions whose pre-checks both pass; the loser must get 409.
+
+    `create_project` reads before it inserts, which is not atomic. This drives
+    the race directly — two connections, both pre-checks answered before either
+    insert — and asserts the loser sees `identity.ConflictError`, which is what
+    `app.py` maps to 409. Before the unique-violation translation it saw the
+    driver's raw error and the API answered 500.
+    """
+    from opendox.runtime.identity import ConflictError, CoordinationStore
+
+    with database.transaction() as conn:
+        owner = CoordinationStore(conn).upsert_user(
+            issuer="https://broker.test/realms/opendox", subject="racer")
+
+    with database.connection() as first, database.connection() as second:
+        one = CoordinationStore(first)
+        two = CoordinationStore(second)
+        # Both pre-checks happen before either insert.
+        assert one.list_projects() == two.list_projects()
+        one.create_project(slug="raced", title="One", created_by=owner.id)
+        first.commit()
+        with pytest.raises(ConflictError) as caught:
+            two.create_project(slug="raced", title="Two", created_by=owner.id)
+        second.rollback()
+    assert "raced" in str(caught.value)

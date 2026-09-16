@@ -60,11 +60,39 @@ def _module_level_imports(path: Path) -> set[str]:
     return names
 
 
-def test_the_stdlib_only_modules_name_no_extra_package_at_module_level() -> None:
+def _stdlib_only_paths() -> list[tuple[str, Path]]:
+    """The declared modules THAT THIS TREE CARRIES.
+
+    `local_git_adapter` and `repository_act` arrive with the § 3.6 act stacked
+    on § 3.5's branch, so on the § 3.5 branch alone they are absent. The
+    contract is declared for both in `opendox/runtime/__init__.py`; what is
+    MEASURED is whichever of them is here, which is what keeps this suite
+    honest on both branches instead of green on one by being skipped on the
+    other.
+    """
+    found = []
     for dotted in STDLIB_ONLY_MODULES:
         tail = dotted.split(".")[-1]
         path = PACKAGE / ("__init__.py" if dotted == "opendox.runtime"
                           else f"{tail}.py")
+        if path.is_file():
+            found.append((dotted, path))
+    return found
+
+
+def test_every_declared_stdlib_only_module_that_exists_is_measured() -> None:
+    present = [dotted for dotted, _ in _stdlib_only_paths()]
+    assert "opendox.runtime" in present
+    assert "opendox.runtime.config" in present
+    missing = [d for d in STDLIB_ONLY_MODULES if d not in present]
+    # The only modules allowed to be absent are § 3.6's two, and only on the
+    # § 3.5 branch.
+    assert set(missing) <= {"opendox.runtime.local_git_adapter",
+                            "opendox.runtime.repository_act"}, missing
+
+
+def test_the_stdlib_only_modules_name_no_extra_package_at_module_level() -> None:
+    for dotted, path in _stdlib_only_paths():
         offenders = _module_level_imports(path) & EXTRA_TOP_LEVEL_NAMES
         assert offenders == set(), (
             f"{path.name} imports {sorted(offenders)} at module level. The "
@@ -85,7 +113,7 @@ def test_the_stdlib_only_modules_really_import_without_the_extra() -> None:
     """
     program = (
         "import sys\n"
-        f"for name in {list(STDLIB_ONLY_MODULES)!r}:\n"
+        f"for name in {[d for d, _ in _stdlib_only_paths()]!r}:\n"
         "    __import__(name)\n"
         f"leaked = sorted(set(sys.modules) & set({sorted(EXTRA_TOP_LEVEL_NAMES)!r}))\n"
         "print(','.join(leaked))\n"
@@ -188,3 +216,40 @@ def test_no_collection_names_a_governed_document(collection: str) -> None:
     """
     assert collection not in {"specs", "changes", "documents", "ideation",
                               "contracts"}
+
+
+def test_only_asymmetric_algorithms_can_be_configured_and_they_keep_pyjwts_spelling(
+) -> None:
+    """`EdDSA` is mixed case, and PyJWT's comparison is case-sensitive.
+
+    Upper-casing the configured value turned it into `EDDSA`, which a
+    `startswith(("RS", "ES", "PS", "Ed"))` test then classified as symmetric —
+    so the one EdDSA broker in the world would have been refused at startup,
+    and had it got past that, no token would have matched (Copilot review of
+    openDox-code#25).
+    """
+    from opendox.runtime.config import (
+        ASYMMETRIC_ALGORITHMS,
+        PREFIX,
+        ConfigurationError,
+        load_settings,
+    )
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://x/y",
+            PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for name in ASYMMETRIC_ALGORITHMS:
+        for spelling in (name, name.lower(), name.upper()):
+            settings = load_settings({**base,
+                                      PREFIX + "OIDC_ALGORITHMS": spelling})
+            assert settings.oidc_algorithms == (name,), (
+                f"{spelling!r} did not canonicalize to PyJWT's {name!r}")
+    for refused in ("HS256", "HS512", "none", "RS255", "RS256,HS256"):
+        with pytest.raises(ConfigurationError):
+            load_settings({**base, PREFIX + "OIDC_ALGORITHMS": refused})
+    assert "HS256" not in ASYMMETRIC_ALGORITHMS
+    # An EMPTY value takes the declared default, exactly as every other
+    # optional setting does — the refusal is for a value that NAMES something
+    # unacceptable, not for one that names nothing.
+    assert load_settings({**base, PREFIX + "OIDC_ALGORITHMS": ""}
+                         ).oidc_algorithms == ("RS256",)

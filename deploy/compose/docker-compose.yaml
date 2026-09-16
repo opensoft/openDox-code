@@ -95,6 +95,16 @@ services:
   # container, and it receives no runtime DSN.
   #   docker compose --profile migration run --rm migrate
   migrate:
+    # THE SAME BUILD AS THE SERVED SERVICE. Without it a fresh checkout running
+    # the runbook's order — migrate, then up — tries to PULL
+    # `opendox-runtime:local`, an image that has never been built and is in no
+    # registry, and the documented first command fails (Copilot review of
+    # openDox-code#25). Compose reuses the built image for both services.
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+      args:
+        SOURCE_REVISION: ${OPENDOX_SOURCE_REVISION:-unknown}
     image: ${OPENDOX_IMAGE:-opendox-runtime:local}
     profiles:
       - migration
@@ -102,13 +112,15 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      # THE PRIVILEGED DSN AND NOTHING ELSE. `opendox-runtime migrate` reads
+      # `load_migration_settings`, which requires this variable alone — so this
+      # container carries no served identity, no broker and no second
+      # credential. It used to also receive `OPENDOX_DATABASE_URL` set to this
+      # same value, purely to satisfy the served loader; that made any path
+      # reading `settings.database_url` here schema-privileged and defeated the
+      # separation this service exists to keep (Copilot review of
+      # openDox-code#25).
       OPENDOX_MIGRATION_DATABASE_URL: ${OPENDOX_MIGRATION_DATABASE_URL}
-      # `load_settings` requires these three before any verb runs; the
-      # migration job needs no broker and no served identity, so they are the
-      # compose file's own placeholders and reach no network.
-      OPENDOX_DATABASE_URL: ${OPENDOX_MIGRATION_DATABASE_URL}
-      OPENDOX_OIDC_ISSUER: ${OPENDOX_OIDC_ISSUER}
-      OPENDOX_OIDC_AUDIENCE: ${OPENDOX_OIDC_AUDIENCE}
       OPENDOX_MIGRATIONS_DIR: ${OPENDOX_MIGRATIONS_DIR:-migrations}
     command: ["opendox-runtime", "runtime", "migrate"]
     networks:

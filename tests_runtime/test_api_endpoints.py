@@ -298,3 +298,226 @@ def test_a_list_query_is_always_bounded(client, mint_token) -> None:
     assert over.status_code == 422, (
         "an unbounded page size must be refused by the declared query shape, "
         "not clamped silently")
+
+
+# ---------------------------------------------------------------------------
+# the review round's own assertions (Copilot review of openDox-code#25)
+# ---------------------------------------------------------------------------
+
+
+def _project_with(client, token: str, slug: str) -> dict:
+    return client.post("/api/v1/projects", json={"slug": slug, "title": slug},
+                       headers=_auth(token)).json()
+
+
+def test_a_draft_is_not_readable_by_another_member_of_the_project(
+        client, mint_token) -> None:
+    """A DRAFT IS THE ONE PLACE THIS SCHEMA HOLDS BYTES, so listing one is
+    reading unwritten text. The first cut filtered by caller-supplied ids after
+    authenticating, which let any signed-in principal read every draft in the
+    install."""
+    owner = mint_token(subject="draft-owner")
+    other = mint_token(subject="draft-other")
+    project = _project_with(client, owner, "draft-privacy")
+    other_me = client.get("/api/v1/users/me", headers=_auth(other)).json()
+    client.post("/api/v1/memberships",
+                json={"user_id": other_me["id"], "project_id": project["id"],
+                      "role": "member"}, headers=_auth(owner))
+
+    session = client.post("/api/v1/sessions", json={"project_id": project["id"]},
+                          headers=_auth(owner)).json()
+    saved = client.put("/api/v1/drafts",
+                       json={"session_id": session["id"],
+                             "project_id": project["id"],
+                             "document_key": "secret.md",
+                             "body": "not yours to read"},
+                       headers=_auth(owner))
+    assert saved.status_code == 200, saved.text
+
+    # The other MEMBER sees nothing, and is refused the owner's session by name.
+    assert client.get("/api/v1/drafts", headers=_auth(other)).json() == []
+    refused = client.get(f"/api/v1/drafts?session_id={session['id']}",
+                         headers=_auth(other))
+    assert refused.status_code == 403
+    assert refused.json()["detail"]["code"] == "authz.not_your_session"
+    # And the owner still sees their own.
+    mine = client.get("/api/v1/drafts", headers=_auth(owner)).json()
+    assert [d["document_key"] for d in mine] == ["secret.md"]
+
+
+def test_a_member_may_not_write_into_another_members_session(
+        client, mint_token) -> None:
+    """`drafts` is keyed by `(session_id, document_key)`, so naming another
+    member's session id would OVERWRITE their unsaved text through the upsert —
+    while being a legitimate member of the project the whole time."""
+    owner = mint_token(subject="sess-owner")
+    other = mint_token(subject="sess-other")
+    project = _project_with(client, owner, "session-privacy")
+    other_me = client.get("/api/v1/users/me", headers=_auth(other)).json()
+    client.post("/api/v1/memberships",
+                json={"user_id": other_me["id"], "project_id": project["id"],
+                      "role": "member"}, headers=_auth(owner))
+    session = client.post("/api/v1/sessions", json={"project_id": project["id"]},
+                          headers=_auth(owner)).json()
+    client.put("/api/v1/drafts",
+               json={"session_id": session["id"], "project_id": project["id"],
+                     "document_key": "x.md", "body": "mine"},
+               headers=_auth(owner))
+
+    clobber = client.put("/api/v1/drafts",
+                         json={"session_id": session["id"],
+                               "project_id": project["id"],
+                               "document_key": "x.md", "body": "theirs"},
+                         headers=_auth(other))
+    assert clobber.status_code == 403
+    assert clobber.json()["detail"]["code"] == "authz.not_your_session"
+    still = client.get("/api/v1/drafts", headers=_auth(owner)).json()
+    assert [d["body"] for d in still] == ["mine"]
+
+
+def test_a_member_may_not_discard_another_members_draft(
+        client, mint_token) -> None:
+    owner = mint_token(subject="del-owner")
+    other = mint_token(subject="del-other")
+    project = _project_with(client, owner, "delete-privacy")
+    other_me = client.get("/api/v1/users/me", headers=_auth(other)).json()
+    client.post("/api/v1/memberships",
+                json={"user_id": other_me["id"], "project_id": project["id"],
+                      "role": "member"}, headers=_auth(owner))
+    session = client.post("/api/v1/sessions", json={"project_id": project["id"]},
+                          headers=_auth(owner)).json()
+    draft = client.put("/api/v1/drafts",
+                       json={"session_id": session["id"],
+                             "project_id": project["id"],
+                             "document_key": "y.md", "body": "mine"},
+                       headers=_auth(owner)).json()
+    refused = client.delete(f"/api/v1/drafts/{draft['id']}", headers=_auth(other))
+    assert refused.status_code == 403
+    assert refused.json()["detail"]["code"] == "authz.not_your_session"
+    assert client.delete(f"/api/v1/drafts/{draft['id']}",
+                         headers=_auth(owner)).status_code == 204
+
+
+def test_a_session_open_on_another_project_cannot_hold_this_projects_draft(
+        client, mint_token) -> None:
+    owner = mint_token(subject="mismatch-owner")
+    one = _project_with(client, owner, "mismatch-one")
+    two = _project_with(client, owner, "mismatch-two")
+    session = client.post("/api/v1/sessions", json={"project_id": one["id"]},
+                          headers=_auth(owner)).json()
+    response = client.put("/api/v1/drafts",
+                          json={"session_id": session["id"],
+                                "project_id": two["id"],
+                                "document_key": "z.md", "body": "?"},
+                          headers=_auth(owner))
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == (
+        "coordination.session_project_mismatch")
+
+
+def test_a_closed_session_cannot_save_a_draft(client, mint_token) -> None:
+    owner = mint_token(subject="closed-owner")
+    project = _project_with(client, owner, "closed-session")
+    session = client.post("/api/v1/sessions", json={"project_id": project["id"]},
+                          headers=_auth(owner)).json()
+    client.delete(f"/api/v1/sessions/{session['id']}", headers=_auth(owner))
+    response = client.put("/api/v1/drafts",
+                          json={"session_id": session["id"],
+                                "project_id": project["id"],
+                                "document_key": "w.md", "body": "?"},
+                          headers=_auth(owner))
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "coordination.session_closed"
+
+
+def test_the_unauthenticated_surface_is_exactly_the_two_probes(
+        client, mint_token) -> None:
+    """Enumerated against the running app, not read off the docstring.
+
+    FastAPI publishes `/docs`, `/redoc` and `/openapi.json` to anybody by
+    default; the contract is that the public surface is the two orchestrator
+    probes, and `OPENDOX_PUBLISH_OPENAPI` is what changes that deliberately.
+    """
+    public = []
+    for route in client.app.routes:
+        path = getattr(route, "path", None)
+        if path is None or path.startswith("/api/"):
+            continue
+        response = client.get(path)
+        if response.status_code != 401:
+            public.append(path)
+    assert sorted(public) == ["/livez", "/readyz"], public
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404, path
+
+
+def test_the_schema_viewers_appear_only_when_the_install_says_so(
+        database, postgres_dsn: str, verifier) -> None:
+    from fastapi.testclient import TestClient
+
+    from opendox.runtime.app import create_app
+    from opendox.runtime.config import PREFIX, load_settings
+    from opendox.runtime.db import Database
+    from tests_runtime.conftest import TEST_AUDIENCE, TEST_ISSUER
+
+    settings = load_settings({
+        PREFIX + "DATABASE_URL": postgres_dsn,
+        PREFIX + "OIDC_ISSUER": TEST_ISSUER,
+        PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
+        PREFIX + "PUBLISH_OPENAPI": "true",
+    })
+    app = create_app(settings=settings,
+                     database=Database(postgres_dsn, schema=database.schema),
+                     verifier=verifier)
+    with TestClient(app) as client:
+        assert client.get("/openapi.json").status_code == 200
+        assert client.get("/docs").status_code == 200
+
+
+def test_readiness_refuses_an_unmigrated_database_by_name(
+        postgres_dsn: str, verifier) -> None:
+    """`select 1` succeeds against a schema with no tables in it at all.
+
+    Readiness without a migration check therefore turns a fresh install READY
+    and sends it traffic that fails on missing relations.
+    """
+    import uuid
+
+    from fastapi.testclient import TestClient
+
+    from opendox.runtime.app import create_app
+    from opendox.runtime.config import PREFIX, load_settings
+    from opendox.runtime.db import Database
+    from tests_runtime.conftest import TEST_AUDIENCE, TEST_ISSUER
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+        try:
+            settings = load_settings({
+                PREFIX + "DATABASE_URL": postgres_dsn,
+                PREFIX + "OIDC_ISSUER": TEST_ISSUER,
+                PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
+            })
+            app = create_app(settings=settings,
+                             database=Database(postgres_dsn, schema=schema),
+                             verifier=verifier)
+            with TestClient(app) as client:
+                response = client.get("/readyz")
+            assert response.status_code == 503, response.text
+            body = response.json()
+            assert body["status"] == "not-ready"
+            assert body["checks"]["database"] == "ok"
+            assert body["checks"]["schema"].startswith("pending: 0001,0002")
+            assert "opendox-runtime migrate" in body["checks"]["schema"]
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+
+
+def test_readiness_is_ready_once_the_schema_is_applied(client) -> None:
+    body = client.get("/readyz").json()
+    assert body["status"] == "ready"
+    assert body["checks"]["schema"] == "applied"

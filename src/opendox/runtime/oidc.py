@@ -55,6 +55,20 @@ from jwt import PyJWK, PyJWKSet
 
 DEFAULT_JWKS_TIMEOUT_SECONDS = 5.0
 
+#: How long a `kid` MISS is remembered before another outbound refresh is
+#: allowed. Copilot's review of openDox-code#25 named the hole this closes,
+#: critical and correct: without it every token carrying an unknown `kid`
+#: forced an immediate fetch that bypassed the TTL, WHILE THE CACHE LOCK WAS
+#: HELD — so a caller sending random `kid` headers turned one request into one
+#: outbound broker request and serialized every other verification behind it.
+#:
+#: A miss still refreshes ONCE, which is what key rotation needs; what the
+#: cooldown removes is the second, third and thousandth refresh in the same
+#: few seconds. Short, because a rotation should be picked up in seconds, not
+#: minutes — the cost of being wrong here is one extra fetch, and the cost of
+#: having no cooldown is the broker taking the traffic.
+DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS = 10.0
+
 
 class OidcError(Exception):
     """Base class for token-validation failures. Carries no secret material."""
@@ -164,12 +178,16 @@ class CachingJwks:
     """A key-set cache that refreshes on a MONOTONIC TTL and on a `kid` miss."""
 
     def __init__(self, source: FileJwksSource | HttpJwksSource, *,
-                 ttl_seconds: int) -> None:
+                 ttl_seconds: int,
+                 miss_cooldown_seconds: float =
+                 DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS) -> None:
         self._source = source
         self._ttl = ttl_seconds
+        self._miss_cooldown = miss_cooldown_seconds
         self._lock = threading.Lock()
         self._keyset: PyJWKSet | None = None
         self._loaded_monotonic = 0.0
+        self._last_miss_refresh = float("-inf")
 
     def _load_keyset(self) -> PyJWKSet:
         raw = self._source.load()
@@ -198,13 +216,28 @@ class CachingJwks:
     def select_key(self, kid: str | None) -> PyJWK:
         keyset = self.keyset()
         key = self._match(keyset, kid)
-        if key is None:
-            # Key rotation: refresh once before giving up.
+        if key is None and self._may_refresh_on_miss():
+            # Key rotation: refresh ONCE, and at most once per cooldown — see
+            # `DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS` for the amplification
+            # this bound removes.
             keyset = self.keyset(force_refresh=True)
             key = self._match(keyset, kid)
         if key is None:
             raise InvalidSignatureError("no broker signing key matched the token")
         return key
+
+    def _may_refresh_on_miss(self) -> bool:
+        """True at most once per cooldown, measured on the MONOTONIC clock.
+
+        Under the same lock the cache uses, so two threads missing at once
+        produce one refresh rather than two.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if (now - self._last_miss_refresh) < self._miss_cooldown:
+                return False
+            self._last_miss_refresh = now
+            return True
 
     @staticmethod
     def _match(keyset: PyJWKSet, kid: str | None) -> PyJWK | None:

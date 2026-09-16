@@ -34,6 +34,14 @@ from pathlib import Path
 #: The environment prefix. One string, so a rename is one edit.
 PREFIX = "OPENDOX_"
 
+#: The issuer and audience a MIGRATION run carries. Sentinels, and they are
+#: sentinels rather than empty strings so that anything which reached a broker
+#: with them would fail loudly and name this constant rather than silently
+#: trusting an unpinned issuer. `.invalid` is reserved (RFC 2606) and can never
+#: resolve.
+MIGRATION_SENTINEL_ISSUER = "https://migration-run.opendox.invalid/no-broker"
+MIGRATION_SENTINEL_AUDIENCE = "opendox-migration-run"
+
 
 class ConfigurationError(Exception):
     """A setting that is absent or unusable, named. Carries no secret material.
@@ -111,6 +119,12 @@ SETTINGS: tuple[Setting, ...] = (
         "the port the API binds",
     ),
     Setting(
+        PREFIX + "PUBLISH_OPENAPI", "false", False, False,
+        "whether to serve the interactive schema at /docs, /redoc and "
+        "/openapi.json; OFF by default, because FastAPI's defaults would "
+        "otherwise publish the whole API surface to an unauthenticated caller",
+    ),
+    Setting(
         PREFIX + "MIGRATIONS_DIR", "migrations", False, False,
         "the ordered-SQL directory, repository-root-relative",
     ),
@@ -145,6 +159,7 @@ class RuntimeSettings:
     oidc_leeway_seconds: int
     bind_host: str
     bind_port: int
+    publish_openapi: bool
     migrations_dir: Path
     project_repository_root: Path
 
@@ -161,6 +176,7 @@ class RuntimeSettings:
             f"oidc_jwks_ttl_seconds={self.oidc_jwks_ttl_seconds!r}, "
             f"oidc_leeway_seconds={self.oidc_leeway_seconds!r}, "
             f"bind_host={self.bind_host!r}, bind_port={self.bind_port!r}, "
+            f"publish_openapi={self.publish_openapi!r}, "
             f"migrations_dir={str(self.migrations_dir)!r}, "
             f"project_repository_root={str(self.project_repository_root)!r})"
         )
@@ -215,6 +231,68 @@ def _positive_int(env: Mapping[str, str], setting: Setting) -> int:
     return value
 
 
+#: The asymmetric signature algorithms this runtime may be configured with,
+#: spelled EXACTLY as PyJWT spells them — which is why they are a declared set
+#: and not a prefix test over an upper-cased string. Measured: PyJWT's name is
+#: `EdDSA`, mixed case; upper-casing the configured value turned it into
+#: `EDDSA`, which then failed a `startswith(("RS", "ES", "PS", "Ed"))` test and
+#: was refused as symmetric — and would not have matched a token's `alg` header
+#: either, since `jwt.decode`'s comparison is case-sensitive (Copilot review of
+#: openDox-code#25). A configured name is now matched case-INSENSITIVELY
+#: against this set and CANONICALIZED to the spelling in it.
+ASYMMETRIC_ALGORITHMS: tuple[str, ...] = (
+    "RS256", "RS384", "RS512",
+    "PS256", "PS384", "PS512",
+    "ES256", "ES256K", "ES384", "ES512",
+    "EdDSA",
+)
+
+_CANONICAL_ALGORITHM = {name.lower(): name for name in ASYMMETRIC_ALGORITHMS}
+
+
+def _algorithms(env: Mapping[str, str]) -> tuple[str, ...]:
+    """The configured allow-list, canonicalized, or a refusal naming the value.
+
+    REFUSED AT CONFIGURATION TIME AND NOT AT THE FIRST TOKEN: a runtime
+    configured to accept `HS256` would verify a token signed with the public
+    key anybody can fetch from the broker's JWKS, and discovering that on the
+    first request means it is already serving.
+    """
+    configured = [part.strip() for part
+                  in (_optional(env, _by_name(PREFIX + "OIDC_ALGORITHMS")) or "").split(",")
+                  if part.strip()]
+    if not configured:
+        raise ConfigurationError(
+            f"{PREFIX}OIDC_ALGORITHMS resolved to an empty allow-list; a "
+            "runtime that accepts no algorithm can verify no token")
+    unknown = [name for name in configured
+               if name.lower() not in _CANONICAL_ALGORITHM]
+    if unknown:
+        raise ConfigurationError(
+            f"{PREFIX}OIDC_ALGORITHMS names {unknown}, which is not among the "
+            f"asymmetric signature algorithms {list(ASYMMETRIC_ALGORITHMS)}. A "
+            "shared-secret or `none` algorithm would let anybody holding the "
+            "broker's PUBLIC key mint a token this runtime accepts")
+    return tuple(_CANONICAL_ALGORITHM[name.lower()] for name in configured)
+
+
+def _boolean(env: Mapping[str, str], setting: Setting) -> bool:
+    """A strict boolean: the value is one of a named set, or it is a refusal.
+
+    Deliberately NOT `bool(value)` and not "anything but empty is true":
+    `OPENDOX_PUBLISH_OPENAPI=off` reading as TRUE is how a surface nobody meant
+    to publish ends up published.
+    """
+    raw = (env.get(setting.name, "").strip() or (setting.default or "")).lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(
+        f"{setting.name} must be one of true/false/yes/no/on/off/1/0, not "
+        f"{raw!r}: {setting.purpose}")
+
+
 def _by_name(name: str) -> Setting:
     for setting in SETTINGS:
         if setting.name == name:
@@ -237,24 +315,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
     """
     env = os.environ if env is None else env
 
-    algorithms = tuple(
-        part.strip().upper()
-        for part in (_optional(env, _by_name(PREFIX + "OIDC_ALGORITHMS")) or "").split(",")
-        if part.strip()
-    )
-    if not algorithms:
-        raise ConfigurationError(
-            f"{PREFIX}OIDC_ALGORITHMS resolved to an empty allow-list; a "
-            "runtime that accepts no algorithm can verify no token"
-        )
-    symmetric = tuple(a for a in algorithms if not a.startswith(("RS", "ES", "PS", "Ed")))
-    if symmetric:
-        raise ConfigurationError(
-            f"{PREFIX}OIDC_ALGORITHMS names {list(symmetric)}, which is not an "
-            "asymmetric signature algorithm: a shared-secret or `none` "
-            "algorithm would let anybody holding the broker's PUBLIC key mint "
-            "a token this runtime accepts"
-        )
+    algorithms = _algorithms(env)
 
     return RuntimeSettings(
         database_url=_require(env, _by_name(PREFIX + "DATABASE_URL")),
@@ -267,10 +328,59 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
         oidc_leeway_seconds=_positive_int(env, _by_name(PREFIX + "OIDC_LEEWAY_SECONDS")),
         bind_host=_optional(env, _by_name(PREFIX + "BIND_HOST")) or "127.0.0.1",
         bind_port=_positive_int(env, _by_name(PREFIX + "BIND_PORT")),
+        publish_openapi=_boolean(env, _by_name(PREFIX + "PUBLISH_OPENAPI")),
         migrations_dir=Path(_optional(env, _by_name(PREFIX + "MIGRATIONS_DIR")) or "migrations"),
         project_repository_root=Path(
             _optional(env, _by_name(PREFIX + "PROJECT_REPOSITORY_ROOT")) or "var/projects"
         ),
+    )
+
+
+def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
+    """Settings for a MIGRATION run, which needs no served identity and no broker.
+
+    WHY THIS EXISTS AT ALL — Copilot review of openDox-code#25, and the finding
+    was right. `load_settings` requires `OPENDOX_DATABASE_URL`,
+    `OPENDOX_OIDC_ISSUER` and `OPENDOX_OIDC_AUDIENCE`, so the compose migration
+    service and the Kubernetes migration Job were handed the PRIVILEGED DSN in
+    `OPENDOX_DATABASE_URL` as well, purely to satisfy the loader. That defeats
+    the separation those two files exist to keep: any path in that container
+    that read `settings.database_url` would have been running with
+    schema-changing privileges.
+
+    So a migration run loads THIS instead: the migration DSN and the migrations
+    directory are real, and every served-identity field is a placeholder that
+    cannot connect or trust anything — `database_url` is the SAME migration DSN
+    the run is already using (so there is no second credential in the
+    container, and nothing is silently *more* privileged than the run itself),
+    the issuer and audience are unusable sentinels, and `publish_openapi` is
+    off. `opendox-runtime migrate` and `reset` use it; `serve` and `status` do
+    not, because those are the served runtime and must have the real thing.
+    """
+    env = os.environ if env is None else env
+    dsn = env.get(PREFIX + "MIGRATION_DATABASE_URL", "").strip()
+    if not dsn:
+        raise ConfigurationError(
+            f"{PREFIX}MIGRATION_DATABASE_URL is required to apply migrations; "
+            f"{PREFIX}DATABASE_URL is the served runtime's least-privileged "
+            "identity and is deliberately not used for schema changes")
+    return RuntimeSettings(
+        database_url=dsn,
+        migration_database_url=dsn,
+        oidc_issuer=MIGRATION_SENTINEL_ISSUER,
+        oidc_audience=MIGRATION_SENTINEL_AUDIENCE,
+        oidc_jwks_url=None,
+        oidc_algorithms=(ASYMMETRIC_ALGORITHMS[0],),
+        oidc_jwks_ttl_seconds=1,
+        oidc_leeway_seconds=1,
+        bind_host="127.0.0.1",
+        bind_port=1,
+        publish_openapi=False,
+        migrations_dir=Path(
+            _optional(env, _by_name(PREFIX + "MIGRATIONS_DIR")) or "migrations"),
+        project_repository_root=Path(
+            _optional(env, _by_name(PREFIX + "PROJECT_REPOSITORY_ROOT"))
+            or "var/projects"),
     )
 
 

@@ -72,6 +72,25 @@ CANONICAL_MIGRATION_SHA256 = (
 #: prefix is also what keeps the ledger from reading as a seventh.
 LEDGER_TABLE = "opendox_schema_migrations"
 
+#: THE ADVISORY LOCK KEY the whole run is serialized on. A fixed bigint, so two
+#: processes agree on it without a table to agree through — which matters
+#: because the thing being protected is the creation of the tables.
+#:
+#: WHY THE RUN NEEDS ONE AT ALL (Copilot review of openDox-code#25, critical,
+#: and correct): the gate, the ledger bootstrap, the ledger read and the
+#: per-migration transactions are four separate statements. Two deploys, or a
+#: Kubernetes Job retry overlapping its predecessor, can both read an EMPTY
+#: ledger and both start applying `0001`; one then fails on objects the other
+#: created, and the failure looks like a broken migration rather than a race.
+#: `pg_advisory_lock` is session-scoped, so it spans every one of those
+#: statements on the holder's connection while costing nothing on a run with no
+#: contention.
+#:
+#: The value is arbitrary and only has to be stable and unlikely to collide
+#: with another application's lock on the same database: `0x0D0C` for "dox"
+#: followed by `0001` for the canonical schema this run applies.
+MIGRATION_LOCK_KEY = 0x0D0C0001
+
 #: Canonical DDL for the ledger. MUST stay textually identical to the
 #: `create table if not exists` block in `migrations/0002_migration_state.sql`
 #: (asserted by `tests_runtime/test_migration_shape.py`).
@@ -272,9 +291,27 @@ class MigrationRunner:
     def apply(self) -> list[str]:
         """Apply every pending migration in order; return the versions applied.
 
+        SERIALIZED ON `MIGRATION_LOCK_KEY` for the whole run — see that
+        constant for why. The lock is taken on a connection held open across
+        the gate, the bootstrap, the ledger read and every per-migration
+        transaction, and released in a `finally` so a failed run does not leave
+        the next one waiting on a session that has gone away (Postgres would
+        release it when the backend exits anyway; releasing it explicitly is
+        what makes a retry in the SAME process immediate).
+
         The canonical gate runs FIRST, before the ledger is even bootstrapped,
         so a tree carrying the wrong `0001` changes nothing at all.
         """
+        with self._db.connection() as lock:
+            lock.execute("select pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
+            try:
+                return self._apply_locked()
+            finally:
+                lock.execute("select pg_advisory_unlock(%s)",
+                             (MIGRATION_LOCK_KEY,))
+
+    def _apply_locked(self) -> list[str]:
+        """`apply`'s body, with the run's advisory lock already held."""
         verify_canonical_digest(self._migrations_dir)
         self.bootstrap_ledger()
 

@@ -37,6 +37,12 @@ import pytest
 #: nobody could trust twice.
 TEST_DSN_ENV = "OPENDOX_TEST_DATABASE_URL"
 
+#: How long the connectivity probe waits before calling the server unreachable.
+#: Short on purpose: this runs once per session and its whole job is to turn a
+#: developer's stopped container into one skip line instead of a wall of
+#: connection errors.
+PROBE_TIMEOUT_SECONDS = 5
+
 _SKIP_REASON = (
     f"{TEST_DSN_ENV} is not set, so the DB-backed runtime suites did not run. "
     "Start one and export it, e.g.\n"
@@ -51,12 +57,34 @@ _SKIP_REASON = (
 
 @pytest.fixture(scope="session")
 def postgres_dsn() -> str:
+    """The DSN, PROBED — an unreachable one skips, it does not fail.
+
+    The variable being ABSENT was the only skip at first, and the module, the
+    runbook and the PR all promised a skip "whenever Postgres is unreachable"
+    (Copilot review of openDox-code#25, and it was right). A developer with a
+    stale or stopped container therefore got a wall of connection errors from a
+    promise that said otherwise. The probe below is bounded — one connection
+    attempt with a short timeout — and its failure is a skip that NAMES the DSN
+    host and the error, so "skipped" never means "nobody knows why".
+
+    CI is unaffected and is meant to be: the `runtime` job supplies a
+    `postgres:16` service, so a skip there would be a real failure of that job's
+    own setup, and the job's log carries the reason.
+    """
     dsn = os.environ.get(TEST_DSN_ENV, "").strip()
     if not dsn:
         pytest.skip(_SKIP_REASON)
-    pytest.importorskip(
+    psycopg = pytest.importorskip(
         "psycopg",
         reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
+    try:
+        with psycopg.connect(dsn, connect_timeout=PROBE_TIMEOUT_SECONDS) as conn:
+            conn.execute("select 1")
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(
+            f"{TEST_DSN_ENV} is set and the server did not answer within "
+            f"{PROBE_TIMEOUT_SECONDS}s: {type(exc).__name__}: {exc}. The "
+            "DB-backed runtime suites did not run.")
     return dsn
 
 
@@ -76,6 +104,20 @@ def database(postgres_dsn: str) -> Iterator[object]:
                       application_name="opendox-test")
         try:
             with db:
+                # ISOLATION, ASSERTED BEFORE ANYTHING IS CREATED. `search_path`
+                # is `<schema>,public`, so a schema that does not exist is not
+                # an error — every `create table` simply lands in `public`
+                # instead, and the suite then pollutes the shared database and
+                # the NEXT test sees an already-migrated ledger through the
+                # search path. Measured, not hypothetical: it happened once in
+                # this act's own development, and this is the assertion that
+                # makes it a failure at the fixture instead of a mystery three
+                # tests later.
+                with db.connection() as conn:
+                    current = conn.execute("select current_schema()").fetchone()
+                assert current and current[0] == schema, (
+                    f"the test schema {schema} is not the current schema "
+                    f"({current}); writes would land in `public`")
                 MigrationRunner(db, migrations_dir="migrations").apply()
                 yield db
         finally:

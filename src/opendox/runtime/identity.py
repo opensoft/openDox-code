@@ -82,6 +82,33 @@ class ConflictError(CoordinationError):
     """A uniqueness or vocabulary rule the caller broke, named."""
 
 
+#: Postgres's SQLSTATE for `unique_violation`. Matched by VALUE off the
+#: exception rather than by catching `psycopg.errors.UniqueViolation`, because
+#: this module imports no database driver — see the module docstring — and
+#: `sqlstate` is a plain string attribute psycopg puts on every database error.
+UNIQUE_VIOLATION = "23505"
+
+
+def _conflict_if_duplicate(call: Any, message: str) -> Any:
+    """Run `call`, turning a UNIQUE VIOLATION into a `ConflictError`.
+
+    A CHECK-THEN-INSERT IS NOT ATOMIC, and the race is not theoretical: two
+    concurrent requests can both pass the pre-check, and the loser then gets
+    the database's raw error rather than this module's. `app.py` maps
+    `ConflictError` to 409 and nothing else, so without this the loser of a
+    slug race got a 500 for a conflict the API documents as 409 (Copilot review
+    of openDox-code#25). The pre-check stays, because it produces the better
+    message in the ordinary case; this is what makes the race produce the same
+    answer as the check.
+    """
+    try:
+        return call()
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, "sqlstate", None) != UNIQUE_VIOLATION:
+            raise
+        raise ConflictError(message) from exc
+
+
 def clamp_limit(limit: int | None) -> int:
     """Clamp a requested page size into `[1, MAX_PAGE_SIZE]`."""
     if limit is None:
@@ -270,11 +297,13 @@ class CoordinationStore:
         ).fetchone()
         if row is not None:
             raise ConflictError(f"a project already exists at slug {slug!r}")
-        row = self._conn.execute(
-            f"insert into projects ({_PROJECT_COLUMNS}) "
-            f"values (%s, %s, %s, %s, now()) returning {_PROJECT_COLUMNS}",
-            (new_id(), slug, title, created_by),
-        ).fetchone()
+        row = _conflict_if_duplicate(
+            lambda: self._conn.execute(
+                f"insert into projects ({_PROJECT_COLUMNS}) "
+                f"values (%s, %s, %s, %s, now()) returning {_PROJECT_COLUMNS}",
+                (new_id(), slug, title, created_by),
+            ).fetchone(),
+            f"a project already exists at slug {slug!r}")
         return Project(*_one(row, "project", f"slug={slug!r}"))
 
     def get_project(self, project_id: str) -> Project:
@@ -346,11 +375,16 @@ class CoordinationStore:
                 f"project {project_id!r} already maps to a repository at "
                 f"{row[3]!r}; the map is one row per project (RULING C3: a "
                 "plain local git repository PER PROJECT)")
-        row = self._conn.execute(
-            f"insert into project_repositories ({_REPOSITORY_COLUMNS}) "
-            f"values (%s, %s, %s, %s, %s, now()) returning {_REPOSITORY_COLUMNS}",
-            (new_id(), project_id, adapter, location, remote_url),
-        ).fetchone()
+        row = _conflict_if_duplicate(
+            lambda: self._conn.execute(
+                f"insert into project_repositories ({_REPOSITORY_COLUMNS}) "
+                "values (%s, %s, %s, %s, %s, now()) "
+                f"returning {_REPOSITORY_COLUMNS}",
+                (new_id(), project_id, adapter, location, remote_url),
+            ).fetchone(),
+            f"project {project_id!r} already maps to a repository; the map is "
+            "one row per project (RULING C3: a plain local git repository PER "
+            "PROJECT)")
         return ProjectRepository(
             *_one(row, _PROJECT_REPOSITORY, f"project_id={project_id!r}"))
 
