@@ -58,6 +58,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -289,9 +290,27 @@ def _declared_st_tokens(css: str) -> list[str]:
 
 
 def _assembled_views() -> Path | None:
-    """`views/` if an assembly has placed the contributed modules there."""
+    """`views/` if an assembly has placed the contributed modules there.
+
+    A PARTIAL ASSEMBLY IS NOT "NO ASSEMBLY" (Copilot review, round 5). This
+    returned `None` unless all six were present, so a bundle carrying five of
+    them skipped the derived ownership check entirely and a packaging error
+    hid behind a pytest skip. Absent is a legitimate state — this leg ships
+    none of the six, and RULED Q5 places them at assembly — but a bundle that
+    has SOME of them has been assembled wrongly, and that is a failure here
+    rather than a silence.
+    """
     views = WEB / "views"
-    return views if all((views / name).is_file() for name in GATE_MODULES) else None
+    present = [name for name in GATE_MODULES if (views / name).is_file()]
+    if not present:
+        return None
+    assert len(present) == len(GATE_MODULES), (
+        "this bundle carries a PARTIAL contributed column — "
+        f"{sorted(present)} and not {sorted(set(GATE_MODULES) - set(present))}. "
+        "`openxdox.web_assets.install_view_modules` places every declared asset "
+        "or refuses, so a partial set is an assembly that failed halfway and "
+        "must not read as an install that never happened")
+    return views
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +650,63 @@ def test_no_contributed_sheet_declares_a_design_token() -> None:
         css = _blank_css_comments(sheet.read_text(encoding="utf-8"))
         written = _declared_st_tokens(css)
         assert written == [], f"{sheet.name} declares {written}"
+
+
+def test_a_partial_assembly_is_a_failure_and_not_a_skip(tmp_path: Path,
+                                                        monkeypatch) -> None:
+    """`_assembled_views()`'s own rule, driven (Copilot review, round 5)."""
+    views = tmp_path / "views"
+    views.mkdir()
+    monkeypatch.setattr(sys.modules[__name__], "WEB", tmp_path)
+    assert _assembled_views() is None          # none of the six: no assembly
+    (views / GATE_MODULES[0]).write_text("// one\n", encoding="utf-8")
+    with pytest.raises(AssertionError) as partial:
+        _assembled_views()
+    assert "PARTIAL" in str(partial.value)
+    for name in GATE_MODULES[1:]:
+        (views / name).write_text("// placed\n", encoding="utf-8")
+    assert _assembled_views() == views          # all six: an assembly
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed on this runner")
+def test_a_failed_sheet_is_forgotten_so_the_next_render_may_retry(
+        tmp_path: Path) -> None:
+    """THE DEDUPE IS ABOUT ONE SUCCESSFUL INJECTION, NOT ONE ATTEMPT EVER
+    (Copilot review, round 5).
+
+    The href joins the per-document set BEFORE the fetch resolves — it has to,
+    or two bindings naming one sheet in the same pass would each inject a link
+    — so a transient 404 would otherwise be PERMANENT: every later render would
+    see the href as already injected and skip it, and the panel would stay
+    unstyled until a full page reload.
+    """
+    script = tmp_path / "retry.mjs"
+    script.write_text("""
+import { injectBindingStyles } from %(registry)s;
+const made = [];
+const head = { appendChild(n) { made.push(n); n.parentNode = head; },
+               removeChild(n) { n.parentNode = null; } };
+const doc = { head, body: { appendChild() { throw new Error("body"); } },
+              createElement: (tag) => ({ tagName: tag, attrs: {},
+                setAttribute(k, v) { this.attrs[k] = v; } }) };
+const b = { id: "gate.bar", styles: "./views/gate.css" };
+const root = new URL("file:///bundle/");
+injectBindingStyles(b, root, doc);
+const second = injectBindingStyles(b, root, doc);   // deduped: no second link
+made[0].onerror();                                   // the fetch fails
+const third = injectBindingStyles(b, root, doc);     // may retry now
+console.log(JSON.stringify({
+  deduped: second === null, retried: third !== null, links: made.length,
+  detached: made[0].parentNode === null }));
+""" % {"registry": json.dumps(REGISTRY_JS.as_uri())}, encoding="utf-8")
+    proc = subprocess.run([NODE, str(script)], capture_output=True, text=True,
+                          timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["deduped"] is True        # a successful href injects once
+    assert out["retried"] is True        # a FAILED one does not block forever
+    assert out["links"] == 2
+    assert out["detached"] is True       # and the dead link leaves the document
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed on this runner")

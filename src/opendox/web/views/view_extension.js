@@ -655,11 +655,21 @@ export function injectBindingStyles(binding, bundleRoot, doc) {
   link.href = href;
   link.setAttribute("data-view-binding", binding.id);
   link.onerror = function () {
+    // A FAILED SHEET IS FORGOTTEN, so the next render may try again (Copilot
+    // review, round 5). The href joins `seen` BEFORE the fetch resolves —
+    // it has to, or two bindings naming one sheet in the same pass would each
+    // inject a link — and a transient 404 or a dropped connection would then
+    // be permanent: every later render would see the href as already injected
+    // and skip it, leaving the panel unstyled until a full page reload. The
+    // dedupe is about ONE SUCCESSFUL injection per document, not about one
+    // attempt ever.
+    seen.delete(href);
+    if (link.parentNode) link.parentNode.removeChild(link);
     console.warn("view binding " + JSON.stringify(binding.id) + " names styles "
       + JSON.stringify(binding.styles) + ", which failed to load from " + href
-      + ". The panel mounts UNSTYLED: a binding's contract is its manifest "
-      + "entry, not its appearance (RULED Q7, openxFactory#656 comment "
-      + "5648049748).");
+      + ". The panel mounts UNSTYLED and the next render may retry: a "
+      + "binding's contract is its manifest entry, not its appearance (RULED "
+      + "Q7, openxFactory#656 comment 5648049748).");
   };
   target.head.appendChild(link);
   return link;
