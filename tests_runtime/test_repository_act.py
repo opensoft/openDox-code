@@ -479,3 +479,98 @@ def test_the_remote_this_runtime_attaches_is_the_one_it_pushes_to(
                 act.REMOTE_NAME) == str(remote)
     act.push_to_remote(store, project_id=project.id)
     assert _git(remote, "rev-parse", "refs/heads/main") == created.initial_commit
+
+
+def test_a_credential_in_a_query_or_fragment_is_refused_too(
+        store, project, project_repository_root: Path) -> None:
+    """Userinfo is not the only place a secret hides."""
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    for url in ("https://example.invalid/x.git?token=ghp_supersecrettoken",
+                "https://example.invalid/x.git?a=1&access_key=abc",
+                "https://example.invalid/x.git#password=hunter2"):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.attach_remote(store, project_id=project.id, remote_url=url)
+        message = str(caught.value)
+        assert "credential-shaped query or fragment" in message
+        assert "supersecrettoken" not in message
+        assert "hunter2" not in message
+
+
+def test_a_url_that_will_not_parse_is_a_named_refusal_and_not_a_500(
+        store, project, project_repository_root: Path) -> None:
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    for url in ("https://[bad", "http://[::1", "   "):
+        with pytest.raises(act.RepositoryActRefused):
+            act.attach_remote(store, project_id=project.id, remote_url=url)
+
+
+def test_a_failed_git_remote_never_carries_the_url_into_the_refusal(
+        store, project, project_repository_root: Path) -> None:
+    """`GitCommandFailed` formatted its whole argv.
+
+    A failed `git remote add <url>` therefore put the caller's URL — and any
+    credential in it — into the message the API and the CLI return verbatim,
+    defeating the guarantee the successful path keeps.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    # A remote name git refuses, so `git remote add` fails with the URL in argv.
+    git = lga.GitRunner(created.location)
+    with pytest.raises(lga.GitCommandFailed) as caught:
+        git.out("remote", "add", "not a valid remote name",
+                "https://someone:ghp_supersecrettoken@example.invalid/x.git")
+    message = str(caught.value)
+    assert "supersecrettoken" not in message, message
+    assert "<redacted-url>" in message or "example.invalid" not in message
+    # ...and the argv is still available to a debugger.
+    assert "remote" in caught.value.args_run
+
+
+def test_a_push_is_bounded_and_never_waits_for_a_password(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """The push runs inside the caller's database transaction.
+
+    An unbounded, interactive push held the request, the repository and that
+    transaction for as long as the network — or a password prompt nobody was
+    there to answer — wanted.
+    """
+    import inspect
+
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    source = inspect.getsource(act.push_to_remote)
+    assert "out_bounded" in source
+    assert "PUSH_TIMEOUT_SECONDS" in source
+    assert act.PUSH_TIMEOUT_SECONDS > 0
+
+    # A remote that does not exist fails promptly and by name, rather than
+    # blocking on a prompt.
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(tmp_path / "there-is-no-repository-here"))
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "push" in str(caught.value)
+    assert created.location.is_dir()
+
+
+def test_initialize_repository_keeps_the_orphan_guarantee_on_its_own(
+        tmp_path: Path) -> None:
+    """It is public and § 3.7's corpus setup calls it directly.
+
+    Only `create_repository` checked, so a direct caller could `git init
+    --bare` over a non-empty, unaccounted directory and mix the two.
+    """
+    occupied = tmp_path / "occupied"
+    occupied.mkdir()
+    (occupied / "somebody-elses-file").write_text("!", encoding="utf-8")
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.initialize_repository(occupied, project_id="p", actor=ACTOR)
+    assert "will not adopt" in str(caught.value)
+
+    collision = tmp_path / "collision"
+    collision.write_text("not a directory\n", encoding="utf-8")
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.initialize_repository(collision, project_id="p", actor=ACTOR)
+    assert "is not a directory" in str(caught.value)

@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import os
 import re
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -83,6 +84,11 @@ from opendox.runtime.local_git_adapter import (
 #: second remote would be a name the map cannot record and the push cannot find.
 REMOTE_NAME = "origin"
 
+#: How long a push may take before it is a refusal. The push runs inside the
+#: caller's database transaction, so an unbounded one holds a connection and a
+#: row lock for as long as the network does.
+PUSH_TIMEOUT_SECONDS = 120.0
+
 #: A remote URL carrying USERINFO — `https://user:token@host/...` or
 #: `user@host:path` — is refused. `project_repositories.remote_url` is
 #: serialized by the repository endpoints to any authenticated caller, so a
@@ -95,11 +101,34 @@ _URL_USERINFO = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/@]*@")
 _SCP_USERINFO = re.compile(r"^[^/:@]+@[^/:@]+:")
 
 
+#: Query or fragment keys that carry a secret. USERINFO IS NOT THE ONLY PLACE:
+#: `https://host/repo.git?token=…` keeps the token out of the userinfo and puts
+#: it in the map row and in every API response just the same (Copilot review of
+#: openDox-code#26).
+_SECRET_PARAMETER = re.compile(
+    r"(?:^|[?&#])[^=&#]*(?:token|secret|password|passwd|pwd|key|credential|auth|"
+    r"sig|signature)[^=&#]*=", re.IGNORECASE)
+
+
 def refuse_credential_bearing_remote(remote_url: str) -> None:
-    """Refuse a remote URL with a credential in it, naming what was found.
+    """Refuse a remote URL with a credential in it, and a URL that will not parse.
 
     The message NEVER echoes the URL: it is the thing that might be a secret.
+
+    A MALFORMED URL IS REFUSED HERE TOO. `urlsplit` (and `parts.port`) raise
+    `ValueError` on values like `https://[bad`, and that escaped as an
+    unhandled 500 rather than as this act's named refusal.
     """
+    if not remote_url.strip():
+        raise RepositoryActRefused("the remote URL is empty")
+    try:
+        parts = urllib.parse.urlsplit(remote_url)
+        _ = parts.port          # `port` parses lazily and is where it raises
+    except ValueError as exc:
+        raise RepositoryActRefused(
+            f"the remote URL could not be parsed ({type(exc).__name__}); it is "
+            "not echoed here because a malformed value may still contain a "
+            "secret") from exc
     if _URL_USERINFO.match(remote_url) or _SCP_USERINFO.match(remote_url):
         raise RepositoryActRefused(
             "the remote URL carries user information before the host. "
@@ -108,6 +137,13 @@ def refuse_credential_bearing_remote(remote_url: str) -> None:
             "with nothing to rotate it, so a credential must not be part of "
             "it. Use a credential helper, an ssh key or a .netrc, and give "
             "this act the URL alone.")
+    if _SECRET_PARAMETER.search(remote_url):
+        raise RepositoryActRefused(
+            "the remote URL carries a credential-shaped query or fragment "
+            "parameter. Userinfo is not the only place a secret hides, and "
+            "this column is read back to every authenticated caller; give "
+            "this act the URL alone and let git's own credential machinery "
+            "supply the rest.")
 
 __all__ = [
     "ADAPTER_NAME",
@@ -118,7 +154,9 @@ __all__ = [
     "corpus_ref_for",
     "create_repository",
     "initialize_repository",
+    "PUSH_TIMEOUT_SECONDS",
     "refuse_credential_bearing_remote",
+    "refuse_unusable_location",
     "push_to_remote",
     "repository_location",
 ]
@@ -158,6 +196,30 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
     # of openDox-code#26). `resolve()` also collapses `..` and a symlinked
     # root, so the row records one canonical name for one directory.
     return (Path(root).expanduser().resolve() / project_id)
+
+
+def refuse_unusable_location(location: Path) -> None:
+    """Refuse a path that is not an empty (or absent) directory, BY NAME.
+
+    Two different refusals with one rule: a path collision (`location` is a
+    regular file, which made `iterdir()` raise `NotADirectoryError` and reach
+    the API as a 500) and a directory nobody can account for — left, for
+    instance, by a process killed between `git init` and the transaction's
+    commit. Adopting such a directory is how a project ends up pointed at
+    somebody else's history.
+    """
+    if location.exists() and not location.is_dir():
+        raise RepositoryActRefused(
+            f"{location} exists and is not a directory, so this project's "
+            "repository cannot be created there. Remove it, or point "
+            "OPENDOX_PROJECT_REPOSITORY_ROOT somewhere else.")
+    if location.is_dir() and any(location.iterdir()):
+        raise RepositoryActRefused(
+            f"{location} already exists and is not empty. Either a previous "
+            "act was interrupted between creating the repository and "
+            "committing its map row, or this directory belongs to something "
+            "else. Remove it, or map the project to it deliberately — this "
+            "act will not adopt a directory nobody can account for.")
 
 
 def corpus_ref_for(row: Any, *, name: str | None = None) -> CorpusRef:
@@ -204,20 +266,7 @@ def create_repository(store: Any, *, project_id: str,
     # THEN the orphan check, and still before any filesystem mutation: nothing
     # below has run, so a refusal here leaves the disk untouched and the row is
     # rolled back with the caller's transaction.
-    if location.exists() and not location.is_dir():
-        # A PATH COLLISION IS A NAMED REFUSAL, not a `NotADirectoryError` from
-        # the `iterdir()` below — which reached the API as an unhandled 500.
-        raise RepositoryActRefused(
-            f"{location} exists and is not a directory, so this project's "
-            "repository cannot be created there. Remove it, or point "
-            "OPENDOX_PROJECT_REPOSITORY_ROOT somewhere else.")
-    if location.is_dir() and any(location.iterdir()):
-        raise RepositoryActRefused(
-            f"{location} already exists and is not empty. Either a previous "
-            "act was interrupted between creating the repository and "
-            "committing its map row, or this directory belongs to something "
-            "else. Remove it, or map the project to it deliberately — this "
-            "act will not adopt a directory nobody can account for.")
+    refuse_unusable_location(location)
 
     commit = initialize_repository(location, project_id=project_id, actor=actor,
                                    branch=branch, executable=executable)
@@ -238,6 +287,13 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
     of it that touches the filesystem.
     """
     location = Path(location)
+    # THE ORPHAN GUARANTEE IS THIS FUNCTION'S TOO, not only `create_repository`'s.
+    # It is public and § 3.7's corpus setup calls it directly, so a direct
+    # caller could otherwise `git init --bare` over a non-empty, unaccounted
+    # directory and mix the two (Copilot review of openDox-code#26). The checks
+    # are cheap and idempotent, so making them twice costs nothing and makes
+    # the guarantee a property of the function rather than of one caller.
+    refuse_unusable_location(location)
     try:
         # INSIDE the `try`: a permission error or a non-directory parent from
         # `mkdir` used to escape as `PermissionError`/`NotADirectoryError` and
@@ -356,7 +412,15 @@ def push_to_remote(store: Any, *, project_id: str,
             "a push)")
     git = GitRunner(Path(row.location), executable)
     try:
-        git.out("push", REMOTE_NAME, f"refs/heads/{branch}:refs/heads/{branch}")
+        # THE ONE OPERATION THAT TOUCHES A NETWORK, and the only one with a
+        # wall-clock bound: a stalled remote used to hold the request, the
+        # repository and the caller's DATABASE TRANSACTION for as long as it
+        # liked. `out_bounded` also refuses every interactive prompt, so a
+        # remote that wants a password fails instead of waiting for one that is
+        # never coming.
+        git.out_bounded("push", REMOTE_NAME,
+                        f"refs/heads/{branch}:refs/heads/{branch}",
+                        timeout=PUSH_TIMEOUT_SECONDS)
     except GitCommandFailed as failed:
         raise RepositoryActRefused(
             f"the push to {row.remote_url} failed ({failed}); the project "

@@ -171,13 +171,14 @@ class GitRunner:
     executable: str = "git"
 
     def run(self, *args: str, stdin: bytes | None = None,
-            env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
+            env: dict[str, str] | None = None,
+            timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
         argv = [self.executable, "-C", str(self.root), "--literal-pathspecs",
                 *args]
         merged = {**os.environ, **(env or {})}
         try:
             return subprocess.run(argv, input=stdin, capture_output=True,
-                                  check=False, env=merged)
+                                  check=False, env=merged, timeout=timeout)
         except OSError as exc:
             # A MISSING OR UNUSABLE EXECUTABLE IS A `GitCommandFailed` LIKE ANY
             # OTHER. `subprocess.run` does not return a non-zero
@@ -195,6 +196,38 @@ class GitRunner:
                     argv, returncode=127, stdout=b"",
                     stderr=(f"{self.executable}: {exc}").encode())) from exc
 
+    def out_bounded(self, *args: str, timeout: float,
+                    env: dict[str, str] | None = None) -> bytes:
+        """`out`, with a wall-clock bound and NO interactive prompting.
+
+        For the one operation that touches a network. A stalled remote used to
+        hold the request, the repository and the caller's database transaction
+        indefinitely, and a remote that wanted a password would wait for one
+        that is never coming (Copilot review of openDox-code#26). The
+        environment below is git's own non-interactive contract:
+        `GIT_TERMINAL_PROMPT=0` refuses the terminal, an empty `GIT_ASKPASS`
+        and `SSH_ASKPASS` refuse the graphical one, and `BatchMode=yes` refuses
+        ssh's.
+        """
+        merged = {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "",
+            "SSH_ASKPASS": "",
+            "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes",
+            **(env or {}),
+        }
+        try:
+            completed = self.run(*args, env=merged, timeout=timeout)
+        except subprocess.TimeoutExpired as expired:
+            raise GitCommandFailed(
+                args, subprocess.CompletedProcess(
+                    [], returncode=124, stdout=b"",
+                    stderr=(f"timed out after {timeout:g}s with no answer from "
+                            "the remote").encode())) from expired
+        if completed.returncode != 0:
+            raise GitCommandFailed(args, completed)
+        return completed.stdout
+
     def out(self, *args: str, stdin: bytes | None = None,
             env: dict[str, str] | None = None) -> bytes:
         completed = self.run(*args, stdin=stdin, env=env)
@@ -203,16 +236,46 @@ class GitRunner:
         return completed.stdout
 
 
+#: Anything shaped like `scheme://…@…` or `user@host:path`. Used to REDACT, not
+#: to validate: a git argument or a git error line can carry a remote URL, and a
+#: remote URL can carry a credential.
+_CREDENTIAL_SHAPED = re.compile(
+    r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s/@]*@[^\s]*|(?<![\w.])[^\s/:@]+@[^\s/:@]+:[^\s]*")
+
+
+def redact_credentials(text: str) -> str:
+    """Replace anything shaped like a credential-bearing URL with a marker.
+
+    WHY AN ERROR MESSAGE NEEDS THIS. `GitCommandFailed` used to format its
+    whole argv, so a failed `git remote add <url>` put the caller's URL — and
+    any credential in it — into `str(exc)`, which the API and the CLI return
+    verbatim. That defeated the credential-free guarantee `attach_remote`
+    makes, in the one path where the value is most likely to be wrong and
+    therefore most likely to be logged (Copilot review of openDox-code#26).
+    git's own stderr gets the same treatment, because it echoes the remote it
+    could not reach.
+    """
+    return _CREDENTIAL_SHAPED.sub("<redacted-url>", text)
+
+
 class GitCommandFailed(Exception):
-    """An internal signal. Never escapes: every caller converts it to a Refusal."""
+    """An internal signal. Never escapes: every caller converts it to a Refusal.
+
+    `str()` carries the SUBCOMMAND, the exit code and a redacted stderr — never
+    the full argument vector. The vector is on `args_run` for a debugger that
+    already has the process's own confidence; it is not in the message that
+    reaches an API response.
+    """
 
     def __init__(self, args: tuple[str, ...],
                  completed: subprocess.CompletedProcess[bytes]) -> None:
         self.args_run = args
         self.completed = completed
+        subcommand = args[0] if args else "(none)"
+        stderr = completed.stderr.decode("utf-8", "replace").strip()
         super().__init__(
-            f"git {' '.join(args)} exited {completed.returncode}: "
-            f"{completed.stderr.decode('utf-8', 'replace').strip()}")
+            f"git {subcommand} exited {completed.returncode}: "
+            f"{redact_credentials(stderr)}")
 
 
 def git_identity(actor: str) -> dict[str, str]:
