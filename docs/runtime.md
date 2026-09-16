@@ -195,6 +195,42 @@ python -m pytest -q tests_runtime/
 Without that variable the DB-backed cases **skip with the reason printed** —
 never pass silently, never fail a tree for not running Postgres.
 
+## 8a. The lifecycle, run end to end (2026-09-16, measured)
+
+Not a test: the installed console script, a real Postgres and a real socket.
+Every figure below is that run's own output.
+
+```
+$ opendox-runtime runtime init
+{ "ok": true, "canonical_sha256": "6db4710578b012a3318…", "directories_created": ["/tmp/smoke-projects"],
+  "migrations_on_disk": ["0001","0002"], "next": "opendox-runtime migrate" }
+
+$ opendox-runtime runtime migrate
+{ "ok": true, "applied": ["0001","0002"], "planned": [] }
+
+$ opendox-runtime runtime status --probe-timeout 5
+{ "ok": false, "database": "reachable", "applied_migrations": ["0001","0002"],
+  "pending_migrations": [], "migration_drift": [],
+  "broker_keys": "unreachable: IdentityUnavailableError" }
+
+$ opendox-runtime runtime serve &          # then, over the socket:
+GET /livez             200  {"status":"live"}
+GET /readyz            503  {"status":"not-ready","checks":{"database":"ok","schema":"applied",
+                                                            "broker_keys":"unavailable: IdentityUnavailableError"}}
+GET /docs              404                 # off unless OPENDOX_PUBLISH_OPENAPI
+GET /api/v1/projects   401                 # no bearer token
+
+$ opendox-runtime runtime reset --confirm yes-drop-the-coordination-database
+{ "ok": true, "dropped": ["drafts","sessions","project_repositories","memberships","projects","users",
+                          "opendox_schema_migrations"] }
+```
+
+**`status` and `/readyz` are `ok: false` / `not-ready` on purpose here**: there
+is no Keycloak broker in that environment, and both surfaces say so by name
+rather than reporting healthy. The database half is green in both, the schema
+is applied and nothing has drifted — which is the whole of what this act can
+prove without a broker, and it proves it rather than asserting it.
+
 ## 9. Residue this runbook records rather than resolves
 
 * **A pre-governed scratch space.** Design § D5: "The hybrid where ideas live
