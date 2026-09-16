@@ -1,0 +1,500 @@
+"""RULING C3's plain local git repository, as the TRIVIAL CONFORMANT
+implementation of `opendox.corpus_adapter.CorpusAdapter`.
+
+RULING C3 (opensoft/openxFactory#656 comment 5544381563, Brett Heap,
+2026-09-04T17:48Z), verbatim: "standalone openDox creates and manages a plain
+local git repository per project. Documents are always git-backed; commits are
+the write path; a remote can be attached later. Q1 holds unchanged (the
+database never holds documents), and moving a student or lab-assistant project
+into a governed factory is a push, not a migration."
+
+Design § D5 says what that makes this file: "That is the trivial conformant
+implementation of the adapter's write-back operation — a corpus whose declared
+governed write path is 'commit to this local repository' — so the standalone
+case is NOT A MODE, it is one adapter implementation."
+
+    THE IMPORT PATH IS `opendox.runtime.local_git_adapter` AND THE CLASS IS
+    `LocalGitCorpus`. `split-opendox-two-layer-product` § 3.7's neutral
+    conformance corpus needs exactly this object, so the path is stated here
+    and in `docs/runtime.md`, and it costs the STANDARD LIBRARY ONLY to
+    import — no FastAPI, no psycopg, no web framework — because a conformance
+    suite over three destinations' adapters should not have to install a
+    runtime to check one of them.
+
+## What conformance means here, operation by operation
+
+`corpus_adapter.CorpusAdapter` is a `runtime_checkable` Protocol with a CLOSED
+six-member set, and conformance is STRUCTURAL: this module imports
+`corpus_adapter` for its data types and its refusal vocabulary and does not
+subclass anything, which is the property that interface's own header says the
+Protocol exists for.
+
+THE CORPUS IS THE HISTORY, NOT THE WORKING TREE, and that is the decision this
+whole file turns on. `list_documents` and `read` answer from the commit the
+corpus was resolved at (`git ls-tree`, `git cat-file`), and `write_back` builds
+a blob, a tree and a commit with plumbing against a TEMPORARY INDEX and moves
+the branch ref — so no operation writes a byte into a checkout. That is not
+fastidiousness: `corpus_adapter.write_back`'s contract is "It never touches the
+corpus tree — an implementation that does is refused even where the bytes would
+be identical, because the gate is the act of passing through the path and not
+the shape of the result." A `git add` + `git commit` implementation would
+produce identical bytes and would not be conformant.
+
+AND THAT IS WHY THE REPOSITORY THE ACT CREATES IS BARE
+(`repository_act.initialize_repository`, `git init --bare`). A repository with
+a checkout that this adapter writes to would have TWO answers to "what does
+this project contain" — the history, which is the corpus, and a working tree
+this adapter is forbidden to update — and the second would drift from the first
+on every save. openDox MANAGES this repository (RULING C3's own verb): it is
+storage, and a human who wants a checkout clones it. A repository openDox did
+not create is still readable and writable here, and `check` is where its
+divergence is REPORTED rather than silently tolerated.
+
+The two failure modes stay the interface's, deliberately different:
+
+  * an unresolvable CORPUS refuses (`CORPUS_ABSENT` for a path that is not
+    there, `CORPUS_UNCLASSIFIABLE` for a directory that is not a repository,
+    `REVISION_UNKNOWN` for a revision this repository cannot serve) and never
+    degrades to an empty listing;
+  * an unrecognizable DOCUMENT is REPORTED — `classify` returns `kind=None`
+    with an `unclassifiable` reason naming it, and the document stays in
+    `list_documents`.
+
+`write_back` raises `CORPUS_READ_ONLY` and `WRITE_PATH_UNREACHABLE` and NO
+OTHER KIND, which is the interface's own per-method row ("an implementation
+raising a kind outside its row is a defect the conformance suite is entitled to
+catch"). There is therefore no "stale" refusal: `basis_revision` is RECORDED in
+the commit's trailers rather than adjudicated here, because the closed refusal
+vocabulary has no kind for staleness and inventing one would be a seventh
+member by another name. A governed corpus whose write path is a pull request
+refuses a stale basis at that path; this corpus's path is a commit, and git's
+own machinery is where two commits are reconciled.
+
+NO HOME VOCABULARY. This module names no governance noun, no lifecycle word and
+no header of openxFactory's corpus (RULING C2, and `corpus_adapter.py`'s own
+closing paragraph). A plain local git repository knows about files, blobs and
+commits; it obliges no fields, and `classify` says so by returning an empty
+`required_fields` for every kind it recognizes.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+from opendox.corpus_adapter import (
+    CORPUS_ABSENT,
+    CORPUS_READ_ONLY,
+    CORPUS_UNCLASSIFIABLE,
+    CORPUS_UNREADABLE,
+    DOCUMENT_UNKNOWN,
+    REVISION_UNKNOWN,
+    SCOPE_ALL,
+    SCOPE_UNKNOWN,
+    WRITE_PATH_UNREACHABLE,
+    Classification,
+    CorpusRef,
+    CorpusRefused,
+    Document,
+    DocumentId,
+    Finding,
+    Refusal,
+    ResolvedCorpus,
+    WriteReceipt,
+)
+
+#: The name this adapter answers to in `project_repositories.adapter`. One
+#: string, so a row written by the act and a row read by a consumer are
+#: compared against the same literal.
+ADAPTER_NAME = "local-git"
+
+#: The DECLARED GOVERNED WRITE PATH, and it is RULING C3's own sentence made
+#: machine-readable: "commits are the write path". `ResolvedCorpus.write_path`
+#: carries it, `WriteReceipt.dispatched_to` repeats it, and a corpus that
+#: cannot reach it is read-only rather than silently direct-writing.
+WRITE_PATH = "local-git-commit"
+
+#: The default branch a created repository is initialized on.
+DEFAULT_BRANCH = "main"
+
+#: What this corpus can say about a document's SHAPE, which is all a plain git
+#: repository knows. Every kind obliges NO fields: obligations are governance,
+#: and a pre-governed repository has none — that is the whole of what makes
+#: this the trivial implementation rather than a small governed one.
+KINDS_BY_SUFFIX: dict[str, str] = {
+    ".md": "text",
+    ".markdown": "text",
+    ".txt": "text",
+    ".rst": "text",
+    ".yaml": "structured",
+    ".yml": "structured",
+    ".json": "structured",
+    ".toml": "structured",
+}
+
+#: The corpus's ONE verdict of its own, and it is a fact about git rather than
+#: a rule about documents: RULING C3 says "documents are always git-backed", so
+#: a tracked file whose checkout differs from the resolved commit is a document
+#: whose current bytes are not in the corpus. `check` reports it and nothing
+#: else; this corpus has no other verdict machinery and does not pretend to.
+UNCOMMITTED_CHANGE = "local-git/uncommitted-change"
+
+_SAFE_ACTOR = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _refuse(kind: str, subject: str, detail: str) -> CorpusRefused:
+    return CorpusRefused(Refusal(kind=kind, subject=subject, detail=detail))
+
+
+@dataclass(frozen=True)
+class GitRunner:
+    """Every `git` invocation this package makes, in one place.
+
+    PUBLIC because `opendox.runtime.repository_act` is a second caller: the
+    repository-creation act initializes a repository and writes its first
+    commit with the same plumbing, and a second module reaching into this one's
+    underscore names would be a seam nobody declared.
+
+    A FIXED ARGUMENT LIST, never a shell string: the repository path and the
+    document key both come from outside and a shell would make either of them
+    executable. `-C <root>` rather than `cwd=` so the call is readable in a
+    traceback, and `--literal-pathspecs` so a key that begins with `:` or `*`
+    is a path and not a magic pathspec.
+    """
+
+    root: Path
+    executable: str = "git"
+
+    def run(self, *args: str, stdin: bytes | None = None,
+            env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
+        argv = [self.executable, "-C", str(self.root), "--literal-pathspecs",
+                *args]
+        merged = {**os.environ, **(env or {})}
+        return subprocess.run(argv, input=stdin, capture_output=True,
+                              check=False, env=merged)
+
+    def out(self, *args: str, stdin: bytes | None = None,
+            env: dict[str, str] | None = None) -> bytes:
+        completed = self.run(*args, stdin=stdin, env=env)
+        if completed.returncode != 0:
+            raise GitCommandFailed(args, completed)
+        return completed.stdout
+
+
+class GitCommandFailed(Exception):
+    """An internal signal. Never escapes: every caller converts it to a Refusal."""
+
+    def __init__(self, args: tuple[str, ...],
+                 completed: subprocess.CompletedProcess[bytes]) -> None:
+        self.args_run = args
+        self.completed = completed
+        super().__init__(
+            f"git {' '.join(args)} exited {completed.returncode}: "
+            f"{completed.stderr.decode('utf-8', 'replace').strip()}")
+
+
+def git_identity(actor: str) -> dict[str, str]:
+    """The `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment for one actor.
+
+    Git needs a name AND an address. The address is under the reserved
+    `.invalid` top-level domain (RFC 2606), so a commit carries a
+    syntactically valid address that cannot route anywhere and cannot be
+    mistaken for a real one — inventing `first.last@some-company.com` from a
+    display name would put a plausible, wrong address in permanent history. A
+    caller that has a real address supplies `actor` as `Name <address>`, which
+    git parses itself.
+
+    Module level, and public, because `opendox.runtime.repository_act` writes
+    the repository's first commit with the same identity.
+    """
+    if "<" in actor and actor.rstrip().endswith(">"):
+        name, _, address = actor.partition("<")
+        name = name.strip() or "opendox"
+        address = address.rstrip(">").strip()
+        return {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": address,
+                "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": address}
+    slug = _SAFE_ACTOR.sub("-", actor).strip("-") or "opendox"
+    address = f"{slug}@opendox.invalid"
+    return {"GIT_AUTHOR_NAME": actor or "opendox", "GIT_AUTHOR_EMAIL": address,
+            "GIT_COMMITTER_NAME": actor or "opendox",
+            "GIT_COMMITTER_EMAIL": address}
+
+
+def git_available(executable: str = "git") -> bool:
+    """Whether the `git` this adapter shells out to is on PATH.
+
+    Answered here so a caller can refuse at the act — or a suite can skip with
+    a reason — rather than discovering it inside a commit.
+    """
+    return shutil.which(executable) is not None
+
+
+class LocalGitCorpus:
+    """A plain local git repository, read and written through its own history.
+
+    Structurally conformant with `corpus_adapter.CorpusAdapter`: six methods,
+    no seventh, and nothing inherited.
+    """
+
+    def __init__(self, *, executable: str = "git",
+                 branch: str = DEFAULT_BRANCH) -> None:
+        self._executable = executable
+        self._branch = branch
+
+    # -- resolve ----------------------------------------------------------
+
+    def resolve(self, ref: CorpusRef) -> ResolvedCorpus:
+        """Which checkout, which revision, which scopes, which write path."""
+        location = Path(ref.location).expanduser()
+        if not location.exists():
+            raise _refuse(CORPUS_ABSENT, ref.location,
+                          "no such path; a plain local git repository is "
+                          "created by the repository act before it is resolved")
+        if not location.is_dir():
+            raise _refuse(CORPUS_UNCLASSIFIABLE, ref.location,
+                          "the location is a file, not a repository directory")
+        git = GitRunner(location.resolve(), self._executable)
+        try:
+            git.out("rev-parse", "--git-dir")
+        except GitCommandFailed as failed:
+            raise _refuse(CORPUS_UNCLASSIFIABLE, str(location),
+                          f"the directory is not a git repository ({failed})"
+                          ) from failed
+
+        revision = self._head(git)
+        if ref.revision is not None:
+            revision = self._resolve_revision(git, ref.revision, str(location))
+
+        # THE WRITE PATH IS ANSWERED HERE AND NOT AT THE FIRST WRITE, which is
+        # the interface's rule: "a read-only corpus is a fact about the corpus,
+        # and discovering it by attempting a write is how a caller ends up with
+        # a half-built edit and nowhere to put it."
+        try:
+            git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
+                           .decode().strip())
+            reachable = os.access(git_dir, os.W_OK)
+        except GitCommandFailed:
+            reachable = False
+
+        return ResolvedCorpus(
+            ref=ref,
+            location=str(location.resolve()),
+            revision=revision,
+            scopes=(SCOPE_ALL,),
+            write_path=WRITE_PATH,
+            write_path_available=reachable,
+        )
+
+    # -- list -------------------------------------------------------------
+
+    def list_documents(self, corpus: ResolvedCorpus,
+                       scope: str = SCOPE_ALL) -> tuple[DocumentId, ...]:
+        """Sorted, stable, no duplicates; an empty corpus is `()` and not a refusal."""
+        if scope not in corpus.scopes:
+            raise _refuse(SCOPE_UNKNOWN, scope,
+                          f"this corpus declares {list(corpus.scopes)}; a "
+                          "silent widening is indistinguishable from a correct "
+                          "answer")
+        if corpus.revision is None:
+            # A repository with no commits yet. LEGAL, and empty — not absent.
+            return ()
+        git = self._git(corpus)
+        try:
+            raw = git.out("ls-tree", "-r", "--name-only", "-z", corpus.revision)
+        except GitCommandFailed as failed:
+            raise _refuse(CORPUS_UNREADABLE, corpus.location, str(failed)) from failed
+        keys = sorted({name for name in raw.decode("utf-8").split("\0") if name})
+        return tuple(DocumentId(corpus=corpus.ref.name, key=key) for key in keys)
+
+    # -- read -------------------------------------------------------------
+
+    def read(self, corpus: ResolvedCorpus, document: DocumentId,
+             revision: str | None = None) -> Document:
+        """The bytes at a declared revision; NEVER a silent fallback."""
+        git = self._git(corpus)
+        at = corpus.revision if revision is None else self._resolve_revision(
+            git, revision, corpus.location)
+        if at is None:
+            raise _refuse(DOCUMENT_UNKNOWN, document.key,
+                          "this repository has no commits, so it holds no "
+                          "documents at any revision")
+        try:
+            content = git.out("cat-file", "blob", f"{at}:{document.key}")
+        except GitCommandFailed as failed:
+            raise _refuse(DOCUMENT_UNKNOWN, document.key,
+                          f"not present at revision {at} ({failed})") from failed
+        return Document(id=document, content=content, revision=at)
+
+    # -- classify ---------------------------------------------------------
+
+    def classify(self, corpus: ResolvedCorpus,
+                 document: DocumentId) -> Classification:
+        """Never omits: an unrecognized shape is REPORTED, naming the document.
+
+        `required_fields` is empty for every kind, and that is the honest
+        answer rather than an unfinished one: obligations are governance, and a
+        plain local git repository has none. A descendant that governs its
+        corpus declares them; this one would be inventing them.
+        """
+        del corpus
+        suffix = Path(document.key).suffix.lower()
+        kind = KINDS_BY_SUFFIX.get(suffix)
+        if kind is None:
+            return Classification(
+                id=document, kind=None, required_fields=(), missing_fields=(),
+                unclassifiable=(
+                    f"{document.key!r} has no shape this corpus recognizes "
+                    f"(suffix {suffix or '(none)'!r}); it is still listed and "
+                    "still readable"))
+        return Classification(id=document, kind=kind, required_fields=(),
+                              missing_fields=())
+
+    # -- check ------------------------------------------------------------
+
+    def check(self, corpus: ResolvedCorpus,
+              subjects: tuple[DocumentId, ...] | None = None) -> tuple[Finding, ...]:
+        """This corpus's ONE verdict: a document whose checkout is not committed.
+
+        RULING C3 says "documents are always git-backed", so a tracked file
+        whose working-tree bytes differ from the resolved commit is a document
+        whose current content is NOT in the corpus. That is a fact about git
+        and the only verdict this adapter has; everything else it could say
+        would be governance it does not carry.
+
+        THE REPOSITORY THE ACT CREATES IS BARE, so for those this returns `()`
+        every time — there is no second copy to diverge. The verdict is for a
+        repository openDox did NOT create, which a caller may point this
+        adapter at and which may well have a checkout somebody edits by hand.
+
+        A consumer "must not read it as 'clean' without asking whether the
+        corpus judges at all" — the interface's own warning, and it applies
+        here with force: `()` from this corpus means "no divergence and no
+        further opinion", never "reviewed and approved".
+        """
+        git = self._git(corpus)
+        try:
+            bare = git.out("rev-parse", "--is-bare-repository").decode().strip()
+        except GitCommandFailed:
+            return ()
+        if bare == "true" or corpus.revision is None:
+            return ()
+        try:
+            raw = git.out("diff", "--name-only", "-z", corpus.revision)
+        except GitCommandFailed:
+            return ()
+        changed = {name for name in raw.decode("utf-8").split("\0") if name}
+        if subjects is not None:
+            changed &= {document.key for document in subjects}
+        return tuple(
+            Finding(severity="warning", subject=key, code=UNCOMMITTED_CHANGE,
+                    message=(f"{key} differs in the checkout from "
+                             f"{corpus.revision}; documents are git-backed and "
+                             "commits are the write path (RULING C3)"))
+            for key in sorted(changed))
+
+    # -- write back -------------------------------------------------------
+
+    def write_back(self, corpus: ResolvedCorpus, document: DocumentId,
+                   content: bytes, *, actor: str, basis_revision: str,
+                   reason: str = "") -> WriteReceipt:
+        """DISPATCH through the declared path — a commit — touching no file.
+
+        The whole operation is plumbing against a TEMPORARY INDEX: the blob is
+        written to the object database, the new tree is written from a copy of
+        the resolved commit's tree, the commit is created with `commit-tree`
+        and the branch ref is moved with a compare-and-swap. The checkout is
+        never read and never written, which is what
+        `corpus_adapter.write_back`'s "It never touches the corpus tree" means
+        for a corpus whose write path happens to live in the same directory.
+
+        `basis_revision` and `reason` become COMMIT TRAILERS. See the module
+        header for why they are recorded rather than adjudicated.
+        """
+        if corpus.write_path is None:
+            raise _refuse(CORPUS_READ_ONLY, corpus.location,
+                          "this corpus declares no governed write path")
+        if not corpus.write_path_available:
+            raise _refuse(WRITE_PATH_UNREACHABLE, corpus.write_path,
+                          f"the object database under {corpus.location} is not "
+                          "writable; the document remains unsaved rather than "
+                          "being written by a fallback")
+        git = self._git(corpus)
+        try:
+            blob = git.out("hash-object", "-w", "--stdin",
+                           stdin=content).decode().strip()
+            # The temporary index lives inside the REAL git directory, which is
+            # `<location>/.git` for a checkout and `<location>` itself for the
+            # BARE repository the act creates — so it is asked for rather than
+            # assumed.
+            git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
+                           .decode().strip())
+            index = git_dir / f"opendox-index-{os.getpid()}"
+            index_env = {"GIT_INDEX_FILE": str(index)}
+            try:
+                if corpus.revision is not None:
+                    git.out("read-tree", corpus.revision, env=index_env)
+                else:
+                    git.out("read-tree", "--empty", env=index_env)
+                git.out("update-index", "--add", "--cacheinfo",
+                        f"100644,{blob},{document.key}", env=index_env)
+                tree = git.out("write-tree", env=index_env).decode().strip()
+            finally:
+                index.unlink(missing_ok=True)
+
+            message = self._message(document, actor, basis_revision, reason)
+            parents: list[str] = []
+            if corpus.revision is not None:
+                parents = ["-p", corpus.revision]
+            commit = git.out("commit-tree", tree, *parents, "-m", message,
+                             env=git_identity(actor)).decode().strip()
+            ref = f"refs/heads/{self._branch}"
+            if corpus.revision is None:
+                git.out("update-ref", ref, commit, "")
+            else:
+                # COMPARE-AND-SWAP: the ref moves only if it is still where
+                # this corpus was resolved. A concurrent writer therefore loses
+                # its dispatch rather than silently overwriting the other one.
+                git.out("update-ref", ref, commit, corpus.revision)
+        except GitCommandFailed as failed:
+            raise _refuse(WRITE_PATH_UNREACHABLE, corpus.write_path,
+                          f"the commit could not be made ({failed}); the "
+                          "document remains unsaved") from failed
+        return WriteReceipt(correlation_id=commit, dispatched_to=WRITE_PATH)
+
+    # -- internals --------------------------------------------------------
+
+    def _git(self, corpus: ResolvedCorpus) -> GitRunner:
+        return GitRunner(Path(corpus.location), self._executable)
+
+    def _head(self, git: _Git) -> str | None:
+        """The current commit, or None where the repository has none yet."""
+        completed = git.run("rev-parse", "--verify", "HEAD")
+        if completed.returncode != 0:
+            return None
+        return completed.stdout.decode().strip() or None
+
+    def _resolve_revision(self, git: _Git, revision: str,
+                          subject: str) -> str:
+        completed = git.run("rev-parse", "--verify", f"{revision}^{{commit}}")
+        if completed.returncode != 0:
+            raise _refuse(REVISION_UNKNOWN, subject,
+                          f"this repository cannot serve revision {revision!r}; "
+                          "it is never silently replaced with another one")
+        return completed.stdout.decode().strip()
+
+    @staticmethod
+    def _message(document: DocumentId, actor: str, basis_revision: str,
+                 reason: str) -> str:
+        subject = f"Write {document.key}"
+        body = [subject, ""]
+        if reason:
+            body.extend([reason, ""])
+        body.append(f"Corpus: {document.corpus}")
+        body.append(f"Basis-Revision: {basis_revision}")
+        body.append(f"Dispatched-By: {actor}")
+        body.append(f"Write-Path: {WRITE_PATH}")
+        return "\n".join(body) + "\n"

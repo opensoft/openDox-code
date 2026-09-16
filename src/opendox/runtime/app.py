@@ -70,6 +70,10 @@ class MembershipCreate(BaseModel):
     role: str
 
 
+class RemoteAttach(BaseModel):
+    remote_url: str = Field(min_length=1)
+
+
 class SessionCreate(BaseModel):
     project_id: str | None = None
 
@@ -265,6 +269,90 @@ def read_project(project_id: str, store: StoreDep,
                  principal: PrincipalDep) -> dict[str, Any]:
     del principal
     return _project_json(_found(lambda: store.get_project(project_id)))
+
+
+# ---------------------------------------------------------------------------
+# § 3.6 — THE REPOSITORY-CREATION ACT, on the project it belongs to
+#
+# "openDox CREATES A REPOSITORY AS A FIRST-CLASS ACT, or the origin complaint
+# returns one level down" (`split-opendox-two-layer-product` § 3.6). A verb,
+# not a side effect of `POST /projects`: a project with no repository yet is a
+# visible state, and the act that gives it one is a thing somebody did.
+#
+# These three routes hang off `/projects/{id}/repository` rather than off the
+# `project-repositories` collection, because the act is performed ON A PROJECT
+# and the collection is the map it writes into. `COLLECTIONS` therefore does
+# not grow: the closed six are what the database owns, and this is a verb over
+# one of them.
+# ---------------------------------------------------------------------------
+
+
+@projects.post("/{project_id}/repository", status_code=201)
+def create_project_repository(project_id: str, request: Request,
+                              store: StoreDep,
+                              principal: PrincipalDep) -> dict[str, Any]:
+    """Create this project's plain local git repository (RULING C3).
+
+    Writes the map row and creates the repository in ONE act, in this
+    request's transaction — see `repository_act`'s header for why the row goes
+    first and what the remaining window is.
+    """
+    from opendox.runtime import repository_act
+
+    _found(lambda: store.get_project(project_id))
+    _require_role(store, user=principal, project_id=project_id,
+                  allowed=("owner",))
+    settings = _context(request).settings
+    try:
+        created = _conflict(lambda: repository_act.create_repository(
+            store, project_id=project_id,
+            root=settings.project_repository_root,
+            actor=principal.display_name or principal.subject))
+    except repository_act.RepositoryActRefused as exc:
+        raise HTTPException(status_code=409,
+                            detail={"code": "repository.refused",
+                                    "message": str(exc)}) from exc
+    body = _repository_json(created.row)
+    body["initial_commit"] = created.initial_commit
+    return body
+
+
+@projects.put("/{project_id}/repository/remote")
+def attach_project_remote(project_id: str, body: RemoteAttach, store: StoreDep,
+                          principal: PrincipalDep) -> dict[str, Any]:
+    """RULING C3's "a remote can be attached later" — one update, no migration."""
+    from opendox.runtime import repository_act
+
+    _require_role(store, user=principal, project_id=project_id,
+                  allowed=("owner",))
+    _found(lambda: store.repository_for_project(project_id))
+    try:
+        row = repository_act.attach_remote(store, project_id=project_id,
+                                           remote_url=body.remote_url)
+    except repository_act.RepositoryActRefused as exc:
+        raise HTTPException(status_code=409,
+                            detail={"code": "repository.refused",
+                                    "message": str(exc)}) from exc
+    return _repository_json(row)
+
+
+@projects.post("/{project_id}/repository/push")
+def push_project_repository(project_id: str, store: StoreDep,
+                            principal: PrincipalDep) -> dict[str, Any]:
+    """Move this project into a governed factory. RULING C3: it is a PUSH."""
+    from opendox.runtime import repository_act
+
+    _require_role(store, user=principal, project_id=project_id,
+                  allowed=("owner",))
+    _found(lambda: store.repository_for_project(project_id))
+    try:
+        remote_url = repository_act.push_to_remote(store, project_id=project_id)
+    except repository_act.RepositoryActRefused as exc:
+        raise HTTPException(status_code=409,
+                            detail={"code": "repository.refused",
+                                    "message": str(exc)}) from exc
+    return {"project_id": project_id, "pushed_to": remote_url,
+            "note": "a push, not a migration (RULING C3)"}
 
 
 @project_repositories.get("")

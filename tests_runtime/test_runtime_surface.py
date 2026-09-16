@@ -29,6 +29,14 @@ STDLIB_ONLY_MODULES: tuple[str, ...] = (
     "opendox.runtime.migrations",
     "opendox.runtime.identity",
     "opendox.runtime.cli",
+    # § 3.6's adapter and its act. These two carry the contract's SHARPEST
+    # obligation: `split-opendox-two-layer-product` § 3.7's neutral
+    # conformance corpus checks this adapter against
+    # `opendox.corpus_adapter.CorpusAdapter` in a process that has installed
+    # neither a web framework nor a database driver, and an import that needed
+    # one would make openDox the only destination the corpus could not test.
+    "opendox.runtime.local_git_adapter",
+    "opendox.runtime.repository_act",
 )
 
 #: The modules that legitimately need the `runtime` extra, and the only ones.

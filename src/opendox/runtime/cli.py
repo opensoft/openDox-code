@@ -69,9 +69,14 @@ from opendox.runtime.config import (
     migration_database_url,
 )
 
-#: The verb set, closed and in lifecycle order. Read by
+#: The `runtime` verb set, closed and in lifecycle order. Read by
 #: `tests_runtime/test_runtime_cli.py` against the parser the module builds.
 VERBS: tuple[str, ...] = ("init", "migrate", "serve", "status", "reset")
+
+#: The `project` verb set — `split-opendox-two-layer-product` § 3.6's
+#: first-class act and the two verbs RULING C3 puts after it. Closed for the
+#: same reason and read by the same test.
+PROJECT_VERBS: tuple[str, ...] = ("create-repository", "attach-remote", "push")
 
 #: What `reset` will not do without being told twice.
 RESET_CONFIRMATION = "yes-drop-the-coordination-database"
@@ -321,6 +326,104 @@ def cmd_reset(args: argparse.Namespace) -> int:
                           "repository (RULING Q1)"}, ok=True)
 
 
+# -- § 3.6, the repository-creation act, as CLI verbs ------------------------
+
+
+def _store_and_settings(args: argparse.Namespace):
+    """The settings, a `Database`, and the transaction the act runs in.
+
+    Returns `(settings, Database)` or an exit code already emitted.
+    """
+    settings = _settings_or_refusal(args)
+    if isinstance(settings, int):
+        return settings, None
+    try:
+        from opendox.runtime.db import Database
+    except ImportError as exc:  # pragma: no cover - the extra is absent
+        return _emit({"verb": args.verb, "refusal": "runtime-extra-missing",
+                      "message": f"{exc}; install this package with the "
+                                 "`runtime` extra: pip install '.[runtime]'"},
+                     ok=False), None
+    return settings, Database(settings.database_url)
+
+
+def cmd_create_repository(args: argparse.Namespace) -> int:
+    """Create this project's plain local git repository (RULING C3)."""
+    from opendox.runtime import repository_act
+    from opendox.runtime.identity import CoordinationStore
+
+    settings, database = _store_and_settings(args)
+    if database is None:
+        return int(settings)
+    try:
+        with database, database.transaction() as conn:
+            created = repository_act.create_repository(
+                CoordinationStore(conn), project_id=args.project_id,
+                root=settings.project_repository_root, actor=args.actor)
+            return _emit({"verb": "create-repository",
+                          "project_id": args.project_id,
+                          "adapter": repository_act.ADAPTER_NAME,
+                          "location": str(created.location),
+                          "initial_commit": created.initial_commit}, ok=True)
+    except repository_act.RepositoryActRefused as exc:
+        return _emit({"verb": "create-repository", "refusal": "repository",
+                      "message": str(exc)}, ok=False)
+    except Exception as exc:  # noqa: BLE001 - reported as evidence, not a traceback
+        return _emit({"verb": "create-repository",
+                      "refusal": type(exc).__name__,
+                      "message": str(exc)}, ok=False)
+
+
+def cmd_attach_remote(args: argparse.Namespace) -> int:
+    """RULING C3: "a remote can be attached later"."""
+    from opendox.runtime import repository_act
+    from opendox.runtime.identity import CoordinationStore
+
+    settings, database = _store_and_settings(args)
+    if database is None:
+        return int(settings)
+    try:
+        with database, database.transaction() as conn:
+            row = repository_act.attach_remote(
+                CoordinationStore(conn), project_id=args.project_id,
+                remote_url=args.remote_url)
+            return _emit({"verb": "attach-remote",
+                          "project_id": args.project_id,
+                          "remote_url": row.remote_url,
+                          "note": "no local content changed; the move is a "
+                                  "push, not a migration"}, ok=True)
+    except repository_act.RepositoryActRefused as exc:
+        return _emit({"verb": "attach-remote", "refusal": "repository",
+                      "message": str(exc)}, ok=False)
+    except Exception as exc:  # noqa: BLE001 - same
+        return _emit({"verb": "attach-remote", "refusal": type(exc).__name__,
+                      "message": str(exc)}, ok=False)
+
+
+def cmd_push(args: argparse.Namespace) -> int:
+    """Move the project into a governed factory. RULING C3: this is a PUSH."""
+    from opendox.runtime import repository_act
+    from opendox.runtime.identity import CoordinationStore
+
+    settings, database = _store_and_settings(args)
+    if database is None:
+        return int(settings)
+    try:
+        with database, database.transaction() as conn:
+            remote_url = repository_act.push_to_remote(
+                CoordinationStore(conn), project_id=args.project_id)
+            return _emit({"verb": "push", "project_id": args.project_id,
+                          "pushed_to": remote_url,
+                          "note": "a push, not a migration (RULING C3)"},
+                         ok=True)
+    except repository_act.RepositoryActRefused as exc:
+        return _emit({"verb": "push", "refusal": "repository",
+                      "message": str(exc)}, ok=False)
+    except Exception as exc:  # noqa: BLE001 - same
+        return _emit({"verb": "push", "refusal": type(exc).__name__,
+                      "message": str(exc)}, ok=False)
+
+
 # -- parser -----------------------------------------------------------------
 
 
@@ -369,6 +472,48 @@ def register(subparsers: Any) -> None:
     reset.set_defaults(func=cmd_reset, verb="reset")
 
 
+def register_project(subparsers: Any) -> None:
+    """Attach the `project` command — § 3.6's act and its two successors.
+
+    A SEPARATE COMMAND from `runtime`, because the two are different kinds of
+    thing: `runtime` verbs operate an install (migrate it, serve it, reset it)
+    and `project` verbs act on one project's repository. `opendox.cli` declares
+    no `project` command today (its subcommands are `generate`,
+    `generate-and-open`, `create`, `edit`, `model-binding` and the contributed
+    `gate`), so contributing this name collides with nothing — measured at
+    `src/opendox/cli.py` rather than assumed.
+    """
+    project = subparsers.add_parser(
+        "project",
+        help="acts on one project's repository (split-opendox § 3.6)",
+        description="openDox creates a repository as a first-class act "
+                    "(split-opendox-two-layer-product § 3.6): a PLAIN LOCAL "
+                    "GIT REPOSITORY per project, commits as the write path, a "
+                    "remote attachable later (RULING C3, "
+                    "opensoft/openxFactory#656 comment 5544381563).")
+    verbs = project.add_subparsers(dest="verb", required=True)
+
+    create = verbs.add_parser(
+        "create-repository",
+        help="create this project's repository and write the map row")
+    create.add_argument("--project-id", required=True)
+    create.add_argument("--actor", required=True,
+                        help="who is performing the act; becomes the first "
+                             "commit's author (`Name <address>` is honoured)")
+    create.set_defaults(func=cmd_create_repository, verb="create-repository")
+
+    attach = verbs.add_parser(
+        "attach-remote", help="attach a remote to an existing repository")
+    attach.add_argument("--project-id", required=True)
+    attach.add_argument("--remote-url", required=True)
+    attach.set_defaults(func=cmd_attach_remote, verb="attach-remote")
+
+    push = verbs.add_parser(
+        "push", help="move the project into a governed factory (a push)")
+    push.add_argument("--project-id", required=True)
+    push.set_defaults(func=cmd_push, verb="push")
+
+
 class RuntimeSubcommand:
     """`register`, in an object that conforms to `SubcommandExtension`.
 
@@ -384,6 +529,20 @@ class RuntimeSubcommand:
         register(subparsers)
 
 
+class ProjectSubcommand:
+    """`register_project`, in an object that conforms to `SubcommandExtension`.
+
+    Same argument as `RuntimeSubcommand`'s, and the same one line at the
+    eventual assembly point: `build_parser(subcommand_extensions=(
+    RuntimeSubcommand(), ProjectSubcommand()))` gives `opendox project
+    create-repository` the spelling § 3.6 names, without this act editing a
+    carved file.
+    """
+
+    def register(self, subparsers: Any) -> None:
+        register_project(subparsers)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The standalone parser `[project.scripts] opendox-runtime` runs.
 
@@ -394,9 +553,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="opendox-runtime",
         description="The openDox runtime's lifecycle CLI "
-                    "(split-opendox-two-layer-product § 3.5).")
+                    "(split-opendox-two-layer-product § 3.5) and the "
+                    "repository-creation act (§ 3.6).")
     sub = parser.add_subparsers(dest="command", required=True)
     register(sub)
+    register_project(sub)
     return parser
 
 
