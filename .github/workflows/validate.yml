@@ -479,6 +479,10 @@ jobs:
       #              the `runtime` extra made UNIMPORTABLE, which is this
       #              job's own install. THE CURRENT FIGURE for this
       #              branch; the PR description states it at this commit.
+      #  172 passed  at `build/3-6-repository-act` `dd672184` (same day,
+      #              same python, pytest and git; extras unimportable)
+      #              — the same six modules, after the repository
+      #              directory was made an EXCLUSIVE create.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
