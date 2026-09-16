@@ -771,8 +771,23 @@ def _found(call: Any) -> Any:
 
 
 def _conflict(call: Any) -> Any:
+    """409 for a duplicate — AND 404 for a referenced row that has gone.
+
+    `identity._conflict_if_duplicate` translates a FOREIGN KEY violation into
+    `NotFoundError`, which is the race this API cannot pre-check away: the
+    referenced user or project can be deleted between the check and the
+    insert. Wrapped by `_conflict` alone, that exception escaped as a 500 —
+    the documented 404 turning into an unhandled error for a row that simply
+    is not there any more (Copilot review of openDox-code#25, round 6). Both
+    translations live here, so every write that can reference a row gets both
+    without each route remembering to ask for them.
+    """
     try:
         return call()
+    except identity.NotFoundError as exc:
+        raise HTTPException(status_code=404,
+                            detail={"code": "coordination.not_found",
+                                    "message": str(exc)}) from exc
     except identity.ConflictError as exc:
         raise HTTPException(status_code=409,
                             detail={"code": "coordination.conflict",

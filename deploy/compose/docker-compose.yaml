@@ -86,7 +86,13 @@ services:
       # and not a bind mount: these are repositories the runtime creates and
       # owns, and losing them is losing documents — the one thing RULING Q1's
       # "the database is disposable" does NOT say about this stack.
-      - project_repositories:/var/lib/opendox/projects
+      #
+      # AND THE TARGET IS THE CONFIGURED ROOT. `OPENDOX_PROJECT_REPOSITORY_ROOT`
+      # is interpolated above and was NOT interpolated here, so an operator who
+      # set the documented root wrote repositories outside the volume — onto a
+      # read-only filesystem, or into a layer that dies with the container
+      # (Copilot review of openDox-code#25). One expression, both places.
+      - project_repositories:${OPENDOX_PROJECT_REPOSITORY_ROOT:-/var/lib/opendox/projects}
     networks:
       - internal
     restart: unless-stopped
@@ -100,7 +106,13 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/livez',timeout=3).status==200 else 1)"
+        # THE CONFIGURED PORT, not a literal 8080. The service accepts
+        # `OPENDOX_BIND_PORT`, and a healthcheck that always probed 8080 made
+        # any other configured port a permanently unhealthy container — the
+        # server listening and the orchestrator restarting it (Copilot review
+        # of openDox-code#25). `${VAR:-default}` is interpolated by compose,
+        # so the value and the probe cannot drift.
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:${OPENDOX_BIND_PORT:-8080}/livez',timeout=3).status==200 else 1)"
       interval: 15s
       timeout: 5s
       retries: 5

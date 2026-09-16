@@ -664,3 +664,67 @@ def test_the_served_roles_name_is_declared_once_and_reaches_both_services(
     assert "${" + PREFIX + "DATABASE_URL" in served_dsn, (
         "the served DSN must stay an operator-supplied value; the role name in "
         "it is the same role these two derive")
+
+
+def test_the_compose_probe_and_the_repository_mount_follow_their_settings(
+) -> None:
+    """A setting the deployment does not follow is a setting that breaks it.
+
+    The healthcheck probed a literal 8080 while the service accepts
+    `OPENDOX_BIND_PORT`, so any other configured port made the container
+    permanently unhealthy and eligible for restart with the server listening;
+    and the repositories volume mounted a literal path while
+    `OPENDOX_PROJECT_REPOSITORY_ROOT` is interpolated into the environment, so
+    a changed root wrote documents outside the volume — onto the read-only
+    filesystem or into a layer that dies with the container (Copilot review of
+    openDox-code#25, round 6, suppressed).
+    """
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    service = compose["services"]["opendox"]
+    probe = " ".join(str(part) for part in service["healthcheck"]["test"])
+    assert "${" + PREFIX + "BIND_PORT" in probe, (
+        "the healthcheck names a literal port; a configured one is unhealthy")
+    assert "localhost:8080/livez" not in probe
+
+    mounts = service["volumes"]
+    assert any("${" + PREFIX + "PROJECT_REPOSITORY_ROOT" in str(m)
+               for m in mounts), (
+        "the repositories volume mounts a literal path while the root is "
+        "configurable; the two must be one expression")
+
+
+def test_the_kubernetes_repository_root_equals_the_mount_it_is_claimed_at(
+) -> None:
+    """A volumeMount path cannot read a ConfigMap, so the root is FIXED here.
+
+    The Deployment exposed the root as an environment value while the PVC
+    stayed at a literal path, so a changed root bypassed the claim (Copilot
+    review of openDox-code#25, round 6, suppressed). In this shape the two are
+    one value, held equal here, and an overlay moves both in one patch.
+    """
+    deployment = _load_yaml(KUBERNETES / "base" / "opendox-deployment.yaml")
+    container = _containers(deployment)[0]
+    root = next(e for e in container["env"]
+                if e["name"] == PREFIX + "PROJECT_REPOSITORY_ROOT")["value"]
+    mount = next(m for m in container["volumeMounts"]
+                 if m["name"] == "project-repositories")["mountPath"]
+    assert root == mount, (
+        f"the configured root {root!r} is not the path the claim is mounted "
+        f"at ({mount!r}); repository creation would bypass the volume")
+
+
+def test_the_readiness_probe_allows_the_endpoints_own_budgets() -> None:
+    """Kubernetes defaults `timeoutSeconds` to ONE.
+
+    `/readyz` can spend the database checkout timeout plus the broker's JWKS
+    HTTP timeout before it answers, so a healthy but slow dependency was
+    reported unready and every cut probe left its request running in the
+    process (Copilot review of openDox-code#25, round 6, suppressed).
+    """
+    deployment = _load_yaml(KUBERNETES / "base" / "opendox-deployment.yaml")
+    probe = _containers(deployment)[0]["readinessProbe"]
+    assert probe["timeoutSeconds"] >= 10, (
+        "the readiness probe's timeout is under the endpoint's own dependency "
+        "budgets; a slow dependency reads as an unready pod")
+    assert probe["timeoutSeconds"] <= probe["periodSeconds"], (
+        "a probe that can outlive its own period overlaps itself")

@@ -116,6 +116,16 @@ spec:
               value: "8080"
             - name: OPENDOX_MIGRATIONS_DIR
               value: "migrations"
+            # THE ROOT IS NOT OVERLAY-CONFIGURABLE IN THIS SHAPE, and that
+            # is the decision rather than an omission: a volumeMount path
+            # cannot read a ConfigMap, so a root that could be changed without
+            # the mount following it would put repository creation outside the
+            # PersistentVolumeClaim — on a read-only filesystem, or in storage
+            # that dies with the pod (Copilot review of openDox-code#25). This
+            # value and the `project-repositories` mountPath below are held
+            # EQUAL by `tests_runtime/test_deploy_shape.py`; an overlay that
+            # moves one moves the other in the same patch, and the runbook
+            # says so.
             - name: OPENDOX_PROJECT_REPOSITORY_ROOT
               value: "/var/lib/opendox/projects"
             # The schema viewers' switch — a DECISION, so it comes from the
@@ -140,6 +150,15 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 15
+            # A TIMEOUT THAT COVERS THE ENDPOINT'S OWN BUDGETS. Kubernetes
+            # defaults `timeoutSeconds` to ONE, and `/readyz` can spend the
+            # database checkout timeout (10s by default) plus the broker's
+            # JWKS HTTP timeout before it answers — so a healthy but slow
+            # dependency was reported unready, and each cut probe left its
+            # request still running in the process (Copilot review of
+            # openDox-code#25). Fifteen: longer than both budgets together,
+            # shorter than `periodSeconds` so two probes never overlap.
+            timeoutSeconds: 15
           volumeMounts:
             - name: project-repositories
               mountPath: /var/lib/opendox/projects

@@ -105,7 +105,16 @@ create table if not exists opendox_schema_migrations (
   applied_at timestamptz not null default now()
 );"""
 
-_MIGRATION_FILENAME_RE = re.compile(r"^(?P<version>\d+)_(?P<name>.+)\.sql$")
+#: THE SAME SHAPE `tests_runtime/test_migration_shape.py` HOLDS THE TREE TO:
+#: four digits, then lower_snake_case. It used to be `\d+_.+`, which is
+#: broader than the contract — `1_custom.sql`, `0001_Custom Name.sql` — so a
+#: configured directory could hold a file the repository's own rule forbids and
+#: the runner would apply it, ordered by a version that is not the pinned form
+#: (Copilot review of openDox-code#25, round 6). A file outside the shape is
+#: now not a migration at all, which is the same answer `discover_migrations`
+#: already gives anything that is not `NNNN_name.sql`.
+_MIGRATION_FILENAME_RE = re.compile(
+    r"^(?P<version>\d{4})_(?P<name>[a-z0-9]+(?:_[a-z0-9]+)*)\.sql$")
 
 #: See `MigrationRunner.protect_ledger`. Mirrors `config._ROLE_NAME`, and is
 #: duplicated rather than imported for the same reason every other closure in

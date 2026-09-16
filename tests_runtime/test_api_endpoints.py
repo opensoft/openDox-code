@@ -955,3 +955,55 @@ def test_a_request_body_over_the_cap_is_refused_before_it_is_parsed(
                                 "body": "x" * 1024},
                           headers=_auth(token))
     assert accepted.status_code in (200, 201), accepted.text
+
+
+def test_a_referenced_row_deleted_under_a_write_is_404_and_not_500(
+        client, mint_token, database,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one race a pre-check cannot close, driven deliberately.
+
+    The route resolves both referenced rows first, so an id that is simply
+    wrong is already a 404. What it cannot close is the row going away BETWEEN
+    that read and the insert: `identity._conflict_if_duplicate` translates the
+    foreign-key violation into `NotFoundError`, and the write was wrapped in
+    `_conflict` alone — which catches `ConflictError` and nothing else — so
+    that raced request escaped as a 500 instead of the documented 404 (Copilot
+    review of openDox-code#25, round 6, suppressed). `_conflict` translates
+    both now.
+
+    The race is made deterministic by letting the pre-check see a row the
+    insert will not find: that is the only difference between this test and
+    the ordinary wrong-id case, and it is exactly the window.
+    """
+    import dataclasses
+
+    from opendox.runtime import identity
+
+    owner = mint_token(subject="fk-race-owner")
+    other = mint_token(subject="fk-race-other")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "fk-race", "title": "FK race"},
+                          headers=_auth(owner)).json()
+    stranger = client.get("/api/v1/users/me", headers=_auth(other)).json()
+    with database.transaction() as conn:
+        conn.execute("delete from users where id = %s", (stranger["id"],))
+
+    real_get_user = identity.CoordinationStore.get_user
+
+    def _stale_read(self, user_id: str):
+        if user_id == stranger["id"]:
+            # What the pre-check saw a moment before the delete.
+            return identity.User(
+                *(stranger.get(field.name) for field in
+                  dataclasses.fields(identity.User)))
+        return real_get_user(self, user_id)
+
+    monkeypatch.setattr(identity.CoordinationStore, "get_user", _stale_read)
+
+    refused = client.post("/api/v1/memberships",
+                          json={"user_id": stranger["id"],
+                                "project_id": project["id"],
+                                "role": "reader"},
+                          headers=_auth(owner))
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"]["code"] == "coordination.not_found"

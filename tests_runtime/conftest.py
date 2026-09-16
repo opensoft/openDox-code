@@ -196,10 +196,21 @@ TEST_KID = "test-key-1"
 
 @pytest.fixture(scope="session")
 def rsa_key_pair() -> tuple[object, object]:
-    pytest.importorskip(
-        "cryptography",
-        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
-    from cryptography.hazmat.primitives.asymmetric import rsa
+    """The in-fixture key pair — CI-AWARE, like the DSN probe above.
+
+    `pytest.importorskip` here was not: a `cryptography` that is installed and
+    cannot be imported skipped every OIDC and API case that depends on this
+    fixture, and the `runtime` job then passed having exercised only the
+    migrations and the shape checks (Copilot review of openDox-code#25, round
+    6). Same policy, same reason: a developer skips, CI fails.
+    """
+    try:
+        from cryptography.hazmat.primitives.asymmetric import rsa
+    except ImportError as exc:
+        _skip_or_fail(
+            "the `runtime` extra is not installed "
+            f"(pip install -e '.[runtime,test]'): {exc}")
+        raise                       # unreachable: `_skip_or_fail` always raises
 
     private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     return private, private.public_key()
