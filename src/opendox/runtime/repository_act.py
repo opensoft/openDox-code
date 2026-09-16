@@ -77,6 +77,7 @@ from opendox.runtime.local_git_adapter import (
     GitRunner,
     git_available,
     git_identity,
+    redact_credentials,
 )
 
 #: The ONE remote this runtime configures and pushes to. A constant and not a
@@ -208,6 +209,19 @@ def refuse_unusable_location(location: Path) -> None:
     commit. Adopting such a directory is how a project ends up pointed at
     somebody else's history.
     """
+    # A SYMLINK IS REFUSED BEFORE ANYTHING ELSE, because every check below
+    # FOLLOWS it: a symlink pointing at an empty directory passes the emptiness
+    # guard and `git init --bare` then writes through it into somebody else's
+    # tree, which is precisely the adoption this function exists to refuse
+    # (Copilot review of openDox-code#26). `lexists` so a dangling one is
+    # refused too rather than silently replaced.
+    if location.is_symlink() or (os.path.lexists(location)
+                                 and not location.exists()):
+        raise RepositoryActRefused(
+            f"{location} is a symbolic link. A repository is created at a real "
+            "directory this act owns; writing through a link would put the "
+            "project's history wherever the link points, which is a directory "
+            "nobody accounted for.")
     if location.exists() and not location.is_dir():
         raise RepositoryActRefused(
             f"{location} exists and is not a directory, so this project's "
@@ -422,7 +436,12 @@ def push_to_remote(store: Any, *, project_id: str,
                         f"refs/heads/{branch}:refs/heads/{branch}",
                         timeout=PUSH_TIMEOUT_SECONDS)
     except GitCommandFailed as failed:
+        # THE STORED URL IS REDACTED IN THE REFUSAL. A row written before
+        # `refuse_credential_bearing_remote` existed can still carry a
+        # credential, and this message reaches an API response (Copilot review
+        # of openDox-code#26).
         raise RepositoryActRefused(
-            f"the push to {row.remote_url} failed ({failed}); the project "
-            f"is unchanged and is still served from {row.location}") from failed
+            f"the push to {redact_credentials(row.remote_url)} failed "
+            f"({failed}); the project is unchanged and is still served from "
+            f"{row.location}") from failed
     return row.remote_url

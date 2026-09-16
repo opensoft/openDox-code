@@ -574,3 +574,43 @@ def test_initialize_repository_keeps_the_orphan_guarantee_on_its_own(
     with pytest.raises(act.RepositoryActRefused) as caught:
         act.initialize_repository(collision, project_id="p", actor=ACTOR)
     assert "is not a directory" in str(caught.value)
+
+
+def test_a_symlink_at_the_project_location_is_refused(tmp_path: Path) -> None:
+    """Every other guard FOLLOWS the link.
+
+    A symlink pointing at an empty directory passed the emptiness check, and
+    `git init --bare` then wrote through it into somebody else's tree — the
+    adoption these refusals exist to prevent, arriving by the one route they
+    did not look at.
+    """
+    elsewhere = tmp_path / "somebody-elses-empty-directory"
+    elsewhere.mkdir()
+    link = tmp_path / "linked"
+    link.symlink_to(elsewhere)
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.initialize_repository(link, project_id="p", actor=ACTOR)
+    assert "symbolic link" in str(caught.value)
+    assert list(elsewhere.iterdir()) == [], "the act wrote through the link"
+
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "there-is-nothing-here")
+    with pytest.raises(act.RepositoryActRefused):
+        act.initialize_repository(dangling, project_id="p", actor=ACTOR)
+
+
+def test_a_failed_push_redacts_the_stored_remote(store, project,
+                                                 project_repository_root: Path,
+                                                 tmp_path: Path) -> None:
+    """A row written before the credential rule existed can still carry one."""
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    del created
+    # Written straight into the map, as a pre-existing row would have been.
+    store.attach_remote(
+        project_id=project.id,
+        remote_url="https://someone:ghp_supersecrettoken@example.invalid/x.git")
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "supersecrettoken" not in str(caught.value)
+    assert "<redacted-url>" in str(caught.value)
