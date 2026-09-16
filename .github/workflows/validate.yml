@@ -483,6 +483,11 @@ jobs:
       #              same python, pytest and git; extras unimportable)
       #              — the same six modules, after the repository
       #              directory was made an EXCLUSIVE create.
+      #  174 passed  at `build/3-6-repository-act` `57e79746` (same day,
+      #              same python, pytest and git; extras unimportable)
+      #              — the same six modules, after round nine: a NUL
+      #              in a document key, and a corpus failure told
+      #              from a missing document.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
