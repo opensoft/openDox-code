@@ -1,15 +1,20 @@
 """The ordered SQL, measured: order, the pin, and the ledger's two copies.
 
-HERMETIC BY CONSTRUCTION — this module imports the standard library and
-`opendox.runtime.migrations` only, so it runs in the leg's REQUIRED `validate`
-job, which installs `.[test]` and not `.[runtime]`. Everything it asserts is a
-property of the files on disk; nothing here needs a database.
+HERMETIC BY CONSTRUCTION — this module imports the standard library,
+`pytest` and `opendox.runtime.migrations`, and nothing else, so it runs in
+the leg's REQUIRED `validate` job, which installs `.[test]` and not
+`.[runtime]`. (`pytest` was not named until Copilot's tenth review of
+openDox-code#25 pointed out that a hermeticity claim which omits the runner
+is not a claim a reader can check.) Everything it asserts is a property of
+the files on disk or of a double defined here; nothing needs a database.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -212,3 +217,144 @@ def test_a_version_below_the_canonical_one_is_not_a_migration(tmp_path) -> None:
         discover_migrations(tmp_path)
     assert "0000_before_everything.sql" in str(caught.value)
     assert "0001" in str(caught.value)
+
+
+# -- Copilot's tenth round on #25: the documented connection contract ---------
+#
+# The module docstring promised `.execute(...)` alone and the runner also calls
+# `.transaction()`, `.commit()` and `.rollback()`, so a double or an
+# alternative driver written to the documented contract failed with
+# `AttributeError`. The docstring now states four members; these two tests are
+# what keep it the same list the code uses — one proves the four are ENOUGH,
+# the other proves the shorter list was not.
+
+
+class _Cursor:
+    """What `.execute()` returns: `fetchone()` and `fetchall()` and no more."""
+
+    def __init__(self, rows: list[tuple]) -> None:
+        self._rows = rows
+
+    def fetchone(self) -> tuple | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[tuple]:
+        return list(self._rows)
+
+
+class _DocumentedConnection:
+    """EXACTLY the connection members the docstring documents, and nothing else.
+
+    No `__getattr__`, deliberately: anything the runner reaches for that is not
+    on this class is an `AttributeError`, which is what makes this a contract
+    test rather than a mock that agrees with whatever it is asked.
+    """
+
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+        self._ledger_exists = False
+
+    def execute(self, sql: str, params: tuple | None = None) -> _Cursor:
+        text = " ".join(sql.split())
+        self.log.append(text)
+        if text.startswith("select current_schema()"):
+            return _Cursor([("public",)])
+        if "to_regclass" in text:
+            return _Cursor([(self._ledger_exists,)])
+        if text.startswith("select version, name, checksum, reversible"):
+            return _Cursor([])
+        if "create table if not exists" in text.lower():
+            self._ledger_exists = True
+        return _Cursor([])
+
+    @contextmanager
+    def transaction(self) -> Iterator[_DocumentedConnection]:
+        self.log.append("<begin>")
+        yield self
+        self.log.append("<end>")
+
+    def commit(self) -> None:
+        self.log.append("<commit>")
+
+    def rollback(self) -> None:
+        self.log.append("<rollback>")
+
+
+class _DocumentedDatabase:
+    """`connection()` and `transaction()`, the two the docstring names."""
+
+    def __init__(self) -> None:
+        self.log: list[str] = []
+        self.conn = _DocumentedConnection(self.log)
+
+    @contextmanager
+    def connection(self) -> Iterator[_DocumentedConnection]:
+        yield self.conn
+
+    @contextmanager
+    def transaction(self) -> Iterator[_DocumentedConnection]:
+        with self.conn.transaction() as conn:
+            yield conn
+
+
+class _ExecuteOnlyConnection:
+    """The contract as it USED to be written: one method."""
+
+    def execute(self, sql: str, params: tuple | None = None) -> _Cursor:
+        if " ".join(sql.split()).startswith("select current_schema()"):
+            return _Cursor([("public",)])
+        return _Cursor([])
+
+
+class _ExecuteOnlyDatabase:
+    def __init__(self) -> None:
+        self.conn = _ExecuteOnlyConnection()
+
+    @contextmanager
+    def connection(self) -> Iterator[_ExecuteOnlyConnection]:
+        yield self.conn
+
+    @contextmanager
+    def transaction(self) -> Iterator[_ExecuteOnlyConnection]:
+        yield self.conn
+
+
+def test_a_double_implementing_the_documented_contract_drives_a_whole_apply(
+) -> None:
+    """The four documented members are ENOUGH to run `apply()` end to end.
+
+    Which is the property the docstring is FOR: `opendox.runtime.db.Database`
+    is one implementation, and anything else that keeps this contract — a test
+    double here, an alternative driver — is another (Copilot review of
+    openDox-code#25, round 10).
+    """
+    db = _DocumentedDatabase()
+    runner = migrations.MigrationRunner(db, migrations_dir=MIGRATIONS)
+    applied = runner.apply()
+
+    assert applied == [m.version for m in runner.discover()], db.log
+    ledger_ddl = next(i for i, line in enumerate(db.log)
+                      if "create table if not exists" in line.lower())
+    first_migration = next(i for i, line in enumerate(db.log)
+                           if "create table users" in line.lower())
+    assert ledger_ddl < first_migration, (
+        "the ledger has to exist before a migration can be recorded in it")
+    # The three members the shorter docstring left out are all REACHED.
+    assert "<begin>" in db.log and "<commit>" in db.log
+
+
+def test_a_double_with_only_execute_cannot_drive_the_runner() -> None:
+    """And the shorter contract was NOT enough — which is why it is longer now.
+
+    This is the failure a reader of the old docstring met: they wrote the
+    object it described and the runner asked it for a member the paragraph
+    never mentioned.
+    """
+    runner = migrations.MigrationRunner(_ExecuteOnlyDatabase(),
+                                        migrations_dir=MIGRATIONS)
+    with pytest.raises(AttributeError) as raised:
+        runner.apply()
+    assert any(member in str(raised.value)
+               for member in ("transaction", "commit", "rollback")), (
+        f"expected the missing member to be one the docstring now names: "
+        f"{raised.value}")

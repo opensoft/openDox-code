@@ -333,7 +333,25 @@ def cmd_serve(args: argparse.Namespace) -> int:
     server = uvicorn.Server(uvicorn.Config(
         app, host=settings.bind_host, port=settings.bind_port,
         log_level=args.log_level))
-    server.run()
+    # A BIND FAILURE IS EVIDENCE TOO — and it is the failure an operator meets
+    # first. `Server.run()` RAISES for an address it cannot use: `SystemExit`
+    # from uvicorn's own `sys.exit(1)` on an occupied port, `OSError` for an
+    # address that is not this host's. This call sat outside every
+    # exception-to-evidence handler, so the verb an operator runs longest
+    # answered a misconfigured port with a traceback and no JSON at all, which
+    # is the same lifecycle-contract hole round 8 closed for the SILENT startup
+    # failure beside it (Copilot review of openDox-code#25, round 10,
+    # suppressed). `SystemExit` is named explicitly because it is a
+    # `BaseException` and `except Exception` does not reach it.
+    try:
+        server.run()
+    except (Exception, SystemExit) as exc:  # noqa: BLE001
+        detail = _safe_message(exc)
+        return _emit({"verb": "serve", "refusal": "serve-failed",
+                      "bind_host": settings.bind_host,
+                      "bind_port": settings.bind_port,
+                      "message": (f"{type(exc).__name__}: {detail}" if detail
+                                  else type(exc).__name__)}, ok=False)
     if not getattr(server, "started", False):
         return _emit({"verb": "serve", "refusal": "startup-failed",
                       "bind_host": settings.bind_host,
@@ -390,6 +408,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return _emit(report, ok=False)
     report["runtime_extra"] = "present"
 
+    connected = False
     try:
         # INSIDE the context, all of it. `runner.applied()` and `runner.plan()`
         # each check a connection out of the pool, so calling them after the
@@ -401,6 +420,10 @@ def cmd_status(args: argparse.Namespace) -> int:
                       checkout_timeout=args.probe_timeout) as db:
             with db.connection() as conn:
                 conn.execute("select 1")
+            # THE CONNECTIVITY ANSWER IS RECORDED THE MOMENT IT IS TRUE, so a
+            # failure in the queries BELOW cannot rewrite it — see the generic
+            # handler at the end of this block.
+            connected = True
             # THE SAME CANONICAL GATE `apply()` AND `/readyz` RUN. Without
             # it an EMPTY migrations directory reports `pending: []` on a
             # fresh database — nothing pending, nothing drifted, everything
@@ -438,8 +461,22 @@ def cmd_status(args: argparse.Namespace) -> int:
         report["migrations"] = f"unreadable: {type(exc).__name__}: {exc}"
         ok = False
     except Exception as exc:  # noqa: BLE001
-        report["database"] = (
-            f"unreachable: {type(exc).__name__}: {_safe_message(exc)}")
+        # THE SAME DISTINCTION THE BRANCH ABOVE MAKES, for the failures that
+        # are not the runner's own. Once `select 1` has answered, the database
+        # IS reachable, and a later failure — the served role without `select`
+        # on the ledger, a schema the search path does not reach, a query that
+        # errors — is a privilege or schema problem reported as one. Reporting
+        # `database: unreachable` for it pointed the operator at the network
+        # and hid the real fault, which is the defect round 7 fixed for
+        # `MigrationError` and left in place one handler down (Copilot review
+        # of openDox-code#25, round 10, suppressed).
+        if connected:
+            report["database"] = "reachable"
+            report["schema_queries"] = (
+                f"failed: {type(exc).__name__}: {_safe_message(exc)}")
+        else:
+            report["database"] = (
+                f"unreachable: {type(exc).__name__}: {_safe_message(exc)}")
         ok = False
 
     try:

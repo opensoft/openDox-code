@@ -713,6 +713,23 @@ def test_the_kubernetes_repository_root_equals_the_mount_it_is_claimed_at(
         f"at ({mount!r}); repository creation would bypass the volume")
 
 
+def _declared_seconds(module: str, constant: str) -> float:
+    """A default read out of the module that DECLARES it, as text.
+
+    As text because this suite is the hermetic one: `opendox.runtime.db`
+    imports `psycopg` and `opendox.runtime.oidc` imports `jwt` and `httpx`, all
+    of which belong to the `runtime` extra the REQUIRED job does not install.
+    The number still has to come from the declaration rather than from a copy
+    of it here, or the relation below is asserted against this file's memory of
+    the budgets instead of against the budgets.
+    """
+    source = (ROOT / "src" / "opendox" / "runtime" / module).read_text(
+        encoding="utf-8")
+    match = re.search(rf"^{constant} = ([0-9.]+)$", source, re.MULTILINE)
+    assert match, f"{constant} is not declared in {module}"
+    return float(match.group(1))
+
+
 def test_the_readiness_probe_allows_the_endpoints_own_budgets() -> None:
     """Kubernetes defaults `timeoutSeconds` to ONE.
 
@@ -720,14 +737,65 @@ def test_the_readiness_probe_allows_the_endpoints_own_budgets() -> None:
     HTTP timeout before it answers, so a healthy but slow dependency was
     reported unready and every cut probe left its request running in the
     process (Copilot review of openDox-code#25, round 6, suppressed).
+
+    AND STRICTLY OVER THE SUM, not equal to it. The first cut chose exactly
+    `10 + 5` while the manifest's own comment called it "longer than both
+    budgets together": a worst-case-but-valid readiness request had nothing
+    left for probe scheduling, network latency or writing the response, so the
+    probe could cut a request the endpoint was about to answer and mark the pod
+    unavailable (Copilot review of openDox-code#25, round 10, suppressed). Both
+    budgets are read from the modules that declare them, so a change to either
+    default is a change this assertion sees.
     """
     deployment = _load_yaml(KUBERNETES / "base" / "opendox-deployment.yaml")
     probe = _containers(deployment)[0]["readinessProbe"]
-    assert probe["timeoutSeconds"] >= 10, (
-        "the readiness probe's timeout is under the endpoint's own dependency "
-        "budgets; a slow dependency reads as an unready pod")
+    budget = (_declared_seconds("db.py", "DEFAULT_CHECKOUT_TIMEOUT_SECONDS")
+              + _declared_seconds("oidc.py", "DEFAULT_JWKS_TIMEOUT_SECONDS"))
+    assert probe["timeoutSeconds"] > budget, (
+        f"the readiness probe's timeout ({probe['timeoutSeconds']}s) leaves "
+        f"nothing over the endpoint's own dependency budgets ({budget}s); a "
+        "slow but healthy dependency reads as an unready pod")
     assert probe["timeoutSeconds"] <= probe["periodSeconds"], (
         "a probe that can outlive its own period overlaps itself")
+
+
+def test_the_runbook_makes_the_managed_database_role_an_explicit_prerequisite(
+) -> None:
+    """A managed database runs no init script, so nothing grants the role.
+
+    The bundled Postgres creates and grants the served role on its first start
+    (`init-runtime-role.sh`, mounted by the StatefulSet). The documented
+    managed-database path pointed both DSNs at the external server and cleared
+    the wait host and said nothing about privileges, so the migration owner
+    created the six tables and the served role had no access to any of them:
+    the Job succeeded, `/readyz` reported an applied schema, and every request
+    then failed with `permission denied` (Copilot review of openDox-code#25,
+    round 10). The remedy this act took is the one that matches how the role is
+    provisioned in the first place — out of band, with its password — so the
+    runbook states it as a prerequisite, and this holds the runbook to the same
+    grants the bundled script performs.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    script = (COMPOSE / "init-runtime-role.sh").read_text(encoding="utf-8")
+    managed = runbook.split("**A managed database instead of the bundled "
+                            "Postgres.**", 1)
+    assert len(managed) == 2, "the runbook no longer has a managed-database note"
+    section = managed[1].split("\n## ", 1)[0]
+
+    for statement in ("create role", "grant connect on database",
+                      "grant usage on schema public",
+                      "grant select, insert, update, delete on all tables",
+                      "alter default privileges"):
+        assert statement in script.lower(), (
+            f"{statement!r} is no longer what the bundled bootstrap does; the "
+            "runbook's managed-database prerequisite is derived from it")
+        assert statement in section.lower(), (
+            f"the managed-database prerequisite does not name {statement!r}, "
+            "which the bundled Postgres does for the operator")
+    assert "protect_ledger" in section, (
+        "the prerequisite must say what the migration run then narrows, or an "
+        "operator granting everything has no way to know the ledger is the "
+        "one exception")
 
 
 def test_the_bootstrap_creates_the_role_the_migration_narrows() -> None:

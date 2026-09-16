@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 
 import pytest
@@ -502,3 +502,172 @@ def test_the_migrate_preview_runs_the_same_canonical_gate_the_run_does(
     # and this assertion is what keeps it there.
     assert evidence["refusal"] == "MigrationError", evidence
     assert str(empty) in evidence["message"]
+
+
+# -- Copilot's tenth round on #25 --------------------------------------------
+
+
+def _stub_uvicorn(monkeypatch: pytest.MonkeyPatch, run) -> None:
+    """uvicorn and the application, stubbed the way this file already does.
+
+    STUBBED, NOT SKIPPED, for the reason the ordinary-shutdown test above
+    states: both belong to the `runtime` extra, and a test that skipped in the
+    REQUIRED job would make that job's recorded figure depend on the extras the
+    measuring environment happened to have.
+    """
+    import sys
+    import types
+
+    uvicorn_stub = types.ModuleType("uvicorn")
+
+    class _Config:
+        def __init__(self, app: object, **kwargs: object) -> None:
+            pass
+
+    class _Server:
+        def __init__(self, config: object) -> None:
+            self.started = False
+
+    # ASSIGNED AFTER THE CLASS BODY, not inside it: a class body resolves a
+    # name it also assigns through the local/global path and never through the
+    # enclosing function, so `run = run` in the body is a `NameError`.
+    _Server.run = run                                  # type: ignore[method-assign]
+
+    uvicorn_stub.Config = _Config                      # type: ignore[attr-defined]
+    uvicorn_stub.Server = _Server                      # type: ignore[attr-defined]
+    app_stub = types.ModuleType("opendox.runtime.app")
+    app_stub.create_app = lambda **kwargs: object()    # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn_stub)
+    monkeypatch.setitem(sys.modules, "opendox.runtime.app", app_stub)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                       "postgresql://nobody:hunter2@127.0.0.1:1/none")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+
+
+def test_serve_reports_a_bind_failure_as_evidence_and_not_a_traceback(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failure an operator meets first: the port is already in use.
+
+    `Server.run()` RAISES for an address it cannot use, and that call sat
+    outside every exception-to-evidence handler — so the one verb an operator
+    runs longest answered a misconfigured port with a traceback and no JSON at
+    all (Copilot review of openDox-code#25, round 10, suppressed). Round 8
+    closed the SILENT half of the same hole (a lifespan failure uvicorn
+    swallows); this is the loud half.
+    """
+    def _run(self) -> None:
+        raise OSError(98, "Address already in use")
+
+    _stub_uvicorn(monkeypatch, _run)
+    code, evidence = _run_serve()
+    assert code == 1, evidence
+    assert evidence["ok"] is False
+    assert evidence["refusal"] == "serve-failed"
+    assert "Address already in use" in evidence["message"]
+    # AND IT NAMES THE ADDRESS IT TRIED, which is the fact an operator needs
+    # first when the port is the problem.
+    from opendox.runtime.config import load_settings
+
+    settings = load_settings()
+    assert evidence["bind_port"] == settings.bind_port
+    assert evidence["bind_host"] == settings.bind_host
+
+
+def test_serve_reports_uvicorns_own_sys_exit_as_evidence_too(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """`SystemExit` is a `BaseException`, and `except Exception` misses it.
+
+    uvicorn's own answer to a socket it cannot bind is `sys.exit(1)` from
+    inside `Server.run()`, so a handler that named `Exception` alone would have
+    left exactly the reported case — an occupied port — printing nothing.
+    """
+    def _run(self) -> None:
+        raise SystemExit(1)
+
+    _stub_uvicorn(monkeypatch, _run)
+    code, evidence = _run_serve()
+    assert code == 1, evidence
+    assert evidence["refusal"] == "serve-failed"
+    assert "SystemExit" in evidence["message"]
+
+
+def test_a_serve_failure_message_carries_no_dsn(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redacted, like every other operational message this CLI emits."""
+    def _run(self) -> None:
+        raise RuntimeError(
+            "could not start: postgresql://nobody:hunter2@127.0.0.1:1/none")
+
+    _stub_uvicorn(monkeypatch, _run)
+    code, evidence = _run_serve()
+    assert code == 1
+    printed = json.dumps(evidence)
+    assert "hunter2" not in printed, printed
+    assert "postgresql://" not in printed, printed
+
+
+def _run_serve() -> tuple[int, dict]:
+    return _run(cli.build_parser().parse_args(["runtime", "serve"]))
+
+
+def test_status_keeps_the_connectivity_answer_when_a_later_query_fails(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """`select 1` answered, so the database IS reachable — say so.
+
+    A served role without `select` on the ledger, a search path that does not
+    reach the schema, any query error after the connectivity probe: all of them
+    were reported as `database: unreachable`, which points an operator at the
+    network for a privilege problem. Round 7 made that distinction for the
+    runner's own `MigrationError` and left it unmade in the handler one line
+    down (Copilot review of openDox-code#25, round 10, suppressed).
+    """
+    import sys
+    import types
+
+    class _Cursor:
+        def fetchone(self) -> tuple:
+            return (1,)
+
+        def fetchall(self) -> list:
+            return []
+
+    class _Connection:
+        def execute(self, sql: str, params: tuple | None = None) -> _Cursor:
+            if " ".join(sql.split()).startswith("select 1"):
+                return _Cursor()
+            raise RuntimeError(
+                "permission denied for table opendox_schema_migrations")
+
+    class _Database:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _Database:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        @contextmanager
+        def connection(self):
+            yield _Connection()
+
+    db_stub = types.ModuleType("opendox.runtime.db")
+    db_stub.Database = _Database                       # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "opendox.runtime.db", db_stub)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                       "postgresql://runtime:hunter2@127.0.0.1:5432/opendox")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+    monkeypatch.setenv(PREFIX + "MIGRATIONS_DIR",
+                       str(Path(__file__).resolve().parents[1] / "migrations"))
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "status", "--probe-timeout", "0.2"]))
+
+    assert code == 1, evidence
+    assert evidence["database"] == "reachable", evidence
+    assert evidence["schema_queries"].startswith("failed: RuntimeError"), evidence
+    assert "permission denied" in evidence["schema_queries"]
+    printed = json.dumps(evidence)
+    assert "hunter2" not in printed, printed

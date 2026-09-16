@@ -4,7 +4,11 @@ Both are contracts stated in `src/opendox/runtime/__init__.py`, and both are
 the kind that stays true for months and then stops being true in a commit
 nobody meant it in. So each is MEASURED here rather than described there.
 
-HERMETIC: standard library plus the stdlib-only modules of the package.
+HERMETIC: standard library, `pytest`, and the stdlib-only modules of the
+package — which is the whole import block below, named in full because a
+file that measures IMPORT WEIGHT and is vague about its own is asking to be
+read twice (Copilot review of openDox-code#25, round 10, suppressed). The
+fresh-interpreter half runs `sys.executable` with no test runner at all.
 """
 
 from __future__ import annotations

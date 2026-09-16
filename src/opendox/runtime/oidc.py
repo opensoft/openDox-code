@@ -47,7 +47,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import httpx
 import jwt
@@ -132,6 +132,28 @@ class Claims:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@runtime_checkable
+class JwksSource(Protocol):
+    """Where a key set comes from: ONE method, and this is the whole contract.
+
+    THE ANNOTATION WAS A UNION OF THE TWO IMPLEMENTATIONS THIS MODULE SHIPS,
+    and neither `CachingJwks` nor the suites ever asked for more than `load()`:
+    the tests already pass counting and rotating sources of their own, and a
+    deployment that fetched its key set from a secret store would be a third.
+    A union of concrete classes said a false thing about the surface and made
+    every legitimate third source a type error (Copilot review of
+    openDox-code#25, round 10). `runtime_checkable` so `isinstance` can be
+    asked the same question the annotation states.
+
+    `load()` returns the RAW JWKS document (`{"keys": [...]}`) and raises
+    `IdentityUnavailableError` when it cannot be read — the cache turns the
+    document into a `PyJWKSet` and owns the freshness rules.
+    """
+
+    def load(self) -> dict[str, Any]:
+        ...                                            # pragma: no cover
+
+
 class FileJwksSource:
     """Load a key set from a local file — tests and air-gapped installs."""
 
@@ -177,7 +199,7 @@ class HttpJwksSource:
 class CachingJwks:
     """A key-set cache that refreshes on a MONOTONIC TTL and on a `kid` miss."""
 
-    def __init__(self, source: FileJwksSource | HttpJwksSource, *,
+    def __init__(self, source: JwksSource, *,
                  ttl_seconds: float,
                  miss_cooldown_seconds: float =
                  DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS) -> None:

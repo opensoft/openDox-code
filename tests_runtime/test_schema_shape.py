@@ -10,7 +10,14 @@ This file is the slice's own running proof. `test_migration_shape.py` measures
 that the SQL is ordered and pinned and would be just as green if the schema had
 a `documents` table in it; this one measures what the schema SAYS.
 
-HERMETIC: standard library + `opendox.runtime.identity` only.
+HERMETIC, and the list is the file's real import block: standard library,
+`pytest`, and the two stdlib-only package modules `opendox.runtime.identity`
+and `opendox.runtime.migrations` (the ledger table's name is read from the
+second, so the six coordination tables can be counted without it). It named
+only `identity`, which made the module's own hermeticity claim narrower than
+its imports — and this suite runs in the REQUIRED job, where what may be
+imported is the whole question (Copilot review of openDox-code#25, round 10,
+suppressed). Nothing here needs a database or the `runtime` extra.
 """
 
 from __future__ import annotations

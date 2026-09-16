@@ -644,8 +644,15 @@ def open_session(body: SessionCreate, store: StoreDep,
     if body.project_id is not None:
         _require_role(store, user=principal, project_id=body.project_id,
                       allowed=identity.ROLES)
-    return _session_json(store.open_session(user_id=principal.id,
-                                            project_id=body.project_id))
+    # `_conflict`, LIKE EVERY OTHER WRITE THAT REFERENCES A ROW. The membership
+    # check above cannot close the window in which the project is deleted
+    # before this insert, and the foreign-key violation escaped the route as a
+    # 500 instead of the documented 404 (Copilot review of openDox-code#25,
+    # round 10, suppressed). `identity.open_session` translates the SQLSTATE
+    # and this translates the exception.
+    return _session_json(_conflict(
+        lambda: store.open_session(user_id=principal.id,
+                                   project_id=body.project_id)))
 
 
 @sessions.delete("/{session_id}")
@@ -723,28 +730,46 @@ def put_draft(body: DraftPut, store: StoreDep,
                   allowed=("owner", "member"))
     _require_own_open_session(store, user=principal, session_id=body.session_id,
                               project_id=body.project_id)
-    return _draft_json(store.put_draft(
+    # THE CHECK ABOVE IS THE MESSAGE; THE WRITE ITSELF IS THE GUARANTEE.
+    # `identity.put_draft` carries the session-open predicate in the insert, so
+    # a session closed between that read and this call refuses instead of
+    # writing into a sitting that has ended (Copilot review of openDox-code#25,
+    # round 10, suppressed), and `_conflict` turns that — and the project
+    # deleted under the same write — into the documented 404.
+    return _draft_json(_conflict(lambda: store.put_draft(
         session_id=body.session_id, project_id=body.project_id,
         document_key=body.document_key, body=body.body,
-        basis_revision=body.basis_revision))
+        basis_revision=body.basis_revision)))
 
 
 @drafts.delete("/{draft_id}", status_code=204)
 def discard_draft(draft_id: str, store: StoreDep,
                   principal: PrincipalDep) -> None:
+    # OWNERSHIP IS ASKED FIRST, AND BEFORE THE ROLE CHECK. An unknown draft id
+    # and another user's draft are ONE answer (round 7) — but only for a
+    # caller who is a member of the draft's project. A caller who is not got
+    # `authz.not_a_member` for a draft that EXISTS and `_NOT_YOUR_DRAFT` for
+    # one that does not, which is the same existence oracle one step out
+    # (Copilot review of openDox-code#25, round 10, suppressed). Both
+    # questions — is there such a draft, and is it this principal's — are
+    # answered here, in one refusal, before authorization is consulted at all.
     try:
         draft = store.get_draft(draft_id)
-    except identity.NotFoundError as exc:
-        # An unknown draft id and another user's draft are ONE answer; reading
-        # the row first told them apart (Copilot review of openDox-code#25,
-        # round 7, suppressed).
-        raise HTTPException(status_code=403,
-                            detail=_NOT_YOUR_DRAFT) from exc
+        mine = store.get_session(draft.session_id).user_id == principal.id
+    except identity.NotFoundError:
+        mine = False
+    if not mine:
+        raise HTTPException(status_code=403, detail=_NOT_YOUR_DRAFT)
     _require_role(store, user=principal, project_id=draft.project_id,
                   allowed=("owner", "member"))
     _require_own_open_session(store, user=principal, session_id=draft.session_id,
                               project_id=draft.project_id, require_open=False)
-    store.delete_draft(draft_id)
+    # `_found`, LIKE THE SESSION-CLOSE PATH. Two concurrent discards by the
+    # owner, or a row deleted between the read above and this statement, made
+    # `identity.NotFoundError` escape the route as a 500 instead of the
+    # documented coordination 404 (Copilot review of openDox-code#25, round 10,
+    # suppressed).
+    _found(lambda: store.delete_draft(draft_id))
 
 
 # ---------------------------------------------------------------------------
