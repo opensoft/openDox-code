@@ -432,3 +432,84 @@ def test_the_ledger_is_resolved_in_this_schema_and_not_through_public(
                 conn.execute(f"drop schema if exists {schema} cascade")
                 conn.execute(
                     f"drop table if exists public.{migrations.LEDGER_TABLE}")
+
+
+def test_a_run_does_its_whole_work_on_the_connection_that_holds_the_lock(
+        postgres_dsn: str) -> None:
+    """A POOL OF ONE, which the old shape could not finish at all.
+
+    `apply()` takes `MIGRATION_LOCK_KEY` on a connection and then used to do
+    the bootstrap, the ledger read and every migration through
+    `Database.transaction()`, which checks out a DIFFERENT connection. A
+    session-level advisory lock protects only the session that took it, so two
+    runners could each hold their own lock session and race through the same
+    schema work (Copilot review of openDox-code#25).
+
+    The regression is measurable WITHOUT a race: with `max_size=1` the lock
+    holds the only connection in the pool, so the old shape blocked on its own
+    checkout until `checkout_timeout` and raised. A run that completes here is
+    a run whose every statement went through the lock's own session.
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+        try:
+            with Database(postgres_dsn, schema=schema, min_size=1, max_size=1,
+                          checkout_timeout=5.0) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations")
+                applied = runner.apply()
+                assert applied == [m.version for m in runner.discover()]
+                assert runner.plan() == []
+                assert (set(identity.TABLES) | {migrations.LEDGER_TABLE}
+                        <= _tables_in(db))
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+
+
+def test_a_ledger_that_cannot_be_protected_applies_no_migration_at_all(
+        postgres_dsn: str) -> None:
+    """The narrowing is a PRECONDITION of the run, not its last step.
+
+    When `protect_ledger()` ran after the loop, a `runtime_role` the database
+    does not have failed the run only once every migration and its ledger
+    INSERT had committed — and `/readyz` asks about schema and drift, never
+    about grants, so the install could go on serving with the SERVED role still
+    able to rewrite the runner's tamper-evident record (Copilot review of
+    openDox-code#25). Now the run refuses before it applies anything, which is
+    the state an operator can act on.
+    """
+    import uuid
+
+    import psycopg
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    absent_role = "t_absent_" + uuid.uuid4().hex[:8]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations",
+                    runtime_role=absent_role)
+                with pytest.raises(psycopg.errors.UndefinedObject):
+                    runner.apply()
+                # The ledger exists (it is bootstrapped before the narrowing is
+                # attempted) and records NOTHING, and no coordination table was
+                # created.
+                assert runner.applied() == []
+                assert _tables_in(db) == {migrations.LEDGER_TABLE}
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")

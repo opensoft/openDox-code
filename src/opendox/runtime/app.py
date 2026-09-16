@@ -38,6 +38,21 @@ authorization stops being a property of the request's origin." So:
     exemption, no `--allow-local` and no header that stands in for a token:
     those are exactly what the inversion removes.
 
+    THE READ ROUTES ASK IT TOO, and the first cut of this sentence was a
+    contract the handlers did not keep: `GET /users`, `GET /memberships`,
+    `GET /projects` and the project-repository reads authenticated and then
+    returned the whole install, so any signed-in account could enumerate every
+    user's issuer/subject/email and every project's repository `location` and
+    `remote_url` (Copilot review of openDox-code#25, and it was right twice —
+    once as a thread, once as a suppressed comment naming this very
+    paragraph). THE SCOPE IS THE MEMBERSHIP ROW, which is the only thing this
+    runtime ever asks an authorization question about: a principal sees
+    itself, the projects it is a member of, the users it shares a project
+    with, and the memberships and repository rows of those projects. The
+    narrowing is in the SQL (`identity.CoordinationStore.list_*`'s
+    `visible_to` / `member`), never applied to a page the LIMIT already cut —
+    the same lesson `list_drafts` learned one round earlier.
+
 THE APPLICATION OPENS THE POOL, THE MIGRATIONS ARE NOT APPLIED HERE. Schema is
 applied by `opendox runtime migrate` with the privileged DSN and never at
 request time — the Hermes install records the same separation ("Privileged
@@ -329,28 +344,49 @@ def read_me(principal: PrincipalDep) -> dict[str, Any]:
     return _user_json(principal)
 
 
-# `del principal` IN A READ HANDLER IS DELIBERATE AND IS SAID ONCE HERE. The
-# `PrincipalDep` parameter is what makes the route authenticated at all —
-# FastAPI resolves the dependency, which verifies the token and upserts the row,
-# before the body runs — and a handler that does not then USE the value is a
-# handler whose authorization is "any signed-in principal may read this". `del`
-# states that in code instead of leaving an argument that looks forgotten. A
-# route that narrows further calls `_require_role`, and every write does.
+# NO READ HANDLER DISCARDS ITS PRINCIPAL ANY MORE, and that is the point of
+# this paragraph. An earlier cut wrote `del principal` in each of these bodies
+# to SAY that the route's authorization was "any signed-in principal may read
+# this" — honest about the code, wrong about the product: the rows being read
+# are who is in this install, what the projects are and where each project's
+# documents live. Every read below now scopes to the principal, by one of two
+# shapes:
+#
+#   * a COLLECTION scopes in SQL (`visible_to=` / `member=`), so the page the
+#     LIMIT cuts is already the caller's page and `after` can walk it; and
+#   * a SINGLE ROW is 404 when the caller may not see it (`_visible_user`), or
+#     403 through `_require_role` when the row names a project — 404 for a
+#     user because "no such user" and "not in your projects" must not be
+#     distinguishable to a prober, 403 for a project because the project id
+#     was in the caller's own URL and the refusal owes it a reason.
+#
+# `/users/me` is the one read that needs no scope: it IS the principal.
 
 
 @users.get("")
 def list_users(store: StoreDep, principal: PrincipalDep,
                limit: LimitQuery = None,
                after: str | None = None) -> list[dict[str, Any]]:
-    del principal
-    return [_user_json(u) for u in store.list_users(limit=limit, after=after)]
+    """The users this principal shares a project with, and itself."""
+    return [_user_json(u) for u in store.list_users(
+        visible_to=principal.id, limit=limit, after=after)]
 
 
 @users.get("/{user_id}")
 def read_user(user_id: str, store: StoreDep,
               principal: PrincipalDep) -> dict[str, Any]:
-    del principal
-    return _user_json(_found(lambda: store.get_user(user_id)))
+    """One user, if the principal shares a project with it (or is it).
+
+    A user it may not see is 404, not 403: a 403 would confirm the id exists,
+    which is the enumeration this route was closing.
+    """
+    user = _found(lambda: store.get_user(user_id))
+    if not store.user_is_visible_to(user_id, viewer_id=principal.id):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "coordination.not_found",
+                    "message": f"no user {user_id!r} visible to this principal"})
+    return _user_json(user)
 
 
 @memberships.get("")
@@ -359,9 +395,10 @@ def list_memberships(store: StoreDep, principal: PrincipalDep,
                      user_id: str | None = None,
                      limit: LimitQuery = None,
                      after: str | None = None) -> list[dict[str, Any]]:
-    del principal
+    """The memberships of the projects this principal is a member of."""
     return [_membership_json(m) for m in store.list_memberships(
-        project_id=project_id, user_id=user_id, limit=limit, after=after)]
+        project_id=project_id, user_id=user_id, visible_to=principal.id,
+        limit=limit, after=after)]
 
 
 @memberships.post("", status_code=201)
@@ -386,8 +423,9 @@ def create_membership(body: MembershipCreate, store: StoreDep,
 def list_projects(store: StoreDep, principal: PrincipalDep,
                   limit: LimitQuery = None,
                   after: str | None = None) -> list[dict[str, Any]]:
-    del principal
-    return [_project_json(p) for p in store.list_projects(limit=limit, after=after)]
+    """The projects this principal holds a membership in."""
+    return [_project_json(p) for p in store.list_projects(
+        member=principal.id, limit=limit, after=after)]
 
 
 @projects.post("", status_code=201)
@@ -410,7 +448,15 @@ def create_project(body: ProjectCreate, store: StoreDep,
 @projects.get("/{project_id}")
 def read_project(project_id: str, store: StoreDep,
                  principal: PrincipalDep) -> dict[str, Any]:
-    del principal
+    """One project, for a member of it — any role, including `reader`.
+
+    THE MEMBERSHIP IS ASKED BEFORE THE ROW IS READ, so a project that does not
+    exist and a project the caller is not in give the SAME refusal
+    (`403 authz.not_a_member`). Reading first would have made 404-vs-403 an
+    existence oracle over an id space a prober can walk.
+    """
+    _require_role(store, user=principal, project_id=project_id,
+                  allowed=identity.ROLES)
     return _project_json(_found(lambda: store.get_project(project_id)))
 
 
@@ -418,15 +464,21 @@ def read_project(project_id: str, store: StoreDep,
 def list_project_repositories(store: StoreDep, principal: PrincipalDep,
                               limit: LimitQuery = None,
                               after: str | None = None) -> list[dict[str, Any]]:
-    del principal
+    """The repository map rows of this principal's own projects.
+
+    A `location` and a `remote_url` say where a project's documents live; that
+    is not a fact about somebody else's project any signed-in account is owed.
+    """
     return [_repository_json(r) for r in store.list_project_repositories(
-        limit=limit, after=after)]
+        visible_to=principal.id, limit=limit, after=after)]
 
 
 @project_repositories.get("/{project_id}")
 def read_project_repository(project_id: str, store: StoreDep,
                             principal: PrincipalDep) -> dict[str, Any]:
-    del principal
+    """One project's map row, for a member of that project."""
+    _require_role(store, user=principal, project_id=project_id,
+                  allowed=identity.ROLES)
     return _repository_json(
         _found(lambda: store.repository_for_project(project_id)))
 
@@ -478,23 +530,35 @@ def list_drafts(store: StoreDep, principal: PrincipalDep,
     belongs to the sitting that is typing it, and that sitting belongs to one
     user.
     """
-    own = [session.id for session in store.list_sessions(
-        user_id=principal.id, limit=identity.MAX_PAGE_SIZE)]
     if session_id is not None:
-        if session_id not in own:
+        try:
+            session = store.get_session(session_id)
+            mine = session.user_id == principal.id
+        except identity.NotFoundError:
+            mine = False
+        if not mine:
+            # UNKNOWN AND SOMEBODY ELSE'S GET THE SAME REFUSAL, deliberately:
+            # a 404 for the first would make this route an oracle for which
+            # session ids exist.
             raise HTTPException(
                 status_code=403,
                 detail={"code": "authz.not_your_session",
                         "message": "a draft is read by the user whose session "
                                    "is typing it"})
-        own = [session_id]
     # THE OWNERSHIP FILTER IS IN THE QUERY, not applied to a page the query
     # already cut. Filtering after the LIMIT returned an empty page whenever
     # the global page happened to hold nobody else's drafts, and `after`
     # pagination could not walk past it — a correct-looking empty answer to a
     # principal who has drafts (Copilot review of openDox-code#25).
-    found = store.list_drafts(session_ids=own, project_id=project_id,
-                              limit=limit, after=after)
+    #
+    # AND IT IS A JOIN, not a list of session ids this handler collected. That
+    # collection was capped at `MAX_PAGE_SIZE` while the schema caps sessions
+    # per user at nothing, so a user with more than 500 sittings lost the
+    # drafts of the later ones and was refused their own session by name
+    # (Copilot review of openDox-code#25, suppressed comment). `owned_by` asks
+    # `sessions.user_id` in SQL, which has no page to fall off.
+    found = store.list_drafts(session_id=session_id, owned_by=principal.id,
+                              project_id=project_id, limit=limit, after=after)
     return [_draft_json(d) for d in found]
 
 

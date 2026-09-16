@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -267,7 +269,27 @@ class MigrationRunner:
     def discover(self) -> list[Migration]:
         return discover_migrations(self._migrations_dir)
 
-    def applied(self) -> list[AppliedMigration]:
+    @contextmanager
+    def _session(self, conn: Any = None) -> Iterator[Any]:
+        """Either the caller's connection, or one checked out for this call.
+
+        THE ARGUMENT EXISTS FOR THE ADVISORY LOCK. `apply()` holds
+        `MIGRATION_LOCK_KEY` on one session, and a session-level advisory lock
+        protects only the session that took it: every read and every DDL the
+        run then made through `self._db.transaction()` checked out a DIFFERENT
+        pool connection, so two runners each holding their own lock session
+        could race through the bootstrap, the ledger read and the migration
+        transactions — and a pool sized to one connection deadlocked instead
+        (Copilot review of openDox-code#25). Passing the lock-owning
+        connection down is what makes the lock cover the work it names.
+        """
+        if conn is not None:
+            yield conn
+            return
+        with self._db.connection() as owned:
+            yield owned
+
+    def applied(self, conn: Any = None) -> list[AppliedMigration]:
         """The ledger's rows IN THIS SCHEMA, or `[]` where it has none yet.
 
         `to_regclass` rather than a `select` that would raise: an absent ledger
@@ -283,7 +305,7 @@ class MigrationRunner:
         harness write its tables into `public` once, so this is the second time
         the shape has bitten; it is pinned here.
         """
-        with self._db.connection() as conn:
+        with self._session(conn) as conn:
             schema_row = conn.execute("select current_schema()").fetchone()
             schema = schema_row[0] if schema_row else None
             if not schema:
@@ -344,9 +366,13 @@ class MigrationRunner:
 
     # -- apply ------------------------------------------------------------
 
-    def bootstrap_ledger(self) -> None:
-        with self._db.transaction() as conn:
-            conn.execute(LEDGER_DDL)
+    def bootstrap_ledger(self, conn: Any = None) -> None:
+        if conn is not None:
+            with conn.transaction():
+                conn.execute(LEDGER_DDL)
+            return
+        with self._db.transaction() as owned:
+            owned.execute(LEDGER_DDL)
 
     def apply(self) -> list[str]:
         """Apply every pending migration in order; return the versions applied.
@@ -364,18 +390,41 @@ class MigrationRunner:
         """
         with self._db.connection() as lock:
             lock.execute("select pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
+            lock.commit()
             try:
-                return self._apply_locked()
+                return self._apply_locked(lock)
             finally:
+                # The connection may be mid-transaction if a migration raised;
+                # roll that back before the unlock so the unlock is not itself
+                # swallowed by a failed transaction block.
+                lock.rollback()
                 lock.execute("select pg_advisory_unlock(%s)",
                              (MIGRATION_LOCK_KEY,))
+                lock.commit()
 
-    def _apply_locked(self) -> list[str]:
-        """`apply`'s body, with the run's advisory lock already held."""
+    def _apply_locked(self, lock: Any) -> list[str]:
+        """`apply`'s body, ON THE CONNECTION THAT OWNS THE RUN'S LOCK.
+
+        EVERY statement below goes through `lock`. It used to reach the
+        database through `self._db.transaction()`, which checks out another
+        pool connection the advisory lock does not cover — see `_session`.
+        """
         verify_canonical_digest(self._migrations_dir)
-        self.bootstrap_ledger()
+        self.bootstrap_ledger(lock)
+        lock.commit()
 
-        applied_rows = self.applied()
+        # THE LEDGER IS NARROWED BEFORE ANY MIGRATION RUNS, not after. When
+        # this came last, a misconfigured `runtime_role` failed the run only
+        # once every migration and its ledger INSERT had already committed —
+        # and `/readyz` asks about schema and drift, not about grants, so the
+        # install could serve with the SERVED role still able to rewrite the
+        # runner's tamper-evident record (Copilot review of openDox-code#25).
+        # Now the narrowing is a precondition: it runs the moment the table
+        # exists, and a run that cannot narrow the ledger applies nothing.
+        self.protect_ledger(lock)
+        lock.commit()
+
+        applied_rows = self.applied(lock)
         on_disk = {m.version for m in self.discover()}
         vanished = sorted(row.version for row in applied_rows
                           if row.version not in on_disk)
@@ -399,20 +448,25 @@ class MigrationRunner:
                         recorded=recorded[migration.version],
                         current=current)
                 continue
-            with self._db.transaction() as conn:
-                conn.execute(migration.read_sql())
-                conn.execute(
+            with lock.transaction():
+                lock.execute(migration.read_sql())
+                lock.execute(
                     f"insert into {LEDGER_TABLE} "
                     "(version, name, checksum, reversible, applied_at) "
                     "values (%s, %s, %s, %s, now())",
                     (migration.version, migration.name, current,
                      migration.reversible))
+            lock.commit()
             applied_now.append(migration.version)
 
-        self.protect_ledger()
+        # AND AGAIN AT THE END, because a migration's own DDL may widen the
+        # served role's rights (`grant … on all tables in schema`) and would
+        # then have re-granted the ledger along with its own tables.
+        self.protect_ledger(lock)
+        lock.commit()
         return applied_now
 
-    def protect_ledger(self) -> None:
+    def protect_ledger(self, conn: Any = None) -> None:
         """Narrow the SERVED role's rights on the ledger to SELECT.
 
         WHY THE RUNNER DOES THIS AND NOT THE ROLE-CREATION SCRIPT. The compose
@@ -444,9 +498,16 @@ class MigrationRunner:
                 f"{self._runtime_role!r} is not a plain SQL identifier; the "
                 "ledger narrowing interpolates a role name as syntax and "
                 "refuses anything outside [A-Za-z_][A-Za-z0-9_]*")
-        with self._db.transaction() as conn:
-            conn.execute(
-                f"revoke insert, update, delete, truncate on {LEDGER_TABLE} "
-                f"from {self._runtime_role}")
-            conn.execute(
-                f"grant select on {LEDGER_TABLE} to {self._runtime_role}")
+        if conn is not None:
+            with conn.transaction():
+                self._narrow_ledger(conn)
+            return
+        with self._db.transaction() as owned:
+            self._narrow_ledger(owned)
+
+    def _narrow_ledger(self, conn: Any) -> None:
+        conn.execute(
+            f"revoke insert, update, delete, truncate on {LEDGER_TABLE} "
+            f"from {self._runtime_role}")
+        conn.execute(
+            f"grant select on {LEDGER_TABLE} to {self._runtime_role}")

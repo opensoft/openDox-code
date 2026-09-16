@@ -96,7 +96,13 @@ spec:
         - name: init-runtime-role
           configMap:
             name: opendox-postgres-init
-            defaultMode: 0o555
+            # 0555 — the YAML 1.1 octal spelling, NOT Python's `0o555`.
+            # `defaultMode` is an integer field and a Kubernetes manifest is
+            # parsed as YAML 1.1, in which `0o555` is a STRING: the API server
+            # rejects the StatefulSet before Postgres ever starts (Copilot
+            # review of openDox-code#25). `tests_runtime/test_deploy_shape.py`
+            # now asserts the parsed value is the integer 0o555 = 365.
+            defaultMode: 0555
   volumeClaimTemplates:
     - metadata:
         name: pg-data

@@ -337,3 +337,60 @@ def test_reset_takes_the_same_advisory_lock_a_migration_run_does() -> None:
     assert "pg_advisory_lock" in source
     assert "MIGRATION_LOCK_KEY" in source
     assert "pg_advisory_unlock" in source
+
+
+def test_init_refuses_a_repository_root_that_is_not_a_directory(
+        monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A regular file at the root was reported as a valid install.
+
+    `init` only asked `exists()`, so a path that existed as a FILE skipped the
+    `mkdir` and emitted a successful evidence object, leaving § 3.6's
+    repository creation with no directory to create anything under (Copilot
+    review of openDox-code#25, suppressed comment). It is a named, nonzero
+    refusal now.
+    """
+    root = tmp_path / "projects"
+    root.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                       "postgresql://nobody@127.0.0.1:1/none")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+    monkeypatch.setenv(PREFIX + "PROJECT_REPOSITORY_ROOT", str(root))
+    code, evidence = _run(cli.build_parser().parse_args(["runtime", "init"]))
+    assert code == 1, evidence
+    assert evidence["ok"] is False
+    assert evidence["refusal"] == "root-not-a-directory"
+    assert str(root) in evidence["message"]
+
+
+def test_serve_emits_evidence_on_an_ordinary_shutdown(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every lifecycle verb emits a JSON evidence object — `serve` too.
+
+    It was the one verb that returned 0 and printed nothing when `uvicorn.run`
+    returned normally, which made the CLI's own contract false for the verb an
+    operator runs longest (Copilot review of openDox-code#25, suppressed
+    comment). `uvicorn` and the application are stubbed here because the point
+    is the RETURN path, not a listening socket.
+    """
+    pytest.importorskip(
+        "uvicorn",
+        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
+    import uvicorn
+
+    served: dict[str, object] = {}
+
+    def _fake_run(app: object, **kwargs: object) -> None:
+        served.update(kwargs)
+
+    monkeypatch.setattr(uvicorn, "run", _fake_run)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                       "postgresql://nobody@127.0.0.1:1/none")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+    code, evidence = _run(cli.build_parser().parse_args(["runtime", "serve"]))
+    assert code == 0, evidence
+    assert evidence["ok"] is True
+    assert evidence["verb"] == "serve"
+    assert evidence["state"] == "stopped"
+    assert evidence["bind_port"] == served["port"]

@@ -189,8 +189,27 @@ def cmd_init(args: argparse.Namespace) -> int:
         return settings
     created: list[str] = []
     root = Path(settings.project_repository_root)
+    # A ROOT THAT IS NOT A DIRECTORY IS A REFUSAL, not a silent success. The
+    # first cut only asked `exists()`, so a regular file (or a symlink to one)
+    # at `OPENDOX_PROJECT_REPOSITORY_ROOT` skipped the `mkdir` and `init`
+    # reported a valid install that repository creation would later have no
+    # directory to use (Copilot review of openDox-code#25). `exists()` follows
+    # symlinks, which is the right question here: what matters is what the
+    # path RESOLVES to when § 3.6 creates a repository under it.
+    if root.exists() and not root.is_dir():
+        return _emit({"verb": "init", "refusal": "root-not-a-directory",
+                      "project_repository_root": str(root),
+                      "message": f"{root} exists and is not a directory; "
+                                 "OPENDOX_PROJECT_REPOSITORY_ROOT names the "
+                                 "directory per-project repositories are "
+                                 "created under (RULING C3)"}, ok=False)
     if not root.exists():
-        root.mkdir(parents=True, exist_ok=True)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return _emit({"verb": "init", "refusal": "root-uncreatable",
+                          "project_repository_root": str(root),
+                          "message": _safe_message(exc)}, ok=False)
         created.append(str(root))
     try:
         digest = migrations.verify_canonical_digest(settings.migrations_dir)
@@ -277,7 +296,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
     app = create_app(settings=settings)
     uvicorn.run(app, host=settings.bind_host, port=settings.bind_port,
                 log_level=args.log_level)
-    return 0
+    # EVERY LIFECYCLE VERB EMITS A JSON EVIDENCE OBJECT, INCLUDING THIS ONE.
+    # `serve` was the single verb that returned 0 and printed nothing after a
+    # normal `uvicorn.run` shutdown, which made the CLI's own contract false
+    # for the one verb an operator runs longest (Copilot review of
+    # openDox-code#25). A startup failure still raises and is still reported by
+    # `main`'s boundary; this is the ORDINARY exit, and it says what was served
+    # and that it stopped.
+    return _emit({"verb": "serve", "state": "stopped",
+                  "bind_host": settings.bind_host,
+                  "bind_port": settings.bind_port,
+                  "message": "the server returned from uvicorn.run; the "
+                             "process is exiting normally"}, ok=True)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -397,16 +427,27 @@ def cmd_reset(args: argparse.Namespace) -> int:
             # beside a migration retry could interleave DDL and leave either
             # one failed or the schema in a state neither intended (Copilot
             # review of openDox-code#25). One key, both acts.
+            # THE DROPS RUN ON THE CONNECTION THAT HOLDS THE LOCK. They used
+            # to run in `db.transaction()`, which checks out a DIFFERENT pool
+            # connection — and a session-level advisory lock protects only the
+            # session that took it, so a migration run could proceed beside a
+            # confirmed reset while this comment claimed both shared one lock
+            # (Copilot review of openDox-code#25). `MigrationRunner.apply` had
+            # the same shape and was repaired in the same commit.
             with db.connection() as lock:
                 lock.execute("select pg_advisory_lock(%s)",
                              (migrations.MIGRATION_LOCK_KEY,))
+                lock.commit()
                 try:
-                    with db.transaction() as conn:
+                    with lock.transaction():
                         for table in DROP_ORDER:
-                            conn.execute(f"drop table if exists {table}")
+                            lock.execute(f"drop table if exists {table}")
+                    lock.commit()
                 finally:
+                    lock.rollback()
                     lock.execute("select pg_advisory_unlock(%s)",
                                  (migrations.MIGRATION_LOCK_KEY,))
+                    lock.commit()
     except Exception as exc:  # noqa: BLE001
         return _emit({"verb": "reset", "refusal": type(exc).__name__,
                       "message": _safe_message(exc)}, ok=False)

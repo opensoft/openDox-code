@@ -291,14 +291,46 @@ class CoordinationStore:
         ).fetchone()
         return User(*_one(row, "user", f"id={user_id!r}"))
 
-    def list_users(self, *, limit: int | None = None,
+    def list_users(self, *, visible_to: str | None = None,
+                   limit: int | None = None,
                    after: str | None = None) -> list[User]:
+        """One page of users; `visible_to` narrows it to a principal's own.
+
+        VISIBILITY IS A PROJECT RELATION, not a role. A principal sees itself
+        and every user it shares a project with — which is the set it can
+        already name in a membership — and nobody else. Without this, any
+        signed-in account could enumerate every account in the install
+        (Copilot review of openDox-code#25): the routes authenticated and then
+        listed the whole table, while the module's own contract said every
+        non-probe route asks `memberships.role`.
+
+        `visible_to=None` is the UNSCOPED listing and stays for callers that
+        are not a request — a migration tool, an operator script — so the
+        narrowing is a decision the API makes rather than one the store hides.
+        """
         rows = self._conn.execute(
-            f"select {_USER_COLUMNS} from users "
-            "where (%s::text is null or id > %s) order by id limit %s",
-            (after, after, clamp_limit(limit)),
+            f"select {_USER_COLUMNS} from users u "
+            "where (%s::text is null or u.id > %s) "
+            "and (%s::text is null or u.id = %s or exists ("
+            "  select 1 from memberships mine"
+            "   join memberships theirs on theirs.project_id = mine.project_id"
+            "  where mine.user_id = %s and theirs.user_id = u.id)) "
+            "order by u.id limit %s",
+            (after, after, visible_to, visible_to, visible_to,
+             clamp_limit(limit)),
         ).fetchall()
         return [User(*row) for row in rows]
+
+    def user_is_visible_to(self, user_id: str, *, viewer_id: str) -> bool:
+        """Whether `viewer_id` may see `user_id` at all. Itself, always."""
+        if user_id == viewer_id:
+            return True
+        row = self._conn.execute(
+            "select 1 from memberships mine "
+            " join memberships theirs on theirs.project_id = mine.project_id "
+            "where mine.user_id = %s and theirs.user_id = %s limit 1",
+            (viewer_id, user_id)).fetchone()
+        return row is not None
 
     # -- projects ---------------------------------------------------------
 
@@ -323,12 +355,23 @@ class CoordinationStore:
         ).fetchone()
         return Project(*_one(row, "project", f"id={project_id!r}"))
 
-    def list_projects(self, *, limit: int | None = None,
+    def list_projects(self, *, member: str | None = None,
+                      limit: int | None = None,
                       after: str | None = None) -> list[Project]:
+        """One page of projects; `member` narrows it to that user's own.
+
+        A project a principal has no membership in is not that principal's to
+        see — and the membership is exactly the row every other authorization
+        question in this runtime is asked about.
+        """
         rows = self._conn.execute(
-            f"select {_PROJECT_COLUMNS} from projects "
-            "where (%s::text is null or id > %s) order by id limit %s",
-            (after, after, clamp_limit(limit)),
+            f"select {_PROJECT_COLUMNS} from projects p "
+            "where (%s::text is null or p.id > %s) "
+            "and (%s::text is null or exists ("
+            "  select 1 from memberships m"
+            "   where m.project_id = p.id and m.user_id = %s)) "
+            "order by p.id limit %s",
+            (after, after, member, member, clamp_limit(limit)),
         ).fetchall()
         return [Project(*row) for row in rows]
 
@@ -340,12 +383,18 @@ class CoordinationStore:
             raise ConflictError(
                 f"role {role!r} is not one of {list(ROLES)}; the vocabulary is "
                 "closed by `memberships_role_check` in the canonical migration")
+        # A PLAIN INSERT, AND THE UNIQUENESS IS THE ANSWER. This was an
+        # `on conflict (user_id, project_id) do update set role = excluded.role`
+        # upsert, which made `POST /memberships` — declared a create, documented
+        # as 409 on a duplicate — silently REWRITE an existing member's role and
+        # still answer 201 (Copilot review of openDox-code#25). A role change is
+        # a different act from a join and does not get to arrive disguised as
+        # one; until this runtime declares that act, a second POST for a pair
+        # that already exists is the conflict `_conflict_if_duplicate` promises.
         row = _conflict_if_duplicate(
             lambda: self._conn.execute(
                 f"insert into memberships ({_MEMBERSHIP_COLUMNS}) "
                 "values (%s, %s, %s, %s, now()) "
-                "on conflict (user_id, project_id) do update set "
-                "role = excluded.role "
                 f"returning {_MEMBERSHIP_COLUMNS}",
                 (new_id(), user_id, project_id, role),
             ).fetchone(),
@@ -364,15 +413,24 @@ class CoordinationStore:
 
     def list_memberships(self, *, project_id: str | None = None,
                          user_id: str | None = None,
+                         visible_to: str | None = None,
                          limit: int | None = None,
                          after: str | None = None) -> list[Membership]:
+        """One page of memberships; `visible_to` narrows it to shared projects.
+
+        A membership is who may act on a project, so it is readable by the
+        people that project already belongs to and by nobody else.
+        """
         rows = self._conn.execute(
-            f"select {_MEMBERSHIP_COLUMNS} from memberships "
-            "where (%s::text is null or project_id = %s) "
-            "and (%s::text is null or user_id = %s) "
-            "and (%s::text is null or id > %s) order by id limit %s",
-            (project_id, project_id, user_id, user_id, after, after,
-             clamp_limit(limit)),
+            f"select {_MEMBERSHIP_COLUMNS} from memberships x "
+            "where (%s::text is null or x.project_id = %s) "
+            "and (%s::text is null or x.user_id = %s) "
+            "and (%s::text is null or exists ("
+            "  select 1 from memberships mine"
+            "   where mine.project_id = x.project_id and mine.user_id = %s)) "
+            "and (%s::text is null or x.id > %s) order by x.id limit %s",
+            (project_id, project_id, user_id, user_id, visible_to, visible_to,
+             after, after, clamp_limit(limit)),
         ).fetchall()
         return [Membership(*row) for row in rows]
 
@@ -427,12 +485,23 @@ class CoordinationStore:
         return ProjectRepository(
             *_one(row, _PROJECT_REPOSITORY, f"project_id={project_id!r}"))
 
-    def list_project_repositories(self, *, limit: int | None = None,
+    def list_project_repositories(self, *, visible_to: str | None = None,
+                                  limit: int | None = None,
                                   after: str | None = None) -> list[ProjectRepository]:
+        """One page of the map; `visible_to` narrows it to a member's projects.
+
+        A `location` and a `remote_url` say where a project's documents live,
+        which is not a fact about somebody else's project that any signed-in
+        account is owed.
+        """
         rows = self._conn.execute(
-            f"select {_REPOSITORY_COLUMNS} from project_repositories "
-            "where (%s::text is null or id > %s) order by id limit %s",
-            (after, after, clamp_limit(limit)),
+            f"select {_REPOSITORY_COLUMNS} from project_repositories r "
+            "where (%s::text is null or r.id > %s) "
+            "and (%s::text is null or exists ("
+            "  select 1 from memberships m"
+            "   where m.project_id = r.project_id and m.user_id = %s)) "
+            "order by r.id limit %s",
+            (after, after, visible_to, visible_to, clamp_limit(limit)),
         ).fetchall()
         return [ProjectRepository(*row) for row in rows]
 
@@ -510,29 +579,42 @@ class CoordinationStore:
 
     def list_drafts(self, *, session_id: str | None = None,
                     session_ids: Sequence[str] | None = None,
+                    owned_by: str | None = None,
                     project_id: str | None = None,
                     limit: int | None = None,
                     after: str | None = None) -> list[Draft]:
-        """One page of drafts, with the SESSION FILTER APPLIED IN THE QUERY.
+        """One page of drafts, with EVERY FILTER APPLIED IN THE QUERY.
 
-        `session_ids` exists so a caller that may only see its own sessions
-        does not have to filter a page the LIMIT has already cut — which
-        returned an empty page whenever the global page held nobody else's
-        drafts, and left `after` pagination unable to walk past it. An EMPTY
-        list is "no sessions, therefore no drafts" and is answered without a
-        query; `None` is "do not filter by session".
+        `owned_by` is the ownership filter and is the one the API uses: a
+        draft belongs to the sitting typing it, and that sitting belongs to one
+        user, so the ownership question is `sessions.user_id` and it is asked
+        as a join. The first cut asked it by materializing the principal's
+        session ids and passing them as `session_ids` — correct only while a
+        user has fewer than `MAX_PAGE_SIZE` sessions, after which later
+        sessions' drafts vanished from the listing and an explicit `session_id`
+        for one of them was refused as somebody else's (Copilot review of
+        openDox-code#25). The schema puts no cap on sessions per user, so the
+        cap had to leave the authorization path entirely.
+
+        `session_ids` is kept for callers that already hold an explicit,
+        bounded set. An EMPTY list is "no sessions, therefore no drafts" and is
+        answered without a query; `None` is "do not filter by session".
         """
         if session_ids is not None and not session_ids:
             return []
         rows = self._conn.execute(
-            f"select {_DRAFT_COLUMNS} from drafts "
-            "where (%s::text is null or session_id = %s) "
-            "and (%s::text[] is null or session_id = any(%s)) "
-            "and (%s::text is null or project_id = %s) "
-            "and (%s::text is null or id > %s) order by id limit %s",
+            f"select {_DRAFT_COLUMNS} from drafts d "
+            "where (%s::text is null or d.session_id = %s) "
+            "and (%s::text[] is null or d.session_id = any(%s)) "
+            "and (%s::text is null or exists ("
+            "  select 1 from sessions s"
+            "   where s.id = d.session_id and s.user_id = %s)) "
+            "and (%s::text is null or d.project_id = %s) "
+            "and (%s::text is null or d.id > %s) order by d.id limit %s",
             (session_id, session_id,
              list(session_ids) if session_ids is not None else None,
              list(session_ids) if session_ids is not None else None,
+             owned_by, owned_by,
              project_id, project_id, after, after, clamp_limit(limit)),
         ).fetchall()
         return [Draft(*row) for row in rows]

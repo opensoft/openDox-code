@@ -44,6 +44,52 @@ spec:
         runAsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      # THE JOB WAITS FOR POSTGRES, because Kubernetes does not order the
+      # resources a single `kubectl apply` creates. On a clean install this Job
+      # and the Postgres StatefulSet are admitted together, so the first
+      # migration attempt could run against a server still initializing its
+      # data directory; with `backoffLimit: 2` the whole Job could then be
+      # marked Failed while the database came up seconds later, leaving the
+      # runtime unready until an operator deleted and reapplied it (Copilot
+      # review of openDox-code#25). The wait is an initContainer and not a
+      # larger `backoffLimit` because a retry budget is a guess and a readiness
+      # gate is an answer.
+      #
+      # It uses the SAME image as the migration container and only that
+      # image's PYTHON — `deploy/compose/Dockerfile` adds `git` and nothing
+      # else, so there is no `pg_isready` here, and pulling a second image in
+      # would put an unpinned dependency in the install path. The probe is a
+      # TCP CONNECT and carries no credential: the official `postgres` image
+      # serves its first-start `initdb` over a unix socket only and does not
+      # listen on 5432 until it is ready for clients, so an open port is
+      # exactly the fact this wait needs, and asking for it needs no DSN in a
+      # container that should not have one.
+      initContainers:
+        - name: wait-for-postgres
+          image: ghcr.io/opensoft/opendox-runtime:0.0.0
+          command:
+            - python3
+            - -c
+            - |
+              import socket, sys, time
+              # 120 x 2s = four minutes: longer than a first-start initdb,
+              # shorter than a human's patience.
+              for _ in range(120):
+                  try:
+                      with socket.create_connection(
+                              ("opendox-postgres", 5432), timeout=2):
+                          sys.exit(0)
+                  except OSError:
+                      time.sleep(2)
+              sys.stderr.write(
+                  "opendox-postgres did not accept connections in 240s\n")
+              sys.exit(1)
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
       containers:
         - name: migrate
           image: ghcr.io/opensoft/opendox-runtime:0.0.0
