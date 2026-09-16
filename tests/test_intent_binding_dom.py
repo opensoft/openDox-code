@@ -53,9 +53,12 @@ in the workflow's list and the required check runs it.
 
 **THE TWO SIBLINGS ARE NOT OMITTED ANY MORE, THEY ARE RETIRED**, and the
 deletion is in this commit. RULED `openxFactory#656` comment 5656343213 (Brett
-Heap, 2026-09-13, citing RULED OQ-F) retired both at this leg: both drove
-`views/intent-feed.js`, which STAYED at openxFactory and arrived at NEITHER
-leg. S8's own reason for leaving them out of the list — neither is among the
+Heap, 2026-09-13, citing RULED OQ-F) retired both at this leg. What each of
+them DID with `views/intent-feed.js` differs, and the paragraph above says so:
+the tray suite drove it, the wheel suite copied it only so `dispose.js`'s
+static import would resolve. What they share is the copy loop and what it
+cannot find here — that module is RULED OQ-F `not_moved`, at NEITHER leg, and
+`views/dispose.js`, which both mount, went to openXdox-code at slice S5. S8's own reason for leaving them out of the list — neither is among the
 suites S8 repairs and each is red alone at that head, so naming either would
 have put the required check red for another act's defect — was the right answer
 to the question S8 could ask, and the ruling answers a different one: not
