@@ -470,14 +470,14 @@ class LocalGitCorpus:
     def _git(self, corpus: ResolvedCorpus) -> GitRunner:
         return GitRunner(Path(corpus.location), self._executable)
 
-    def _head(self, git: _Git) -> str | None:
+    def _head(self, git: GitRunner) -> str | None:
         """The current commit, or None where the repository has none yet."""
         completed = git.run("rev-parse", "--verify", "HEAD")
         if completed.returncode != 0:
             return None
         return completed.stdout.decode().strip() or None
 
-    def _resolve_revision(self, git: _Git, revision: str,
+    def _resolve_revision(self, git: GitRunner, revision: str,
                           subject: str) -> str:
         completed = git.run("rev-parse", "--verify", f"{revision}^{{commit}}")
         if completed.returncode != 0:
