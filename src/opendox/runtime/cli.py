@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -103,6 +104,27 @@ DROP_ORDER: tuple[str, ...] = (
 )
 
 
+#: Anything shaped like a connection string or a credential-bearing URL. A
+#: driver's error message quotes the DSN it could not reach — "connection to
+#: server at ... failed", "invalid dsn: ..." — and an evidence object that
+#: printed it would put the database password in a log, which is exactly what
+#: the lifecycle contract's "redacted" forbids (Copilot review of
+#: openDox-code#25).
+_DSN_SHAPED = re.compile(
+    r"(?i)\b(?:postgres(?:ql)?|postgresql\+\w+)://\S*"
+    r"|[A-Za-z][A-Za-z0-9+.\-]*://[^\s/@]*@\S*"
+    r"|\bpassword\s*=\s*\S+")
+
+
+def _safe_message(exc: BaseException) -> str:
+    """An exception's text with every DSN- or credential-shaped run removed.
+
+    Applied to EVERY operational message this CLI emits, rather than to the
+    ones somebody remembered: the contract is that evidence is redacted.
+    """
+    return _DSN_SHAPED.sub("<redacted>", str(exc))
+
+
 def _emit(payload: dict[str, Any], *, ok: bool) -> int:
     """Print one evidence object and return the process exit code."""
     payload = {"ok": ok, **payload}
@@ -127,6 +149,14 @@ def _redacted_settings(settings: RuntimeSettings) -> dict[str, Any]:
         "OPENDOX_OIDC_LEEWAY_SECONDS": settings.oidc_leeway_seconds,
         "OPENDOX_BIND_HOST": settings.bind_host,
         "OPENDOX_BIND_PORT": settings.bind_port,
+        # Both of these were declared in `SETTINGS` and missing from this map,
+        # so `status` reported them as `null` whatever the process was actually
+        # configured with — a machine-readable report that described a
+        # different process (Copilot review of openDox-code#25). The test below
+        # now drives the map from `SETTINGS` so a new setting cannot be added
+        # to one and forgotten in the other.
+        "OPENDOX_RUNTIME_PG_ROLE": settings.runtime_pg_role,
+        "OPENDOX_PUBLISH_OPENAPI": settings.publish_openapi,
         "OPENDOX_MIGRATIONS_DIR": str(settings.migrations_dir),
         "OPENDOX_PROJECT_REPOSITORY_ROOT": str(settings.project_repository_root),
     }
@@ -225,10 +255,13 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     # EVERY OPERATIONAL FAILURE IS EVIDENCE TOO, not a traceback: a pool
     # timeout, a refused connection, a permission error and a SQL error all
     # reach an operator through the same one redacted object the lifecycle
-    # contract promises.
+    # contract promises — and REDACTED is the operative word. A driver's
+    # connection error quotes the DSN it could not reach, which is the one
+    # string in this process that must never be printed (Copilot review of
+    # openDox-code#25).
     except Exception as exc:  # noqa: BLE001
         return _emit({"verb": "migrate", "refusal": type(exc).__name__,
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     return _emit(evidence, ok=True)
 
 
@@ -303,12 +336,20 @@ def cmd_status(args: argparse.Namespace) -> int:
                 db, migrations_dir=settings.migrations_dir)
             applied = [row.version for row in runner.applied()]
             pending = [m.version for m in runner.plan()]
+            drifted = runner.drift()
         report["database"] = "reachable"
         report["applied_migrations"] = applied
         report["pending_migrations"] = pending
+        # NOTHING PENDING IS NOT THE SAME AS MATCHING THIS TREE: a migration
+        # whose file changed, or vanished, is invisible to `plan()` and is
+        # refused by `apply()`. See `MigrationRunner.drift`.
+        report["migration_drift"] = drifted
+        if drifted:
+            ok = False
     # a status verb reports, never raises
     except Exception as exc:  # noqa: BLE001
-        report["database"] = f"unreachable: {type(exc).__name__}: {exc}"
+        report["database"] = (
+            f"unreachable: {type(exc).__name__}: {_safe_message(exc)}")
         ok = False
 
     try:
@@ -355,13 +396,25 @@ def cmd_reset(args: argparse.Namespace) -> int:
                       "message": str(exc)}, ok=False)
     try:
         with Database(dsn, application_name="opendox-runtime-reset",
-                      checkout_timeout=args.connect_timeout) as db, \
-                db.transaction() as conn:
-            for table in DROP_ORDER:
-                conn.execute(f"drop table if exists {table}")
+                      checkout_timeout=args.connect_timeout) as db:
+            # THE SAME ADVISORY LOCK A MIGRATION RUN TAKES. `reset` drops the
+            # very tables `apply()` creates, so a confirmed reset running
+            # beside a migration retry could interleave DDL and leave either
+            # one failed or the schema in a state neither intended (Copilot
+            # review of openDox-code#25). One key, both acts.
+            with db.connection() as lock:
+                lock.execute("select pg_advisory_lock(%s)",
+                             (migrations.MIGRATION_LOCK_KEY,))
+                try:
+                    with db.transaction() as conn:
+                        for table in DROP_ORDER:
+                            conn.execute(f"drop table if exists {table}")
+                finally:
+                    lock.execute("select pg_advisory_unlock(%s)",
+                                 (migrations.MIGRATION_LOCK_KEY,))
     except Exception as exc:  # noqa: BLE001
         return _emit({"verb": "reset", "refusal": type(exc).__name__,
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     return _emit({"verb": "reset", "dropped": list(DROP_ORDER),
                   "note": "coordination state only; every document is in a "
                           "repository (RULING Q1)"}, ok=True)
@@ -647,7 +700,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         return _emit({"verb": getattr(args, "verb", "unknown"),
                       "refusal": type(exc).__name__,
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry

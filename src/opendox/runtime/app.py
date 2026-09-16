@@ -133,21 +133,69 @@ def get_context(request: Request) -> AppContext:
     return _context(request)
 
 
-def get_store(request: Request) -> Iterator[identity.CoordinationStore]:
-    """One transaction per request, and one store over it.
+class _LazyStore:
+    """A `CoordinationStore` that checks a connection out ON FIRST USE.
+
+    WHY LAZY. `get_principal` depends on the store, and FastAPI resolves a
+    dependency before it calls the function that asked for it — so an EAGER
+    store opened a transaction and took a pooled connection before anybody had
+    looked at the `Authorization` header. A request with no bearer token, or a
+    forged one, then failed with a database error whenever Postgres was
+    unreachable or the pool was exhausted, instead of the 401 it had earned
+    (Copilot review of openDox-code#25): the cheapest possible refusal was
+    made to depend on the most expensive resource in the process.
+
+    Deferring the checkout keeps the transaction semantics a route needs — the
+    FIRST use opens it, every later use is the same connection, and the
+    teardown commits or rolls it back — while an unauthenticated request now
+    touches no connection at all.
+    """
+
+    def __init__(self, database: Any) -> None:
+        self._database = database
+        self._exit: Any = None
+        self._store: identity.CoordinationStore | None = None
+
+    def _open(self) -> identity.CoordinationStore:
+        if self._store is None:
+            self._exit = self._database.transaction()
+            self._store = identity.CoordinationStore(self._exit.__enter__())
+        return self._store
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._open(), name)
+
+    def close(self, exc: BaseException | None) -> None:
+        if self._exit is None:
+            return
+        if exc is None:
+            self._exit.__exit__(None, None, None)
+        else:
+            self._exit.__exit__(type(exc), exc, exc.__traceback__)
+
+
+def get_store(request: Request) -> Iterator[Any]:
+    """One transaction per request, opened on first use, and one store over it.
 
     A request that writes three rows writes them atomically because they share
     this connection; a request that only reads still gets one consistent
-    snapshot.
+    snapshot; and a request that is refused before it reads anything opens no
+    transaction at all.
     """
     context = _context(request)
-    with context.database.transaction() as conn:
-        yield identity.CoordinationStore(conn)
+    store = _LazyStore(context.database)
+    try:
+        yield store
+    except BaseException as exc:
+        store.close(exc)
+        raise
+    else:
+        store.close(None)
 
 
 def get_principal(
     request: Request,
-    store: Annotated[identity.CoordinationStore, Depends(get_store)],
+    store: Annotated[Any, Depends(get_store)],
     authorization: Annotated[str | None, Header()] = None,
 ) -> identity.User:
     """The DURABLE ROW this request is made by (design § D5's inversion).
@@ -173,12 +221,12 @@ def get_principal(
     return oidc.principal_for(store, claims)
 
 
-StoreDep = Annotated[identity.CoordinationStore, Depends(get_store)]
+StoreDep = Annotated[Any, Depends(get_store)]
 PrincipalDep = Annotated[identity.User, Depends(get_principal)]
 LimitQuery = Annotated[int | None, Query(ge=1, le=identity.MAX_PAGE_SIZE)]
 
 
-def _require_own_open_session(store: identity.CoordinationStore, *,
+def _require_own_open_session(store: Any, *,
                               user: identity.User, session_id: str,
                               project_id: str,
                               require_open: bool = True) -> identity.Session:
@@ -217,7 +265,7 @@ def _require_own_open_session(store: identity.CoordinationStore, *,
     return session
 
 
-def _require_role(store: identity.CoordinationStore, *, user: identity.User,
+def _require_role(store: Any, *, user: identity.User,
                   project_id: str, allowed: tuple[str, ...]) -> identity.Membership:
     """Authorization, asked about the ROW and answered by `memberships.role`."""
     try:
@@ -317,6 +365,15 @@ def create_membership(body: MembershipCreate, store: StoreDep,
                       principal: PrincipalDep) -> dict[str, Any]:
     _require_role(store, user=principal, project_id=body.project_id,
                   allowed=("owner",))
+    # BOTH REFERENCED ROWS ARE RESOLVED FIRST. Without this, a body naming a
+    # user or project that does not exist reached the insert and came back as
+    # the database's foreign-key violation — which `_conflict` does not
+    # translate, so the caller got a 500 for a request whose only fault was a
+    # wrong id (Copilot review of openDox-code#25). `_found` makes it the 404
+    # it is. `identity` also translates a foreign-key violation now, for the
+    # race where the row is deleted between this read and the insert.
+    _found(lambda: store.get_user(body.user_id))
+    _found(lambda: store.get_project(body.project_id))
     return _membership_json(_conflict(lambda: store.create_membership(
         user_id=body.user_id, project_id=body.project_id, role=body.role)))
 
@@ -504,8 +561,8 @@ def list_drafts(store: StoreDep, principal: PrincipalDep,
     belongs to the sitting that is typing it, and that sitting belongs to one
     user.
     """
-    own = {session.id for session in store.list_sessions(
-        user_id=principal.id, limit=identity.MAX_PAGE_SIZE)}
+    own = [session.id for session in store.list_sessions(
+        user_id=principal.id, limit=identity.MAX_PAGE_SIZE)]
     if session_id is not None:
         if session_id not in own:
             raise HTTPException(
@@ -513,10 +570,14 @@ def list_drafts(store: StoreDep, principal: PrincipalDep,
                 detail={"code": "authz.not_your_session",
                         "message": "a draft is read by the user whose session "
                                    "is typing it"})
-        own = {session_id}
-    found = [d for d in store.list_drafts(project_id=project_id,
-                                          limit=limit, after=after)
-             if d.session_id in own]
+        own = [session_id]
+    # THE OWNERSHIP FILTER IS IN THE QUERY, not applied to a page the query
+    # already cut. Filtering after the LIMIT returned an empty page whenever
+    # the global page happened to hold nobody else's drafts, and `after`
+    # pagination could not walk past it — a correct-looking empty answer to a
+    # principal who has drafts (Copilot review of openDox-code#25).
+    found = store.list_drafts(session_ids=own, project_id=project_id,
+                              limit=limit, after=after)
     return [_draft_json(d) for d in found]
 
 
@@ -715,10 +776,19 @@ def create_app(*, settings: RuntimeSettings | None = None,
                     app.state.context.database,
                     migrations_dir=app.state.context.settings.migrations_dir)
                 pending = [m.version for m in runner.plan()]
+                drifted = runner.drift()
                 if pending:
                     checks["schema"] = (
                         "pending: " + ",".join(pending)
                         + " — run `opendox-runtime migrate`")
+                    ok = False
+                elif drifted:
+                    # NOTHING PENDING IS NOT THE SAME AS MATCHING THIS TREE: a
+                    # migration whose file changed, or vanished, is invisible
+                    # to `plan()` and is REFUSED by `apply()`. Readiness that
+                    # ignored it called an image the runner would not migrate
+                    # healthy (Copilot review of openDox-code#25).
+                    checks["schema"] = "drifted: " + ",".join(drifted)
                     ok = False
                 else:
                     checks["schema"] = "applied"

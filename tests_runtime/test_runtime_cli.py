@@ -347,3 +347,59 @@ def test_the_entrypoint_turns_an_escaped_exception_into_evidence(
 def test_an_argparse_usage_error_still_exits_the_way_argparse_means_it() -> None:
     with pytest.raises(SystemExit):
         cli.main(["runtime", "no-such-verb"])
+
+
+def test_status_reports_every_declared_setting_and_none_as_null(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """`OPENDOX_RUNTIME_PG_ROLE` and `OPENDOX_PUBLISH_OPENAPI` were declared in
+    `SETTINGS` and missing from the verb's own value map, so a
+    machine-readable report described a different process than the one running.
+    """
+    from opendox.runtime.config import SETTING_NAMES
+
+    monkeypatch.setenv(PREFIX + "DATABASE_URL", "postgresql://u:pw@127.0.0.1:1/x")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+    monkeypatch.setenv(PREFIX + "RUNTIME_PG_ROLE", "opendox_runtime")
+    monkeypatch.setenv(PREFIX + "PUBLISH_OPENAPI", "true")
+    args = cli.build_parser().parse_args(
+        ["runtime", "status", "--probe-timeout", "0.2"])
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        args.func(args)
+    reported = json.loads(buffer.getvalue())["settings"]
+    assert set(reported) == set(SETTING_NAMES), (
+        "the status map and `config.SETTINGS` disagree")
+    assert reported[PREFIX + "RUNTIME_PG_ROLE"] == "opendox_runtime"
+    assert reported[PREFIX + "PUBLISH_OPENAPI"] is True
+    for name, value in reported.items():
+        if name in SECRET_NAMES:
+            continue
+        assert value is not None, f"{name} reported as null"
+
+
+def test_an_operational_failure_never_prints_the_dsn(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A driver's connection error quotes the DSN it could not reach."""
+    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
+                       "postgresql://someone:hunter2@127.0.0.1:1/none")
+    buffer = io.StringIO()
+    args = cli.build_parser().parse_args(
+        ["runtime", "migrate", "--connect-timeout", "0.2"])
+    with redirect_stdout(buffer):
+        code = args.func(args)
+    printed = buffer.getvalue()
+    assert code == 1
+    assert "hunter2" not in printed, printed
+    assert "postgresql://" not in printed, printed
+    assert json.loads(printed)["ok"] is False
+
+
+def test_reset_takes_the_same_advisory_lock_a_migration_run_does() -> None:
+    """`reset` drops the very tables `apply()` creates."""
+    import inspect
+
+    source = inspect.getsource(cli.cmd_reset)
+    assert "pg_advisory_lock" in source
+    assert "MIGRATION_LOCK_KEY" in source
+    assert "pg_advisory_unlock" in source

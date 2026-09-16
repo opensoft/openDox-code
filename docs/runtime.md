@@ -121,11 +121,30 @@ Reach it over the compose network or with `docker compose exec`.
 ### On Kubernetes
 
 ```sh
-kubectl create secret generic opendox-postgres   --from-literal=password=...
-kubectl create secret generic opendox-db-runtime --from-literal=dsn=...
-kubectl create secret generic opendox-db-migration --from-literal=dsn=...
+# THREE secrets and FOUR keys. The bundled Postgres needs both its own
+# superuser password and the least-privileged role's, because the base creates
+# that role on first start; a secret with only `password` leaves the pod unable
+# to resolve `runtime-password` and the install does not come up.
+kubectl -n opendox create secret generic opendox-postgres \
+    --from-literal=password=... \
+    --from-literal=runtime-password=...
+kubectl -n opendox create secret generic opendox-db-runtime   --from-literal=dsn=...
+kubectl -n opendox create secret generic opendox-db-migration --from-literal=dsn=...
 kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
 ```
+
+**Re-running the migration Job.** A Job's pod template is immutable, so a
+second `kubectl apply` after the first run does not start a new migration. Ask
+for one:
+
+```sh
+kubectl -n opendox delete job opendox-migrate --ignore-not-found
+kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
+```
+
+The Job carries `ttlSecondsAfterFinished: 3600`, so the delete is usually a
+no-op — and "usually" is not a migration guarantee, which is why it is written
+here.
 
 This repository commits every Secret's **name and key** and no Secret's value;
 `tests_runtime/test_deploy_shape.py` refuses a `kind: Secret` anywhere under

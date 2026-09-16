@@ -37,15 +37,28 @@ images:
 # plausible-looking placeholder would be a runtime trusting an issuer nobody
 # chose. `disableNameSuffixHash` keeps the name stable for the references.
 configMapGenerator:
-  # The bundled Postgres's first-start role bootstrap, from the SAME file the
-  # compose package mounts. One script, two deployments; a second copy here
-  # would be a second thing to keep in step.
+  # The bundled Postgres's first-start role bootstrap.
+  #
+  # A COPY INSIDE THIS BASE, and the copy is not a lapse — it is what
+  # kustomize's default load restrictor requires. `LoadRestrictionsRootOnly`
+  # refuses a generator source outside the kustomization root, so
+  # `../../compose/init-runtime-role.sh` made the documented
+  # `kustomize build deploy/kubernetes/overlays/dev` FAIL rather than render
+  # (Copilot review of openDox-code#25). The alternative — telling every
+  # operator to pass `--load-restrictor LoadRestrictionsNone` — buys one file
+  # at the cost of weakening every build.
+  #
+  # ONE SOURCE OF TRUTH IS KEPT BY A TEST INSTEAD OF BY A PATH:
+  # `tests_runtime/test_deploy_shape.py::
+  # test_the_two_copies_of_the_role_bootstrap_are_byte_identical` compares this
+  # file with `deploy/compose/init-runtime-role.sh` and fails on any
+  # difference, so the duplication cannot drift even though it exists.
   - name: opendox-postgres-init
     behavior: create
     options:
       disableNameSuffixHash: true
     files:
-      - 010-runtime-role.sh=../../compose/init-runtime-role.sh
+      - 010-runtime-role.sh=init-runtime-role.sh
   - name: opendox-oidc
     behavior: create
     options:

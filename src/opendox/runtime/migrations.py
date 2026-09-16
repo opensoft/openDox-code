@@ -268,15 +268,35 @@ class MigrationRunner:
         return discover_migrations(self._migrations_dir)
 
     def applied(self) -> list[AppliedMigration]:
-        """The ledger's rows, or `[]` where no ledger exists yet.
+        """The ledger's rows IN THIS SCHEMA, or `[]` where it has none yet.
 
         `to_regclass` rather than a `select` that would raise: an absent ledger
         is the state of a fresh database and must be distinguishable from a
         database that cannot be read at all.
+
+        QUALIFIED WITH `current_schema()`, and that is not decoration. A
+        connection's `search_path` is `<schema>,public`, so an unqualified
+        `to_regclass('opendox_schema_migrations')` finds a ledger in `public`
+        when the selected schema has none — after which `plan()` reports a
+        fresh schema as fully migrated and `/readyz` calls it ready (Copilot
+        review of openDox-code#25). The same search path is what let a test
+        harness write its tables into `public` once, so this is the second time
+        the shape has bitten; it is pinned here.
         """
         with self._db.connection() as conn:
+            schema_row = conn.execute("select current_schema()").fetchone()
+            schema = schema_row[0] if schema_row else None
+            if not schema:
+                raise MigrationError(
+                    "this connection has no current schema; the ledger cannot "
+                    "be resolved without one")
+            # `quote_ident` and CONCATENATION, not `format('%I.%I', …)`:
+            # psycopg's client-side placeholder scanner reads `%I` as a
+            # placeholder it does not know and refuses the whole statement, so
+            # the server-side formatter cannot be reached through it.
             exists = conn.execute(
-                "select to_regclass(%s) is not null", (LEDGER_TABLE,)).fetchone()
+                "select to_regclass(quote_ident(%s) || '.' || quote_ident(%s)) "
+                "is not null", (schema, LEDGER_TABLE)).fetchone()
             if not exists or not exists[0]:
                 return []
             rows = conn.execute(
@@ -286,9 +306,41 @@ class MigrationRunner:
                                  reversible=r[3]) for r in rows]
 
     def plan(self) -> list[Migration]:
-        """The pending migrations, in the order they would be applied."""
+        """The pending migrations, in the order they would be applied.
+
+        VERSIONS ONLY, and `drift()` is where the rest of the answer is: see
+        that method for why "nothing pending" is not the same as "this database
+        matches this tree".
+        """
         already = {row.version for row in self.applied()}
         return [m for m in self.discover() if m.version not in already]
+
+    def drift(self) -> list[str]:
+        """Applied migrations this tree can no longer account for.
+
+        TWO KINDS, both of which `plan()` CANNOT see because it compares
+        versions and nothing else (Copilot review of openDox-code#25):
+
+          * a migration whose file has CHANGED since it was applied — `apply()`
+            refuses it with `MigrationChecksumDriftError`, and without this
+            method `/readyz` and `opendox-runtime status` both reported
+            `schema: applied` for a database the runner would refuse;
+          * a migration whose file is GONE — the ledger says it ran and the
+            tree cannot say what it did, which makes a deleted migration
+            indistinguishable from a valid no-op.
+
+        Returns the versions, sorted, with a one-word reason each, so a caller
+        can name them. Empty is the only clean answer.
+        """
+        on_disk = {m.version: m for m in self.discover()}
+        out: list[str] = []
+        for row in self.applied():
+            migration = on_disk.get(row.version)
+            if migration is None:
+                out.append(f"{row.version}:missing")
+            elif migration.checksum() != row.checksum:
+                out.append(f"{row.version}:changed")
+        return sorted(out)
 
     # -- apply ------------------------------------------------------------
 
@@ -323,7 +375,19 @@ class MigrationRunner:
         verify_canonical_digest(self._migrations_dir)
         self.bootstrap_ledger()
 
-        recorded = {row.version: row.checksum for row in self.applied()}
+        applied_rows = self.applied()
+        on_disk = {m.version for m in self.discover()}
+        vanished = sorted(row.version for row in applied_rows
+                          if row.version not in on_disk)
+        if vanished:
+            raise MigrationError(
+                f"the ledger records migration(s) {vanished} that this tree "
+                "does not contain. A run cannot say what they did, so it "
+                "cannot say the database matches the tree; restore the file(s) "
+                "or reconcile the ledger deliberately. (Fail closed — the same "
+                "rule a checksum drift gets.)")
+
+        recorded = {row.version: row.checksum for row in applied_rows}
         applied_now: list[str] = []
 
         for migration in self.discover():
