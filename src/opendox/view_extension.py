@@ -355,13 +355,22 @@ class ViewBinding:
     #: over the six gate-loop bindings, `gate.lens` owns no selector of its own
     #: and reuses the shell's shared chrome, so it declares none.
     #:
-    #: WHY A STRING AND NOT A LIST. One binding, one sheet, for `module`'s
-    #: reason: the manifest crosses a process boundary as JSON and the client
-    #: resolves exactly one href per binding. TWO BINDINGS MAY NAME THE SAME
-    #: SHEET, and that is how a column whose panels share a rule family avoids
-    #: either duplicating it into two files (two authorities for one rule set)
-    #: or making one optional binding depend on another's sheet: the client
-    #: DEDUPES BY HREF, so a sheet named twice is injected once.
+    #: WHY A STRING AND NOT A LIST, AND IT IS RULED. One binding, one sheet,
+    #: for `module`'s reason: the manifest crosses a process boundary as JSON
+    #: and the client resolves exactly one href per binding. TWO BINDINGS MAY
+    #: NAME THE SAME SHEET, and that is how a column whose panels share a rule
+    #: family avoids either duplicating it into two files (two authorities for
+    #: one rule set) or making one optional binding depend on another's sheet:
+    #: the client DEDUPES BY HREF, so a sheet named twice is injected once.
+    #:
+    #: The alternative — a TUPLE of specifiers, with a separate shared sheet
+    #: named beside each binding's own — was put to Brett Heap with the
+    #: measurement that raised it (openXdox's six contributed bindings need
+    #: FOUR sheets: one owns no selector at all, and two name eleven blocks
+    #: between them) and REFUSED: RULED openxFactory#656 comment `5700475319`
+    #: (2026-09-16, by interactive multi-choice) keeps the single specifier and
+    #: makes the href de-duplication load-bearing rather than decorative. A
+    #: successor widening this field is changing a ruled decision.
     styles: str = ""
 
     def __post_init__(self) -> None:

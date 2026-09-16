@@ -304,6 +304,23 @@ def test_a_binding_may_name_one_bundle_relative_sheet() -> None:
     assert binding.as_manifest_entry()["styles"] == "./views/gate.css"
 
 
+def test_the_single_specifier_shape_is_cited_as_ruled() -> None:
+    """ONE SHEET PER BINDING, AND TWO BINDINGS MAY NAME THE SAME ONE — the
+    measured shape, and a RULED one.
+
+    The alternative (a tuple of specifiers with a shared sheet beside each
+    binding's own) was put to Brett Heap with the measurement that raised it
+    and refused: RULED openxFactory#656 comment `5700475319`, 2026-09-16, by
+    interactive multi-choice. The citation is asserted rather than trusted, so
+    a successor widening the field has to move the reference with it instead of
+    leaving a sentence that attributes its own choice to a ruling.
+    """
+    source = (ROOT / "src" / "opendox" / "view_extension.py").read_text(
+        encoding="utf-8")
+    assert "5700475319" in source
+    assert ViewBinding.__dataclass_fields__["styles"].type in ("str", str)
+
+
 def test_a_binding_with_no_sheet_is_the_default_and_is_carried() -> None:
     """RULED Q7's absent case, which `gate.lens` is the measured instance of."""
     binding = _binding()
