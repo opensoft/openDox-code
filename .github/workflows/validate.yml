@@ -473,6 +473,12 @@ jobs:
       #              #25's rounds 6 and 7 by merge. THE CURRENT FIGURE for this
       #              branch, stated at the same commit as in the PR
       #              description.
+      #  171 passed  at `build/3-6-repository-act` `46f1e5bb` (same day,
+      #              same python, pytest and git) — the same six modules,
+      #              carrying #25's round 8 by merge, and measured with
+      #              the `runtime` extra made UNIMPORTABLE, which is this
+      #              job's own install. THE CURRENT FIGURE for this
+      #              branch; the PR description states it at this commit.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
