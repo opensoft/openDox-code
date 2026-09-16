@@ -977,3 +977,171 @@ def test_a_referenced_row_deleted_under_a_write_is_404_and_not_500(
                           headers=_auth(owner))
     assert refused.status_code == 404, refused.text
     assert refused.json()["detail"]["code"] == "coordination.not_found"
+
+
+# -- Copilot's tenth round on #25 --------------------------------------------
+
+
+def test_a_session_that_ends_under_the_write_takes_no_draft(
+        client, database, mint_token, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`require_open=True` is a promise about the WRITE, not about a read.
+
+    The route's check and the upsert were two statements, so a
+    `DELETE /sessions/{id}` committing between them wrote a draft into a
+    sitting that had ended — the one thing that check exists to prevent
+    (Copilot review of openDox-code#25, round 10, suppressed). The predicate
+    now travels in the insert. The race is made deterministic the way this file
+    already drives one: the pre-check is shown the row as it was a moment
+    before the close.
+    """
+    import dataclasses
+
+    from opendox.runtime import identity
+
+    token = mint_token(subject="race-close")
+    project = _project_with(client, token, "close-race")
+    session = client.post("/api/v1/sessions", json={"project_id": project["id"]},
+                          headers=_auth(token)).json()
+    client.delete(f"/api/v1/sessions/{session['id']}", headers=_auth(token))
+
+    real_get_session = identity.CoordinationStore.get_session
+
+    def _still_open(self, session_id: str):
+        row = real_get_session(self, session_id)
+        if session_id == session["id"]:
+            # What the pre-check saw a moment before the close committed.
+            return dataclasses.replace(row, ended_at=None)
+        return row
+
+    monkeypatch.setattr(identity.CoordinationStore, "get_session", _still_open)
+
+    refused = client.put("/api/v1/drafts",
+                         json={"session_id": session["id"],
+                               "project_id": project["id"],
+                               "document_key": "raced.md", "body": "?"},
+                         headers=_auth(token))
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"]["code"] == "coordination.not_found"
+    with database.connection() as conn:
+        rows = conn.execute("select count(*) from drafts where session_id = %s",
+                            (session["id"],)).fetchone()
+    assert rows[0] == 0, "a draft was written into a session that had ended"
+
+
+def test_a_draft_answers_the_same_to_a_stranger_whether_or_not_it_exists(
+        client, mint_token) -> None:
+    """The existence oracle, one step out from the one round 7 closed.
+
+    Round 7 normalized "unknown draft" and "another member's draft" for a
+    member of the project. A caller who is NOT a member still got
+    `authz.not_a_member` for a draft that exists and `authz.not_your_session`
+    for an id that does not, so the id space was walkable by anyone with an
+    account (Copilot review of openDox-code#25, round 10, suppressed).
+    """
+    owner = mint_token(subject="oracle-owner")
+    stranger = mint_token(subject="oracle-stranger")
+    project = _project_with(client, owner, "oracle-project")
+    session = client.post("/api/v1/sessions", json={"project_id": project["id"]},
+                          headers=_auth(owner)).json()
+    draft = client.put("/api/v1/drafts",
+                       json={"session_id": session["id"],
+                             "project_id": project["id"],
+                             "document_key": "secret.md", "body": "mine"},
+                       headers=_auth(owner)).json()
+
+    real = client.delete(f"/api/v1/drafts/{draft['id']}",
+                         headers=_auth(stranger))
+    invented = client.delete("/api/v1/drafts/no-such-draft-id",
+                             headers=_auth(stranger))
+    assert real.status_code == invented.status_code == 403
+    assert real.json() == invented.json(), (
+        "a stranger can tell a real draft id from an invented one")
+    # And the owner's own discard still works.
+    assert client.delete(f"/api/v1/drafts/{draft['id']}",
+                         headers=_auth(owner)).status_code == 204
+
+
+def test_a_draft_deleted_under_the_discard_is_404_and_not_500(
+        client, mint_token, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two concurrent discards by the owner, the second arriving late.
+
+    The route read the row, authorized, and then called `delete_draft`
+    directly, so `identity.NotFoundError` escaped as a 500 instead of the
+    documented coordination 404 — the session-close path beside it was already
+    wrapped in `_found` (Copilot review of openDox-code#25, round 10,
+    suppressed).
+    """
+    import dataclasses
+
+    from opendox.runtime import identity
+
+    token = mint_token(subject="discard-race")
+    project = _project_with(client, token, "discard-race")
+    session = client.post("/api/v1/sessions", json={"project_id": project["id"]},
+                          headers=_auth(token)).json()
+    draft = client.put("/api/v1/drafts",
+                       json={"session_id": session["id"],
+                             "project_id": project["id"],
+                             "document_key": "gone.md", "body": "x"},
+                       headers=_auth(token)).json()
+    assert client.delete(f"/api/v1/drafts/{draft['id']}",
+                         headers=_auth(token)).status_code == 204
+
+    stale = identity.Draft(
+        id=draft["id"], session_id=session["id"], project_id=project["id"],
+        document_key="gone.md", body="x", basis_revision=None,
+        updated_at=None)
+    monkeypatch.setattr(identity.CoordinationStore, "get_draft",
+                        lambda self, draft_id: dataclasses.replace(stale))
+
+    late = client.delete(f"/api/v1/drafts/{draft['id']}", headers=_auth(token))
+    assert late.status_code == 404, late.text
+    assert late.json()["detail"]["code"] == "coordination.not_found"
+
+
+def test_a_project_deleted_under_an_open_session_is_404_and_not_500(
+        client, database, mint_token, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other referencing write this API makes, and it was unwrapped.
+
+    `POST /sessions` checks the caller's membership and then inserts; the
+    project can go between the two, and the foreign-key violation escaped the
+    route as a 500 rather than the documented 404. `identity.open_session` now
+    goes through `_conflict_if_duplicate` like every other referencing write,
+    and the route through `_conflict` (Copilot review of openDox-code#25, round
+    10, suppressed).
+    """
+    from opendox.runtime import identity
+
+    token = mint_token(subject="session-fk-race")
+    project = _project_with(client, token, "session-fk-race")
+    membership = client.get("/api/v1/memberships", headers=_auth(token)).json()[0]
+    with database.transaction() as conn:
+        conn.execute("delete from projects where id = %s", (project["id"],))
+
+    stale = identity.Membership(
+        id=membership["id"], user_id=membership["user_id"],
+        project_id=project["id"], role="owner", created_at=None)
+    monkeypatch.setattr(identity.CoordinationStore, "membership_for",
+                        lambda self, *, user_id, project_id: stale)
+
+    refused = client.post("/api/v1/sessions",
+                          json={"project_id": project["id"]},
+                          headers=_auth(token))
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"]["code"] == "coordination.not_found"
+
+
+def test_the_store_translates_a_foreign_key_violation_on_a_session(
+        store) -> None:
+    """And the translation is the store's, measured against a real Postgres.
+
+    `_conflict_if_duplicate` is the one place this module turns a SQLSTATE into
+    its own error, and `open_session` was written outside it — so the API layer
+    had nothing to translate and the raw driver error became a 500.
+    """
+    from opendox.runtime import identity
+
+    user = store.upsert_user(issuer="https://broker.test/realms/opendox",
+                             subject="fk-session-store")
+    with pytest.raises(identity.NotFoundError):
+        store.open_session(user_id=user.id, project_id="no-such-project")

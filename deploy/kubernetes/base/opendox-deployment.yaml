@@ -33,8 +33,9 @@ spec:
       labels:
         app.kubernetes.io/name: opendox-runtime
     spec:
-      # This pod never calls the Kubernetes API, so a usable API-server token
-      # in an internet-adjacent container is reach it does not need.
+      # This pod never calls the Kubernetes API, so mounting a usable
+      # API-server token into an internet-adjacent container would hand it
+      # reach it does not need.
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -149,16 +150,29 @@ spec:
               path: /readyz
               port: http
             initialDelaySeconds: 10
-            periodSeconds: 15
-            # A TIMEOUT THAT COVERS THE ENDPOINT'S OWN BUDGETS. Kubernetes
-            # defaults `timeoutSeconds` to ONE, and `/readyz` can spend the
-            # database checkout timeout (10s by default) plus the broker's
-            # JWKS HTTP timeout before it answers — so a healthy but slow
-            # dependency was reported unready, and each cut probe left its
-            # request still running in the process (Copilot review of
-            # openDox-code#25). Fifteen: longer than both budgets together,
-            # shorter than `periodSeconds` so two probes never overlap.
-            timeoutSeconds: 15
+            periodSeconds: 30
+            # A TIMEOUT THAT COVERS THE ENDPOINT'S OWN BUDGETS, WITH ROOM.
+            # Kubernetes defaults `timeoutSeconds` to ONE, and `/readyz` can
+            # spend the database checkout timeout (`db.DEFAULT_CHECKOUT_
+            # TIMEOUT_SECONDS`, 10s) plus the broker's JWKS HTTP timeout
+            # (`oidc.DEFAULT_JWKS_TIMEOUT_SECONDS`, 5s) before it answers — so
+            # a healthy but slow dependency was reported unready, and each cut
+            # probe left its request still running in the process (Copilot
+            # review of openDox-code#25).
+            #
+            # TWENTY, AND NOT FIFTEEN. Fifteen was the sum of those two budgets
+            # EXACTLY, and the comment here called it "longer than both
+            # budgets together" — which it was not: a worst-case-but-valid
+            # readiness request had zero allowance for probe scheduling,
+            # network latency or serializing the response, so the probe could
+            # cut a request the endpoint was about to answer and mark the pod
+            # unavailable (Copilot review of openDox-code#25, round 10,
+            # suppressed). Twenty is five seconds over the endpoint's whole
+            # budget, and `periodSeconds` moved to thirty with it so a probe
+            # still cannot outlive its own period and overlap itself.
+            # `tests_runtime/test_deploy_shape.py` reads both budgets out of
+            # the modules that declare them and holds this relation.
+            timeoutSeconds: 20
           volumeMounts:
             - name: project-repositories
               mountPath: /var/lib/opendox/projects

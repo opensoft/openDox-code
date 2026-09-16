@@ -152,6 +152,41 @@ and set `migration_wait_host=` (empty) in the `opendox-runtime-config`
 ConfigMap: the migration Job's readiness gate then exits immediately instead of
 waiting four minutes for a Service this cluster does not have.
 
+**And provision the served role FIRST — this is a prerequisite, not a
+suggestion.** The bundled Postgres creates and grants that role on its first
+start (`deploy/compose/init-runtime-role.sh`, mounted by the StatefulSet); a
+managed database runs no init script, so nothing else will. Without it the
+migration owner creates the six tables and the served role has no privilege on
+any of them: the Job succeeds, `/readyz` reports a database that answers and an
+applied schema, and every API request then fails with `permission denied for
+table …` (Copilot review of openDox-code#25, round 10). Run this once, on the
+managed database, as an administrator, BEFORE the migration Job — `<migration
+owner>` is the role in `opendox-db-migration`'s DSN and `<runtime role>` is
+both the role in `opendox-db-runtime`'s DSN and the `runtime_pg_role` value in
+the ConfigMap:
+
+```sql
+create role "<runtime role>" login password '<runtime password>';
+grant connect on database "<database>" to "<runtime role>";
+grant usage on schema public to "<runtime role>";
+-- tables that already exist, if this database has been migrated before
+grant select, insert, update, delete on all tables in schema public
+  to "<runtime role>";
+-- and everything the migration owner creates from here on, so a later
+-- migration that adds a table needs no second visit
+alter default privileges for role "<migration owner>" in schema public
+  grant select, insert, update, delete on tables to "<runtime role>";
+```
+
+The migration run then NARROWS that role on the ledger alone
+(`MigrationRunner.protect_ledger`, which is why the role has to exist before
+the Job runs and why the Job fails loudly if it does not): the served identity
+keeps `select` on `opendox_schema_migrations` for `/readyz` and loses every
+write, so it cannot rewrite the runner's own tamper-evident record. That
+narrowing is the one privilege difference between the bundled and the managed
+path; the four statements above are the rest of what the bundled init script
+does, spelled for an operator who has to do it by hand.
+
 **Re-running the migration Job.** A Job's pod template is immutable, so a
 second `kubectl apply` after the first run does not start a new migration. Ask
 for one:

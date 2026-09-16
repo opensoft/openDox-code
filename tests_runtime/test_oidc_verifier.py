@@ -408,3 +408,57 @@ def test_the_miss_cooldown_is_measured_against_the_serialized_decision(
     assert answer == [True], (
         "the refresh was refused against a clock read before the wait; a key "
         "rotation that arrives while the lock is held goes unseen")
+
+
+# -- Copilot's tenth round on #25: the key-set source is a contract, not a union
+
+
+def test_any_object_with_load_is_a_jwks_source_and_the_cache_takes_it(
+        jwks_path: str) -> None:
+    """`CachingJwks` was annotated with the two classes this module ships.
+
+    Neither the cache nor the suites ever needed more than `load()` — the
+    rotation and counting sources in this very file are third implementations,
+    and a deployment reading its key set from a secret store would be a fourth.
+    A union of concrete classes therefore said a false thing about the surface
+    and made every legitimate source a type error (Copilot review of
+    openDox-code#25, round 10). `JwksSource` is the contract, `runtime_checkable`
+    so the annotation and `isinstance` ask the same question.
+    """
+    import inspect
+
+    class _FromAnywhere:
+        """Not a subclass of either shipped source — just `load()`."""
+
+        def __init__(self, document: dict) -> None:
+            self._document = document
+            self.loads = 0
+
+        def load(self) -> dict:
+            self.loads += 1
+            return self._document
+
+    document = json.loads(Path(jwks_path).read_text(encoding="utf-8"))
+    source = _FromAnywhere(document)
+    assert isinstance(source, oidc.JwksSource)
+    assert isinstance(oidc.FileJwksSource(jwks_path), oidc.JwksSource)
+
+    cache = oidc.CachingJwks(source, ttl_seconds=300)
+    assert cache.keyset().keys, "the cache did not accept a conformant source"
+    assert source.loads == 1
+
+    annotation = inspect.signature(oidc.CachingJwks.__init__).parameters[
+        "source"].annotation
+    assert annotation == "JwksSource", (
+        f"the declared surface is {annotation!r}, not the contract the cache "
+        "actually asks for")
+
+
+def test_an_object_without_load_is_not_a_jwks_source() -> None:
+    """The contract has a member, so it can be failed as well as kept."""
+
+    class _NotASource:
+        def fetch(self) -> dict:                       # the wrong spelling
+            return {"keys": []}
+
+    assert not isinstance(_NotASource(), oidc.JwksSource)

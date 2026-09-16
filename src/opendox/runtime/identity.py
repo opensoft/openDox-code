@@ -522,11 +522,25 @@ class CoordinationStore:
 
     def open_session(self, *, user_id: str,
                      project_id: str | None = None) -> Session:
-        row = self._conn.execute(
-            f"insert into sessions ({_SESSION_COLUMNS}) "
-            f"values (%s, %s, %s, now(), now(), null) returning {_SESSION_COLUMNS}",
-            (new_id(), user_id, project_id),
-        ).fetchone()
+        """Open a sitting for this user, optionally bound to one project.
+
+        WRAPPED LIKE EVERY OTHER REFERENCING WRITE. The route checks the
+        caller's membership first, so an unknown project is already a 403 — but
+        the project can be deleted BETWEEN that check and this insert, and the
+        raw foreign-key violation then escaped the route as a 500 for a row
+        that simply is not there any more (Copilot review of openDox-code#25,
+        round 10, suppressed). `_conflict_if_duplicate` is the one place this
+        module turns a SQLSTATE into its own error, and this write had been
+        left outside it.
+        """
+        row = _conflict_if_duplicate(
+            lambda: self._conn.execute(
+                f"insert into sessions ({_SESSION_COLUMNS}) "
+                "values (%s, %s, %s, now(), now(), null) "
+                f"returning {_SESSION_COLUMNS}",
+                (new_id(), user_id, project_id),
+            ).fetchone(),
+            f"a session for user {user_id!r} on project {project_id!r}")
         return Session(*_one(row, "session", f"user_id={user_id!r}"))
 
     def touch_session(self, session_id: str) -> Session:
@@ -572,17 +586,38 @@ class CoordinationStore:
         that is typing it, so two sessions editing the same document hold two
         drafts and neither silently overwrites the other. Resolving them is the
         apply lane's business, not the database's.
+
+        THE SESSION-OPEN PREDICATE IS PART OF THIS WRITE, not a check the
+        caller made a moment earlier. `app.put_draft` asks
+        `_require_own_open_session` first — which produces the better refusal
+        in the ordinary case — but that read and this insert were two
+        statements, so a `DELETE /sessions/{id}` committing between them let a
+        draft be written into a sitting that had ended, which is exactly what
+        `require_open=True` promises cannot happen (Copilot review of
+        openDox-code#25, round 10, suppressed). The `where exists` is evaluated
+        by the statement that writes, so the promise is kept by one atomic act
+        rather than by the interval between two. A session closed before this
+        statement begins is `NotFoundError`; one closed after it begins was
+        open when the draft was saved, which is the true answer.
         """
-        row = self._conn.execute(
-            f"insert into drafts ({_DRAFT_COLUMNS}) "
-            "values (%s, %s, %s, %s, %s, %s, now()) "
-            "on conflict (session_id, document_key) do update set "
-            "body = excluded.body, basis_revision = excluded.basis_revision, "
-            "updated_at = now() "
-            f"returning {_DRAFT_COLUMNS}",
-            (new_id(), session_id, project_id, document_key, body, basis_revision),
-        ).fetchone()
-        return Draft(*_one(row, "draft", f"document_key={document_key!r}"))
+        row = _conflict_if_duplicate(
+            lambda: self._conn.execute(
+                f"insert into drafts ({_DRAFT_COLUMNS}) "
+                "select %s, %s, %s, %s, %s, %s, now() "
+                "where exists (select 1 from sessions "
+                "where id = %s and ended_at is null) "
+                "on conflict (session_id, document_key) do update set "
+                "body = excluded.body, "
+                "basis_revision = excluded.basis_revision, "
+                "updated_at = now() "
+                f"returning {_DRAFT_COLUMNS}",
+                (new_id(), session_id, project_id, document_key, body,
+                 basis_revision, session_id),
+            ).fetchone(),
+            f"a draft of {document_key!r} in session {session_id!r}")
+        # AN EMPTY RETURNING IS THE PREDICATE, and it has one cause: the
+        # session is not open. Every other failure of this statement raises.
+        return Draft(*_one(row, "open session", f"id={session_id!r}"))
 
     def get_draft(self, draft_id: str) -> Draft:
         row = self._conn.execute(

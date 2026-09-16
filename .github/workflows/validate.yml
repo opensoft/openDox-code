@@ -423,11 +423,12 @@ jobs:
       #              canonical gate, and the filename assertion that is now the
       #              runner's own regex rather than a looser restatement.
       #
-      #              THE CURRENT FIGURE IS THIS ONE, and the PR description
-      #              states it at this same commit. An entry above is the
-      #              measurement that was current when it was written; the
-      #              commit that records a figure changes no test, so the
-      #              figure also holds at the head that carries the record.
+      #              READING THIS LIST: the LAST entry is the current figure
+      #              and the PR description states that one at that same
+      #              commit. An earlier entry is the measurement that was
+      #              current when it was written, not a competing claim; the
+      #              commit that records a figure changes no test, so each
+      #              figure also holds at the head that carries its record.
       #  111 passed  at `build/3-5-runtime` `2161a23a` (same day, same python
       #              and pytest) — the same five modules, after round
       #              EIGHT: `serve` telling a startup failure from a
@@ -442,7 +443,22 @@ jobs:
       #              added a test that passed that way and went RED here,
       #              because the gate it asserted sat behind the deferred
       #              driver import.
-
+      #  118 passed  at `build/3-5-runtime` `f9c72341` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round TEN: `serve` reporting a bind
+      #              failure as evidence rather than a traceback, `status`
+      #              keeping the connectivity answer `select 1` already gave
+      #              it, the migration runner's documented connection contract
+      #              driven by a double that implements exactly it, the
+      #              readiness probe's timeout held STRICTLY over the
+      #              endpoint's own budgets (both read from the modules that
+      #              declare them), and the managed-database role provisioning
+      #              made a prerequisite the runbook states and this suite
+      #              derives from the bundled bootstrap. ROUND TEN'S OTHER SIX
+      #              FIXES ARE IN THE DB-BACKED JOB (three write races, an
+      #              existence oracle, the key-set source Protocol): 211
+      #              passed there at the same commit.
+      #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
       #              branch names, the sixth being the adapter conformance

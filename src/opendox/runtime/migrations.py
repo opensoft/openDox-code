@@ -30,11 +30,27 @@ its `execute_migration` session-setting containment (`reset role`, restored
 and no migration in this repository does. Both are re-derivable from this
 paragraph the day openDox pins somebody else's schema.
 
-THIS MODULE IMPORTS NO DATABASE DRIVER. It is handed a `Database`-shaped object
-— anything with `connection()` and `transaction()` context managers yielding
-something with `.execute(sql, params)` — so discovery, checksums, the ledger
-DDL and the plan can all be read under the leg's `validate` check, which
-installs `.[test]` and not `.[runtime]`. `opendox.runtime.db` supplies the real
+THIS MODULE IMPORTS NO DATABASE DRIVER. It is handed a `Database`-shaped
+object, and the WHOLE contract is four members and no more:
+
+  * `db.connection()` and `db.transaction()`, both context managers, each
+    yielding a connection;
+  * on that connection: `.execute(sql, params=None)` returning a cursor
+    (`.fetchone()` / `.fetchall()`), `.transaction()` — a context manager of
+    its own, which `bootstrap_ledger`, `protect_ledger` and every
+    per-migration write use — and `.commit()` / `.rollback()`, which `apply()`
+    needs to hold the advisory lock across transactions.
+
+That list is stated because a shorter one was: this docstring promised
+`.execute(...)` alone while the runner also called `.transaction()`,
+`.commit()` and `.rollback()`, so a test double or an alternative driver
+written to the documented contract failed with `AttributeError` (Copilot
+review of openDox-code#25, round 10). `tests_runtime/test_migration_shape.py`
+drives a whole `apply()` through a double that implements exactly the four,
+which is what keeps the paragraph and the code the same thing.
+
+So discovery, checksums, the ledger DDL and the plan can all be read under the
+leg's `validate` check, which installs `.[test]` and not `.[runtime]`. `opendox.runtime.db` supplies the real
 one. That is the package's import-weight contract, stated in
 `opendox/runtime/__init__.py` and asserted by
 `tests_runtime/test_runtime_surface.py`.
@@ -302,9 +318,11 @@ class MigrationRunner:
     """Applies ordered SQL to a database, fail-closed.
 
     `db` is any object with `connection()` and `transaction()` context managers
-    yielding a connection whose `.execute(sql, params=None)` returns a cursor —
-    which is what `opendox.runtime.db.Database` is and what a test double can be
-    without importing a driver.
+    yielding a connection that carries `.execute(sql, params=None)` (returning
+    a cursor), `.transaction()` and `.commit()` / `.rollback()` — the four-part
+    contract the module docstring states, which is what
+    `opendox.runtime.db.Database` is and what a test double can be without
+    importing a driver.
     """
 
     def __init__(self, db: Any, *,
