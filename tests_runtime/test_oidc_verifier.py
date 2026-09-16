@@ -348,3 +348,63 @@ def test_one_ttl_boundary_causes_one_jwks_refresh_and_not_one_per_waiter(
     assert source.loads == 2, (
         f"{source.loads - 1} refreshes for one TTL boundary; the cache is "
         "amplifying broker traffic instead of absorbing it")
+
+
+# -- Copilot's ninth round on #25 --------------------------------------------
+
+
+def test_the_miss_cooldown_is_measured_against_the_serialized_decision(
+        jwks_path: str) -> None:
+    """The cooldown's clock was read BEFORE the lock, like the TTL's was.
+
+    A caller that waits on the lock longer than the cooldown carried its
+    pre-lock `now` through the wait and was then refused a refresh the
+    cooldown had in fact already allowed — so a real key rotation arriving
+    while another thread held the lock (a forced refresh holds it for a whole
+    fetch) went unseen until the NEXT miss (Copilot review of openDox-code#25,
+    round 9). The decision is serialized; the reading it is made against has
+    to be the serialized one.
+
+    MEASURED ON `_may_refresh_on_miss` DIRECTLY, and deliberately: the defect
+    is a property of what that method reads and when, and the scheduling that
+    exposes it through `select_key` cannot be forced from outside. Holding the
+    cache's own lock for longer than the cooldown IS the condition, stated
+    once.
+    """
+    import threading
+    import time
+
+    from opendox.runtime.oidc import CachingJwks, FileJwksSource
+
+    cooldown = 0.1
+    cache = CachingJwks(FileJwksSource(jwks_path), ttl_seconds=3600,
+                        miss_cooldown_seconds=cooldown)
+    assert cache._may_refresh_on_miss() is True          # stamps the clock
+    assert cache._may_refresh_on_miss() is False         # inside the cooldown
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _hold_the_lock() -> None:
+        with cache._lock:
+            holding.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=_hold_the_lock)
+    holder.start()
+    holding.wait(5)
+    answer: list[bool] = []
+
+    def _ask() -> None:
+        answer.append(cache._may_refresh_on_miss())
+
+    asker = threading.Thread(target=_ask)
+    asker.start()
+    time.sleep(cooldown * 3)          # the wait outlives the cooldown
+    release.set()
+    for thread in (asker, holder):
+        thread.join(5)
+
+    assert answer == [True], (
+        "the refresh was refused against a clock read before the wait; a key "
+        "rotation that arrives while the lock is held goes unseen")

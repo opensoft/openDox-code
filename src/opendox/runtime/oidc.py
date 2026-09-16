@@ -178,7 +178,7 @@ class CachingJwks:
     """A key-set cache that refreshes on a MONOTONIC TTL and on a `kid` miss."""
 
     def __init__(self, source: FileJwksSource | HttpJwksSource, *,
-                 ttl_seconds: int,
+                 ttl_seconds: float,
                  miss_cooldown_seconds: float =
                  DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS) -> None:
         self._source = source
@@ -244,9 +244,16 @@ class CachingJwks:
 
         Under the same lock the cache uses, so two threads missing at once
         produce one refresh rather than two.
+
+        AND THE CLOCK IS READ INSIDE THE LOCK — the same correction `keyset`
+        took, in the method beside it. A thread that waited on the lock longer
+        than the cooldown carried its pre-lock `now` through the wait and was
+        refused a refresh the cooldown had in fact already allowed: the
+        decision is serialized, so the reading it is made against has to be
+        the serialized one (Copilot review of openDox-code#25, round 9).
         """
-        now = time.monotonic()
         with self._lock:
+            now = time.monotonic()
             if (now - self._last_miss_refresh) < self._miss_cooldown:
                 return False
             self._last_miss_refresh = now
