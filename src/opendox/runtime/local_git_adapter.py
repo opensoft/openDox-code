@@ -255,8 +255,8 @@ def git_available(executable: str = "git") -> bool:
 def repository_lock(git: GitRunner):
     """Serialize git-side repository mutation across processes."""
     lock = Path(git.out("rev-parse", "--absolute-git-dir").decode().strip()
-                ) / "HEAD"
-    with lock.open("r+b") as handle:
+                ) / "opendox.lock"
+    with lock.open("a+b") as handle:
         if fcntl is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         else:  # pragma: no cover - Windows-only fallback
@@ -270,6 +270,10 @@ def repository_lock(git: GitRunner):
             else:  # pragma: no cover - Windows-only fallback
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    try:
+        lock.unlink()
+    except OSError:  # pragma: no cover - another process may still hold it open
+        pass
 
 
 class LocalGitCorpus:
