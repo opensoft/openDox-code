@@ -611,12 +611,28 @@ def test_the_two_halves_of_the_credential_rule_share_one_key_list() -> None:
     """
     from opendox.runtime import repository_act
 
-    assert repository_act.SECRET_PARAMETER_KEYS is lga.SECRET_PARAMETER_KEYS
+    # ONE PREDICATE NOW, not only one key list: the halves drifted a second
+    # time over PERCENT-ENCODING — the refusal read raw text and the redactor
+    # read raw text, each with its own regex, so `?%74oken=…` walked past both
+    # (Copilot review of openDox-code#26, round 5). `names_a_secret_parameter`
+    # is the question, and this asserts the importing half asks that one.
+    assert (repository_act.names_a_secret_parameter
+            is lga.names_a_secret_parameter)
     for key in lga.SECRET_PARAMETER_KEYS.split("|"):
-        url = f"https://example.invalid/r.git?{key}=ghp_supersecret"
-        with pytest.raises(repository_act.RepositoryActRefused):
-            repository_act.refuse_credential_bearing_remote(url)
-        assert "ghp_supersecret" not in lga.redact_credentials(url), key
+        for spelling in (key, key[0].upper() + key[1:],
+                         # the same name with its first character
+                         # percent-encoded, and then double-encoded
+                         f"%{ord(key[0]):02x}{key[1:]}",
+                         f"%25{ord(key[0]):02x}{key[1:]}"):
+            url = f"https://example.invalid/r.git?{spelling}=ghp_supersecret"
+            with pytest.raises(repository_act.RepositoryActRefused):
+                repository_act.refuse_credential_bearing_remote(url)
+            assert "ghp_supersecret" not in lga.redact_credentials(url), spelling
+    # A parameter that is not a credential keeps its value, encoded or not.
+    for plain in ("https://example.invalid/r.git?depth=1",
+                  "https://example.invalid/r.git?%64epth=1"):
+        assert lga.redact_credentials(plain) == plain
+        repository_act.refuse_credential_bearing_remote(plain)
 
 
 def test_a_corpus_that_becomes_unreadable_is_refused_and_not_reported_clean(

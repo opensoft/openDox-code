@@ -83,6 +83,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.parse
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -254,9 +255,43 @@ _CREDENTIAL_SHAPED = re.compile(
 #: `test_the_two_halves_of_the_credential_rule_name_the_same_keys`.
 SECRET_PARAMETER_KEYS = (
     "token|secret|password|passwd|pwd|key|credential|auth|sig|signature")
-_CREDENTIAL_PARAMETER = re.compile(
-    r"(?P<lead>[?&#][^=&#\s]*(?:" + SECRET_PARAMETER_KEYS + r")[^=&#\s]*=)"
-    r"[^&#\s]*", re.IGNORECASE)
+_SECRET_KEY = re.compile(SECRET_PARAMETER_KEYS, re.IGNORECASE)
+
+#: EVERY query or fragment parameter, whose NAME is then DECODED and tested —
+#: rather than a regex over the raw text that only ever saw a literal key.
+#: `https://host/x.git?%74oken=ghp_secret` contains no literal `token`, so the
+#: matching half saw nothing to redact and the refusing half saw nothing to
+#: refuse, while the value was every bit as much a credential (Copilot review
+#: of openDox-code#26, round 5). The decode is REPEATED until it is stable
+#: (bounded), because `%2574oken` is the same trick applied twice.
+_ANY_PARAMETER = re.compile(
+    r"(?P<lead>[?&#](?P<name>[^=&#\s]*)=)(?P<value>[^&#\s]*)")
+_ANY_PARAMETER_ANCHORED = re.compile(r"(?:^|[?&#])(?P<name>[^=&#\s]*)=")
+_MAX_DECODE_PASSES = 4
+
+
+def _decoded_parameter_name(name: str) -> str:
+    """A parameter name with its percent-encoding removed, decoded to a fixed
+    point so one layer of encoding cannot hide another."""
+    for _ in range(_MAX_DECODE_PASSES):
+        once = urllib.parse.unquote_plus(name)
+        if once == name:
+            break
+        name = once
+    return name
+
+
+def names_a_secret_parameter(text: str) -> bool:
+    """Whether `text` carries a credential-shaped query or fragment parameter.
+
+    THE ONE PLACE THE QUESTION IS ASKED, by both halves of the rule: what may
+    not be STORED (`repository_act.refuse_credential_bearing_remote`) and what
+    must not be PRINTED (`redact_credentials`). They drifted apart once over
+    the key list and once over percent-encoding; sharing the predicate is what
+    stops a third drift.
+    """
+    return any(_SECRET_KEY.search(_decoded_parameter_name(match.group("name")))
+               for match in _ANY_PARAMETER_ANCHORED.finditer(text))
 
 
 def redact_credentials(text: str) -> str:
@@ -271,15 +306,25 @@ def redact_credentials(text: str) -> str:
     git's own stderr gets the same treatment, because it echoes the remote it
     could not reach.
 
+    AND THE PARAMETER NAME IS DECODED BEFORE IT IS JUDGED, which the first cut
+    did not do: `?%74oken=ghp_secret` carries no literal `token`, so an error
+    or a legacy remote in that shape was returned unchanged (Copilot review of
+    openDox-code#26, round 5). `names_a_secret_parameter` is the shared
+    predicate, so the refusing half cannot answer this question differently.
+
     TWO SHAPES, NOT ONE. The userinfo form is replaced whole; a credential in a
     QUERY OR FRAGMENT parameter has only its VALUE replaced, so the refusal can
     still say which host would not answer — the host is not the secret, and a
     push failure an operator cannot locate is a refusal that costs more than it
     protects.
     """
-    return _CREDENTIAL_PARAMETER.sub(
-        lambda m: m.group("lead") + "<redacted>",
-        _CREDENTIAL_SHAPED.sub("<redacted-url>", text))
+    def _redact_value(match: re.Match[str]) -> str:
+        if _SECRET_KEY.search(_decoded_parameter_name(match.group("name"))):
+            return match.group("lead") + "<redacted>"
+        return match.group(0)
+
+    return _ANY_PARAMETER.sub(
+        _redact_value, _CREDENTIAL_SHAPED.sub("<redacted-url>", text))
 
 
 class GitCommandFailed(Exception):

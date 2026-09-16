@@ -783,3 +783,83 @@ def test_the_api_never_hands_back_a_legacy_rows_credential(
     # The remote is unreachable, so this is the refusal path — and it, too,
     # says nothing it should not.
     assert "ghp_supersecret" not in pushed.text
+
+
+# -- Copilot's fifth round on #26 --------------------------------------------
+
+
+def test_a_push_url_behind_the_maps_back_is_refused(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`git push` does not use the URL `git remote get-url` reports.
+
+    `remote.origin.pushurl` wins when it is set, so the fetch-URL comparison
+    passed while the corpus went somewhere else entirely and the API reported
+    the mapped URL (Copilot review of openDox-code#26, round 5). The check now
+    asks git where a push WOULD go — `get-url --push`, git's own answer,
+    rather than a reimplementation of the fallback.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "of-record.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(destination)],
+                   check=True)
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+
+    elsewhere = tmp_path / "somewhere-else.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(elsewhere)],
+                   check=True)
+    # The fetch URL still agrees with the map; only the push URL is moved.
+    _git(created.location, "remote", "set-url", "--push", act.REMOTE_NAME,
+         str(elsewhere))
+    assert _git(created.location, "remote", "get-url",
+                act.REMOTE_NAME) == str(destination)
+
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    message = str(caught.value)
+    assert "would push to" in message
+    assert "somewhere-else.git" in message and "of-record.git" in message
+    assert "Nothing is pushed" in message
+    # And nothing arrived at either end.
+    for bare in (destination, elsewhere):
+        assert subprocess.run(["git", "--git-dir", str(bare), "rev-parse",
+                               "--verify", "--quiet", "refs/heads/main"],
+                              capture_output=True).returncode != 0, bare
+
+
+def test_the_push_takes_no_branch_override_at_all(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`push_to_remote(..., branch="other")` pushed a history the project is not.
+
+    Nothing exposed the parameter — the API and the CLI both call with a
+    project id alone — but it defaulted to HEAD's branch rather than requiring
+    it, so a caller could push `refs/heads/other` while HEAD, `LocalGitCorpus`
+    and every read served `main`, and get a success back (Copilot review of
+    openDox-code#26, round 5). It is gone, for the same reason `remote_name`
+    is: a push this act cannot record is not a push it can make.
+    """
+    import inspect
+
+    assert "branch" not in inspect.signature(act.push_to_remote).parameters
+
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    # A second branch with its own commit, which is what the override could
+    # have sent in place of the served one.
+    _git(created.location, "branch", "other", created.initial_commit)
+    destination = tmp_path / "governed.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(destination)],
+                   check=True)
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+    with pytest.raises(TypeError):
+        act.push_to_remote(store, project_id=project.id,   # type: ignore[call-arg]
+                           branch="other")
+    act.push_to_remote(store, project_id=project.id)
+    assert _git(destination, "rev-parse", "refs/heads/main") == (
+        created.initial_commit)
+    assert subprocess.run(["git", "--git-dir", str(destination), "rev-parse",
+                           "--verify", "--quiet", "refs/heads/other"],
+                          capture_output=True).returncode != 0, (
+        "the push sent a branch the repository does not serve")

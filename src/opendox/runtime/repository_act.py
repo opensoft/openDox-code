@@ -73,11 +73,11 @@ from opendox.corpus_adapter import CorpusRef
 from opendox.runtime.local_git_adapter import (
     ADAPTER_NAME,
     DEFAULT_BRANCH,
-    SECRET_PARAMETER_KEYS,
     GitCommandFailed,
     GitRunner,
     git_available,
     git_identity,
+    names_a_secret_parameter,
     redact_credentials,
 )
 
@@ -113,9 +113,15 @@ _SCP_USERINFO = re.compile(r"^[^/:@]+@[^/:@]+:")
 #: the refusal rejected `?token=…` while the redaction saw straight through it
 #: (Copilot review of openDox-code#26). Sharing the vocabulary is what keeps a
 #: key added to one from being missing in the other.
-_SECRET_PARAMETER = re.compile(
-    r"(?:^|[?&#])[^=&#]*(?:" + SECRET_PARAMETER_KEYS + r")[^=&#]*=",
-    re.IGNORECASE)
+#: AND THE NAME IS DECODED BEFORE IT IS JUDGED. This was a raw-text regex over
+#: the URL, so `https://host/x.git?%74oken=ghp_secret` contained no literal
+#: `token`, was accepted, and was stored verbatim in a column the repository
+#: endpoints read back to every project member (Copilot review of
+#: openDox-code#26, round 5). The question is asked by
+#: `local_git_adapter.names_a_secret_parameter` — ONE predicate for both
+#: halves, so the storing rule and the printing rule cannot answer it
+#: differently, which is the same defect the shared key list was introduced to
+#: close.
 
 
 def refuse_credential_bearing_remote(remote_url: str) -> None:
@@ -161,7 +167,7 @@ def refuse_credential_bearing_remote(remote_url: str) -> None:
             "with nothing to rotate it, so a credential must not be part of "
             "it. Use a credential helper, an ssh key or a .netrc, and give "
             "this act the URL alone.")
-    if _SECRET_PARAMETER.search(remote_url):
+    if names_a_secret_parameter(remote_url):
         raise RepositoryActRefused(
             "the remote URL carries a credential-shaped query or fragment "
             "parameter. Userinfo is not the only place a secret hides, and "
@@ -456,9 +462,21 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
     return updated
 
 
-def _configured_remote_url(git: GitRunner, remote_name: str) -> str | None:
-    """What git has under `<remote_name>`, or None when it has no such remote."""
-    existing = git.run("remote", "get-url", remote_name)
+def _configured_remote_url(git: GitRunner, remote_name: str, *,
+                           for_push: bool = False) -> str | None:
+    """What git has under `<remote_name>`, or None when it has no such remote.
+
+    `for_push` asks for the EFFECTIVE PUSH URL. `git push` uses
+    `remote.<name>.pushurl` when one is configured and falls back to the fetch
+    URL when none is, so the fetch URL alone is not the destination: a stale or
+    hand-added `pushurl` passed the map comparison and sent the corpus
+    somewhere else while the API reported the mapped URL (Copilot review of
+    openDox-code#26, round 5). `--push` is git's own answer to "where would a
+    push go", so this asks git rather than reimplementing the fallback.
+    """
+    arguments = ("remote", "get-url", "--push", remote_name) if for_push else (
+        "remote", "get-url", remote_name)
+    existing = git.run(*arguments)
     if existing.returncode != 0:
         return None
     return existing.stdout.decode("utf-8", "replace").strip() or None
@@ -488,7 +506,6 @@ def _pushable_branch(git: GitRunner, location: str) -> str:
 
 
 def push_to_remote(store: Any, *, project_id: str,
-                   branch: str | None = None,
                    executable: str = "git") -> str:
     """Move the project into a governed factory. RULING C3: this is a PUSH.
 
@@ -514,22 +531,37 @@ def push_to_remote(store: Any, *, project_id: str,
     # make quietly (Copilot review of openDox-code#26). Refused rather than
     # silently reconciled: re-running `attach_remote` is the act that changes a
     # destination, and it is one line for an operator.
+    # BOTH URLs, because `git push` does not use the one `get-url` reports:
+    # `remote.origin.pushurl` wins when it is set, and a stale or hand-added
+    # one passed a fetch-URL comparison while sending the corpus elsewhere
+    # (Copilot review of openDox-code#26, round 5).
     configured = _configured_remote_url(git, REMOTE_NAME)
     if configured is None:
         raise RepositoryActRefused(
             f"the map records a remote for project {project_id} but the "
             f"repository at {row.location} has no {REMOTE_NAME!r}; re-attach "
             "the remote so the two agree before pushing")
-    if configured != row.remote_url:
-        raise RepositoryActRefused(
-            f"the repository at {row.location} has {REMOTE_NAME!r} configured "
-            f"as {redact_credentials(configured)} while the map records "
-            f"{redact_credentials(row.remote_url)}. Nothing is pushed: the "
-            "destination of record and the destination git would use are not "
-            "the same place. Re-attach the remote to settle it.")
+    effective = _configured_remote_url(git, REMOTE_NAME, for_push=True)
+    for what, found in (("fetches from", configured),
+                        ("would push to", effective)):
+        if found != row.remote_url:
+            raise RepositoryActRefused(
+                f"the repository at {row.location} {what} "
+                f"{redact_credentials(found or '(nothing)')} under "
+                f"{REMOTE_NAME!r} while the map records "
+                f"{redact_credentials(row.remote_url)}. Nothing is pushed: the "
+                "destination of record and the destination git would use are "
+                "not the same place. Re-attach the remote to settle it.")
 
-    if branch is None:
-        branch = _pushable_branch(git, str(row.location))
+    # THE BRANCH IS THE REPOSITORY'S OWN AND IS NOT A PARAMETER. It was a
+    # caller-supplied override defaulting to HEAD's branch, and nothing exposed
+    # it — but `push_to_remote(..., branch="other")` would have pushed
+    # `refs/heads/other` while HEAD, `LocalGitCorpus` and every read served
+    # `main`, then reported success for a history the project is not (Copilot
+    # review of openDox-code#26, round 5). It is the same reason `remote_name`
+    # is a constant: a push destination the map cannot record is not a push
+    # this act can make.
+    branch = _pushable_branch(git, str(row.location))
     try:
         # THE ONE OPERATION THAT TOUCHES A NETWORK, and the only one with a
         # wall-clock bound: a stalled remote used to hold the request, the
