@@ -682,6 +682,18 @@ export async function resolveBinding(binding, options) {
   // for a module that then fails to load costs one unused request and leaves
   // no partly-applied state, while the reverse order would make styling
   // conditional on a race this function does not control.
+  //
+  // `options.document` IS A DECLARED OPTION, not an accident: this module
+  // already takes an explicit `doc` at `regionHost(binding, doc)` for the same
+  // reason, which is that a test drives several documents through one process
+  // and the global is the wrong one in all but the first. Omitted, the
+  // injector reads the global `document`, and where there is none — node, a
+  // worker — it does nothing and the binding still resolves.
+  //
+  // IT RUNS AFTER RULED Q4's VERDICT, which is the order that matters more
+  // than the one above: a binding whose requirement is unmet answers `null`
+  // several lines up and never reaches here, so a panel that does not mount
+  // does not put its sheet in the document either.
   injectBindingStyles(binding, bundleRoot,
     (options && options.document) || undefined);
   // A REJECTED IMPORT IS A REFUSAL TOO, and one this seam names rather than
