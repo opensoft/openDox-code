@@ -79,12 +79,15 @@ commits; it obliges no fields, and `classify` says so by returning an empty
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shutil
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from opendox.corpus_adapter import (
     CORPUS_ABSENT,
@@ -171,11 +174,19 @@ class GitRunner:
 
     def run(self, *args: str, stdin: bytes | None = None,
             env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
-        argv = [self.executable, "-C", str(self.root), "--literal-pathspecs",
-                *args]
+        argv = [self.executable, "-c", "safe.bareRepository=all",
+                "-C", str(self.root), "--literal-pathspecs", *args]
         merged = {**os.environ, **(env or {})}
-        return subprocess.run(argv, input=stdin, capture_output=True,
-                              check=False, env=merged)
+        try:
+            return subprocess.run(argv, input=stdin, capture_output=True,
+                                  check=False, env=merged)
+        except OSError as exc:
+            return subprocess.CompletedProcess(
+                argv,
+                getattr(exc, "errno", 127) or 127,
+                stdout=b"",
+                stderr=str(exc).encode("utf-8", "replace"),
+            )
 
     def out(self, *args: str, stdin: bytes | None = None,
             env: dict[str, str] | None = None) -> bytes:
@@ -233,6 +244,19 @@ def git_available(executable: str = "git") -> bool:
     return shutil.which(executable) is not None
 
 
+@contextmanager
+def repository_lock(git: GitRunner):
+    """Serialize git-side repository mutation across processes."""
+    lock = Path(git.out("rev-parse", "--absolute-git-dir").decode().strip()
+                ) / "HEAD"
+    with lock.open("rb") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 class LocalGitCorpus:
     """A plain local git repository, read and written through its own history.
 
@@ -261,13 +285,27 @@ class LocalGitCorpus:
         try:
             git.out("rev-parse", "--git-dir")
         except GitCommandFailed as failed:
+            looks_like_repository = (
+                (location / ".git").exists()
+                or ((location / "HEAD").exists()
+                    and (location / "objects").exists()
+                    and (location / "refs").exists())
+            )
+            if looks_like_repository:
+                raise _refuse(CORPUS_UNREADABLE, str(location),
+                              f"the repository could not be read ({failed})"
+                              ) from failed
             raise _refuse(CORPUS_UNCLASSIFIABLE, str(location),
                           f"the directory is not a git repository ({failed})"
                           ) from failed
 
-        revision = self._head(git)
-        if ref.revision is not None:
-            revision = self._resolve_revision(git, ref.revision, str(location))
+        try:
+            if ref.revision is not None:
+                revision = self._resolve_revision(git, ref.revision, str(location))
+            else:
+                revision = self._head(git)
+        except GitCommandFailed as failed:
+            raise _refuse(CORPUS_UNREADABLE, str(location), str(failed)) from failed
 
         # THE WRITE PATH IS ANSWERED HERE AND NOT AT THE FIRST WRITE, which is
         # the interface's rule: "a read-only corpus is a fact about the corpus,
@@ -424,41 +462,42 @@ class LocalGitCorpus:
                           "being written by a fallback")
         git = self._git(corpus)
         try:
-            blob = git.out("hash-object", "-w", "--stdin",
-                           stdin=content).decode().strip()
-            # The temporary index lives inside the REAL git directory, which is
-            # `<location>/.git` for a checkout and `<location>` itself for the
-            # BARE repository the act creates — so it is asked for rather than
-            # assumed.
-            git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
-                           .decode().strip())
-            index = git_dir / f"opendox-index-{os.getpid()}"
-            index_env = {"GIT_INDEX_FILE": str(index)}
-            try:
-                if corpus.revision is not None:
-                    git.out("read-tree", corpus.revision, env=index_env)
-                else:
-                    git.out("read-tree", "--empty", env=index_env)
-                git.out("update-index", "--add", "--cacheinfo",
-                        f"100644,{blob},{document.key}", env=index_env)
-                tree = git.out("write-tree", env=index_env).decode().strip()
-            finally:
-                index.unlink(missing_ok=True)
+            with repository_lock(git):
+                blob = git.out("hash-object", "-w", "--stdin",
+                               stdin=content).decode().strip()
+                # The temporary index lives inside the REAL git directory, which is
+                # `<location>/.git` for a checkout and `<location>` itself for the
+                # BARE repository the act creates — so it is asked for rather than
+                # assumed.
+                git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
+                               .decode().strip())
+                index = git_dir / f"opendox-index-{os.getpid()}-{uuid4().hex}"
+                index_env = {"GIT_INDEX_FILE": str(index)}
+                try:
+                    if corpus.revision is not None:
+                        git.out("read-tree", corpus.revision, env=index_env)
+                    else:
+                        git.out("read-tree", "--empty", env=index_env)
+                    git.out("update-index", "--add", "--cacheinfo",
+                            f"100644,{blob},{document.key}", env=index_env)
+                    tree = git.out("write-tree", env=index_env).decode().strip()
+                finally:
+                    index.unlink(missing_ok=True)
 
-            message = self._message(document, actor, basis_revision, reason)
-            parents: list[str] = []
-            if corpus.revision is not None:
-                parents = ["-p", corpus.revision]
-            commit = git.out("commit-tree", tree, *parents, "-m", message,
-                             env=git_identity(actor)).decode().strip()
-            ref = f"refs/heads/{self._branch}"
-            if corpus.revision is None:
-                git.out("update-ref", ref, commit, "")
-            else:
-                # COMPARE-AND-SWAP: the ref moves only if it is still where
-                # this corpus was resolved. A concurrent writer therefore loses
-                # its dispatch rather than silently overwriting the other one.
-                git.out("update-ref", ref, commit, corpus.revision)
+                message = self._message(document, actor, basis_revision, reason)
+                parents: list[str] = []
+                if corpus.revision is not None:
+                    parents = ["-p", corpus.revision]
+                commit = git.out("commit-tree", tree, *parents, "-m", message,
+                                 env=git_identity(actor)).decode().strip()
+                ref = self._head_ref(git)
+                if corpus.revision is None:
+                    git.out("update-ref", ref, commit, "")
+                else:
+                    # COMPARE-AND-SWAP: the ref moves only if it is still where
+                    # this corpus was resolved. A concurrent writer therefore loses
+                    # its dispatch rather than silently overwriting the other one.
+                    git.out("update-ref", ref, commit, corpus.revision)
         except GitCommandFailed as failed:
             raise _refuse(WRITE_PATH_UNREACHABLE, corpus.write_path,
                           f"the commit could not be made ({failed}); the "
@@ -472,10 +511,28 @@ class LocalGitCorpus:
 
     def _head(self, git: GitRunner) -> str | None:
         """The current commit, or None where the repository has none yet."""
+        head = git.run("symbolic-ref", "-q", "HEAD")
+        if head.returncode == 0:
+            ref = head.stdout.decode().strip()
+            exists = git.run("show-ref", "--verify", "--quiet", ref)
+            if exists.returncode == 0:
+                return git.out("rev-parse", "--verify", "HEAD").decode().strip() or None
+            if exists.returncode == 1:
+                return None
+            raise GitCommandFailed(("show-ref", "--verify", "--quiet", ref), exists)
+        if head.returncode != 1:
+            raise GitCommandFailed(("symbolic-ref", "-q", "HEAD"), head)
+
         completed = git.run("rev-parse", "--verify", "HEAD")
         if completed.returncode != 0:
-            return None
+            raise GitCommandFailed(("rev-parse", "--verify", "HEAD"), completed)
         return completed.stdout.decode().strip() or None
+
+    def _head_ref(self, git: GitRunner) -> str:
+        completed = git.run("symbolic-ref", "HEAD")
+        if completed.returncode != 0:
+            raise GitCommandFailed(("symbolic-ref", "HEAD"), completed)
+        return completed.stdout.decode().strip()
 
     def _resolve_revision(self, git: GitRunner, revision: str,
                           subject: str) -> str:

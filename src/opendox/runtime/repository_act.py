@@ -66,8 +66,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from opendox.corpus_adapter import CorpusRef
+from opendox.runtime import identity
 from opendox.runtime.local_git_adapter import (
     ADAPTER_NAME,
     DEFAULT_BRANCH,
@@ -75,6 +77,7 @@ from opendox.runtime.local_git_adapter import (
     GitRunner,
     git_available,
     git_identity,
+    repository_lock,
 )
 
 __all__ = [
@@ -115,7 +118,36 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
     if not project_id or "/" in project_id or project_id in {".", ".."}:
         raise RepositoryActRefused(
             f"{project_id!r} is not a usable project id for a directory name")
-    return Path(root).expanduser() / project_id
+    return Path(root).expanduser().resolve() / project_id
+
+
+def _require_local_git(row: Any, *, project_id: str) -> Any:
+    if row.adapter != ADAPTER_NAME:
+        raise RepositoryActRefused(
+            f"project {project_id} maps to adapter {row.adapter!r}, not "
+            f"{ADAPTER_NAME!r}; this act mutates only RULING C3's plain local "
+            "git repository")
+    return row
+
+
+def _current_head_ref(git: GitRunner) -> str:
+    completed = git.run("symbolic-ref", "HEAD")
+    if completed.returncode != 0:
+        raise GitCommandFailed(("symbolic-ref", "HEAD"), completed)
+    return completed.stdout.decode().strip()
+
+
+def _display_remote_url(remote_url: str) -> str:
+    parts = urlsplit(remote_url)
+    if parts.scheme and parts.netloc:
+        host = parts.hostname or ""
+        if parts.port is not None:
+            host = f"{host}:{parts.port}"
+        return urlunsplit((parts.scheme, host, parts.path, parts.query,
+                           parts.fragment))
+    if "@" in remote_url and ":" in remote_url.split("@", 1)[1]:
+        return remote_url.split("@", 1)[1]
+    return remote_url
 
 
 def corpus_ref_for(row: Any, *, name: str | None = None) -> CorpusRef:
@@ -136,12 +168,22 @@ def create_repository(store: Any, *, project_id: str,
     `store` is an `identity.CoordinationStore` over the CALLER'S transaction,
     so the row and everything else the caller writes commit together.
     """
+    location = repository_location(root, project_id)
+
+    try:
+        row = store.repository_for_project(project_id)
+    except identity.NotFoundError:
+        row = None
+    if row is not None:
+        raise identity.ConflictError(
+            f"project {project_id!r} already maps to a repository at "
+            f"{row.location!r}; the map is one row per project (RULING C3: a "
+            "plain local git repository PER PROJECT)")
+
     if not git_available(executable):
         raise RepositoryActRefused(
             f"{executable!r} is not on PATH; RULING C3's repository is a plain "
             "local git repository and this act creates it by running git")
-
-    location = repository_location(root, project_id)
 
     # THE ROW FIRST, inside the caller's transaction, and first also because it
     # holds the AUTHORITATIVE fact: a project that is already mapped is refused
@@ -156,7 +198,7 @@ def create_repository(store: Any, *, project_id: str,
     # THEN the orphan check, and still before any filesystem mutation: nothing
     # below has run, so a refusal here leaves the disk untouched and the row is
     # rolled back with the caller's transaction.
-    if location.exists() and any(location.iterdir()):
+    if location.exists() and (not location.is_dir() or any(location.iterdir())):
         raise RepositoryActRefused(
             f"{location} already exists and is not empty. Either a previous "
             "act was interrupted between creating the repository and "
@@ -182,10 +224,10 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
     where psycopg is not installed. The act is still the pair; this is the half
     of it that touches the filesystem.
     """
-    location = Path(location)
-    location.mkdir(parents=True, exist_ok=True)
+    location = Path(location).expanduser().resolve()
     git = GitRunner(location, executable)
     try:
+        location.mkdir(parents=True, exist_ok=True)
         # BARE, and it is the decision `local_git_adapter`'s header argues in
         # full: this repository is storage openDox MANAGES (RULING C3's own
         # verb), the corpus is its history, and a checkout beside it would be a
@@ -213,7 +255,7 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
         commit = git.out("commit-tree", empty_tree, "-m", message,
                          env=git_identity(actor)).decode().strip()
         git.out("update-ref", f"refs/heads/{branch}", commit, "")
-    except GitCommandFailed as failed:
+    except (GitCommandFailed, OSError) as failed:
         raise RepositoryActRefused(
             f"the repository at {location} could not be created ({failed}); "
             "the map row is rolled back with the caller's transaction"
@@ -231,23 +273,40 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
     changes where this repository can push and changes nothing it contains —
     which is what makes the eventual move "a push, not a migration".
     """
-    row = store.repository_for_project(project_id)
+    if remote_name != "origin":
+        raise RepositoryActRefused(
+            f"remote name {remote_name!r} is not supported; this act stores and "
+            "pushes one attached remote named 'origin'")
+    row = _require_local_git(store.repository_for_project(project_id),
+                             project_id=project_id)
     git = GitRunner(Path(row.location), executable)
+    stored_remote_url = _display_remote_url(remote_url)
     try:
-        existing = git.run("remote", "get-url", remote_name)
-        if existing.returncode == 0:
-            git.out("remote", "set-url", remote_name, remote_url)
-        else:
-            git.out("remote", "add", remote_name, remote_url)
+        with repository_lock(git):
+            existing = git.run("remote", "get-url", remote_name)
+            previous = (existing.stdout.decode().strip()
+                        if existing.returncode == 0 else None)
+            if existing.returncode == 0:
+                git.out("remote", "set-url", remote_name, remote_url)
+            else:
+                git.out("remote", "add", remote_name, remote_url)
+            try:
+                return store.attach_remote(project_id=project_id,
+                                           remote_url=stored_remote_url)
+            except Exception:
+                if previous is None:
+                    git.out("remote", "remove", remote_name)
+                else:
+                    git.out("remote", "set-url", remote_name, previous)
+                raise
     except GitCommandFailed as failed:
         raise RepositoryActRefused(
             f"the remote {remote_name!r} could not be attached to "
             f"{row.location} ({failed})") from failed
-    return store.attach_remote(project_id=project_id, remote_url=remote_url)
 
 
 def push_to_remote(store: Any, *, project_id: str,
-                   branch: str = DEFAULT_BRANCH, remote_name: str = "origin",
+                   branch: str | None = None, remote_name: str = "origin",
                    executable: str = "git") -> str:
     """Move the project into a governed factory. RULING C3: this is a PUSH.
 
@@ -257,7 +316,12 @@ def push_to_remote(store: Any, *, project_id: str,
     previous act attached, and the local repository keeps serving reads through
     the same adapter afterwards.
     """
-    row = store.repository_for_project(project_id)
+    if remote_name != "origin":
+        raise RepositoryActRefused(
+            f"remote name {remote_name!r} is not supported; this act pushes the "
+            "attached remote named 'origin'")
+    row = _require_local_git(store.repository_for_project(project_id),
+                             project_id=project_id)
     if not row.remote_url:
         raise RepositoryActRefused(
             f"project {project_id} has no attached remote; attach one first "
@@ -265,7 +329,10 @@ def push_to_remote(store: Any, *, project_id: str,
             "a push)")
     git = GitRunner(Path(row.location), executable)
     try:
-        git.out("push", remote_name, f"refs/heads/{branch}:refs/heads/{branch}")
+        with repository_lock(git):
+            head_ref = _current_head_ref(git)
+            target = branch or head_ref.rsplit("/", 1)[-1]
+            git.out("push", remote_name, f"{head_ref}:refs/heads/{target}")
     except GitCommandFailed as failed:
         raise RepositoryActRefused(
             f"the push to {row.remote_url} failed ({failed}); the project "

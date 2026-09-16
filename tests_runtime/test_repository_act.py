@@ -30,7 +30,8 @@ ACTOR = "Student One"
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+    return subprocess.run(["git", "-c", "safe.bareRepository=all",
+                          "-C", str(root), *args], capture_output=True,
                           text=True, check=True).stdout.strip()
 
 
@@ -157,6 +158,32 @@ def test_a_repository_that_cannot_be_created_leaves_no_row_behind(
             identity.CoordinationStore(conn).repository_for_project(project.id)
 
 
+def test_a_non_directory_collision_is_refused_by_name_and_the_row_rolls_back(
+        database, project_repository_root: Path) -> None:
+    with database.transaction() as conn:
+        store = identity.CoordinationStore(conn)
+        owner = store.upsert_user(issuer="https://broker.test/realms/opendox",
+                                  subject="file-owner", display_name=ACTOR)
+        project = store.create_project(slug="file-collision", title="Collision",
+                                       created_by=owner.id)
+        store.create_membership(user_id=owner.id, project_id=project.id,
+                                role="owner")
+
+    collision = project_repository_root / project.id
+    collision.write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        with database.transaction() as conn:
+            act.create_repository(identity.CoordinationStore(conn),
+                                  project_id=project.id,
+                                  root=project_repository_root, actor=ACTOR)
+    assert "already exists" in str(caught.value)
+
+    with database.connection() as conn:
+        with pytest.raises(identity.NotFoundError):
+            identity.CoordinationStore(conn).repository_for_project(project.id)
+
+
 def test_the_repository_is_addressed_by_project_id_and_not_by_slug(
         store, project, project_repository_root: Path) -> None:
     """A slug is a human name a rename would move; a location must not."""
@@ -164,6 +191,25 @@ def test_the_repository_is_addressed_by_project_id_and_not_by_slug(
                                     root=project_repository_root, actor=ACTOR)
     assert created.location.name == project.id
     assert project.slug not in str(created.location)
+
+
+def test_the_repository_location_is_stored_as_an_absolute_path(
+        store, project, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    created = act.create_repository(store, project_id=project.id,
+                                    root="projects", actor=ACTOR)
+    assert created.location.is_absolute()
+    assert store.repository_for_project(project.id).location == str(created.location)
+
+
+def test_initializing_under_a_non_directory_parent_is_a_named_refusal(
+        tmp_path: Path) -> None:
+    parent = tmp_path / "file-parent"
+    parent.write_text("x\n", encoding="utf-8")
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.initialize_repository(parent / "repo", project_id="project-1",
+                                  actor=ACTOR)
+    assert "could not be created" in str(caught.value)
 
 
 # -- a write is a commit, through the act's product --------------------------
@@ -222,6 +268,16 @@ def test_attaching_a_remote_changes_no_local_content(
     assert _git(created.location, "count-objects", "-v") == before_objects
 
 
+def test_attaching_a_remote_stores_a_credential_free_reference(
+        store, project, project_repository_root: Path) -> None:
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    full = "******example.invalid/factory.git"
+    row = act.attach_remote(store, project_id=project.id, remote_url=full)
+    assert row.remote_url == "https://example.invalid/factory.git"
+    assert _git(created.location, "remote", "get-url", "origin") == full
+
+
 def test_attaching_a_second_time_replaces_the_url_rather_than_failing(
         store, project, project_repository_root: Path, tmp_path: Path) -> None:
     act.create_repository(store, project_id=project.id,
@@ -231,6 +287,17 @@ def test_attaching_a_second_time_replaces_the_url_rather_than_failing(
     act.attach_remote(store, project_id=project.id, remote_url=str(first))
     row = act.attach_remote(store, project_id=project.id, remote_url=str(second))
     assert row.remote_url == str(second)
+
+
+def test_attaching_a_remote_refuses_a_repository_mapped_to_another_adapter(
+        store, project, project_repository_root: Path) -> None:
+    row = store.create_project_repository(project_id=project.id,
+                                          adapter="governed-factory",
+                                          location=str(project_repository_root / "x"))
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.attach_remote(store, project_id=project.id,
+                          remote_url="https://example.invalid/factory.git")
+    assert row.adapter in str(caught.value)
 
 
 # -- the move is a push ------------------------------------------------------
@@ -274,6 +341,20 @@ def test_moving_into_a_governed_factory_is_a_push_not_a_migration(
                         ).content == b"# one\n"
 
 
+def test_a_push_uses_the_repositorys_current_branch(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR,
+                                    branch="topic")
+    remote = tmp_path / "governed-factory.git"
+    subprocess.run(["git", "init", "--bare", "--initial-branch=topic",
+                    str(remote)], check=True, capture_output=True)
+    act.attach_remote(store, project_id=project.id, remote_url=str(remote))
+    pushed_to = act.push_to_remote(store, project_id=project.id)
+    assert pushed_to == str(remote)
+    assert _git(remote, "rev-parse", "refs/heads/topic") == created.initial_commit
+
+
 def test_a_push_with_no_attached_remote_is_refused_by_name(
         store, project, project_repository_root: Path) -> None:
     act.create_repository(store, project_id=project.id,
@@ -281,6 +362,17 @@ def test_a_push_with_no_attached_remote_is_refused_by_name(
     with pytest.raises(act.RepositoryActRefused) as caught:
         act.push_to_remote(store, project_id=project.id)
     assert "no attached remote" in str(caught.value)
+
+
+def test_a_push_refuses_a_repository_mapped_to_another_adapter(
+        store, project, project_repository_root: Path) -> None:
+    store.create_project_repository(project_id=project.id,
+                                    adapter="governed-factory",
+                                    location=str(project_repository_root / "x"),
+                                    remote_url="https://example.invalid/factory.git")
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "governed-factory" in str(caught.value)
 
 
 # -- the act over the API ----------------------------------------------------

@@ -338,19 +338,22 @@ class CoordinationStore:
                                   location: str,
                                   remote_url: str | None = None) -> ProjectRepository:
         row = self._conn.execute(
-            f"select {_REPOSITORY_COLUMNS} from project_repositories "
-            "where project_id = %s", (project_id,)
-        ).fetchone()
-        if row is not None:
-            raise ConflictError(
-                f"project {project_id!r} already maps to a repository at "
-                f"{row[3]!r}; the map is one row per project (RULING C3: a "
-                "plain local git repository PER PROJECT)")
-        row = self._conn.execute(
             f"insert into project_repositories ({_REPOSITORY_COLUMNS}) "
-            f"values (%s, %s, %s, %s, %s, now()) returning {_REPOSITORY_COLUMNS}",
+            f"values (%s, %s, %s, %s, %s, now()) "
+            "on conflict (project_id) do nothing "
+            f"returning {_REPOSITORY_COLUMNS}",
             (new_id(), project_id, adapter, location, remote_url),
         ).fetchone()
+        if row is None:
+            row = self._conn.execute(
+                f"select {_REPOSITORY_COLUMNS} from project_repositories "
+                "where project_id = %s", (project_id,)
+            ).fetchone()
+            raise ConflictError(
+                f"project {project_id!r} already maps to a repository at "
+                f"{_one(row, _PROJECT_REPOSITORY, f'project_id={project_id!r}')[3]!r}; "
+                "the map is one row per project (RULING C3: a plain local git "
+                "repository PER PROJECT)")
         return ProjectRepository(
             *_one(row, _PROJECT_REPOSITORY, f"project_id={project_id!r}"))
 
