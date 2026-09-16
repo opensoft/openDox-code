@@ -618,3 +618,205 @@ def test_readiness_refuses_a_database_whose_migration_file_has_changed(
         response = client.get("/readyz")
     assert response.status_code == 503, response.text
     assert response.json()["checks"]["schema"] == "drifted: 0002:changed"
+
+
+# -- the read routes are scoped to the principal -----------------------------
+#
+# THE CONTRACT IN `app.py`'S DOCSTRING WAS TRUE OF THE WRITES AND FALSE OF THE
+# READS: `GET /users`, `GET /memberships`, `GET /projects` and the
+# project-repository reads authenticated and then returned the whole install,
+# so any signed-in account could enumerate every user's issuer/subject/email
+# and every project's repository `location` and `remote_url` (Copilot review of
+# openDox-code#25 — a thread, and again as a suppressed comment naming the
+# docstring). These are the assertions that keep the sentence and the handlers
+# the same thing.
+
+
+def _write_repository_row(database, *, project_id: str, location: str) -> None:
+    """Commit a map row the way § 3.6's act will, so the API can read it."""
+    from opendox.runtime.identity import CoordinationStore
+
+    with database.transaction() as conn:
+        CoordinationStore(conn).create_project_repository(
+            project_id=project_id, adapter="local-git", location=location)
+
+
+def test_a_stranger_enumerates_no_project_no_membership_and_no_repository(
+        client, database, mint_token) -> None:
+    owner = mint_token(subject="scope-owner")
+    stranger = mint_token(subject="scope-stranger")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "private-one", "title": "Private"},
+                          headers=_auth(owner)).json()
+    _write_repository_row(database, project_id=project["id"],
+                          location="/var/lib/opendox/projects/private-one")
+
+    # The owner sees its own project, its membership and its map row.
+    assert [p["id"] for p in client.get("/api/v1/projects",
+                                        headers=_auth(owner)).json()] == [project["id"]]
+    assert client.get("/api/v1/memberships", headers=_auth(owner)).json() != []
+    mine = client.get("/api/v1/project-repositories", headers=_auth(owner)).json()
+    assert [r["project_id"] for r in mine] == [project["id"]]
+
+    # The stranger is a signed-in principal with no membership anywhere.
+    assert client.get("/api/v1/projects", headers=_auth(stranger)).json() == []
+    assert client.get("/api/v1/memberships", headers=_auth(stranger)).json() == []
+    assert client.get("/api/v1/project-repositories",
+                      headers=_auth(stranger)).json() == []
+
+
+def test_a_stranger_sees_only_itself_in_the_user_directory(
+        client, mint_token) -> None:
+    owner = mint_token(subject="dir-owner", email="owner@example.test")
+    stranger = mint_token(subject="dir-stranger")
+    owner_me = client.get("/api/v1/users/me", headers=_auth(owner)).json()
+    stranger_me = client.get("/api/v1/users/me", headers=_auth(stranger)).json()
+
+    listed = client.get("/api/v1/users", headers=_auth(stranger)).json()
+    assert [u["id"] for u in listed] == [stranger_me["id"]]
+
+    # And the owner's row is not reachable by id either — 404, not 403, so the
+    # route is not an oracle for which user ids exist.
+    refused = client.get(f"/api/v1/users/{owner_me['id']}",
+                         headers=_auth(stranger))
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"]["code"] == "coordination.not_found"
+
+
+def test_sharing_a_project_is_what_makes_two_users_visible_to_each_other(
+        client, mint_token) -> None:
+    """Visibility is a PROJECT RELATION and not a role."""
+    owner = mint_token(subject="share-owner")
+    other = mint_token(subject="share-other")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "shared", "title": "Shared"},
+                          headers=_auth(owner)).json()
+    owner_me = client.get("/api/v1/users/me", headers=_auth(owner)).json()
+    other_me = client.get("/api/v1/users/me", headers=_auth(other)).json()
+
+    assert client.get(f"/api/v1/users/{owner_me['id']}",
+                      headers=_auth(other)).status_code == 404
+
+    client.post("/api/v1/memberships",
+                json={"user_id": other_me["id"], "project_id": project["id"],
+                      "role": "reader"}, headers=_auth(owner))
+
+    assert client.get(f"/api/v1/users/{owner_me['id']}",
+                      headers=_auth(other)).status_code == 200
+    seen = {u["id"] for u in client.get("/api/v1/users",
+                                        headers=_auth(other)).json()}
+    assert seen == {owner_me["id"], other_me["id"]}
+    # `reader` is enough to read the project itself and its map row.
+    assert client.get(f"/api/v1/projects/{project['id']}",
+                      headers=_auth(other)).status_code == 200
+
+
+def test_a_non_member_is_refused_a_project_and_its_map_row_by_name(
+        client, database, mint_token) -> None:
+    owner = mint_token(subject="refuse-owner")
+    stranger = mint_token(subject="refuse-stranger")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "refused", "title": "Refused"},
+                          headers=_auth(owner)).json()
+    _write_repository_row(database, project_id=project["id"],
+                          location="/var/lib/opendox/projects/refused")
+
+    for path in (f"/api/v1/projects/{project['id']}",
+                 f"/api/v1/project-repositories/{project['id']}"):
+        response = client.get(path, headers=_auth(stranger))
+        assert response.status_code == 403, (path, response.text)
+        assert response.json()["detail"]["code"] == "authz.not_a_member"
+
+
+def test_a_project_that_does_not_exist_answers_exactly_as_one_it_may_not_see(
+        client, mint_token) -> None:
+    """404-vs-403 must not become an existence oracle over the id space."""
+    owner = mint_token(subject="oracle-owner")
+    stranger = mint_token(subject="oracle-stranger")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "oracle", "title": "Oracle"},
+                          headers=_auth(owner)).json()
+    real = client.get(f"/api/v1/projects/{project['id']}",
+                      headers=_auth(stranger))
+    invented = client.get("/api/v1/projects/p_does_not_exist",
+                          headers=_auth(stranger))
+    assert real.status_code == invented.status_code == 403
+    assert (real.json()["detail"]["code"]
+            == invented.json()["detail"]["code"] == "authz.not_a_member")
+
+
+def test_a_second_membership_for_the_same_pair_is_a_conflict_not_a_role_change(
+        client, mint_token) -> None:
+    """`POST /memberships` is declared a create and now behaves like one.
+
+    The insert carried `on conflict … do update set role = excluded.role`, so a
+    repeated POST silently REWROTE an existing member's role and still answered
+    201, while the route advertised 409 for a duplicate (Copilot review of
+    openDox-code#25, suppressed comment). A role change is a different act and
+    does not get to arrive disguised as a join.
+    """
+    owner = mint_token(subject="upsert-owner")
+    other = mint_token(subject="upsert-other")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "upsert", "title": "Upsert"},
+                          headers=_auth(owner)).json()
+    other_me = client.get("/api/v1/users/me", headers=_auth(other)).json()
+    body = {"user_id": other_me["id"], "project_id": project["id"],
+            "role": "reader"}
+    assert client.post("/api/v1/memberships", json=body,
+                       headers=_auth(owner)).status_code == 201
+
+    promoted = client.post("/api/v1/memberships",
+                           json={**body, "role": "owner"}, headers=_auth(owner))
+    assert promoted.status_code == 409, promoted.text
+    assert promoted.json()["detail"]["code"] == "coordination.conflict"
+
+    listed = client.get(f"/api/v1/memberships?project_id={project['id']}"
+                        f"&user_id={other_me['id']}",
+                        headers=_auth(owner)).json()
+    assert [m["role"] for m in listed] == ["reader"], (
+        "the duplicate POST changed the role it was refused for")
+
+
+def test_a_users_own_drafts_survive_more_sessions_than_one_page_holds(
+        client, database, mint_token) -> None:
+    """The ownership filter is a JOIN, not a page of session ids.
+
+    `list_drafts` collected the principal's sessions with one capped query and
+    passed the ids down, so a user with more than `MAX_PAGE_SIZE` sittings lost
+    the drafts of every later one and was refused its OWN session by name
+    (Copilot review of openDox-code#25, suppressed comment). The schema caps
+    sessions per user at nothing, so the cap had to leave the authorization
+    path entirely.
+    """
+    from opendox.runtime import identity as identity_module
+
+    owner = mint_token(subject="paging-owner")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "paging", "title": "Paging"},
+                          headers=_auth(owner)).json()
+    me = client.get("/api/v1/users/me", headers=_auth(owner)).json()
+
+    # One more sitting than a single page of the old ownership lookup held.
+    extra = identity_module.MAX_PAGE_SIZE + 1
+    with database.transaction() as conn:
+        store = identity_module.CoordinationStore(conn)
+        for _ in range(extra):
+            store.open_session(user_id=me["id"], project_id=project["id"])
+    newest = client.post("/api/v1/sessions", json={"project_id": project["id"]},
+                         headers=_auth(owner)).json()
+
+    saved = client.put("/api/v1/drafts",
+                       json={"session_id": newest["id"],
+                             "project_id": project["id"],
+                             "document_key": "late.md",
+                             "body": "typed in the 502nd sitting"},
+                       headers=_auth(owner))
+    assert saved.status_code == 200, saved.text
+
+    listed = client.get("/api/v1/drafts", headers=_auth(owner)).json()
+    assert [d["id"] for d in listed] == [saved.json()["id"]]
+    by_session = client.get(f"/api/v1/drafts?session_id={newest['id']}",
+                            headers=_auth(owner))
+    assert by_session.status_code == 200, by_session.text
+    assert [d["id"] for d in by_session.json()] == [saved.json()["id"]]

@@ -490,3 +490,49 @@ def test_the_dev_overlay_does_not_claim_a_pin_it_does_not_make() -> None:
             "make one")
         assert "digest:" in text, (
             "the overlay must show the `digest:` form a real environment uses")
+
+
+def test_the_init_script_mode_is_an_integer_kubernetes_accepts() -> None:
+    """`defaultMode: 0o555` is a STRING in YAML 1.1, and the API server refuses it.
+
+    A Kubernetes manifest is parsed as YAML 1.1, whose octal spelling is a
+    leading zero (`0555`); Python's `0o` prefix is not an integer there at all,
+    so the StatefulSet was rejected before Postgres could start and nothing in
+    this repository noticed (Copilot review of openDox-code#25). The assertion
+    is on the PARSED value, not the text, because the text is exactly what
+    looked right.
+    """
+    statefulset = _load_yaml(KUBERNETES / "base" / "postgres-statefulset.yaml")
+    volume = next(v for v in statefulset["spec"]["template"]["spec"]["volumes"]
+                  if v["name"] == "init-runtime-role")
+    mode = volume["configMap"]["defaultMode"]
+    assert isinstance(mode, int), (
+        f"defaultMode parsed as {type(mode).__name__} {mode!r}; Kubernetes "
+        "declares it an int32 and rejects the object when it is a string")
+    assert mode == 0o555, oct(mode)
+
+
+def test_the_migration_job_waits_for_postgres_before_it_runs() -> None:
+    """Nothing orders a Job against the StatefulSet it needs.
+
+    One `kubectl apply` admits both; the Job's first attempt can therefore meet
+    a server still running `initdb`, and `backoffLimit: 2` can retire the whole
+    Job seconds before the database is ready (Copilot review of
+    openDox-code#25). The wait is a readiness gate rather than a bigger retry
+    budget, and it reaches the Postgres SERVICE this base ships.
+    """
+    job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
+    inits = job["spec"]["template"]["spec"].get("initContainers") or []
+    assert inits, "the migration Job runs with nothing waiting for Postgres"
+    wait = inits[0]
+    service = _load_yaml(KUBERNETES / "base" / "postgres-service.yaml")
+    host = service["metadata"]["name"]
+    port = service["spec"]["ports"][0]["port"]
+    script = "\n".join(str(part) for part in wait["command"])
+    assert host in script, f"the wait names no host reaching {host}"
+    assert str(port) in script, f"the wait names no port reaching {port}"
+    # The same image, so the wait adds no dependency to the install path.
+    assert wait["image"] == _containers(job)[0]["image"]
+    # And it carries no credential: the question is whether the port answers.
+    assert "valueFrom" not in str(wait.get("env", []))
+    assert wait["securityContext"]["allowPrivilegeEscalation"] is False

@@ -23,6 +23,15 @@ PACKAGE = ROOT / "src" / "opendox" / "runtime"
 
 #: The modules whose import must cost STDLIB ONLY. `opendox.runtime.__init__`
 #: is in the list because importing any of the others imports it first.
+#: § 3.6's two modules ARE IN THIS TUPLE even though the § 3.5 branch does not
+#: carry them. They were left out of the first cut, and the omission was
+#: silent in exactly the way that matters: `_stdlib_only_paths()` walks THIS
+#: tuple, so on the § 3.6 branch — where both files exist and the contract is
+#: the whole point of them — the AST check and the fresh-interpreter check
+#: skipped them, while the assertion below that names them as the only
+#: permitted absences passed vacuously (Copilot review of openDox-code#25,
+#: suppressed comment). Listed here, `_stdlib_only_paths()` measures whichever
+#: of them the branch carries.
 STDLIB_ONLY_MODULES: tuple[str, ...] = (
     "opendox.runtime",
     "opendox.runtime.config",
