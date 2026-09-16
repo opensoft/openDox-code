@@ -20,8 +20,21 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Dependency metadata first, so a source-only change does not reinstall the
-# dependency tree.
+# THE DEPENDENCY TREE IS REINSTALLED ON ANY SOURCE CHANGE, and this comment
+# used to claim the opposite. `pip install ".[runtime]"` below needs the
+# package's own source to build it, so `COPY src` has to precede it, and the
+# install layer's cache key therefore includes every file under `src/`
+# (Copilot review of openDox-code#25 — the comment was the defect, not the
+# order). Stated rather than papered over: an image build after a one-line
+# source edit re-resolves and reinstalls FastAPI, psycopg and the rest.
+#
+# Splitting it — install the pinned dependency set first, then `--no-deps .` —
+# is the `--require-hashes` LOCKFILE act `pyproject.toml` already names as a
+# separate act with a real owner. Without a lockfile the "dependency set" would
+# have to be re-derived from `pyproject.toml` inside the build, which is a
+# second resolver nobody would maintain. This image is not built by CI, so the
+# cost is a developer's minutes and it is recorded here rather than traded for
+# an invented pin.
 COPY pyproject.toml README.md ./
 COPY src ./src
 # `--only-binary :all:` so pip never builds a dependency from an sdist —

@@ -264,3 +264,23 @@ def test_only_asymmetric_algorithms_can_be_configured_and_they_keep_pyjwts_spell
     # unacceptable, not for one that names nothing.
     assert load_settings({**base, PREFIX + "OIDC_ALGORITHMS": ""}
                          ).oidc_algorithms == ("RS256",)
+
+
+def test_ci_turns_the_db_backed_skip_into_a_failure() -> None:
+    """A skipped suite exits 0, so "skip where there is no Postgres" made the
+    `runtime` job green while running no database-backed assertion.
+
+    The job exists to supply a `postgres:16` service; its absence there is the
+    job's defect and is reported as one (Copilot review of openDox-code#25,
+    round 5). A developer's skip is unchanged, and that asymmetry is the whole
+    point — so it is asserted on the SOURCE rather than by running the fixture,
+    because this module is the hermetic one and `conftest.py` is not read here.
+    """
+    source = (ROOT / "tests_runtime" / "conftest.py").read_text(encoding="utf-8")
+    assert "def _skip_or_fail(" in source
+    assert "pytest.fail(" in source, (
+        "conftest still only skips; a `runtime` job whose Postgres service "
+        "failed to start would report green")
+    # Every exit from the probe goes through the asymmetry, not around it.
+    assert "pytest.skip(_SKIP_REASON)" not in source
+    assert source.count("_skip_or_fail(") >= 3

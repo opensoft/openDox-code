@@ -55,6 +55,47 @@ _SKIP_REASON = (
 )
 
 
+def in_ci() -> bool:
+    """Whether this run is CI's, by CI's own variable.
+
+    GitHub Actions sets `CI=true` in every job (and so does every other runner
+    this estate uses), which is the one signal that does not require the suite
+    to know whose CI it is.
+    """
+    return os.environ.get("CI", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _skip_or_fail(reason: str) -> None:
+    """A developer's skip is CI's FAILURE, and that asymmetry is the point.
+
+    Skipping where there is no Postgres is right for a developer and wrong for
+    the `runtime` job: pytest exits 0 when every collected case is skipped, so
+    a job whose `postgres:16` service failed to start went GREEN while running
+    no database-backed assertion at all — reporting the opposite of what the
+    workflow's own comment claims about it (Copilot review of openDox-code#25).
+    The job exists to supply that service, so its absence there is a defect in
+    the job and is reported as one.
+    """
+    if in_ci():
+        pytest.fail(
+            "CI is set, so the DB-backed runtime suites must RUN and not skip: "
+            "the `runtime` job supplies a `postgres:16` service and this is "
+            "what its absence looks like. " + reason, pytrace=False)
+    pytest.skip(reason)
+
+
+def _import_psycopg():
+    """`psycopg`, or the same asymmetry: a developer skips, CI fails."""
+    try:
+        import psycopg
+    except ImportError as exc:
+        _skip_or_fail(
+            "the `runtime` extra is not installed "
+            f"(pip install -e '.[runtime,test]'): {exc}")
+        raise                       # unreachable: `_skip_or_fail` always raises
+    return psycopg
+
+
 @pytest.fixture(scope="session")
 def postgres_dsn() -> str:
     """The DSN, PROBED — an unreachable one skips, it does not fail.
@@ -67,21 +108,24 @@ def postgres_dsn() -> str:
     attempt with a short timeout — and its failure is a skip that NAMES the DSN
     host and the error, so "skipped" never means "nobody knows why".
 
-    CI is unaffected and is meant to be: the `runtime` job supplies a
-    `postgres:16` service, so a skip there would be a real failure of that job's
-    own setup, and the job's log carries the reason.
+    AND IN CI IT IS NOT A SKIP AT ALL — it is a FAILURE, through
+    `_skip_or_fail`. The sentence here used to say "a skip there would be a
+    real failure of that job's own setup", which was true of the intent and
+    false of the code: pytest exits 0 when every collected case is skipped, so
+    a `runtime` job whose `postgres:16` service failed to start reported GREEN
+    while running no database-backed assertion (Copilot review of
+    openDox-code#25). The job supplies the service; its absence there is the
+    job's defect and is reported as one.
     """
     dsn = os.environ.get(TEST_DSN_ENV, "").strip()
     if not dsn:
-        pytest.skip(_SKIP_REASON)
-    psycopg = pytest.importorskip(
-        "psycopg",
-        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
+        _skip_or_fail(_SKIP_REASON)
+    psycopg = _import_psycopg()
     try:
         with psycopg.connect(dsn, connect_timeout=PROBE_TIMEOUT_SECONDS) as conn:
             conn.execute("select 1")
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(
+        _skip_or_fail(
             f"{TEST_DSN_ENV} is set and the server did not answer within "
             f"{PROBE_TIMEOUT_SECONDS}s: {type(exc).__name__}: {exc}. The "
             "DB-backed runtime suites did not run.")

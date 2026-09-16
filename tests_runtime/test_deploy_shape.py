@@ -439,8 +439,22 @@ def test_the_role_the_migration_narrows_is_a_name_and_not_a_credential() -> None
     job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
     entry = next(e for e in _containers(job)[0]["env"]
                  if e["name"] == PREFIX + "RUNTIME_PG_ROLE")
-    assert entry["value"] == "opendox_runtime"
-    assert "valueFrom" not in entry
+    # FROM THE ConfigMap, because the narrowed role must match the user in the
+    # `opendox-db-runtime` Secret's DSN — which is created out of band, so an
+    # overlay that serves as another role and a Job that narrows the bundled
+    # one would leave the real served role able to rewrite the migration ledger
+    # (Copilot review of openDox-code#25, round 5).
+    reference = entry["valueFrom"]["configMapKeyRef"]
+    assert reference["name"] == "opendox-runtime-config"
+    assert reference["key"] == "runtime_pg_role"
+    assert "secretKeyRef" not in str(entry), "a role NAME is not a credential"
+    literals = dict(item.split("=", 1)
+                    for item in _generator("opendox-runtime-config")["literals"])
+    assert literals["runtime_pg_role"] == "opendox_runtime"
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    assert "runtime_pg_role" in runbook, (
+        "the runbook must say that this role and the served DSN's user are one "
+        "role; the ledger narrowing is pointless if they are two")
 
 
 def test_both_pods_declare_command_and_not_only_args() -> None:
@@ -525,14 +539,91 @@ def test_the_migration_job_waits_for_postgres_before_it_runs() -> None:
     inits = job["spec"]["template"]["spec"].get("initContainers") or []
     assert inits, "the migration Job runs with nothing waiting for Postgres"
     wait = inits[0]
+
+    # THE ADDRESS COMES FROM THE ConfigMap, not from this file. The first cut
+    # hard-coded the bundled Service, which the base also says an overlay may
+    # replace with a managed database — and there the wait burned its whole
+    # budget and failed the Job before the configured DSN was used (Copilot
+    # review of openDox-code#25, round 5).
+    keys = {entry["name"]: entry["valueFrom"]["configMapKeyRef"]
+            for entry in wait["env"]}
+    assert keys["OPENDOX_MIGRATION_WAIT_HOST"]["key"] == "migration_wait_host"
+    assert keys["OPENDOX_MIGRATION_WAIT_PORT"]["key"] == "migration_wait_port"
+    literals = dict(item.split("=", 1)
+                    for item in _generator("opendox-runtime-config")["literals"])
     service = _load_yaml(KUBERNETES / "base" / "postgres-service.yaml")
-    host = service["metadata"]["name"]
-    port = service["spec"]["ports"][0]["port"]
+    assert literals["migration_wait_host"] == service["metadata"]["name"]
+    assert literals["migration_wait_port"] == str(
+        service["spec"]["ports"][0]["port"])
+
     script = "\n".join(str(part) for part in wait["command"])
-    assert host in script, f"the wait names no host reaching {host}"
-    assert str(port) in script, f"the wait names no port reaching {port}"
+    # An EMPTY host is "nothing to wait for" — the managed-database overlay.
+    assert "if not host" in script and "sys.exit(0)" in script
     # The same image, so the wait adds no dependency to the install path.
     assert wait["image"] == _containers(job)[0]["image"]
     # And it carries no credential: the question is whether the port answers.
-    assert "valueFrom" not in str(wait.get("env", []))
+    assert all("secretKeyRef" not in str(entry) for entry in wait["env"])
     assert wait["securityContext"]["allowPrivilegeEscalation"] is False
+
+
+# -- Copilot's fifth round on #25 --------------------------------------------
+
+
+def test_the_schema_viewer_switch_reaches_both_deployments() -> None:
+    """`OPENDOX_PUBLISH_OPENAPI` was documented everywhere and passed nowhere.
+
+    `.env.example` declares it, `config.SETTINGS` reads it and the runbook's
+    boundary table names it — and neither the compose service nor the
+    Kubernetes Deployment handed it to the container, so setting it in the
+    documented `.env` changed nothing and `/docs` stayed 404 with no way to
+    tell why (Copilot review of openDox-code#25, round 5).
+    """
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    served = compose["services"]["opendox"]["environment"]
+    assert PREFIX + "PUBLISH_OPENAPI" in served
+    # The application's own default: OFF.
+    assert served[PREFIX + "PUBLISH_OPENAPI"].endswith(":-false}")
+
+    deployment = _load_yaml(KUBERNETES / "base" / "opendox-deployment.yaml")
+    entry = next(e for e in _containers(deployment)[0]["env"]
+                 if e["name"] == PREFIX + "PUBLISH_OPENAPI")
+    reference = entry["valueFrom"]["configMapKeyRef"]
+    assert reference["name"] == "opendox-runtime-config"
+    assert reference["key"] == "publish_openapi"
+    literals = dict(item.split("=", 1)
+                    for item in _generator("opendox-runtime-config")["literals"])
+    assert literals["publish_openapi"] == "false"
+
+
+def test_the_runbook_creates_the_namespace_before_it_creates_secrets() -> None:
+    """Every `kubectl -n opendox create secret` needs the namespace to exist.
+
+    On a clean cluster it did not: the namespace arrived with the manifest, on
+    the LAST line of the block, so all three `create secret` calls failed with
+    `namespaces "opendox" not found` and the documented install could not
+    proceed (Copilot review of openDox-code#25, round 5).
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    creates_namespace = runbook.index("apply -f deploy/kubernetes/base/namespace.yaml")
+    first_secret = runbook.index("create secret generic opendox-postgres")
+    assert creates_namespace < first_secret, (
+        "the runbook creates a Secret in a namespace it has not created yet")
+
+
+def test_the_image_comment_does_not_claim_a_layer_cache_it_does_not_have() -> None:
+    """`COPY src` precedes the install, so a source edit reinstalls everything.
+
+    The comment above those lines claimed the opposite (Copilot review of
+    openDox-code#25, round 5). The ORDER is forced — pip builds the package
+    from its own source — so the comment is what had to change, and it now
+    names the lockfile act where the split belongs.
+    """
+    text = (COMPOSE / "Dockerfile").read_text(encoding="utf-8")
+    copy_src = text.index("COPY src ./src")
+    install = text.index('pip install --no-cache-dir --only-binary :all: ".[runtime]"')
+    assert copy_src < install, "the layer order changed; re-read the comment"
+    claim = text[:copy_src]
+    assert "does not reinstall" not in claim, (
+        "the comment claims a dependency-layer cache this Dockerfile does not "
+        "have; either split the install or keep the comment honest")
+    assert "REINSTALLED ON ANY SOURCE CHANGE" in claim

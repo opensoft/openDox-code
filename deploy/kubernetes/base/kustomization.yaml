@@ -70,3 +70,35 @@ configMapGenerator:
       - oidc_algorithms=RS256
       - oidc_jwks_ttl_seconds=300
       - oidc_leeway_seconds=60
+  # Non-secret RUNTIME config an overlay changes without patching a workload.
+  #
+  # `publish_openapi` is here and not an inline `value:` because it is a
+  # DECISION an environment makes — a staging cluster may publish the schema
+  # viewers and a production one may not — and the Deployment had no reference
+  # to it at all, so the setting `.env.example` and the runbook both document
+  # could not be turned on in Kubernetes by any means (Copilot review of
+  # openDox-code#25).
+  #
+  # `migration_wait_host` / `migration_wait_port` are the address the migration
+  # Job's readiness gate probes. The base ships Postgres and the default names
+  # its Service; an overlay that points the DSN at a MANAGED database sets the
+  # host to that endpoint — or to the EMPTY STRING, which the wait reads as
+  # "nothing to wait for" and exits immediately. Hard-coding the bundled
+  # Service made the Job burn its 240-second budget and fail in exactly the
+  # deployment shape this base says it supports (same review).
+  - name: opendox-runtime-config
+    behavior: create
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - publish_openapi=false
+      - migration_wait_host=opendox-postgres
+      - migration_wait_port=5432
+      # The SERVED role `MigrationRunner.protect_ledger` narrows. It must be
+      # the role the `opendox-db-runtime` Secret's DSN authenticates as: the
+      # narrowing is what keeps the served identity out of the migration
+      # ledger, and narrowing a role nobody serves as would leave the real one
+      # able to rewrite it (Copilot review of openDox-code#25). An overlay that
+      # changes the DSN's user changes this in the same commit; the runbook
+      # says so beside the Secret it names.
+      - runtime_pg_role=opendox_runtime

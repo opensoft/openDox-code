@@ -850,3 +850,27 @@ def test_a_users_own_drafts_survive_more_sessions_than_one_page_holds(
                             headers=_auth(owner))
     assert by_session.status_code == 200, by_session.text
     assert [d["id"] for d in by_session.json()] == [saved.json()["id"]]
+
+
+def test_a_hidden_user_and_a_missing_one_answer_byte_for_byte_the_same(
+        client, mint_token) -> None:
+    """The status matched; the BODY did not, which is the same oracle.
+
+    Reading the row first meant a missing user came back as `_found`'s
+    `no user with id=…` and a hidden one as a message naming visibility — 404
+    twice, distinguishable at a glance, so the id space was still walkable
+    (Copilot review of openDox-code#25, round 5).
+    """
+    owner = mint_token(subject="oracle2-owner")
+    stranger = mint_token(subject="oracle2-stranger")
+    owner_me = client.get("/api/v1/users/me", headers=_auth(owner)).json()
+
+    hidden = client.get(f"/api/v1/users/{owner_me['id']}",
+                        headers=_auth(stranger))
+    missing = client.get("/api/v1/users/u_does_not_exist",
+                         headers=_auth(stranger))
+    assert hidden.status_code == missing.status_code == 404
+    assert hidden.json() == missing.json(), (
+        "the two 404s differ, so the route still answers which ids exist")
+    # And the body names no id at all — naming one puts the probe in the answer.
+    assert owner_me["id"] not in hidden.text
