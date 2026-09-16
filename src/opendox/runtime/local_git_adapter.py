@@ -83,6 +83,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -174,8 +175,25 @@ class GitRunner:
         argv = [self.executable, "-C", str(self.root), "--literal-pathspecs",
                 *args]
         merged = {**os.environ, **(env or {})}
-        return subprocess.run(argv, input=stdin, capture_output=True,
-                              check=False, env=merged)
+        try:
+            return subprocess.run(argv, input=stdin, capture_output=True,
+                                  check=False, env=merged)
+        except OSError as exc:
+            # A MISSING OR UNUSABLE EXECUTABLE IS A `GitCommandFailed` LIKE ANY
+            # OTHER. `subprocess.run` does not return a non-zero
+            # `CompletedProcess` when the program cannot be started — it raises
+            # `FileNotFoundError` or `PermissionError` — so every caller that
+            # translated only `GitCommandFailed` leaked an OS exception: the
+            # API returned 500 and the CLI printed a traceback, in place of the
+            # named refusal the act promises (Copilot review of
+            # openDox-code#26). `create_repository` preflighted `git_available`
+            # and the other paths did not; normalizing here covers all of them,
+            # including the race where git disappears between the preflight and
+            # the call.
+            raise GitCommandFailed(
+                args, subprocess.CompletedProcess(
+                    argv, returncode=127, stdout=b"",
+                    stderr=(f"{self.executable}: {exc}").encode())) from exc
 
     def out(self, *args: str, stdin: bytes | None = None,
             env: dict[str, str] | None = None) -> bytes:
@@ -265,7 +283,7 @@ class LocalGitCorpus:
                           f"the directory is not a git repository ({failed})"
                           ) from failed
 
-        revision = self._head(git)
+        revision = self._head(git, str(location))
         if ref.revision is not None:
             revision = self._resolve_revision(git, ref.revision, str(location))
 
@@ -432,7 +450,13 @@ class LocalGitCorpus:
             # assumed.
             git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
                            .decode().strip())
-            index = git_dir / f"opendox-index-{os.getpid()}"
+            # A UNIQUE NAME PER CALL. Keyed on the process id alone, two
+            # concurrent writes to the same repository in ONE process shared
+            # `GIT_INDEX_FILE`: their `read-tree`/`update-index`/`write-tree`
+            # steps could interleave into a wrong tree, and one cleanup could
+            # unlink the other's index. The ref compare-and-swap protects the
+            # REF and not the index (Copilot review of openDox-code#26).
+            index = git_dir / f"opendox-index-{os.getpid()}-{uuid.uuid4().hex}"
             index_env = {"GIT_INDEX_FILE": str(index)}
             try:
                 if corpus.revision is not None:
@@ -451,7 +475,7 @@ class LocalGitCorpus:
                 parents = ["-p", corpus.revision]
             commit = git.out("commit-tree", tree, *parents, "-m", message,
                              env=git_identity(actor)).decode().strip()
-            ref = f"refs/heads/{self._branch}"
+            ref = self._served_ref(git, corpus.location)
             if corpus.revision is None:
                 git.out("update-ref", ref, commit, "")
             else:
@@ -470,12 +494,49 @@ class LocalGitCorpus:
     def _git(self, corpus: ResolvedCorpus) -> GitRunner:
         return GitRunner(Path(corpus.location), self._executable)
 
-    def _head(self, git: GitRunner) -> str | None:
-        """The current commit, or None where the repository has none yet."""
+    def _head(self, git: GitRunner, subject: str) -> str | None:
+        """The current commit, or None for an UNBORN branch — and only that.
+
+        An unborn branch (a repository whose first commit has not been made)
+        and an unreadable HEAD both made `rev-parse --verify HEAD` exit
+        non-zero, and treating them alike resolved a broken repository with
+        `revision=None`, after which `list_documents` answered `()` — an empty
+        corpus — instead of refusing (Copilot review of openDox-code#26, and
+        the interface is emphatic that "an absent corpus and an empty corpus
+        are different answers"). They are told apart by asking whether HEAD is
+        a symbolic ref that simply has no commit yet.
+        """
         completed = git.run("rev-parse", "--verify", "HEAD")
-        if completed.returncode != 0:
-            return None
-        return completed.stdout.decode().strip() or None
+        if completed.returncode == 0:
+            return completed.stdout.decode().strip() or None
+        symbolic = git.run("symbolic-ref", "--quiet", "HEAD")
+        if symbolic.returncode == 0:
+            ref = symbolic.stdout.decode().strip()
+            if git.run("show-ref", "--verify", "--quiet", ref).returncode != 0:
+                return None          # unborn: the ref exists, the commit does not
+        raise _refuse(
+            CORPUS_UNREADABLE, subject,
+            "HEAD could not be read and is not an unborn branch: "
+            + completed.stderr.decode("utf-8", "replace").strip())
+
+    def _served_ref(self, git: GitRunner, subject: str) -> str:
+        """The ref `write_back` moves: the one HEAD points at.
+
+        NOT `refs/heads/<self._branch>`. `resolve` accepts any git repository
+        and this module says in terms that a repository openDox did not create
+        stays writable, so assuming `main` meant that a repository on `master`
+        got its commit on a ref HEAD does not point at: the receipt came back
+        successful and the document was not readable through the resolved
+        corpus (Copilot review of openDox-code#26). A DETACHED HEAD has no ref
+        to move and is refused rather than guessed at.
+        """
+        symbolic = git.run("symbolic-ref", "--quiet", "HEAD")
+        if symbolic.returncode == 0:
+            return symbolic.stdout.decode().strip()
+        raise _refuse(
+            WRITE_PATH_UNREACHABLE, subject,
+            "HEAD is detached, so there is no branch for a commit to advance; "
+            "check out a branch before writing back")
 
     def _resolve_revision(self, git: GitRunner, revision: str,
                           subject: str) -> str:

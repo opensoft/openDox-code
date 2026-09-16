@@ -373,3 +373,109 @@ def test_the_act_on_a_project_that_does_not_exist_is_a_404(
     response = client.post("/api/v1/projects/no-such-project/repository",
                            headers=_auth(token))
     assert response.status_code == 404
+
+
+# -- the review round's own assertions (Copilot review of openDox-code#26) ---
+
+
+def test_the_map_records_an_absolute_location(store, project,
+                                              tmp_path: Path) -> None:
+    """A relative root in the durable map resolves against whatever working
+    directory the next process happens to have."""
+    relative = Path("var") / "projects"
+    created = act.create_repository(store, project_id=project.id,
+                                    root=relative, actor=ACTOR)
+    try:
+        assert Path(created.row.location).is_absolute()
+        assert created.location.is_absolute()
+    finally:
+        import shutil
+        shutil.rmtree(created.location.parent.parent, ignore_errors=True)
+
+
+def test_an_already_mapped_project_is_refused_the_same_way_with_or_without_git(
+        store, project, project_repository_root: Path) -> None:
+    """The map is the authoritative fact; the environment is checked after it.
+
+    With `git_available` first, a repeat create answered "git is not on PATH"
+    on a host without git and `ConflictError` on a host with it — the same act
+    giving two different answers about the same durable fact.
+    """
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    with pytest.raises(identity.ConflictError):
+        act.create_repository(store, project_id=project.id,
+                              root=project_repository_root, actor=ACTOR,
+                              executable="git-that-is-not-installed")
+
+
+def test_a_path_collision_is_a_named_refusal_and_not_a_notadirectoryerror(
+        store, project, project_repository_root: Path) -> None:
+    (project_repository_root / project.id).write_text("in the way\n",
+                                                      encoding="utf-8")
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.create_repository(store, project_id=project.id,
+                              root=project_repository_root, actor=ACTOR)
+    assert "is not a directory" in str(caught.value)
+
+
+def test_a_row_owned_by_another_adapter_is_never_touched(
+        store, project, tmp_path: Path) -> None:
+    """The map carries an `adapter` column precisely so a project can be served
+    by something else; these acts ignored it and would have run `git remote
+    set-url` and `git push` against another adapter's opaque location."""
+    store.create_project_repository(project_id=project.id,
+                                    adapter="governed-factory",
+                                    location=str(tmp_path / "not-ours"))
+    for call in (
+            lambda: act.attach_remote(store, project_id=project.id,
+                                      remote_url="https://example.invalid/x.git"),
+            lambda: act.push_to_remote(store, project_id=project.id)):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            call()
+        assert "governed-factory" in str(caught.value)
+        assert "must not touch another adapter's corpus" in str(caught.value)
+
+
+def test_a_remote_url_carrying_a_credential_is_refused_without_echoing_it(
+        store, project, project_repository_root: Path) -> None:
+    """`remote_url` is read back by the repository endpoints to any
+    authenticated caller, and is stored durably with nothing to rotate it."""
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    for url in ("https://someone:ghp_supersecrettoken@example.invalid/x.git",
+                "git@github.com:opensoft/x.git",
+                "ssh://user:pw@example.invalid/x.git"):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.attach_remote(store, project_id=project.id, remote_url=url)
+        message = str(caught.value)
+        assert "user information" in message
+        assert url not in message, "the refusal echoed the URL back"
+        assert "supersecrettoken" not in message
+    # ...and a URL with no userinfo is accepted.
+    row = act.attach_remote(store, project_id=project.id,
+                            remote_url="https://example.invalid/x.git")
+    assert row.remote_url == "https://example.invalid/x.git"
+
+
+def test_the_remote_this_runtime_attaches_is_the_one_it_pushes_to(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`attach_remote` took a `remote_name` the map could not record, so
+    `attach_remote(..., remote_name="upstream")` succeeded and the push then
+    looked for `origin` and found nothing."""
+    import inspect
+
+    assert "remote_name" not in inspect.signature(act.attach_remote).parameters
+    assert "remote_name" not in inspect.signature(act.push_to_remote).parameters
+    assert act.REMOTE_NAME == "origin"
+
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    remote = tmp_path / "factory.git"
+    subprocess.run(["git", "init", "--bare", "--initial-branch=main",
+                    str(remote)], check=True, capture_output=True)
+    act.attach_remote(store, project_id=project.id, remote_url=str(remote))
+    assert _git(created.location, "remote", "get-url",
+                act.REMOTE_NAME) == str(remote)
+    act.push_to_remote(store, project_id=project.id)
+    assert _git(remote, "rev-parse", "refs/heads/main") == created.initial_commit

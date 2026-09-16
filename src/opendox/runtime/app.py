@@ -409,6 +409,9 @@ def attach_project_remote(project_id: str, body: RemoteAttach, store: StoreDep,
                   allowed=("owner",))
     _found(lambda: store.repository_for_project(project_id))
     try:
+        # The credential check happens in the act, so the CLI gets it too; this
+        # route only has to let the refusal through as a 409 with a message
+        # that never echoes the URL.
         row = repository_act.attach_remote(store, project_id=project_id,
                                            remote_url=body.remote_url)
     except repository_act.RepositoryActRefused as exc:

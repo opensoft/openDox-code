@@ -63,6 +63,7 @@ below for the line.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -77,14 +78,47 @@ from opendox.runtime.local_git_adapter import (
     git_identity,
 )
 
+#: The ONE remote this runtime configures and pushes to. A constant and not a
+#: parameter: `project_repositories` has a single `remote_url` column, so a
+#: second remote would be a name the map cannot record and the push cannot find.
+REMOTE_NAME = "origin"
+
+#: A remote URL carrying USERINFO — `https://user:token@host/...` or
+#: `user@host:path` — is refused. `project_repositories.remote_url` is
+#: serialized by the repository endpoints to any authenticated caller, so a
+#: credential embedded here is a credential disclosed to every signed-in user
+#: of the install, and it is also written into the durable map where nothing
+#: will ever rotate it (Copilot review of openDox-code#26). Credentials for a
+#: remote belong in the environment git already reads them from — a credential
+#: helper, an `ssh` key, a `.netrc` — never in a row.
+_URL_USERINFO = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/@]*@")
+_SCP_USERINFO = re.compile(r"^[^/:@]+@[^/:@]+:")
+
+
+def refuse_credential_bearing_remote(remote_url: str) -> None:
+    """Refuse a remote URL with a credential in it, naming what was found.
+
+    The message NEVER echoes the URL: it is the thing that might be a secret.
+    """
+    if _URL_USERINFO.match(remote_url) or _SCP_USERINFO.match(remote_url):
+        raise RepositoryActRefused(
+            "the remote URL carries user information before the host. "
+            "`project_repositories.remote_url` is read back by the repository "
+            "endpoints to every authenticated caller and is stored durably "
+            "with nothing to rotate it, so a credential must not be part of "
+            "it. Use a credential helper, an ssh key or a .netrc, and give "
+            "this act the URL alone.")
+
 __all__ = [
     "ADAPTER_NAME",
+    "REMOTE_NAME",
     "CreatedRepository",
     "RepositoryActRefused",
     "attach_remote",
     "corpus_ref_for",
     "create_repository",
     "initialize_repository",
+    "refuse_credential_bearing_remote",
     "push_to_remote",
     "repository_location",
 ]
@@ -115,7 +149,15 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
     if not project_id or "/" in project_id or project_id in {".", ".."}:
         raise RepositoryActRefused(
             f"{project_id!r} is not a usable project id for a directory name")
-    return Path(root).expanduser() / project_id
+    # ABSOLUTE, ALWAYS. `OPENDOX_PROJECT_REPOSITORY_ROOT` defaults to the
+    # RELATIVE `var/projects`, and a relative path written into the durable map
+    # resolves against whatever working directory the next process happens to
+    # have — so the API and the CLI, or the same API after a restart under a
+    # different unit, would read one row as two different places and the
+    # repository would look absent or, worse, be the wrong tree (Copilot review
+    # of openDox-code#26). `resolve()` also collapses `..` and a symlinked
+    # root, so the row records one canonical name for one directory.
+    return (Path(root).expanduser().resolve() / project_id)
 
 
 def corpus_ref_for(row: Any, *, name: str | None = None) -> CorpusRef:
@@ -136,11 +178,6 @@ def create_repository(store: Any, *, project_id: str,
     `store` is an `identity.CoordinationStore` over the CALLER'S transaction,
     so the row and everything else the caller writes commit together.
     """
-    if not git_available(executable):
-        raise RepositoryActRefused(
-            f"{executable!r} is not on PATH; RULING C3's repository is a plain "
-            "local git repository and this act creates it by running git")
-
     location = repository_location(root, project_id)
 
     # THE ROW FIRST, inside the caller's transaction, and first also because it
@@ -153,10 +190,28 @@ def create_repository(store: Any, *, project_id: str,
     row = store.create_project_repository(
         project_id=project_id, adapter=ADAPTER_NAME, location=str(location))
 
+    # THE DEPENDENCY CHECK COMES AFTER THE MAP, and the order is the finding's
+    # (Copilot review of openDox-code#26): with `git_available` first, a repeat
+    # create for an ALREADY-MAPPED project answered "git is not on PATH" on a
+    # host without git and `ConflictError` on a host with it — the same act
+    # giving two different answers about the same durable fact. The map row is
+    # authoritative; the environment is checked once the map has spoken.
+    if not git_available(executable):
+        raise RepositoryActRefused(
+            f"{executable!r} is not on PATH; RULING C3's repository is a plain "
+            "local git repository and this act creates it by running git")
+
     # THEN the orphan check, and still before any filesystem mutation: nothing
     # below has run, so a refusal here leaves the disk untouched and the row is
     # rolled back with the caller's transaction.
-    if location.exists() and any(location.iterdir()):
+    if location.exists() and not location.is_dir():
+        # A PATH COLLISION IS A NAMED REFUSAL, not a `NotADirectoryError` from
+        # the `iterdir()` below — which reached the API as an unhandled 500.
+        raise RepositoryActRefused(
+            f"{location} exists and is not a directory, so this project's "
+            "repository cannot be created there. Remove it, or point "
+            "OPENDOX_PROJECT_REPOSITORY_ROOT somewhere else.")
+    if location.is_dir() and any(location.iterdir()):
         raise RepositoryActRefused(
             f"{location} already exists and is not empty. Either a previous "
             "act was interrupted between creating the repository and "
@@ -183,7 +238,16 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
     of it that touches the filesystem.
     """
     location = Path(location)
-    location.mkdir(parents=True, exist_ok=True)
+    try:
+        # INSIDE the `try`: a permission error or a non-directory parent from
+        # `mkdir` used to escape as `PermissionError`/`NotADirectoryError` and
+        # reach the API as a 500, instead of the act's named refusal (Copilot
+        # review of openDox-code#26).
+        location.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RepositoryActRefused(
+            f"the directory {location} could not be created ({exc}); the map "
+            "row is rolled back with the caller's transaction") from exc
     git = GitRunner(location, executable)
     try:
         # BARE, and it is the decision `local_git_adapter`'s header argues in
@@ -221,8 +285,26 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
     return commit
 
 
+def _local_git_row(store: Any, project_id: str) -> Any:
+    """The map row, REFUSED unless this adapter is the one that owns it.
+
+    The map carries an `adapter` column precisely so a project can be served by
+    something other than a plain local git repository, and these acts ignored
+    it: a row belonging to a governed factory's adapter would have had `git
+    remote set-url` and `git push` run against its opaque `location` (Copilot
+    review of openDox-code#26). A row this adapter does not own is somebody
+    else's to act on.
+    """
+    row = store.repository_for_project(project_id)
+    if row.adapter != ADAPTER_NAME:
+        raise RepositoryActRefused(
+            f"project {project_id} is mapped to the {row.adapter!r} adapter, "
+            f"not {ADAPTER_NAME!r}; this act runs git against a plain local "
+            "repository and must not touch another adapter's corpus")
+    return row
+
+
 def attach_remote(store: Any, *, project_id: str, remote_url: str,
-                  remote_name: str = "origin",
                   executable: str = "git") -> Any:
     """RULING C3's "a remote can be attached later", as one act.
 
@@ -230,8 +312,17 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
     repository. It writes NO object and moves NO ref: attaching a remote
     changes where this repository can push and changes nothing it contains —
     which is what makes the eventual move "a push, not a migration".
+
+    THE REMOTE IS ALWAYS `origin` AND IS NO LONGER A PARAMETER. It was one, and
+    only the URL was persisted: `attach_remote(..., remote_name="upstream")`
+    succeeded and `push_to_remote` then looked for `origin` and found nothing
+    (Copilot review of openDox-code#26). The map has one `remote_url` column,
+    so the runtime has one remote; a name the map cannot record is a name the
+    push cannot find.
     """
-    row = store.repository_for_project(project_id)
+    refuse_credential_bearing_remote(remote_url)
+    row = _local_git_row(store, project_id)
+    remote_name = REMOTE_NAME
     git = GitRunner(Path(row.location), executable)
     try:
         existing = git.run("remote", "get-url", remote_name)
@@ -247,7 +338,7 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
 
 
 def push_to_remote(store: Any, *, project_id: str,
-                   branch: str = DEFAULT_BRANCH, remote_name: str = "origin",
+                   branch: str = DEFAULT_BRANCH,
                    executable: str = "git") -> str:
     """Move the project into a governed factory. RULING C3: this is a PUSH.
 
@@ -257,7 +348,7 @@ def push_to_remote(store: Any, *, project_id: str,
     previous act attached, and the local repository keeps serving reads through
     the same adapter afterwards.
     """
-    row = store.repository_for_project(project_id)
+    row = _local_git_row(store, project_id)
     if not row.remote_url:
         raise RepositoryActRefused(
             f"project {project_id} has no attached remote; attach one first "
@@ -265,7 +356,7 @@ def push_to_remote(store: Any, *, project_id: str,
             "a push)")
     git = GitRunner(Path(row.location), executable)
     try:
-        git.out("push", remote_name, f"refs/heads/{branch}:refs/heads/{branch}")
+        git.out("push", REMOTE_NAME, f"refs/heads/{branch}:refs/heads/{branch}")
     except GitCommandFailed as failed:
         raise RepositoryActRefused(
             f"the push to {row.remote_url} failed ({failed}); the project "

@@ -401,11 +401,11 @@ def cmd_create_repository(args: argparse.Namespace) -> int:
             created = repository_act.create_repository(
                 CoordinationStore(conn), project_id=args.project_id,
                 root=settings.project_repository_root, actor=args.actor)
-            return _emit({"verb": "create-repository",
-                          "project_id": args.project_id,
-                          "adapter": repository_act.ADAPTER_NAME,
-                          "location": str(created.location),
-                          "initial_commit": created.initial_commit}, ok=True)
+            evidence = {"verb": "create-repository",
+                        "project_id": args.project_id,
+                        "adapter": repository_act.ADAPTER_NAME,
+                        "location": str(created.location),
+                        "initial_commit": created.initial_commit}
     except repository_act.RepositoryActRefused as exc:
         return _emit({"verb": "create-repository", "refusal": "repository",
                       "message": str(exc)}, ok=False)
@@ -413,6 +413,7 @@ def cmd_create_repository(args: argparse.Namespace) -> int:
         return _emit({"verb": "create-repository",
                       "refusal": type(exc).__name__,
                       "message": str(exc)}, ok=False)
+    return _emit(evidence, ok=True)
 
 
 def cmd_attach_remote(args: argparse.Namespace) -> int:
@@ -428,17 +429,18 @@ def cmd_attach_remote(args: argparse.Namespace) -> int:
             row = repository_act.attach_remote(
                 CoordinationStore(conn), project_id=args.project_id,
                 remote_url=args.remote_url)
-            return _emit({"verb": "attach-remote",
-                          "project_id": args.project_id,
-                          "remote_url": row.remote_url,
-                          "note": "no local content changed; the move is a "
-                                  "push, not a migration"}, ok=True)
+            evidence = {"verb": "attach-remote",
+                        "project_id": args.project_id,
+                        "remote_url": row.remote_url,
+                        "note": "no local content changed; the move is a "
+                                "push, not a migration"}
     except repository_act.RepositoryActRefused as exc:
         return _emit({"verb": "attach-remote", "refusal": "repository",
                       "message": str(exc)}, ok=False)
     except Exception as exc:  # noqa: BLE001 - same
         return _emit({"verb": "attach-remote", "refusal": type(exc).__name__,
                       "message": str(exc)}, ok=False)
+    return _emit(evidence, ok=True)
 
 
 def cmd_push(args: argparse.Namespace) -> int:
@@ -453,16 +455,16 @@ def cmd_push(args: argparse.Namespace) -> int:
         with database, database.transaction() as conn:
             remote_url = repository_act.push_to_remote(
                 CoordinationStore(conn), project_id=args.project_id)
-            return _emit({"verb": "push", "project_id": args.project_id,
-                          "pushed_to": remote_url,
-                          "note": "a push, not a migration (RULING C3)"},
-                         ok=True)
+            evidence = {"verb": "push", "project_id": args.project_id,
+                        "pushed_to": remote_url,
+                        "note": "a push, not a migration (RULING C3)"}
     except repository_act.RepositoryActRefused as exc:
         return _emit({"verb": "push", "refusal": "repository",
                       "message": str(exc)}, ok=False)
     except Exception as exc:  # noqa: BLE001 - same
         return _emit({"verb": "push", "refusal": type(exc).__name__,
                       "message": str(exc)}, ok=False)
+    return _emit(evidence, ok=True)
 
 
 # -- parser -----------------------------------------------------------------

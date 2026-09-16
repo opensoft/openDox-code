@@ -427,3 +427,143 @@ def test_a_repository_opendox_did_not_create_still_reads(
     corpus = _resolve(adapter, repository_with_a_checkout)
     keys = [document.key for document in adapter.list_documents(corpus)]
     assert keys == ["a.md", "b.md"]
+
+
+# -- the review round's own assertions (Copilot review of openDox-code#26) ---
+
+
+def test_a_missing_git_executable_is_a_named_refusal_and_not_an_oserror(
+        repository: Path) -> None:
+    """`subprocess.run` RAISES when the program cannot be started.
+
+    It does not return a non-zero `CompletedProcess`, so every caller that
+    translated only `GitCommandFailed` leaked a `FileNotFoundError` — an API
+    500 and a CLI traceback in place of the act's named refusal.
+    """
+    adapter = lga.LocalGitCorpus(executable="git-that-is-not-installed")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.resolve(ca.CorpusRef(name="project-1",
+                                     location=str(repository)))
+    assert caught.value.refusal.kind == ca.CORPUS_UNCLASSIFIABLE
+    assert "git-that-is-not-installed" in str(caught.value)
+
+
+def test_a_repository_on_another_branch_gets_its_commit_on_that_branch(
+        adapter, tmp_path: Path) -> None:
+    """`resolve` accepts any repository, so `write_back` must not assume `main`.
+
+    A repository whose HEAD is `master` used to receive the commit on
+    `refs/heads/main` — a ref HEAD does not point at — so the receipt came back
+    successful and the document was not readable through the resolved corpus.
+    """
+    location = tmp_path / "on-master"
+    initialize_repository(location, project_id="on-master", actor=ACTOR,
+                          branch="master")
+    assert _git(location, "symbolic-ref", "--short", "HEAD") == "master"
+    corpus = adapter.resolve(ca.CorpusRef(name="on-master",
+                                          location=str(location)))
+    receipt = adapter.write_back(
+        corpus, ca.DocumentId("on-master", "a.md"), b"a\n", actor=ACTOR,
+        basis_revision=corpus.revision or "")
+    assert _git(location, "rev-parse", "refs/heads/master") == (
+        receipt.correlation_id)
+    assert _git(location, "rev-parse", "HEAD") == receipt.correlation_id
+    after = adapter.resolve(ca.CorpusRef(name="on-master",
+                                         location=str(location)))
+    assert adapter.read(after, ca.DocumentId("on-master", "a.md")
+                        ).content == b"a\n", (
+        "the receipt was successful and the document is not readable through "
+        "the resolved corpus")
+
+
+def test_a_detached_head_is_refused_rather_than_guessed_at(
+        adapter, repository: Path) -> None:
+    corpus = _resolve(adapter, repository)
+    # Detach by writing the commit id into HEAD directly, which is what a
+    # `git checkout <sha>` leaves behind; `symbolic-ref --delete HEAD` is
+    # refused by git on a bare repository.
+    (repository / "HEAD").write_text(f"{corpus.revision}\n", encoding="utf-8")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus, ca.DocumentId("project-1", "a.md"), b"a\n",
+                           actor=ACTOR, basis_revision=corpus.revision or "")
+    assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+    assert "detached" in str(caught.value)
+
+
+def test_an_unreadable_head_refuses_rather_than_reading_as_an_empty_corpus(
+        adapter, tmp_path: Path) -> None:
+    """An unborn branch and a broken HEAD are different answers.
+
+    Both made `rev-parse --verify HEAD` exit non-zero; treating them alike
+    resolved a broken repository with `revision=None`, and `list_documents`
+    then answered `()` — "an absent corpus and an empty corpus are different
+    answers", which the interface is emphatic about.
+    """
+    location = tmp_path / "broken"
+    initialize_repository(location, project_id="broken", actor=ACTOR)
+    (location / "HEAD").write_text("this is not a ref\n", encoding="utf-8")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.resolve(ca.CorpusRef(name="broken", location=str(location)))
+    assert caught.value.refusal.kind in {ca.CORPUS_UNREADABLE,
+                                         ca.CORPUS_UNCLASSIFIABLE}
+
+
+def test_an_unborn_branch_is_a_legal_empty_corpus(adapter,
+                                                  tmp_path: Path) -> None:
+    """The other half of the same distinction, and it must keep working."""
+    location = tmp_path / "unborn"
+    location.mkdir()
+    _git(location, "init", "--bare", "--initial-branch=main", ".")
+    corpus = adapter.resolve(ca.CorpusRef(name="unborn",
+                                          location=str(location)))
+    assert corpus.revision is None
+    assert adapter.list_documents(corpus) == ()
+
+
+def test_two_writes_in_one_process_do_not_share_a_temporary_index(
+        adapter, tmp_path: Path) -> None:
+    """The ref compare-and-swap protects the REF; the index needed its own name.
+
+    Keyed on the process id alone, two concurrent writes to the same repository
+    in ONE process shared `GIT_INDEX_FILE` and could interleave into a wrong
+    tree — or one cleanup could unlink the other's index.
+    """
+    import threading
+
+    location = tmp_path / "concurrent"
+    initialize_repository(location, project_id="concurrent", actor=ACTOR)
+    ref = ca.CorpusRef(name="concurrent", location=str(location))
+    results: list[object] = []
+    barrier = threading.Barrier(4)
+
+    def _write_one(index: int) -> None:
+        try:
+            corpus = adapter.resolve(ref)
+            barrier.wait(timeout=10)
+            results.append(adapter.write_back(
+                corpus, ca.DocumentId("concurrent", f"doc-{index}.md"),
+                f"# {index}\n".encode(), actor=ACTOR,
+                basis_revision=corpus.revision or ""))
+        except Exception as exc:  # noqa: BLE001 - collected and read below
+            results.append(exc)
+
+    threads = [threading.Thread(target=_write_one, args=(i,)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    receipts = [r for r in results if isinstance(r, ca.WriteReceipt)]
+    refusals = [r for r in results if isinstance(r, ca.CorpusRefused)]
+    assert len(results) == 4
+    # EXACTLY ONE WINS. All four resolved the same revision, so the
+    # compare-and-swap lets one commit through and refuses the other three —
+    # which is the documented behaviour, and none of them may fail any OTHER
+    # way (a wrong tree, an unlinked index, an OSError).
+    assert len(receipts) == 1, results
+    assert len(refusals) == 3, results
+    for refusal in refusals:
+        assert refusal.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+    assert not list(Path(location).glob("opendox-index-*"))
+    corpus = adapter.resolve(ref)
+    assert len(adapter.list_documents(corpus)) == 1
