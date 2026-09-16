@@ -12,6 +12,7 @@ proved hermetically in `test_local_git_adapter.py`, in the REQUIRED job.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -1242,3 +1243,62 @@ def test_a_pushurl_that_cannot_be_cleared_fails_the_attach(
     monkeypatch.undo()
     act.attach_remote(store, project_id=project.id,
                       remote_url=str(destination))
+
+
+# -- Copilot's twelfth round on #26 ------------------------------------------
+
+
+def test_any_remote_helper_spelling_is_refused_not_only_ext_and_fd(
+        store, project, project_repository_root: Path) -> None:
+    """`<name>::<address>` makes git resolve `git-remote-<name>` from `PATH`.
+
+    So naming `ext` and `fd` was the narrow reading of a general mechanism: an
+    installed helper — one the image ships, one a sibling package left there —
+    is reachable through any spelling, and `protocol.ext.allow` governs `ext`
+    alone (Copilot review of openDox-code#26, round 12).
+    """
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    for url in ("evil::anything", "testgit::/tmp/x", "Helper::sh -c whoami"):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.attach_remote(store, project_id=project.id, remote_url=url)
+        assert "runs a command" in str(caught.value), url
+    # A SINGLE colon is not this form and is unaffected: a URL, an SCP remote
+    # and a Windows-style path all still attach.
+    for url in ("https://example.invalid/x.git", "git@example.invalid:x.git",
+                "/srv/projects/x.git"):
+        act.refuse_command_executing_remote(url)
+
+
+def test_a_legacy_helper_row_is_refused_before_the_push_runs_it(
+        store, project, project_repository_root: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The attach rule cannot reach a row that predates it; this does.
+
+    `-c protocol.ext.allow=never` covers `ext` and says nothing about
+    `git-remote-evil`, so a legacy `evil::…` row still handed `git push` a
+    helper to run (Copilot review of openDox-code#26, round 12). The row is
+    asked the same question `attach_remote` asks, before anything is pushed.
+
+    A REAL HELPER IS PLANTED ON `PATH` for this, so the old shape's failure is
+    the helper RUNNING rather than an assertion about intent.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "HELPER-RAN"
+    helper = bin_dir / "git-remote-evil"
+    helper.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+    helper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    hostile = "evil::anything"
+    store.attach_remote(project_id=project.id, remote_url=hostile)
+    _git(created.location, "remote", "add", act.REMOTE_NAME, hostile)
+
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "runs a command" in str(caught.value)
+    assert not marker.exists(), (
+        "the remote helper was executed by this runtime's own push")

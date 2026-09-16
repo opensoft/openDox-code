@@ -842,3 +842,33 @@ def test_a_repository_refusal_is_redacted_like_every_other_message(
     printed = json.dumps(evidence)
     assert "hunter2" not in printed, printed
     assert "<redacted>" in printed, printed
+
+
+def test_the_evidence_boundary_redacts_a_credential_parameter_too() -> None:
+    """`_DSN_SHAPED` is half the credential rule, and this helper is the other
+    half's only boundary.
+
+    The repository verbs route caller-controlled text — a project id, a remote
+    URL from a row written before the attach rule — through `_safe_message`,
+    and that helper applied the DSN pattern alone: `?token=…` is not a DSN and
+    is every bit as much a credential, so a token in that shape reached the
+    evidence object despite this CLI's no-token contract (Copilot review of
+    openDox-code#26, round 12). Both halves now, in the one place every message
+    passes.
+    """
+    message = _safe_carrier(
+        "'https://example.invalid/x.git?token=ghp_supersecret' is not a usable "
+        "project id for a directory name")
+    assert "ghp_supersecret" not in message, message
+    assert "example.invalid" in message, message
+
+    # The DSN half is unchanged, and a message with nothing secret in it is
+    # returned as it was.
+    assert "hunter2" not in _safe_carrier(
+        "could not connect to postgresql://someone:hunter2@127.0.0.1/db")
+    plain = "the directory /srv/projects/p1 is not empty"
+    assert _safe_carrier(plain) == plain
+
+
+def _safe_carrier(text: str) -> str:
+    return cli._safe_message(RuntimeError(text))

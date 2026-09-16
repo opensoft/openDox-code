@@ -20,6 +20,7 @@ none.
 from __future__ import annotations
 
 import dataclasses
+import os
 import subprocess
 from pathlib import Path
 
@@ -1251,3 +1252,141 @@ def test_the_initialization_is_bound_to_the_directory_it_verified(
     assert _git(moved, "rev-parse", "HEAD") == commit
     assert not any(decoy.iterdir()), (
         f"git wrote into the swapped-in path: {sorted(decoy.iterdir())}")
+
+
+# -- Copilot's twelfth round on #26 ------------------------------------------
+
+
+not_root = pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="root ignores the permission bits these cases set, so they are "
+           "skipped with the reason printed rather than passing vacuously")
+
+
+def test_a_pinned_revision_resolves_without_asking_head(
+        adapter: lga.LocalGitCorpus, repository: Path) -> None:
+    """`CorpusRef.revision` is the PINNED form; HEAD is not its business.
+
+    `resolve` asked `_head` first in every case, so a repository with a
+    malformed or unreadable HEAD was refused before the revision the caller
+    actually named was looked up — a corpus this adapter can serve, refused for
+    a fact about a ref the request does not use (Copilot review of
+    openDox-code#26, round 12, suppressed).
+    """
+    commit = _git(repository, "rev-parse", "HEAD")
+    # A ref store HEAD cannot read: the branch file is junk, which `_head`
+    # refuses as CORPUS_UNREADABLE (round 6's own distinction).
+    (repository / "refs" / "heads" / "main").write_text("not a sha\n",
+                                                        encoding="utf-8")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.resolve(ca.CorpusRef(name="pinned", location=str(repository)))
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+
+    pinned = adapter.resolve(ca.CorpusRef(name="pinned",
+                                          location=str(repository),
+                                          revision=commit))
+    assert pinned.revision == commit
+    assert adapter.list_documents(pinned) == ()
+
+
+@not_root
+def test_a_location_that_cannot_be_read_is_a_refusal_and_not_an_oserror(
+        adapter: lga.LocalGitCorpus, tmp_path: Path) -> None:
+    """`exists()`, `is_dir()` and `resolve()` raise for an unsearchable parent.
+
+    So a location this adapter could not READ left a `PermissionError` where
+    the protocol promises a refusal, and the API turned it into a 500 (Copilot
+    review of openDox-code#26, round 12, suppressed). A missing path and an
+    unreadable one are still different answers.
+    """
+    parent = tmp_path / "sealed"
+    parent.mkdir()
+    location = parent / "project"
+    location.mkdir()
+    parent.chmod(0o000)
+    try:
+        with pytest.raises(ca.CorpusRefused) as caught:
+            adapter.resolve(ca.CorpusRef(name="sealed", location=str(location)))
+        assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+    finally:
+        parent.chmod(0o755)
+
+
+@not_root
+def test_the_write_path_is_available_only_where_a_write_would_land(
+        adapter: lga.LocalGitCorpus, repository: Path) -> None:
+    """A commit writes an OBJECT and moves a REF, not just "the git dir".
+
+    `write_path_available` asked `os.access(git_dir, W_OK)` alone, so a
+    repository whose root was writable and whose `objects/` was read-only
+    advertised an available write path and then failed inside the commit —
+    the discovery order this interface's rule forbids: "a read-only corpus is
+    a fact about the corpus, and discovering it by attempting a write is how a
+    caller ends up with a half-built edit and nowhere to put it" (Copilot
+    review of openDox-code#26, round 12, suppressed).
+    """
+    assert adapter.resolve(
+        ca.CorpusRef(name="writable", location=str(repository))
+    ).write_path_available is True
+
+    objects = repository / "objects"
+    objects.chmod(0o500)
+    try:
+        corpus = adapter.resolve(ca.CorpusRef(name="read-only-objects",
+                                              location=str(repository)))
+        assert corpus.write_path_available is False, (
+            "an unwritable object store was advertised as a usable write path")
+    finally:
+        objects.chmod(0o755)
+
+
+def test_the_directory_the_emptiness_check_saw_is_the_one_initialized(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check and the use have to be the same OBJECT, not the same name.
+
+    The first cut verified emptiness through a no-follow handle, CLOSED it, and
+    opened the path again for the run: a directory removed and replaced between
+    those two opens was described by both `fstat` and `stat`, so the inode
+    comparison compared the replacement with itself and passed (Copilot review
+    of openDox-code#26, round 12). One descriptor is opened now, emptiness is
+    asked of IT (`os.listdir` takes a file descriptor), and git is given that
+    same descriptor.
+
+    The swap is made deterministic by performing it the instant the act opens
+    the leaf: the name then leads to an empty directory while the descriptor
+    holds the one that is not.
+    """
+    from opendox.runtime import repository_act
+
+    location = tmp_path / "project-swapped"
+    location.mkdir()                      # empty: the preflight accepts it
+    decoy = tmp_path / "an-empty-directory"
+    decoy.mkdir()
+    moved = tmp_path / "moved-aside"
+
+    real_open = os.open
+    swapped = {"done": False}
+
+    def _swap_on_the_acts_open(path, flags, *args, **kwargs):
+        handle = real_open(path, flags, *args, **kwargs)
+        if not swapped["done"] and path == location.name and kwargs.get("dir_fd"):
+            swapped["done"] = True
+            # The directory the descriptor holds acquires content, and the
+            # NAME is re-pointed at an empty one — which is the whole window:
+            # a check by name would see the decoy and say "empty".
+            (location / "somebody-elses-history").write_text("x",
+                                                             encoding="utf-8")
+            location.rename(moved)
+            decoy.rename(location)
+        return handle
+
+    monkeypatch.setattr(os, "open", _swap_on_the_acts_open)
+    with pytest.raises(repository_act.RepositoryActRefused) as caught:
+        repository_act.initialize_repository(location, project_id="swapped",
+                                             actor=ACTOR)
+    assert swapped["done"], "the race this test drives did not happen"
+    assert "not empty" in str(caught.value), caught.value
+    # Nothing was initialized ANYWHERE: not in the directory the descriptor
+    # held, and not in the one the name was re-pointed at.
+    assert not (moved / "HEAD").exists()
+    assert not (location / "HEAD").exists()

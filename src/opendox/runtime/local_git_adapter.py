@@ -470,14 +470,30 @@ class LocalGitCorpus:
     def resolve(self, ref: CorpusRef) -> ResolvedCorpus:
         """Which checkout, which revision, which scopes, which write path."""
         location = Path(ref.location).expanduser()
-        if not location.exists():
-            raise _refuse(CORPUS_ABSENT, ref.location,
-                          "no such path; a plain local git repository is "
-                          "created by the repository act before it is resolved")
-        if not location.is_dir():
-            raise _refuse(CORPUS_UNCLASSIFIABLE, ref.location,
-                          "the location is a file, not a repository directory")
-        git = GitRunner(location.resolve(), self._executable)
+        # THE FILESYSTEM PROBES ARE TRANSLATED TOO. `exists()`, `is_dir()` and
+        # `resolve()` all raise `PermissionError` for a path whose parent is
+        # present and not searchable, and `resolve()` can raise `OSError` for a
+        # symlink loop — so a location this adapter could not READ left an OS
+        # exception where the protocol promises a refusal, and the API turned
+        # it into a 500 (Copilot review of openDox-code#26, round 12,
+        # suppressed). A missing path and an unreadable one are still different
+        # answers.
+        try:
+            if not location.exists():
+                raise _refuse(CORPUS_ABSENT, ref.location,
+                              "no such path; a plain local git repository is "
+                              "created by the repository act before it is "
+                              "resolved")
+            if not location.is_dir():
+                raise _refuse(CORPUS_UNCLASSIFIABLE, ref.location,
+                              "the location is a file, not a repository "
+                              "directory")
+            resolved_location = location.resolve()
+        except OSError as exc:
+            raise _refuse(CORPUS_UNREADABLE, ref.location,
+                          f"the location could not be read ({exc.__class__.__name__})"
+                          ) from exc
+        git = GitRunner(resolved_location, self._executable)
         try:
             git.out("rev-parse", "--git-dir")
         except GitCommandFailed as failed:
@@ -485,9 +501,17 @@ class LocalGitCorpus:
                           f"the directory is not a git repository ({failed})"
                           ) from failed
 
-        revision = self._head(git, str(location))
+        # A PINNED REVISION DOES NOT NEED HEAD. `CorpusRef.revision` is the
+        # pinned form of this interface, and asking `_head` first meant a
+        # repository with a detached, malformed or unreadable HEAD was refused
+        # before the revision the caller actually named was ever looked up —
+        # a corpus this adapter can serve, refused for a fact about a ref the
+        # request does not use (Copilot review of openDox-code#26, round 12,
+        # suppressed).
         if ref.revision is not None:
             revision = self._resolve_revision(git, ref.revision, str(location))
+        else:
+            revision = self._head(git, str(location))
 
         # THE WRITE PATH IS ANSWERED HERE AND NOT AT THE FIRST WRITE, which is
         # the interface's rule: "a read-only corpus is a fact about the corpus,
@@ -496,8 +520,23 @@ class LocalGitCorpus:
         try:
             git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
                            .decode().strip())
-            reachable = os.access(git_dir, os.W_OK)
-        except GitCommandFailed:
+            # THE PLACES A WRITE ACTUALLY TOUCHES, not the directory that
+            # contains them. `write_back` hashes an object (`objects/`), writes
+            # a temporary index (the git dir itself) and moves a ref
+            # (`refs/`), so a repository whose root is writable and whose
+            # `objects/` is read-only advertised an available write path and
+            # then failed inside the commit — which is exactly the discovery
+            # order this interface's own rule forbids: "a read-only corpus is a
+            # fact about the corpus" (Copilot review of openDox-code#26, round
+            # 12, suppressed). `refs/` may not exist in a repository using only
+            # packed refs, and an absent one is answered by the git dir's own
+            # writability, since that is where it would be created.
+            reachable = all(
+                os.access(path, os.W_OK)
+                for path in (git_dir, git_dir / "objects",
+                             git_dir / "refs" if (git_dir / "refs").is_dir()
+                             else git_dir))
+        except (GitCommandFailed, OSError):
             reachable = False
 
         return ResolvedCorpus(

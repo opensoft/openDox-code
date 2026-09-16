@@ -132,8 +132,22 @@ def _safe_message(exc: BaseException) -> str:
 
     Applied to EVERY operational message this CLI emits, rather than to the
     ones somebody remembered: the contract is that evidence is redacted.
+
+    TWO PASSES, BECAUSE A CREDENTIAL IS NOT ONLY A DSN. `_DSN_SHAPED` covers a
+    connection string and a `scheme://user:secret@host` run; it says nothing
+    about `?token=…`, which is the other half of the rule
+    `local_git_adapter.redact_credentials` holds — and the repository verbs
+    route caller-controlled text (a project id, a remote URL from a legacy row)
+    through this one helper, so a token in that shape reached the evidence
+    object despite the contract above (Copilot review of openDox-code#26,
+    round 12). One boundary, both halves; `local_git_adapter` is stdlib-only,
+    so this costs the CLI no import weight, and it is imported here rather than
+    at module scope so `opendox.runtime.cli`'s own import graph is what
+    `tests_runtime/test_runtime_surface.py` already measures.
     """
-    return _DSN_SHAPED.sub("<redacted>", str(exc))
+    from opendox.runtime.local_git_adapter import redact_credentials
+
+    return redact_credentials(_DSN_SHAPED.sub("<redacted>", str(exc)))
 
 
 def _emit(payload: dict[str, Any], *, ok: bool) -> int:

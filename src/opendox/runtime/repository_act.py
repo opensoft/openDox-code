@@ -134,7 +134,14 @@ MAX_REMOTE_URL_CHARS = 2048
 #: the shape is refused where it would be stored, and the push also carries
 #: `-c protocol.ext.allow=never` so an ambient policy cannot re-enable it for a
 #: row written before this rule.
-_COMMAND_TRANSPORT = re.compile(r"^(?:ext|fd)::", re.IGNORECASE)
+#: EVERY `<name>::<address>` FORM, not only the two built-ins. Git treats any
+#: such URL as a REMOTE HELPER and resolves `git-remote-<name>` from `PATH`, so
+#: `evil::anything` runs an installed `git-remote-evil` and
+#: `protocol.ext.allow=never` says nothing about it (Copilot review of
+#: openDox-code#26, round 12). Naming `ext` and `fd` alone was the narrow
+#: reading of a general mechanism. A single colon — `https://…`, `host:path`,
+#: `C:\repo` — is not this form and is unaffected.
+_COMMAND_TRANSPORT = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*::")
 
 
 #: Query or fragment keys that carry a secret. USERINFO IS NOT THE ONLY PLACE:
@@ -238,6 +245,14 @@ def refuse_command_executing_remote(remote_url: str) -> None:
     descriptor of the caller's choosing. Neither is a destination the map can
     mean, and an owner attaching one would be choosing a command for a server
     to run (Copilot review of openDox-code#26, round 10).
+
+    AND IT IS THE WHOLE FORM, not those two names. `<name>::<address>` makes
+    git resolve `git-remote-<name>` from `PATH`, so an installed helper — one
+    the image ships, one a sibling package left there — is reachable through
+    any spelling, and the `protocol.ext.allow` setting governs `ext` alone
+    (Copilot review of openDox-code#26, round 12). `push_to_remote` asks this
+    question again about the ROW it is about to push, because a row written
+    before this rule is exactly the case the rule cannot reach.
 
     THE AMBIENT POLICY IS NOT THE GUARD. Measured on git 2.43.0: a direct `git
     push` to an `ext::` remote is refused by default, AND is executed the
@@ -448,44 +463,54 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
         # `mkdir` cannot follow a symlink: it fails with `FileExistsError`
         # whether the thing in the way is a link or a directory.
         location.parent.mkdir(parents=True, exist_ok=True)
+        # THE LEAF IS CREATED AND OPENED RELATIVE TO A HELD PARENT DESCRIPTOR,
+        # and the descriptor that is opened is the ONE this function then uses.
+        # The first cut checked emptiness through a no-follow handle, CLOSED
+        # it, and opened the path again for the run: a directory removed and
+        # replaced between those two opens was described by both `fstat` and
+        # `stat`, so the inode comparison compared the replacement with itself
+        # and passed (Copilot review of openDox-code#26, round 12). One handle
+        # from the check to the use is the only shape that has no such window.
+        parent = os.open(location.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            location.mkdir()
-        except FileExistsError:
-            # The legal case the check above already allows: an EMPTY
-            # directory this act may use. It is re-verified through a
-            # NO-FOLLOW open, so a symlink swapped in after that check cannot
-            # be the thing we proceed with.
-            handle = os.open(location, os.O_RDONLY | os.O_DIRECTORY
-                             | getattr(os, "O_NOFOLLOW", 0))
+            leaf = location.name
             try:
-                if os.listdir(location):
-                    raise RepositoryActRefused(
-                        f"{location} is not empty; this act creates a "
-                        "repository at a directory it owns and adopts none")
-            finally:
-                os.close(handle)
+                # EXCLUSIVE, and relative to the parent handle: an exclusive
+                # `mkdir` cannot follow a symlink (it fails with
+                # `FileExistsError` whether the thing in the way is a link or
+                # a directory), and `dir_fd` means the lookup happens in the
+                # directory this call holds rather than by re-walking a path
+                # another process can re-point (Copilot review of
+                # openDox-code#26, round 8 for the exclusive create, round 12
+                # for the handle).
+                os.mkdir(leaf, dir_fd=parent)
+            except FileExistsError:
+                pass
+            owned = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY
+                            | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+        finally:
+            os.close(parent)
     except RepositoryActRefused:
         raise
     except OSError as exc:
         raise RepositoryActRefused(
             f"the directory {location} could not be created ({exc}); the map "
             "row is rolled back with the caller's transaction") from exc
-    # AND THE PLACE GIT IS ABOUT TO WRITE IS THE PLACE WE CREATED. Held open
-    # NO-FOLLOW, and compared with the path git will be given: if the final
-    # component became a symlink in the meantime, the open refuses it
-    # (`ELOOP`), and if the path was swapped for another real directory the
-    # inode comparison catches it. This is the check that makes the guarantee
-    # a property of the filesystem rather than of the order of two calls.
     try:
-        owned = os.open(location, os.O_RDONLY | os.O_DIRECTORY
-                        | getattr(os, "O_NOFOLLOW", 0))
-    except OSError as exc:
-        raise RepositoryActRefused(
-            f"{location} could not be opened as a real directory ({exc}); a "
-            "symbolic link at the repository's own path is refused, and one "
-            "that appears between the check and the create is refused here"
-        ) from exc
-    try:
+        # EMPTINESS IS ASKED OF THE DESCRIPTOR, not of the name. `os.listdir`
+        # takes a file descriptor, so this is a question about the directory
+        # this function is holding open — the legal case
+        # `refuse_unusable_location` allows (an empty directory this act may
+        # use) verified on the object that will be initialized, not on a
+        # pathname that can be re-pointed between the two.
+        if os.listdir(owned):
+            raise RepositoryActRefused(
+                f"{location} is not empty; this act creates a "
+                "repository at a directory it owns and adopts none")
+        # AND THE NAME STILL LEADS HERE. The descriptor decides what is
+        # written; this comparison decides whether the map row's `location`
+        # will find it again, and a path re-pointed underneath the act is
+        # refused rather than recorded.
         created = os.fstat(owned)
         seen = os.stat(location)
         if (created.st_dev, created.st_ino) != (seen.st_dev, seen.st_ino):
@@ -760,6 +785,12 @@ def push_to_remote(store: Any, *, project_id: str,
             f"project {project_id} has no attached remote; attach one first "
             "(RULING C3: a remote can be attached later, and the move is then "
             "a push)")
+    # THE ROW IS ASKED THE SAME QUESTION `attach_remote` ASKS, because this act
+    # deliberately keeps a row written before that rule pushable — and a
+    # `<name>::<address>` row would then hand `git push` a remote HELPER to
+    # run. `-c protocol.ext.allow=never` below covers `ext` and says nothing
+    # about `git-remote-evil` (Copilot review of openDox-code#26, round 12).
+    refuse_command_executing_remote(row.remote_url)
     git = GitRunner(Path(row.location), executable)
 
     # THE MAP IS THE DESTINATION OF RECORD, AND GIT IS ASKED WHETHER IT AGREES.
