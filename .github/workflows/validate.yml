@@ -412,7 +412,7 @@ jobs:
           # below on the estate's own precedent:
           # `xFactory-Hermes-Install/.github/workflows/ci.yml` marks its
           # identical Postgres password the same way.
-          POSTGRES_PASSWORD: opendox # NOSONAR
+          POSTGRES_PASSWORD: opendox # NOSONAR # NOSONAR
           POSTGRES_DB: opendox
         ports:
           - 5432:5432

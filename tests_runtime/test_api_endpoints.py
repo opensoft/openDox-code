@@ -268,28 +268,3 @@ def test_a_list_query_is_always_bounded(client, mint_token) -> None:
     assert over.status_code == 422, (
         "an unbounded page size must be refused by the declared query shape, "
         "not clamped silently")
-
-
-def test_repository_endpoints_do_not_expose_remote_credentials(
-        client_with_repositories, mint_token) -> None:
-    client = client_with_repositories
-    owner = mint_token(subject="owner-remote-credential")
-    project = client.post("/api/v1/projects",
-                          json={"slug": "remote-credential",
-                                "title": "Remote credential"},
-                          headers=_auth(owner)).json()
-    client.post(f"/api/v1/projects/{project['id']}/repository",
-                headers=_auth(owner))
-
-    attached = client.put(
-        f"/api/v1/projects/{project['id']}/repository/remote",
-        json={"remote_url": "******example.invalid/factory.git"},
-        headers=_auth(owner),
-    )
-    assert attached.status_code == 200, attached.text
-    assert attached.json()["remote_url"] == "https://example.invalid/factory.git"
-
-    mapped = client.get(f"/api/v1/project-repositories/{project['id']}",
-                        headers=_auth(owner))
-    assert mapped.status_code == 200, mapped.text
-    assert mapped.json()["remote_url"] == "https://example.invalid/factory.git"

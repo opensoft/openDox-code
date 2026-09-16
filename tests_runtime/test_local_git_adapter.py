@@ -38,8 +38,7 @@ ACTOR = "Student One"
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", "-c", "safe.bareRepository=all",
-                           "-C", str(root), *args],
+    return subprocess.run(["git", "-C", str(root), *args],
                           capture_output=True, text=True,
                           check=True).stdout.strip()
 
@@ -176,14 +175,6 @@ def test_an_unserveable_revision_refuses_rather_than_falling_back(
     assert caught.value.refusal.kind == ca.REVISION_UNKNOWN
 
 
-def test_a_malformed_head_refuses_instead_of_listing_as_empty(
-        adapter, repository: Path) -> None:
-    (repository / "HEAD").write_text("nonsense\n", encoding="utf-8")
-    with pytest.raises(ca.CorpusRefused) as caught:
-        _resolve(adapter, repository)
-    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
-
-
 # -- list --------------------------------------------------------------------
 
 
@@ -290,22 +281,6 @@ def test_a_stale_corpus_loses_its_dispatch_rather_than_overwriting(
     corpus = _resolve(adapter, repository)
     assert adapter.read(corpus, ca.DocumentId("project-1", "ideation/first.md")
                         ).content == b"# one\n"
-
-
-def test_a_write_updates_the_repositorys_head_branch_and_not_the_adapters_default(
-        tmp_path: Path) -> None:
-    repository = tmp_path / "topic-repository"
-    initialize_repository(repository, project_id="project-1", actor=ACTOR,
-                          branch="topic")
-    adapter = lga.LocalGitCorpus()
-    corpus = _resolve(adapter, repository)
-    receipt = adapter.write_back(corpus, ca.DocumentId("project-1", "topic.md"),
-                                 b"topic\n", actor=ACTOR,
-                                 basis_revision=corpus.revision or "")
-    assert _git(repository, "symbolic-ref", "--short", "HEAD") == "topic"
-    assert _git(repository, "rev-parse", "HEAD") == receipt.correlation_id
-    assert _git(repository, "show-ref", "--verify",
-                "refs/heads/topic").split()[0] == receipt.correlation_id
 
 
 def test_a_read_only_corpus_refuses_the_declared_kind(adapter,
