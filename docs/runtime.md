@@ -111,9 +111,19 @@ is a fact to resolve, not a difference to skip past.
 ```sh
 cp deploy/compose/.env.example deploy/compose/.env    # fill it in; it is gitignored
 docker compose --env-file deploy/compose/.env -f deploy/compose/docker-compose.yaml \
-  --profile migration run --rm migrate
+  --profile migration run --rm --build migrate
 docker compose --env-file deploy/compose/.env -f deploy/compose/docker-compose.yaml up -d
 ```
+
+`--build` on the FIRST command only, and it is not decoration: `docker compose
+run` does not build by policy — it is the one subcommand of the three here that
+carries no `--no-build` flag, because there is nothing to suppress — while `up`
+and `create` do build a missing image. The default `OPENDOX_IMAGE` is the local
+tag `opendox-runtime:local`, which no registry has, so on a clean checkout the
+documented first command otherwise fails trying to pull an image that has never
+been built (Copilot review of openDox-code#25, round 11). `up -d` needs no flag
+for the same reason in reverse: by then the image exists, and it would build one
+if it did not.
 
 No service publishes a host port: TLS and ingress terminate at the platform.
 Reach it over the compose network or with `docker compose exec`.

@@ -458,6 +458,20 @@ jobs:
       #              FIXES ARE IN THE DB-BACKED JOB (three write races, an
       #              existence oracle, the key-set source Protocol): 211
       #              passed there at the same commit.
+      #  122 passed  at `build/3-5-runtime` `4bf054ec` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round ELEVEN: the canonical migration
+      #              re-checked against the exact bytes about to run, the role
+      #              bootstrap keeping its password out of `psql`'s argv, the
+      #              documented `compose run` carrying `--build` (it does not
+      #              build by policy), and the migration Job's retry budget
+      #              covering a database that is still recovering when the TCP
+      #              wait returns. THE CURRENT FIGURE; the PR description
+      #              states it at this same commit. Round eleven's other fix —
+      #              the streamed body cap answering 413 rather than FastAPI's
+      #              400 — is in the DB-backed job: 216 passed there at this
+      #              commit.
+      #
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this

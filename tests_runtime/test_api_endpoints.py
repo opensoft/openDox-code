@@ -1177,3 +1177,45 @@ def test_a_repository_refusal_reaching_the_api_is_redacted(
     assert refused.json()["detail"]["code"] == "repository.refused"
     assert "hunter2" not in refused.text, refused.text
     assert "<redacted" in refused.text, refused.text
+
+def test_a_chunked_body_over_the_cap_is_refused_as_it_arrives(
+        client, database, mint_token) -> None:
+    """The cap's OTHER half: a request that declares no `Content-Length`.
+
+    The existing oversized case sends `json=…`, so it only ever exercises the
+    declared-length fast path — the middleware's `counting_receive` branch, the
+    one protection a streamed body has, had no test at all, and a regression
+    there would leave the cap test green while parsing continued unbounded
+    (Copilot review of openDox-code#25, round 11, suppressed). This request is
+    chunked: httpx sends `Transfer-Encoding: chunked` for a generator body, so
+    the ASGI app sees several `http.request` messages and no declared length.
+    """
+    from opendox.runtime.app import MAX_REQUEST_BODY_BYTES
+
+    token = mint_token(subject="chunked-cap")
+    project = _project_with(client, token, "chunked-cap")
+    session = client.post("/api/v1/sessions", json={"project_id": project["id"]},
+                          headers=_auth(token)).json()
+
+    chunk = b"x" * 262_144
+    chunks = MAX_REQUEST_BODY_BYTES // len(chunk) + 2      # over the cap
+
+    def _stream():
+        head = ('{"session_id": "' + session["id"] + '", "project_id": "'
+                + project["id"] + '", "document_key": "streamed.md", '
+                '"body": "').encode()
+        yield head
+        for _ in range(chunks):
+            yield chunk
+        yield b'"}'
+
+    refused = client.put("/api/v1/drafts", content=_stream(),
+                         headers={**_auth(token),
+                                  "Content-Type": "application/json"})
+    assert refused.status_code == 413, refused.text
+    assert refused.json()["detail"]["code"] == "request.too_large"
+    # AND NOTHING WAS WRITTEN: the refusal is the point, not the status line.
+    with database.connection() as conn:
+        rows = conn.execute("select count(*) from drafts where session_id = %s",
+                            (session["id"],)).fetchone()
+    assert rows[0] == 0

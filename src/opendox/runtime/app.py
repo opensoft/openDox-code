@@ -137,8 +137,23 @@ _TOO_LARGE: dict[str, Any] = {
 }
 
 
-class _BodyTooLarge(Exception):
-    """Raised inside the wrapped `receive`; never escapes this module."""
+class _BodyTooLarge(BaseException):
+    """Raised inside the wrapped `receive`; never escapes this module.
+
+    A `BaseException` AND NOT AN `Exception`, which is the difference between
+    this cap working for a chunked request and only appearing to. FastAPI's
+    body parser wraps its read in `except Exception` and turns anything it
+    catches into `400 {"detail": "There was an error parsing the body"}` — so
+    the streamed half of this cap stopped the read at the limit (the memory
+    bound held) and then answered with a generic 400 instead of the documented
+    `413 request.too_large`, and nothing measured it because the only cap test
+    sent a declared `Content-Length` (Copilot review of openDox-code#25, round
+    11, suppressed — it asked for the test, and the test found this). A
+    `BaseException` passes that handler and reaches the middleware, which is
+    the only frame that can answer for a request whose body it refused.
+
+    It never escapes this module: `BodySizeLimit.__call__` catches it.
+    """
 
 
 class BodySizeLimit:

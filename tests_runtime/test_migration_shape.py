@@ -358,3 +358,41 @@ def test_a_double_with_only_execute_cannot_drive_the_runner() -> None:
                for member in ("transaction", "commit", "rollback")), (
         f"expected the missing member to be one the docstring now names: "
         f"{raised.value}")
+
+
+def test_a_canonical_migration_swapped_after_the_gate_never_runs(
+        tmp_path) -> None:
+    """The byte pin has to cover the bytes that EXECUTE, not a earlier read.
+
+    `apply()` verified `0001`'s digest, then `discover()` found the file again
+    and `read_sql()` read it a third time to execute it. A migrations directory
+    that can change under the process — a mounted volume, a deploy that
+    rewrites it — could therefore pass the pin and run something else, and the
+    ledger would record the digest of the bytes that did NOT run (Copilot
+    review of openDox-code#25, round 11). One read per migration now, and the
+    canonical digest is re-checked against exactly those bytes.
+
+    The swap is made deterministic by performing it while the runner is
+    bootstrapping the ledger — after the gate, before the loop.
+    """
+    directory = tmp_path / "migrations"
+    directory.mkdir()
+    canonical = MIGRATIONS / f"{migrations.CANONICAL_MIGRATION_VERSION}_identity_and_coordination.sql"
+    target = directory / canonical.name
+    target.write_bytes(canonical.read_bytes())
+
+    db = _DocumentedDatabase()
+    real_execute = db.conn.execute
+    replacement = b"create table replaced_by_somebody_else ();\n"
+
+    def _swap_on_the_ledger_ddl(sql: str, params: tuple | None = None):
+        if "create table if not exists" in sql.lower():
+            target.write_bytes(replacement)
+        return real_execute(sql, params)
+
+    db.conn.execute = _swap_on_the_ledger_ddl              # type: ignore[method-assign]
+    runner = migrations.MigrationRunner(db, migrations_dir=directory)
+    with pytest.raises(migrations.CanonicalDigestMismatchError):
+        runner.apply()
+    assert not any(replacement.decode() in line for line in db.log), (
+        "the replacement bytes were executed after the gate had passed")

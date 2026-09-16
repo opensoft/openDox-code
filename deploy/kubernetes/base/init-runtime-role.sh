@@ -34,11 +34,19 @@ fi
 
 runtime_user="${OPENDOX_RUNTIME_PG_USER:-opendox_runtime}"
 
+# THE PASSWORD IS NEVER AN ARGUMENT. `-v runtime_password=…` puts it in
+# `psql`'s argv, where `ps`, `/proc/<pid>/cmdline` and any host tooling that
+# reads process tables can see it — for the whole life of the command, on a
+# host the operator may not be alone on (Copilot review of openDox-code#25,
+# round 11). `\getenv` reads it from psql's OWN ENVIRONMENT instead, which this
+# script already has it in; the role NAME stays an argument because a name is
+# not a secret. Measured against psql 16 before it was written here: the
+# variable is set, `%L` quotes it, and the role is created with that password.
 psql -v ON_ERROR_STOP=1 \
      --username "$POSTGRES_USER" \
      --dbname "$POSTGRES_DB" \
-     -v runtime_user="$runtime_user" \
-     -v runtime_password="$OPENDOX_RUNTIME_PG_PASSWORD" <<'SQL'
+     -v runtime_user="$runtime_user" <<'SQL'
+\getenv runtime_password OPENDOX_RUNTIME_PG_PASSWORD
 select format('create role %I login password %L', :'runtime_user',
               :'runtime_password')
 \gexec
