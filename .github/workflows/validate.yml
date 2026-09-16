@@ -504,6 +504,23 @@ jobs:
       #              — the same six modules, after round nine: a NUL
       #              in a document key, and a corpus failure told
       #              from a missing document.
+      #  189 passed  at `build/3-6-repository-act` `dff382dd` (same day,
+      #              same python, pytest and git; extras unimportable) —
+      #              the same six modules, carrying #25's round 10 by
+      #              merge (seven of the rise) and adding this branch's
+      #              own eight: a listing filtered to blobs so it agrees
+      #              with `read`, a NUL-carrying revision refused by
+      #              name, the runner's own failure translated at five
+      #              call sites, the initialization bound to the
+      #              directory handle it verified, a space inside a URL
+      #              no longer hiding a credential parameter, a control
+      #              character refused, an over-long URL refused unread,
+      #              and the bracketed-IPv6 pin. THE CURRENT FIGURE for
+      #              this branch; the PR description states it at this
+      #              same commit. Round ten's other cases — the command
+      #              transport, the two-URL repair, the `--unset-all`
+      #              status and both redaction paths — are in the
+      #              DB-backed job: 330 passed there at this commit.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
