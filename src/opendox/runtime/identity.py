@@ -461,10 +461,23 @@ class CoordinationStore:
         return ProjectRepository(
             *_one(row, _PROJECT_REPOSITORY, f"project_id={project_id!r}"))
 
-    def repository_for_project(self, project_id: str) -> ProjectRepository:
+    def repository_for_project(self, project_id: str, *,
+                               for_update: bool = False) -> ProjectRepository:
+        """The map row — optionally LOCKED for the rest of this transaction.
+
+        `for_update` exists for the acts that read the destination and then USE
+        it. `push_to_remote` compared the row with git's configured remote and
+        then pushed, and nothing stopped a concurrent `attach_remote` from
+        moving both in between: the corpus went to the newly attached
+        destination while the response named the stale one, which is exactly
+        the guarantee that comparison exists to make (Copilot review of
+        openDox-code#26, round 6). `select … for update` is the whole fix,
+        because both acts already run inside the caller's transaction.
+        """
         row = self._conn.execute(
             f"select {_REPOSITORY_COLUMNS} from project_repositories "
-            "where project_id = %s", (project_id,)
+            "where project_id = %s" + (" for update" if for_update else ""),
+            (project_id,)
         ).fetchone()
         return ProjectRepository(
             *_one(row, _PROJECT_REPOSITORY, f"project_id={project_id!r}"))

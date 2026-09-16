@@ -403,7 +403,8 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
     return commit
 
 
-def _local_git_row(store: Any, project_id: str) -> Any:
+def _local_git_row(store: Any, project_id: str, *,
+                   for_update: bool = False) -> Any:
     """The map row, REFUSED unless this adapter is the one that owns it.
 
     The map carries an `adapter` column precisely so a project can be served by
@@ -413,7 +414,11 @@ def _local_git_row(store: Any, project_id: str) -> Any:
     review of openDox-code#26). A row this adapter does not own is somebody
     else's to act on.
     """
-    row = store.repository_for_project(project_id)
+    # `for_update` LOCKS the row for the rest of the caller's transaction —
+    # see the store's own note; the acts that read a destination and then use
+    # it take it, so a concurrent `attach_remote` cannot move the destination
+    # between the check and the push.
+    row = store.repository_for_project(project_id, for_update=for_update)
     if row.adapter != ADAPTER_NAME:
         raise RepositoryActRefused(
             f"project {project_id} is mapped to the {row.adapter!r} adapter, "
@@ -439,7 +444,7 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
     push cannot find.
     """
     refuse_credential_bearing_remote(remote_url)
-    row = _local_git_row(store, project_id)
+    row = _local_git_row(store, project_id, for_update=True)
     remote_name = REMOTE_NAME
     # THE DURABLE FACT IS WRITTEN FIRST, INSIDE THE CALLER'S TRANSACTION, and
     # git is configured after it. The order was the other way round, which left
@@ -458,6 +463,14 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
             git.out("remote", "set-url", remote_name, remote_url)
         else:
             git.out("remote", "add", remote_name, remote_url)
+        # AND EVERY `pushurl` IS CLEARED, because `set-url` writes the FETCH
+        # url alone. A repository carrying a legacy or hand-added
+        # `remote.origin.pushurl` — the very state `push_to_remote` refuses —
+        # kept it through this act, so the destination of record could not be
+        # repaired by re-attaching, which is the one repair this act offers
+        # (Copilot review of openDox-code#26, round 6). `--unset-all` exits
+        # non-zero when there is nothing to unset, which is not a failure.
+        git.run("config", "--unset-all", f"remote.{remote_name}.pushurl")
     except GitCommandFailed as failed:
         raise RepositoryActRefused(
             f"the remote {remote_name!r} could not be attached to "
@@ -535,7 +548,13 @@ def push_to_remote(store: Any, *, project_id: str,
     previous act attached, and the local repository keeps serving reads through
     the same adapter afterwards.
     """
-    row = _local_git_row(store, project_id)
+    # LOCKED, and held for the whole check-and-push. These comparisons and the
+    # push that follows them are one act: without the lock a concurrent
+    # `attach_remote` could move the map and `origin` in between, so the corpus
+    # went to the newly attached destination while this call returned the stale
+    # URL — defeating the destination-of-record guarantee the comparison exists
+    # to make (Copilot review of openDox-code#26, round 6).
+    row = _local_git_row(store, project_id, for_update=True)
     if not row.remote_url:
         raise RepositoryActRefused(
             f"project {project_id} has no attached remote; attach one first "
@@ -555,13 +574,26 @@ def push_to_remote(store: Any, *, project_id: str,
     # `remote.origin.pushurl` wins when it is set, and a stale or hand-added
     # one passed a fetch-URL comparison while sending the corpus elsewhere
     # (Copilot review of openDox-code#26, round 5).
-    configured = _configured_remote_url(git, REMOTE_NAME)
+    # THE INSPECTION IS INSIDE A HANDLER, like every other git call in this
+    # module. `_configured_remote_url` and `_pushable_branch` ran outside one,
+    # so a git that disappeared or became unusable after the map lookup let
+    # `GitCommandFailed` escape — and the API translates only
+    # `RepositoryActRefused`, so `/push` answered 500 instead of the named
+    # refusal this act promises for a missing git runtime (Copilot review of
+    # openDox-code#26, round 6).
+    try:
+        configured = _configured_remote_url(git, REMOTE_NAME)
+        effective = _configured_remote_url(git, REMOTE_NAME, for_push=True)
+        branch = _pushable_branch(git, str(row.location))
+    except GitCommandFailed as failed:
+        raise RepositoryActRefused(
+            f"the repository at {row.location} could not be inspected before "
+            f"the push ({failed}); nothing is pushed") from failed
     if configured is None:
         raise RepositoryActRefused(
             f"the map records a remote for project {project_id} but the "
             f"repository at {row.location} has no {REMOTE_NAME!r}; re-attach "
             "the remote so the two agree before pushing")
-    effective = _configured_remote_url(git, REMOTE_NAME, for_push=True)
     for what, found in (("fetches from", configured),
                         ("would push to", effective)):
         if found != row.remote_url:
@@ -573,15 +605,15 @@ def push_to_remote(store: Any, *, project_id: str,
                 "destination of record and the destination git would use are "
                 "not the same place. Re-attach the remote to settle it.")
 
-    # THE BRANCH IS THE REPOSITORY'S OWN AND IS NOT A PARAMETER. It was a
-    # caller-supplied override defaulting to HEAD's branch, and nothing exposed
-    # it — but `push_to_remote(..., branch="other")` would have pushed
+    # THE BRANCH IS THE REPOSITORY'S OWN AND IS NOT A PARAMETER (resolved in
+    # the handler above). It was a caller-supplied override defaulting to
+    # HEAD's branch, and nothing exposed it — but
+    # `push_to_remote(..., branch="other")` would have pushed
     # `refs/heads/other` while HEAD, `LocalGitCorpus` and every read served
     # `main`, then reported success for a history the project is not (Copilot
     # review of openDox-code#26, round 5). It is the same reason `remote_name`
     # is a constant: a push destination the map cannot record is not a push
     # this act can make.
-    branch = _pushable_branch(git, str(row.location))
     try:
         # THE ONE OPERATION THAT TOUCHES A NETWORK, and the only one with a
         # wall-clock bound: a stalled remote used to hold the request, the

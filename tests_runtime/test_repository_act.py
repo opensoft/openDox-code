@@ -970,3 +970,68 @@ def test_a_second_push_url_is_refused_even_when_the_first_one_matches(
         assert subprocess.run(["git", "--git-dir", str(bare), "rev-parse",
                                "--verify", "--quiet", "refs/heads/main"],
                               capture_output=True).returncode != 0, bare
+
+
+def test_attaching_clears_a_stale_push_url_so_the_repair_repairs(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`git remote set-url` writes the FETCH url alone.
+
+    A repository carrying a legacy or hand-added `remote.origin.pushurl` — the
+    very state `push_to_remote` refuses — kept it through `attach_remote`, so
+    re-attaching could not repair the destination of record, which is the one
+    repair this act offers (Copilot review of openDox-code#26, round 6).
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "of-record.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(destination)],
+                   check=True)
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+    _git(created.location, "remote", "set-url", "--push", act.REMOTE_NAME,
+         str(tmp_path / "somewhere-else.git"))
+    with pytest.raises(act.RepositoryActRefused):
+        act.push_to_remote(store, project_id=project.id)
+
+    # The repair this act offers, re-run — and it now repairs.
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+    assert act.push_to_remote(store, project_id=project.id) == str(destination)
+    assert _git(destination, "rev-parse", "refs/heads/main") == (
+        created.initial_commit)
+
+
+def test_the_push_locks_the_map_row_it_checked(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """The check and the push are ONE act, or the destination can move.
+
+    `push_to_remote` compared the map with git's configured remote and then
+    pushed; a concurrent `attach_remote` between the two sent the corpus to the
+    newly attached destination while the response named the stale one (Copilot
+    review of openDox-code#26, round 6). Both acts take `select … for update`
+    on the map row, inside the caller's transaction.
+    """
+    import inspect
+
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    source = inspect.getsource(act.push_to_remote)
+    assert "for_update=True" in source, (
+        "the push reads the map row without locking it")
+    assert "for_update=True" in inspect.getsource(act.attach_remote), (
+        "the attach does not take the lock the push waits on")
+
+    # And the store really emits the lock, rather than accepting the argument.
+    statements: list[str] = []
+    real_execute = type(store._conn).execute
+
+    def _record(self, statement, *args, **kwargs):
+        statements.append(str(statement))
+        return real_execute(self, statement, *args, **kwargs)
+
+    try:
+        type(store._conn).execute = _record
+        store.repository_for_project(project.id, for_update=True)
+    finally:
+        type(store._conn).execute = real_execute
+    assert any("for update" in s for s in statements), statements
