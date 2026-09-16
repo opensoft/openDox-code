@@ -353,8 +353,18 @@ jobs:
       # own. Each of the five does; `tests_runtime/conftest.py` is read only by
       # the `runtime` job.
       #
-      # MEASURED, file by file, under this exact invocation before it was
-      # named (2026-09-16, python 3.12.3 / pytest 8.4.2): 68 passed.
+      # MEASURED, file by file, under this exact invocation before each was
+      # named. THE FIGURE MOVES WITH THE TREE, so it is stated with the head
+      # that produced it — the same rule the § 3.4 slice S8 block above states
+      # for the same reason ("a figure that moves with the base is stated with
+      # the base that produced it"), and Copilot's review of openDox-code#26
+      # was right that a bare number here and a different one in a PR
+      # description cannot both be the evidence.
+      #
+      #   87 passed  at `build/3-5-runtime` `8648c119` (2026-09-16,
+      #              python 3.12.3 / pytest 8.4.2) — the five modules § 3.5
+      #              names; `tests_runtime/test_local_git_adapter.py` is not in
+      #              that branch's list because the file arrives with § 3.6.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
