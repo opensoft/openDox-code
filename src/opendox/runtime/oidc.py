@@ -262,8 +262,11 @@ class TokenVerifier:
         # can be known until it is read. NOTHING from this header is trusted —
         # `alg` is checked against the allow-list below, and the signature is
         # verified against the broker's own key in `_decode`, which runs with
-        # `verify_signature: True` and a required-claim list. `# NOSONAR` for
-        # `python:S5659` on that measurement.
+        # `verify_signature: True` and a required-claim list. The marker on the
+        # call below suppresses `python:S5659` on that measurement — and it is
+        # written only THERE, because a prose comment that spells the marker is
+        # itself read as a malformed suppression (`python:S7632`, which is what
+        # this act's first pass earned).
         try:
             header = jwt.get_unverified_header(token)  # NOSONAR
         except jwt.PyJWTError as exc:
