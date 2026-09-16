@@ -421,6 +421,8 @@ def cmd_reset(args: argparse.Namespace) -> int:
         return _emit({"verb": "reset", "refusal": "configuration",
                       "message": str(exc)}, ok=False)
     try:
+        from psycopg import sql
+
         from opendox.runtime.db import Database
     except ImportError as exc:  # pragma: no cover - the extra is absent
         return _emit({"verb": "reset", "refusal": "runtime-extra-missing",
@@ -445,9 +447,31 @@ def cmd_reset(args: argparse.Namespace) -> int:
                              (migrations.MIGRATION_LOCK_KEY,))
                 lock.commit()
                 try:
+                    # QUALIFIED WITH `current_schema()`, for the reason
+                    # `MigrationRunner.applied` is: a connection's
+                    # `search_path` is `<schema>,public`, so an UNQUALIFIED
+                    # `drop table if exists users` in a schema that has no
+                    # `users` resolves through the fallback and drops
+                    # `public.users` — a verb whose whole promise is "this
+                    # schema's coordination state and nothing else" quietly
+                    # dropping another tenant's table (Copilot review of
+                    # openDox-code#25). The identifiers go through
+                    # `psycopg.sql`, which is the only safe way to put a name
+                    # into DDL, and the schema is reported in the evidence so
+                    # an operator can see WHERE the drop landed.
+                    schema_row = lock.execute(
+                        "select current_schema()").fetchone()
+                    schema = schema_row[0] if schema_row else None
+                    if not schema:
+                        raise migrations.MigrationError(
+                            "this connection has no current schema; `reset` "
+                            "will not drop through a search-path fallback")
                     with lock.transaction():
                         for table in DROP_ORDER:
-                            lock.execute(f"drop table if exists {table}")
+                            lock.execute(
+                                sql.SQL("drop table if exists {}.{}").format(
+                                    sql.Identifier(schema),
+                                    sql.Identifier(table)))
                     lock.commit()
                 finally:
                     lock.rollback()
@@ -457,9 +481,11 @@ def cmd_reset(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         return _emit({"verb": "reset", "refusal": type(exc).__name__,
                       "message": _safe_message(exc)}, ok=False)
-    return _emit({"verb": "reset", "dropped": list(DROP_ORDER),
-                  "note": "coordination state only; every document is in a "
-                          "repository (RULING Q1)"}, ok=True)
+    return _emit({"verb": "reset", "schema": schema,
+                  "dropped": list(DROP_ORDER),
+                  "note": "coordination state only, in this schema alone; "
+                          "every document is in a repository (RULING Q1)"},
+                 ok=True)
 
 
 # -- parser -----------------------------------------------------------------
