@@ -403,6 +403,10 @@ jobs:
       #              mount following their settings, the Kubernetes root held
       #              equal to its mountPath, the readiness probe's timeout, and
       #              a discovery regex that is the filename contract.
+      #  108 passed  at `build/3-5-runtime` `b7e05744` (same day, same python
+      #              and pytest) — the same five modules, after round SEVEN:
+      #              duplicate migration versions refused at discovery, and the
+      #              Kubernetes bootstrap creating the role the Job narrows.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
