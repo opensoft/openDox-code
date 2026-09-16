@@ -173,7 +173,7 @@ header.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 16
 .repofilter { position: relative; display: inline-block; }
 /* an explicit display on these panels would defeat the `hidden` attribute's
    UA rule — restate it, or the popover/panel can never close */
-.filterpop[hidden], .projectform.projectpanel[hidden] { display: none; }
+.filterpop[hidden] { display: none; }
 .filterpop {
   position: absolute; top: calc(100% + 4px); left: 0; z-index: 40;
   display: flex; flex-direction: column; gap: 2px; min-width: 240px;
@@ -232,25 +232,6 @@ button.filtereye { border: 0; background: none; cursor: pointer; padding: 2px 0;
 button.filtereye:hover:not(:disabled) { background: rgba(127,127,127,0.12); border-radius: 3px; }
 button.filtereye:disabled { opacity: 0.4; cursor: default; }
 .repopicker { position: relative; }
-/* The create form is a LABELED PANEL anchored under the header controls,
-   the same visual family as the filter popover. */
-.projectform.projectpanel {
-  position: absolute; top: calc(100% + 4px); left: 0; z-index: 40;
-  display: flex; flex-direction: column; gap: 6px; min-width: 260px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: 4px; padding: 10px; box-shadow: 0 4px 14px rgba(0,0,0,0.12);
-}
-.panelhead { font-family: var(--mono); font-size: 13px; font-weight: 700; }
-.panelnote { font-size: 11px; color: var(--muted); max-width: 300px; }
-.panelfield { display: flex; flex-direction: column; gap: 2px; }
-.panellabel { font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }
-.panelmembers {
-  display: flex; flex-direction: column; gap: 2px;
-  max-height: 220px; overflow-y: auto;
-}
-.panelbuttons { display: flex; gap: 6px; }
-.projectform .projectmember { font-size: 12px; display: inline-flex; align-items: center; gap: 3px; }
-.projectname { font-family: var(--mono); font-size: 12px; padding: 2px 6px; }
 .filteraddselect { border-bottom: 1px solid var(--border); padding-bottom: 5px; }
 .asof { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
@@ -790,12 +771,6 @@ svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacit
    reveal the CLI action descriptor (the command a human runs); nothing
    executes server-side. */
 .viewer-gate { margin: 8px 0; }
-.gatebar { border: 1px solid var(--st-proposed); border-radius: 6px; padding: 8px 10px; background: var(--faint); }
-.gatebar-title { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--st-proposed); margin-bottom: 6px; }
-.gatebar-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.gatebtn { font-family: var(--sans); font-size: 11.5px; padding: 4px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--ink); cursor: pointer; }
-.gatebtn:hover { border-color: var(--st-proposed); }
-.gatebar-cmd { font-family: var(--mono); font-size: 11px; color: var(--ink); background: var(--panel); border: 1px dashed var(--border); border-radius: 5px; padding: 7px 9px; margin-top: 7px; user-select: all; word-break: break-all; }
 
 /* ============================================================================
    v3 frontend sweep — search/filter controls, staleness stamp, singleton
@@ -1157,20 +1132,10 @@ svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacit
 }
 
 /* ==== local action center: dispose tray + refusal panel (intent-plane §3) */
-.disposetray { display: inline-flex; gap: 4px; margin-left: 6px; }
-.disposetray.is-busy { opacity: 0.5; pointer-events: none; }
 .disposebtn {
   border: 1px solid var(--border); background: var(--panel); color: var(--ink);
   border-radius: 999px; padding: 0 8px; font-size: 10px; cursor: pointer;
 }
-.dispose-accepted { border-color: var(--good); color: var(--good); }
-.dispose-accepted:hover { background: var(--good); color: var(--panel); }
-.dispose-rejected { border-color: var(--blocked); color: var(--blocked); }
-.dispose-rejected:hover { background: var(--blocked); color: var(--panel); }
-.dispose-deferred:hover { border-color: var(--st-proposed); color: var(--st-proposed); }
-.dispose-propose { border-color: var(--st-proposed); color: var(--st-proposed); }
-.dispose-propose:hover:not(:disabled) { background: var(--st-proposed); color: var(--panel); }
-.dispose-propose:disabled { opacity: 0.55; cursor: default; }
 /* the IN-TILE mount (mountProposeButton `compact`): smaller chrome so the verb
    fits the expanded tile's action row, which the tile's own transform magnifies */
 .dispose-intile {
@@ -1271,30 +1236,6 @@ svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacit
 .wheeltile.wheelintent[data-intent="stalled"] { border-color: var(--blocked); }
 .wheeltile.wheelintent[data-intent="refused"]::after,
 .wheeltile.wheelintent[data-intent="stalled"]::after { color: var(--blocked); }
-.refusalpanel {
-  position: fixed; right: 14px; bottom: 14px; z-index: 30; width: 340px;
-  max-height: 40vh; overflow-y: auto; background: var(--panel);
-  border: 1px solid var(--border); border-radius: 10px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2); font-size: 11px;
-}
-.refusalpanel-head {
-  display: flex; align-items: center; padding: 6px 10px;
-  border-bottom: 1px solid var(--faint);
-}
-.refusalpanel-title { font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; flex: 1; }
-.refusalpanel-clear { border: none; background: none; color: var(--faint-ink); cursor: pointer; font-size: 10px; }
-.refusalpanel-list { list-style: none; margin: 0; padding: 4px 10px 8px; }
-.refusalpanel-item { display: flex; gap: 6px; padding: 3px 0; align-items: baseline; }
-.refusalpanel-kind { flex: none; font-family: var(--mono); font-size: 9px; border-radius: 999px; padding: 0 6px; }
-.is-refused .refusalpanel-kind { background: var(--blocked-bg); color: var(--blocked); }
-.is-ok .refusalpanel-kind { background: var(--good-bg); color: var(--good); }
-/* the HOSTED plane's other outcomes (task 4.4): submitted-not-yet-decided,
-   recorded-but-not-dispatched, and never-sent-at-all. Distinct from a refusal
-   on purpose - only one of the three is a verdict on the decision. */
-.is-queued .refusalpanel-kind { background: var(--faint); color: var(--st-proposed); }
-.is-stalled .refusalpanel-kind { background: var(--faint); color: var(--blocked); }
-.is-error .refusalpanel-kind { background: var(--faint); color: var(--faint-ink); }
-.refusalpanel-msg { color: var(--ink); }
 
 /* ---- intent-feed chips (add-ideation-intent-plane task 4.4, ruling D-1) ----
    The hosted overlay's per-target lifecycle indicators, rendered beside the
@@ -1303,7 +1244,6 @@ svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacit
    never restyle a tile's own snapshot-derived state, which is what keeps the
    two planes separate on screen. Every colour is a shared token, so the chips
    theme in light, dark and auto without a second rule set. */
-.intentchips { display: inline-flex; gap: 4px; margin-left: 6px; align-items: center; }
 .intentchip {
   font-family: var(--mono); font-size: 9px; line-height: 1.6;
   border-radius: 999px; padding: 0 6px; border: 1px solid transparent;
@@ -1314,7 +1254,6 @@ svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacit
 .intentchip-refused { background: var(--blocked-bg); color: var(--blocked); }
 .intentchip-stalled { color: var(--blocked); border-color: var(--blocked); }
 .intentchip-error { color: var(--faint-ink); border-color: var(--border); }
-.gatebtn-live { border-color: var(--good); }
 
 /* ---- settings panel (header gear, views/settings.js) -----------------------
    The gear reuses .themebtn's chrome (same header button family) with an
@@ -1541,37 +1480,14 @@ svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacit
 .swb-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 /* create affordance (task 5.4–5.7): a live button with the gate capability, a
    copyable CLI descriptor without it — never a greyed-out control. */
-.swb-cwrap { display: flex; flex-direction: column; gap: 6px; }
 .swb-cbtn { white-space: nowrap; }
 .swb-cslot:empty { display: none; }
-.swb-cform {
-  display: flex; flex-direction: column; gap: 6px; margin-top: 6px;
-  border: 1px solid var(--st-organized); border-radius: 6px; padding: 10px 12px;
-  background: var(--panel);
-}
-.swb-ch { font-family: var(--mono); font-size: 11.5px; font-weight: 700; }
-.swb-cline { font-size: 11px; font-family: var(--mono); word-break: break-all; }
-.swb-cnote { font-size: 10.5px; color: var(--faint-ink); }
-.swb-csource { font-size: 10.5px; color: var(--muted); font-family: var(--mono); word-break: break-word; }
 .swb-cfield { display: flex; align-items: center; gap: 8px; }
 .swb-clabel { font-family: var(--mono); font-size: 10.5px; color: var(--muted); flex: 0 0 120px; }
 .swb-cfield input {
   flex: 1; min-width: 0; font: inherit; font-size: 11.5px; padding: 3px 6px;
   border: 1px solid var(--border); border-radius: 3px;
   background: var(--surface); color: var(--ink);
-}
-.swb-cactions { display: flex; gap: 8px; }
-.swb-cresult:empty { display: none; }
-.swb-clanded { border-left: 3px solid var(--st-completion); padding-left: 8px; }
-.swb-crefused { border-left: 3px solid var(--blocked); padding-left: 8px; }
-.swb-cdescriptor {
-  display: flex; flex-direction: column; gap: 4px;
-  border: 1px dashed var(--border); border-radius: 6px; padding: 8px 10px;
-  background: var(--faint);
-}
-.swb-ccmd {
-  font-family: var(--mono); font-size: 10.5px; color: var(--ink);
-  white-space: pre-wrap; word-break: break-all; user-select: all;
 }
 .swb-cfield textarea {
   flex: 1; min-width: 0; font-family: var(--mono); font-size: 11px; padding: 4px 6px;
@@ -1605,11 +1521,6 @@ svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacit
 .swb-posture.is-live { color: var(--st-organized); border-color: var(--st-organized); }
 .swb-sessionhost { display: flex; flex-direction: column; gap: 6px; }
 .swb-sessionhost:empty { display: none; }
-.swb-sessionactions { display: flex; flex-wrap: wrap; gap: 6px; }
-.swb-sessionbtn { white-space: nowrap; }
-.swb-sessionbtn:disabled { opacity: 0.5; cursor: not-allowed; }
-.swb-sessiondescriptors { display: flex; flex-direction: column; gap: 6px; }
-.swb-notice { color: var(--st-organized); }
 .swb-outline { border: 1px solid var(--faint); border-radius: 6px; padding: 10px 14px; background: var(--panel); }
 .swb-outline-empty { padding: 12px 4px; }
 /* the create gesture (design D6, extended to every ring sector by Brett's
@@ -2532,7 +2443,6 @@ tr.lit > td { background: rgba(127, 127, 127, 0.16); }
   display: flex; flex-direction: column; gap: 8px;
   border-top: 1px solid var(--border); padding-top: 8px;
 }
-.swb-draftchrome .swb-cactions { justify-content: flex-end; }
 /* "you already have N of this topic" — stated BEFORE the save, because the
    engine's create-only refusal states it after (Brett, 2026-08-10). A notice,
    not an error: a second document on a shared topic is ordinary. */
@@ -2567,14 +2477,6 @@ tr.lit > td { background: rgba(127, 127, 127, 0.16); }
   font-size: 13px; line-height: 1.6;
 }
 
-/* The create form's per-field help, and the mark on a field only a human can
-   fill: empty means two different things here, and the form could not say
-   which (Brett, 2026-08-09). */
-.swb-chelp { display: block; font-size: 11px; color: var(--muted); line-height: 1.45; margin-top: 3px; }
-.swb-creq {
-  margin-left: 6px; font-size: 10px; font-weight: 700; letter-spacing: .04em;
-  text-transform: uppercase; color: var(--picked); cursor: help;
-}
 
 /* The outline tab's TEMPLATED SECTION INDEX and its add-section affordance
    (add-staged-topic-outline-template tasks 3.2-3.4). Deliberately quiet: a

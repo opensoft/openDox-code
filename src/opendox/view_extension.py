@@ -261,6 +261,19 @@ _ID = re.compile(r"^[a-z0-9]+(?:[-.][a-z0-9]+)*$")
 #: own refusal rather than that test's coverage.
 _MODULE = re.compile(r"^\./[A-Za-z0-9_./-]+\.js$")
 
+#: A bundle-relative STYLESHEET specifier — `_MODULE`'s grammar with `.css`,
+#: and deliberately a second pattern rather than one widened to `(js|css)`.
+#: RULED Q7 (openxFactory#656 comment `5648049748`, Brett Heap, 2026-09-12):
+#: *"a contributed binding's CSS lives WITH THE BINDING, in its own sheet;
+#: openDox's declared design tokens (the `--st-*` family, S7) are the one
+#: stable styling surface; nothing else in `styles.css` is."* A sheet is
+#: subject to every reason `_MODULE` is narrow — a root-relative href breaks a
+#: served sub-path and an absolute one is a remote asset § 4.4's vendor policy
+#: forbids — and to one more of its own: a `<link>` is the one element in this
+#: bundle that can fetch across an origin without `type="module"`'s CORS rules
+#: applying, so the seam that admits it cannot be the one that admits scripts.
+_SHEET = re.compile(r"^\./[A-Za-z0-9_./-]+\.css$")
+
 #: An export name, held to the SAME grammar `views/view_extension.js`'s
 #: `viewBinding()` checks (Copilot, PR #14): `str.isidentifier()` and this
 #: bundle's client both claimed to validate "a JS export name" and actually
@@ -334,6 +347,22 @@ class ViewBinding:
     #: without it, a required binding absent is a refusal. Slice S2's intent
     #: chips are the first optional one; `gate.bar` is the second.
     optional: bool = False
+    #: THE BINDING'S OWN STYLESHEET — RULED Q7 (openxFactory#656 comment
+    #: `5648049748`, Brett Heap, 2026-09-12): "a contributed binding's CSS
+    #: lives WITH THE BINDING, in its own sheet". A bundle-relative `./….css`
+    #: specifier, validated exactly as `module` is; EMPTY means the binding
+    #: ships no sheet, which is a real answer and not an omission — measured
+    #: over the six gate-loop bindings, `gate.lens` owns no selector of its own
+    #: and reuses the shell's shared chrome, so it declares none.
+    #:
+    #: WHY A STRING AND NOT A LIST. One binding, one sheet, for `module`'s
+    #: reason: the manifest crosses a process boundary as JSON and the client
+    #: resolves exactly one href per binding. TWO BINDINGS MAY NAME THE SAME
+    #: SHEET, and that is how a column whose panels share a rule family avoids
+    #: either duplicating it into two files (two authorities for one rule set)
+    #: or making one optional binding depend on another's sheet: the client
+    #: DEDUPES BY HREF, so a sheet named twice is injected once.
+    styles: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not _ID.match(self.id):
@@ -378,6 +407,24 @@ class ViewBinding:
                 f"view binding {self.id!r} names entry {self.entry!r}: a dunder "
                 "reaches the object protocol rather than the module's own "
                 "surface")
+        if not isinstance(self.styles, str):
+            raise ViewBindingError(
+                f"view binding {self.id!r} declares styles {self.styles!r}, "
+                "which is not a string: a binding names ONE bundle-relative "
+                "sheet or none (RULED Q7, openxFactory#656 comment "
+                "`5648049748`)")
+        if self.styles and not _SHEET.match(self.styles):
+            raise ViewBindingError(
+                f"view binding {self.id!r} names styles {self.styles!r}: a "
+                "contributed stylesheet must be a bundle-relative './….css' "
+                "specifier, held to the grammar `module` is held to and for "
+                "the same reasons — a root-relative href breaks a served "
+                "sub-path, an absolute one is a remote asset the § 4.4 vendor "
+                "policy forbids. A binding with no sheet declares \"\"")
+        if ".." in self.styles.split("/"):
+            raise ViewBindingError(
+                f"view binding {self.id!r} names styles {self.styles!r}, which "
+                "climbs out of the bundle with '..'")
         # Guarded for the region's reason above. A tuple membership test does
         # not hash and so cannot raise today — but the guard states the rule
         # rather than relying on `VIEW_CLASSES` staying a tuple, which is
@@ -462,6 +509,10 @@ class ViewBinding:
             "routes": list(self.routes),
             "requires": list(self.requires),
             "optional": self.optional,
+            # RULED Q7: the sheet travels on the SAME payload the module does,
+            # so the client needs no second route and no second fetch to learn
+            # a binding has one. `/capabilities` therefore carries it already.
+            "styles": self.styles,
         }
 
 

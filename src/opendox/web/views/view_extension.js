@@ -140,6 +140,13 @@ const ID = /^[a-z0-9]+(?:[-.][a-z0-9]+)*$/;
 // exactly the hole that policy would leak through if this seam did not close
 // it.
 const MODULE = /^\.\/[A-Za-z0-9_./-]+\.js$/;
+// A bundle-relative STYLESHEET specifier — MODULE's grammar with `.css`, and a
+// second pattern rather than one widened to `(js|css)`, exactly as the server
+// half keeps `_SHEET` beside `_MODULE`. RULED Q7 (openxFactory#656 comment
+// `5648049748`): "a contributed binding's CSS lives WITH THE BINDING, in its
+// own sheet". A `<link>` fetches without `type="module"`'s CORS rules, so the
+// seam that admits a sheet cannot be the one that admits a script.
+const SHEET = /^\.\/[A-Za-z0-9_./-]+\.css$/;
 
 // One error for every declaration defect, for `RouteBindingError`'s reason: a
 // caller does nothing different for any of them — they are all "this shell must
@@ -192,6 +199,16 @@ export function viewBinding(spec) {
       + JSON.stringify(b.entry) + ": an entry is the NAME of an export on the "
       + "binding's module, never a callable — the manifest crosses a process "
       + "boundary as JSON.");
+  }
+  if (b.styles !== undefined && b.styles !== null && b.styles !== "") {
+    if (typeof b.styles !== "string" || !SHEET.test(b.styles)
+        || b.styles.split("/").includes("..")) {
+      refuse("view binding " + JSON.stringify(b.id) + " names styles "
+        + JSON.stringify(b.styles) + ": a contributed stylesheet must be a "
+        + "bundle-relative './….css' specifier that does not climb out of the "
+        + "bundle (RULED Q7, openxFactory#656 comment 5648049748). A binding "
+        + "with no sheet declares \"\" or omits the field.");
+    }
   }
   if (!VIEW_CLASSES.includes(b.view_class)) {
     refuse("view binding " + JSON.stringify(b.id) + " declares class "
@@ -254,6 +271,10 @@ export function viewBinding(spec) {
     routes: Object.freeze(routes.slice()),
     requires: Object.freeze(requires.slice()),
     optional,
+    // RULED Q7. Normalized to "" so every reader sees one absent-shape rather
+    // than three (`undefined`, `null`, `""`), the same normalization `requires`
+    // and `optional` above already take.
+    styles: b.styles === undefined || b.styles === null ? "" : b.styles,
     mount: b.mount,
     control: b.control,
     // What makes two bindings the SAME panel — never the module. Two bindings
@@ -588,6 +609,54 @@ export async function resolveView(bindings, id, options) {
 // binding's module and entry into the SECOND binding's region: a panel
 // rendering another column's module, with nothing refused and nothing logged.
 // The pass holds the binding already; it resolves THAT one.
+// EVERY SHEET THIS DOCUMENT HAS ALREADY BEEN GIVEN, keyed by resolved href.
+// The dedupe is not an optimisation: `ViewBinding.styles` is ONE sheet per
+// binding and two bindings of one column may name the SAME sheet where they
+// share a rule family, which is the only shape that neither duplicates those
+// rules into two files nor makes one optional binding depend on another's.
+// A `Set` per document rather than a module-level one, because a test drives
+// several documents through this module in one process.
+const SHEETS = new WeakMap();
+
+// INJECT A BINDING'S SHEET, ONCE, INTO `document.head`.
+//
+// WHY `head` AND NOT `body`. RULED Q8 (openxFactory#656 comment `5648049748`):
+// "a fourth `shell` region, `page-overlay`, is the declared host for
+// page-level panels … `document.body` is never a contract surface." A `<link>`
+// in `body` is valid HTML and is exactly the reach that ruling closes.
+//
+// WHY A FAILED SHEET IS NOT A REFUSAL. A binding's CONTRACT is its manifest
+// entry — its module, its entry, its declared exports (RULED Q2) — and this
+// seam refuses when any of those cannot be honoured. Styling is not in that
+// list: a panel that mounts and works unstyled is degraded, and a panel that
+// refuses to mount because a stylesheet 404'd is deleted. So the failure is
+// NAMED on the console, with the binding and the href, and the mount proceeds.
+// `link.onerror` is the only signal available — a stylesheet fetch reports no
+// status to script — and it fires asynchronously, after the mount it must not
+// block, which is the second reason this cannot be a refusal.
+export function injectBindingStyles(binding, bundleRoot, doc) {
+  const target = doc || (typeof document === "undefined" ? null : document);
+  if (!binding || !binding.styles || !target || !target.head) return null;
+  const href = new URL(binding.styles, bundleRoot).href;
+  let seen = SHEETS.get(target);
+  if (!seen) { seen = new Set(); SHEETS.set(target, seen); }
+  if (seen.has(href)) return null;
+  seen.add(href);
+  const link = target.createElement("link");
+  link.rel = "stylesheet";
+  link.href = href;
+  link.setAttribute("data-view-binding", binding.id);
+  link.onerror = function () {
+    console.warn("view binding " + JSON.stringify(binding.id) + " names styles "
+      + JSON.stringify(binding.styles) + ", which failed to load from " + href
+      + ". The panel mounts UNSTYLED: a binding's contract is its manifest "
+      + "entry, not its appearance (RULED Q7, openxFactory#656 comment "
+      + "5648049748).");
+  };
+  target.head.appendChild(link);
+  return link;
+}
+
 export async function resolveBinding(binding, options) {
   if (!binding) return null;
   // RULED Q4, at the ONE place every named reader already goes through. A
@@ -605,6 +674,16 @@ export async function resolveBinding(binding, options) {
     }
   }
   const bundleRoot = new URL("../", import.meta.url);
+  // RULED Q7's ONE LINE OF MECHANISM, and it sits BEFORE the import on
+  // purpose: the browser starts fetching the sheet while the module is still
+  // being fetched, so a panel that mounts is styled by the time it paints
+  // rather than one frame after it. It is also before the import's own refusal
+  // path, which is the right order for a non-fatal step — a sheet requested
+  // for a module that then fails to load costs one unused request and leaves
+  // no partly-applied state, while the reverse order would make styling
+  // conditional on a race this function does not control.
+  injectBindingStyles(binding, bundleRoot,
+    (options && options.document) || undefined);
   // A REJECTED IMPORT IS A REFUSAL TOO, and one this seam names rather than
   // lets pass through raw (Copilot, PR #14): a missing file, a syntax error
   // or a circular import all reject `import()` with a native error carrying
