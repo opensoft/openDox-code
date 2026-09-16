@@ -106,7 +106,12 @@ DROP_ORDER: tuple[str, ...] = (
     "memberships",            # references users, projects
     "projects",               # references users
     "users",
-    "opendox_schema_migrations",
+    # THE LEDGER'S NAME FROM ITS OWN MODULE, not a second spelling of it. The
+    # literal here and `migrations.LEDGER_TABLE` were one name written twice,
+    # and the one place they would ever disagree is a rename — after which
+    # `reset` would drop six of seven tables and report all seven (Copilot
+    # review of openDox-code#25, round 9).
+    migrations.LEDGER_TABLE,
 )
 
 
