@@ -157,3 +157,25 @@ def test_discovery_accepts_only_the_filename_shape_this_repository_declares(
         (tmp_path / name).write_text("select 1;\n", encoding="utf-8")
     discovered = [f"{m.version}_{m.name}" for m in discover_migrations(tmp_path)]
     assert discovered == ["0001_identity", "0002_migration_state"], discovered
+
+
+def test_two_files_claiming_one_version_are_refused_before_any_mutation(
+        tmp_path) -> None:
+    """The shape test holds THIS TREE; an image is not this tree.
+
+    Two `0002_*.sql` files in a configured directory made `apply()` run and
+    COMMIT the first and then fail on the ledger's primary key for the second
+    — a partially applied run, which is the one state the runner exists to
+    prevent (Copilot review of openDox-code#25, round 7).
+    """
+    import pytest
+
+    from opendox.runtime.migrations import MigrationError, discover_migrations
+
+    for name in ("0001_identity.sql", "0002_first.sql", "0002_second.sql"):
+        (tmp_path / name).write_text("select 1;\n", encoding="utf-8")
+    with pytest.raises(MigrationError) as caught:
+        discover_migrations(tmp_path)
+    message = str(caught.value)
+    assert "0002" in message
+    assert "0002_first.sql" in message and "0002_second.sql" in message

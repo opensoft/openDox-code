@@ -56,8 +56,19 @@ spec:
             # which is the separation the whole layout exists to keep (Copilot
             # review of openDox-code#25). The init script below creates it on
             # the volume's FIRST start, exactly as the compose package does.
+            #
+            # FROM THE SAME ConfigMap KEY THE MIGRATION JOB NARROWS. This was
+            # a literal while the Job read `runtime_pg_role`, so an overlay
+            # that changed the documented served role created one role and
+            # narrowed another — a startup failure, or the real served role
+            # left able to write the ledger (Copilot review of
+            # openDox-code#25). Creation, narrowing and the served DSN's user
+            # are one name; two of them are these two references.
             - name: OPENDOX_RUNTIME_PG_USER
-              value: opendox_runtime
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: runtime_pg_role
             - name: OPENDOX_RUNTIME_PG_PASSWORD
               valueFrom:
                 secretKeyRef:

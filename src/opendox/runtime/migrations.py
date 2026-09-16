@@ -234,6 +234,23 @@ def discover_migrations(
                       path=entry)
         )
     migrations.sort(key=lambda m: int(m.version))
+    # NO TWO FILES MAY CLAIM ONE VERSION, and this is refused HERE rather than
+    # by the ledger's primary key. `tests_runtime/test_migration_shape.py`
+    # holds THIS TREE to unique versions; an image is not this tree, and two
+    # `0002_*.sql` files in a configured directory made `apply()` run and
+    # COMMIT the first and then fail on the second — a partially applied run,
+    # which is the one state the runner exists to prevent (Copilot review of
+    # openDox-code#25, round 7). A refusal before any mutation costs nothing
+    # and is the same answer `discover` gives any other malformed directory.
+    seen: dict[str, str] = {}
+    for migration in migrations:
+        if migration.version in seen:
+            raise MigrationError(
+                f"two migrations claim version {migration.version}: "
+                f"{seen[migration.version]} and {migration.path.name}. A run "
+                "would apply and commit one and fail on the other, leaving a "
+                "partially migrated database; nothing is applied.")
+        seen[migration.version] = migration.path.name
     return migrations
 
 
@@ -525,11 +542,20 @@ class MigrationRunner:
             self._narrow_ledger(owned)
 
     def _narrow_ledger(self, conn: Any) -> None:
+        # QUOTED, because Postgres FOLDS an unquoted identifier to lower case
+        # while the bootstrap creates the role with `%I`, which quotes it. A
+        # configured `MyRole` — accepted by `_ROLE_NAME` and by
+        # `_PLAIN_IDENTIFIER`, both of which allow upper case — therefore had
+        # its grant and revoke aimed at `myrole`: a different role, or none
+        # (Copilot review of openDox-code#25, round 7). The shape is already
+        # validated as a plain identifier above, so doubling any quote is
+        # belt-and-braces rather than the guard.
+        role = '"' + self._runtime_role.replace('"', '""') + '"'
         conn.execute(
             f"revoke insert, update, delete, truncate on {LEDGER_TABLE} "
-            f"from {self._runtime_role}")
+            f"from {role}")
         conn.execute(
-            f"grant select on {LEDGER_TABLE} to {self._runtime_role}")
+            f"grant select on {LEDGER_TABLE} to {role}")
         # AND THE NARROWING IS MEASURED, because `revoke` can succeed and
         # change nothing. A role that OWNS the ledger — which is what happens
         # when both DSNs are pointed at the migration identity — keeps every

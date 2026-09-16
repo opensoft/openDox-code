@@ -728,3 +728,25 @@ def test_the_readiness_probe_allows_the_endpoints_own_budgets() -> None:
         "budgets; a slow dependency reads as an unready pod")
     assert probe["timeoutSeconds"] <= probe["periodSeconds"], (
         "a probe that can outlive its own period overlaps itself")
+
+
+def test_the_bootstrap_creates_the_role_the_migration_narrows() -> None:
+    """One name, and in Kubernetes that means one ConfigMap key.
+
+    The StatefulSet's bootstrap hard-coded `opendox_runtime` while the
+    migration Job read `runtime_pg_role`, so an overlay that changed the
+    documented served role created one role and narrowed another — a startup
+    failure, or the real served role left able to write the ledger (Copilot
+    review of openDox-code#25, round 7).
+    """
+    statefulset = _load_yaml(KUBERNETES / "base" / "postgres-statefulset.yaml")
+    created = next(e for e in _containers(statefulset)[0]["env"]
+                   if e["name"] == PREFIX + "RUNTIME_PG_USER")
+    job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
+    narrowed = next(e for e in _containers(job)[0]["env"]
+                    if e["name"] == PREFIX + "RUNTIME_PG_ROLE")
+    assert "value" not in created, "the bootstrap hard-codes the role again"
+    assert (created["valueFrom"]["configMapKeyRef"]
+            == narrowed["valueFrom"]["configMapKeyRef"]), (
+        "the role the bootstrap creates and the role the migration narrows "
+        "come from different places; they are one role")

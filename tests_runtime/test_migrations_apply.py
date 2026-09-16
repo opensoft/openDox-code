@@ -632,3 +632,47 @@ def test_a_narrowing_that_changes_nothing_fails_the_run(
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")
+
+
+def test_a_role_whose_name_is_not_lower_case_is_narrowed_as_itself(
+        postgres_dsn: str) -> None:
+    """Postgres FOLDS an unquoted identifier and the bootstrap quotes one.
+
+    `_ROLE_NAME` and `_PLAIN_IDENTIFIER` both accept upper case, so a
+    configured `MyRole` had its revoke and grant aimed at `myrole` — a
+    different role, or none at all, with the ledger narrowing silently missing
+    its subject (Copilot review of openDox-code#25, round 7).
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    role = "OpenDoxRuntime" + uuid.uuid4().hex[:6]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            # Created QUOTED, exactly as the compose and Kubernetes bootstrap
+            # scripts create it (`%I`), so the role really carries upper case.
+            # A literal password: `create role` takes no parameters (it is
+            # not a plannable statement), and this role is dropped below.
+            conn.execute(
+                f'create role "{role}" login password ' "'throwaway-local'")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations", runtime_role=role)
+                runner.apply()
+                with db.connection() as conn:
+                    for privilege, expected in (("INSERT", False),
+                                                ("SELECT", True)):
+                        answer = conn.execute(
+                            "select has_table_privilege(%s, %s, %s)",
+                            (role, migrations.LEDGER_TABLE,
+                             privilege)).fetchone()
+                        assert answer and answer[0] is expected, privilege
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+                conn.execute(f'drop role if exists "{role}"')
