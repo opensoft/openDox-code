@@ -958,3 +958,43 @@ def test_an_option_shaped_revision_cannot_become_a_git_option(
                          revision=revision)
         assert caught.value.refusal.kind == ca.REVISION_UNKNOWN, revision
     assert not Path("/tmp/opendox-should-not-exist").exists()
+
+
+def test_a_symlink_swapped_in_after_the_check_cannot_be_written_through(
+        tmp_path: Path) -> None:
+    """The check and the create were two acts, with a window between them.
+
+    `refuse_unusable_location` refuses a symlink, and `mkdir(exist_ok=True)`
+    then FOLLOWED one that appeared afterwards — `git init --bare .` writing
+    the project's history into whatever the link pointed at, which is the
+    adoption the refusal exists to prevent (Copilot review of openDox-code#26,
+    round 8). The leaf is created EXCLUSIVELY now (an exclusive `mkdir` cannot
+    follow a link) and the directory git is handed is re-opened NO-FOLLOW.
+
+    The race is made deterministic by doing what the racing process would do,
+    at the only moment it could: after the check, before the create.
+    """
+    import os
+
+    from opendox.runtime import repository_act as act
+
+    elsewhere = tmp_path / "somebody-elses-tree"
+    elsewhere.mkdir()
+    location = tmp_path / "project-raced"
+
+    real_refuse = act.refuse_unusable_location
+
+    def _check_then_swap(path) -> None:
+        real_refuse(path)
+        # The window: the path was absent and legal a moment ago.
+        os.symlink(elsewhere, path)
+
+    act.refuse_unusable_location = _check_then_swap
+    try:
+        with pytest.raises(act.RepositoryActRefused):
+            act.initialize_repository(location, project_id="raced", actor=ACTOR)
+    finally:
+        act.refuse_unusable_location = real_refuse
+
+    assert list(elsewhere.iterdir()) == [], (
+        "the act wrote the repository through the symlink")

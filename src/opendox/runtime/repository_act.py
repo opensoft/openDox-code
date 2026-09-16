@@ -358,11 +358,63 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
         # `mkdir` used to escape as `PermissionError`/`NotADirectoryError` and
         # reach the API as a 500, instead of the act's named refusal (Copilot
         # review of openDox-code#26).
-        location.mkdir(parents=True, exist_ok=True)
+        #
+        # THE PARENTS MAY EXIST; THE LEAF IS CREATED EXCLUSIVELY. `exist_ok=True`
+        # on the leaf made the check above a CHECK AND THE CREATE A SEPARATE
+        # ACT: another process could replace the path with a symlink in
+        # between, and `mkdir` would then succeed by following it — `git init
+        # --bare .` writing the project's history into whatever the link
+        # points at, which is the adoption `refuse_unusable_location` exists
+        # to refuse (Copilot review of openDox-code#26, round 8). An exclusive
+        # `mkdir` cannot follow a symlink: it fails with `FileExistsError`
+        # whether the thing in the way is a link or a directory.
+        location.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            location.mkdir()
+        except FileExistsError:
+            # The legal case the check above already allows: an EMPTY
+            # directory this act may use. It is re-verified through a
+            # NO-FOLLOW open, so a symlink swapped in after that check cannot
+            # be the thing we proceed with.
+            handle = os.open(location, os.O_RDONLY | os.O_DIRECTORY
+                             | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                if os.listdir(location):
+                    raise RepositoryActRefused(
+                        f"{location} is not empty; this act creates a "
+                        "repository at a directory it owns and adopts none")
+            finally:
+                os.close(handle)
+    except RepositoryActRefused:
+        raise
     except OSError as exc:
         raise RepositoryActRefused(
             f"the directory {location} could not be created ({exc}); the map "
             "row is rolled back with the caller's transaction") from exc
+    # AND THE PLACE GIT IS ABOUT TO WRITE IS THE PLACE WE CREATED. Held open
+    # NO-FOLLOW, and compared with the path git will be given: if the final
+    # component became a symlink in the meantime, the open refuses it
+    # (`ELOOP`), and if the path was swapped for another real directory the
+    # inode comparison catches it. This is the check that makes the guarantee
+    # a property of the filesystem rather than of the order of two calls.
+    try:
+        owned = os.open(location, os.O_RDONLY | os.O_DIRECTORY
+                        | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise RepositoryActRefused(
+            f"{location} could not be opened as a real directory ({exc}); a "
+            "symbolic link at the repository's own path is refused, and one "
+            "that appears between the check and the create is refused here"
+        ) from exc
+    try:
+        created = os.fstat(owned)
+        seen = os.stat(location)
+        if (created.st_dev, created.st_ino) != (seen.st_dev, seen.st_ino):
+            raise RepositoryActRefused(
+                f"{location} is not the directory this act created; the path "
+                "changed underneath it and nothing is written")
+    finally:
+        os.close(owned)
     git = GitRunner(location, executable)
     try:
         # BARE, and it is the decision `local_git_adapter`'s header argues in
