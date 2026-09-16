@@ -477,6 +477,70 @@ console.log(JSON.stringify({{
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_js_a_pass_with_no_capabilities_payload_refuses_instead_of_mounting(
+        tmp_path) -> None:
+    """A MISSING PAYLOAD IS AN UNMET REQUIREMENT (Copilot review of this PR,
+    round 5). The pass used to read `capabilities === undefined ? null :
+    unmetRequirement(...)`, so a caller that omitted the payload skipped RULED
+    Q4's gate entirely: a REQUIRED binding with an unmet requirement was
+    imported and MOUNTED, the one outcome the ruling says must refuse. That also
+    contradicted the registry's own contract — `probeCapabilityPath` was
+    rewritten at round 2 to fail CLOSED, and `undefined` at the end of a path is
+    the honest answer "this plane does not offer it"; `undefined` for the whole
+    payload says it about every path at once."""
+    web = _temp_bundle(tmp_path, {
+        "panel.js": "export function mount(host) { host.hit = true; return 'ok'; }\n",
+    })
+    result = _run_node(f"""
+import {{ collectViewBindings, mountContributedViews }}
+  from {json.dumps((web / "views" / "view_extension.js").as_uri())};
+const hosts = {{}};
+const doc = {{ getElementById: (id) => hosts[id] || null,
+               createElement: () => ({{ attrs: {{}}, textContent: "",
+                                       className: "",
+                                       setAttribute(k, v) {{ this.attrs[k] = v; }},
+                                       appendChild(c) {{ return c; }} }}) }};
+for (const id of ["view-docs", "explorer-root"]) {{
+  hosts[id] = {{ id, hit: false, appendChild() {{}} }};
+}}
+const spec = (id, region, extra) => ({{
+  id, region, module: "./views/panel.js", entry: "mount",
+  view_class: "B", requires: ["actions.gate"], ...extra }});
+// an OPTIONAL binding: skipped with a named reason, never imported
+const optional = await mountContributedViews(
+  collectViewBindings([{{ views: () => [
+    spec("panel.optional", "view-docs", {{ optional: true }})] }}]),
+  null, {{}}, {{ document: doc }});
+// a REQUIRED binding: refuses, and the refusal names the path
+let refusal = null;
+try {{
+  await mountContributedViews(
+    collectViewBindings([{{ views: () => [
+      spec("panel.required", "explorer-root", {{ optional: false }})] }}]),
+    null, {{}}, {{ document: doc }});
+}} catch (err) {{ refusal = {{ name: err.name, message: err.message }}; }}
+console.log(JSON.stringify({{
+  optional: optional.map((r) => [r.binding.id, r.skipped, r.unmet.path,
+                                 r.unmet.value === undefined]),
+  mountedOptional: hosts["view-docs"].hit,
+  mountedRequired: hosts["explorer-root"].hit,
+  refusal,
+}}));
+""", tmp_path)
+    # the optional one is SKIPPED for `requires`, with the probed value reported
+    # as "not carried at all" rather than as a falsy verdict
+    assert result["optional"] == [["panel.optional", "requires",
+                                   "actions.gate", True]]
+    assert result["mountedOptional"] is False
+    # the required one REFUSES, and nothing of it was mounted
+    assert result["refusal"] is not None
+    assert result["refusal"]["name"] == "ViewBindingError"
+    assert "panel.required" in result["refusal"]["message"]
+    assert "actions.gate" in result["refusal"]["message"]
+    assert result["mountedRequired"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
 def test_js_the_pass_mounts_each_binding_s_own_module_not_the_first_id_match(
         tmp_path) -> None:
     """IDS ARE UNIQUE PER REGION, NOT GLOBALLY (Copilot review of this PR,
@@ -645,6 +709,70 @@ console.log(JSON.stringify({{
     # aborted during: the binding is RECORDED as skipped, and still not mounted
     assert result["during"] == [["panel.one", "aborted"]]
     assert result["mounted"] is False
+
+
+def test_a_render_that_lost_its_scope_while_resolving_mounts_nothing() -> None:
+    """THE SIX CONTRIBUTED RESOLVES AWAIT DYNAMIC IMPORTS, AND EVERYTHING AFTER
+    THEM MOUNTS (Copilot review of this PR, round 4). A repository switch during
+    one of those imports aborts this render's scope, but the old render still
+    resumes after the awaits — and `mountContributedViews`'s own signal check
+    (round 3) cannot undo a shell mount that already happened: the page-overlay
+    host, the dispose panel mounted into it, and every region's core render all
+    run BEFORE the generic pass. So the render that lost its scope stops between
+    the last resolve and the first mount, and its error path stops with it."""
+    app = _app()
+    guard = "if (signal.aborted) return;"
+    # FOUR scope checks, and the census of them is the point: the stop below,
+    # the two after the generic pass's awaits (round 6, pinned by the test
+    # under this one), and the error path's. Every other await in `render()`
+    # belongs to a human-driven callback, not to the initial mount path.
+    assert app.count(guard) == 4, app.count(guard)
+    stop = app.index(guard)
+    # AFTER the last of the six resolves — all six are awaited before the stop,
+    # so none of them is left half-resolved for the next render to inherit
+    assert app.index('await resolveContributed("gate.workbench.session")') < stop
+    # and BEFORE anything this render hands down, hosts, mounts or renders
+    assert stop < app.index("const disposeColumn = disposeView")
+    assert stop < app.index("const pageOverlayHost = ensurePageOverlayHost();")
+    assert stop < app.index("mountExplorer(explorerRoot")
+    # the error path of the same finding: a refusal from a render the user has
+    # already switched away from is dropped, not written over the live one's
+    report = app.index("function reportAssemblyFailure(err) {")
+    assert report < app.index(guard, report) < app.index(
+        "const host = ensureStatusHost();", report)
+
+
+def test_a_render_that_lost_its_scope_while_mounting_writes_nothing_below() -> None:
+    """THE GENERIC PASS IS AWAITED TWICE MORE, AND EVERYTHING BELOW EACH AWAIT
+    WRITES TO THE PAGE (Copilot review of this PR, round 6 — round 4's finding,
+    one and two awaits further down). `mountContributedInto` awaits a dynamic
+    `import()` per contributed binding, and `mountContributedViews`'s own signal
+    check (round 3) stops only ITS mounts, never the CALLER that resumes after
+    it. Below the explorer's pass sit the staging workbench, the tab strip and
+    the repository selector; below the workbench's pass sit the last two of
+    those — and both paths end at `status.remove()`, which would strip the NEWER
+    render's loading state. So the resuming caller stops, at BOTH awaits."""
+    app = _app()
+    guard = "if (signal.aborted) return;"
+    explorer = app.index('await mountContributedInto(["explorer-root"]);')
+    workbench = app.index(
+        'await mountContributedInto(["staging-workbench-root"]);')
+    after_explorer = app.index(guard, explorer)
+    after_workbench = app.index(guard, workbench)
+    # each stop sits between its own pass and the next thing this render writes
+    assert explorer < after_explorer < workbench, (
+        "the explorer pass's scope check is missing, or falls after the "
+        "workbench's own await")
+    assert after_explorer < app.index("mountStagingWorkbench(", explorer)
+    assert workbench < after_workbench < app.index("mountRepoSelector(",
+                                                   workbench)
+    # and both are above the one write that would strip the LIVE render's
+    # loading state rather than this dead one's
+    assert after_workbench < app.index("status.remove();", workbench)
+    # the THIRD call of the same pass is deliberately un-awaited — it runs from
+    # the tab router's click handler — so its scope check is its rejection
+    # path's, which is the round-4 guard at the top of the refusal frame
+    assert "mountContributedInto([region]).catch(reportAssemblyFailure);" in app
 
 
 def test_a_late_assembly_refusal_still_has_somewhere_to_be_written() -> None:

@@ -1187,6 +1187,17 @@ async function render() {
     const disposeView = await resolveContributed("gate.dispose");
     const createView = await resolveContributed("gate.workbench.create");
     const sessionView = await resolveContributed("gate.workbench.session");
+    // A RENDER THAT LOST ITS SCOPE WHILE RESOLVING STOPS HERE (Copilot review,
+    // round 4). Each resolve above may await a dynamic import, so a repository
+    // switch can begin the next render — and abort this scope — while one is in
+    // flight. Everything below MOUNTS: the page-overlay host, the dispose panel
+    // into it, and every region's core render. The generic pass's own signal
+    // check (round 3) cannot undo a shell mount that already happened, so the
+    // stale render must not reach one. Stopping here is the same rule every
+    // listener this render binds already follows — it honours the signal it was
+    // handed — applied to the one stretch of `render()` that awaits before it
+    // writes to the page.
+    if (signal.aborted) return;
     // THE DECLARED NAMESPACES, handed down already-resolved so that no class-A
     // or class-C module in this bundle imports a class-B one (§ 4.5 assertion
     // 3). Each is the binding's DECLARED namespace and nothing wider: RULED Q2
@@ -1287,6 +1298,17 @@ async function render() {
     // `explorer-root` is rendered: its contributed bindings can mount into a
     // root that will not be cleared out from under them.
     await mountContributedInto(["explorer-root"]);
+    // AND THIS RENDER, TOO, STOPS IF IT LOST ITS SCOPE WHILE MOUNTING (Copilot
+    // review, round 6 — round 4's finding, one await further down). The pass
+    // above awaits a dynamic `import()` per contributed binding, so a
+    // repository switch can abort this scope while one is still in flight. The
+    // pass's OWN signal check (round 3) stops only ITS mounts; the CALLER that
+    // resumes here keeps writing to the page — the staging workbench, the tab
+    // strip, the repository selector — and both paths end at `status.remove()`,
+    // which would strip the NEWER render's loading state. The cancellation
+    // guarantee therefore belongs at the resuming caller, not only in the
+    // callee, exactly as it does after the six resolves above.
+    if (signal.aborted) return;
     // When the capability probe reports the notebook action
     // available, tiles grow an "Open in NotebookLM" affordance; otherwise the
     // controller's button() returns null and nothing renders — the served/local
@@ -1487,6 +1509,11 @@ async function render() {
         onSessionEnded: resetEndedSession });
     // `staging-workbench-root` is rendered: same reading as the explorer's.
     await mountContributedInto(["staging-workbench-root"]);
+    // AND THE SAME STOP AFTER THE WORKBENCH'S PASS (Copilot round 6, the
+    // "analogous await below"): the tab strip, the repository selector and the
+    // `#loadstatus` removal are all below this line, and a render whose
+    // repository is no longer on screen must reach none of them.
+    if (signal.aborted) return;
     // The wheel's read-only verbs (documents read · clusters lens/canvas): app.js
     // owns every cross-view jump, so the wheel declares the verb and calls back
     // here. `tabs` is assigned just below; the callbacks only run on a click.
@@ -1664,6 +1691,13 @@ async function render() {
   // render; the alternative is an unhandled rejection in the console and a tab
   // that silently lacks its panel.
   function reportAssemblyFailure(err) {
+    // AND NOT FROM A RENDER THAT LOST ITS SCOPE (Copilot review, round 4 — the
+    // error path of the same finding). This closure belongs to ONE render, and
+    // the per-region pass hands it rejections that can arrive minutes later. A
+    // refusal from a render the user has already switched away from would be
+    // written over the live render's own surface, describing a column probed
+    // for a repository no longer on screen. The live render reports its own.
+    if (signal.aborted) return;
     // RE-INSERT THE HOST IF A SUCCESSFUL RENDER ALREADY REMOVED IT (Copilot
     // round 3). The initial render ends with `status.remove()`, so a refusal
     // arriving from the per-region pass on a tab's first render — or on any
