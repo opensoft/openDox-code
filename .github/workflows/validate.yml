@@ -402,6 +402,13 @@ jobs:
       #              python, pytest and git) — the same six modules, after the
       #              round that answered Copilot's fourth review on #25 and
       #              #26 added its assertions to four of them.
+      #  152 passed  at `build/3-6-repository-act` `01531a92` (same day, same
+      #              python, pytest and git) — the same six modules, carrying
+      #              #25's round-5 fixes by merge and adding this branch's own:
+      #              the percent-decoded credential parameter, which both
+      #              halves of the rule now ask ONE predicate about. The
+      #              commits above this one are where they landed; this block
+      #              changes no test, so the figure holds at this head too.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
