@@ -418,6 +418,20 @@ jobs:
       #              measurement that was current when it was written; the
       #              commit that records a figure changes no test, so the
       #              figure also holds at the head that carries the record.
+      #  111 passed  at `build/3-5-runtime` `2161a23a` (same day, same python
+      #              and pytest) — the same five modules, after round
+      #              EIGHT: `serve` telling a startup failure from a
+      #              shutdown, and a version below the canonical one
+      #              refused at discovery.
+      #
+      #              AND MEASURED WITH THE `runtime` EXTRA MADE
+      #              UNIMPORTABLE (`psycopg`, `psycopg_pool`, `fastapi`,
+      #              `uvicorn`, `jwt` stubbed to raise ImportError), which
+      #              is this job's own install. A figure measured with the
+      #              extras present is not this job's figure: round 7
+      #              added a test that passed that way and went RED here,
+      #              because the gate it asserted sat behind the deferred
+      #              driver import.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
