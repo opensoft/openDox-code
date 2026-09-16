@@ -35,6 +35,14 @@ jobs:
       # the BUILD arc lands. The root conftest's collect_ignore list (round 2)
       # remains the record of what was already known.
       #
+      # THAT PARAGRAPH IS THE PRE-S8 BASELINE AND IS KEPT AS ONE (Copilot
+      # review of #23): § 3.4 slice S8, at the end of this block, lifts the
+      # narrowing FOR THE WEB SUITES — the half of Q-L5 (b′) the note's § 5 S8
+      # row scopes to this slice — so the sentence above states what this
+      # workflow ran BEFORE that lift, not what it runs now. The other half
+      # stands: what the tree still cannot collect waits on the BUILD arc, and
+      # the closing paragraphs of this block measure exactly what that is.
+      #
       # BUILD SLICE 2 adds `tests/test_consumer_reach.py` beside it, and it is
       # not a carved suite returning early: it asserts the DIRECTION — that
       # openDox's own modules import with `openxdox` unimportable — which is
@@ -77,49 +85,26 @@ jobs:
       # `views/intent-feed.js` (RULED OQ-F `not_moved`) in a static import.
       # `--noconftest` safe and needs no consumer — it reads three files as
       # text and nothing else. The BEHAVIOURAL probe of the same seam
-      # (`tests/test_intent_binding_dom.py`, node-driven) stays off this
-      # list, and NOT for being a node-driven DOM probe of a `web/` view:
-      # FOUR files ON this list are exactly that (opensoft/openDox-code#24,
-      # Copilot, twice — the fourth arrived with slice S7 while that pull
-      # request was open). `tests/test_view_registry.py` mounts the real
-      # `views/view_extension.js` and `views/docs.js` under node behind a
-      # `class Node` stand-in of its own; `tests/test_split_route_tails.py`
-      # installs a `globalThis.document`; `tests/test_gate_loop_contributed.py`
-      # mounts contributed panels through the registry; and
-      # `tests/test_display_facet.py` (openDox-code#21, § 3.4 slice S7) drives
-      # the real `views/display.js` under the node the runner already has,
-      # skipping where node is absent. So no sentence of the form "no DOM probe
-      # of a `web/` view is on this list" can be written here truthfully, and
-      # the one that was here is withdrawn.
-      #
-      # WHAT THE LIST ACTUALLY IS. An allow-list, admitted file by file, and
-      # every admission above gives the same reason in its own words: the file
-      # is the SHAPE assertion RULED Q-L5 (b′) leaves running while the carved
-      # suite waits on the BUILD arc, or WITHOUT IT THE SLICE'S RULED CONTRACT
-      # WOULD BE ONLY DESCRIBED — S3's "the only place slice S3's ruled
-      # contract is executed rather than described", S4's and S5's "measures
-      # the other half" (`test_web_boundary.py` would be just as green if the
-      # thing that was supposed to move had been DELETED), S6's "the slice's
-      # only running proof". Slice S2 is in neither position for a second
-      # instrument: `tests/test_intent_binding_shape.py` is already on the
-      # list, and it goes red if S2 had deleted the intent reach instead of
-      # routing it through the binding — it requires all seven exports of
-      # `views/intent-binding.js` and `views/wheel.js`'s static import of five
-      # of them. The DOM probe measures the seam's FORWARDING, which is
-      # coverage S2 wanted rather than the proof S2 owed, and three of its six
-      # cases have to write a stand-in for the never-carried
-      # `views/intent-feed.js` to measure it at all. Admitting behavioural
-      # probes as a CLASS is slice S8's job, not S2's.
-      #
-      # ITS TWO FORMER SIBLINGS ARE NOT NARROWED, THEY ARE GONE (RULED
-      # `openxFactory#656` comment 5656343213, Brett Heap, 2026-09-13, citing
-      # RULED OQ-F). This sentence used to name `test_intent_tray_dom.py` and
-      # `test_wheel_verbs_dom.py` as the narrowed siblings this probe keeps
-      # company with. Both drove `views/intent-feed.js`, which STAYED at
-      # openxFactory and arrived at NEITHER leg, so both have been RETIRED at
-      # this leg as a declared act — openxFactory's carve manifest carries the
-      # `retired:` block and this repository carries the deletion. There is no
-      # narrowed sibling left to un-narrow there: S8 un-narrows what remains.
+      # (`tests/test_intent_binding_dom.py`, node-driven) STAYED off this
+      # list at S2, on the same footing as its siblings
+      # `test_intent_tray_dom.py` / `test_wheel_verbs_dom.py`: it is a DOM
+      # probe of a `web/` view, and un-narrowing that class of test was
+      # slice S8's job, not S2's. **S8 has since done that job for this one
+      # file** — `tests/test_intent_binding_dom.py` is named in the list below
+      # — and the two siblings are NOT on it because THEY NO LONGER EXIST
+      # HERE. RULED `openxFactory#656` comment 5656343213 (Brett Heap,
+      # 2026-09-13, citing RULED OQ-F) RETIRED both at this leg: both drove
+      # `views/intent-feed.js`, which STAYED at openxFactory and arrived at
+      # NEITHER leg, so openxFactory's carve manifest carries the `retired:`
+      # block and this commit carries the deletion. S8's own reason for
+      # omitting them was right for the question S8 could ask — measured at
+      # its head, `test_intent_tray_dom.py` 23 failed and
+      # `test_wheel_verbs_dom.py` 8 failed, so naming either would have put the
+      # required check red for another act's defect — and the ruling answers a
+      # DIFFERENT question: not "should the list name them" but "should they be
+      # here at all". THERE IS NO NARROWED SIBLING LEFT TO UN-NARROW HERE.
+      # This paragraph records S2's state, then S8's, then the ruling's; the
+      # list below records today's.
       #
       # TWO SENTENCES ELSEWHERE IN THE TREE STILL NAME THE RETIRED SUITES, AND
       # THEY STAY — recorded here so the residue is DECLARED rather than found.
@@ -147,6 +132,16 @@ jobs:
       # under a declared admission. What would move those two sentences: a
       # ruling widening OQ-1's class vocabulary, or some other act amending
       # those rows for a reason the vocabulary already covers.
+      #
+      # `tests/test_account_menu_dom.py` is now ON the list below, so the
+      # required check RUNS the file whose line 4 still names a retired
+      # sibling. That changes nothing: the sentence is a comment, and the
+      # reason it is unrepaired is unchanged — the file is a
+      # `moved_with_declared_edit` carve row whose only declared edit is
+      # `path constants` at carve line 30, and a comment naming a retired
+      # sibling is none of RULING OQ-1's three CLOSED classes. Its companion
+      # `tests/test_doxbench_tile_verbs.py` is NOT on the list, so that
+      # sentence is not executed by anything either way.
       #
       # § 3.4 SLICE S3 adds `tests/test_view_registry.py`, on exactly the same
       # footing as its three neighbours and for the same reason: it asserts a
@@ -238,6 +233,107 @@ jobs:
       # `views/staging-workbench-model.js` under the `node` the runner already has
       # (skipped, never failed, where node is absent), exactly as
       # `tests/test_view_registry.py` and `tests/test_split_route_tails.py` do.
+      # § 3.4 SLICE S8 UN-NARROWS THIS LIST FOR THE WEB SUITES, which is the
+      # half of RULED Q-L5 (b′) this slice was scoped to lift: the note's § 5
+      # S8 row says the narrowings "lift FOR THE WEB SUITES", and the S2
+      # paragraph above says of the DOM probes that "un-narrowing THAT CLASS OF
+      # TEST is slice S8's job, not S2's". Seventeen carved suites join the ten
+      # shape assertions here — 283 tests become 694 — and every one of them was
+      # run file-by-file under this exact invocation before it was named
+      # (openDox-code `build/s8-receive-web-tests`, measured 2026-09-13 at
+      # python 3.12.3 / pytest 8.4.2). THE FIGURE MOVED TWICE AND BOTH STEPS ARE
+      # THE BASE'S, not this list's — the list has been the same 27 files
+      # throughout. It was 683 when this block was written; +8 are
+      # `tests/test_display_facet.py`'s own, which grew in the S7 BASE this
+      # branch merged (openDox-code#21 `706b533`), giving 691; +3 more are
+      # `tests/test_gate_loop_contributed.py`'s, which grew by 128 lines when
+      # that same merge-forward brought `origin/main` in — 31 test functions
+      # in it at `a7b7ac28`, 34 now — giving 694 at the merged head. A figure
+      # that moves with the base is stated with the base that produced it.
+      #
+      # WHAT THIS LIST STILL IS NOT: `python -m pytest -q` over the tree. That
+      # is measured and it is NOT S8's to deliver — with the root conftest in
+      # play the tree is 1188 errors and 0 passed, and 1126 of those are ONE
+      # line, `src/opendox/serve.py:192`'s `from ideation_dashboard import
+      # serve_openxfactory_lanes`, reached from the autouse
+      # `declared_human_console` fixture (`tests/session_fixtures.py:413` ->
+      # `opendox.cli` -> `opendox.serve`) that `tests/conftest.py` re-exports for
+      # the whole tree. `tests/test_consumer_reach.py`'s `STILL_REACHING` records
+      # that reach BY NAME and asserts it still fails — "whose rewrite target
+      # exists at neither carve destination" — and RULED Q-L5 (b′)'s own sentence
+      # at the head of this block says the rest of the narrowing stands "until
+      # the BUILD arc (split-opendox § 3.5/3.6) inverts the openDox -> openXdox
+      # dependency". So the remaining narrowing is the BUILD arc's to lift, on
+      # the record, rather than bought here with a `--continue-on-collection-
+      # errors` or an ignore list.
+      #
+      # SIX SUITES S8 REPAIRED TO GET HERE (Copilot review of #23, accurate —
+      # this block said four and omitted two), all of them the same defect
+      # class: a PATH CONSTANT the carve's `import rewrites` edit never
+      # rewrote, each declared on its own row in the paired openxFactory
+      # annotation. Measured file-by-file under this workflow's own
+      # invocation, before and after:
+      #
+      #   tests/test_outline_model.py               48 failed  -> 47 passed, 1
+      #       `parents[2]`, the openDox-code #19 conftest-depth defect one file
+      #       over. The one left needs `doc_health`, openxFactory-only.
+      #   tests/test_doxbench_view.py               73 errors  -> 124 passed
+      #       `tests/ideation-dashboard/fixtures/`, the pre-carve location.
+      #   tests/test_doxbench_knowledge.py          21 failed  -> 56 passed
+      #   tests/test_doxbench_document_abstract.py   2 failed  -> 54 passed
+      #   tests/test_doxbench_memory_gateway.py     12 failed  -> 3 failed
+      #       `scripts/ideation_dashboard/<module>.py`, the pre-carve module
+      #       path; the three left read openxFactory's own `openspec/` tree.
+      #   tests/test_bullseye_widget.py              5 failed  -> 4 failed
+      #       the same pre-carve read, for `serve.py`.
+      #
+      # TWO OF THE SIX ARE NAMED IN THE LIST BELOW and FOUR ARE NOT (Copilot
+      # review of this head, accurate — this block said three and three, and
+      # the list below names two). The two named are the two the repair leaves
+      # wholly green: `test_doxbench_knowledge.py` and
+      # `test_doxbench_document_abstract.py`. The four omitted are
+      # `test_outline_model.py`, `test_doxbench_memory_gateway.py`,
+      # `test_bullseye_widget.py` and `test_doxbench_view.py`, and the reason
+      # for each is measured rather than asserted. The first three each keep a
+      # residue this slice does not own (`doc_health` and openxFactory's
+      # `openspec/` tree — the BUILD arc's; and three `test_bullseye_widget.py`
+      # quotations of `views/staging-workbench.js` / `swb-create.js` lines S5
+      # rewrote). `test_doxbench_view.py` is the fourth and the one worth
+      # stating in full: with
+      # ONLY the S8 path repair applied it is 136 PASSED at `main`, and on this
+      # branch it is 124 passed with 11 errors and 1 failure — every one of the
+      # twelve a shell behaviour S5 and S7 changed under a suite nobody has run
+      # since the carve ("timed out waiting for the canvas textareas"). So the
+      # repair is complete and the residue is the authoring slices'; naming the
+      # file here would put the required check red for their defect, and this
+      # block records the measurement instead.
+      #
+      # `--noconftest` STAYS, and it is why this list is a list. The root
+      # conftest's `collect_ignore` and `tests/conftest.py`'s autouse fixtures are
+      # both written for a tree that can import `opendox.serve`; until it can,
+      # a file named here has to stand on its own, and each of the seventeen
+      # does.
+      #
+      # FIVE MORE SUITES COLLECT CLEANLY UNDER `--noconftest` AND ARE STILL NOT
+      # NAMED, for two different reasons — collecting is what the tree blocker
+      # denies the rest, and it is not by itself a reason to name a file.
+      # Measured at this head, each run alone under this workflow's own
+      # invocation:
+      #
+      #   ALL-SKIP, so naming them would add no assertion the check can fail on
+      #   and would advertise coverage that is not running:
+      #     tests/test_doxbench_bridge_live.py        8 skipped
+      #     tests/test_openprofiler_broker_e2e.py     3 skipped
+      #
+      #   A STANDING RED THIS SLICE DOES NOT OWN (§ 3 of the S8 inventory), so
+      #   naming one would put the required check red for another act's defect:
+      #     tests/test_boundary.py            1 failed,  27 passed
+      #     tests/test_provider_boundary.py  11 failed,  17 passed
+      #     tests/test_workbench.py           2 failed,  26 passed, 3 skipped
+      #
+      # `test_provider_boundary.py`'s is itself a cross-leg reach worth naming:
+      # it asserts that seven per-module scan suites still exist BY FILENAME,
+      # and the carve sent all seven to openXdox-code.
       - name: pytest
         run: >-
           python -m pytest -q
@@ -251,4 +347,21 @@ jobs:
           tests/test_source_core_arm.py
           tests/test_gate_loop_contributed.py
           tests/test_display_facet.py
+          tests/test_account_menu_dom.py
+          tests/test_doc_wheel.py
+          tests/test_doxbench_accessibility.py
+          tests/test_doxbench_context_panes.py
+          tests/test_doxbench_document_abstract.py
+          tests/test_doxbench_hash.py
+          tests/test_doxbench_knowledge.py
+          tests/test_doxbench_privacy.py
+          tests/test_doxbench_proposal_discard.py
+          tests/test_doxbench_proposals.py
+          tests/test_doxbench_state.py
+          tests/test_doxbench_thread_switch.py
+          tests/test_doxbench_workspace.py
+          tests/test_intent_binding_dom.py
+          tests/test_lens_labels_at_scale.py
+          tests/test_smoke_signals.py
+          tests/test_wheel_paint_and_reach.py
           --noconftest

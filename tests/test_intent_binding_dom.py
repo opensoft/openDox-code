@@ -30,22 +30,26 @@ actually loading the module graph and, where useful, mounting and inspecting
 the resulting tree — so a passing test means the behaviour exists, not that the
 code looks right.
 
-NOT PART OF `.github/workflows/validate.yml`'s EXPLICIT LIST, and not for being
-a node-driven DOM probe of a `web/` view (opensoft/openDox-code#24, Copilot):
-`tests/test_view_registry.py`, `tests/test_split_route_tails.py` and
-`tests/test_gate_loop_contributed.py` are all ON that list and all drive real
-`web/` modules under node behind a DOM stand-in of their own. The list is an
-allow-list, admitted file by file, and the reason `validate.yml` records for
-every entry is the same: the file is the SHAPE assertion RULED Q-L5 (b′) leaves
-running while the carved suite waits on the BUILD arc, or without it the
-slice's ruled contract would be only DESCRIBED. Slice S2's contract already has
-its running proof there — `tests/test_intent_binding_shape.py`, which goes red
-if the intent reach is deleted rather than routed through the binding. What
-THIS file adds is the seam's BEHAVIOUR, and three of its six cases have to
-write a stand-in for the never-carried `views/intent-feed.js` to measure it. So
-it sits where S2 left it: present in the tree, runnable by hand or by a future
-un-narrowed `validate`, and skipped outright where `node` is not on PATH.
-Admitting behavioural probes as a CLASS is slice S8's job, not S2's.
+IN `.github/workflows/validate.yml`'s explicit list SINCE SLICE S8, and that
+is a change from what this header said at S2. It was written narrowed out of
+the required check with its siblings — every DOM probe of `web/`, including
+`test_intent_tray_dom.py` and `test_wheel_verbs_dom.py` — under RULED Q-L5
+(b′), until the BUILD arc inverts the openDox -> openXdox dependency — and it
+said *"un-narrowing that class of test is slice S8's job, not S2's."* **S8 has
+done that job for this file** (Copilot review of openDox-code#23): it is named
+in the workflow's list and the required check runs it.
+
+**THE TWO SIBLINGS ARE NOT OMITTED ANY MORE, THEY ARE RETIRED**, and the
+deletion is in this commit. RULED `openxFactory#656` comment 5656343213 (Brett
+Heap, 2026-09-13, citing RULED OQ-F) retired both at this leg: both drove
+`views/intent-feed.js`, which STAYED at openxFactory and arrived at NEITHER
+leg. S8's own reason for leaving them out of the list — neither is among the
+suites S8 repairs and each is red alone at that head, so naming either would
+have put the required check red for another act's defect — was the right answer
+to the question S8 could ask, and the ruling answers a different one: not
+whether the list should name them, but whether they should be here at all.
+Skipped outright where `node` is not on PATH, which is why naming this file is
+safe on a runner that has none.
 """
 
 from __future__ import annotations
@@ -57,17 +61,19 @@ from pathlib import Path
 
 import pytest
 
-# Computed locally rather than imported from `conftest.REPO_ROOT`
-# (`tests/conftest.py`'s own `HERE.parent.parent`, a formula this leg
-# inherited byte-identical from `tests/ideation-dashboard/conftest.py` at
-# one directory level deeper than it now sits, so it resolves ONE LEVEL
-# ABOVE this repository today — latent and, so far, harmless, because
-# nothing that depends on it currently loads outside `--noconftest` either,
-# for the unrelated reason `.github/workflows/validate.yml` narrows around
-# (RULED Q-L5 (b′): `session_fixtures.py` -> `opendox.session_pr` ->
-# `opendox.serve` -> the still-present `ideation_dashboard` back-import).
+# Computed locally rather than imported from `conftest.REPO_ROOT`, and the
+# reason has CHANGED since this comment was written (Copilot review of
+# openDox-code#23). It used to be that `tests/conftest.py` carried
+# `HERE.parent.parent` — the formula this leg inherited byte-identical from
+# `tests/ideation-dashboard/conftest.py`, at one directory level deeper than
+# it now sits, so it resolved ONE LEVEL ABOVE this repository. **That is
+# fixed**: `tests/conftest.py` reads `HERE.parent` today (openDox-code#19,
+# `3954d78`, the RULED Q-L7 (a) `:25` depth fix the carve manifest declares),
+# so `conftest.REPO_ROOT` is this repository. The local computation stays
+# anyway, because this file runs under `--noconftest` in the required check
+# and must not depend on a conftest being imported at all;
 # `tests/test_leg_shape.py`'s own `Path(__file__).resolve().parents[1]` is
-# the correct, self-contained pattern this file mirrors instead.
+# that same self-contained pattern.
 ROOT = Path(__file__).resolve().parents[1]
 
 NODE = shutil.which("node")
