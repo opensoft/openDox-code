@@ -28,7 +28,15 @@ services:
       POSTGRES_USER: ${OPENDOX_PG_USER:-opendox}
       # Supplied at run time by the platform or the local `.env`.
       POSTGRES_PASSWORD: ${OPENDOX_PG_PASSWORD}
-      OPENDOX_RUNTIME_PG_USER: ${OPENDOX_RUNTIME_PG_USER:-opendox_runtime}
+      # THE ROLE `init-runtime-role.sh` CREATES, from the ONE name `.env`
+      # declares — `OPENDOX_RUNTIME_PG_ROLE`, which is also the runtime setting
+      # the migration narrows and the user in `OPENDOX_DATABASE_URL`. This used
+      # to read a second `.env` variable of its own, so an operator who set the
+      # documented setting created one role and narrowed another and the real
+      # served role kept its write on the ledger (Copilot review of
+      # openDox-code#25). The container-side name stays what the init script
+      # reads.
+      OPENDOX_RUNTIME_PG_USER: ${OPENDOX_RUNTIME_PG_ROLE:-opendox_runtime}
       OPENDOX_RUNTIME_PG_PASSWORD: ${OPENDOX_RUNTIME_PG_PASSWORD}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
@@ -78,7 +86,13 @@ services:
       # and not a bind mount: these are repositories the runtime creates and
       # owns, and losing them is losing documents — the one thing RULING Q1's
       # "the database is disposable" does NOT say about this stack.
-      - project_repositories:/var/lib/opendox/projects
+      #
+      # AND THE TARGET IS THE CONFIGURED ROOT. `OPENDOX_PROJECT_REPOSITORY_ROOT`
+      # is interpolated above and was NOT interpolated here, so an operator who
+      # set the documented root wrote repositories outside the volume — onto a
+      # read-only filesystem, or into a layer that dies with the container
+      # (Copilot review of openDox-code#25). One expression, both places.
+      - project_repositories:${OPENDOX_PROJECT_REPOSITORY_ROOT:-/var/lib/opendox/projects}
     networks:
       - internal
     restart: unless-stopped
@@ -92,7 +106,13 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/livez',timeout=3).status==200 else 1)"
+        # THE CONFIGURED PORT, not a literal 8080. The service accepts
+        # `OPENDOX_BIND_PORT`, and a healthcheck that always probed 8080 made
+        # any other configured port a permanently unhealthy container — the
+        # server listening and the orchestrator restarting it (Copilot review
+        # of openDox-code#25). `${VAR:-default}` is interpolated by compose,
+        # so the value and the probe cannot drift.
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:${OPENDOX_BIND_PORT:-8080}/livez',timeout=3).status==200 else 1)"
       interval: 15s
       timeout: 5s
       retries: 5
@@ -130,8 +150,9 @@ services:
       OPENDOX_MIGRATION_DATABASE_URL: ${OPENDOX_MIGRATION_DATABASE_URL}
       OPENDOX_MIGRATIONS_DIR: ${OPENDOX_MIGRATIONS_DIR:-migrations}
       # A ROLE NAME, not a credential: after applying, the runner narrows this
-      # role's rights on the migration ledger to SELECT.
-      OPENDOX_RUNTIME_PG_ROLE: ${OPENDOX_RUNTIME_PG_USER:-opendox_runtime}
+      # role's rights on the migration ledger to SELECT. The SAME `.env` name
+      # the Postgres service creates the role from — see that service.
+      OPENDOX_RUNTIME_PG_ROLE: ${OPENDOX_RUNTIME_PG_ROLE:-opendox_runtime}
     command: ["opendox-runtime", "runtime", "migrate"]
     networks:
       - internal

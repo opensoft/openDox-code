@@ -137,3 +137,23 @@ def test_migrations_after_the_canonical_one_are_additive_only() -> None:
 def test_reversibility_is_computed_from_the_sidecar_and_not_assumed() -> None:
     for migration in migrations.discover_migrations(MIGRATIONS):
         assert migration.reversible == migration.down_path.is_file()
+
+
+def test_discovery_accepts_only_the_filename_shape_this_repository_declares(
+        tmp_path) -> None:
+    """The regex was `\\d+_.+`, which is broader than the contract above.
+
+    A configured directory could therefore hold `1_custom.sql` or
+    `0001_Custom Name.sql` — files this repository's own rule forbids — and the
+    runner would apply them, ordered by a version that is not the pinned
+    four-digit form (Copilot review of openDox-code#25, round 6, suppressed).
+    """
+    from opendox.runtime.migrations import discover_migrations
+
+    for name in ("0001_identity.sql", "0002_migration_state.sql",
+                 "1_custom.sql", "0003_Custom Name.sql", "0004_UPPER.sql",
+                 "0005_trailing_.sql", "00006_too_many.sql",
+                 "0007-dashed.sql"):
+        (tmp_path / name).write_text("select 1;\n", encoding="utf-8")
+    discovered = [f"{m.version}_{m.name}" for m in discover_migrations(tmp_path)]
+    assert discovered == ["0001_identity", "0002_migration_state"], discovered

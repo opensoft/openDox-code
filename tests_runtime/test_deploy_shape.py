@@ -34,7 +34,7 @@ ENV_EXAMPLE = COMPOSE / ".env.example"
 #: `OPENDOX_*` in `.env.example` is a setting somebody forgot to declare.
 COMPOSE_ONLY = frozenset({
     "OPENDOX_PG_USER", "OPENDOX_PG_PASSWORD", "OPENDOX_PG_DB",
-    "OPENDOX_RUNTIME_PG_USER", "OPENDOX_RUNTIME_PG_PASSWORD",
+    "OPENDOX_RUNTIME_PG_PASSWORD",
     "OPENDOX_IMAGE", "OPENDOX_SOURCE_REVISION",
 })
 
@@ -627,3 +627,104 @@ def test_the_image_comment_does_not_claim_a_layer_cache_it_does_not_have() -> No
         "the comment claims a dependency-layer cache this Dockerfile does not "
         "have; either split the install or keep the comment honest")
     assert "REINSTALLED ON ANY SOURCE CHANGE" in claim
+
+
+# -- Copilot's sixth round on #25 --------------------------------------------
+
+
+def test_the_served_roles_name_is_declared_once_and_reaches_both_services(
+) -> None:
+    """Two names for one role is how creation and narrowing come apart.
+
+    `.env.example` declared `OPENDOX_RUNTIME_PG_USER` (which created the role)
+    AND `OPENDOX_RUNTIME_PG_ROLE` (which the runtime reads and the migration
+    narrows), while the compose file read only the first — so setting the
+    documented one changed nothing, and setting both differently created one
+    role and narrowed another, leaving the real served role able to rewrite the
+    migration ledger (Copilot review of openDox-code#25, round 6).
+    """
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    declarations = [line.split("=", 1)[0] for line in text.splitlines()
+                    if line.strip() and not line.startswith("#") and "=" in line]
+    assert PREFIX + "RUNTIME_PG_USER" not in declarations, (
+        "a second name for the served role is back in .env.example")
+    assert declarations.count(PREFIX + "RUNTIME_PG_ROLE") == 1
+
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    creates = compose["services"]["postgres"]["environment"][
+        PREFIX + "RUNTIME_PG_USER"]
+    narrows = compose["services"]["migrate"]["environment"][
+        PREFIX + "RUNTIME_PG_ROLE"]
+    # Both services interpolate the SAME `.env` name, whatever each container's
+    # own variable is called.
+    assert "${" + PREFIX + "RUNTIME_PG_ROLE" in creates
+    assert "${" + PREFIX + "RUNTIME_PG_ROLE" in narrows
+    served_dsn = compose["services"]["opendox"]["environment"][
+        PREFIX + "DATABASE_URL"]
+    assert "${" + PREFIX + "DATABASE_URL" in served_dsn, (
+        "the served DSN must stay an operator-supplied value; the role name in "
+        "it is the same role these two derive")
+
+
+def test_the_compose_probe_and_the_repository_mount_follow_their_settings(
+) -> None:
+    """A setting the deployment does not follow is a setting that breaks it.
+
+    The healthcheck probed a literal 8080 while the service accepts
+    `OPENDOX_BIND_PORT`, so any other configured port made the container
+    permanently unhealthy and eligible for restart with the server listening;
+    and the repositories volume mounted a literal path while
+    `OPENDOX_PROJECT_REPOSITORY_ROOT` is interpolated into the environment, so
+    a changed root wrote documents outside the volume — onto the read-only
+    filesystem or into a layer that dies with the container (Copilot review of
+    openDox-code#25, round 6, suppressed).
+    """
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    service = compose["services"]["opendox"]
+    probe = " ".join(str(part) for part in service["healthcheck"]["test"])
+    assert "${" + PREFIX + "BIND_PORT" in probe, (
+        "the healthcheck names a literal port; a configured one is unhealthy")
+    assert "localhost:8080/livez" not in probe
+
+    mounts = service["volumes"]
+    assert any("${" + PREFIX + "PROJECT_REPOSITORY_ROOT" in str(m)
+               for m in mounts), (
+        "the repositories volume mounts a literal path while the root is "
+        "configurable; the two must be one expression")
+
+
+def test_the_kubernetes_repository_root_equals_the_mount_it_is_claimed_at(
+) -> None:
+    """A volumeMount path cannot read a ConfigMap, so the root is FIXED here.
+
+    The Deployment exposed the root as an environment value while the PVC
+    stayed at a literal path, so a changed root bypassed the claim (Copilot
+    review of openDox-code#25, round 6, suppressed). In this shape the two are
+    one value, held equal here, and an overlay moves both in one patch.
+    """
+    deployment = _load_yaml(KUBERNETES / "base" / "opendox-deployment.yaml")
+    container = _containers(deployment)[0]
+    root = next(e for e in container["env"]
+                if e["name"] == PREFIX + "PROJECT_REPOSITORY_ROOT")["value"]
+    mount = next(m for m in container["volumeMounts"]
+                 if m["name"] == "project-repositories")["mountPath"]
+    assert root == mount, (
+        f"the configured root {root!r} is not the path the claim is mounted "
+        f"at ({mount!r}); repository creation would bypass the volume")
+
+
+def test_the_readiness_probe_allows_the_endpoints_own_budgets() -> None:
+    """Kubernetes defaults `timeoutSeconds` to ONE.
+
+    `/readyz` can spend the database checkout timeout plus the broker's JWKS
+    HTTP timeout before it answers, so a healthy but slow dependency was
+    reported unready and every cut probe left its request running in the
+    process (Copilot review of openDox-code#25, round 6, suppressed).
+    """
+    deployment = _load_yaml(KUBERNETES / "base" / "opendox-deployment.yaml")
+    probe = _containers(deployment)[0]["readinessProbe"]
+    assert probe["timeoutSeconds"] >= 10, (
+        "the readiness probe's timeout is under the endpoint's own dependency "
+        "budgets; a slow dependency reads as an unready pod")
+    assert probe["timeoutSeconds"] <= probe["periodSeconds"], (
+        "a probe that can outlive its own period overlaps itself")
