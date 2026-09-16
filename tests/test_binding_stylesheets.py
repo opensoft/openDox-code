@@ -100,6 +100,34 @@ GATE_EXCLUSIVE = (
     "swb-sessiondescriptors",
 )
 
+#: THE ORPHAN REGISTER — every class `styles.css` still declares in a selector
+#: that NO file of openDox's own bundle names, MEASURED after the extraction.
+#: This is the tuple-free half of the proof, and it is the one that runs in a
+#: checkout with no assembly (Copilot review, round 1: the re-derivation test
+#: SKIPS here, so a gate-only class this file's `GATE_EXCLUSIVE` never heard of
+#: could be left behind and nothing would say so). A class openDox does not
+#: name is either one of these declared orphans or a rule that belongs at
+#: another leg — there is no third kind — so a NEW one fails, whatever tuple
+#: does or does not mention it.
+#:
+#: WHAT THEY ARE, and none of them is this act's: 6 `.intentchip*` are the
+#: hosted intent feed's, whose builder (`views/intent-feed.js`) is RULED OQ-F
+#: `not_moved` and never arrived, so `views/intent-binding.js` delegates to an
+#: absent module; the rest are rules whose builders the carve left elsewhere or
+#: which the bundle stopped using. They are REGISTERED here rather than swept:
+#: a register that names 28 is a measurement, and a test that skipped them
+#: silently was the defect.
+STYLES_CSS_ORPHANS = (
+    "filteradd", "gridwrap", "intentchip", "intentchip-applied",
+    "intentchip-error", "intentchip-pending", "intentchip-refused",
+    "intentchip-stalled", "managepane", "sigrid-collab", "sigrid-row",
+    "sigrid-rowlab", "swb-bar", "swb-bar-fill", "swb-completeness",
+    "swb-inheritedhead", "swb-name", "swb-nobar", "swb-row",
+    "swb-row-selected", "swb-rowinfo", "swb-score", "swb-sectionhead",
+    "swb-sectionlabel", "swb-sectionnote", "swb-signals", "swb-unresolved",
+    "swb-where",
+)
+
 #: The ONE openDox class a contributed sheet names as its HOST CONTEXT:
 #: `.swb-draftchrome .swb-cactions` places the create affordance's action row
 #: inside openDox's own draft chrome. Declared, so it is a known coupling rather
@@ -163,6 +191,21 @@ def _selector_classes(css: str) -> set[str]:
     return out
 
 
+#: A CUSTOM PROPERTY IS DECLARED WHEREVER A DECLARATION MAY START, not only at
+#: the beginning of a line (Copilot review, round 1). This read
+#: `^\s*(--st-…)\s*:` under `re.M`, and every sheet in this bundle is written
+#: one rule per line — `.x { --st-proposed: red; }` declares the token after a
+#: `{`, and a second declaration after a `;`, and the guard saw neither. The
+#: contexts a declaration can follow are the start of the text, `{` and `;`;
+#: `var(--st-…)` is a READ and is bounded by `(`, which is none of them.
+_ST_DECLARATION = re.compile(r"(?:^|[{;])\s*(--st-[A-Za-z0-9_-]+)\s*:")
+
+
+def _declared_st_tokens(css: str) -> list[str]:
+    """Every `--st-*` this stylesheet WRITES. Comments must already be blanked."""
+    return _ST_DECLARATION.findall(css)
+
+
 def _assembled_views() -> Path | None:
     """`views/` if an assembly has placed the contributed modules there."""
     views = WEB / "views"
@@ -217,8 +260,13 @@ import { viewBinding, injectBindingStyles, ViewBindingError }
 
 const out = { refusals: [], injected: [], deduped: null, warned: null };
 
+// `null` IS IN THIS LIST DELIBERATELY (Copilot review, round 1): the Python
+// seam refuses `styles=None` as a non-string, and a client that accepted it
+// and normalized it to "" would be § 4.1's "one vocabulary, both halves"
+// broken for the second time on this module. Omission and "" are the two
+// absent forms and `null` is neither.
 for (const bad of ["/views/gate.css", "https://cdn.example/g.css",
-                   "./views/gate.js", "./views/../x.css", 7]) {
+                   "./views/gate.js", "./views/../x.css", 7, null]) {
   try {
     viewBinding({ id: "gate.bar", region: "viewer-gatebar",
                   module: "./views/gate.js", entry: "mountGateBar",
@@ -231,6 +279,10 @@ for (const bad of ["/views/gate.css", "https://cdn.example/g.css",
 out.absent = viewBinding({ id: "gate.lens", region: "lens-gate",
                            module: "./views/gate-lens.js", entry: "mountLensGate",
                            view_class: "B" }).styles;
+out.absentEmpty = viewBinding({ id: "gate.lens", region: "lens-gate",
+                                module: "./views/gate-lens.js",
+                                entry: "mountLensGate", view_class: "B",
+                                styles: "" }).styles;
 
 // A DOM stub, for `test_view_registry.py`'s reason: this bundle ships no DOM
 // implementation and the injector's whole contract is which element it appends
@@ -275,8 +327,9 @@ def test_the_client_half_validates_and_injects(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    assert out["refusals"] == ["refused"] * 5, out["refusals"]
+    assert out["refusals"] == ["refused"] * 6, out["refusals"]
     assert out["absent"] == ""
+    assert out["absentEmpty"] == ""
     # ONE link for two bindings naming one sheet, and none for the binding that
     # declares no sheet.
     assert out["deduped"] == 1, out["injected"]
@@ -309,6 +362,35 @@ def test_styles_css_declares_no_selector_only_the_gate_loop_uses() -> None:
         "sheet (openxFactory#656 comment 5648049748)")
     # openDox's own half of the one SPLIT rule stayed.
     assert ".filterpop[hidden]" in STYLES.read_text(encoding="utf-8")
+
+    # AND THE PROOF THAT DOES NOT READ `GATE_EXCLUSIVE` AT ALL, which is the
+    # one that runs in a checkout with no assembly: every class this file still
+    # declares is named by openDox's own bundle, or is one of the DECLARED
+    # orphans. A gate-only selector left behind is named by neither — and a
+    # tuple that forgot it cannot hide it, because this assertion never reads
+    # the tuple.
+    own = "\n".join(p.read_text(encoding="utf-8")
+                    for p in sorted((WEB / "views").glob("*.js")))
+    own += (WEB / "app.js").read_text(encoding="utf-8")
+    own += (WEB / "index.html").read_text(encoding="utf-8")
+
+    def named_by_opendox(token: str) -> bool:
+        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])",
+                     own):
+            return True
+        # `"swb-pane-" + kind` and `` `x-${kind}` `` name a class no literal
+        # search can see; a PREFIX the bundle concatenates onto counts.
+        return any(token.startswith(prefix) for prefix in re.findall(
+            r"[\"\'`\s]([A-Za-z_][A-Za-z0-9_-]*-)(?:[\"\'`]|\$\{)", own))
+
+    unnamed = sorted(t for t in declared if not named_by_opendox(t))
+    assert unnamed == sorted(STYLES_CSS_ORPHANS), (
+        "the set of classes `styles.css` declares and openDox's own bundle does "
+        "not name has changed. New: "
+        f"{sorted(set(unnamed) - set(STYLES_CSS_ORPHANS))}; gone: "
+        f"{sorted(set(STYLES_CSS_ORPHANS) - set(unnamed))}. A NEW one is either "
+        "a rule this extraction should have taken to the binding that owns it, "
+        "or a new orphan to register here with its reason")
 
 
 def test_the_design_tokens_and_the_shared_selectors_stayed() -> None:
@@ -343,14 +425,56 @@ def test_the_gate_exclusive_set_is_re_derived_where_the_modules_are_present() ->
     own_text = "\n".join(p.read_text(encoding="utf-8") for p in own)
     own_text += (WEB / "app.js").read_text(encoding="utf-8")
     own_text += (WEB / "index.html").read_text(encoding="utf-8")
+
+    # THE SET IS DERIVED FROM THE MODULES AND THE STYLESHEET, not read off the
+    # tuple (Copilot review, round 1). Checking only that every DECLARED token
+    # is named by the six answers a question nobody asked: a gate-only class
+    # this tuple forgot would be named by the six, left behind in `styles.css`,
+    # and invisible to both halves of the old assertion. The derivation is the
+    # census tool's own: every class token `styles.css` still declares in a
+    # SELECTOR, classified by which side of the seam names it, with the
+    # concatenation forms (`"disposebtn dispose-" + v.outcome`) counted by
+    # PREFIX because no literal search can see a name never written down.
+    def names(token: str, corpus: str) -> bool:
+        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])",
+                     corpus):
+            return True
+        return any(token.startswith(prefix) for prefix in
+                   re.findall(r"[\"\'`\s]([A-Za-z_][A-Za-z0-9_-]*-)(?:[\"\'`]|\$\{)",
+                              corpus))
+
+    still_declared = _selector_classes(STYLES.read_text(encoding="utf-8"))
+    derived_leftovers = sorted(
+        token for token in still_declared
+        if names(token, gate_text) and not names(token, own_text))
+    assert derived_leftovers == [], (
+        "these classes are named by openXdox's six contributed modules and by "
+        f"no file of openDox's own bundle, yet `styles.css` still declares a "
+        f"selector for them: {derived_leftovers}. RULED Q7 sends them to the "
+        "binding's own sheet — and this set is DERIVED from the modules, so it "
+        "catches a class `GATE_EXCLUSIVE` never heard of")
+
+    # AND THE DECLARED SET IS STILL CHECKED AGAINST THE MODULES, because the
+    # derivation above can only see what `styles.css` still declares: a token in
+    # the tuple that no contributed module names would be a stale entry, and the
+    # tuple is what this suite asserts against in a leg with no assembly.
     for token in GATE_EXCLUSIVE:
-        stem = token.rsplit("-", 1)[0] + "-"
-        named = re.search(rf"(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])",
-                          gate_text) or re.search(re.escape(stem) + r'"', gate_text)
-        assert named, f"{token} is named by none of the six contributed modules"
-        assert not re.search(
-            rf"(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])", own_text), \
+        assert names(token, gate_text), \
+            f"{token} is named by none of the six contributed modules"
+        assert not names(token, own_text), \
             f"{token} is named by openDox's own bundle and must not have left"
+
+
+def test_the_design_token_guard_sees_an_inline_declaration() -> None:
+    """The guard above is only worth running if it catches the shape these
+    sheets are actually written in — one rule per line, so a declaration
+    follows a `{` or a `;` and never a newline. Asserted here rather than
+    trusted, because a guard that cannot fail is a comment."""
+    assert _declared_st_tokens(".x { --st-proposed: red; }") == ["--st-proposed"]
+    assert _declared_st_tokens("a{color:red;--st-captured:blue}") == ["--st-captured"]
+    assert _declared_st_tokens("  --st-organized: green;") == ["--st-organized"]
+    # A READ is not a declaration, which is the whole distinction RULED Q7 draws.
+    assert _declared_st_tokens(".x { color: var(--st-proposed); }") == []
 
 
 def test_no_contributed_sheet_declares_a_design_token() -> None:
@@ -367,5 +491,74 @@ def test_no_contributed_sheet_declares_a_design_token() -> None:
                     "bundle (RULED Q5); openDox ships none of its own")
     for sheet in sheets:
         css = _blank_css_comments(sheet.read_text(encoding="utf-8"))
-        written = re.findall(r"^\s*(--st-[A-Za-z0-9_-]+)\s*:", css, re.M)
+        written = _declared_st_tokens(css)
         assert written == [], f"{sheet.name} declares {written}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed on this runner")
+def test_the_generic_mount_pass_puts_the_sheet_in_the_document_it_mounts_into(
+        tmp_path: Path) -> None:
+    """THE SHEET FOLLOWS THE PANEL (Copilot review, round 1).
+
+    `mountContributedViews` chooses its own `document` — a caller may mount into
+    an iframe, a probe document or a test one — and it used to resolve each
+    binding with `resolveBinding(binding)`, which forwards nothing. The panel
+    then landed in the supplied document and its stylesheet in the global one,
+    or nowhere at all where there is no global: a binding mounted UNSTYLED, with
+    nothing refused and nothing logged, which is the failure class this whole
+    seam exists to replace.
+
+    Driven against the REAL registry in a throwaway bundle, because the claim is
+    about which document the `<link>` reaches and no source read can make it.
+    """
+    web = tmp_path / "web"
+    (web / "views").mkdir(parents=True)
+    (web / "package.json").write_text('{"private": true, "type": "module"}\n',
+                                      encoding="utf-8")
+    (web / "views" / "view_extension.js").write_bytes(REGISTRY_JS.read_bytes())
+    (web / "views" / "panel.js").write_text(
+        "export function mount(host) { host.mounted = true; return 'ok'; }\n",
+        encoding="utf-8")
+    (web / "views" / "panel.css").write_text(".p { color: red; }\n",
+                                             encoding="utf-8")
+
+    source = """
+import { collectViewBindings, mountContributedViews }
+  from %(registry)s;
+const links = [];
+const host = { id: "view-docs", appendChild() {} };
+const doc = {
+  getElementById: (id) => (id === "view-docs" ? host : null),
+  head: { appendChild(node) { links.push(node); } },
+  body: { appendChild() { throw new Error("body is never a contract surface"); } },
+  createElement: (tag) => ({ tag, attrs: {},
+                             setAttribute(k, v) { this.attrs[k] = v; },
+                             appendChild() {} }),
+};
+const bindings = collectViewBindings([{ views: () => [
+  { id: "panel.one", region: "view-docs", module: "./views/panel.js",
+    entry: "mount", view_class: "B", optional: true,
+    styles: "./views/panel.css" },
+]}]);
+await mountContributedViews(bindings, {}, {}, { document: doc });
+console.log(JSON.stringify({
+  mounted: host.mounted === true,
+  links: links.map((n) => [n.tag, n.rel, n.href, n.attrs["data-view-binding"]]),
+}));
+"""
+    script = tmp_path / "harness.mjs"
+    script.write_text(
+        source % {"registry": json.dumps((web / "views" / "view_extension.js").as_uri())},
+        encoding="utf-8")
+    proc = subprocess.run([NODE, str(script)], capture_output=True, text=True,
+                          timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert out["mounted"] is True
+    # ONE link, in the SUPPLIED document's head — not the global one, and not
+    # `document.body` (RULED Q8), which this stub throws on.
+    assert len(out["links"]) == 1, out["links"]
+    tag, rel, href, owner = out["links"][0]
+    assert (tag, rel, owner) == ("link", "stylesheet", "panel.one")
+    assert href.endswith("/views/panel.css"), href

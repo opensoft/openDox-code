@@ -200,7 +200,14 @@ export function viewBinding(spec) {
       + "binding's module, never a callable — the manifest crosses a process "
       + "boundary as JSON.");
   }
-  if (b.styles !== undefined && b.styles !== null && b.styles !== "") {
+  // OMITTED AND `""` ARE THE TWO ABSENT FORMS, AND `null` IS NEITHER (Copilot
+  // review, round 1). This guard read `!== null` as well, which let a malformed
+  // manifest through here and normalized it to `""` — while the server half's
+  // `ViewBinding.__post_init__` refuses `styles=None` as a non-string. § 4.1's
+  // rule for this seam is one vocabulary in BOTH halves, and it was written
+  // after `_ENTRY` was found to mean two different things on the two sides; a
+  // second instance of exactly that defect is not one to leave.
+  if (b.styles !== undefined && b.styles !== "") {
     if (typeof b.styles !== "string" || !SHEET.test(b.styles)
         || b.styles.split("/").includes("..")) {
       refuse("view binding " + JSON.stringify(b.id) + " names styles "
@@ -271,10 +278,11 @@ export function viewBinding(spec) {
     routes: Object.freeze(routes.slice()),
     requires: Object.freeze(requires.slice()),
     optional,
-    // RULED Q7. Normalized to "" so every reader sees one absent-shape rather
-    // than three (`undefined`, `null`, `""`), the same normalization `requires`
-    // and `optional` above already take.
-    styles: b.styles === undefined || b.styles === null ? "" : b.styles,
+    // RULED Q7. Normalized to "" so every reader sees ONE absent shape rather
+    // than two (`undefined` and `""`), the same normalization `requires` and
+    // `optional` above already take. `null` is NOT normalized here — it is
+    // refused above, because the server half refuses it.
+    styles: b.styles === undefined ? "" : b.styles,
     mount: b.mount,
     control: b.control,
     // What makes two bindings the SAME panel — never the module. Two bindings
@@ -938,7 +946,13 @@ export async function mountContributedViews(bindings, snapshot, ctx, options) {
     // THE EXACT BINDING, never a re-lookup by id (Copilot review, round 2):
     // ids are unique per REGION, not globally, so `resolveView(bindings, id)`
     // could answer a different region's binding.
-    const resolved = await resolveBinding(binding);
+    // THE PASS'S OWN DOCUMENT TRAVELS WITH THE RESOLUTION (Copilot review,
+    // round 1). This read `resolveBinding(binding)`, so a caller mounting into
+    // an iframe or a test document got its PANEL in that document and its
+    // STYLESHEET in the global one — or nowhere, where there is no global — and
+    // the panel mounted unstyled with nothing refused. The pass has already
+    // chosen `doc` for `regionHost`; the sheet follows the panel.
+    const resolved = await resolveBinding(binding, { document: doc });
     if (!resolved) {
       results.push({ binding, mounted: null, skipped: "absent" });
       continue;
