@@ -35,6 +35,14 @@ jobs:
       # the BUILD arc lands. The root conftest's collect_ignore list (round 2)
       # remains the record of what was already known.
       #
+      # THAT PARAGRAPH IS THE PRE-S8 BASELINE AND IS KEPT AS ONE (Copilot
+      # review of #23): § 3.4 slice S8, at the end of this block, lifts the
+      # narrowing FOR THE WEB SUITES — the half of Q-L5 (b′) the note's § 5 S8
+      # row scopes to this slice — so the sentence above states what this
+      # workflow ran BEFORE that lift, not what it runs now. The other half
+      # stands: what the tree still cannot collect waits on the BUILD arc, and
+      # the closing paragraphs of this block measure exactly what that is.
+      #
       # BUILD SLICE 2 adds `tests/test_consumer_reach.py` beside it, and it is
       # not a carved suite returning early: it asserts the DIRECTION — that
       # openDox's own modules import with `openxdox` unimportable — which is
@@ -77,11 +85,19 @@ jobs:
       # `views/intent-feed.js` (RULED OQ-F `not_moved`) in a static import.
       # `--noconftest` safe and needs no consumer — it reads three files as
       # text and nothing else. The BEHAVIOURAL probe of the same seam
-      # (`tests/test_intent_binding_dom.py`, node-driven) stays off this
-      # list on the same footing as its narrowed siblings
+      # (`tests/test_intent_binding_dom.py`, node-driven) STAYED off this
+      # list at S2, on the same footing as its siblings
       # `test_intent_tray_dom.py` / `test_wheel_verbs_dom.py`: it is a DOM
-      # probe of a `web/` view, and un-narrowing that class of test is
-      # slice S8's job, not S2's.
+      # probe of a `web/` view, and un-narrowing that class of test was
+      # slice S8's job, not S2's. **S8 has since done that job for this one
+      # file** — `tests/test_intent_binding_dom.py` is named in the list below
+      # — and the two siblings are still deliberately omitted, MEASURED and not
+      # assumed: neither is among the six suites this slice repairs, and each
+      # run alone under this exact invocation at this head is RED for a defect
+      # this slice does not own (`test_intent_tray_dom.py` 23 failed,
+      # `test_wheel_verbs_dom.py` 8 failed), so naming either would put the
+      # required check red for another act's work. This paragraph therefore
+      # records S2's state and the list below records today's.
       #
       # § 3.4 SLICE S3 adds `tests/test_view_registry.py`, on exactly the same
       # footing as its three neighbours and for the same reason: it asserts a
@@ -178,12 +194,17 @@ jobs:
       # S8 row says the narrowings "lift FOR THE WEB SUITES", and the S2
       # paragraph above says of the DOM probes that "un-narrowing THAT CLASS OF
       # TEST is slice S8's job, not S2's". Seventeen carved suites join the ten
-      # shape assertions here — 283 tests become 691 — and every one of them was
+      # shape assertions here — 283 tests become 694 — and every one of them was
       # run file-by-file under this exact invocation before it was named
       # (openDox-code `build/s8-receive-web-tests`, measured 2026-09-13 at
-      # python 3.12.3 / pytest 8.4.2). It was 683 when this block was written;
-      # the eight are `tests/test_display_facet.py`'s own, which grew in the S7
-      # BASE this branch has since merged (openDox-code#21 `706b533`) — a figure
+      # python 3.12.3 / pytest 8.4.2). THE FIGURE MOVED TWICE AND BOTH STEPS ARE
+      # THE BASE'S, not this list's — the list has been the same 27 files
+      # throughout. It was 683 when this block was written; +8 are
+      # `tests/test_display_facet.py`'s own, which grew in the S7 BASE this
+      # branch merged (openDox-code#21 `706b533`), giving 691; +3 more are
+      # `tests/test_gate_loop_contributed.py`'s, which grew by 128 lines when
+      # that same merge-forward brought `origin/main` in — 31 test functions
+      # in it at `a7b7ac28`, 34 now — giving 694 at the merged head. A figure
       # that moves with the base is stated with the base that produced it.
       #
       # WHAT THIS LIST STILL IS NOT: `python -m pytest -q` over the tree. That
