@@ -506,8 +506,15 @@ def test_styles_css_declares_no_selector_only_the_gate_loop_uses() -> None:
     # orphans. A gate-only selector left behind is named by neither — and a
     # tuple that forgot it cannot hide it, because this assertion never reads
     # the tuple.
+    # GATE MODULES ARE EXCLUDED HERE TOO (Copilot review, round 7). Where an
+    # assembly HAS placed the six, this glob swept them into openDox's own
+    # corpus, so a gate-only class left behind would read as "named by
+    # openDox" and the orphan check — the half of this proof that runs with no
+    # tuple at all — would have hidden exactly the defect it exists to catch.
+    # The derived check below already excluded them; this one now does.
     own = "\n".join(_blank_code_comments(p.read_text(encoding="utf-8"))
-                    for p in sorted((WEB / "views").glob("*.js")))
+                    for p in sorted((WEB / "views").glob("*.js"))
+                    if p.name not in GATE_MODULES)
     own += _blank_code_comments((WEB / "app.js").read_text(encoding="utf-8"))
     own += _blank_code_comments((WEB / "index.html").read_text(encoding="utf-8"),
                                 html=True)
