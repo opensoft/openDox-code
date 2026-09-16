@@ -382,7 +382,14 @@ jobs:
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
       #              branch names, the sixth being the adapter conformance
-      #              suite described just above.
+      #              suite described just above. (Copilot's review of #26 read
+      #              this line against a PR description that still said 108,
+      #              which was the figure two heads earlier; the description is
+      #              corrected and both numbers now name their own head.)
+      #  148 passed  at `build/3-6-repository-act` `2f518e5f` (same day, same
+      #              python, pytest and git) — the same six modules, after the
+      #              round that answered Copilot's fourth review on #25 and
+      #              #26 added its assertions to four of them.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
