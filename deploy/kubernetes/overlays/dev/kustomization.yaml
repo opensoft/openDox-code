@@ -1,0 +1,30 @@
+# A worked example of what an environment supplies, and the shape a real one
+# (a QA cluster, a tenant install) takes. It carries NO credential: the two
+# Secrets named by the base are created out of band, by the platform's secret
+# store or by `kubectl create secret generic`, and never by a file in this
+# repository.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opendox
+
+resources:
+  - ../../base
+
+# The overlay supplies the concrete broker. These are public facts about the
+# realm, not credentials.
+configMapGenerator:
+  - name: opendox-oidc
+    behavior: merge
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - oidc_issuer=https://keycloak.dev.example/realms/opendox
+      - oidc_audience=opendox-runtime
+
+# The reviewed image, by digest. A tag moves; a digest is the thing that was
+# reviewed.
+images:
+  - name: ghcr.io/opensoft/opendox-runtime
+    newName: ghcr.io/opensoft/opendox-runtime
+    newTag: "0.0.0"

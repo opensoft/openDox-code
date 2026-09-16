@@ -1,0 +1,24 @@
+# RULING C3's per-project plain local git repositories.
+#
+# THIS IS THE ONE VOLUME IN THIS BASE THAT HOLDS DOCUMENTS, and it is the
+# reason `ReadWriteOnce` + one replica is the shape rather than an oversight:
+# git's object store is not safe under two writers on a shared filesystem, and
+# a Deployment scaled to two would corrupt a repository rather than serve it
+# twice. Scaling the runtime is an act that first moves these repositories
+# behind a remote — which is what RULING C3's "a remote can be attached later"
+# and "moving a project into a governed factory is a push" already describe.
+#
+# RULING Q1's "the database is disposable relative to the corpus" does NOT
+# apply to this claim: the coordination database can be rebuilt from a
+# migration, and these repositories cannot be rebuilt from anything.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: opendox-project-repositories
+  namespace: opendox
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

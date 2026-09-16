@@ -88,6 +88,75 @@ test = [
     "pytest>=8,<9",
 ]
 
+# THE RUNTIME EXTRA — `split-opendox-two-layer-product` § 3.5, RULED Q2
+# (openxFactory#656 comment 5542792997, Brett Heap, 2026-09-04: "reuse the
+# Hermes install pattern — FastAPI + Postgres … OIDC through the Keycloak
+# broker").
+#
+# WHY A SEPARATE EXTRA AND NOT `dependencies` ABOVE. The leg's required
+# `validate` check installs `.[test]`, and `opendox.serve` — the stdlib
+# document surface a student runs from a checkout — needs none of this. Putting
+# five packages and their transitive trees into the base install would make
+# every consumer of `pip install opendox` pay for a runtime it may never start,
+# and would put the required check's green light at the mercy of a web
+# framework's release. `.[runtime,test]` is what the new `runtime` CI job
+# installs; the existing `validate` job's install line is untouched.
+#
+# LOWER BOUNDS ONLY, EACH WITH ITS REASON, and each floor is one this package
+# has actually been exercised against (measured 2026-09-16, python 3.12.3:
+# fastapi 0.141.1, uvicorn 0.53.0, psycopg 3.3.5, psycopg_pool 3.3.1,
+# PyJWT 2.14.0, httpx 0.28.1, pydantic 2.13.5, cryptography 50.0.1) rather than
+# the oldest release that might import — the same rule the PyYAML floor above
+# was set by.
+#
+# Deliberately NOT done here, and recorded rather than done quietly: a
+# `--require-hashes` lockfile. Pinning this leg's supply chain by digest is a
+# real act with a real owner (the note above `PyYAML` says so already, and the
+# Hermes install carries a `uv.lock` for exactly that reason); a § 3.5 PR
+# should not invent one.
+runtime = [
+    # The web framework RULING Q2 names. `>=0.115` is the first release whose
+    # `Annotated[... , Depends(...)]` dependency spelling — which
+    # `opendox/runtime/app.py` uses throughout — is the documented form rather
+    # than an accepted one, so it is the floor the app is written against.
+    "fastapi>=0.115",
+    # The ASGI server `opendox runtime serve` runs. `[standard]` brings the
+    # HTTP/1.1 and websocket implementations uvicorn otherwise degrades to a
+    # pure-Python fallback for; `>=0.30` is the floor for the `--log-level
+    # trace` value the CLI accepts.
+    "uvicorn[standard]>=0.30",
+    # psycopg 3 — the driver, its binary wheels and its connection pool, which
+    # `opendox/runtime/db.py` uses exactly as the Hermes install's
+    # `persistence/database.py` does. `>=3.2` is the floor for the
+    # `ConnectionPool(open=False)` + `kwargs=` construction that file depends
+    # on to avoid opening a pool at import; `[binary]` keeps CI and the
+    # container free of a libpq build step.
+    "psycopg[binary,pool]>=3.2",
+    # Token verification against the broker's JWKS. `[crypto]` is REQUIRED and
+    # not optional here: the allow-list in `opendox/runtime/config.py` refuses
+    # every symmetric algorithm, so every token this runtime can accept is
+    # signed with an asymmetric key PyJWT cannot verify without it. `>=2.9` is
+    # the floor for `PyJWKSet.from_dict` behaving as `opendox/runtime/oidc.py`
+    # relies on for a key set with an unusable key in it.
+    "PyJWT[crypto]>=2.9",
+    # The JWKS fetch, and nothing else. `>=0.27` is the floor for the
+    # `httpx.get(..., timeout=...)` + `raise_for_status()` pair the source uses.
+    "httpx>=0.27",
+]
+
+# THE LIFECYCLE ENTRY POINT — `split-opendox-two-layer-product` § 3.5's "one
+# lifecycle CLI". `opendox/runtime/cli.py`'s header records in full why the
+# verbs are registered here and not in `opendox.cli.build_parser`: `cli.py` is
+# a CARVED file (a line added to it is a declared edit that lands at
+# openxFactory first) and it cannot be imported at this leg at all until the
+# BUILD arc repairs `opendox.serve`'s `ideation_dashboard` reach, which
+# `tests/test_consumer_reach.py::STILL_REACHING` records by name. The same
+# module also exposes `RuntimeSubcommand`, which structurally conforms to
+# `subcommand_extension.SubcommandExtension`, so wiring these verbs into the
+# core parser the day it imports is one line at the assembly point.
+[project.scripts]
+opendox-runtime = "opendox.runtime.cli:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

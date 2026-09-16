@@ -1,0 +1,49 @@
+# Neutral kustomize base for the openDox runtime. NO environment literal lives
+# here: the issuer, the audience and the image digest arrive through an
+# overlay, and the two DSNs arrive as Secrets created out of band.
+#
+# WHAT THIS BASE COMMITS AND WHAT IT REFUSES TO. It commits every Secret's NAME
+# and key (`opendox-db-runtime/dsn`, `opendox-db-migration/dsn`,
+# `opendox-postgres/password`) and no Secret's value. `tests_runtime/
+# test_deploy_shape.py` reads every manifest here and refuses any `kind:
+# Secret` and any `stringData:`/`data:` credential block, so a value cannot be
+# added later without the test that forbids it going red.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opendox
+
+commonLabels:
+  app.kubernetes.io/part-of: opendox
+
+resources:
+  - namespace.yaml
+  - project-repositories-pvc.yaml
+  - postgres-service.yaml
+  - postgres-statefulset.yaml
+  - opendox-service.yaml
+  - opendox-deployment.yaml
+  - migration-job.yaml
+
+images:
+  - name: ghcr.io/opensoft/opendox-runtime
+    newTag: "0.0.0"
+
+# Non-secret runtime config the Deployment and the migration Job consume via
+# `configMapKeyRef`. The neutral base leaves the environment-specific values
+# EMPTY on purpose — an empty issuer is a refusal at startup
+# (`config.load_settings` names the variable), which is the honest failure; a
+# plausible-looking placeholder would be a runtime trusting an issuer nobody
+# chose. `disableNameSuffixHash` keeps the name stable for the references.
+configMapGenerator:
+  - name: opendox-oidc
+    behavior: create
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - oidc_issuer=
+      - oidc_audience=
+      - oidc_jwks_url=
+      - oidc_algorithms=RS256
+      - oidc_jwks_ttl_seconds=300
+      - oidc_leeway_seconds=60

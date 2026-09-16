@@ -1,0 +1,70 @@
+# The PRIVILEGED one-shot migration executor — the Kubernetes counterpart of
+# the compose package's `migrate` profile, and the only workload in this
+# namespace that receives `OPENDOX_MIGRATION_DATABASE_URL`.
+#
+# A Job and not an initContainer of the Deployment: an initContainer would run
+# on every pod restart with the privileged DSN mounted into the same pod spec
+# as the served application, which is the separation this file exists to keep.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: opendox-migrate
+  namespace: opendox
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opendox-migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/opensoft/opendox-runtime:0.0.0
+          args: ["opendox-runtime", "runtime", "migrate"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: OPENDOX_MIGRATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: opendox-db-migration
+                  key: dsn
+            # `load_settings` requires these three before any verb runs. The
+            # migration job reaches no broker; the OIDC values come from the
+            # same ConfigMap so there is one source for them in the namespace.
+            - name: OPENDOX_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: opendox-db-migration
+                  key: dsn
+            - name: OPENDOX_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-oidc
+                  key: oidc_issuer
+            - name: OPENDOX_OIDC_AUDIENCE
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-oidc
+                  key: oidc_audience
+            - name: OPENDOX_MIGRATIONS_DIR
+              value: "migrations"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

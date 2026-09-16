@@ -1,0 +1,79 @@
+# The single-node Postgres this base ships, on the Hermes install's shape.
+# An environment with a managed Postgres drops this resource in its overlay and
+# points `OPENDOX_DATABASE_URL` elsewhere; nothing else in the base changes,
+# which is the point of the DSN being a Secret reference rather than a host
+# name assembled from parts.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: opendox-postgres
+  namespace: opendox
+spec:
+  serviceName: opendox-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opendox-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opendox-postgres
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: opendox
+            - name: POSTGRES_USER
+              value: opendox
+            # BY REFERENCE, never a literal. The Secret is created out of band
+            # (or by the platform's secret store); this repository commits its
+            # NAME and its key and no value.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: opendox-postgres
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "opendox", "-d", "opendox"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: pg-data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: pg-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
