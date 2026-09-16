@@ -397,6 +397,12 @@ jobs:
       #              and the last entry is the current one. An earlier entry is
       #              history, not a competing claim, and the PR description
       #              states the same current figure at the same head.
+      #  106 passed  at `build/3-5-runtime` `76457876` (same day, same python
+      #              and pytest) — the same five modules, after the eight
+      #              suppressed comments of that round: the compose probe and
+      #              mount following their settings, the Kubernetes root held
+      #              equal to its mountPath, the readiness probe's timeout, and
+      #              a discovery regex that is the filename contract.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
