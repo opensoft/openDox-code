@@ -914,3 +914,47 @@ def test_an_embedded_nul_in_a_caller_value_is_a_refusal_and_not_a_valueerror(
                            b"# a\n", actor="Student\x00One",
                            basis_revision=corpus.revision)
     assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+
+
+# -- Copilot's eighth round on #26 -------------------------------------------
+
+
+def test_a_plus_in_a_parameter_name_is_not_a_five_hundred() -> None:
+    """`unquote_plus` turns `+` into a SPACE, which changes nothing's length.
+
+    The decode loop asserted that every changing pass SHORTENS the name, so a
+    perfectly ordinary `...?a+b=1` raised `AssertionError` out of both halves
+    of the credential rule — a 500 where the answer was "this is not a
+    credential" (Copilot review of openDox-code#26, round 8).
+    """
+    from opendox.runtime import repository_act
+
+    harmless = "https://example.invalid/r.git?a+b=1&depth=1#frag+ment=2"
+    assert lga.names_a_secret_parameter(harmless) is False
+    assert lga.redact_credentials(harmless) == harmless
+    repository_act.refuse_credential_bearing_remote(harmless)
+
+    # And the fixed point is still reached where it matters.
+    hidden = "https://example.invalid/r.git?%2525252574oken=ghp_supersecret"
+    assert lga.names_a_secret_parameter(hidden)
+    assert "ghp_supersecret" not in lga.redact_credentials(hidden)
+
+
+def test_an_option_shaped_revision_cannot_become_a_git_option(
+        adapter, repository: Path) -> None:
+    """`revision` is opaque and caller-controlled.
+
+    An argument beginning with `--` is read by `rev-parse` as an OPTION, so
+    resolving "a revision" could perform an unintended git operation (Copilot
+    review of openDox-code#26, round 8). `--end-of-options` is git's own
+    answer, and this is the assertion that it stays there.
+    """
+    corpus = _resolve(adapter, repository)
+    for revision in ("--version", "--output=/tmp/opendox-should-not-exist",
+                     "--all"):
+        with pytest.raises(ca.CorpusRefused) as caught:
+            adapter.read(corpus,
+                         ca.DocumentId(corpus=corpus.ref.name, key="a.md"),
+                         revision=revision)
+        assert caught.value.refusal.kind == ca.REVISION_UNKNOWN, revision
+    assert not Path("/tmp/opendox-should-not-exist").exists()

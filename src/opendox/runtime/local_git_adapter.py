@@ -287,13 +287,22 @@ def _decoded_parameter_name(name: str) -> str:
     the string SHORTENS it, because a decoded `%XX` is one character where
     three were — and the assertion below says so rather than trusting it.
     """
-    while True:
+    # BOUNDED BY THE NAME'S OWN LENGTH, and not by an assertion that every
+    # pass shortens it: `unquote_plus` also turns `+` into a SPACE, which
+    # changes the string without shortening it — so a harmless
+    # `...?a+b=1` tripped that assertion and made both the refusal and the
+    # redaction raise, a 500 where the answer was "this is not a credential"
+    # (Copilot review of openDox-code#26, round 8). Termination is still by
+    # construction: a pass either removes at least one `%` escape (three
+    # characters become one) or replaces `+` with a space, and neither can be
+    # undone by a later pass, so the number of passes cannot exceed the
+    # starting length.
+    for _ in range(len(name) + 1):
         once = urllib.parse.unquote_plus(name)
         if once == name:
             return name
-        assert len(once) < len(name), (
-            "a decode pass that does not shorten the name would not terminate")
         name = once
+    return name
 
 
 def names_a_secret_parameter(text: str) -> bool:
@@ -838,7 +847,14 @@ class LocalGitCorpus:
 
     def _resolve_revision(self, git: GitRunner, revision: str,
                           subject: str) -> str:
-        completed = git.run("rev-parse", "--verify", f"{revision}^{{commit}}")
+        # `--end-of-options` BEFORE THE CALLER'S VALUE. `revision` is opaque
+        # and caller-controlled, and an argument beginning with `--` is read
+        # by `rev-parse` as an OPTION — including options that change what the
+        # command does — so resolving "a revision" could perform an unintended
+        # git operation (Copilot review of openDox-code#26, round 8). The
+        # marker is git's own answer to this, available since 2.24.
+        completed = git.run("rev-parse", "--verify", "--end-of-options",
+                            f"{revision}^{{commit}}")
         if completed.returncode != 0:
             raise _refuse(REVISION_UNKNOWN, subject,
                           f"this repository cannot serve revision {revision!r}; "

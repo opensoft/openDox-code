@@ -447,7 +447,7 @@ jobs:
       #              halves of the rule now ask ONE predicate about. The
       #              commits above this one are where they landed; this block
       #              changes no test, so the figure holds at this head too.
-      #  164 passed  at `build/3-6-repository-act` `%s` (same day, same
+      #  164 passed  at `build/3-6-repository-act` `378290d9` (same day, same
       #              python, pytest and git) — the same six modules, carrying
       #              #25's rounds 5 and 6 by merge and adding this branch's
       #              round-6 assertions: the decode fixed point, `resolve`
