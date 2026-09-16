@@ -407,3 +407,28 @@ def test_serve_emits_evidence_on_an_ordinary_shutdown(
     assert evidence["verb"] == "serve"
     assert evidence["state"] == "stopped"
     assert evidence["bind_port"] == served["port"]
+
+
+# -- Copilot's seventh round on #25 ------------------------------------------
+
+
+def test_the_migrate_preview_runs_the_same_canonical_gate_the_run_does(
+        monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A preview must not approve a tree the next command refuses.
+
+    `apply()` verifies the pinned `0001` FIRST and `--plan` skipped it, so an
+    operator could be shown a plan (or an empty one) for a directory whose
+    canonical migration is absent or changed — and then watch `migrate` refuse
+    it (Copilot review of openDox-code#25, round 7, suppressed).
+    """
+    empty = tmp_path / "no-migrations"
+    empty.mkdir()
+    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
+                       "postgresql://nobody@127.0.0.1:1/none")
+    monkeypatch.setenv(PREFIX + "MIGRATIONS_DIR", str(empty))
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "migrate", "--plan", "--connect-timeout", "0.2"]))
+    assert code == 1, evidence
+    assert evidence["ok"] is False
+    assert "MigrationError" in evidence["refusal"]
+    assert "planned" not in evidence

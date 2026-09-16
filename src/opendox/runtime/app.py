@@ -368,13 +368,14 @@ def _require_own_open_session(store: Any, *,
     `require_open` is False on the discard path: a draft left by a session that
     has since ended is still that user's to throw away.
     """
-    session = _found(lambda: store.get_session(session_id))
+    try:
+        session = store.get_session(session_id)
+    except identity.NotFoundError as exc:
+        # THE SAME REFUSAL A FOREIGN SESSION GETS — see `_NOT_YOUR_SESSION`.
+        raise HTTPException(status_code=403,
+                            detail=_NOT_YOUR_SESSION) from exc
     if session.user_id != user.id:
-        raise HTTPException(
-            status_code=403,
-            detail={"code": "authz.not_your_session",
-                    "message": "a draft belongs to the session typing it, and "
-                               "that session is not this principal's"})
+        raise HTTPException(status_code=403, detail=_NOT_YOUR_SESSION)
     if session.project_id != project_id:
         raise HTTPException(
             status_code=409,
@@ -444,6 +445,28 @@ sessions = APIRouter(prefix="/sessions", tags=["sessions"],
                      responses=REFUSALS)
 drafts = APIRouter(prefix="/drafts", tags=["drafts"],
                    responses=REFUSALS)
+
+
+#: ONE REFUSAL FOR A SESSION THAT IS NOT THIS PRINCIPAL'S — whether it does
+#: not exist or belongs to somebody else. Reading the row first made the two
+#: answers different (404 from `_found`, 403 from the ownership check), which
+#: is a session-existence oracle over an id space a prober can walk, and the
+#: same one for the draft rows keyed by those sessions (Copilot review of
+#: openDox-code#25, round 7, suppressed). It is the `authz` code because that
+#: is what the caller can act on: ask the user who opened the session.
+_NOT_YOUR_SESSION: dict[str, Any] = {
+    "code": "authz.not_your_session",
+    "message": ("no session of that id is this principal's; a session and its "
+                "drafts belong to the sitting that opened it"),
+}
+
+#: The same normalization for a DRAFT read by id: an unknown id and another
+#: user's draft are one answer.
+_NOT_YOUR_DRAFT: dict[str, Any] = {
+    "code": "authz.not_your_session",
+    "message": ("no draft of that id is this principal's; a draft belongs to "
+                "the session typing it"),
+}
 
 
 #: ONE BODY FOR BOTH 404s ON `/users/{id}` — a user that does not exist and a
@@ -628,12 +651,13 @@ def open_session(body: SessionCreate, store: StoreDep,
 @sessions.delete("/{session_id}")
 def close_session(session_id: str, store: StoreDep,
                   principal: PrincipalDep) -> dict[str, Any]:
-    session = _found(lambda: store.get_session(session_id))
-    if session.user_id != principal.id:
+    try:
+        session = store.get_session(session_id)
+    except identity.NotFoundError as exc:
         raise HTTPException(status_code=403,
-                            detail={"code": "authz.not_your_session",
-                                    "message": "a session is closed by the user "
-                                               "who opened it"})
+                            detail=_NOT_YOUR_SESSION) from exc
+    if session.user_id != principal.id:
+        raise HTTPException(status_code=403, detail=_NOT_YOUR_SESSION)
     return _session_json(_found(lambda: store.close_session(session_id)))
 
 
@@ -708,7 +732,14 @@ def put_draft(body: DraftPut, store: StoreDep,
 @drafts.delete("/{draft_id}", status_code=204)
 def discard_draft(draft_id: str, store: StoreDep,
                   principal: PrincipalDep) -> None:
-    draft = _found(lambda: store.get_draft(draft_id))
+    try:
+        draft = store.get_draft(draft_id)
+    except identity.NotFoundError as exc:
+        # An unknown draft id and another user's draft are ONE answer; reading
+        # the row first told them apart (Copilot review of openDox-code#25,
+        # round 7, suppressed).
+        raise HTTPException(status_code=403,
+                            detail=_NOT_YOUR_DRAFT) from exc
     _require_role(store, user=principal, project_id=draft.project_id,
                   allowed=("owner", "member"))
     _require_own_open_session(store, user=principal, session_id=draft.session_id,

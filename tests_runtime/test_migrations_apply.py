@@ -676,3 +676,64 @@ def test_a_role_whose_name_is_not_lower_case_is_narrowed_as_itself(
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")
                 conn.execute(f'drop role if exists "{role}"')
+
+
+def test_status_calls_an_unmigrated_database_unhealthy_and_blames_the_tree(
+        postgres_dsn: str, monkeypatch, tmp_path) -> None:
+    """Two findings of one round, both about `status` telling the truth.
+
+    A reachable but UNMIGRATED database exited 0 with `ok: true` while
+    `/readyz` on the same install refuses traffic — two answers to one
+    question, and the CLI's was the comforting one. And a `MigrationError`
+    (a missing or malformed migrations directory) was reported as
+    `database: unreachable`, although `select 1` had already succeeded: the
+    operator was pointed at the wrong dependency entirely (Copilot review of
+    openDox-code#25, round 7, suppressed).
+    """
+    import io
+    import json
+    import uuid
+    from contextlib import redirect_stdout
+
+    from opendox.runtime import cli
+    from opendox.runtime.config import PREFIX
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    separator = "&" if "?" in postgres_dsn else "?"
+    scoped = (f"{postgres_dsn}{separator}"
+              f"options=-csearch_path%3D{schema}%2Cpublic")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+        try:
+            monkeypatch.setenv(PREFIX + "DATABASE_URL", scoped)
+            monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+            monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+            monkeypatch.setenv(PREFIX + "MIGRATIONS_DIR", str(ROOT / "migrations"))
+
+            def _status() -> tuple[int, dict]:
+                buffer = io.StringIO()
+                args = cli.build_parser().parse_args(
+                    ["runtime", "status", "--probe-timeout", "2"])
+                with redirect_stdout(buffer):
+                    code = args.func(args)
+                return code, json.loads(buffer.getvalue())
+
+            code, report = _status()
+            assert report["database"] == "reachable"
+            assert report["pending_migrations"] == ["0001", "0002"]
+            assert report["ok"] is False and code == 1, report
+
+            # And a tree the runner cannot read blames the TREE.
+            empty = tmp_path / "no-migrations"
+            empty.mkdir()
+            monkeypatch.setenv(PREFIX + "MIGRATIONS_DIR", str(empty))
+            code, report = _status()
+            assert report["database"] == "reachable", report
+            assert report["migrations"].startswith("unreadable: "), report
+            assert report["ok"] is False and code == 1
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")

@@ -41,10 +41,22 @@ def test_every_migration_filename_is_the_declared_form() -> None:
     for entry in sorted(MIGRATIONS.iterdir()):
         if not entry.is_file() or not entry.name.endswith(".sql"):
             continue
-        assert re.match(r"^\d{4}_[a-z0-9_]+(\.down)?\.sql$", entry.name), (
+        # THE RUNNER'S OWN REGEX, not a looser restatement of it. This
+        # accepted `0005_trailing_.sql` and `0005__name.sql`, which
+        # `migrations._MIGRATION_FILENAME_RE` does not discover — so a future
+        # migration could pass the required shape suite and never be applied
+        # (Copilot review of openDox-code#25, round 7, suppressed). The
+        # `.down.sql` sidecar is checked against the same grammar with the
+        # suffix removed, because the runner never discovers a sidecar.
+        from opendox.runtime.migrations import _MIGRATION_FILENAME_RE
+
+        name = entry.name
+        if name.endswith(".down.sql"):
+            name = name[: -len(".down.sql")] + ".sql"
+        assert _MIGRATION_FILENAME_RE.fullmatch(name), (
             f"{entry.name} is not `NNNN_lower_snake.sql` (or its `.down.sql` "
-            "sidecar); the runner discovers by that form and a file outside it "
-            "is silently never applied")
+            "sidecar) by the RUNNER's own grammar, so the runner discovers it "
+            "never and it is silently never applied")
 
 
 def test_migrations_are_discovered_in_numeric_order() -> None:

@@ -29,9 +29,19 @@ def client(database, postgres_dsn: str, verifier) -> Iterator[object]:
     and sharing one with the fixture would have the teardown closing a pool the
     app had already closed.
     """
-    fastapi_testclient = pytest.importorskip(
-        "fastapi.testclient",
-        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
+    # CI-AWARE, like the DSN probe and the key pair: `importorskip` here let a
+    # broken `.[runtime,test]` install skip EVERY API case while the `runtime`
+    # job still exited 0, against that job's own fail-in-CI policy (Copilot
+    # review of openDox-code#25, round 7, suppressed).
+    try:
+        from fastapi import testclient as fastapi_testclient
+    except ImportError as exc:
+        from tests_runtime.conftest import _skip_or_fail
+
+        _skip_or_fail(
+            "the `runtime` extra is not installed "
+            f"(pip install -e '.[runtime,test]'): {exc}")
+        raise                       # unreachable: `_skip_or_fail` always raises
     from opendox.runtime.app import create_app
     from opendox.runtime.db import Database
 
