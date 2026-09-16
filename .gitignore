@@ -10,3 +10,13 @@ venv/
 *.swp
 .idea/
 .vscode/
+
+# The runtime's FILLED-IN compose environment (split-opendox § 3.5). The
+# committed file is `deploy/compose/.env.example` and it carries placeholders;
+# this is the copy with real DSNs in it and it must never be committed.
+deploy/compose/.env
+
+# The default `OPENDOX_PROJECT_REPOSITORY_ROOT` — RULING C3's per-project
+# plain local git repositories, created by the repository-creation act. They
+# are a runtime's data, never this repository's content.
+/var/

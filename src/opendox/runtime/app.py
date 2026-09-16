@@ -39,7 +39,15 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+)
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -94,15 +102,21 @@ class AppContext:
         self.verifier = verifier
 
 
-def _context(request: Any) -> AppContext:
+def _context(request: Request) -> AppContext:
+    # ANNOTATED `Request` AND NOT `Any`, and it is load-bearing: FastAPI reads
+    # a dependency's annotations to decide where each argument comes from, and
+    # a parameter typed `Any` is taken for a QUERY PARAMETER — every route
+    # would then answer 422 "missing query parameter: request" instead of
+    # authenticating. Measured, not assumed: that is exactly what the first
+    # run of `tests_runtime/test_api_endpoints.py` reported, on sixteen cases.
     return request.app.state.context  # type: ignore[no-any-return]
 
 
-def get_context(request: Any) -> AppContext:
+def get_context(request: Request) -> AppContext:
     return _context(request)
 
 
-def get_store(request: Any) -> Iterator[identity.CoordinationStore]:
+def get_store(request: Request) -> Iterator[identity.CoordinationStore]:
     """One transaction per request, and one store over it.
 
     A request that writes three rows writes them atomically because they share
@@ -115,7 +129,7 @@ def get_store(request: Any) -> Iterator[identity.CoordinationStore]:
 
 
 def get_principal(
-    request: Any,
+    request: Request,
     store: Annotated[identity.CoordinationStore, Depends(get_store)],
     authorization: Annotated[str | None, Header()] = None,
 ) -> identity.User:

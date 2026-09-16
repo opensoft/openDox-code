@@ -1,0 +1,198 @@
+# The openDox runtime — a runbook
+
+`split-opendox-two-layer-product` § 3.5 and § 3.6, at
+`opensoft/openxFactory` issue #656.
+
+> **RULING Q2** (comment `5542792997`, Brett Heap, 2026-09-04T15:31Z) — "reuse
+> the Hermes install pattern — FastAPI + Postgres, deployed the way
+> `xFactory-Hermes-Install` is (live on AKS since 2026-07-19), OIDC through the
+> Keycloak broker being adopted in QA".
+>
+> **RULING Q1** (comment `5542694957`) — "the database owns identity and
+> coordination; git owns governed artifacts. Users, memberships, projects, the
+> project-to-repository mapping, sessions and unsaved drafts live in the
+> openDox database. Specs, changes, ideation documents and contracts stay in
+> git, read from repositories and written back only through the apply lane. …
+> the database is disposable relative to the corpus."
+>
+> **RULING C3** (comment `5544381563`) — "standalone openDox creates and
+> manages a plain local git repository per project. Documents are always
+> git-backed; commits are the write path; a remote can be attached later. …
+> moving a student or lab-assistant project into a governed factory is a push,
+> not a migration."
+
+## 1. What this runtime is, and what it is not
+
+It is identity and coordination: six tables, six collections, one bearer token
+verified against the Keycloak broker.
+
+It is **not** a document store and it is not a second dashboard. It does not
+import `opendox.serve` — the stdlib document surface a student runs from a
+checkout — and the two are joined only by one database row, the
+project-to-repository map. Nothing under `/api/v1` reads or writes a spec, a
+change, an ideation document or a contract.
+
+The one place bytes live in the database is `drafts.body`, and RULING Q1 rules
+it in by name: a draft is the text that has **not** entered the corpus yet.
+
+## 2. The layout, all at the root of this leg
+
+```
+migrations/          0001 pinned canonical, 0002+ additive
+deploy/compose/      docker-compose.yaml, Dockerfile, init-runtime-role.sh, .env.example
+deploy/kubernetes/   base/ + overlays/dev/
+src/opendox/runtime/ config, migrations, identity, db, oidc, app, cli
+tests_runtime/       the hermetic half (required check) and the DB-backed half
+```
+
+§ 3.5's own sentence is "**all at the root of `openDox-code`, not of the
+assembly root**", and `tests_runtime/test_migration_shape.py` asserts it.
+
+## 3. Configuration
+
+Every setting is an environment variable, and
+`deploy/compose/.env.example` is the list.
+`src/opendox/runtime/config.py` is the only place their names appear in Python;
+`tests_runtime/test_deploy_shape.py` holds the three declarations — the Python,
+the compose example, the Kubernetes manifests — to each other.
+
+Required, with no default: `OPENDOX_DATABASE_URL`, `OPENDOX_OIDC_ISSUER`,
+`OPENDOX_OIDC_AUDIENCE`. A runtime missing one **refuses to start and names
+it** rather than falling back to a local database or an unpinned issuer.
+
+`OPENDOX_MIGRATION_DATABASE_URL` is separate on purpose and
+`opendox-runtime migrate` will not borrow the served DSN if it is unset. The
+compose package and the Kubernetes base keep the two identities in different
+containers; the refusal is what stops a convenience undoing that.
+
+## 4. The lifecycle CLI
+
+```
+opendox-runtime runtime init      # local state and a coherent config; no database
+opendox-runtime runtime migrate   # apply the ordered SQL (privileged DSN); --plan to report
+opendox-runtime runtime serve     # run the API
+opendox-runtime runtime status    # report config (redacted), schema pin, ledger, broker
+opendox-runtime runtime reset     # drop the coordination schema (see § 7)
+```
+
+Every verb prints one redacted JSON object and exits nonzero on a refusal.
+No DSN, token or password is ever printed.
+
+The verbs are registered by `opendox.runtime.cli.register`, which is reached
+two ways: the `opendox-runtime` console script, and
+`opendox.runtime.cli.RuntimeSubcommand`, an object that structurally conforms
+to `subcommand_extension.SubcommandExtension`. The module's own header records
+why they are not (yet) in `opendox.cli.build_parser`: that file is a CARVED
+file whose edits are declared at openxFactory, and it cannot be imported at
+this leg until the BUILD arc repairs `opendox.serve`'s `ideation_dashboard`
+reach.
+
+## 5. Migrations
+
+`migrations/0001_identity_and_coordination.sql` is **canonical and immutable**.
+`opendox.runtime.migrations.CANONICAL_MIGRATION_SHA256` pins its bytes, the
+runner verifies the digest **before any mutation** and refuses the whole run on
+a mismatch, and `tests_runtime/test_migration_shape.py` hashes the file against
+the constant on every `validate`. Changing the schema is an additive `0002_…`,
+`0003_…` file. Moving the pin is a two-file act somebody has to mean.
+
+The ledger is `opendox_schema_migrations`. The runner bootstraps it with
+`create table if not exists` (it has to exist before migration 0001 can be
+recorded); `migrations/0002_migration_state.sql` carries the reviewable copy
+and a test asserts the two texts are identical. An already-applied migration
+whose file has changed aborts the run — the database and the tree disagreeing
+is a fact to resolve, not a difference to skip past.
+
+## 6. Running it
+
+### Locally, with compose
+
+```sh
+cp deploy/compose/.env.example deploy/compose/.env    # fill it in; it is gitignored
+docker compose --env-file deploy/compose/.env -f deploy/compose/docker-compose.yaml \
+  --profile migration run --rm migrate
+docker compose --env-file deploy/compose/.env -f deploy/compose/docker-compose.yaml up -d
+```
+
+No service publishes a host port: TLS and ingress terminate at the platform.
+Reach it over the compose network or with `docker compose exec`.
+
+### On Kubernetes
+
+```sh
+kubectl create secret generic opendox-postgres   --from-literal=password=...
+kubectl create secret generic opendox-db-runtime --from-literal=dsn=...
+kubectl create secret generic opendox-db-migration --from-literal=dsn=...
+kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
+```
+
+This repository commits every Secret's **name and key** and no Secret's value;
+`tests_runtime/test_deploy_shape.py` refuses a `kind: Secret` anywhere under
+`deploy/kubernetes/`.
+
+The Deployment is one replica with a `Recreate` strategy, and that is a
+property of RULING C3 rather than a capacity decision: the pod mounts the
+per-project git repositories read-write and git has no cross-writer protocol
+over a shared filesystem. Scaling first moves those repositories behind a
+remote — which is what C3's "a remote can be attached later" already describes.
+
+## 7. `reset`, and what "disposable" does and does not cover
+
+`opendox-runtime runtime reset --confirm yes-drop-the-coordination-database`
+drops the six coordination tables and the ledger. It exists because of RULING
+Q1's last sentence — "the database is disposable relative to the corpus"; lose
+it and you lose coordination state, not a governed artifact.
+
+**The project repositories are not covered by that sentence.** The coordination
+database can be rebuilt from a migration; the repositories under
+`OPENDOX_PROJECT_REPOSITORY_ROOT` hold documents and cannot be rebuilt from
+anything. `reset` does not touch them, and nor should a cluster teardown that
+deletes the `opendox-project-repositories` claim.
+
+## 8. Tests
+
+| suite | where it runs | what it needs |
+|---|---|---|
+| `test_migration_shape.py` | `validate` (required) | `.[test]` |
+| `test_schema_shape.py` | `validate` (required) | `.[test]` |
+| `test_runtime_surface.py` | `validate` (required) | `.[test]` |
+| `test_runtime_cli.py` | `validate` (required) | `.[test]` |
+| `test_deploy_shape.py` | `validate` (required) | `.[test]` |
+| `test_migrations_apply.py` | `runtime` | `.[runtime,test]` + Postgres |
+| `test_oidc_verifier.py` | `runtime` | `.[runtime,test]` |
+| `test_api_endpoints.py` | `runtime` | `.[runtime,test]` + Postgres |
+
+The split is the package's import-weight contract
+(`src/opendox/runtime/__init__.py`), and `test_runtime_surface.py` measures it
+in a fresh interpreter rather than asserting it in prose. Locally:
+
+```sh
+docker run -d --name opendox-test-pg -e POSTGRES_USER=opendox \
+  -e POSTGRES_PASSWORD=opendox -e POSTGRES_DB=opendox -p 55432:5432 postgres:16
+export OPENDOX_TEST_DATABASE_URL='postgresql://opendox:opendox@127.0.0.1:55432/opendox'
+python -m pytest -q tests_runtime/
+```
+
+Without that variable the DB-backed cases **skip with the reason printed** —
+never pass silently, never fail a tree for not running Postgres.
+
+## 9. Residue this runbook records rather than resolves
+
+* **A pre-governed scratch space.** Design § D5: "The hybrid where ideas live
+  in the database until promoted was REJECTED, so an idea is a governed
+  document in git from its first save — consistent, and heavier than a lab
+  assistant may want. Whether openDox needs a pre-governed scratch space that
+  is NOT 'a draft of a document' is a real residual, it is not one of the open
+  questions." `drafts` is the draft of a document and is not that scratch
+  space. Unresolved, and deliberately.
+* **`validate`'s remaining narrowing** (RULED Q-L5 (b′)). This act lifts none
+  of it. `opendox.serve` still cannot import at this leg —
+  `tests/test_consumer_reach.py::STILL_REACHING` records the line — and the
+  runtime is written so that no part of it depends on that being repaired.
+* **The `runtime` job is not a required check.** Making one required is a
+  repository setting (`docs/branch-protection.md`), a separate act.
+* **Not taken from the Hermes install**, and each for a reason: its three-layer
+  Subject/Tenant/Domain topology (openDox is single-layer, so a `layer` claim
+  would be a shape without a meaning), its worker-readiness surface, its
+  correlated backup job, and its `uv.lock` supply-chain pin (a real act with a
+  real owner, recorded rather than invented here).

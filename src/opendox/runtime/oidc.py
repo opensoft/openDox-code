@@ -172,8 +172,14 @@ class CachingJwks:
         raw = self._source.load()
         try:
             return PyJWKSet.from_dict(raw)
-        except (jwt.PyJWKError, jwt.InvalidKeyError, KeyError, TypeError,
-                AttributeError) as exc:
+        except (jwt.PyJWKError, jwt.PyJWKSetError, jwt.InvalidKeyError,
+                KeyError, TypeError, AttributeError) as exc:
+            # `PyJWKSetError` is NOT a subclass of `PyJWKError` and has to be
+            # named separately — measured, not assumed: a broker serving
+            # `{"keys": []}` (a realm mid-rotation, a misconfigured proxy)
+            # raises it, and without this clause it would escape as an
+            # untyped exception past the 401 mapping in `app.get_principal`
+            # and surface as a 500.
             raise IdentityUnavailableError(
                 "the broker's JWKS document could not be parsed") from exc
 
