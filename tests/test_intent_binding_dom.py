@@ -11,14 +11,19 @@ claim below is made by actually loading the module graph and, where useful,
 mounting and inspecting the resulting tree — so a passing test means the
 behaviour exists, not that the code looks right.
 
-NOT PART OF `.github/workflows/validate.yml`'s explicit list. Every existing
-DOM probe of `web/` — including `test_intent_tray_dom.py`, the carried-over
-test of this SAME pair of views — is narrowed out of the required check
-(RULED Q-L5 (b′)) until the BUILD arc inverts the openDox -> openXdox
-dependency; un-narrowing that class of test is slice S8's job, not S2's. This
-file is deliberately on the same footing as its narrowed siblings: present in
-the tree, runnable by hand or by a future un-narrowed `validate`, and skipped
-outright where `node` is not on PATH.
+IN `.github/workflows/validate.yml`'s explicit list SINCE SLICE S8, and that
+is a change from what this header said at S2. It was written narrowed out of
+the required check with its siblings — every DOM probe of `web/`, including
+`test_intent_tray_dom.py`, the carried-over test of this SAME pair of views,
+is narrowed out under RULED Q-L5 (b′) until the BUILD arc inverts the
+openDox -> openXdox dependency — and it said *"un-narrowing that class of test
+is slice S8's job, not S2's."* **S8 has done that job for this file** (Copilot
+review of openDox-code#23): it is named in the workflow's list and the
+required check runs it. The siblings are still omitted, and for a measured
+reason rather than by inheritance: neither is among the suites S8 repairs and
+each is red alone at this head, so naming either would put the required check
+red for another act's defect. Skipped outright where `node` is not on PATH,
+which is why naming it is safe on a runner that has none.
 """
 
 from __future__ import annotations
@@ -30,17 +35,19 @@ from pathlib import Path
 
 import pytest
 
-# Computed locally rather than imported from `conftest.REPO_ROOT`
-# (`tests/conftest.py`'s own `HERE.parent.parent`, a formula this leg
-# inherited byte-identical from `tests/ideation-dashboard/conftest.py` at
-# one directory level deeper than it now sits, so it resolves ONE LEVEL
-# ABOVE this repository today — latent and, so far, harmless, because
-# nothing that depends on it currently loads outside `--noconftest` either,
-# for the unrelated reason `.github/workflows/validate.yml` narrows around
-# (RULED Q-L5 (b′): `session_fixtures.py` -> `opendox.session_pr` ->
-# `opendox.serve` -> the still-present `ideation_dashboard` back-import).
+# Computed locally rather than imported from `conftest.REPO_ROOT`, and the
+# reason has CHANGED since this comment was written (Copilot review of
+# openDox-code#23). It used to be that `tests/conftest.py` carried
+# `HERE.parent.parent` — the formula this leg inherited byte-identical from
+# `tests/ideation-dashboard/conftest.py`, at one directory level deeper than
+# it now sits, so it resolved ONE LEVEL ABOVE this repository. **That is
+# fixed**: `tests/conftest.py` reads `HERE.parent` today (openDox-code#19,
+# `3954d78`, the RULED Q-L7 (a) `:25` depth fix the carve manifest declares),
+# so `conftest.REPO_ROOT` is this repository. The local computation stays
+# anyway, because this file runs under `--noconftest` in the required check
+# and must not depend on a conftest being imported at all;
 # `tests/test_leg_shape.py`'s own `Path(__file__).resolve().parents[1]` is
-# the correct, self-contained pattern this file mirrors instead.
+# that same self-contained pattern.
 ROOT = Path(__file__).resolve().parents[1]
 
 NODE = shutil.which("node")
