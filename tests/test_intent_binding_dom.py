@@ -24,7 +24,14 @@ it five. The union is five distinct modules and NOT ONE of them is the
 the only thing the list is here to establish, and it holds at either end.
 What is inherited is the INSTRUMENT, not the coverage; both were RETIRED at
 this leg on 2026-09-13 (RULED `openxFactory#656` comment 5656343213, citing
-RULED OQ-F: they drove `views/intent-feed.js`, which arrived at neither leg).
+RULED OQ-F). Only ONE of them drove `views/intent-feed.js` — the tray suite,
+whose header calls itself "DOM behaviour of the HOSTED dispose tray and the
+intent-feed overlay"; the wheel suite's own comment says the module "rides
+along because dispose.js imports it" and that it "drives the LOCAL path only —
+no `opts.intent` is ever passed". What both needed and neither could find here
+is the copy loop's contents: `intent-feed.js` arrived at NEITHER leg
+(RULED OQ-F `not_moved`), and `dispose.js`, which both mount, went to
+openXdox-code at slice S5.
 They are named here as the historical source of the shape and nothing else —
 following either name finds openxFactory's carve manifest and this
 repository's history, not a file in the tree.

@@ -93,10 +93,31 @@ jobs:
       # file** — `tests/test_intent_binding_dom.py` is named in the list below
       # — and the two siblings are NOT on it because THEY NO LONGER EXIST
       # HERE. RULED `openxFactory#656` comment 5656343213 (Brett Heap,
-      # 2026-09-13, citing RULED OQ-F) RETIRED both at this leg: both drove
-      # `views/intent-feed.js`, which STAYED at openxFactory and arrived at
-      # NEITHER leg, so openxFactory's carve manifest carries the `retired:`
-      # block and this commit carries the deletion. S8's own reason for
+      # 2026-09-13, citing RULED OQ-F) RETIRED both at this leg.
+      #
+      # NEITHER CAN RUN HERE, AND THE TWO DO NOT FAIL FOR QUITE THE SAME
+      # REASON -- measured in the two files themselves before they were
+      # deleted, because an earlier draft of this paragraph said both DROVE
+      # `views/intent-feed.js` and only one did (Copilot review of
+      # openDox-code#24). The TRAY suite drove it: its own header reads "DOM
+      # behaviour of the HOSTED dispose tray and the intent-feed overlay", it
+      # imports `emitIntent` from that module, and it passes `intent:`
+      # payloads throughout. The WHEEL suite did NOT, and said so in its own
+      # words -- "`intent-feed.js` rides along because dispose.js imports it
+      # ... This probe drives the LOCAL path only -- no `opts.intent` is ever
+      # passed" -- so it copied the feed to make a static import resolve and
+      # nothing more. Saying both drove it OVERSTATED the coverage this
+      # retirement gives up, which is the one thing a retirement's record
+      # must not do.
+      #
+      # WHAT THEY SHARE IS THE COPY LOOP AND WHAT IT CANNOT FIND HERE.
+      # `views/intent-feed.js` is RULED OQ-F `not_moved`: it STAYED at
+      # openxFactory and arrived at NEITHER leg. And `views/dispose.js`,
+      # which BOTH suites mount, moved to openXdox-code at § 3.4 slice S5 and
+      # is not at this leg either (`find . -name dispose.js` is empty here and
+      # finds `src/openxdox/web/views/dispose.js` there). So openxFactory's
+      # carve manifest carries the `retired:` block and this commit carries
+      # the deletion. S8's own reason for
       # omitting them was right for the question S8 could ask — measured at
       # its head, `test_intent_tray_dom.py` 23 failed and
       # `test_wheel_verbs_dom.py` 8 failed, so naming either would have put the
