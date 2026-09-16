@@ -115,10 +115,16 @@ GATE_EXCLUSIVE = (
 #: `not_moved` and never arrived, so `views/intent-binding.js` delegates to an
 #: absent module; the rest are rules whose builders the carve left elsewhere or
 #: which the bundle stopped using. They are REGISTERED here rather than swept:
-#: a register that names 28 is a measurement, and a test that skipped them
+#: a register that names 30 is a measurement, and a test that skipped them
 #: silently was the defect.
 STYLES_CSS_ORPHANS = (
-    "filteradd", "gridwrap", "intentchip", "intentchip-applied",
+    # `divider` and `ghost` JOINED THE REGISTER when comments stopped counting
+    # as ownership evidence (Copilot review, round 2): openDox's bundle names
+    # each of them in a comment and nowhere else, which is precisely the
+    # evidence that finding says must not count — and it is the register, not
+    # the extraction, that the correction moved.
+    "divider", "filteradd", "ghost", "gridwrap", "intentchip",
+    "intentchip-applied",
     "intentchip-error", "intentchip-pending", "intentchip-refused",
     "intentchip-stalled", "managepane", "sigrid-collab", "sigrid-row",
     "sigrid-rowlab", "swb-bar", "swb-bar-fill", "swb-completeness",
@@ -126,6 +132,20 @@ STYLES_CSS_ORPHANS = (
     "swb-row-selected", "swb-rowinfo", "swb-score", "swb-sectionhead",
     "swb-sectionlabel", "swb-sectionnote", "swb-signals", "swb-unresolved",
     "swb-where",
+)
+
+#: THE SHARED HALF — every class named by openDox's own bundle AND by
+#: openXdox's six contributed modules, measured at openDox-code `0b4e8bbf` /
+#: openXdox-code `0a0265f7` by `measure_opendox_css_census.py`'s class-bearing
+#: scan (openxFactory `scripts/`). 22 today; `STYLE_RESIDUE` recorded 24 at
+#: `cb343ae8`, and slice S7 retired `possible` / `proposal` / `rejected` while
+#: `lens` joined. These STAY in `styles.css` — they are openDox's, and a class
+#: both columns name was never a candidate to leave.
+SHARED_CLASSES = (
+    "cbtn", "dc-h", "dc-line", "dc-note", "dispose-intile", "disposebtn",
+    "docstatus", "g", "lens", "member", "name", "reason-form", "repobtn",
+    "repopick-msg", "rf-label", "swb-cbtn", "swb-cfield", "swb-clabel",
+    "swb-cslot", "tile", "topic", "why",
 )
 
 #: The ONE openDox class a contributed sheet names as its HOST CONTEXT:
@@ -189,6 +209,67 @@ def _selector_classes(css: str) -> set[str]:
             seg = i + 1
         i += 1
     return out
+
+
+def _blank_code_comments(text: str, html: bool = False) -> str:
+    """`//`, `/* */` and `<!-- -->` blanked, QUOTE-AWARE, newlines kept.
+
+    A COMMENT IS NOT OWNERSHIP EVIDENCE (Copilot review, round 2). The orphan
+    register below asks "does openDox's own bundle NAME this class", and a raw
+    concatenation answers yes for a class mentioned only in a comment or a
+    docstring — so a gate-only selector left behind in `styles.css` could be
+    excused by prose that never emits it, which is the one way that register
+    can be talked out of a finding.
+
+    QUOTE-AWARE and not a regex, because `"https://…"` carries a `//` inside a
+    string and blanking from there would delete real code — a false GREEN is
+    what this whole function is about, and a false RED for the same reason is
+    no better. A local copy of `test_web_boundary.py`'s walk rather than an
+    import: these files are collected `--noconftest` as top-level modules and
+    neither may depend on the other being importable.
+    """
+    out, i, n = [], 0, len(text)
+    quote = ""
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if quote:
+            out.append(c)
+            if c == "\\":
+                if i + 1 < n:
+                    out.append(nxt)
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if not html and c in "\"'`":
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if html and text.startswith("<!--", i):
+            j = text.find("-->", i + 4)
+            j = n if j < 0 else j + 3
+            out.append(re.sub(r"[^\n]", " ", text[i:j]))
+            i = j
+            continue
+        if not html and c == "/" and nxt == "/":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if not html and c == "/" and nxt == "*":
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append(re.sub(r"[^\n]", " ", text[i:j]))
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 #: A CUSTOM PROPERTY IS DECLARED WHEREVER A DECLARATION MAY START, not only at
@@ -369,10 +450,11 @@ def test_styles_css_declares_no_selector_only_the_gate_loop_uses() -> None:
     # orphans. A gate-only selector left behind is named by neither — and a
     # tuple that forgot it cannot hide it, because this assertion never reads
     # the tuple.
-    own = "\n".join(p.read_text(encoding="utf-8")
+    own = "\n".join(_blank_code_comments(p.read_text(encoding="utf-8"))
                     for p in sorted((WEB / "views").glob("*.js")))
-    own += (WEB / "app.js").read_text(encoding="utf-8")
-    own += (WEB / "index.html").read_text(encoding="utf-8")
+    own += _blank_code_comments((WEB / "app.js").read_text(encoding="utf-8"))
+    own += _blank_code_comments((WEB / "index.html").read_text(encoding="utf-8"),
+                                html=True)
 
     def named_by_opendox(token: str) -> bool:
         if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])",
@@ -402,11 +484,21 @@ def test_the_design_tokens_and_the_shared_selectors_stayed() -> None:
         # the two explicit data-theme choices (S7's own arrangement).
         assert len(re.findall(rf"^\s*{role}\s*:", css, re.M)) == 4, role
     declared = _selector_classes(css)
-    for shared in ("swb-cbtn", "swb-cfield", "swb-clabel", "swb-cslot",
-                   "disposebtn", "dispose-intile", "cbtn", "repobtn",
-                   "docstatus", "reason-form", "rf-label", "repopick-msg",
-                   "dc-h", "dc-line", "dc-note", "swb-draftchrome"):
-        assert shared in declared, shared
+    # THE COMPLETE SHARED SET, not a sample of it (Copilot review, round 2).
+    # Sixteen names stood here, and removing an unlisted shared rule left this
+    # green — an extraction that took openDox-owned styling with it and said
+    # nothing. `SHARED_CLASSES` is the census's own `shared` bucket at
+    # openDox-code `0b4e8bbf` / openXdox-code `0a0265f7`: every class named by
+    # BOTH columns, which is exactly the set this extraction puts at risk. A
+    # class openDox alone names was never a candidate to leave.
+    missing = sorted(set(SHARED_CLASSES) - declared)
+    assert missing == [], (
+        f"these classes are named by openDox's own bundle AND by openXdox's six "
+        f"contributed modules, so they are openDox's and stay: {missing}. An "
+        "extraction that took one took openDox-owned styling with it")
+    # and the host-context class the one moved cross-rule names
+    for host in HOST_CONTEXT_CLASSES:
+        assert host in declared, host
 
 
 def test_the_gate_exclusive_set_is_re_derived_where_the_modules_are_present() -> None:
@@ -485,7 +577,11 @@ def test_no_contributed_sheet_declares_a_design_token() -> None:
     `views/display.js`'s `applyTokens` is already the first.
     """
     views = WEB / "views"
-    sheets = sorted(views.glob("*.css"))
+    # RECURSIVE, because `_SHEET` admits a nested specifier (Copilot review,
+    # round 2): `./views/gate/panel.css` is a lawful `styles` value, and a
+    # direct-child glob would have let a sheet in a subdirectory declare an
+    # `--st-*` token with this guard claiming to cover every contributed sheet.
+    sheets = sorted(views.rglob("*.css"))
     if not sheets:
         pytest.skip("no assembly has placed a contributed stylesheet in this "
                     "bundle (RULED Q5); openDox ships none of its own")
