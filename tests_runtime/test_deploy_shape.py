@@ -22,6 +22,7 @@ import yaml
 from opendox.runtime.config import PREFIX, SETTINGS, SETTING_NAMES
 
 ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github" / "workflows" / "validate.yml"
 COMPOSE = ROOT / "deploy" / "compose"
 KUBERNETES = ROOT / "deploy" / "kubernetes"
 ENV_EXAMPLE = COMPOSE / ".env.example"
@@ -68,6 +69,79 @@ def _env_names_of(container: dict[str, Any]) -> set[str]:
 def _containers(document: Any) -> list[dict[str, Any]]:
     spec = (document.get("spec") or {}).get("template", {}).get("spec", {})
     return list(spec.get("containers", []))
+
+
+# -- the workflow is a file GitHub can actually read -------------------------
+#
+# THIS SUITE EXISTS BECAUSE THE ABSENCE OF A RUN LOOKS LIKE NOTHING. A workflow
+# file GitHub cannot parse does not fail a job — it runs NO job, reports under
+# the file's own path instead of its jobs' names, and every required check
+# simply never appears. Measured on this act: `run: python -m pip install
+# --only-binary :all: -e ".[runtime,test]"` written as a PLAIN scalar contains
+# `: `, which YAML reads as a mapping indicator, so at head `4d3ce664` neither
+# `validate` nor `runtime` started and only SonarCloud reported. Nothing in the
+# tree noticed; a green-looking PR page did.
+
+
+def test_the_workflow_file_parses_as_yaml() -> None:
+    try:
+        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:  # pragma: no cover - the failure this guards
+        raise AssertionError(
+            f"{WORKFLOW} is not parseable YAML, so GitHub Actions will run NO "
+            f"job from it and every required check will be ABSENT: {exc}"
+        ) from exc
+    assert isinstance(workflow, dict)
+    assert isinstance(workflow.get("jobs"), dict)
+
+
+def test_the_workflow_declares_both_jobs_and_their_steps() -> None:
+    """The required job, and the DB-backed job this act adds beside it."""
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    assert "validate" in jobs, (
+        "`validate` is this repository's one REQUIRED status check "
+        "(openDox-code#2) and the workflow no longer declares it")
+    assert "runtime" in jobs, (
+        "the DB-backed `runtime` job is gone; the suites that need Postgres, a "
+        "token or a web framework would then run nowhere")
+    names = [step.get("name") for step in jobs["validate"]["steps"]]
+    assert "pytest (runtime, hermetic)" in names, (
+        "the required job no longer runs this act's hermetic suites")
+    assert names.index("pytest") < names.index("pytest (runtime, hermetic)"), (
+        "this act's step must stay APPENDED after the existing pytest step; "
+        "reordering is an edit to what the required check already ran")
+    runtime_names = [step.get("name") for step in jobs["runtime"]["steps"]]
+    assert runtime_names[-1] == "pytest (runtime, database-backed)"
+
+
+def test_the_runtime_job_supplies_a_postgres_service_and_the_extras() -> None:
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    service = jobs["runtime"]["services"]["postgres"]
+    assert service["image"].startswith("postgres:")
+    install = next(step["run"] for step in jobs["runtime"]["steps"]
+                   if step.get("name", "").startswith("install"))
+    assert "--only-binary :all:" in install
+    assert '.[runtime,test]' in install
+    probe = next(step for step in jobs["runtime"]["steps"]
+                 if step.get("name") == "pytest (runtime, database-backed)")
+    assert probe["env"]["OPENDOX_TEST_DATABASE_URL"].startswith("postgresql://")
+
+
+def test_the_required_job_installs_only_the_test_extra() -> None:
+    """The import-weight contract, read off the workflow rather than the prose.
+
+    If the required job ever installed `.[runtime]`, every assertion about what
+    imports without the extra would still pass and would stop meaning anything.
+    """
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    installs = [step.get("run", "") for step in jobs["validate"]["steps"]
+                if "pip install" in step.get("run", "")]
+    assert installs, "the required job installs nothing"
+    for line in installs:
+        assert "runtime" not in line, (
+            f"the required `validate` job installs {line!r}; it must install "
+            "the test extra alone, or the hermetic suites stop measuring the "
+            "import-weight contract they exist for")
 
 
 # -- the three declarations agree -------------------------------------------
