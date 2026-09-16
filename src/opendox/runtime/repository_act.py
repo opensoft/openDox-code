@@ -290,6 +290,7 @@ class RepositoryActRefused(Exception):
     """The act could not be performed, named. Carries no secret material."""
 
 
+
 @dataclass(frozen=True)
 class CreatedRepository:
     """What the act produced: the map row, and the corpus it addresses."""
@@ -471,25 +472,51 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
         # `stat`, so the inode comparison compared the replacement with itself
         # and passed (Copilot review of openDox-code#26, round 12). One handle
         # from the check to the use is the only shape that has no such window.
-        parent = os.open(location.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            leaf = location.name
+        if os.mkdir in os.supports_dir_fd:
+            # THE LEAF IS CREATED AND OPENED RELATIVE TO A HELD PARENT
+            # DESCRIPTOR, and the descriptor that is opened is the ONE this
+            # function then uses. The first cut checked emptiness through a
+            # no-follow handle, CLOSED it, and opened the path again for the
+            # run: a directory removed and replaced between those two opens was
+            # described by both `fstat` and `stat`, so the inode comparison
+            # compared the replacement with itself and passed (Copilot review
+            # of openDox-code#26, round 12). One handle from the check to the
+            # use is the only shape that has no such window.
+            #
+            # EXCLUSIVE, because an exclusive `mkdir` cannot follow a symlink:
+            # it fails with `FileExistsError` whether the thing in the way is a
+            # link or a directory (round 8). `dir_fd` means the lookup happens
+            # in the directory this call holds rather than by re-walking a path
+            # another process can re-point (round 12).
+            parent = os.open(location.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                # EXCLUSIVE, and relative to the parent handle: an exclusive
-                # `mkdir` cannot follow a symlink (it fails with
-                # `FileExistsError` whether the thing in the way is a link or
-                # a directory), and `dir_fd` means the lookup happens in the
-                # directory this call holds rather than by re-walking a path
-                # another process can re-point (Copilot review of
-                # openDox-code#26, round 8 for the exclusive create, round 12
-                # for the handle).
-                os.mkdir(leaf, dir_fd=parent)
+                leaf = location.name
+                try:
+                    os.mkdir(leaf, dir_fd=parent)
+                except FileExistsError:
+                    pass
+                owned = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY
+                                | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+            finally:
+                os.close(parent)
+        else:
+            # A PLATFORM WITHOUT `dir_fd`, and the weaker guarantee is stated
+            # rather than assumed. `os.supports_dir_fd` excludes `mkdir` and
+            # `open` on Windows, where they raise `NotImplementedError`; every
+            # place this runtime is deployed (both `deploy/` shapes) and every
+            # runner its CI uses is Linux, where both are supported. Where they
+            # are not, this is the shape the act had before: an exclusive
+            # create and a no-follow open BY NAME, which still refuses a
+            # symlink and (with the inode comparison below) a re-pointed path,
+            # and leaves only the window between the two calls. Same policy as
+            # `_runner_bound_to`'s `/proc/self/fd` → `/dev/fd` → pathname
+            # ladder: take the strongest the platform offers, and say which.
+            try:
+                location.mkdir()
             except FileExistsError:
                 pass
-            owned = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY
-                            | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
-        finally:
-            os.close(parent)
+            owned = os.open(location, os.O_RDONLY | os.O_DIRECTORY
+                            | getattr(os, "O_NOFOLLOW", 0))
     except RepositoryActRefused:
         raise
     except OSError as exc:

@@ -541,7 +541,11 @@ class LocalGitCorpus:
 
         return ResolvedCorpus(
             ref=ref,
-            location=str(location.resolve()),
+            # THE RESOLUTION COMPUTED ABOVE, inside the translation, and not a
+            # second `resolve()` here: the same `PermissionError`/`OSError`
+            # this function now refuses for the probes could be raised by this
+            # call, two lines from the fix for it.
+            location=str(resolved_location),
             revision=revision,
             scopes=(SCOPE_ALL,),
             write_path=WRITE_PATH,
