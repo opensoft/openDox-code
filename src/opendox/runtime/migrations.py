@@ -242,6 +242,20 @@ def discover_migrations(
     # which is the one state the runner exists to prevent (Copilot review of
     # openDox-code#25, round 7). A refusal before any mutation costs nothing
     # and is the same answer `discover` gives any other malformed directory.
+    # AND NOTHING BELOW THE CANONICAL VERSION IS A MIGRATION. The filename
+    # shape accepts `0000_*.sql`, and discovery only ordered and de-duplicated
+    # — so such a file ran BEFORE the pinned `0001`, mutating the database
+    # after the digest gate had passed and against the act's own
+    # `0001`-canonical / `0002`-and-up-additive contract (Copilot review of
+    # openDox-code#25, round 8). Refused here, where every caller sees it.
+    for migration in migrations:
+        if int(migration.version) < int(CANONICAL_MIGRATION_VERSION):
+            raise MigrationError(
+                f"{migration.path.name} claims version {migration.version}, "
+                f"below the canonical {CANONICAL_MIGRATION_VERSION}. The "
+                "canonical migration is the first thing this schema has; a "
+                "file before it would run after its digest was verified and "
+                "before the schema it pins exists. Nothing is applied.")
     seen: dict[str, str] = {}
     for migration in migrations:
         if migration.version in seen:

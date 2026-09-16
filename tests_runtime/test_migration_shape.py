@@ -191,3 +191,24 @@ def test_two_files_claiming_one_version_are_refused_before_any_mutation(
     message = str(caught.value)
     assert "0002" in message
     assert "0002_first.sql" in message and "0002_second.sql" in message
+
+
+def test_a_version_below_the_canonical_one_is_not_a_migration(tmp_path) -> None:
+    """`0000_*.sql` would have run BEFORE the pinned `0001`.
+
+    The filename shape accepts it and discovery only ordered and de-duplicated,
+    so such a file mutated the database after the canonical digest gate had
+    passed and before the schema that digest pins existed — against the act's
+    own `0001`-canonical / `0002`-and-up-additive contract (Copilot review of
+    openDox-code#25, round 8).
+    """
+    import pytest
+
+    from opendox.runtime.migrations import MigrationError, discover_migrations
+
+    for name in ("0000_before_everything.sql", "0001_identity.sql"):
+        (tmp_path / name).write_text("select 1;\n", encoding="utf-8")
+    with pytest.raises(MigrationError) as caught:
+        discover_migrations(tmp_path)
+    assert "0000_before_everything.sql" in str(caught.value)
+    assert "0001" in str(caught.value)
