@@ -373,17 +373,30 @@ def test_serve_emits_evidence_on_an_ordinary_shutdown(
     comment). `uvicorn` and the application are stubbed here because the point
     is the RETURN path, not a listening socket.
     """
-    pytest.importorskip(
-        "uvicorn",
-        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
-    import uvicorn
+    import sys
+    import types
 
+    # STUBBED, NOT SKIPPED. `uvicorn` and `opendox.runtime.app` belong to the
+    # `runtime` extra, which the REQUIRED `validate` job does not install, and
+    # a test that skips there would leave this contract measured only in the
+    # advisory job — and would make the required job's recorded figure depend
+    # on which extras the measuring environment happened to have, which is the
+    # very mismatch Copilot's review of openDox-code#26 caught in this file's
+    # sibling block. `cmd_serve` imports both INSIDE the function, so two
+    # entries in `sys.modules` are the whole seam; the subject here is the
+    # RETURN path, never a listening socket.
     served: dict[str, object] = {}
+
+    uvicorn_stub = types.ModuleType("uvicorn")
 
     def _fake_run(app: object, **kwargs: object) -> None:
         served.update(kwargs)
 
-    monkeypatch.setattr(uvicorn, "run", _fake_run)
+    uvicorn_stub.run = _fake_run                       # type: ignore[attr-defined]
+    app_stub = types.ModuleType("opendox.runtime.app")
+    app_stub.create_app = lambda **kwargs: object()    # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn_stub)
+    monkeypatch.setitem(sys.modules, "opendox.runtime.app", app_stub)
     monkeypatch.setenv(PREFIX + "DATABASE_URL",
                        "postgresql://nobody@127.0.0.1:1/none")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
