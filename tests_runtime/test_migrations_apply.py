@@ -589,3 +589,46 @@ def test_reset_drops_in_this_schema_only_and_never_through_public(
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")
                 conn.execute("drop table if exists public.users")
+
+
+def test_a_narrowing_that_changes_nothing_fails_the_run(
+        postgres_dsn: str) -> None:
+    """`revoke` succeeds and changes nothing for the ledger's OWNER.
+
+    Point both DSNs at the migration identity — the accident this separation
+    exists to survive — and the run used to report a narrowed ledger that the
+    served identity could still rewrite, because a role cannot be revoked out
+    of privileges it holds by ownership (the same is true of a superuser, and
+    of a role holding the write through another grant). The run now ASKS
+    Postgres whether the narrowing took effect and fails when it did not
+    (Copilot review of openDox-code#25, round 6).
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            owner_row = conn.execute("select current_user").fetchone()
+        owner = owner_row[0]
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations",
+                    runtime_role=owner)
+                with pytest.raises(
+                        migrations.LedgerNarrowingIneffectiveError) as caught:
+                    runner.apply()
+                assert "INSERT" in str(caught.value)
+                assert owner in str(caught.value)
+                # The narrowing is a PRECONDITION of the run, so nothing was
+                # applied: the ledger is bootstrapped and empty, and no
+                # coordination table exists.
+                assert runner.applied() == []
+                assert _tables_in(db) == {migrations.LEDGER_TABLE}
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")

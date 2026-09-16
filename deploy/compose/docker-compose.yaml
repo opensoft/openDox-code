@@ -28,7 +28,15 @@ services:
       POSTGRES_USER: ${OPENDOX_PG_USER:-opendox}
       # Supplied at run time by the platform or the local `.env`.
       POSTGRES_PASSWORD: ${OPENDOX_PG_PASSWORD}
-      OPENDOX_RUNTIME_PG_USER: ${OPENDOX_RUNTIME_PG_USER:-opendox_runtime}
+      # THE ROLE `init-runtime-role.sh` CREATES, from the ONE name `.env`
+      # declares — `OPENDOX_RUNTIME_PG_ROLE`, which is also the runtime setting
+      # the migration narrows and the user in `OPENDOX_DATABASE_URL`. This used
+      # to read a second `.env` variable of its own, so an operator who set the
+      # documented setting created one role and narrowed another and the real
+      # served role kept its write on the ledger (Copilot review of
+      # openDox-code#25). The container-side name stays what the init script
+      # reads.
+      OPENDOX_RUNTIME_PG_USER: ${OPENDOX_RUNTIME_PG_ROLE:-opendox_runtime}
       OPENDOX_RUNTIME_PG_PASSWORD: ${OPENDOX_RUNTIME_PG_PASSWORD}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
@@ -130,8 +138,9 @@ services:
       OPENDOX_MIGRATION_DATABASE_URL: ${OPENDOX_MIGRATION_DATABASE_URL}
       OPENDOX_MIGRATIONS_DIR: ${OPENDOX_MIGRATIONS_DIR:-migrations}
       # A ROLE NAME, not a credential: after applying, the runner narrows this
-      # role's rights on the migration ledger to SELECT.
-      OPENDOX_RUNTIME_PG_ROLE: ${OPENDOX_RUNTIME_PG_USER:-opendox_runtime}
+      # role's rights on the migration ledger to SELECT. The SAME `.env` name
+      # the Postgres service creates the role from — see that service.
+      OPENDOX_RUNTIME_PG_ROLE: ${OPENDOX_RUNTIME_PG_ROLE:-opendox_runtime}
     command: ["opendox-runtime", "runtime", "migrate"]
     networks:
       - internal

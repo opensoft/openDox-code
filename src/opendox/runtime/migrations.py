@@ -135,6 +135,16 @@ class CanonicalDigestMismatchError(MigrationError):
         self.version = version
 
 
+class LedgerNarrowingIneffectiveError(MigrationError):
+    """The configured runtime role still holds a write on the ledger.
+
+    `revoke` succeeds and changes nothing for the ledger's OWNER, for a
+    superuser, and for a role holding the same privilege through another grant.
+    Raising here is what keeps "the ledger is narrowed" from being a claim the
+    run makes about work it did not do (Copilot review of openDox-code#25).
+    """
+
+
 class MigrationChecksumDriftError(MigrationError):
     """An already-applied migration's file has changed since it was applied."""
 
@@ -511,3 +521,26 @@ class MigrationRunner:
             f"from {self._runtime_role}")
         conn.execute(
             f"grant select on {LEDGER_TABLE} to {self._runtime_role}")
+        # AND THE NARROWING IS MEASURED, because `revoke` can succeed and
+        # change nothing. A role that OWNS the ledger — which is what happens
+        # when both DSNs are pointed at the migration identity — keeps every
+        # privilege, and so does a superuser or a role holding the same write
+        # through another grant; the run then reported a narrowed ledger that
+        # the served identity could still rewrite (Copilot review of
+        # openDox-code#25). Postgres is asked the question directly, with the
+        # role name as a PARAMETER (this is a function call, not an
+        # identifier), and a `true` here fails the whole run.
+        for privilege in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+            row = conn.execute(
+                "select has_table_privilege(%s, %s, %s)",
+                (self._runtime_role, LEDGER_TABLE, privilege)).fetchone()
+            if row and row[0]:
+                raise LedgerNarrowingIneffectiveError(
+                    f"{self._runtime_role!r} still has {privilege} on "
+                    f"{LEDGER_TABLE} after the revoke. A role that owns the "
+                    "ledger (both DSNs pointed at the migration identity), a "
+                    "superuser, or a role holding the privilege through "
+                    "another grant cannot be narrowed by revoking from it, and "
+                    "an unnarrowed served role can rewrite the runner's own "
+                    "tamper-evident record. Serve as a role that is not the "
+                    "owner of the coordination schema.")

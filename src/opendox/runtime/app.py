@@ -63,6 +63,7 @@ database rather than migrating it.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -108,6 +109,111 @@ class DraftPut(BaseModel):
     document_key: str = Field(min_length=1)
     body: str
     basis_revision: str | None = None
+
+
+#: THE BIGGEST REQUEST BODY THIS RUNTIME WILL PARSE. A draft is a document, so
+#: this is the document-sized cap `opendox.doxbench_model`'s
+#: `SERVER_MAX_INPUT_LIMIT_BYTES` and `serve_wire`'s `DOXBENCH_MAX_REQUEST_BYTES`
+#: already use for the same question elsewhere in this repository — one MiB.
+#:
+#: DECLARED HERE AND NOT IMPORTED FROM THEM, and that is not duplication for
+#: its own sake: `opendox.serve*` cannot be imported at this leg at all (its
+#: `ideation_dashboard` reach, RULED Q-L5 (b′)), so importing the constant
+#: would make the runtime unimportable. The BUILD-arc act that repairs that
+#: import is where the two can become one name.
+MAX_REQUEST_BODY_BYTES = 1_048_576
+
+#: The refusal a body over that cap gets. A CODE, like every other refusal this
+#: API returns, so a caller can branch on it rather than on prose.
+_TOO_LARGE: dict[str, Any] = {
+    "code": "request.too_large",
+    "message": ("the request body exceeds "
+                f"{MAX_REQUEST_BODY_BYTES} bytes; a draft is a document, not a "
+                "stream"),
+}
+
+
+class _BodyTooLarge(Exception):
+    """Raised inside the wrapped `receive`; never escapes this module."""
+
+
+class BodySizeLimit:
+    """Refuse a request body over `max_bytes` BEFORE anything parses it.
+
+    `DraftPut.body` had no bound, so an authenticated caller could hand
+    FastAPI an arbitrarily large JSON document, have it parsed into memory and
+    written into an unbounded `text` column — process memory and database
+    storage spent by one request (Copilot review of openDox-code#25). Every
+    other HTTP surface in this repository caps its request bytes; this one did
+    not.
+
+    A PURE ASGI middleware and not a route dependency, because the cost is
+    incurred before any handler is reached: the declared `Content-Length` is
+    refused without reading a byte, and a request that declares none (a chunked
+    upload) is COUNTED as it arrives and refused the moment it passes the cap,
+    which is the only way a streamed body can be bounded at all.
+    """
+
+    def __init__(self, app: Any, *, max_bytes: int = MAX_REQUEST_BODY_BYTES) -> None:
+        self._app = app
+        self._max = max_bytes
+
+    async def __call__(self, scope: dict[str, Any], receive: Any,
+                       send: Any) -> None:
+        if scope.get("type") != "http":
+            await self._app(scope, receive, send)
+            return
+        declared = self._declared_length(scope)
+        if declared is not None and declared > self._max:
+            await self._refuse(send)
+            return
+
+        received = 0
+        started = False
+
+        async def counting_receive() -> dict[str, Any]:
+            nonlocal received
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body", b""))
+                if received > self._max:
+                    raise _BodyTooLarge
+            return message
+
+        async def watching_send(message: dict[str, Any]) -> None:
+            nonlocal started
+            if message.get("type") == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self._app(scope, counting_receive, watching_send)
+        except _BodyTooLarge:
+            # Only when the application has not begun answering: once it has,
+            # the connection is the application's and a second response start
+            # would be a protocol error.
+            if started:
+                raise
+            await self._refuse(send)
+
+    @staticmethod
+    def _declared_length(scope: dict[str, Any]) -> int | None:
+        for name, value in scope.get("headers") or ():
+            if name == b"content-length":
+                try:
+                    return int(value)
+                except ValueError:
+                    return None
+        return None
+
+    @staticmethod
+    async def _refuse(send: Any) -> None:
+        body = json.dumps({"detail": _TOO_LARGE}).encode("utf-8")
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length",
+                                 str(len(body)).encode("ascii"))]})
+        await send({"type": "http.response.body", "body": body})
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +426,8 @@ REFUSALS: dict[int | str, dict[str, Any]] = {
     403: {"description": "a verified principal whose `memberships.role` does "
                          "not permit this act (`authz.*`)"},
     404: {"description": "no such row (`coordination.not_found`)"},
+    413: {"description": "the request body is over the cap "
+                         "(`request.too_large`)"},
     409: {"description": "a uniqueness or vocabulary rule the caller broke "
                          "(`coordination.conflict`, `repository.refused`)"},
 }
@@ -729,6 +837,8 @@ def create_app(*, settings: RuntimeSettings | None = None,
                   lifespan=lifespan)
     app.state.context = AppContext(settings=resolved, database=database,
                                    verifier=verifier)
+    # BEFORE ANY ROUTE, and before FastAPI parses a body — see `BodySizeLimit`.
+    app.add_middleware(BodySizeLimit, max_bytes=MAX_REQUEST_BODY_BYTES)
 
     @app.get("/livez")
     def livez() -> dict[str, str]:
@@ -769,6 +879,19 @@ def create_app(*, settings: RuntimeSettings | None = None,
             ok = False
         if checks["database"] == "ok":
             try:
+                # THE PINNED CANONICAL FILE IS VERIFIED BEFORE THE PLAN IS
+                # CALCULATED. `plan()` and `drift()` compare the ledger with
+                # what `discover()` FINDS, and `discover()` returns `[]` for a
+                # migrations directory that exists and is empty — so an image
+                # that lost `0001`, or a wrong `OPENDOX_MIGRATIONS_DIR`, made
+                # both answers empty on a FRESH database and readiness reported
+                # `schema: applied` and admitted traffic to an install with no
+                # coordination schema at all (Copilot review of
+                # openDox-code#25). `verify_canonical_digest` is the same gate
+                # `apply()` runs first and `status` reports, and it refuses an
+                # absent `0001` as loudly as a changed one.
+                migrations.verify_canonical_digest(
+                    app.state.context.settings.migrations_dir)
                 runner = migrations.MigrationRunner(
                     app.state.context.database,
                     migrations_dir=app.state.context.settings.migrations_dir)

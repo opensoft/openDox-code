@@ -874,3 +874,84 @@ def test_a_hidden_user_and_a_missing_one_answer_byte_for_byte_the_same(
         "the two 404s differ, so the route still answers which ids exist")
     # And the body names no id at all — naming one puts the probe in the answer.
     assert owner_me["id"] not in hidden.text
+
+
+# -- Copilot's sixth round on #25 --------------------------------------------
+
+
+def test_readiness_refuses_a_migrations_directory_without_the_pinned_0001(
+        database, postgres_dsn: str, verifier, tmp_path) -> None:
+    """An EMPTY directory made `plan()` and `drift()` both empty.
+
+    `discover()` returns `[]` for a directory that exists and holds no
+    migration, so on a fresh database readiness reported `schema: applied` and
+    admitted traffic to an install with no coordination schema at all — an
+    image that lost `0001`, or a wrong `OPENDOX_MIGRATIONS_DIR`, looked
+    healthier than a pending one (Copilot review of openDox-code#25, round 6).
+    The pinned canonical file is verified BEFORE the plan, which is the same
+    gate `apply()` runs first.
+    """
+    from fastapi.testclient import TestClient
+
+    from opendox.runtime.app import create_app
+    from opendox.runtime.config import PREFIX, load_settings
+    from opendox.runtime.db import Database
+    from tests_runtime.conftest import TEST_AUDIENCE, TEST_ISSUER
+
+    empty = tmp_path / "no-migrations-here"
+    empty.mkdir()
+    settings = load_settings({
+        PREFIX + "DATABASE_URL": postgres_dsn,
+        PREFIX + "OIDC_ISSUER": TEST_ISSUER,
+        PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
+        PREFIX + "MIGRATIONS_DIR": str(empty),
+    })
+    app = create_app(settings=settings,
+                     database=Database(postgres_dsn, schema=database.schema),
+                     verifier=verifier)
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+    assert response.status_code == 503, response.text
+    schema = response.json()["checks"]["schema"]
+    assert schema.startswith("unreadable: MigrationError"), schema
+
+
+def test_a_request_body_over_the_cap_is_refused_before_it_is_parsed(
+        client, mint_token) -> None:
+    """`DraftPut.body` had no bound at all.
+
+    An authenticated caller could hand FastAPI an arbitrarily large JSON
+    document, have it parsed into memory and written into an unbounded `text`
+    column — process memory and database storage spent by one request, on a
+    surface where every other HTTP entry point in this repository caps its
+    bytes (Copilot review of openDox-code#25, round 6).
+    """
+    from opendox.runtime.app import MAX_REQUEST_BODY_BYTES
+
+    token = mint_token(subject="bulk-writer")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "capped", "title": "Capped"},
+                          headers=_auth(token)).json()
+    session = client.post("/api/v1/sessions",
+                          json={"project_id": project["id"]},
+                          headers=_auth(token)).json()
+
+    oversized = "x" * (MAX_REQUEST_BODY_BYTES + 1)
+    refused = client.put("/api/v1/drafts",
+                         json={"session_id": session["id"],
+                               "project_id": project["id"],
+                               "document_key": "big.md",
+                               "body": oversized},
+                         headers=_auth(token))
+    assert refused.status_code == 413, refused.status_code
+    assert refused.json()["detail"]["code"] == "request.too_large"
+
+    # And the cap is the only thing refusing it: the same request one document
+    # smaller is accepted and stored.
+    accepted = client.put("/api/v1/drafts",
+                          json={"session_id": session["id"],
+                                "project_id": project["id"],
+                                "document_key": "big.md",
+                                "body": "x" * 1024},
+                          headers=_auth(token))
+    assert accepted.status_code in (200, 201), accepted.text
