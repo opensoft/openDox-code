@@ -45,8 +45,14 @@ slice S3's ruled contract is executed rather than described"; S4's and S5's
 "measures the other half"; S6's "the slice's only running proof"). THIS file is
 the first kind. S2's contract is not left undescribed without the second one:
 delete the intent reach instead of routing it through the binding and
-`test_intent_binding_exports_every_name_the_views_need` and
-`test_wheel_imports_the_intent_names_from_the_binding` below both go red. What
+`test_wheel_imports_the_intent_names_from_the_binding` below goes red. It is
+that test ALONE, and the header used to claim both (Copilot review of
+openDox-code#24): `test_intent_binding_exports_every_name_the_views_need` reads
+`intent-binding.js` against a FIXED `REQUIRED_BINDING_EXPORTS` tuple, so it is
+blind to what the CONSUMERS do — measured by deleting wheel.js's static import
+of the binding, which leaves it green and reds only the consumer test. One
+running proof of S2's contract, not two, which is exactly enough and is what
+the paragraph above claims. What
 the DOM probe adds is the seam's FORWARDING, and three of its six cases have to
 write a stand-in for the never-carried `views/intent-feed.js` to measure it.
 Admitting behavioural probes as a CLASS is BUILD-arc work (S8), not this
