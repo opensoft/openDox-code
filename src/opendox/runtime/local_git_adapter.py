@@ -68,7 +68,10 @@ the commit's trailers rather than adjudicated here, because the closed refusal
 vocabulary has no kind for staleness and inventing one would be a seventh
 member by another name. A governed corpus whose write path is a pull request
 refuses a stale basis at that path; this corpus's path is a commit, and git's
-own machinery is where two commits are reconciled.
+own machinery is where two commits are reconciled. RULED: RULED openxFactory#656 comment 5701772032 (Brett Heap, 2026-09-16, by interactive multi-choice)
+answers Q-R2 — `basis_revision` is a COMMIT TRAILER and the compare-and-swap
+ref move is what decides staleness. So the trailer below is the recorded
+answer, not an interim one.
 
 NO HOME VOCABULARY. This module names no governance noun, no lifecycle word and
 no header of openxFactory's corpus (RULING C2, and `corpus_adapter.py`'s own

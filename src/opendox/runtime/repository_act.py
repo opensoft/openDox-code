@@ -371,6 +371,9 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
         # second answer to "what does this project contain" that the adapter is
         # forbidden to keep up to date. A human who wants a checkout clones it;
         # `push_to_remote` below works from a bare repository unchanged.
+        # AND IT IS RULED, not this act's preference:
+        # RULED openxFactory#656 comment 5701772032 (Brett Heap, 2026-09-16, by interactive multi-choice)
+        # answers Q-R1 — the repository this act creates STAYS BARE.
         git.out("init", "--bare", f"--initial-branch={branch}", ".")
         # The first commit, through plumbing and over the EMPTY TREE: no file
         # is written, so the repository's whole content is what its owner puts
