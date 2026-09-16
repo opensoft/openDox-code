@@ -222,13 +222,19 @@ jobs:
       #   tests/test_bullseye_widget.py              5 failed  -> 4 failed
       #       the same pre-carve read, for `serve.py`.
       #
-      # THREE OF THE SIX ARE NAMED IN THE LIST BELOW and three are not, and the
-      # reason is measured rather than asserted. `test_outline_model.py`,
-      # `test_doxbench_memory_gateway.py` and `test_bullseye_widget.py` each
-      # keep a residue this slice does not own (`doc_health` and openxFactory's
+      # TWO OF THE SIX ARE NAMED IN THE LIST BELOW and FOUR ARE NOT (Copilot
+      # review of this head, accurate — this block said three and three, and
+      # the list below names two). The two named are the two the repair leaves
+      # wholly green: `test_doxbench_knowledge.py` and
+      # `test_doxbench_document_abstract.py`. The four omitted are
+      # `test_outline_model.py`, `test_doxbench_memory_gateway.py`,
+      # `test_bullseye_widget.py` and `test_doxbench_view.py`, and the reason
+      # for each is measured rather than asserted. The first three each keep a
+      # residue this slice does not own (`doc_health` and openxFactory's
       # `openspec/` tree — the BUILD arc's; and three `test_bullseye_widget.py`
       # quotations of `views/staging-workbench.js` / `swb-create.js` lines S5
-      # rewrote). `test_doxbench_view.py` is the one worth stating in full: with
+      # rewrote). `test_doxbench_view.py` is the fourth and the one worth
+      # stating in full: with
       # ONLY the S8 path repair applied it is 136 PASSED at `main`, and on this
       # branch it is 124 passed with 11 errors and 1 failure — every one of the
       # twelve a shell behaviour S5 and S7 changed under a suite nobody has run
