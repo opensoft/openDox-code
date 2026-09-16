@@ -407,6 +407,17 @@ jobs:
       #              and pytest) — the same five modules, after round SEVEN:
       #              duplicate migration versions refused at discovery, and the
       #              Kubernetes bootstrap creating the role the Job narrows.
+      #  109 passed  at `build/3-5-runtime` `3f20a122` (same day, same python
+      #              and pytest) — the same five modules, after that round's
+      #              suppressed comments: the migrate PREVIEW running the
+      #              canonical gate, and the filename assertion that is now the
+      #              runner's own regex rather than a looser restatement.
+      #
+      #              THE CURRENT FIGURE IS THIS ONE, and the PR description
+      #              states it at this same commit. An entry above is the
+      #              measurement that was current when it was written; the
+      #              commit that records a figure changes no test, so the
+      #              figure also holds at the head that carries the record.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
