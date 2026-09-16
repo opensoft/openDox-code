@@ -372,7 +372,7 @@ jobs:
       #              python 3.12.3 / pytest 8.4.2) — the FIVE modules § 3.5
       #              names, without the adapter suite, because that file
       #              arrives with § 3.6.
-      #   97 passed  at `build/3-5-runtime` `06aacfc2` (same day, same python
+      #   97 passed  at `build/3-5-runtime` `a9c6f0d6` (same day, same python
       #              and pytest) — the same five modules. The round that
       #              answered Copilot's fourth review added ten assertions to
       #              them: the StatefulSet's parsed `defaultMode`, the
