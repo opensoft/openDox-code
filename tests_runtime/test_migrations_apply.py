@@ -248,3 +248,75 @@ def test_a_duplicate_slug_race_is_a_conflict_and_not_a_raw_database_error(
             two.create_project(slug="raced", title="Two", created_by=owner.id)
         second.rollback()
     assert "raced" in str(caught.value)
+
+
+def test_the_served_role_cannot_rewrite_the_ledger_after_a_run(
+        postgres_dsn: str) -> None:
+    """The runner's record is the runner's, not the API's.
+
+    A served role that could INSERT, UPDATE or DELETE `opendox_schema_
+    migrations` could hide an applied migration or manufacture one, after which
+    the fail-closed drift check would be checking a story the API wrote. SELECT
+    is kept, because `/readyz` reads the ledger.
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    role = "t_role_" + uuid.uuid4().hex[:8]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            conn.execute(f"create role {role}")
+            conn.execute(f"grant usage on schema {schema} to {role}")
+            conn.execute(
+                f"alter default privileges in schema {schema} "
+                f"grant select, insert, update, delete on tables to {role}")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations",
+                    runtime_role=role).apply()
+                with db.connection() as conn:
+                    granted = {
+                        row[0] for row in conn.execute(
+                            "select privilege_type from "
+                            "information_schema.table_privileges "
+                            "where grantee = %s and table_name = %s",
+                            (role, migrations.LEDGER_TABLE)).fetchall()}
+                    on_users = {
+                        row[0] for row in conn.execute(
+                            "select privilege_type from "
+                            "information_schema.table_privileges "
+                            "where grantee = %s and table_name = 'users'",
+                            (role,)).fetchall()}
+            assert granted == {"SELECT"}, (
+                f"the served role holds {sorted(granted)} on the ledger; only "
+                "SELECT may survive a run")
+            # ...and the coordination tables are untouched, which is what makes
+            # this a narrowing and not a lockout.
+            assert {"SELECT", "INSERT", "UPDATE", "DELETE"} <= on_users
+        finally:
+            with admin.transaction() as conn:
+                # The default-privileges entry references the schema, so it
+                # goes FIRST; dropping the schema first leaves a grant naming
+                # something that no longer exists and the cleanup fails.
+                conn.execute(
+                    f"alter default privileges in schema {schema} "
+                    f"revoke all on tables from {role}")
+                conn.execute(f"revoke usage on schema {schema} from {role}")
+                conn.execute(f"drop schema if exists {schema} cascade")
+                conn.execute(f"drop role if exists {role}")
+
+
+def test_the_ledger_narrowing_refuses_a_role_name_that_is_not_an_identifier(
+        database) -> None:
+    """A role name reaches a `revoke` as SYNTAX and cannot be a parameter."""
+    runner = migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations",
+        runtime_role='evil"; drop table users; --')
+    with pytest.raises(migrations.MigrationError) as caught:
+        runner.protect_ledger()
+    assert "plain SQL identifier" in str(caught.value)

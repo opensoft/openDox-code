@@ -122,6 +122,9 @@ services:
       # openDox-code#25).
       OPENDOX_MIGRATION_DATABASE_URL: ${OPENDOX_MIGRATION_DATABASE_URL}
       OPENDOX_MIGRATIONS_DIR: ${OPENDOX_MIGRATIONS_DIR:-migrations}
+      # A ROLE NAME, not a credential: after applying, the runner narrows this
+      # role's rights on the migration ledger to SELECT.
+      OPENDOX_RUNTIME_PG_ROLE: ${OPENDOX_RUNTIME_PG_USER:-opendox_runtime}
     command: ["opendox-runtime", "runtime", "migrate"]
     networks:
       - internal

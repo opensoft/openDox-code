@@ -48,7 +48,12 @@ spec:
           # Name + version tag in the neutral base; the reviewed digest is
           # stamped by the overlay's `images:` entry at the release step.
           image: ghcr.io/opensoft/opendox-runtime:0.0.0
-          args: ["opendox-runtime", "runtime", "serve"]
+          # `command:` AND NOT `args:`. The image declares `CMD` and no
+          # `ENTRYPOINT`, and Kubernetes `args` replaces CMD's ARGUMENTS while
+          # leaving the entrypoint empty — so with `args:` this pod had no
+          # executable to run and would not have started at all (Copilot review
+          # of openDox-code#25; the compose file already used the right form).
+          command: ["opendox-runtime", "runtime", "serve"]
           ports:
             - containerPort: 8080
               name: http

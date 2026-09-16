@@ -357,14 +357,53 @@ def test_the_migration_container_carries_no_served_identity() -> None:
     assert PREFIX + "DATABASE_URL" not in migrate
     assert PREFIX + "OIDC_ISSUER" not in migrate
     assert set(migrate) == {PREFIX + "MIGRATION_DATABASE_URL",
-                            PREFIX + "MIGRATIONS_DIR"}
+                            PREFIX + "MIGRATIONS_DIR",
+                            PREFIX + "RUNTIME_PG_ROLE"}
 
     job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
     names = _env_names_of(_containers(job)[0])
     assert PREFIX + "DATABASE_URL" not in names
     assert PREFIX + "OIDC_ISSUER" not in names
     assert names == {PREFIX + "MIGRATION_DATABASE_URL",
-                     PREFIX + "MIGRATIONS_DIR"}
+                     PREFIX + "MIGRATIONS_DIR",
+                     PREFIX + "RUNTIME_PG_ROLE"}
+
+
+def test_the_role_the_migration_narrows_is_a_name_and_not_a_credential() -> None:
+    """`OPENDOX_RUNTIME_PG_ROLE` is the exception that proves the rule.
+
+    Every other value the migration container receives is a Secret reference;
+    this one is a plain literal in both deployments, and it is allowed to be
+    because a role NAME is not a credential — the password for that role lives
+    in `opendox-postgres/runtime-password` and never reaches this container.
+    """
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    value = compose["services"]["migrate"]["environment"][PREFIX + "RUNTIME_PG_ROLE"]
+    assert "PASSWORD" not in value.upper()
+    job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
+    entry = next(e for e in _containers(job)[0]["env"]
+                 if e["name"] == PREFIX + "RUNTIME_PG_ROLE")
+    assert entry["value"] == "opendox_runtime"
+    assert "valueFrom" not in entry
+
+
+def test_both_pods_declare_command_and_not_only_args() -> None:
+    """The image has a `CMD` and no `ENTRYPOINT`.
+
+    Kubernetes `args` replaces CMD's ARGUMENTS and leaves the entrypoint empty,
+    so a container declared with `args:` alone has no executable and never
+    starts (Copilot review of openDox-code#25 — a defect no test of this
+    repository could have caught, because nothing here runs a cluster; the
+    assertion is on the manifest's shape instead).
+    """
+    for name in ("opendox-deployment.yaml", "migration-job.yaml"):
+        document = _load_yaml(KUBERNETES / "base" / name)
+        for container in _containers(document):
+            assert container.get("command"), (
+                f"{name}: {container['name']} declares no `command:`")
+            assert container["command"][0] == "opendox-runtime"
+            assert "args" not in container, (
+                f"{name}: {container['name']} still carries `args:`")
 
 
 def test_the_compose_migration_service_can_be_built_like_the_served_one() -> None:

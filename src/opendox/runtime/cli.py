@@ -205,7 +205,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     try:
         with runner_db:
             runner = migrations.MigrationRunner(
-                runner_db, migrations_dir=settings.migrations_dir)
+                runner_db, migrations_dir=settings.migrations_dir,
+                runtime_role=settings.runtime_pg_role)
             if args.plan:
                 evidence = {"verb": "migrate",
                             "planned": [m.version for m in runner.plan()],

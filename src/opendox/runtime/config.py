@@ -27,6 +27,7 @@ instead of failing to start with the same ImportError it was about to explain.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,6 +120,13 @@ SETTINGS: tuple[Setting, ...] = (
         "the port the API binds",
     ),
     Setting(
+        PREFIX + "RUNTIME_PG_ROLE", "", False, False,
+        "the NAME (never a credential) of the least-privileged role the served "
+        "application connects as; when set, `migrate` narrows that role's "
+        "rights on the migration ledger to SELECT after applying, so a "
+        "compromised API cannot rewrite the runner's own record",
+    ),
+    Setting(
         PREFIX + "PUBLISH_OPENAPI", "false", False, False,
         "whether to serve the interactive schema at /docs, /redoc and "
         "/openapi.json; OFF by default, because FastAPI's defaults would "
@@ -159,6 +167,7 @@ class RuntimeSettings:
     oidc_leeway_seconds: int
     bind_host: str
     bind_port: int
+    runtime_pg_role: str | None
     publish_openapi: bool
     migrations_dir: Path
     project_repository_root: Path
@@ -176,6 +185,7 @@ class RuntimeSettings:
             f"oidc_jwks_ttl_seconds={self.oidc_jwks_ttl_seconds!r}, "
             f"oidc_leeway_seconds={self.oidc_leeway_seconds!r}, "
             f"bind_host={self.bind_host!r}, bind_port={self.bind_port!r}, "
+            f"runtime_pg_role={self.runtime_pg_role!r}, "
             f"publish_openapi={self.publish_openapi!r}, "
             f"migrations_dir={str(self.migrations_dir)!r}, "
             f"project_repository_root={str(self.project_repository_root)!r})"
@@ -276,6 +286,27 @@ def _algorithms(env: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(_CANONICAL_ALGORITHM[name.lower()] for name in configured)
 
 
+#: A plain, unquoted SQL identifier. The role NAME reaches a `revoke` that
+#: cannot be parameterized — SQL takes identifiers as syntax, not as values —
+#: so it is validated here against a closed shape and refused otherwise, which
+#: is the only safe way to interpolate one.
+_ROLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+
+
+def _role_name(env: Mapping[str, str]) -> str | None:
+    value = env.get(PREFIX + "RUNTIME_PG_ROLE", "").strip()
+    if not value:
+        return None
+    if not _ROLE_NAME.fullmatch(value):
+        raise ConfigurationError(
+            f"{PREFIX}RUNTIME_PG_ROLE is {value!r}, which is not a plain SQL "
+            "identifier ([A-Za-z_][A-Za-z0-9_]*, at most 63 characters). A "
+            "role name is interpolated into a `revoke` as SYNTAX and cannot be "
+            "passed as a parameter, so a name outside this shape is refused "
+            "rather than quoted and hoped for")
+    return value
+
+
 def _boolean(env: Mapping[str, str], setting: Setting) -> bool:
     """A strict boolean: the value is one of a named set, or it is a refusal.
 
@@ -328,6 +359,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
         oidc_leeway_seconds=_positive_int(env, _by_name(PREFIX + "OIDC_LEEWAY_SECONDS")),
         bind_host=_optional(env, _by_name(PREFIX + "BIND_HOST")) or "127.0.0.1",
         bind_port=_positive_int(env, _by_name(PREFIX + "BIND_PORT")),
+        runtime_pg_role=_role_name(env),
         publish_openapi=_boolean(env, _by_name(PREFIX + "PUBLISH_OPENAPI")),
         migrations_dir=Path(_optional(env, _by_name(PREFIX + "MIGRATIONS_DIR")) or "migrations"),
         project_repository_root=Path(
@@ -375,6 +407,7 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
         oidc_leeway_seconds=1,
         bind_host="127.0.0.1",
         bind_port=1,
+        runtime_pg_role=_role_name(env),
         publish_openapi=False,
         migrations_dir=Path(
             _optional(env, _by_name(PREFIX + "MIGRATIONS_DIR")) or "migrations"),

@@ -105,6 +105,12 @@ create table if not exists opendox_schema_migrations (
 
 _MIGRATION_FILENAME_RE = re.compile(r"^(?P<version>\d+)_(?P<name>.+)\.sql$")
 
+#: See `MigrationRunner.protect_ledger`. Mirrors `config._ROLE_NAME`, and is
+#: duplicated rather than imported for the same reason every other closure in
+#: this package is: `migrations` must import under `.[test]` alone, and it
+#: imports `config` nowhere.
+_PLAIN_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+
 
 class MigrationError(Exception):
     """Base class for runner failures. Carries no secret material."""
@@ -250,9 +256,11 @@ class MigrationRunner:
     """
 
     def __init__(self, db: Any, *,
-                 migrations_dir: str | Path = DEFAULT_MIGRATIONS_DIR) -> None:
+                 migrations_dir: str | Path = DEFAULT_MIGRATIONS_DIR,
+                 runtime_role: str | None = None) -> None:
         self._db = db
         self._migrations_dir = Path(migrations_dir)
+        self._runtime_role = runtime_role
 
     # -- introspection ----------------------------------------------------
 
@@ -337,4 +345,44 @@ class MigrationRunner:
                      migration.reversible))
             applied_now.append(migration.version)
 
+        self.protect_ledger()
         return applied_now
+
+    def protect_ledger(self) -> None:
+        """Narrow the SERVED role's rights on the ledger to SELECT.
+
+        WHY THE RUNNER DOES THIS AND NOT THE ROLE-CREATION SCRIPT. The compose
+        and Kubernetes bootstrap scripts run on the database's FIRST START,
+        before any migration exists, so they can only set default privileges —
+        which then cover the ledger along with everything else, and the served
+        role could INSERT, UPDATE or DELETE the runner's own tamper-evident
+        record (Copilot review of openDox-code#25). Hiding an applied migration
+        or manufacturing one would make the fail-closed drift check check a
+        story the API wrote. The runner is the process that OWNS the ledger and
+        runs as the privileged identity, so it is the one place the narrowing
+        can be applied at the right moment: after the table exists.
+
+        SELECT is kept, deliberately: `/readyz` reads the ledger through the
+        served DSN to report a pending schema.
+
+        A no-op when no role is configured — a single-role install (a developer
+        running one Postgres) is legal and just does not get this separation.
+        """
+        if not self._runtime_role:
+            return
+        # The role NAME is validated as a plain SQL identifier by
+        # `config._role_name`; SQL takes identifiers as syntax, so it cannot be
+        # a parameter, and validating the shape is what makes the
+        # interpolation safe. Asserted here too, because this method is public
+        # and a caller may not have come through the config loader.
+        if not _PLAIN_IDENTIFIER.fullmatch(self._runtime_role):
+            raise MigrationError(
+                f"{self._runtime_role!r} is not a plain SQL identifier; the "
+                "ledger narrowing interpolates a role name as syntax and "
+                "refuses anything outside [A-Za-z_][A-Za-z0-9_]*")
+        with self._db.transaction() as conn:
+            conn.execute(
+                f"revoke insert, update, delete, truncate on {LEDGER_TABLE} "
+                f"from {self._runtime_role}")
+            conn.execute(
+                f"grant select on {LEDGER_TABLE} to {self._runtime_role}")

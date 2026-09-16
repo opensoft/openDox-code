@@ -28,7 +28,10 @@ spec:
       containers:
         - name: migrate
           image: ghcr.io/opensoft/opendox-runtime:0.0.0
-          args: ["opendox-runtime", "runtime", "migrate"]
+          # `command:`, for the reason the Deployment states: the image has a
+          # `CMD` and no `ENTRYPOINT`, so `args:` alone leaves Kubernetes with
+          # no executable.
+          command: ["opendox-runtime", "runtime", "migrate"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -51,6 +54,9 @@ spec:
                   key: dsn
             - name: OPENDOX_MIGRATIONS_DIR
               value: "migrations"
+            # A ROLE NAME, not a credential; see the compose file's note.
+            - name: OPENDOX_RUNTIME_PG_ROLE
+              value: "opendox_runtime"
           volumeMounts:
             - name: tmp
               mountPath: /tmp
