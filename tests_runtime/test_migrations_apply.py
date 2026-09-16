@@ -320,3 +320,40 @@ def test_the_ledger_narrowing_refuses_a_role_name_that_is_not_an_identifier(
     with pytest.raises(migrations.MigrationError) as caught:
         runner.protect_ledger()
     assert "plain SQL identifier" in str(caught.value)
+
+
+def test_status_reports_a_reachable_database_and_its_applied_migrations(
+        database, postgres_dsn: str, monkeypatch) -> None:
+    """The defect only a live database shows.
+
+    `status` used `runner.applied()` and `runner.plan()` after the `Database`
+    context had closed its pool, so `PoolClosed` was caught by the verb's own
+    except clause and a perfectly reachable database was reported unreachable.
+    Every unreachable-database test passed throughout.
+    """
+    import io
+    import json
+    from contextlib import redirect_stdout
+
+    from opendox.runtime import cli
+    from opendox.runtime.config import PREFIX
+
+    # `status` builds its OWN `Database` from the DSN, so the test's schema has
+    # to travel IN the DSN — `options=-c search_path=…`, which is the same
+    # libpq startup parameter `Database(schema=…)` sets for the harness.
+    scoped = (f"{postgres_dsn}?options=-c%20search_path%3D{database.schema}")
+    monkeypatch.setenv(PREFIX + "DATABASE_URL", scoped)
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker.test/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+    monkeypatch.setenv(PREFIX + "MIGRATIONS_DIR", str(ROOT / "migrations"))
+    args = cli.build_parser().parse_args(
+        ["runtime", "status", "--probe-timeout", "5"])
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        args.func(args)
+    report = json.loads(buffer.getvalue())
+    assert report["database"] == "reachable", report
+    # The fixture applied both migrations into this test's own schema; `status`
+    # reads them through the same search path.
+    assert report["applied_migrations"] == ["0001", "0002"], report
+    assert report["pending_migrations"] == [], report
