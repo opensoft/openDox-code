@@ -138,16 +138,25 @@ STYLES_CSS_ORPHANS = (
 #: THE SHARED HALF — every class named by openDox's own bundle AND by
 #: openXdox's six contributed modules, measured at openDox-code `0b4e8bbf` /
 #: openXdox-code `0a0265f7` by `measure_opendox_css_census.py`'s class-bearing
-#: scan (openxFactory `scripts/`). 21 today; `STYLE_RESIDUE` recorded 24 at
-#: `cb343ae8`; slice S7 retired `possible` / `proposal` / `rejected`, `lens`
-#: joined, and `why` left when the census stopped counting a bare literal in a
-#: non-class position (Copilot review of openxFactory #1068, round 3). These STAY in `styles.css` — they are openDox's, and a class
-#: both columns name was never a candidate to leave.
+#: scan (openxFactory `scripts/`). **18** today; `STYLE_RESIDUE` recorded 24 at
+#: `cb343ae8`; slice S7 retired `possible` / `proposal` / `rejected`, and `why`
+#: left when the census stopped counting a bare literal in a non-class position
+#: (Copilot review of openxFactory #1068, round 3). `g`, `lens` and `topic`
+#: left on that review's ROUND 5, when the gate-side scan was narrowed again:
+#: a `.token` counts only inside a literal shaped like a selector with the dot
+#: in selector position, and an assignment only where the target is
+#: class-named, so `"e.g. Field Pilots"` (gate-projects.js), `"gate.lens: ..."`
+#: (gate-lens.js) and `btn.title = "... this staging topic "` (dispose.js:402)
+#: stop naming them. THE EXTRACTION IS UNCHANGED BY THAT — 54 gate-exclusive
+#: classes, the same 59 blocks at the same extents, 89 lines — because a class
+#: leaving the SHARED bucket for openDox's own is a class that stays either
+#: way. These STAY in `styles.css` — they are openDox's, and a class both
+#: columns name was never a candidate to leave.
 SHARED_CLASSES = (
     "cbtn", "dc-h", "dc-line", "dc-note", "dispose-intile", "disposebtn",
-    "docstatus", "g", "lens", "member", "name", "reason-form", "repobtn",
+    "docstatus", "member", "name", "reason-form", "repobtn",
     "repopick-msg", "rf-label", "swb-cbtn", "swb-cfield", "swb-clabel",
-    "swb-cslot", "tile", "topic",
+    "swb-cslot", "tile",
 )
 
 #: The ONE openDox class a contributed sheet names as its HOST CONTEXT:
@@ -384,8 +393,15 @@ const out = { refusals: [], injected: [], deduped: null, warned: null };
 // and normalized it to "" would be § 4.1's "one vocabulary, both halves"
 // broken for the second time on this module. Omission and "" are the two
 // absent forms and `null` is neither.
+// `"./views/gate.css\\n"` IS IN THIS LIST FOR THE SAME REASON (Copilot review,
+// round 6). This act rests on Python's `\\Z` and JavaScript's `$` refusing a
+// trailing newline ALIKE — the Python half parameterizes exactly that input at
+// `test_a_malformed_sheet_refuses_where_it_is_declared` — and the client half
+// never exercised it, so a `SHEET` regex that regressed to `$` under the `m`
+// flag would have left this suite green with the two halves disagreeing.
 for (const bad of ["/views/gate.css", "https://cdn.example/g.css",
-                   "./views/gate.js", "./views/../x.css", 7, null]) {
+                   "./views/gate.js", "./views/../x.css",
+                   "./views/gate.css\\n", 7, null]) {
   try {
     viewBinding({ id: "gate.bar", region: "viewer-gatebar",
                   module: "./views/gate.js", entry: "mountGateBar",
@@ -446,7 +462,9 @@ def test_the_client_half_validates_and_injects(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    assert out["refusals"] == ["refused"] * 6, out["refusals"]
+    # SEVEN, not six: the seventh is `"./views/gate.css\n"`, the newline case
+    # the Python half already parameterizes (Copilot review, round 6).
+    assert out["refusals"] == ["refused"] * 7, out["refusals"]
     assert out["absent"] == ""
     assert out["absentEmpty"] == ""
     # ONE link for two bindings naming one sheet, and none for the binding that
@@ -523,7 +541,7 @@ def test_the_design_tokens_and_the_shared_selectors_stayed() -> None:
         assert len(re.findall(rf"^\s*{role}\s*:", css, re.M)) == 4, role
     declared = _selector_classes(css)
     # AND THE WHOLE RETAINED SET IS PINNED BY COUNT (Copilot review, round 4).
-    # The shared-class assertion below protects 21 names; if the extraction had
+    # The shared-class assertion below protects 18 names; if the extraction had
     # taken a rule only openDox names, `declared` would simply SHRINK and both
     # that check and the orphan register — which examines only what remains —
     # would still pass. This figure is a CENSUS FIGURE on the same footing as
