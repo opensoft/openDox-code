@@ -413,6 +413,22 @@ jobs:
       #              mount following their settings, the Kubernetes root held
       #              equal to its mountPath, the readiness probe's timeout, and
       #              a discovery regex that is the filename contract.
+      #  108 passed  at `build/3-5-runtime` `b7e05744` (same day, same python
+      #              and pytest) — the same five modules, after round SEVEN:
+      #              duplicate migration versions refused at discovery, and the
+      #              Kubernetes bootstrap creating the role the Job narrows.
+      #  109 passed  at `build/3-5-runtime` `3f20a122` (same day, same python
+      #              and pytest) — the same five modules, after that round's
+      #              suppressed comments: the migrate PREVIEW running the
+      #              canonical gate, and the filename assertion that is now the
+      #              runner's own regex rather than a looser restatement.
+      #
+      #              THE CURRENT FIGURE IS THIS ONE, and the PR description
+      #              states it at this same commit. An entry above is the
+      #              measurement that was current when it was written; the
+      #              commit that records a figure changes no test, so the
+      #              figure also holds at the head that carries the record.
+
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
       #              branch names, the sixth being the adapter conformance

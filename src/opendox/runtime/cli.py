@@ -268,6 +268,13 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                 runner_db, migrations_dir=settings.migrations_dir,
                 runtime_role=settings.runtime_pg_role)
             if args.plan:
+                # THE CANONICAL GATE RUNS FOR THE PREVIEW TOO. `apply()` runs
+                # it first and refuses a tree whose `0001` is absent or
+                # changed, and `--plan` skipped it — so an operator could be
+                # shown `planned: []` (or a plan) for a tree the very next
+                # command REFUSES, which is the one thing a preview must not
+                # do (Copilot review of openDox-code#25, round 7).
+                migrations.verify_canonical_digest(settings.migrations_dir)
                 evidence = {"verb": "migrate",
                             "planned": [m.version for m in runner.plan()],
                             "applied": []}
@@ -368,6 +375,13 @@ def cmd_status(args: argparse.Namespace) -> int:
                       checkout_timeout=args.probe_timeout) as db:
             with db.connection() as conn:
                 conn.execute("select 1")
+            # THE SAME CANONICAL GATE `apply()` AND `/readyz` RUN. Without
+            # it an EMPTY migrations directory reports `pending: []` on a
+            # fresh database — nothing pending, nothing drifted, everything
+            # fine — for an install with no coordination schema at all
+            # (Copilot review of openDox-code#25, round 7). `status` is the
+            # verb an operator believes.
+            migrations.verify_canonical_digest(settings.migrations_dir)
             runner = migrations.MigrationRunner(
                 db, migrations_dir=settings.migrations_dir)
             applied = [row.version for row in runner.applied()]
@@ -380,9 +394,23 @@ def cmd_status(args: argparse.Namespace) -> int:
         # whose file changed, or vanished, is invisible to `plan()` and is
         # refused by `apply()`. See `MigrationRunner.drift`.
         report["migration_drift"] = drifted
-        if drifted:
+        # PENDING IS UNHEALTHY, exactly as `/readyz` treats it. This reported
+        # the versions and left `ok` true, so a reachable but UNMIGRATED
+        # database exited 0 while the readiness probe on the same install
+        # refuses traffic — two answers to one question, and the CLI's was the
+        # comforting one (Copilot review of openDox-code#25, round 7).
+        if drifted or pending:
             ok = False
     # a status verb reports, never raises
+    except migrations.MigrationError as exc:
+        # THE DATABASE ANSWERED; THE TREE DID NOT. `select 1` has already
+        # succeeded by the time the runner is asked anything, so reporting
+        # `database: unreachable` for a missing or malformed migrations
+        # directory pointed the operator at the wrong dependency entirely
+        # (Copilot review of openDox-code#25, round 7).
+        report.setdefault("database", "reachable")
+        report["migrations"] = f"unreadable: {type(exc).__name__}: {exc}"
+        ok = False
     except Exception as exc:  # noqa: BLE001
         report["database"] = (
             f"unreachable: {type(exc).__name__}: {_safe_message(exc)}")

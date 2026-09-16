@@ -84,6 +84,25 @@ def _skip_or_fail(reason: str) -> None:
     pytest.skip(reason)
 
 
+def _import_fastapi_testclient():
+    """`fastapi.testclient`, CI-AWARE — a developer skips, CI fails.
+
+    `pytest.importorskip` here let a broken `.[runtime,test]` install skip
+    EVERY API and repository-act case while the `runtime` job still exited 0,
+    against that job's own fail-in-CI policy (Copilot review of
+    openDox-code#25, round 7, suppressed). Same asymmetry as the DSN probe and
+    the key pair.
+    """
+    try:
+        from fastapi import testclient
+    except ImportError as exc:
+        _skip_or_fail(
+            "the `runtime` extra is not installed "
+            f"(pip install -e '.[runtime,test]'): {exc}")
+        raise                       # unreachable: `_skip_or_fail` always raises
+    return testclient
+
+
 def _import_psycopg():
     """`psycopg`, or the same asymmetry: a developer skips, CI fails."""
     try:
@@ -282,9 +301,7 @@ def client(database, postgres_dsn: str, verifier):
     `test_api_endpoints.py` for § 3.5's six collections and
     `test_repository_act.py` for § 3.6's act.
     """
-    fastapi_testclient = pytest.importorskip(
-        "fastapi.testclient",
-        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
+    fastapi_testclient = _import_fastapi_testclient()
     from opendox.runtime.app import create_app
     from opendox.runtime.config import PREFIX, load_settings
     from opendox.runtime.db import Database
@@ -317,9 +334,7 @@ def project_repository_root(tmp_path):
 def client_with_repositories(database, postgres_dsn: str, verifier,
                              project_repository_root):
     """`client`, with the repository root pointed at this test's own directory."""
-    fastapi_testclient = pytest.importorskip(
-        "fastapi.testclient",
-        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
+    fastapi_testclient = _import_fastapi_testclient()
     from opendox.runtime.app import create_app
     from opendox.runtime.config import PREFIX, load_settings
     from opendox.runtime.db import Database
