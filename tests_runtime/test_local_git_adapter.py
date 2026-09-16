@@ -727,3 +727,190 @@ def test_the_adapter_advertises_no_branch_it_does_not_use() -> None:
         "the adapter takes a `branch` again; either it controls the served ref "
         "— which `_served_ref` argues it must not — or it must not be offered")
     assert set(parameters) == {"self", "executable"}
+
+
+# -- Copilot's sixth round on #26 --------------------------------------------
+
+
+def test_the_parameter_name_is_decoded_to_a_true_fixed_point() -> None:
+    """A PASS LIMIT made the docstring's own word false.
+
+    `_decoded_parameter_name` stopped after four passes, so
+    `?%2525252574oken=…` was still `%74oken` when the rule looked at it and
+    both halves missed it again (Copilot review of openDox-code#26, round 6).
+    The loop is unbounded and terminates because every pass that changes the
+    name SHORTENS it — a decoded `%XX` is one character where three were.
+    """
+    from opendox.runtime import repository_act
+
+    for layers in range(1, 9):
+        # `token` with its first character encoded `layers` times over.
+        name = "%74oken"
+        for _ in range(layers - 1):
+            name = name.replace("%", "%25", 1)
+        url = f"https://example.invalid/r.git?{name}=ghp_supersecret"
+        assert lga.names_a_secret_parameter(url), layers
+        assert "ghp_supersecret" not in lga.redact_credentials(url), layers
+        with pytest.raises(repository_act.RepositoryActRefused):
+            repository_act.refuse_credential_bearing_remote(url)
+
+
+def test_resolve_refuses_a_head_whose_commit_object_is_gone(
+        adapter, repository: Path) -> None:
+    """`rev-parse --verify HEAD` answers out of the REF STORE.
+
+    A commit pruned or deleted after it was written still produced a
+    `ResolvedCorpus` carrying a revision nothing can serve, and the refusal
+    arrived later — from `list_documents` or `read` — although `resolve`'s one
+    promise is that it does not hand back an unreadable corpus (Copilot review
+    of openDox-code#26, round 6).
+    """
+    head = _git(repository, "rev-parse", "HEAD")
+    loose = repository / "objects" / head[:2] / head[2:]
+    assert loose.exists(), "the initial commit is not a loose object here"
+    loose.unlink()
+
+    with pytest.raises(ca.CorpusRefused) as caught:
+        _resolve(adapter, repository)
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+
+
+def test_a_head_that_names_something_other_than_a_branch_refuses_the_write(
+        adapter, repository: Path) -> None:
+    """`symbolic-ref HEAD` can legally name a tag or a tracking ref.
+
+    `write_back` would then have advanced THAT with `update-ref` — a write
+    moving a tag instead of a branch (Copilot review of openDox-code#26,
+    round 6). `repository_act._pushable_branch` already refused the shape; the
+    write path is where it costs more.
+    """
+    corpus = _resolve(adapter, repository)
+    subprocess.run(["git", "-C", str(repository), "symbolic-ref", "HEAD",
+                    "refs/tags/not-a-branch"], check=True, capture_output=True)
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus,
+                           ca.DocumentId(corpus=corpus.ref.name, key="a.md"),
+                           b"# a\n", actor=ACTOR, basis_revision=corpus.revision)
+    assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+    assert "not a branch" in str(caught.value)
+
+
+def test_an_unborn_corpus_whose_repository_went_away_refuses_and_is_not_empty(
+        adapter, tmp_path: Path) -> None:
+    """The one path that answered without asking git at all.
+
+    An unborn repository's empty listing was returned out of the
+    `ResolvedCorpus`, so a repository deleted after `resolve` gave the caller
+    the answer a healthy empty repository gives — a corpus failure wearing an
+    empty corpus's clothes, which this interface is emphatic about (Copilot
+    review of openDox-code#26, round 6).
+    """
+    import shutil
+
+    location = tmp_path / "unborn"
+    location.mkdir()
+    subprocess.run(["git", "init", "--quiet", "--bare", str(location)],
+                   check=True)
+    corpus = adapter.resolve(ca.CorpusRef(name="unborn",
+                                          location=str(location)))
+    assert corpus.revision is None
+    assert adapter.list_documents(corpus) == ()
+
+    shutil.rmtree(location)
+    for call in (lambda: adapter.list_documents(corpus),
+                 lambda: adapter.read(
+                     corpus, ca.DocumentId(corpus="unborn", key="a.md"))):
+        with pytest.raises(ca.CorpusRefused) as caught:
+            call()
+        assert caught.value.refusal.kind == ca.CORPUS_ABSENT
+
+
+def test_a_key_that_looks_like_an_option_is_written_and_read_back(
+        adapter, repository: Path) -> None:
+    """`update-index` took the path as a positional argument.
+
+    A valid tracked key such as `-notes.md` was therefore parsed as an OPTION,
+    so `write_back` refused a path `list_documents` and `read` both serve
+    (Copilot review of openDox-code#26, round 6). The path goes in on stdin
+    now — `--index-info -z` — where git does no option parsing at all, which
+    also keeps the comma fix by construction.
+    """
+    for key in ("-notes.md", "--force.md", "notes,2026.md"):
+        # RE-RESOLVED each time: the write path is a compare-and-swap on the
+        # branch ref, so a corpus resolved before the previous write is stale
+        # by design.
+        corpus = _resolve(adapter, repository)
+        receipt = adapter.write_back(
+            corpus, ca.DocumentId(corpus=corpus.ref.name, key=key),
+            f"# {key}\n".encode(), actor=ACTOR,
+            basis_revision=corpus.revision)
+        assert receipt.dispatched_to
+        fresh = _resolve(adapter, repository)
+        assert key in [d.key for d in adapter.list_documents(fresh)], key
+        assert adapter.read(
+            fresh, ca.DocumentId(corpus=fresh.ref.name, key=key)
+        ).content == f"# {key}\n".encode()
+
+
+def test_a_tracked_path_that_is_not_utf8_is_listed_rather_than_raising(
+        adapter, repository: Path) -> None:
+    """git permits a pathname that is not UTF-8; a strict decode raised.
+
+    `ls-tree -z` and `diff -z` both return raw pathname BYTES, so a repository
+    holding such a file made `list_documents` and `check` raise
+    `UnicodeDecodeError` instead of answering — against this module's own
+    promise that a repository openDox did not create stays readable (Copilot
+    review of openDox-code#26, round 6).
+    """
+    # Written through git's own plumbing, because the key is opaque to this
+    # adapter and a bare repository has no working tree to write a file in.
+    blob = subprocess.run(["git", "-C", str(repository), "hash-object", "-w",
+                           "--stdin"], input=b"latin\n", capture_output=True,
+                          check=True).stdout.decode().strip()
+    entry = b"100644 " + blob.encode() + b"\tcaf\xe9.md\x00"
+    index = repository / "opendox-test-index"
+    environment = {"GIT_INDEX_FILE": str(index)}
+    import os
+
+    merged = {**os.environ, **environment}
+    subprocess.run(["git", "-C", str(repository), "read-tree", "HEAD"],
+                   env=merged, check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repository), "update-index", "--add",
+                    "-z", "--index-info"], input=entry, env=merged, check=True,
+                   capture_output=True)
+    tree = subprocess.run(["git", "-C", str(repository), "write-tree"],
+                          env=merged, capture_output=True,
+                          check=True).stdout.decode().strip()
+    commit = subprocess.run(
+        ["git", "-C", str(repository), "commit-tree", tree, "-p", "HEAD",
+         "-m", "a path that is not utf-8"],
+        capture_output=True, check=True,
+        env={**os.environ, **lga.git_identity(ACTOR)}).stdout.decode().strip()
+    subprocess.run(["git", "-C", str(repository), "update-ref",
+                    "refs/heads/main", commit], check=True, capture_output=True)
+    index.unlink(missing_ok=True)
+
+    corpus = _resolve(adapter, repository)
+    keys = [d.key for d in adapter.list_documents(corpus)]
+    assert any("caf" in key for key in keys), keys
+    # And the same corpus reports findings rather than raising.
+    assert adapter.check(corpus) == ()
+
+
+def test_an_embedded_nul_in_a_caller_value_is_a_refusal_and_not_a_valueerror(
+        adapter, repository: Path) -> None:
+    """`subprocess.run` raises BEFORE any process exists.
+
+    `DocumentId.key`, `actor` and `reason` are caller-controlled and reach
+    `subprocess.run`, and a NUL in any of them makes Python raise `ValueError`
+    — which the runner's normalization did not catch, so the API returned a
+    500 and the CLI printed a traceback in place of `write_back`'s declared
+    refusal (Copilot review of openDox-code#26, round 6).
+    """
+    corpus = _resolve(adapter, repository)
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus,
+                           ca.DocumentId(corpus=corpus.ref.name, key="a.md"),
+                           b"# a\n", actor="Student\x00One",
+                           basis_revision=corpus.revision)
+    assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE

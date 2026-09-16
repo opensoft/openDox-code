@@ -616,9 +616,15 @@ def create_project_repository(project_id: str, request: Request,
     """
     from opendox.runtime import repository_act
 
-    _found(lambda: store.get_project(project_id))
+    # THE MEMBERSHIP IS ASKED FIRST, as `read_project` asks it and for the same
+    # reason: reading the row first made a project that does not exist (404)
+    # distinguishable from one the caller may not act on (403), which is an
+    # existence oracle over an id space a prober can walk (Copilot review of
+    # openDox-code#26, round 6). `_require_role` refuses a non-member of a
+    # project that does not exist with the same `authz.not_a_member`.
     _require_role(store, user=principal, project_id=project_id,
                   allowed=("owner",))
+    _found(lambda: store.get_project(project_id))
     settings = _context(request).settings
     try:
         created = _conflict(lambda: repository_act.create_repository(

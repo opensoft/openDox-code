@@ -477,12 +477,29 @@ def _configured_remote_url(git: GitRunner, remote_name: str, *,
     openDox-code#26, round 5). `--push` is git's own answer to "where would a
     push go", so this asks git rather than reimplementing the fallback.
     """
-    arguments = ("remote", "get-url", "--push", remote_name) if for_push else (
-        "remote", "get-url", remote_name)
+    arguments = ("remote", "get-url", "--push", "--all", remote_name) if (
+        for_push) else ("remote", "get-url", remote_name)
     existing = git.run(*arguments)
     if existing.returncode != 0:
         return None
-    return existing.stdout.decode("utf-8", "replace").strip() or None
+    if not for_push:
+        return existing.stdout.decode("utf-8", "replace").strip() or None
+    # `--all`, AND EVERY LINE IS ANSWERED FOR. Git permits several
+    # `remote.origin.pushurl` entries and a push is sent to EACH of them, so
+    # `get-url --push` — which prints only the first — let an extra push URL
+    # match the map while the corpus also went to an unrecorded destination
+    # (Copilot review of openDox-code#26, round 6). The caller compares this
+    # with the map row, so more than one URL can never equal it: the whole
+    # list is returned, joined, and a second destination fails the comparison
+    # while NAMING itself in the refusal.
+    urls = [line.strip() for line
+            in existing.stdout.decode("utf-8", "replace").splitlines()
+            if line.strip()]
+    if not urls:
+        return None
+    if len(urls) == 1:
+        return urls[0]
+    return " and ".join(urls)
 
 
 def _pushable_branch(git: GitRunner, location: str) -> str:

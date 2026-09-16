@@ -366,13 +366,84 @@ def test_the_api_attaches_a_remote_and_then_pushes(
     assert _git(remote, "rev-parse", "refs/heads/main") == created["initial_commit"]
 
 
-def test_the_act_on_a_project_that_does_not_exist_is_a_404(
+def test_the_act_on_a_project_that_does_not_exist_is_the_non_members_refusal(
         client_with_repositories, mint_token) -> None:
+    """AND IT IS THE SAME REFUSAL A NON-MEMBER OF A REAL PROJECT GETS.
+
+    This asserted a 404, which meant the route read the project BEFORE it
+    asked about the membership — so a stranger could tell a project that does
+    not exist (404) from one it may not act on (403) and walk the id space
+    (Copilot review of openDox-code#26, round 6). `read_project` already asked
+    in the other order for exactly this reason; the three repository verbs ask
+    in that order now, and the two cases are one answer.
+    """
     client = client_with_repositories
     token = mint_token(subject="api-owner-4")
-    response = client.post("/api/v1/projects/no-such-project/repository",
-                           headers=_auth(token))
-    assert response.status_code == 404
+    absent = client.post("/api/v1/projects/no-such-project/repository",
+                         headers=_auth(token))
+    assert absent.status_code == 403
+    assert absent.json()["detail"]["code"] == "authz.not_a_member"
+
+    owner = mint_token(subject="api-owner-4-real")
+    real = client.post("/api/v1/projects",
+                       json={"slug": "oracle-check", "title": "Oracle check"},
+                       headers=_auth(owner)).json()
+    hidden = client.post(f"/api/v1/projects/{real['id']}/repository",
+                         headers=_auth(token))
+    assert hidden.status_code == absent.status_code
+    assert hidden.json() == absent.json() or (
+        hidden.json()["detail"]["code"] == absent.json()["detail"]["code"]), (
+        "the two refusals differ, so the route still answers which projects "
+        "exist")
+
+
+def test_every_repository_verb_is_owner_gated_before_it_touches_git(
+        client_with_repositories, mint_token, tmp_path: Path) -> None:
+    """The negative test covered CREATE alone.
+
+    Attach and push were exercised only with the owner, so removing
+    `_require_role` from either would have left the suite green against the
+    stated contract that all three verbs are owner-gated (Copilot review of
+    openDox-code#26, round 6). Each verb is asked twice here: by a stranger,
+    who is no member at all, and by a READER, who is a member with the wrong
+    role — and the refusal must arrive before any git side effect.
+    """
+    client = client_with_repositories
+    owner = mint_token(subject="gate-owner")
+    stranger = mint_token(subject="gate-stranger")
+    reader = mint_token(subject="gate-reader")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "gated", "title": "Gated"},
+                          headers=_auth(owner)).json()
+    reader_me = client.get("/api/v1/users/me", headers=_auth(reader)).json()
+    client.post("/api/v1/memberships",
+                json={"user_id": reader_me["id"], "project_id": project["id"],
+                      "role": "reader"}, headers=_auth(owner))
+
+    destination = tmp_path / "gated-factory.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(destination)],
+                   check=True)
+    base = f"/api/v1/projects/{project['id']}/repository"
+    calls = (
+        ("post", base, None),
+        ("put", base + "/remote", {"remote_url": str(destination)}),
+        ("post", base + "/push", None),
+    )
+    for method, url, body in calls:
+        for token, code in ((stranger, "authz.not_a_member"),
+                            (reader, "authz.role_insufficient")):
+            call = getattr(client, method)
+            response = (call(url, json=body, headers=_auth(token)) if body
+                        else call(url, headers=_auth(token)))
+            assert response.status_code == 403, (method, url, response.text)
+            assert response.json()["detail"]["code"] == code, (method, url)
+    # And nothing git-shaped happened: no repository row, and no refs at the
+    # destination the refused attach named.
+    assert client.get(f"/api/v1/project-repositories/{project['id']}",
+                      headers=_auth(owner)).status_code == 404
+    assert subprocess.run(["git", "--git-dir", str(destination),
+                           "rev-parse", "--verify", "--quiet", "HEAD"],
+                          capture_output=True).returncode != 0
 
 
 # -- the review round's own assertions (Copilot review of openDox-code#26) ---
@@ -863,3 +934,39 @@ def test_the_push_takes_no_branch_override_at_all(
                            "--verify", "--quiet", "refs/heads/other"],
                           capture_output=True).returncode != 0, (
         "the push sent a branch the repository does not serve")
+
+
+def test_a_second_push_url_is_refused_even_when_the_first_one_matches(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`git remote get-url --push` prints ONE url; git permits several.
+
+    A push is sent to EVERY configured `remote.origin.pushurl`, so an extra one
+    left the first matching the map while the corpus also went to an
+    unrecorded destination (Copilot review of openDox-code#26, round 6). The
+    check asks for `--all` and compares the whole list, so a second URL can
+    never equal the single mapped one and names itself in the refusal.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "of-record.git"
+    elsewhere = tmp_path / "unrecorded.git"
+    for bare in (destination, elsewhere):
+        subprocess.run(["git", "init", "--quiet", "--bare", str(bare)],
+                       check=True)
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+    # The mapped URL FIRST, so a check that reads only the first one passes.
+    _git(created.location, "remote", "set-url", "--push", act.REMOTE_NAME,
+         str(destination))
+    _git(created.location, "remote", "set-url", "--push", "--add",
+         act.REMOTE_NAME, str(elsewhere))
+
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    message = str(caught.value)
+    assert "unrecorded.git" in message and "of-record.git" in message
+    assert "Nothing is pushed" in message
+    for bare in (destination, elsewhere):
+        assert subprocess.run(["git", "--git-dir", str(bare), "rev-parse",
+                               "--verify", "--quiet", "refs/heads/main"],
+                              capture_output=True).returncode != 0, bare

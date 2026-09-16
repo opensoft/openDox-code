@@ -350,8 +350,11 @@ jobs:
       # conftest's `collect_ignore` and `tests/conftest.py`'s autouse fixtures
       # are written for a tree that can import `opendox.serve`, and until the
       # BUILD arc repairs that, a file named in this job has to stand on its
-      # own. Each of the five does; `tests_runtime/conftest.py` is read only by
-      # the `runtime` job.
+      # own. Each of the SIX does — this branch's hunk adds
+      # `tests_runtime/test_local_git_adapter.py` to the list below, and this
+      # sentence said "five" after it (Copilot review of openDox-code#26,
+      # round 6, suppressed); `tests_runtime/conftest.py` is read only by the
+      # `runtime` job.
       #
       # `tests_runtime/test_local_git_adapter.py` is here too, and it is the
       # strongest placement § 3.6's proof can have: RULING C3's adapter is

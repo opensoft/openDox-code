@@ -183,7 +183,13 @@ class GitRunner:
         try:
             return subprocess.run(argv, input=stdin, capture_output=True,
                                   check=False, env=merged, timeout=timeout)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # `ValueError` TOO, and for a caller-controlled reason: a
+            # `DocumentId.key`, an `actor` or a `reason` carrying an embedded
+            # NUL makes `subprocess.run` raise BEFORE any process exists, so
+            # those inputs leaked a raw exception in place of `write_back`'s
+            # declared refusal (Copilot review of openDox-code#26, round 6).
+            #
             # A MISSING OR UNUSABLE EXECUTABLE IS A `GitCommandFailed` LIKE ANY
             # OTHER. `subprocess.run` does not return a non-zero
             # `CompletedProcess` when the program cannot be started — it raises
@@ -270,18 +276,24 @@ _SECRET_KEY = re.compile(SECRET_PARAMETER_KEYS, re.IGNORECASE)
 _ANY_PARAMETER = re.compile(
     r"(?P<lead>[?&#](?P<name>[^=&#\s]*)=)(?P<value>[^&#\s]*)")
 _ANY_PARAMETER_ANCHORED = re.compile(r"(?:^|[?&#])(?P<name>[^=&#\s]*)=")
-_MAX_DECODE_PASSES = 4
-
-
 def _decoded_parameter_name(name: str) -> str:
-    """A parameter name with its percent-encoding removed, decoded to a fixed
-    point so one layer of encoding cannot hide another."""
-    for _ in range(_MAX_DECODE_PASSES):
+    """A parameter name with its percent-encoding removed, decoded to a TRUE
+    fixed point — no pass limit.
+
+    The first cut stopped after four passes, which made the docstring's own
+    word false: `?%2525252574oken=…` is still `%74oken` after four and walked
+    past both halves of the rule again (Copilot review of openDox-code#26,
+    round 6). The loop needs no bound to terminate — every pass that changes
+    the string SHORTENS it, because a decoded `%XX` is one character where
+    three were — and the assertion below says so rather than trusting it.
+    """
+    while True:
         once = urllib.parse.unquote_plus(name)
         if once == name:
-            break
+            return name
+        assert len(once) < len(name), (
+            "a decode pass that does not shorten the name would not terminate")
         name = once
-    return name
 
 
 def names_a_secret_parameter(text: str) -> bool:
@@ -458,15 +470,32 @@ class LocalGitCorpus:
                           f"this corpus declares {list(corpus.scopes)}; a "
                           "silent widening is indistinguishable from a correct "
                           "answer")
+        git = self._git(corpus)
         if corpus.revision is None:
             # A repository with no commits yet. LEGAL, and empty — not absent.
+            # REVALIDATED FIRST, because this path touched git at all only by
+            # accident of there being nothing to ask it: a repository deleted
+            # or made unreadable after `resolve` answered the caller with the
+            # same legal empty listing, hiding a corpus failure as an empty
+            # corpus — the one confusion this interface is emphatic about
+            # (Copilot review of openDox-code#26, round 6).
+            self._revalidate(git, corpus)
             return ()
-        git = self._git(corpus)
         try:
             raw = git.out("ls-tree", "-r", "--name-only", "-z", corpus.revision)
         except GitCommandFailed as failed:
             raise _refuse(CORPUS_UNREADABLE, corpus.location, str(failed)) from failed
-        keys = sorted({name for name in raw.decode("utf-8").split("\0") if name})
+        # `surrogateescape`, NOT strict. `ls-tree -z` returns raw pathname
+        # BYTES and git permits a path that is not UTF-8, so a strict decode
+        # raised `UnicodeDecodeError` for a repository this adapter promises to
+        # keep readable — "a repository openDox did not create stays readable"
+        # is the sentence, and a key is opaque to this module anyway (Copilot
+        # review of openDox-code#26, round 6). The round-trip is exact: the
+        # same bytes go back out through `os.fsencode`-style encoding when the
+        # key is handed to git.
+        keys = sorted({name for name
+                       in raw.decode("utf-8", "surrogateescape").split("\0")
+                       if name})
         return tuple(DocumentId(corpus=corpus.ref.name, key=key) for key in keys)
 
     # -- read -------------------------------------------------------------
@@ -478,6 +507,11 @@ class LocalGitCorpus:
         at = corpus.revision if revision is None else self._resolve_revision(
             git, revision, corpus.location)
         if at is None:
+            # The same revalidation `list_documents` does, for the same
+            # reason: an unborn corpus whose repository has since gone answered
+            # DOCUMENT_UNKNOWN, which says the corpus is fine and the document
+            # is not (Copilot review of openDox-code#26, round 6).
+            self._revalidate(git, corpus)
             raise _refuse(DOCUMENT_UNKNOWN, document.key,
                           "this repository has no commits, so it holds no "
                           "documents at any revision")
@@ -551,6 +585,21 @@ class LocalGitCorpus:
                           "refused rather than reported as having no "
                           "findings") from failed
         if bare == "true" or corpus.revision is None:
+            # AND THE RESOLVED COMMIT IS STILL THERE. This returned `()` — a
+            # verdict — out of the `ResolvedCorpus` alone, so a commit pruned
+            # after resolution made `check` report a clean corpus that
+            # `list_documents` could not read: exactly the manufactured
+            # no-finding answer the paragraph above forbids (Copilot review of
+            # openDox-code#26, round 6).
+            self._revalidate(git, corpus)
+            if corpus.revision is not None and git.run(
+                    "cat-file", "-e",
+                    f"{corpus.revision}^{{commit}}").returncode != 0:
+                raise _refuse(
+                    CORPUS_UNREADABLE, corpus.location,
+                    f"the resolved revision {corpus.revision} is no longer in "
+                    "the object store; a corpus that cannot be read is refused "
+                    "rather than reported as clean")
             return ()
         try:
             raw = git.out("diff", "--name-only", "-z", corpus.revision)
@@ -560,7 +609,12 @@ class LocalGitCorpus:
                           f"{corpus.revision} ({failed}); an unreadable corpus "
                           "is refused rather than reported as clean"
                           ) from failed
-        changed = {name for name in raw.decode("utf-8").split("\0") if name}
+        # The same raw-byte pathname contract `ls-tree` has: a tracked file
+        # whose name is not UTF-8 made `check` raise instead of reporting the
+        # changed subject (Copilot review of openDox-code#26, round 6).
+        changed = {name for name
+                   in raw.decode("utf-8", "surrogateescape").split("\0")
+                   if name}
         if subjects is not None:
             changed &= {document.key for document in subjects}
         return tuple(
@@ -626,8 +680,21 @@ class LocalGitCorpus:
                 # wrong path (Copilot review of openDox-code#26). `key` is
                 # opaque to this adapter and must not have to avoid a
                 # delimiter this call chose.
-                git.out("update-index", "--add", "--cacheinfo",
-                        "100644", blob, document.key, env=index_env)
+                # `--index-info` ON STDIN, so the path is DATA. The
+                # three-argument `--cacheinfo` form fixed the comma, and left
+                # the path as a positional argument with nothing terminating
+                # git's option parsing — so a valid tracked key such as
+                # `-notes.md` was read as an option and `write_back` refused a
+                # path `list_documents` and `read` both serve (Copilot review
+                # of openDox-code#26, round 6). The stdin form has no option
+                # parsing at all: `<mode> SP <object> TAB <path> NUL`, with
+                # `-z` so a path may contain anything but NUL — which is the
+                # comma fix kept, by construction.
+                git.out("update-index", "--add", "-z", "--index-info",
+                        stdin=(f"100644 {blob}\t"
+                               + document.key).encode(
+                                   "utf-8", "surrogateescape") + b"\0",
+                        env=index_env)
                 tree = git.out("write-tree", env=index_env).decode().strip()
             finally:
                 index.unlink(missing_ok=True)
@@ -657,6 +724,24 @@ class LocalGitCorpus:
     def _git(self, corpus: ResolvedCorpus) -> GitRunner:
         return GitRunner(Path(corpus.location), self._executable)
 
+    def _revalidate(self, git: GitRunner, corpus: ResolvedCorpus) -> None:
+        """Refuse unless this repository is STILL a readable git repository.
+
+        Every path that answers without asking git — an unborn corpus's empty
+        listing, an unborn corpus's `DOCUMENT_UNKNOWN`, a bare repository's
+        clean `check` — used to answer out of the `ResolvedCorpus` alone, so a
+        repository deleted, unmounted or corrupted after `resolve` returned the
+        answer a HEALTHY empty repository gives (Copilot review of
+        openDox-code#26, round 6). One question, asked in each of them.
+        """
+        if not Path(corpus.location).exists():
+            raise _refuse(CORPUS_ABSENT, corpus.location,
+                          "the repository is no longer at this location")
+        if git.run("rev-parse", "--git-dir").returncode != 0:
+            raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                          "the location is no longer a readable git "
+                          "repository")
+
     def _head(self, git: GitRunner, subject: str) -> str | None:
         """The current commit, or None for an UNBORN branch — and only that.
 
@@ -671,7 +756,23 @@ class LocalGitCorpus:
         """
         completed = git.run("rev-parse", "--verify", "HEAD")
         if completed.returncode == 0:
-            return completed.stdout.decode().strip() or None
+            revision = completed.stdout.decode().strip() or None
+            if revision is not None:
+                # THE REF'S SHA IS NOT THE OBJECT. `rev-parse --verify HEAD`
+                # answers out of the ref store, so a commit that has been
+                # pruned or deleted still produced a `ResolvedCorpus` carrying
+                # a revision nothing can serve — `resolve`'s one promise is
+                # that it does not hand back an unreadable corpus, and the
+                # refusal arrived later, from `list_documents` or `read`
+                # (Copilot review of openDox-code#26, round 6). `cat-file -e`
+                # asks the object store.
+                if git.run("cat-file", "-e",
+                           f"{revision}^{{commit}}").returncode != 0:
+                    raise _refuse(
+                        CORPUS_UNREADABLE, subject,
+                        f"HEAD names {revision}, which the object store cannot "
+                        "read; the ref survived the commit it points at")
+            return revision
         symbolic = git.run("symbolic-ref", "--quiet", "HEAD")
         if symbolic.returncode == 0:
             ref = symbolic.stdout.decode().strip()
@@ -716,7 +817,20 @@ class LocalGitCorpus:
         """
         symbolic = git.run("symbolic-ref", "--quiet", "HEAD")
         if symbolic.returncode == 0:
-            return symbolic.stdout.decode().strip()
+            ref = symbolic.stdout.decode().strip()
+            # A BRANCH, and not merely a symbolic ref. `symbolic-ref HEAD` can
+            # legally name a tag or a remote-tracking ref, and `update-ref`
+            # would then have advanced THAT — a write moving a tag instead of a
+            # branch (Copilot review of openDox-code#26, round 6).
+            # `repository_act._pushable_branch` already refused this shape; the
+            # write path is where it matters more.
+            if not ref.startswith("refs/heads/"):
+                raise _refuse(
+                    WRITE_PATH_UNREACHABLE, subject,
+                    f"HEAD names {ref}, which is not a branch; a write back "
+                    "advances a branch and will not move a tag or a "
+                    "remote-tracking ref")
+            return ref
         raise _refuse(
             WRITE_PATH_UNREACHABLE, subject,
             "HEAD is detached, so there is no branch for a commit to advance; "
