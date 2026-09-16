@@ -209,9 +209,27 @@ class Migration:
     def read_sql(self) -> str:
         return self.path.read_text(encoding="utf-8")
 
+    def snapshot(self) -> bytes:
+        """The file's raw bytes, read ONCE — and these are the bytes that run.
+
+        `apply()` used to hash the file (`checksum()`), then read it again
+        (`read_sql()`) to execute it, with the canonical gate a third read
+        before both. A migrations directory that can change under the process
+        — a mounted volume, a deploy that rewrites it — could therefore pass
+        the byte pin and execute something else, and the ledger would record
+        the digest of the bytes that did NOT run (Copilot review of
+        openDox-code#25, round 11). One read, one digest, one execution.
+        """
+        return self.path.read_bytes()
+
+    @staticmethod
+    def digest_of(raw: bytes) -> str:
+        """Lowercase hex SHA-256 of exactly these bytes."""
+        return hashlib.sha256(raw).hexdigest()
+
     def checksum(self) -> str:
         """Lowercase hex SHA-256 of the file's raw bytes."""
-        return hashlib.sha256(self.path.read_bytes()).hexdigest()
+        return self.digest_of(self.snapshot())
 
 
 @dataclass(frozen=True)
@@ -508,7 +526,19 @@ class MigrationRunner:
         applied_now: list[str] = []
 
         for migration in self.discover():
-            current = migration.checksum()
+            # THE BYTES ARE TAKEN ONCE AND EVERYTHING BELOW IS ABOUT THEM: the
+            # digest recorded in the ledger, the pin re-checked for `0001`, and
+            # the SQL executed. Three separate reads meant the gate could pass
+            # on one version of the file and the run execute another (Copilot
+            # review of openDox-code#25, round 11).
+            raw = migration.snapshot()
+            current = Migration.digest_of(raw)
+            if migration.is_canonical and current != CANONICAL_MIGRATION_SHA256:
+                # The gate at the top of this run verified the file; this
+                # verifies THE BYTES ABOUT TO RUN, which is the only version of
+                # the check a mutable directory cannot walk past.
+                raise CanonicalDigestMismatchError(
+                    expected=CANONICAL_MIGRATION_SHA256, actual=current)
             if migration.version in recorded:
                 if recorded[migration.version] != current:
                     raise MigrationChecksumDriftError(
@@ -517,7 +547,7 @@ class MigrationRunner:
                         current=current)
                 continue
             with lock.transaction():
-                lock.execute(migration.read_sql())
+                lock.execute(raw.decode("utf-8"))
                 lock.execute(
                     f"insert into {LEDGER_TABLE} "
                     "(version, name, checksum, reversible, applied_at) "

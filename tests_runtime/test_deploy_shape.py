@@ -818,3 +818,77 @@ def test_the_bootstrap_creates_the_role_the_migration_narrows() -> None:
             == narrowed["valueFrom"]["configMapKeyRef"]), (
         "the role the bootstrap creates and the role the migration narrows "
         "come from different places; they are one role")
+
+
+# -- Copilot's eleventh round on #25 -----------------------------------------
+
+
+def test_the_documented_first_command_builds_the_image_it_runs() -> None:
+    """`docker compose run` does not build by policy — `up` and `create` do.
+
+    The asymmetry is in the CLI itself: `up` and `create` carry `--no-build`
+    ("Don't build an image, even if it's policy") and `run` does not, because
+    `run` has nothing to suppress. The default `OPENDOX_IMAGE` is the local tag
+    `opendox-runtime:local`, which no registry has, so on a clean checkout the
+    documented FIRST command tried to pull an image that had never been built
+    (Copilot review of openDox-code#25, round 11 — three copies of it). The
+    `build:` stanza in the compose file says HOW, not WHEN.
+    """
+    documented = {
+        "docs/runtime.md": (ROOT / "docs" / "runtime.md"),
+        ".env.example": ENV_EXAMPLE,
+        "docker-compose.yaml": (COMPOSE / "docker-compose.yaml"),
+    }
+    for label, path in documented.items():
+        text = path.read_text(encoding="utf-8")
+        lines = [line for line in text.splitlines()
+                 if "run --rm" in line and "migrate" in line]
+        assert lines, f"{label} no longer documents the migration run"
+        for line in lines:
+            assert "--build" in line, (
+                f"{label} documents `{line.strip()}`, which cannot start from a "
+                "clean checkout: `docker compose run` does not build a missing "
+                "image")
+
+
+def test_the_role_bootstrap_never_puts_the_password_in_the_process_arguments(
+) -> None:
+    """`-v runtime_password=…` is visible in `ps` for the life of the command.
+
+    `/proc/<pid>/cmdline` is world-readable on a default Linux host, so the
+    role's password was copied out of the Secret and into a process table
+    (Copilot review of openDox-code#25, round 11). `\\getenv` reads it from
+    psql's own environment instead — measured against psql 16 before it was
+    written: the variable is set, `%L` quotes it, and the role is created.
+    """
+    for path in (COMPOSE / "init-runtime-role.sh",
+                 KUBERNETES / "base" / "init-runtime-role.sh"):
+        script = path.read_text(encoding="utf-8")
+        assert "\\getenv runtime_password OPENDOX_RUNTIME_PG_PASSWORD" in script, (
+            f"{path.name} no longer loads the password inside psql")
+        # COMMENT LINES ARE EXCLUDED, because the paragraph that explains this
+        # fix quotes the shape it removed.
+        executed = "\n".join(line for line in script.splitlines()
+                             if not line.lstrip().startswith("#"))
+        assert "-v runtime_password=" not in executed, (
+            f"{path.name} passes the role password as a psql argument, where "
+            "any process listing can read it")
+        # The role NAME is still an argument, and that is deliberate.
+        assert '-v runtime_user="$runtime_user"' in executed
+
+
+def test_the_migration_job_can_outlast_a_database_that_is_recovering() -> None:
+    """The TCP wait proves a LISTENER, not a server that will take a session.
+
+    Postgres accepts the socket while it replays a crash recovery and answers
+    "the database system is starting up"; the initContainer carries no
+    credential and cannot tell the two apart. Two attempts could therefore
+    exhaust the Job while the database came up seconds later (Copilot review of
+    openDox-code#25, round 11). The migration container is the honest probe —
+    it opens a real session — and the retry budget is what makes that a wait
+    rather than a failure.
+    """
+    job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
+    assert job["spec"]["backoffLimit"] >= 5, (
+        "the Job's retry budget is too small to cover a database that is "
+        "still recovering when the TCP wait returns")

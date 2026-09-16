@@ -120,7 +120,15 @@ services:
 
   # Privileged one-shot migration executor. Never the long-running application
   # container, and it receives no runtime DSN.
-  #   docker compose --profile migration run --rm migrate
+  #   docker compose --profile migration run --rm --build migrate
+  #
+  # `--build`, because `run` DOES NOT BUILD BY POLICY: it is the only one of
+  # `run`, `up` and `create` with no `--no-build` flag, since it has nothing to
+  # suppress. The `build:` stanza below says HOW to build this service, not
+  # WHEN, so on a clean checkout with the default local image tag the
+  # documented first command tried to pull an image that has never existed
+  # (Copilot review of openDox-code#25, round 11). `up` needs no flag: by then
+  # the image is there, and it would build one if it were not.
   migrate:
     # THE SAME BUILD AS THE SERVED SERVICE. Without it a fresh checkout running
     # the runbook's order — migrate, then up — tries to PULL

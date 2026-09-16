@@ -26,7 +26,19 @@ metadata:
   name: opendox-migrate
   namespace: opendox
 spec:
-  backoffLimit: 2
+  # SIX ATTEMPTS, NOT TWO, AND THE REASON IS THE WAIT BELOW. The initContainer
+  # can only prove that something is LISTENING on 5432 — it carries no
+  # credential, deliberately, so it cannot open a session — and Postgres
+  # accepts the socket while still answering "the database system is starting
+  # up" during crash recovery or a slow restart. So the wait is not a
+  # readiness proof in that case, the migration container meets a server that
+  # refuses sessions, and two attempts could exhaust the Job while the database
+  # came up seconds later — leaving the runtime unready until an operator
+  # deleted and reapplied it (Copilot review of openDox-code#25, round 11).
+  # Kubernetes backs a failed Job's pods off exponentially (10s, 20s, 40s …),
+  # so six attempts is about ten minutes of patience for a database that is
+  # recovering, and no wait at all for one that is up.
+  backoffLimit: 6
   # Reaped an hour after it finishes, so the next `kubectl apply` meets no
   # immutable template. See the note above for why the runbook still names the
   # explicit delete.
@@ -64,6 +76,18 @@ spec:
       # listen on 5432 until it is ready for clients, so an open port is
       # exactly the fact this wait needs, and asking for it needs no DSN in a
       # container that should not have one.
+      #
+      # AND IT IS NOT A READINESS PROOF FOR A RESTART, which is why
+      # `backoffLimit` above is six. A server recovering from an unclean stop
+      # LISTENS while it replays, and answers sessions with "the database
+      # system is starting up"; a TCP connect cannot tell that from ready, and
+      # the only things that can — `pg_isready`, a real connection — need
+      # either a second image in the install path or a credential in a
+      # container this file keeps credential-free. The migration container is
+      # the honest probe for that case: it opens a real session, fails if the
+      # server will not take one, and the Job's retry budget is what makes that
+      # a wait rather than a failure (Copilot review of openDox-code#25,
+      # round 11).
       initContainers:
         - name: wait-for-postgres
           image: ghcr.io/opensoft/opendox-runtime:0.0.0
