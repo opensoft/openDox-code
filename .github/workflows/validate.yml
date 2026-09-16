@@ -454,6 +454,11 @@ jobs:
       #              proving the commit object, a HEAD that is not a branch,
       #              an option-shaped key, a pathname that is not UTF-8, and an
       #              embedded NUL.
+      #  167 passed  at `build/3-6-repository-act` `080ef296` (same day, same
+      #              python, pytest and git) — the same six modules, carrying
+      #              #25's rounds 6 and 7 by merge. THE CURRENT FIGURE for this
+      #              branch, stated at the same commit as in the PR
+      #              description.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
