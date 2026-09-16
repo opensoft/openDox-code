@@ -204,6 +204,15 @@ def read_me(principal: PrincipalDep) -> dict[str, Any]:
     return _user_json(principal)
 
 
+# `del principal` IN A READ HANDLER IS DELIBERATE AND IS SAID ONCE HERE. The
+# `PrincipalDep` parameter is what makes the route authenticated at all —
+# FastAPI resolves the dependency, which verifies the token and upserts the row,
+# before the body runs — and a handler that does not then USE the value is a
+# handler whose authorization is "any signed-in principal may read this". `del`
+# states that in code instead of leaving an argument that looks forgotten. A
+# route that narrows further calls `_require_role`, and every write does.
+
+
 @users.get("")
 def list_users(store: StoreDep, principal: PrincipalDep,
                limit: LimitQuery = None,

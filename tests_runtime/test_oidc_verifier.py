@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -126,7 +127,7 @@ def test_the_key_set_is_cached_and_refreshed_on_a_monotonic_ttl(
     class CountingSource:
         def load(self) -> dict:
             loads.append(1)
-            return json.loads(open(jwks_path, encoding="utf-8").read())
+            return json.loads(Path(jwks_path).read_text(encoding="utf-8"))
 
     cache = oidc.CachingJwks(CountingSource(), ttl_seconds=3600)
     cache.keyset()
@@ -144,7 +145,7 @@ def test_a_rotated_key_is_found_after_one_refresh(jwks_path: str,
     what a broker mid-rotation serves; the token names the new `kid`, the
     select misses, and the one forced refresh is what finds it.
     """
-    current = json.loads(open(jwks_path, encoding="utf-8").read())
+    current = json.loads(Path(jwks_path).read_text(encoding="utf-8"))
     previous = {"keys": [dict(current["keys"][0], kid="the-previous-key")]}
     state = {"served": previous}
 
