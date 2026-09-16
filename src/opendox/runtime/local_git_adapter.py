@@ -79,7 +79,6 @@ commits; it obliges no fields, and `classify` says so by returning an empty
 
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import shutil
@@ -88,6 +87,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+
+try:  # pragma: no cover - the Windows arm is not exercised on this runner
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
+    import msvcrt
+else:  # pragma: no cover - imported for type/runtime symmetry only
+    msvcrt = None
 
 from opendox.corpus_adapter import (
     CORPUS_ABSENT,
@@ -249,12 +256,20 @@ def repository_lock(git: GitRunner):
     """Serialize git-side repository mutation across processes."""
     lock = Path(git.out("rev-parse", "--absolute-git-dir").decode().strip()
                 ) / "HEAD"
-    with lock.open("rb") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    with lock.open("r+b") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        else:  # pragma: no cover - Windows-only fallback
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            else:  # pragma: no cover - Windows-only fallback
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 class LocalGitCorpus:
