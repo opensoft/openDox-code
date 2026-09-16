@@ -72,6 +72,25 @@ CANONICAL_MIGRATION_SHA256 = (
 #: prefix is also what keeps the ledger from reading as a seventh.
 LEDGER_TABLE = "opendox_schema_migrations"
 
+#: THE ADVISORY LOCK KEY the whole run is serialized on. A fixed bigint, so two
+#: processes agree on it without a table to agree through — which matters
+#: because the thing being protected is the creation of the tables.
+#:
+#: WHY THE RUN NEEDS ONE AT ALL (Copilot review of openDox-code#25, critical,
+#: and correct): the gate, the ledger bootstrap, the ledger read and the
+#: per-migration transactions are four separate statements. Two deploys, or a
+#: Kubernetes Job retry overlapping its predecessor, can both read an EMPTY
+#: ledger and both start applying `0001`; one then fails on objects the other
+#: created, and the failure looks like a broken migration rather than a race.
+#: `pg_advisory_lock` is session-scoped, so it spans every one of those
+#: statements on the holder's connection while costing nothing on a run with no
+#: contention.
+#:
+#: The value is arbitrary and only has to be stable and unlikely to collide
+#: with another application's lock on the same database: `0x0D0C` for "dox"
+#: followed by `0001` for the canonical schema this run applies.
+MIGRATION_LOCK_KEY = 0x0D0C0001
+
 #: Canonical DDL for the ledger. MUST stay textually identical to the
 #: `create table if not exists` block in `migrations/0002_migration_state.sql`
 #: (asserted by `tests_runtime/test_migration_shape.py`).
@@ -85,6 +104,12 @@ create table if not exists opendox_schema_migrations (
 );"""
 
 _MIGRATION_FILENAME_RE = re.compile(r"^(?P<version>\d+)_(?P<name>.+)\.sql$")
+
+#: See `MigrationRunner.protect_ledger`. Mirrors `config._ROLE_NAME`, and is
+#: duplicated rather than imported for the same reason every other closure in
+#: this package is: `migrations` must import under `.[test]` alone, and it
+#: imports `config` nowhere.
+_PLAIN_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 
 
 class MigrationError(Exception):
@@ -231,9 +256,11 @@ class MigrationRunner:
     """
 
     def __init__(self, db: Any, *,
-                 migrations_dir: str | Path = DEFAULT_MIGRATIONS_DIR) -> None:
+                 migrations_dir: str | Path = DEFAULT_MIGRATIONS_DIR,
+                 runtime_role: str | None = None) -> None:
         self._db = db
         self._migrations_dir = Path(migrations_dir)
+        self._runtime_role = runtime_role
 
     # -- introspection ----------------------------------------------------
 
@@ -272,9 +299,27 @@ class MigrationRunner:
     def apply(self) -> list[str]:
         """Apply every pending migration in order; return the versions applied.
 
+        SERIALIZED ON `MIGRATION_LOCK_KEY` for the whole run — see that
+        constant for why. The lock is taken on a connection held open across
+        the gate, the bootstrap, the ledger read and every per-migration
+        transaction, and released in a `finally` so a failed run does not leave
+        the next one waiting on a session that has gone away (Postgres would
+        release it when the backend exits anyway; releasing it explicitly is
+        what makes a retry in the SAME process immediate).
+
         The canonical gate runs FIRST, before the ledger is even bootstrapped,
         so a tree carrying the wrong `0001` changes nothing at all.
         """
+        with self._db.connection() as lock:
+            lock.execute("select pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
+            try:
+                return self._apply_locked()
+            finally:
+                lock.execute("select pg_advisory_unlock(%s)",
+                             (MIGRATION_LOCK_KEY,))
+
+    def _apply_locked(self) -> list[str]:
+        """`apply`'s body, with the run's advisory lock already held."""
         verify_canonical_digest(self._migrations_dir)
         self.bootstrap_ledger()
 
@@ -300,4 +345,44 @@ class MigrationRunner:
                      migration.reversible))
             applied_now.append(migration.version)
 
+        self.protect_ledger()
         return applied_now
+
+    def protect_ledger(self) -> None:
+        """Narrow the SERVED role's rights on the ledger to SELECT.
+
+        WHY THE RUNNER DOES THIS AND NOT THE ROLE-CREATION SCRIPT. The compose
+        and Kubernetes bootstrap scripts run on the database's FIRST START,
+        before any migration exists, so they can only set default privileges —
+        which then cover the ledger along with everything else, and the served
+        role could INSERT, UPDATE or DELETE the runner's own tamper-evident
+        record (Copilot review of openDox-code#25). Hiding an applied migration
+        or manufacturing one would make the fail-closed drift check check a
+        story the API wrote. The runner is the process that OWNS the ledger and
+        runs as the privileged identity, so it is the one place the narrowing
+        can be applied at the right moment: after the table exists.
+
+        SELECT is kept, deliberately: `/readyz` reads the ledger through the
+        served DSN to report a pending schema.
+
+        A no-op when no role is configured — a single-role install (a developer
+        running one Postgres) is legal and just does not get this separation.
+        """
+        if not self._runtime_role:
+            return
+        # The role NAME is validated as a plain SQL identifier by
+        # `config._role_name`; SQL takes identifiers as syntax, so it cannot be
+        # a parameter, and validating the shape is what makes the
+        # interpolation safe. Asserted here too, because this method is public
+        # and a caller may not have come through the config loader.
+        if not _PLAIN_IDENTIFIER.fullmatch(self._runtime_role):
+            raise MigrationError(
+                f"{self._runtime_role!r} is not a plain SQL identifier; the "
+                "ledger narrowing interpolates a role name as syntax and "
+                "refuses anything outside [A-Za-z_][A-Za-z0-9_]*")
+        with self._db.transaction() as conn:
+            conn.execute(
+                f"revoke insert, update, delete, truncate on {LEDGER_TABLE} "
+                f"from {self._runtime_role}")
+            conn.execute(
+                f"grant select on {LEDGER_TABLE} to {self._runtime_role}")

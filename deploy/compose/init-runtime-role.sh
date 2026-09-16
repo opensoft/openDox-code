@@ -12,6 +12,18 @@
 # The runtime role is granted on the tables that EXIST at migration time and on
 # everything created later by the migration owner (`alter default privileges`),
 # so a 0003 that adds a table does not need this file edited.
+#
+# THE MIGRATION LEDGER IS THE ONE EXCEPTION, AND IT IS NARROWED ELSEWHERE.
+# `opendox_schema_migrations` is the runner's tamper-evident record, and a
+# served role that could INSERT, UPDATE or DELETE there could hide an applied
+# migration or manufacture one — after which the fail-closed drift check would
+# be checking a story the API wrote (Copilot review of openDox-code#25). This
+# script cannot narrow it: it runs on the database's FIRST START, before any
+# migration exists, so the default privileges above are all it can set. The
+# narrowing belongs where the table is created and the privileged identity is
+# already connected — `opendox-runtime migrate`, which runs
+# `MigrationRunner.protect_ledger` when `OPENDOX_RUNTIME_PG_ROLE` names this
+# role. SELECT is kept, because `/readyz` reads the ledger.
 set -eu
 
 if [ -z "${OPENDOX_RUNTIME_PG_PASSWORD:-}" ]; then

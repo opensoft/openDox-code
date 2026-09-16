@@ -181,9 +181,6 @@ def test_reset_refuses_without_the_spelled_confirmation(
     assert code == 1
     assert evidence["refusal"] == "unconfirmed"
     assert cli.RESET_CONFIRMATION in evidence["message"]
-    for table in identity.TABLES:
-        assert table in evidence["message"]
-    assert migrations.LEDGER_TABLE in evidence["message"]
 
 
 def test_migrate_refuses_rather_than_borrowing_the_served_identity(
@@ -198,7 +195,8 @@ def test_migrate_refuses_rather_than_borrowing_the_served_identity(
     monkeypatch.delenv(PREFIX + "MIGRATION_DATABASE_URL", raising=False)
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
-    code, evidence = _run(cli.build_parser().parse_args(["runtime", "migrate"]))
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "migrate"]))
     assert code == 1
     assert evidence["refusal"] == "configuration"
     assert PREFIX + "MIGRATION_DATABASE_URL" in evidence["message"]
@@ -257,3 +255,95 @@ def test_the_settings_repr_never_carries_a_dsn() -> None:
     assert "hunter2" not in repr(settings)
     assert "hunter3" not in repr(settings)
     assert "<redacted>" in repr(settings)
+
+
+# ---------------------------------------------------------------------------
+# the review round's own assertions (Copilot review of openDox-code#25)
+# ---------------------------------------------------------------------------
+
+
+def test_the_drop_order_is_topological_and_not_reversed_declaration_order() -> None:
+    """`reversed(identity.TABLES)` drops `projects` before `memberships`.
+
+    `memberships.project_id` references `projects.id`, so the first install
+    with one membership in it failed the whole transaction on a foreign key and
+    cleared nothing. The order is written out now, and this asserts the
+    property rather than the list: every table appears after each table that
+    references it.
+    """
+    references = {
+        "drafts": {"sessions", "projects"},
+        "sessions": {"users", "projects"},
+        "project_repositories": {"projects"},
+        "memberships": {"users", "projects"},
+        "projects": {"users"},
+        "users": set(),
+        migrations.LEDGER_TABLE: set(),
+    }
+    assert set(cli.DROP_ORDER) == set(identity.TABLES) | {migrations.LEDGER_TABLE}
+    position = {table: index for index, table in enumerate(cli.DROP_ORDER)}
+    for table, referenced in references.items():
+        for target in referenced:
+            assert position[table] < position[target], (
+                f"{table} references {target} and is dropped after it; "
+                "`drop table` without `cascade` refuses that order")
+
+
+def test_reset_names_the_whole_drop_order_in_its_refusal(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL", "postgresql://m/db")
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "reset", "--confirm", "no"]))
+    assert code == 1
+    for table in cli.DROP_ORDER:
+        assert table in evidence["message"]
+
+
+def test_migrate_and_reset_need_no_served_identity_and_no_broker(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The separation the compose file and the Job declare, enforced in code.
+
+    Both verbs used to go through `load_settings`, which requires the served
+    DSN and the broker, so both deployments handed the migration container the
+    PRIVILEGED DSN in `OPENDOX_DATABASE_URL` purely to satisfy the loader — and
+    any path in that container reading `settings.database_url` was then
+    schema-privileged. They read `load_migration_settings` now, and this is the
+    assertion that they do: with only the migration DSN set, neither refuses
+    for configuration.
+    """
+    for name in ("DATABASE_URL", "OIDC_ISSUER", "OIDC_AUDIENCE"):
+        monkeypatch.delenv(PREFIX + name, raising=False)
+    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
+                       "postgresql://nobody@127.0.0.1:1/none")
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "reset", "--confirm", "no"]))
+    assert evidence["refusal"] == "unconfirmed", evidence
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "migrate", "--connect-timeout", "0.2"]))
+    # It gets past configuration and fails on the unreachable server, which is
+    # the point: the refusal is operational, and it is EVIDENCE, not a traceback.
+    assert code == 1
+    assert evidence["refusal"] != "configuration", evidence
+    assert evidence["ok"] is False
+
+
+def test_the_entrypoint_turns_an_escaped_exception_into_evidence(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every outcome is one redacted JSON object; none is a traceback."""
+    def _boom(_args: argparse.Namespace) -> int:
+        raise RuntimeError("a pool timeout, say")
+
+    monkeypatch.setattr(cli, "cmd_status", _boom)
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        code = cli.main(["runtime", "status"])
+    assert code == 1
+    evidence = json.loads(buffer.getvalue())
+    assert evidence["ok"] is False
+    assert evidence["refusal"] == "RuntimeError"
+    assert "a pool timeout" in evidence["message"]
+
+
+def test_an_argparse_usage_error_still_exits_the_way_argparse_means_it() -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["runtime", "no-such-verb"])

@@ -4,7 +4,8 @@
 #
 # WHAT THIS BASE COMMITS AND WHAT IT REFUSES TO. It commits every Secret's NAME
 # and key (`opendox-db-runtime/dsn`, `opendox-db-migration/dsn`,
-# `opendox-postgres/password`) and no Secret's value. `tests_runtime/
+# `opendox-postgres/password` and `opendox-postgres/runtime-password`) and no
+# Secret's value. `tests_runtime/
 # test_deploy_shape.py` reads every manifest here and refuses any `kind:
 # Secret` and any `stringData:`/`data:` credential block, so a value cannot be
 # added later without the test that forbids it going red.
@@ -36,6 +37,15 @@ images:
 # plausible-looking placeholder would be a runtime trusting an issuer nobody
 # chose. `disableNameSuffixHash` keeps the name stable for the references.
 configMapGenerator:
+  # The bundled Postgres's first-start role bootstrap, from the SAME file the
+  # compose package mounts. One script, two deployments; a second copy here
+  # would be a second thing to keep in step.
+  - name: opendox-postgres-init
+    behavior: create
+    options:
+      disableNameSuffixHash: true
+    files:
+      - 010-runtime-role.sh=../../compose/init-runtime-role.sh
   - name: opendox-oidc
     behavior: create
     options:

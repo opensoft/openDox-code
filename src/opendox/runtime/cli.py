@@ -65,6 +65,7 @@ from opendox.runtime.config import (
     SETTINGS,
     ConfigurationError,
     RuntimeSettings,
+    load_migration_settings,
     load_settings,
     migration_database_url,
 )
@@ -80,6 +81,26 @@ PROJECT_VERBS: tuple[str, ...] = ("create-repository", "attach-remote", "push")
 
 #: What `reset` will not do without being told twice.
 RESET_CONFIRMATION = "yes-drop-the-coordination-database"
+
+#: THE DROP ORDER, TOPOLOGICAL AND WRITTEN OUT. `reversed(identity.TABLES)`
+#: looks like a dependency-safe order and is not: it drops `projects` before
+#: `memberships`, and `memberships.project_id` references `projects.id`, so the
+#: first install with a single membership in it failed the whole transaction on
+#: a foreign key and cleared nothing (Copilot review of openDox-code#25).
+#:
+#: `cascade` is deliberately still NOT used. A `drop table … cascade` would
+#: succeed in any order and would also silently take anything ELSE that
+#: referenced these tables with it; the point of an explicit order is that a
+#: table this list does not know about keeps the drop honest by failing it.
+DROP_ORDER: tuple[str, ...] = (
+    "drafts",                 # references sessions, projects
+    "sessions",               # references users, projects
+    "project_repositories",   # references projects
+    "memberships",            # references users, projects
+    "projects",               # references users
+    "users",
+    "opendox_schema_migrations",
+)
 
 
 def _emit(payload: dict[str, Any], *, ok: bool) -> int:
@@ -166,10 +187,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     `--plan` needs the database (the ledger says what is already applied) and
     changes nothing.
     """
-    settings = _settings_or_refusal(args)
-    if isinstance(settings, int):
-        return settings
     try:
+        settings = load_migration_settings()
         dsn = migration_database_url(settings)
     except ConfigurationError as exc:
         return _emit({"verb": "migrate", "refusal": "configuration",
@@ -181,21 +200,36 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                       "message": f"{exc}; install this package with the "
                                  "`runtime` extra: pip install '.[runtime]'"},
                      ok=False)
-    runner_db = Database(dsn, application_name="opendox-runtime-migrate")
+    runner_db = Database(dsn, application_name="opendox-runtime-migrate",
+                         checkout_timeout=args.connect_timeout)
+    # THE OUTCOME IS COMPUTED INSIDE THE CONTEXT AND EMITTED OUTSIDE IT. A
+    # `return _emit(...)` inside `with runner_db:` reports success before the
+    # context has closed, so a failure in the close would print a second,
+    # contradicting record (Copilot review of openDox-code#26 made the same
+    # point about the § 3.6 verbs, and it applies here).
     try:
         with runner_db:
             runner = migrations.MigrationRunner(
-                runner_db, migrations_dir=settings.migrations_dir)
+                runner_db, migrations_dir=settings.migrations_dir,
+                runtime_role=settings.runtime_pg_role)
             if args.plan:
-                plan = [m.version for m in runner.plan()]
-                return _emit({"verb": "migrate", "planned": plan,
-                              "applied": []}, ok=True)
-            applied = runner.apply()
-            return _emit({"verb": "migrate", "planned": [],
-                          "applied": applied}, ok=True)
+                evidence = {"verb": "migrate",
+                            "planned": [m.version for m in runner.plan()],
+                            "applied": []}
+            else:
+                evidence = {"verb": "migrate", "planned": [],
+                            "applied": runner.apply()}
     except migrations.MigrationError as exc:
         return _emit({"verb": "migrate", "refusal": type(exc).__name__,
                       "message": str(exc)}, ok=False)
+    # EVERY OPERATIONAL FAILURE IS EVIDENCE TOO, not a traceback: a pool
+    # timeout, a refused connection, a permission error and a SQL error all
+    # reach an operator through the same one redacted object the lifecycle
+    # contract promises.
+    except Exception as exc:  # noqa: BLE001
+        return _emit({"verb": "migrate", "refusal": type(exc).__name__,
+                      "message": str(exc)}, ok=False)
+    return _emit(evidence, ok=True)
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -255,15 +289,23 @@ def cmd_status(args: argparse.Namespace) -> int:
     report["runtime_extra"] = "present"
 
     try:
+        # INSIDE the context, all of it. `runner.applied()` and `runner.plan()`
+        # each check a connection out of the pool, so calling them after the
+        # `with` had closed it raised `PoolClosed` and this verb reported a
+        # perfectly reachable database as unreachable (Copilot review of
+        # openDox-code#25, and it is the kind of defect only a live database
+        # shows — every unreachable-database test passed).
         with Database(settings.database_url,
-                      checkout_timeout=args.probe_timeout) as db, \
-                db.connection() as conn:
-            conn.execute("select 1")
+                      checkout_timeout=args.probe_timeout) as db:
+            with db.connection() as conn:
+                conn.execute("select 1")
             runner = migrations.MigrationRunner(
                 db, migrations_dir=settings.migrations_dir)
+            applied = [row.version for row in runner.applied()]
+            pending = [m.version for m in runner.plan()]
         report["database"] = "reachable"
-        report["applied_migrations"] = [row.version for row in runner.applied()]
-        report["pending_migrations"] = [m.version for m in runner.plan()]
+        report["applied_migrations"] = applied
+        report["pending_migrations"] = pending
     # a status verb reports, never raises
     except Exception as exc:  # noqa: BLE001
         report["database"] = f"unreachable: {type(exc).__name__}: {exc}"
@@ -296,15 +338,12 @@ def cmd_reset(args: argparse.Namespace) -> int:
     The confirmation is a SPELLED PHRASE and not a `--force` flag, because a
     flag is something a shell history repeats by accident.
     """
-    settings = _settings_or_refusal(args)
-    if isinstance(settings, int):
-        return settings
     if args.confirm != RESET_CONFIRMATION:
         return _emit({"verb": "reset", "refusal": "unconfirmed",
                       "message": f"pass --confirm {RESET_CONFIRMATION} to drop "
-                                 f"{list(identity.TABLES)} and "
-                                 f"{migrations.LEDGER_TABLE}"}, ok=False)
+                                 f"{list(DROP_ORDER)}"}, ok=False)
     try:
+        settings = load_migration_settings()
         dsn = migration_database_url(settings)
     except ConfigurationError as exc:
         return _emit({"verb": "reset", "refusal": "configuration",
@@ -314,16 +353,16 @@ def cmd_reset(args: argparse.Namespace) -> int:
     except ImportError as exc:  # pragma: no cover - the extra is absent
         return _emit({"verb": "reset", "refusal": "runtime-extra-missing",
                       "message": str(exc)}, ok=False)
-    dropped: list[str] = []
-    with Database(dsn, application_name="opendox-runtime-reset") as db, \
-            db.transaction() as conn:
-        # Reverse declaration order so a dependent table goes before the table
-        # it references; `cascade` is deliberately NOT used, so a table this
-        # list does not know about keeps the drop honest by failing it.
-        for table in (*reversed(identity.TABLES), migrations.LEDGER_TABLE):
-            conn.execute(f"drop table if exists {table}")
-            dropped.append(table)
-    return _emit({"verb": "reset", "dropped": dropped,
+    try:
+        with Database(dsn, application_name="opendox-runtime-reset",
+                      checkout_timeout=args.connect_timeout) as db, \
+                db.transaction() as conn:
+            for table in DROP_ORDER:
+                conn.execute(f"drop table if exists {table}")
+    except Exception as exc:  # noqa: BLE001
+        return _emit({"verb": "reset", "refusal": type(exc).__name__,
+                      "message": str(exc)}, ok=False)
+    return _emit({"verb": "reset", "dropped": list(DROP_ORDER),
                   "note": "coordination state only; every document is in a "
                           "repository (RULING Q1)"}, ok=True)
 
@@ -429,6 +468,19 @@ def cmd_push(args: argparse.Namespace) -> int:
 # -- parser -----------------------------------------------------------------
 
 
+def _add_connect_timeout(parser: argparse.ArgumentParser) -> None:
+    """Bound how long a verb waits for the database before it reports.
+
+    The same argument `status --probe-timeout` makes: a lifecycle verb that
+    hangs for the driver's default is a verb an operator interrupts, and an
+    interrupted verb emits no evidence at all.
+    """
+    parser.add_argument(
+        "--connect-timeout", type=float, default=10.0,
+        help="seconds to wait for a database connection before reporting the "
+             "failure as evidence (default: 10)")
+
+
 def register(subparsers: Any) -> None:
     """Attach the `runtime` command to an argparse subparsers action.
 
@@ -451,6 +503,7 @@ def register(subparsers: Any) -> None:
     migrate = verbs.add_parser("migrate", help="apply the ordered SQL migrations")
     migrate.add_argument("--plan", action="store_true",
                          help="report what would be applied and change nothing")
+    _add_connect_timeout(migrate)
     migrate.set_defaults(func=cmd_migrate, verb="migrate")
 
     serve = verbs.add_parser("serve", help="run the API")
@@ -471,6 +524,7 @@ def register(subparsers: Any) -> None:
         "reset", help="drop the coordination schema (RULING Q1: disposable)")
     reset.add_argument("--confirm", default="",
                        help=f"must be exactly {RESET_CONFIRMATION}")
+    _add_connect_timeout(reset)
     reset.set_defaults(func=cmd_reset, verb="reset")
 
 
@@ -564,9 +618,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse and dispatch. `args.func(args)` — the core's own dispatch line."""
+    """Parse and dispatch, and NEVER let a traceback be the whole answer.
+
+    `args.func(args)` is the core's own dispatch line, wrapped in the last
+    error boundary the lifecycle contract needs: "each verb prints its redacted
+    machine-readable evidence (JSON) and exits nonzero on a refused/failed
+    outcome" is a promise about EVERY outcome, and a pool timeout or a
+    filesystem permission error that escaped a verb used to print a traceback
+    and no evidence at all (Copilot review of openDox-code#25).
+
+    `SystemExit` passes through untouched: that is argparse's own usage error,
+    which has already printed the usage a human needs.
+    """
     args = build_parser().parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        return _emit({"verb": getattr(args, "verb", "unknown"),
+                      "refusal": type(exc).__name__,
+                      "message": str(exc)}, ok=False)
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry

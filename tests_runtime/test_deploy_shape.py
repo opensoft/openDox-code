@@ -286,11 +286,40 @@ def test_every_required_non_secret_setting_reaches_the_deployment(
         "would refuse at startup naming it, which is honest and avoidable")
 
 
+def _generator(name: str) -> dict[str, Any]:
+    kustomization = _load_yaml(KUBERNETES / "base" / "kustomization.yaml")
+    for entry in kustomization["configMapGenerator"]:
+        if entry["name"] == name:
+            return entry
+    raise AssertionError(
+        f"the base declares no configMapGenerator named {name!r}")
+
+
+def test_the_bundled_postgres_provisions_the_least_privileged_role() -> None:
+    """One init script, shared with the compose package, not a second copy.
+
+    The base ships its own Postgres, and the Deployment connects as a role that
+    something has to create. Without this the base authenticated only as the
+    schema-owning role, which is the separation the whole layout exists to keep.
+    """
+    generator = _generator("opendox-postgres-init")
+    assert generator["files"] == [
+        "010-runtime-role.sh=../../compose/init-runtime-role.sh"], (
+        "the Kubernetes base must mount the SAME role-bootstrap script the "
+        "compose package does; a second copy is a second thing to keep in step")
+    assert (COMPOSE / "init-runtime-role.sh").is_file()
+
+    statefulset = _load_yaml(KUBERNETES / "base" / "postgres-statefulset.yaml")
+    container = _containers(statefulset)[0]
+    assert "OPENDOX_RUNTIME_PG_PASSWORD" in _env_names_of(container)
+    mounts = {mount["name"]: mount["mountPath"]
+              for mount in container["volumeMounts"]}
+    assert mounts["init-runtime-role"] == "/docker-entrypoint-initdb.d"
+
+
 def test_the_neutral_base_leaves_the_broker_empty_rather_than_plausible() -> None:
     """An empty issuer refuses at startup; a plausible one is trusted silently."""
-    kustomization = _load_yaml(KUBERNETES / "base" / "kustomization.yaml")
-    generator = kustomization["configMapGenerator"][0]
-    assert generator["name"] == "opendox-oidc"
+    generator = _generator("opendox-oidc")
     literals = dict(item.split("=", 1) for item in generator["literals"])
     assert literals["oidc_issuer"] == ""
     assert literals["oidc_audience"] == ""
@@ -310,3 +339,98 @@ def test_one_replica_and_recreate_because_git_has_no_shared_writer_protocol() ->
     assert deployment["spec"]["strategy"]["type"] == "Recreate"
     claim = _load_yaml(KUBERNETES / "base" / "project-repositories-pvc.yaml")
     assert claim["spec"]["accessModes"] == ["ReadWriteOnce"]
+
+
+# -- the review round's own assertions (Copilot review of openDox-code#25) ---
+
+
+def test_the_migration_container_carries_no_served_identity() -> None:
+    """Compose and Kubernetes both stopped aliasing the privileged DSN.
+
+    Both used to set `OPENDOX_DATABASE_URL` to the MIGRATION DSN purely to
+    satisfy the served loader, which made any path reading
+    `settings.database_url` in that container schema-privileged and defeated
+    the separation the two files exist to keep.
+    """
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    migrate = compose["services"]["migrate"]["environment"]
+    assert PREFIX + "DATABASE_URL" not in migrate
+    assert PREFIX + "OIDC_ISSUER" not in migrate
+    assert set(migrate) == {PREFIX + "MIGRATION_DATABASE_URL",
+                            PREFIX + "MIGRATIONS_DIR",
+                            PREFIX + "RUNTIME_PG_ROLE"}
+
+    job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
+    names = _env_names_of(_containers(job)[0])
+    assert PREFIX + "DATABASE_URL" not in names
+    assert PREFIX + "OIDC_ISSUER" not in names
+    assert names == {PREFIX + "MIGRATION_DATABASE_URL",
+                     PREFIX + "MIGRATIONS_DIR",
+                     PREFIX + "RUNTIME_PG_ROLE"}
+
+
+def test_the_role_the_migration_narrows_is_a_name_and_not_a_credential() -> None:
+    """`OPENDOX_RUNTIME_PG_ROLE` is the exception that proves the rule.
+
+    Every other value the migration container receives is a Secret reference;
+    this one is a plain literal in both deployments, and it is allowed to be
+    because a role NAME is not a credential — the password for that role lives
+    in `opendox-postgres/runtime-password` and never reaches this container.
+    """
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    value = compose["services"]["migrate"]["environment"][PREFIX + "RUNTIME_PG_ROLE"]
+    assert "PASSWORD" not in value.upper()
+    job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
+    entry = next(e for e in _containers(job)[0]["env"]
+                 if e["name"] == PREFIX + "RUNTIME_PG_ROLE")
+    assert entry["value"] == "opendox_runtime"
+    assert "valueFrom" not in entry
+
+
+def test_both_pods_declare_command_and_not_only_args() -> None:
+    """The image has a `CMD` and no `ENTRYPOINT`.
+
+    Kubernetes `args` replaces CMD's ARGUMENTS and leaves the entrypoint empty,
+    so a container declared with `args:` alone has no executable and never
+    starts (Copilot review of openDox-code#25 — a defect no test of this
+    repository could have caught, because nothing here runs a cluster; the
+    assertion is on the manifest's shape instead).
+    """
+    for name in ("opendox-deployment.yaml", "migration-job.yaml"):
+        document = _load_yaml(KUBERNETES / "base" / name)
+        for container in _containers(document):
+            assert container.get("command"), (
+                f"{name}: {container['name']} declares no `command:`")
+            assert container["command"][0] == "opendox-runtime"
+            assert "args" not in container, (
+                f"{name}: {container['name']} still carries `args:`")
+
+
+def test_the_compose_migration_service_can_be_built_like_the_served_one() -> None:
+    """The runbook runs `migrate` BEFORE `up`, so it cannot need a pulled image."""
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    served = compose["services"]["opendox"]["build"]
+    migrate = compose["services"]["migrate"]["build"]
+    assert migrate == served, (
+        "the migration service must build the same image the served service "
+        "does; with `image:` alone a fresh checkout tries to PULL "
+        "`opendox-runtime:local`, which is in no registry")
+
+
+def test_the_dev_overlay_does_not_claim_a_pin_it_does_not_make() -> None:
+    """`newTag:` is mutable; a comment that called it a digest was describing
+    a line that did not do it."""
+    text = (KUBERNETES / "overlays" / "dev" / "kustomization.yaml").read_text(
+        encoding="utf-8")
+    overlay = _load_yaml(KUBERNETES / "overlays" / "dev" / "kustomization.yaml")
+    entry = overlay["images"][0]
+    if "digest" in entry:
+        assert entry["digest"].startswith("sha256:")
+    else:
+        assert "newTag" in entry
+        assert "non-production placeholder" in text.lower(), (
+            "the overlay pins a MUTABLE tag and must say so; a comment "
+            "claiming a digest here would be describing a line that does not "
+            "make one")
+        assert "digest:" in text, (
+            "the overlay must show the `digest:` form a real environment uses")

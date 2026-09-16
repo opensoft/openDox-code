@@ -48,6 +48,21 @@ spec:
                   key: password
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+            # THE LEAST-PRIVILEGED ROLE THE DEPLOYMENT CONNECTS AS. The base
+            # used to start this Postgres with the `opendox` role alone while
+            # the Deployment's `opendox-db-runtime` Secret named another one,
+            # so a fresh base install either could not authenticate at all or
+            # had to point the served runtime at the schema-owning role —
+            # which is the separation the whole layout exists to keep (Copilot
+            # review of openDox-code#25). The init script below creates it on
+            # the volume's FIRST start, exactly as the compose package does.
+            - name: OPENDOX_RUNTIME_PG_USER
+              value: opendox_runtime
+            - name: OPENDOX_RUNTIME_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: opendox-postgres
+                  key: runtime-password
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -68,6 +83,20 @@ spec:
           volumeMounts:
             - name: pg-data
               mountPath: /var/lib/postgresql/data
+            # `/docker-entrypoint-initdb.d/` runs ONCE per data volume, so this
+            # is a first-start bootstrap and never touches an existing
+            # database. The script is the SAME FILE the compose package mounts
+            # (`deploy/compose/init-runtime-role.sh`), carried here by the
+            # kustomization's `configMapGenerator` so there is one script and
+            # not two that drift.
+            - name: init-runtime-role
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: init-runtime-role
+          configMap:
+            name: opendox-postgres-init
+            defaultMode: 0o555
   volumeClaimTemplates:
     - metadata:
         name: pg-data

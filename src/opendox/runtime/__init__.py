@@ -24,11 +24,16 @@ kept. Importing `opendox.runtime`, `opendox.runtime.config`,
 — no FastAPI, no psycopg, no PyJWT, no httpx. Three consumers depend on that:
 
   * `split-opendox-two-layer-product` § 3.7's neutral conformance corpus, which
-    must be able to import `opendox.runtime.local_git_adapter` (and
-    `opendox.runtime.repository_act.initialize_repository`, to build a corpus
-    to check) and hold `LocalGitCorpus` against
-    `opendox.corpus_adapter.CorpusAdapter` in a process that installed neither
-    a web framework nor a database driver;
+    holds an adapter against `opendox.corpus_adapter.CorpusAdapter` in a
+    process that installed neither a web framework nor a database driver. The
+    adapter openDox offers it is `opendox.runtime.local_git_adapter`, and
+    `opendox.runtime.repository_act.initialize_repository` builds a corpus to
+    check without a database. Both arrive with the § 3.6 act — on THIS branch
+    they are here; on the § 3.5 branch this one is stacked on
+    (openDox-code#25) they are not yet, which is why
+    `tests_runtime/test_runtime_surface.py` measures whichever of the declared
+    modules the tree actually carries rather than assuming all of them
+    (Copilot review of openDox-code#25);
   * the leg's REQUIRED `validate` check, which installs `.[test]` and not
     `.[runtime]`, so every assertion it runs has to hold without the extra;
   * a reader running `opendox runtime status` to find out why the runtime will

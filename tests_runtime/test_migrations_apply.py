@@ -136,3 +136,224 @@ def test_a_later_migration_is_applied_in_numeric_order(
             "where table_schema = current_schema() and table_name = 'projects'"
         ).fetchall()
     assert "probe" in {row[0] for row in columns}
+
+
+# ---------------------------------------------------------------------------
+# the review round's own assertions (Copilot review of openDox-code#25)
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_holds_the_advisory_lock_and_a_second_one_waits(
+        postgres_dsn: str) -> None:
+    """Two deploys must not both apply `0001`.
+
+    The gate, the ledger bootstrap, the ledger read and the per-migration
+    transactions are four separate statements; two runs that both saw an empty
+    ledger would both start applying, and one would fail on objects the other
+    had created. This holds the run's advisory lock from ANOTHER session and
+    measures that `apply()` does not proceed until it is released — which is
+    the serialization, not a statement about it.
+    """
+    import threading
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    finished = threading.Event()
+    error: list[BaseException] = []
+
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+        blocker = Database(postgres_dsn, application_name="opendox-test-blocker")
+        try:
+            with blocker, blocker.connection() as held:
+                held.execute("select pg_advisory_lock(%s)",
+                             (migrations.MIGRATION_LOCK_KEY,))
+
+                def _run() -> None:
+                    try:
+                        with Database(postgres_dsn, schema=schema) as db:
+                            migrations.MigrationRunner(
+                                db, migrations_dir=ROOT / "migrations").apply()
+                    except BaseException as exc:  # noqa: BLE001 - reported below
+                        error.append(exc)
+                    finally:
+                        finished.set()
+
+                worker = threading.Thread(target=_run, daemon=True)
+                worker.start()
+                assert not finished.wait(timeout=2.0), (
+                    "the migration run completed while another session held "
+                    f"advisory lock {migrations.MIGRATION_LOCK_KEY}; the run "
+                    "is not serialized")
+                with Database(postgres_dsn, schema=schema) as probe:
+                    assert _tables_in(probe, schema) == set(), (
+                        "the blocked run created objects before taking the lock")
+                held.execute("select pg_advisory_unlock(%s)",
+                             (migrations.MIGRATION_LOCK_KEY,))
+            # The lock is released with the `with` above; the run may proceed.
+            assert finished.wait(timeout=30.0), "the run never completed"
+            worker.join(timeout=30.0)
+            assert not worker.is_alive(), (
+                "the worker outlived the wait; the schema is dropped below and "
+                "a run that outlived it would create its tables in `public`")
+            assert not error, error
+            with Database(postgres_dsn, schema=schema) as db:
+                assert _tables_in(db, schema) == (
+                    set(identity.TABLES) | {migrations.LEDGER_TABLE})
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+
+
+def test_the_lock_is_released_after_a_run(database) -> None:
+    """A released lock is what makes a retry in the same process immediate."""
+    migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations").apply()
+    with database.connection() as conn:
+        held = conn.execute(
+            "select count(*) from pg_locks where locktype = 'advisory' "
+            "and ((classid::bigint << 32) | objid::bigint) = %s",
+            (migrations.MIGRATION_LOCK_KEY,)).fetchone()
+    assert held[0] == 0, "the run left its advisory lock held"
+
+
+def test_a_duplicate_slug_race_is_a_conflict_and_not_a_raw_database_error(
+        database) -> None:
+    """Two transactions whose pre-checks both pass; the loser must get 409.
+
+    `create_project` reads before it inserts, which is not atomic. This drives
+    the race directly — two connections, both pre-checks answered before either
+    insert — and asserts the loser sees `identity.ConflictError`, which is what
+    `app.py` maps to 409. Before the unique-violation translation it saw the
+    driver's raw error and the API answered 500.
+    """
+    from opendox.runtime.identity import ConflictError, CoordinationStore
+
+    with database.transaction() as conn:
+        owner = CoordinationStore(conn).upsert_user(
+            issuer="https://broker.test/realms/opendox", subject="racer")
+
+    with database.connection() as first, database.connection() as second:
+        one = CoordinationStore(first)
+        two = CoordinationStore(second)
+        # Both pre-checks happen before either insert.
+        assert one.list_projects() == two.list_projects()
+        one.create_project(slug="raced", title="One", created_by=owner.id)
+        first.commit()
+        with pytest.raises(ConflictError) as caught:
+            two.create_project(slug="raced", title="Two", created_by=owner.id)
+        second.rollback()
+    assert "raced" in str(caught.value)
+
+
+def test_the_served_role_cannot_rewrite_the_ledger_after_a_run(
+        postgres_dsn: str) -> None:
+    """The runner's record is the runner's, not the API's.
+
+    A served role that could INSERT, UPDATE or DELETE `opendox_schema_
+    migrations` could hide an applied migration or manufacture one, after which
+    the fail-closed drift check would be checking a story the API wrote. SELECT
+    is kept, because `/readyz` reads the ledger.
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    role = "t_role_" + uuid.uuid4().hex[:8]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            conn.execute(f"create role {role}")
+            conn.execute(f"grant usage on schema {schema} to {role}")
+            conn.execute(
+                f"alter default privileges in schema {schema} "
+                f"grant select, insert, update, delete on tables to {role}")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations",
+                    runtime_role=role).apply()
+                with db.connection() as conn:
+                    granted = {
+                        row[0] for row in conn.execute(
+                            "select privilege_type from "
+                            "information_schema.table_privileges "
+                            "where grantee = %s and table_name = %s",
+                            (role, migrations.LEDGER_TABLE)).fetchall()}
+                    on_users = {
+                        row[0] for row in conn.execute(
+                            "select privilege_type from "
+                            "information_schema.table_privileges "
+                            "where grantee = %s and table_name = 'users'",
+                            (role,)).fetchall()}
+            assert granted == {"SELECT"}, (
+                f"the served role holds {sorted(granted)} on the ledger; only "
+                "SELECT may survive a run")
+            # ...and the coordination tables are untouched, which is what makes
+            # this a narrowing and not a lockout.
+            assert {"SELECT", "INSERT", "UPDATE", "DELETE"} <= on_users
+        finally:
+            with admin.transaction() as conn:
+                # The default-privileges entry references the schema, so it
+                # goes FIRST; dropping the schema first leaves a grant naming
+                # something that no longer exists and the cleanup fails.
+                conn.execute(
+                    f"alter default privileges in schema {schema} "
+                    f"revoke all on tables from {role}")
+                conn.execute(f"revoke usage on schema {schema} from {role}")
+                conn.execute(f"drop schema if exists {schema} cascade")
+                conn.execute(f"drop role if exists {role}")
+
+
+def test_the_ledger_narrowing_refuses_a_role_name_that_is_not_an_identifier(
+        database) -> None:
+    """A role name reaches a `revoke` as SYNTAX and cannot be a parameter."""
+    runner = migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations",
+        runtime_role='evil"; drop table users; --')
+    with pytest.raises(migrations.MigrationError) as caught:
+        runner.protect_ledger()
+    assert "plain SQL identifier" in str(caught.value)
+
+
+def test_status_reports_a_reachable_database_and_its_applied_migrations(
+        database, postgres_dsn: str, monkeypatch) -> None:
+    """The defect only a live database shows.
+
+    `status` used `runner.applied()` and `runner.plan()` after the `Database`
+    context had closed its pool, so `PoolClosed` was caught by the verb's own
+    except clause and a perfectly reachable database was reported unreachable.
+    Every unreachable-database test passed throughout.
+    """
+    import io
+    import json
+    from contextlib import redirect_stdout
+
+    from opendox.runtime import cli
+    from opendox.runtime.config import PREFIX
+
+    # `status` builds its OWN `Database` from the DSN, so the test's schema has
+    # to travel IN the DSN — `options=-c search_path=…`, which is the same
+    # libpq startup parameter `Database(schema=…)` sets for the harness.
+    scoped = (f"{postgres_dsn}?options=-c%20search_path%3D{database.schema}")
+    monkeypatch.setenv(PREFIX + "DATABASE_URL", scoped)
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker.test/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+    monkeypatch.setenv(PREFIX + "MIGRATIONS_DIR", str(ROOT / "migrations"))
+    args = cli.build_parser().parse_args(
+        ["runtime", "status", "--probe-timeout", "5"])
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        args.func(args)
+    report = json.loads(buffer.getvalue())
+    assert report["database"] == "reachable", report
+    # The fixture applied both migrations into this test's own schema; `status`
+    # reads them through the same search path.
+    assert report["applied_migrations"] == ["0001", "0002"], report
+    assert report["pending_migrations"] == [], report

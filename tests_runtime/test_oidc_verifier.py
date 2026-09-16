@@ -223,3 +223,60 @@ def test_two_issuers_are_two_people_even_with_the_same_subject(
     two = oidc.principal_for(
         store, there.verify(mint_token(subject="collide", issuer=other_issuer)))
     assert one.id != two.id
+
+
+# -- the review round's own assertions (Copilot review of openDox-code#25) ---
+
+
+def test_an_unknown_kid_refreshes_once_and_then_stops_hammering_the_broker(
+        jwks_path: str) -> None:
+    """Amplification, bounded.
+
+    Every unknown `kid` used to force an immediate fetch that bypassed the TTL
+    while the cache lock was held, so a caller sending random `kid` headers
+    turned one request into one outbound broker request and serialized every
+    other verification behind it. A miss still refreshes ONCE — key rotation
+    needs that — and the cooldown removes the second, third and thousandth
+    refresh in the same few seconds.
+    """
+    loads: list[int] = []
+    document = json.loads(Path(jwks_path).read_text(encoding="utf-8"))
+
+    class CountingSource:
+        def load(self) -> dict:
+            loads.append(1)
+            return document
+
+    cache = oidc.CachingJwks(CountingSource(), ttl_seconds=3600,
+                             miss_cooldown_seconds=60.0)
+    cache.keyset()
+    assert len(loads) == 1
+
+    for _ in range(50):
+        with pytest.raises(oidc.InvalidSignatureError):
+            cache.select_key("a-kid-nobody-published")
+    assert len(loads) == 2, (
+        f"{len(loads) - 1} outbound refreshes for 50 unknown-kid lookups; the "
+        "cooldown allows exactly one")
+
+
+def test_the_cooldown_expires_so_a_real_rotation_is_still_picked_up(
+        jwks_path: str, mint_token) -> None:
+    """A bound that never expired would be an outage, not a defence."""
+    current = json.loads(Path(jwks_path).read_text(encoding="utf-8"))
+    previous = {"keys": [dict(current["keys"][0], kid="the-previous-key")]}
+    state = {"served": previous}
+
+    class RotatingSource:
+        def load(self) -> dict:
+            return state["served"]
+
+    # A zero cooldown is the limit case of "the cooldown has expired".
+    cache = oidc.CachingJwks(RotatingSource(), ttl_seconds=3600,
+                             miss_cooldown_seconds=0.0)
+    verifier = oidc.TokenVerifier(issuer=TEST_ISSUER, audience=TEST_AUDIENCE,
+                                  jwks=cache)
+    cache.keyset()
+    state["served"] = current
+    assert verifier.verify(mint_token(subject="rotated-late")).subject == (
+        "rotated-late")
