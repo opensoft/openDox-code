@@ -137,15 +137,16 @@ STYLES_CSS_ORPHANS = (
 #: THE SHARED HALF — every class named by openDox's own bundle AND by
 #: openXdox's six contributed modules, measured at openDox-code `0b4e8bbf` /
 #: openXdox-code `0a0265f7` by `measure_opendox_css_census.py`'s class-bearing
-#: scan (openxFactory `scripts/`). 22 today; `STYLE_RESIDUE` recorded 24 at
-#: `cb343ae8`, and slice S7 retired `possible` / `proposal` / `rejected` while
-#: `lens` joined. These STAY in `styles.css` — they are openDox's, and a class
+#: scan (openxFactory `scripts/`). 21 today; `STYLE_RESIDUE` recorded 24 at
+#: `cb343ae8`; slice S7 retired `possible` / `proposal` / `rejected`, `lens`
+#: joined, and `why` left when the census stopped counting a bare literal in a
+#: non-class position (Copilot review of openxFactory #1068, round 3). These STAY in `styles.css` — they are openDox's, and a class
 #: both columns name was never a candidate to leave.
 SHARED_CLASSES = (
     "cbtn", "dc-h", "dc-line", "dc-note", "dispose-intile", "disposebtn",
     "docstatus", "g", "lens", "member", "name", "reason-form", "repobtn",
     "repopick-msg", "rf-label", "swb-cbtn", "swb-cfield", "swb-clabel",
-    "swb-cslot", "tile", "topic", "why",
+    "swb-cslot", "tile", "topic",
 )
 
 #: The ONE openDox class a contributed sheet names as its HOST CONTEXT:
