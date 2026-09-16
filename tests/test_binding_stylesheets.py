@@ -512,12 +512,20 @@ def test_the_gate_exclusive_set_is_re_derived_where_the_modules_are_present() ->
         pytest.skip("no assembly has placed openXdox's six contributed modules "
                     "in this bundle (RULED Q5); the declared set is asserted "
                     "against `styles.css` alone")
-    gate_text = "\n".join((views / name).read_text(encoding="utf-8")
-                          for name in GATE_MODULES)
+    # COMMENTS ARE BLANKED ON BOTH CORPORA (Copilot review, round 3). The
+    # no-assembly path already did it; this one read them raw, so a class named
+    # only in a comment counted as ownership on EITHER side — a gate-only
+    # selector excused by openDox prose, or a contributed module credited with
+    # a class it only documents. Same walk, same reason.
+    gate_text = "\n".join(
+        _blank_code_comments((views / name).read_text(encoding="utf-8"))
+        for name in GATE_MODULES)
     own = [p for p in sorted(views.glob("*.js")) if p.name not in GATE_MODULES]
-    own_text = "\n".join(p.read_text(encoding="utf-8") for p in own)
-    own_text += (WEB / "app.js").read_text(encoding="utf-8")
-    own_text += (WEB / "index.html").read_text(encoding="utf-8")
+    own_text = "\n".join(_blank_code_comments(p.read_text(encoding="utf-8"))
+                         for p in own)
+    own_text += _blank_code_comments((WEB / "app.js").read_text(encoding="utf-8"))
+    own_text += _blank_code_comments(
+        (WEB / "index.html").read_text(encoding="utf-8"), html=True)
 
     # THE SET IS DERIVED FROM THE MODULES AND THE STYLESHEET, not read off the
     # tuple (Copilot review, round 1). Checking only that every DECLARED token
