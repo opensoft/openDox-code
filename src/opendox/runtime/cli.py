@@ -264,7 +264,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         report["database"] = "reachable"
         report["applied_migrations"] = [row.version for row in runner.applied()]
         report["pending_migrations"] = [m.version for m in runner.plan()]
-    except Exception as exc:  # noqa: BLE001 - a status verb reports, never raises
+    # a status verb reports, never raises
+    except Exception as exc:  # noqa: BLE001
         report["database"] = f"unreachable: {type(exc).__name__}: {exc}"
         ok = False
 
@@ -274,7 +275,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         build_verifier(settings).probe_keys()
         report["broker_keys"] = "reachable"
         report["broker_discovery"] = settings.discovery_url()
-    except Exception as exc:  # noqa: BLE001 - same
+    # same
+    except Exception as exc:  # noqa: BLE001
         report["broker_keys"] = f"unreachable: {type(exc).__name__}"
         report["broker_discovery"] = settings.discovery_url()
         ok = False

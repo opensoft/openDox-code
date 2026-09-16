@@ -193,6 +193,12 @@ _DRAFT_COLUMNS = (
     "id, session_id, project_id, document_key, body, basis_revision, updated_at")
 
 
+#: The subject name `_one` reports for a missing map row. A constant because
+#: it is the same subject in three places, and three literals are three places
+#: a typo can make one refusal read as a different failure.
+_PROJECT_REPOSITORY = "project repository"
+
+
 def _one(row: Sequence[Any] | None, what: str, key: str) -> Sequence[Any]:
     if row is None:
         raise NotFoundError(f"no {what} with {key}")
@@ -346,7 +352,7 @@ class CoordinationStore:
             (new_id(), project_id, adapter, location, remote_url),
         ).fetchone()
         return ProjectRepository(
-            *_one(row, "project repository", f"project_id={project_id!r}"))
+            *_one(row, _PROJECT_REPOSITORY, f"project_id={project_id!r}"))
 
     def repository_for_project(self, project_id: str) -> ProjectRepository:
         row = self._conn.execute(
@@ -354,7 +360,7 @@ class CoordinationStore:
             "where project_id = %s", (project_id,)
         ).fetchone()
         return ProjectRepository(
-            *_one(row, "project repository", f"project_id={project_id!r}"))
+            *_one(row, _PROJECT_REPOSITORY, f"project_id={project_id!r}"))
 
     def attach_remote(self, *, project_id: str, remote_url: str) -> ProjectRepository:
         """RULING C3's "a remote can be attached later", as one UPDATE.
@@ -370,7 +376,7 @@ class CoordinationStore:
             (remote_url, project_id),
         ).fetchone()
         return ProjectRepository(
-            *_one(row, "project repository", f"project_id={project_id!r}"))
+            *_one(row, _PROJECT_REPOSITORY, f"project_id={project_id!r}"))
 
     def list_project_repositories(self, *, limit: int | None = None,
                                   after: str | None = None) -> list[ProjectRepository]:

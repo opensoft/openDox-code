@@ -403,9 +403,15 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_USER: opendox
-          # A throwaway CI credential for a container reachable only from this
-          # job; no real secret is ever written into a workflow file.
-          POSTGRES_PASSWORD: opendox # NOSONAR
+          # A throwaway CI credential for a service container reachable only
+          # from this job's own network namespace, torn down with the job. No
+          # real secret is ever written into a workflow file — the runtime's
+          # own DSNs are Secret references everywhere they appear
+          # (`deploy/kubernetes/base/`), and `tests_runtime/test_deploy_shape.py`
+          # refuses a committed credential value. `# NOSONAR` on the estate's
+          # own precedent: `xFactory-Hermes-Install/.github/workflows/ci.yml`
+          # marks its identical `POSTGRES_PASSWORD: hermes` the same way.
+          POSTGRES_PASSWORD: opendox # NOSONAR # NOSONAR
           POSTGRES_DB: opendox
         ports:
           - 5432:5432
@@ -421,8 +427,19 @@ jobs:
         with:
           python-version: '3.12'
 
+      # `--only-binary :all:` — SonarCloud `githubactions:S8541`, and it is a
+      # real hardening rather than a suppression: without it pip is allowed to
+      # build a dependency from an sdist, which runs that project's `setup.py`
+      # inside this job. Every package in the `runtime` extra publishes wheels
+      # for cpython 3.12 on linux (`psycopg[binary]` is asked for by name
+      # precisely so libpq never has to be built), so the flag costs nothing —
+      # measured in a clean venv on 2026-09-16: `pip install --only-binary :all:
+      # -e ".[runtime,test]"` resolves and installs, and `import fastapi,
+      # psycopg, jwt, httpx, uvicorn, opendox.runtime` succeeds. The local
+      # editable project itself is exempt from the flag, which is why `-e .`
+      # still works.
       - name: install the package with the runtime and test extras
-        run: python -m pip install -e ".[runtime,test]"
+        run: python -m pip install --only-binary :all: -e ".[runtime,test]"
 
       - name: pytest (runtime, database-backed)
         env:

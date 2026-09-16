@@ -44,19 +44,22 @@ def test_the_claims_object_carries_the_subject_and_not_the_payload(
 
 
 def test_a_token_from_another_issuer_is_refused(verifier, mint_token) -> None:
+    token = mint_token(issuer="https://someone-else/realms/x")
     with pytest.raises(oidc.InvalidIssuerError):
-        verifier.verify(mint_token(issuer="https://someone-else/realms/x"))
+        verifier.verify(token)
 
 
 def test_a_token_for_another_audience_is_refused(verifier, mint_token) -> None:
     """A token minted for another client of the SAME broker is not ours."""
+    token = mint_token(audience="some-other-client")
     with pytest.raises(oidc.InvalidAudienceError):
-        verifier.verify(mint_token(audience="some-other-client"))
+        verifier.verify(token)
 
 
 def test_an_expired_token_is_refused(verifier, mint_token) -> None:
+    token = mint_token(expires_in=-3600)
     with pytest.raises(oidc.TokenExpiredError):
-        verifier.verify(mint_token(expires_in=-3600))
+        verifier.verify(token)
 
 
 def test_a_token_signed_by_another_key_is_refused(verifier, mint_token) -> None:
@@ -93,8 +96,9 @@ def test_an_unsigned_token_is_refused_before_verification(verifier) -> None:
 
 def test_a_symmetrically_signed_token_is_refused(verifier, mint_token) -> None:
     """HS256 signed with the broker's PUBLIC key — refused by the allow-list."""
+    token = mint_token(algorithm="HS256", kid=TEST_KID)
     with pytest.raises(oidc.UnsupportedAlgorithmError):
-        verifier.verify(mint_token(algorithm="HS256", kid=TEST_KID))
+        verifier.verify(token)
 
 
 def test_a_malformed_token_is_refused_with_a_named_code(verifier) -> None:
@@ -104,8 +108,9 @@ def test_a_malformed_token_is_refused_with_a_named_code(verifier) -> None:
 
 
 def test_a_token_naming_an_unknown_key_is_refused(verifier, mint_token) -> None:
+    token = mint_token(kid="a-key-the-broker-never-published")
     with pytest.raises(oidc.InvalidSignatureError):
-        verifier.verify(mint_token(kid="a-key-the-broker-never-published"))
+        verifier.verify(token)
 
 
 def test_an_unreachable_key_set_is_a_named_refusal_and_not_a_crash(

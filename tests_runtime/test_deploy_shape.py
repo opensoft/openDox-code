@@ -154,7 +154,11 @@ def test_the_image_ships_git_and_installs_the_runtime_extra() -> None:
         "the runtime image must install git: the repository-creation act runs "
         "it as a subprocess, and an image without it fails the one thing "
         "§ 3.6 exists to do")
-    assert 'pip install --no-cache-dir ".[runtime]"' in dockerfile
+    assert 'pip install --no-cache-dir --only-binary :all: ".[runtime]"' in (
+        dockerfile), (
+        "the image must install the runtime extra, and with `--only-binary "
+        ":all:` so pip never builds a dependency from an sdist — which would "
+        "run that project's `setup.py` inside the image build")
     assert "COPY migrations ./migrations" in dockerfile, (
         "the ordered SQL travels with the image; a migration job that had to "
         "mount the repository could run against SQL the image never saw")
@@ -170,9 +174,12 @@ def test_the_kubernetes_base_commits_no_secret_object_at_all() -> None:
             f"{path} declares a Secret. This repository commits a Secret's "
             "NAME and key and never its value; the object is created out of "
             "band or by the platform's secret store.")
-        assert "stringData" not in document and (
-            document.get("kind") == "ConfigMap" or "data" not in document), (
-            f"{path} carries a `data:`/`stringData:` block outside a ConfigMap")
+        assert "stringData" not in document, (
+            f"{path} carries a `stringData:` block; this repository commits a "
+            "Secret's NAME and key and never its value")
+        if document.get("kind") != "ConfigMap":
+            assert "data" not in document, (
+                f"{path} carries a `data:` block outside a ConfigMap")
 
 
 def test_the_deployment_takes_its_dsn_by_secret_reference() -> None:

@@ -189,13 +189,34 @@ def _require_role(store: identity.CoordinationStore, *, user: identity.User,
 # routers — one per collection, in `COLLECTIONS` order
 # ---------------------------------------------------------------------------
 
-users = APIRouter(prefix="/users", tags=["users"])
-memberships = APIRouter(prefix="/memberships", tags=["memberships"])
-projects = APIRouter(prefix="/projects", tags=["projects"])
+#: THE REFUSALS EVERY AUTHENTICATED ROUTE CAN RETURN, declared once and hung on
+#: each router, so the published OpenAPI schema says what a client must handle
+#: rather than leaving it to be discovered (SonarCloud `python:S8415`). Every
+#: refusal body is `{"detail": {"code": ..., "message": ...}}` — a STABLE
+#: machine `code` a client branches on, and a message for a human, which is the
+#: same shape `corpus_adapter.Refusal` uses one layer down.
+REFUSALS: dict[int | str, dict[str, Any]] = {
+    401: {"description": "no bearer token, or one the broker's keys do not "
+                         "verify (`auth.*`)"},
+    403: {"description": "a verified principal whose `memberships.role` does "
+                         "not permit this act (`authz.*`)"},
+    404: {"description": "no such row (`coordination.not_found`)"},
+    409: {"description": "a uniqueness or vocabulary rule the caller broke "
+                         "(`coordination.conflict`, `repository.refused`)"},
+}
+
+users = APIRouter(prefix="/users", tags=["users"], responses=REFUSALS)
+memberships = APIRouter(prefix="/memberships", tags=["memberships"],
+                        responses=REFUSALS)
+projects = APIRouter(prefix="/projects", tags=["projects"],
+                     responses=REFUSALS)
 project_repositories = APIRouter(prefix="/project-repositories",
-                                 tags=["project-repositories"])
-sessions = APIRouter(prefix="/sessions", tags=["sessions"])
-drafts = APIRouter(prefix="/drafts", tags=["drafts"])
+                                 tags=["project-repositories"],
+                                 responses=REFUSALS)
+sessions = APIRouter(prefix="/sessions", tags=["sessions"],
+                     responses=REFUSALS)
+drafts = APIRouter(prefix="/drafts", tags=["drafts"],
+                   responses=REFUSALS)
 
 
 @users.get("/me")
@@ -579,13 +600,15 @@ def create_app(*, settings: RuntimeSettings | None = None,
             with app.state.context.database.connection() as conn:
                 conn.execute("select 1")
             checks["database"] = "ok"
-        except Exception as exc:  # noqa: BLE001 - reported, never raised at a probe
+        # reported, never raised at a probe
+        except Exception as exc:  # noqa: BLE001
             checks["database"] = f"unavailable: {type(exc).__name__}"
             ok = False
         try:
             app.state.context.verifier.probe_keys()
             checks["broker_keys"] = "ok"
-        except Exception as exc:  # noqa: BLE001 - same
+        # same
+        except Exception as exc:  # noqa: BLE001
             checks["broker_keys"] = f"unavailable: {type(exc).__name__}"
             ok = False
         return JSONResponse(status_code=200 if ok else 503,
