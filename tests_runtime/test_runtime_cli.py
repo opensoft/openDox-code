@@ -80,8 +80,9 @@ def test_every_verb_sets_a_dispatch_function_and_its_own_name() -> None:
 
 
 def test_the_parser_refuses_a_verb_it_does_not_declare() -> None:
+    parser = cli.build_parser()
     with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["runtime", "drop-everything"])
+        parser.parse_args(["runtime", "drop-everything"])
 
 
 def _run(args: argparse.Namespace) -> tuple[int, dict]:
@@ -167,7 +168,8 @@ def test_status_redacts_every_secret_setting(
     with redirect_stdout(buffer):
         args.func(args)
     printed = buffer.getvalue()
-    assert "hunter2" not in printed and "hunter3" not in printed
+    assert "hunter2" not in printed
+    assert "hunter3" not in printed
     evidence = json.loads(printed)
     for name in SECRET_NAMES:
         assert evidence["settings"][name] == "<redacted>"

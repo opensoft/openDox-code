@@ -19,7 +19,7 @@ from opendox.runtime.config import PREFIX, load_settings
 from tests_runtime.conftest import TEST_AUDIENCE, TEST_ISSUER
 
 
-@pytest.fixture()
+@pytest.fixture
 def client(database, postgres_dsn: str, verifier) -> Iterator[object]:
     """A `TestClient` over the real app, on this test's own schema.
 
@@ -103,7 +103,8 @@ def test_first_request_creates_the_account_and_users_me_returns_it(
     assert body["subject"] == "student-3"
     assert body["email"] == "s3@example.test"
     assert body["display_name"] == "Student Three"
-    assert "password" not in body and "token" not in body
+    assert "password" not in body
+    assert "token" not in body
 
     again = client.get("/api/v1/users/me", headers=_auth(token)).json()
     assert again["id"] == body["id"], "a second request minted a second account"

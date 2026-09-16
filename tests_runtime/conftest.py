@@ -60,7 +60,7 @@ def postgres_dsn() -> str:
     return dsn
 
 
-@pytest.fixture()
+@pytest.fixture
 def database(postgres_dsn: str) -> Iterator[object]:
     """A `Database` on a throwaway schema, with the migrations already applied."""
     from opendox.runtime.db import Database
@@ -83,7 +83,7 @@ def database(postgres_dsn: str) -> Iterator[object]:
                 conn.execute(f"drop schema if exists {schema} cascade")
 
 
-@pytest.fixture()
+@pytest.fixture
 def store(database: object) -> Iterator[object]:
     """A `CoordinationStore` over one transaction, rolled back at teardown."""
     from opendox.runtime.identity import CoordinationStore
@@ -133,7 +133,7 @@ def jwks_path(rsa_key_pair: tuple[object, object], tmp_path_factory) -> str:
     return str(path)
 
 
-@pytest.fixture()
+@pytest.fixture
 def mint_token(rsa_key_pair: tuple[object, object]):
     """Mint a token the local broker would have issued."""
     import time
@@ -162,7 +162,7 @@ def mint_token(rsa_key_pair: tuple[object, object]):
     return _mint
 
 
-@pytest.fixture()
+@pytest.fixture
 def verifier(jwks_path: str):
     """The real `TokenVerifier` over the local key set."""
     from opendox.runtime.oidc import CachingJwks, FileJwksSource, TokenVerifier

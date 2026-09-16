@@ -133,7 +133,8 @@ def test_the_user_row_is_keyed_by_the_brokers_identity() -> None:
     globally unique would merge two people the day a second realm is brokered.
     """
     names = [name for name, _ in _columns_of("users")]
-    assert "issuer" in names and "subject" in names
+    assert "issuer" in names
+    assert "subject" in names
     assert "constraint users_issuer_subject_key unique (issuer, subject)" in _statements()
 
 

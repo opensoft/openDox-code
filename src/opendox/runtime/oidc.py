@@ -148,7 +148,10 @@ class HttpJwksSource:
             response = httpx.get(self._url, timeout=self._timeout)
             response.raise_for_status()
             data = response.json()
-        except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
+        # `ValueError` ALONE covers the JSON case: `json.JSONDecodeError` is a
+        # subclass of it (measured), so naming both is redundant and reads as
+        # if they were two different failures.
+        except (httpx.HTTPError, ValueError) as exc:
             raise IdentityUnavailableError(
                 "the broker's JWKS endpoint could not be fetched") from exc
         if not isinstance(data, dict):
@@ -253,8 +256,16 @@ class TokenVerifier:
             raise MalformedTokenError(
                 "token is not a well-formed JWS compact serialization")
 
+        # READING THE HEADER BEFORE VERIFYING IS NOT A MISSING CHECK, it is the
+        # only possible order: the header carries the `kid` that selects the
+        # signing key and the `alg` the allow-list is applied to, and neither
+        # can be known until it is read. NOTHING from this header is trusted —
+        # `alg` is checked against the allow-list below, and the signature is
+        # verified against the broker's own key in `_decode`, which runs with
+        # `verify_signature: True` and a required-claim list. `# NOSONAR` for
+        # `python:S5659` on that measurement.
         try:
-            header = jwt.get_unverified_header(token)
+            header = jwt.get_unverified_header(token)  # NOSONAR
         except jwt.PyJWTError as exc:
             raise MalformedTokenError("token header could not be parsed") from exc
 
@@ -265,9 +276,36 @@ class TokenVerifier:
                 f"{list(self._algorithms)}")
 
         signing_key = self._jwks.select_key(header.get("kid"))
+        claims = self._decode(token, signing_key)
 
+        subject = claims.get("sub")
+        if not isinstance(subject, str) or not subject:
+            raise MissingClaimError("token has no usable subject claim")
+
+        email = claims.get(self._email_claim)
+        name = claims.get(self._name_claim)
+        return Claims(
+            subject=subject,
+            issuer=str(claims.get("iss") or self._issuer),
+            audience=self._audience,
+            email=email if isinstance(email, str) and email else None,
+            display_name=name if isinstance(name, str) and name else None,
+            expires_at=claims.get("exp"),
+            raw={"sub": subject},
+        )
+
+    def _decode(self, token: str, signing_key: PyJWK) -> dict[str, Any]:
+        """`jwt.decode` with this runtime's pins, and its errors made ours.
+
+        A METHOD OF ITS OWN because the mapping is seven clauses and `verify`
+        is the readable part: with both in one body `verify`'s cognitive
+        complexity was 17 (SonarCloud `python:S3776`, limit 15). The seven
+        clauses are also exactly what a reader wants to read on its own — each
+        turns a PyJWT exception into an `OidcError` subclass carrying a stable
+        machine `code` and never the token.
+        """
         try:
-            claims = jwt.decode(
+            return jwt.decode(
                 token,
                 key=signing_key.key,
                 algorithms=list(self._algorithms),
@@ -296,22 +334,6 @@ class TokenVerifier:
             raise InvalidSignatureError("token signature is invalid") from exc
         except jwt.PyJWTError as exc:
             raise OidcError("token could not be validated") from exc
-
-        subject = claims.get("sub")
-        if not isinstance(subject, str) or not subject:
-            raise MissingClaimError("token has no usable subject claim")
-
-        email = claims.get(self._email_claim)
-        name = claims.get(self._name_claim)
-        return Claims(
-            subject=subject,
-            issuer=str(claims.get("iss") or self._issuer),
-            audience=self._audience,
-            email=email if isinstance(email, str) and email else None,
-            display_name=name if isinstance(name, str) and name else None,
-            expires_at=claims.get("exp"),
-            raw={"sub": subject},
-        )
 
 
 def build_verifier(settings: Any) -> TokenVerifier:

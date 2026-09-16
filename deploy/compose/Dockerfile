@@ -24,7 +24,11 @@ WORKDIR /app
 # dependency tree.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN python -m pip install --no-cache-dir ".[runtime]"
+# `--only-binary :all:` so pip never builds a dependency from an sdist —
+# which would run that project's `setup.py` inside the image build. Every
+# package in the `runtime` extra publishes wheels for cpython 3.12 on
+# linux, `psycopg[binary]` by name, so the flag costs nothing.
+RUN python -m pip install --no-cache-dir --only-binary :all: ".[runtime]"
 
 # The ordered SQL travels with the image: `opendox-runtime migrate` reads
 # `migrations/` relative to the working directory, and an image whose migration
