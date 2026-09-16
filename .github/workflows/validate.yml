@@ -384,6 +384,19 @@ jobs:
       #              the hermetic one and that file is not read here). The
       #              commit above this one is where they landed; this block
       #              changes no test, so the figure holds at this head too.
+      #  102 passed  at `build/3-5-runtime` `7f2cdec1` (same day, same python
+      #              and pytest) — the same five modules. Copilot's SIXTH
+      #              review moved one of them: `.env.example` now declares the
+      #              served role's name ONCE, and `test_deploy_shape.py` holds
+      #              both the Postgres service's role creation and the migrate
+      #              container's narrowing to that one declaration. Its other
+      #              three findings are measured in the DB-backed job.
+      #
+      #              A NOTE ON READING THIS LIST (Copilot's round-6 suppressed
+      #              comment): each entry states the head it was MEASURED at,
+      #              and the last entry is the current one. An earlier entry is
+      #              history, not a competing claim, and the PR description
+      #              states the same current figure at the same head.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
