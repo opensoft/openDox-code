@@ -439,17 +439,27 @@ def test_serve_emits_evidence_on_an_ordinary_shutdown(
     comment). `uvicorn` and the application are stubbed here because the point
     is the RETURN path, not a listening socket.
     """
-    pytest.importorskip(
-        "uvicorn",
-        reason="the `runtime` extra is not installed: pip install -e '.[runtime,test]'")
-    import uvicorn
+    import sys
+    import types
 
+    # STUBBED, NOT SKIPPED. `uvicorn` and `opendox.runtime.app` belong to the
+    # `runtime` extra, which the REQUIRED `validate` job does not install, and
+    # a test that skips there would leave this contract measured only in the
+    # advisory job. `cmd_serve` imports both INSIDE the function, so two entries
+    # in `sys.modules` are the whole seam — and the subject here is the RETURN
+    # path, never a listening socket.
     served: dict[str, object] = {}
+
+    uvicorn_stub = types.ModuleType("uvicorn")
 
     def _fake_run(app: object, **kwargs: object) -> None:
         served.update(kwargs)
 
-    monkeypatch.setattr(uvicorn, "run", _fake_run)
+    uvicorn_stub.run = _fake_run                       # type: ignore[attr-defined]
+    app_stub = types.ModuleType("opendox.runtime.app")
+    app_stub.create_app = lambda **kwargs: object()    # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn_stub)
+    monkeypatch.setitem(sys.modules, "opendox.runtime.app", app_stub)
     monkeypatch.setenv(PREFIX + "DATABASE_URL",
                        "postgresql://nobody@127.0.0.1:1/none")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
@@ -460,3 +470,57 @@ def test_serve_emits_evidence_on_an_ordinary_shutdown(
     assert evidence["verb"] == "serve"
     assert evidence["state"] == "stopped"
     assert evidence["bind_port"] == served["port"]
+
+
+@pytest.mark.parametrize(
+    ("verb", "arguments"),
+    [("create-repository", ["--project-id", "p", "--actor", "a"]),
+     ("attach-remote", ["--project-id", "p", "--remote-url",
+                        "https://example.invalid/x.git"]),
+     ("push", ["--project-id", "p"])])
+def test_a_project_verb_never_prints_a_dsn_it_caught_itself(
+        monkeypatch: pytest.MonkeyPatch, verb: str,
+        arguments: list[str]) -> None:
+    """These three verbs catch before `main()`'s boundary, so they must redact.
+
+    Each wraps its own body in `except Exception` so the evidence object can
+    name the verb — and catching there means `main()`'s redaction never runs.
+    With `str(exc)` a psycopg connection failure put the configured DSN,
+    password included, straight into the JSON (Copilot review of
+    openDox-code#26: one thread and two suppressed comments, the same shape in
+    three handlers).
+
+    THE DATABASE IS A STUB MODULE, so this runs in the REQUIRED `validate` job
+    rather than only where psycopg is installed. `cli` imports
+    `opendox.runtime.db` inside the function, which is the whole seam.
+    """
+    import sys
+    import types
+
+    dsn = "postgresql://opendox:hunter2@db.internal:5432/opendox"
+
+    class _Exploding:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> "_Exploding":
+            raise RuntimeError(f"connection to {dsn} failed: no password "
+                               "supplied")
+
+        def __exit__(self, *exc: object) -> None:
+            pass
+
+    db_stub = types.ModuleType("opendox.runtime.db")
+    db_stub.Database = _Exploding                      # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "opendox.runtime.db", db_stub)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL", dsn)
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["project", verb, *arguments]))
+    assert code == 1, evidence
+    assert evidence["ok"] is False
+    assert evidence["refusal"] == "RuntimeError"
+    assert "hunter2" not in evidence["message"], evidence["message"]
+    assert "<redacted>" in evidence["message"], evidence["message"]

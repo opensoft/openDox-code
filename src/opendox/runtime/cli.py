@@ -462,6 +462,16 @@ def cmd_reset(args: argparse.Namespace) -> int:
 
 
 # -- § 3.6, the repository-creation act, as CLI verbs ------------------------
+#
+# EVERY `except Exception` BELOW REPORTS THROUGH `_safe_message`. These three
+# verbs catch their own failures so the evidence object can name the verb, and
+# catching before `main()`'s boundary means `main()`'s redaction never runs —
+# so a `str(exc)` here put whatever the driver said straight into the JSON, and
+# a psycopg connection failure says the DSN, password included (Copilot review
+# of openDox-code#26, three times: one thread and two suppressed comments for
+# the same shape in three handlers). `RepositoryActRefused` keeps `str(exc)`
+# deliberately: that message is this act's own, carries no secret by
+# construction, and redacting the stored URL is the act's job, which it does.
 
 
 def _store_and_settings(args: argparse.Namespace):
@@ -506,7 +516,7 @@ def cmd_create_repository(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001 - reported as evidence, not a traceback
         return _emit({"verb": "create-repository",
                       "refusal": type(exc).__name__,
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     return _emit(evidence, ok=True)
 
 
@@ -539,7 +549,7 @@ def cmd_attach_remote(args: argparse.Namespace) -> int:
                       "message": str(exc)}, ok=False)
     except Exception as exc:  # noqa: BLE001 - same
         return _emit({"verb": "attach-remote", "refusal": type(exc).__name__,
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     return _emit(evidence, ok=True)
 
 
@@ -564,7 +574,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                       "message": str(exc)}, ok=False)
     except Exception as exc:  # noqa: BLE001 - same
         return _emit({"verb": "push", "refusal": type(exc).__name__,
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     return _emit(evidence, ok=True)
 
 

@@ -242,6 +242,22 @@ class GitRunner:
 _CREDENTIAL_SHAPED = re.compile(
     r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s/@]*@[^\s]*|(?<![\w.])[^\s/:@]+@[^\s/:@]+:[^\s]*")
 
+#: A CREDENTIAL-SHAPED QUERY OR FRAGMENT PARAMETER, whose VALUE is replaced.
+#: Userinfo is not the only place a secret rides: `https://host/r.git?token=…`
+#: keeps the token out of the `@` form entirely, and this module's redaction
+#: saw straight through it — which mattered because
+#: `repository_act.refuse_credential_bearing_remote` REFUSES that shape for new
+#: attachments while rows written before it exist and still reach a
+#: `GitCommandFailed` message, a push refusal and the CLI's evidence (Copilot
+#: review of openDox-code#26). The key list is the same one that refusal uses;
+#: they are two halves of one rule and are kept in step by
+#: `test_the_two_halves_of_the_credential_rule_name_the_same_keys`.
+SECRET_PARAMETER_KEYS = (
+    "token|secret|password|passwd|pwd|key|credential|auth|sig|signature")
+_CREDENTIAL_PARAMETER = re.compile(
+    r"(?P<lead>[?&#][^=&#\s]*(?:" + SECRET_PARAMETER_KEYS + r")[^=&#\s]*=)"
+    r"[^&#\s]*", re.IGNORECASE)
+
 
 def redact_credentials(text: str) -> str:
     """Replace anything shaped like a credential-bearing URL with a marker.
@@ -254,8 +270,16 @@ def redact_credentials(text: str) -> str:
     therefore most likely to be logged (Copilot review of openDox-code#26).
     git's own stderr gets the same treatment, because it echoes the remote it
     could not reach.
+
+    TWO SHAPES, NOT ONE. The userinfo form is replaced whole; a credential in a
+    QUERY OR FRAGMENT parameter has only its VALUE replaced, so the refusal can
+    still say which host would not answer — the host is not the secret, and a
+    push failure an operator cannot locate is a refusal that costs more than it
+    protects.
     """
-    return _CREDENTIAL_SHAPED.sub("<redacted-url>", text)
+    return _CREDENTIAL_PARAMETER.sub(
+        lambda m: m.group("lead") + "<redacted>",
+        _CREDENTIAL_SHAPED.sub("<redacted-url>", text))
 
 
 class GitCommandFailed(Exception):
@@ -321,10 +345,16 @@ class LocalGitCorpus:
     no seventh, and nothing inherited.
     """
 
-    def __init__(self, *, executable: str = "git",
-                 branch: str = DEFAULT_BRANCH) -> None:
+    #: THERE IS NO `branch` PARAMETER, and its absence is the decision.
+    #: `__init__` took one and stored it, and nothing ever read it: the ref
+    #: `write_back` moves is the one HEAD points at (see `_served_ref`, which
+    #: argues why), so `LocalGitCorpus(branch="master")` behaved exactly like
+    #: the default while advertising a branch selection it did not make
+    #: (Copilot review of openDox-code#26). A parameter that cannot change an
+    #: outcome is removed rather than wired up, because wiring it up would
+    #: reintroduce the assumption `_served_ref` exists to refuse.
+    def __init__(self, *, executable: str = "git") -> None:
         self._executable = executable
-        self._branch = branch
 
     # -- resolve ----------------------------------------------------------
 
@@ -456,17 +486,32 @@ class LocalGitCorpus:
         here with force: `()` from this corpus means "no divergence and no
         further opinion", never "reviewed and approved".
         """
+        # A GIT FAILURE HERE IS A REFUSAL, NEVER AN EMPTY VERDICT. Both of
+        # these used to answer `()`, which is this corpus's "no divergence and
+        # no further opinion" — indistinguishable, to a caller, from a corpus
+        # that became unreadable after it resolved (Copilot review of
+        # openDox-code#26). The interface is emphatic that a corpus failure is
+        # refused; `()` is a verdict and a verdict must not be manufactured out
+        # of an error.
         git = self._git(corpus)
         try:
             bare = git.out("rev-parse", "--is-bare-repository").decode().strip()
-        except GitCommandFailed:
-            return ()
+        except GitCommandFailed as failed:
+            raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                          f"the repository could not be classified after it "
+                          f"resolved ({failed}); an unreadable corpus is "
+                          "refused rather than reported as having no "
+                          "findings") from failed
         if bare == "true" or corpus.revision is None:
             return ()
         try:
             raw = git.out("diff", "--name-only", "-z", corpus.revision)
-        except GitCommandFailed:
-            return ()
+        except GitCommandFailed as failed:
+            raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                          f"the checkout could not be compared with "
+                          f"{corpus.revision} ({failed}); an unreadable corpus "
+                          "is refused rather than reported as clean"
+                          ) from failed
         changed = {name for name in raw.decode("utf-8").split("\0") if name}
         if subjects is not None:
             changed &= {document.key for document in subjects}
@@ -526,8 +571,15 @@ class LocalGitCorpus:
                     git.out("read-tree", corpus.revision, env=index_env)
                 else:
                     git.out("read-tree", "--empty", env=index_env)
+                # THE THREE-ARGUMENT FORM. The single comma-delimited
+                # argument is parsed as `mode,object,path`, and git permits a
+                # comma IN A PATH — so a perfectly valid `DocumentId.key` such
+                # as `notes,2026.md` was rejected or, worse, split into the
+                # wrong path (Copilot review of openDox-code#26). `key` is
+                # opaque to this adapter and must not have to avoid a
+                # delimiter this call chose.
                 git.out("update-index", "--add", "--cacheinfo",
-                        f"100644,{blob},{document.key}", env=index_env)
+                        "100644", blob, document.key, env=index_env)
                 tree = git.out("write-tree", env=index_env).decode().strip()
             finally:
                 index.unlink(missing_ok=True)
@@ -576,7 +628,28 @@ class LocalGitCorpus:
         if symbolic.returncode == 0:
             ref = symbolic.stdout.decode().strip()
             if git.run("show-ref", "--verify", "--quiet", ref).returncode != 0:
-                return None          # unborn: the ref exists, the commit does not
+                # `show-ref` IS NOT THE DISCRIMINATOR — it exits non-zero for a
+                # branch that has no commit yet AND for one whose ref file is
+                # malformed or whose target object is gone, so treating every
+                # non-zero as "unborn" resolved a BROKEN repository with
+                # `revision=None` and `list_documents` then answered `()`
+                # (Copilot review of openDox-code#26). `for-each-ref` tells
+                # them apart, measured on git 2.43.0 against a bare repository
+                # whose `refs/heads/main` was overwritten with junk:
+                #   absent  -> rc 0, no stdout, NO STDERR
+                #   broken  -> rc 0, no stdout, "warning: ignoring broken ref"
+                # so git saying nothing at all about the ref is what "the
+                # branch simply has no commit yet" looks like.
+                listed = git.run("for-each-ref", "--format=%(objectname)", ref)
+                if (listed.returncode == 0
+                        and not listed.stdout.decode().strip()
+                        and not listed.stderr.decode().strip()):
+                    return None      # unborn: the ref is named, and is absent
+                raise _refuse(
+                    CORPUS_UNREADABLE, subject,
+                    f"HEAD names {ref}, which the ref store cannot read: "
+                    + (listed.stderr.decode("utf-8", "replace").strip()
+                       or "the ref exists and does not resolve to a commit"))
         raise _refuse(
             CORPUS_UNREADABLE, subject,
             "HEAD could not be read and is not an unborn branch: "

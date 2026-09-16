@@ -547,7 +547,15 @@ def push_project_repository(project_id: str, store: StoreDep,
         raise HTTPException(status_code=409,
                             detail={"code": "repository.refused",
                                     "message": str(exc)}) from exc
-    return {"project_id": project_id, "pushed_to": remote_url,
+    # REDACTED HERE TOO. This PR keeps a row written before
+    # `refuse_credential_bearing_remote` existed pushable (there is a test for
+    # exactly that), so a SUCCESSFUL push of such a row was the one path that
+    # handed its embedded credential back verbatim while the CLI and every
+    # failure path redacted (Copilot review of openDox-code#26).
+    from opendox.runtime.local_git_adapter import redact_credentials
+
+    return {"project_id": project_id,
+            "pushed_to": redact_credentials(remote_url),
             "note": "a push, not a migration (RULING C3)"}
 
 
@@ -710,8 +718,24 @@ def _project_json(p: identity.Project) -> dict[str, Any]:
 
 
 def _repository_json(r: identity.ProjectRepository) -> dict[str, Any]:
+    """The map row, with `remote_url` REDACTED on the way out.
+
+    `repository_act.refuse_credential_bearing_remote` keeps a credential out of
+    this column for every row THIS runtime writes, and the act's own tests keep
+    a legacy row — one written before that rule existed — working. A legacy row
+    is therefore exactly the row that can still carry `https://user:token@…` or
+    `?token=…`, and this function is where such a row is handed to every member
+    of the project (Copilot review of openDox-code#26, which found the same
+    leak in the push response). Redaction is shaped: a URL with no credential
+    in it comes back unchanged, so the column stays readable for what it is
+    for.
+    """
+    from opendox.runtime.local_git_adapter import redact_credentials
+
     return {"id": r.id, "project_id": r.project_id, "adapter": r.adapter,
-            "location": r.location, "remote_url": r.remote_url,
+            "location": r.location,
+            "remote_url": (None if r.remote_url is None
+                           else redact_credentials(r.remote_url)),
             "created_at": _iso(r.created_at)}
 
 

@@ -73,6 +73,7 @@ from opendox.corpus_adapter import CorpusRef
 from opendox.runtime.local_git_adapter import (
     ADAPTER_NAME,
     DEFAULT_BRANCH,
+    SECRET_PARAMETER_KEYS,
     GitCommandFailed,
     GitRunner,
     git_available,
@@ -106,9 +107,15 @@ _SCP_USERINFO = re.compile(r"^[^/:@]+@[^/:@]+:")
 #: `https://host/repo.git?token=…` keeps the token out of the userinfo and puts
 #: it in the map row and in every API response just the same (Copilot review of
 #: openDox-code#26).
+#: ONE KEY LIST, IMPORTED. This refusal and `redact_credentials` are two
+#: halves of one rule — what may not be stored, and what must not be printed if
+#: it was stored before the rule existed — and they drifted apart once already:
+#: the refusal rejected `?token=…` while the redaction saw straight through it
+#: (Copilot review of openDox-code#26). Sharing the vocabulary is what keeps a
+#: key added to one from being missing in the other.
 _SECRET_PARAMETER = re.compile(
-    r"(?:^|[?&#])[^=&#]*(?:token|secret|password|passwd|pwd|key|credential|auth|"
-    r"sig|signature)[^=&#]*=", re.IGNORECASE)
+    r"(?:^|[?&#])[^=&#]*(?:" + SECRET_PARAMETER_KEYS + r")[^=&#]*=",
+    re.IGNORECASE)
 
 
 def refuse_credential_bearing_remote(remote_url: str) -> None:
@@ -122,6 +129,22 @@ def refuse_credential_bearing_remote(remote_url: str) -> None:
     """
     if not remote_url.strip():
         raise RepositoryActRefused("the remote URL is empty")
+    # SURROUNDING WHITESPACE IS REFUSED BEFORE ANYTHING ELSE, and this is the
+    # hole it closes: both credential checks below are ANCHORED (`^`), while
+    # `urllib.parse.urlsplit` accepts and silently discards leading whitespace.
+    # `" https://user:token@example.invalid/x.git"` therefore passed every
+    # check and was persisted VERBATIM into `project_repositories.remote_url`,
+    # which the repository endpoints read back to every authenticated caller —
+    # the exact disclosure this function exists to prevent (Copilot review of
+    # openDox-code#26). REFUSED rather than trimmed: this act stores what the
+    # caller gave it, so quietly rewriting the value would mean the row and the
+    # request disagree about what was attached, and a caller with a stray space
+    # would never learn that its URL was edited.
+    if remote_url != remote_url.strip():
+        raise RepositoryActRefused(
+            "the remote URL has leading or trailing whitespace. It is not "
+            "echoed here because a value that would not parse may still "
+            "contain a secret; send the URL with no surrounding whitespace.")
     try:
         parts = urllib.parse.urlsplit(remote_url)
         _ = parts.port          # `port` parses lazily and is where it raises
@@ -227,13 +250,29 @@ def refuse_unusable_location(location: Path) -> None:
             f"{location} exists and is not a directory, so this project's "
             "repository cannot be created there. Remove it, or point "
             "OPENDOX_PROJECT_REPOSITORY_ROOT somewhere else.")
-    if location.is_dir() and any(location.iterdir()):
-        raise RepositoryActRefused(
-            f"{location} already exists and is not empty. Either a previous "
-            "act was interrupted between creating the repository and "
-            "committing its map row, or this directory belongs to something "
-            "else. Remove it, or map the project to it deliberately — this "
-            "act will not adopt a directory nobody can account for.")
+    if location.is_dir():
+        # THE EMPTINESS CHECK IS INSIDE THE ERROR TRANSLATION. `iterdir()` on a
+        # directory the service can `stat` but not READ raises
+        # `PermissionError`, and this call sat outside every `try`, so it
+        # escaped as an API 500 instead of the named `RepositoryActRefused`
+        # this act promises for every reason it will not create a repository
+        # (Copilot review of openDox-code#26).
+        try:
+            occupied = any(location.iterdir())
+        except OSError as exc:
+            raise RepositoryActRefused(
+                f"{location} exists and could not be inspected "
+                f"({type(exc).__name__}); this act will not create a "
+                "repository at a directory it cannot read, because it cannot "
+                "tell an empty one from somebody else's history") from exc
+        if occupied:
+            raise RepositoryActRefused(
+                f"{location} already exists and is not empty. Either a "
+                "previous act was interrupted between creating the repository "
+                "and committing its map row, or this directory belongs to "
+                "something else. Remove it, or map the project to it "
+                "deliberately — this act will not adopt a directory nobody "
+                "can account for.")
 
 
 def corpus_ref_for(row: Any, *, name: str | None = None) -> CorpusRef:
@@ -393,6 +432,16 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
     refuse_credential_bearing_remote(remote_url)
     row = _local_git_row(store, project_id)
     remote_name = REMOTE_NAME
+    # THE DURABLE FACT IS WRITTEN FIRST, INSIDE THE CALLER'S TRANSACTION, and
+    # git is configured after it. The order was the other way round, which left
+    # a window in which git's `origin` pointed at the new destination while the
+    # map still held the old URL or none: a later push would then have gone to
+    # one place and REPORTED another (Copilot review of openDox-code#26). This
+    # way the only surviving window is the opposite one — the row committed and
+    # git not yet reconfigured — which `push_to_remote` REFUSES by name and a
+    # repeat of this act repairs, because a `git` failure here raises and the
+    # caller's transaction rolls the row back with it.
+    updated = store.attach_remote(project_id=project_id, remote_url=remote_url)
     git = GitRunner(Path(row.location), executable)
     try:
         existing = git.run("remote", "get-url", remote_name)
@@ -404,11 +453,42 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
         raise RepositoryActRefused(
             f"the remote {remote_name!r} could not be attached to "
             f"{row.location} ({failed})") from failed
-    return store.attach_remote(project_id=project_id, remote_url=remote_url)
+    return updated
+
+
+def _configured_remote_url(git: GitRunner, remote_name: str) -> str | None:
+    """What git has under `<remote_name>`, or None when it has no such remote."""
+    existing = git.run("remote", "get-url", remote_name)
+    if existing.returncode != 0:
+        return None
+    return existing.stdout.decode("utf-8", "replace").strip() or None
+
+
+def _pushable_branch(git: GitRunner, location: str) -> str:
+    """The branch this repository's HEAD names — not an assumed `main`.
+
+    `create_repository` and `initialize_repository` both accept a branch and
+    the adapter serves a repository whose HEAD is `master` without complaint,
+    while this push hard-coded `refs/heads/main` and neither the API nor the
+    CLI exposed a branch. A repository created on any other branch was
+    therefore servable and unpushable (Copilot review of openDox-code#26).
+    Asking HEAD is the same answer `LocalGitCorpus._served_ref` gives for the
+    write path, so the two acts agree about which branch the project is.
+    """
+    symbolic = git.run("symbolic-ref", "--quiet", "HEAD")
+    if symbolic.returncode != 0:
+        raise RepositoryActRefused(
+            f"HEAD in {location} is detached, so there is no branch to push; "
+            "point HEAD at a branch first")
+    ref = symbolic.stdout.decode("utf-8", "replace").strip()
+    if not ref.startswith("refs/heads/"):
+        raise RepositoryActRefused(
+            f"HEAD in {location} names {ref!r}, which is not a branch")
+    return ref[len("refs/heads/"):]
 
 
 def push_to_remote(store: Any, *, project_id: str,
-                   branch: str = DEFAULT_BRANCH,
+                   branch: str | None = None,
                    executable: str = "git") -> str:
     """Move the project into a governed factory. RULING C3: this is a PUSH.
 
@@ -425,6 +505,31 @@ def push_to_remote(store: Any, *, project_id: str,
             "(RULING C3: a remote can be attached later, and the move is then "
             "a push)")
     git = GitRunner(Path(row.location), executable)
+
+    # THE MAP IS THE DESTINATION OF RECORD, AND GIT IS ASKED WHETHER IT AGREES.
+    # This pushed to whatever `origin` happened to be configured as and never
+    # looked, so a manual `git remote set-url`, or an `attach_remote` that
+    # failed between its two halves, could send the corpus somewhere the map
+    # and the success response both misnamed — the one error a push must not
+    # make quietly (Copilot review of openDox-code#26). Refused rather than
+    # silently reconciled: re-running `attach_remote` is the act that changes a
+    # destination, and it is one line for an operator.
+    configured = _configured_remote_url(git, REMOTE_NAME)
+    if configured is None:
+        raise RepositoryActRefused(
+            f"the map records a remote for project {project_id} but the "
+            f"repository at {row.location} has no {REMOTE_NAME!r}; re-attach "
+            "the remote so the two agree before pushing")
+    if configured != row.remote_url:
+        raise RepositoryActRefused(
+            f"the repository at {row.location} has {REMOTE_NAME!r} configured "
+            f"as {redact_credentials(configured)} while the map records "
+            f"{redact_credentials(row.remote_url)}. Nothing is pushed: the "
+            "destination of record and the destination git would use are not "
+            "the same place. Re-attach the remote to settle it.")
+
+    if branch is None:
+        branch = _pushable_branch(git, str(row.location))
     try:
         # THE ONE OPERATION THAT TOUCHES A NETWORK, and the only one with a
         # wall-clock bound: a stalled remote used to hold the request, the

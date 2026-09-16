@@ -567,3 +567,147 @@ def test_two_writes_in_one_process_do_not_share_a_temporary_index(
     assert not list(Path(location).glob("opendox-index-*"))
     corpus = adapter.resolve(ref)
     assert len(adapter.list_documents(corpus)) == 1
+
+
+# -- Copilot's fourth round on #26 -------------------------------------------
+
+
+def test_redaction_covers_the_query_and_fragment_forms_too() -> None:
+    """Userinfo is not the only place a credential rides.
+
+    `repository_act.refuse_credential_bearing_remote` REFUSES
+    `https://host/r.git?token=…` for a new attachment, and this module's
+    redaction saw straight through it — so a row written before that rule
+    existed could still put its token into a `GitCommandFailed` message, a push
+    refusal and the CLI's evidence (Copilot review of openDox-code#26).
+    """
+    for url in ("https://example.invalid/r.git?token=ghp_supersecret",
+                "https://example.invalid/r.git?a=1&access_token=ghp_supersecret",
+                "https://example.invalid/r.git#private_key=ghp_supersecret",
+                "https://example.invalid/r.git?AUTH=ghp_supersecret&b=2"):
+        redacted = lga.redact_credentials(f"fatal: could not read from {url}")
+        assert "ghp_supersecret" not in redacted, url
+        # The HOST survives: a push failure an operator cannot locate is a
+        # refusal that costs more than it protects.
+        assert "example.invalid" in redacted, url
+
+    # The userinfo form is still replaced whole.
+    assert lga.redact_credentials(
+        "https://someone:ghp_supersecret@example.invalid/r.git"
+    ) == "<redacted-url>"
+
+    # A URL with nothing secret in it is returned unchanged.
+    plain = "https://example.invalid/r.git?depth=1"
+    assert lga.redact_credentials(plain) == plain
+
+
+def test_the_two_halves_of_the_credential_rule_share_one_key_list() -> None:
+    """What may not be STORED and what must not be PRINTED are one rule.
+
+    They drifted apart once already, in exactly the direction that matters: the
+    refusal rejected `?token=…` while the redaction did not see it. The key
+    vocabulary is imported rather than retyped, and this is the assertion that
+    the import is the one in use.
+    """
+    from opendox.runtime import repository_act
+
+    assert repository_act.SECRET_PARAMETER_KEYS is lga.SECRET_PARAMETER_KEYS
+    for key in lga.SECRET_PARAMETER_KEYS.split("|"):
+        url = f"https://example.invalid/r.git?{key}=ghp_supersecret"
+        with pytest.raises(repository_act.RepositoryActRefused):
+            repository_act.refuse_credential_bearing_remote(url)
+        assert "ghp_supersecret" not in lga.redact_credentials(url), key
+
+
+def test_a_corpus_that_becomes_unreadable_is_refused_and_not_reported_clean(
+        adapter, tmp_path: Path) -> None:
+    """`check` swallowed every git failure into `()`.
+
+    `()` is this corpus's "no divergence and no further opinion" — a VERDICT —
+    and a caller could not tell it from a repository that stopped being
+    readable after it resolved (Copilot review of openDox-code#26). The
+    interface is emphatic that a corpus failure is refused.
+    """
+    working = tmp_path / "checkout"
+    working.mkdir()
+    _git(working, "init", "--quiet", "--initial-branch=main", ".")
+    _git(working, "config", "user.email", "s@opendox.invalid")
+    _git(working, "config", "user.name", "Student")
+    (working / "a.md").write_text("one\n", encoding="utf-8")
+    _git(working, "add", "a.md")
+    _git(working, "commit", "--quiet", "-m", "first")
+    resolved = adapter.resolve(ca.CorpusRef(name="checkout",
+                                            location=str(working)))
+    assert adapter.check(resolved) == ()
+
+    # The repository stops being readable AFTER it resolved.
+    import shutil
+    shutil.rmtree(working / ".git")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.check(resolved)
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+
+
+def test_an_unborn_branch_and_a_broken_ref_are_different_answers(
+        adapter, tmp_path: Path) -> None:
+    """`show-ref` exits non-zero for both, so it cannot be the discriminator.
+
+    Treating every non-zero as "unborn" resolved a BROKEN repository with
+    `revision=None`, after which `list_documents` answered `()` — an empty
+    corpus — for a repository whose refs cannot be read (Copilot review of
+    openDox-code#26). `for-each-ref` tells them apart: git says nothing at all
+    about an absent ref and warns about a broken one.
+    """
+    unborn = tmp_path / "unborn"
+    initialize_repository(unborn, project_id="unborn", actor=ACTOR)
+    # Remove the only commit's ref, leaving HEAD naming a branch that is absent.
+    (unborn / "refs" / "heads" / "main").unlink()
+    resolved = _resolve(adapter, unborn)
+    assert resolved.revision is None
+    assert adapter.list_documents(resolved) == ()
+
+    broken = tmp_path / "broken"
+    initialize_repository(broken, project_id="broken", actor=ACTOR)
+    (broken / "refs" / "heads" / "main").write_text("not-a-sha\n",
+                                                    encoding="utf-8")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        _resolve(adapter, broken)
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+
+
+def test_a_document_key_containing_a_comma_is_written_and_read_back(
+        adapter, repository: Path) -> None:
+    """`--cacheinfo mode,object,path` is parsed on the COMMAS.
+
+    Git permits a comma in a path, and `DocumentId.key` is opaque to this
+    adapter, so `notes,2026.md` was rejected or split into the wrong path
+    (Copilot review of openDox-code#26). The three-argument form has no
+    delimiter to collide with.
+    """
+    resolved = _resolve(adapter, repository)
+    key = "notes,2026.md"
+    document = ca.DocumentId(corpus=repository.name, key=key)
+    receipt = adapter.write_back(resolved, document, b"a comma is a path\n",
+                                 actor=ACTOR,
+                                 basis_revision=resolved.revision or "")
+    assert receipt.dispatched_to == lga.WRITE_PATH
+    after = _resolve(adapter, repository)
+    assert key in {d.key for d in adapter.list_documents(after)}
+    assert adapter.read(after, document).content == b"a comma is a path\n"
+
+
+def test_the_adapter_advertises_no_branch_it_does_not_use() -> None:
+    """A parameter that cannot change an outcome is removed, not wired up.
+
+    `__init__` took `branch=` and stored it; nothing read it, because the ref
+    `write_back` moves is the one HEAD points at. `LocalGitCorpus(branch=
+    "master")` therefore behaved exactly like the default while advertising a
+    selection it did not make (Copilot review of openDox-code#26).
+    """
+    import inspect
+
+    parameters = inspect.signature(lga.LocalGitCorpus.__init__).parameters
+    assert "branch" not in parameters, (
+        "the adapter takes a `branch` again; either it controls the served ref "
+        "— which `_served_ref` argues it must not — or it must not be offered")
+    assert set(parameters) == {"self", "executable"}

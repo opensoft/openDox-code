@@ -378,19 +378,30 @@ def test_the_act_on_a_project_that_does_not_exist_is_a_404(
 # -- the review round's own assertions (Copilot review of openDox-code#26) ---
 
 
-def test_the_map_records_an_absolute_location(store, project,
-                                              tmp_path: Path) -> None:
+def test_the_map_records_an_absolute_location(store, project, tmp_path: Path,
+                                              monkeypatch) -> None:
     """A relative root in the durable map resolves against whatever working
-    directory the next process happens to have."""
+    directory the next process happens to have.
+
+    THE RELATIVE PATH IS RESOLVED UNDER `tmp_path`, and the working directory
+    is moved there for the test rather than the assertion being softened. The
+    first cut passed `Path("var")/"projects"` and let it resolve against
+    pytest's own working directory — the checkout — and then cleaned up with
+    `rmtree(created.location.parent.parent)`, which is the checkout's `var/`:
+    a developer with anything under `var/` lost it to a test whose subject is a
+    path (Copilot review of openDox-code#26). `monkeypatch.chdir` keeps the
+    relative-root property being measured and puts the resolution somewhere
+    this test owns.
+    """
+    monkeypatch.chdir(tmp_path)
     relative = Path("var") / "projects"
     created = act.create_repository(store, project_id=project.id,
                                     root=relative, actor=ACTOR)
-    try:
-        assert Path(created.row.location).is_absolute()
-        assert created.location.is_absolute()
-    finally:
-        import shutil
-        shutil.rmtree(created.location.parent.parent, ignore_errors=True)
+    assert Path(created.row.location).is_absolute()
+    assert created.location.is_absolute()
+    # ...and it resolved under the directory this test owns, which is the half
+    # of the property the `is_absolute()` assertions cannot see.
+    assert created.location.is_relative_to(tmp_path.resolve())
 
 
 def test_an_already_mapped_project_is_refused_the_same_way_with_or_without_git(
@@ -605,12 +616,170 @@ def test_a_failed_push_redacts_the_stored_remote(store, project,
     """A row written before the credential rule existed can still carry one."""
     created = act.create_repository(store, project_id=project.id,
                                     root=project_repository_root, actor=ACTOR)
-    del created
-    # Written straight into the map, as a pre-existing row would have been.
-    store.attach_remote(
-        project_id=project.id,
-        remote_url="https://someone:ghp_supersecrettoken@example.invalid/x.git")
+    legacy = "https://someone:ghp_supersecrettoken@example.invalid/x.git"
+    # Written straight into the map AND into git's config, which is the state a
+    # row predating `refuse_credential_bearing_remote` actually leaves behind:
+    # the old act wrote both. `push_to_remote` now checks that the two agree
+    # before it sends anything, so a legacy row is only reachable when they do.
+    store.attach_remote(project_id=project.id, remote_url=legacy)
+    _git(created.location, "remote", "add", act.REMOTE_NAME, legacy)
     with pytest.raises(act.RepositoryActRefused) as caught:
         act.push_to_remote(store, project_id=project.id)
     assert "supersecrettoken" not in str(caught.value)
     assert "<redacted-url>" in str(caught.value)
+
+
+# -- Copilot's fourth round on #26 -------------------------------------------
+
+
+def test_whitespace_does_not_smuggle_a_credential_past_the_refusal() -> None:
+    """`urlsplit` accepts leading whitespace; both checks below it are anchored.
+
+    `" https://user:token@example.invalid/x.git"` therefore passed every check
+    and was persisted VERBATIM into `project_repositories.remote_url`, which
+    the repository endpoints read back to every authenticated caller — the
+    exact disclosure the refusal exists to prevent (Copilot review of
+    openDox-code#26).
+    """
+    smuggled = (
+        " https://someone:ghp_supersecret@example.invalid/x.git",
+        "https://someone:ghp_supersecret@example.invalid/x.git ",
+        "\thttps://someone:ghp_supersecret@example.invalid/x.git",
+        "\n https://example.invalid/x.git?token=ghp_supersecret",
+    )
+    for url in smuggled:
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.refuse_credential_bearing_remote(url)
+        # The refusal never echoes the value it refused.
+        assert "ghp_supersecret" not in str(caught.value), url
+
+    # And a clean URL with surrounding whitespace is refused too, by name,
+    # rather than being silently trimmed into a row the caller never sent.
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.refuse_credential_bearing_remote(" https://example.invalid/x.git")
+    assert "whitespace" in str(caught.value)
+
+
+def test_a_location_that_cannot_be_read_is_a_refusal_and_not_a_500(
+        tmp_path: Path) -> None:
+    """`iterdir()` on a stat-able, unreadable directory raises `PermissionError`.
+
+    The emptiness check sat outside every `try`, so that escaped to the API as
+    a 500 instead of the named `RepositoryActRefused` this act promises for
+    every reason it will not create a repository (Copilot review of
+    openDox-code#26).
+    """
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("running as root: a mode-less directory is still readable")
+    location = tmp_path / "unreadable"
+    location.mkdir(mode=0o300)          # --wx: stat yes, list no
+    try:
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.refuse_unusable_location(location)
+        assert "could not be inspected" in str(caught.value)
+        assert "PermissionError" in str(caught.value)
+    finally:
+        location.chmod(0o700)
+
+
+def test_a_push_refuses_when_git_and_the_map_name_different_destinations(
+        store, project, project_repository_root: Path) -> None:
+    """The map is the destination of record, and git is asked whether it agrees.
+
+    The push sent to whatever `origin` happened to be and never looked, so a
+    manual `git remote set-url`, or an `attach_remote` interrupted between its
+    two halves, could send the corpus one place while the map and the success
+    response named another (Copilot review of openDox-code#26).
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    act.attach_remote(store, project_id=project.id,
+                      remote_url="https://example.invalid/of-record.git")
+
+    # Somebody moves the remote behind the map's back.
+    _git(created.location, "remote", "set-url", act.REMOTE_NAME,
+         "https://elsewhere.invalid/not-of-record.git")
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    message = str(caught.value)
+    assert "of-record.git" in message and "not-of-record.git" in message
+    assert "Nothing is pushed" in message
+
+    # Re-attaching is the act that settles it, and it does.
+    act.attach_remote(store, project_id=project.id,
+                      remote_url="https://example.invalid/of-record.git")
+    assert _git(created.location, "remote", "get-url", act.REMOTE_NAME) == (
+        "https://example.invalid/of-record.git")
+
+    # The other half of the same rule: the map names a remote git has not got.
+    _git(created.location, "remote", "remove", act.REMOTE_NAME)
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "has no 'origin'" in str(caught.value)
+
+
+def test_a_repository_created_on_another_branch_is_pushable(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`create_repository` accepts any branch; the push hard-coded `main`.
+
+    A repository created with `branch="master"` was servable by the adapter and
+    unpushable through every surface, because neither the API nor the CLI
+    exposes a branch (Copilot review of openDox-code#26). The push now asks the
+    repository's own HEAD, which is the same question `_served_ref` asks for
+    the write path.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR,
+                                    branch="master")
+    assert _git(created.location, "symbolic-ref", "HEAD") == "refs/heads/master"
+
+    # A real destination, so the push is measured and not merely attempted.
+    destination = tmp_path / "governed-factory.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(destination)],
+                   check=True)
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+    assert act.push_to_remote(store, project_id=project.id) == str(destination)
+    assert _git(destination, "rev-parse", "refs/heads/master") == (
+        created.initial_commit)
+
+
+def test_the_api_never_hands_back_a_legacy_rows_credential(
+        client_with_repositories, mint_token, database) -> None:
+    """A row written before the credential rule can still carry one.
+
+    This PR keeps such a row working on purpose, so a SUCCESSFUL push of one
+    was the single path that returned the embedded credential verbatim while
+    the CLI and every failure path redacted it — and the map read-back handed
+    it to every member of the project besides (Copilot review of
+    openDox-code#26).
+    """
+    token = mint_token(subject="api-legacy-owner")
+    project = client_with_repositories.post(
+        "/api/v1/projects", json={"slug": "legacy", "title": "Legacy"},
+        headers=_auth(token)).json()
+    created = client_with_repositories.post(
+        f"/api/v1/projects/{project['id']}/repository", headers=_auth(token))
+    assert created.status_code == 201, created.text
+    location = Path(created.json()["location"])
+
+    legacy = "https://someone:ghp_supersecret@example.invalid/x.git"
+    with database.transaction() as conn:
+        identity.CoordinationStore(conn).attach_remote(
+            project_id=project["id"], remote_url=legacy)
+    _git(location, "remote", "add", act.REMOTE_NAME, legacy)
+
+    mapped = client_with_repositories.get(
+        f"/api/v1/project-repositories/{project['id']}", headers=_auth(token))
+    assert mapped.status_code == 200, mapped.text
+    assert "ghp_supersecret" not in mapped.text
+    assert mapped.json()["remote_url"] == "<redacted-url>"
+
+    pushed = client_with_repositories.post(
+        f"/api/v1/projects/{project['id']}/repository/push",
+        headers=_auth(token))
+    # The remote is unreachable, so this is the refusal path — and it, too,
+    # says nothing it should not.
+    assert "ghp_supersecret" not in pushed.text
