@@ -335,6 +335,7 @@ def test_a_binding_with_no_sheet_is_the_default_and_is_carried() -> None:
     "./views/gate.js",                     # a module is not a sheet
     "views/gate.css",                      # not bundle-relative at all
     "./views/../../etc/passwd.css",        # climbs out of the bundle
+    "./views/gate.css\n",                  # Python's `$` admits it, JS's does not
 ])
 def test_a_malformed_sheet_refuses_where_it_is_declared(bad: str) -> None:
     with pytest.raises(ViewBindingError) as exc:
@@ -502,6 +503,21 @@ def test_the_design_tokens_and_the_shared_selectors_stayed() -> None:
         # the two explicit data-theme choices (S7's own arrangement).
         assert len(re.findall(rf"^\s*{role}\s*:", css, re.M)) == 4, role
     declared = _selector_classes(css)
+    # AND THE WHOLE RETAINED SET IS PINNED BY COUNT (Copilot review, round 4).
+    # The shared-class assertion below protects 21 names; if the extraction had
+    # taken a rule only openDox names, `declared` would simply SHRINK and both
+    # that check and the orphan register — which examines only what remains —
+    # would still pass. This figure is a CENSUS FIGURE on the same footing as
+    # `tests/fixtures/web_boundary_census.yaml`'s `loc`: it moves when openDox
+    # adds or removes a rule of its own, and then it is re-derived and the
+    # commit says which. It does NOT move for this act any more, because this
+    # act is finished; a change to it in a Q7 follow-up is a rule that left
+    # when it should not have.
+    assert len(declared) == 572, (
+        f"`styles.css` declares {len(declared)} classes in selectors and this "
+        "census says 572. If a rule LEFT, the extraction took an openDox-owned "
+        "selector with it; if one arrived, re-derive this number and say so")
+
     # THE COMPLETE SHARED SET, not a sample of it (Copilot review, round 2).
     # Sixteen names stood here, and removing an unlisted shared rule left this
     # green — an extraction that took openDox-owned styling with it and said

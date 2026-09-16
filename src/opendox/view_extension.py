@@ -272,7 +272,18 @@ _MODULE = re.compile(r"^\./[A-Za-z0-9_./-]+\.js$")
 #: forbids — and to one more of its own: a `<link>` is the one element in this
 #: bundle that can fetch across an origin without `type="module"`'s CORS rules
 #: applying, so the seam that admits it cannot be the one that admits scripts.
-_SHEET = re.compile(r"^\./[A-Za-z0-9_./-]+\.css$")
+#:
+#: `\Z` AND NOT `$` (Copilot review, round 4). Python's `$` matches BEFORE a
+#: final newline and JavaScript's does not, so `"./views/gate.css\n"` passed
+#: this seam and would have been refused by `views/view_extension.js`'s
+#: `SHEET.test()` when the manifest reached the browser — § 4.1's one
+#: vocabulary broken by a regex dialect, which is the third time this seam has
+#: been caught by that class of difference (`_ENTRY` was written for the
+#: first). REGISTERED, NOT FIXED HERE: `_MODULE`, `_ID` and `_ENTRY` above
+#: carry the same `$` and the same hole — measured, `_MODULE` admits
+#: `"./views/gate.js\n"` — and repairing a grammar this act does not introduce
+#: belongs to a declared act of its own, not to RULED Q7's window.
+_SHEET = re.compile(r"^\./[A-Za-z0-9_./-]+\.css\Z")
 
 #: An export name, held to the SAME grammar `views/view_extension.js`'s
 #: `viewBinding()` checks (Copilot, PR #14): `str.isidentifier()` and this
