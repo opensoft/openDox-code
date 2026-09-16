@@ -202,6 +202,14 @@ def get_principal(
 
     A missing or malformed `Authorization: Bearer …` is 401 and says which,
     without echoing the header back.
+
+    THE ORDER IN THIS BODY IS THE POINT, and `_LazyStore` is what makes it
+    possible: the header is read, then the token is verified against the
+    broker's keys, and only the LAST line touches the database. `store` is a
+    declared dependency because the row this returns has to be written in the
+    request's own transaction, but it costs nothing until it is used — so a
+    request refused at the header opens no transaction and takes no pooled
+    connection.
     """
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(
