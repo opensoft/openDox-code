@@ -527,6 +527,19 @@ class LocalGitCorpus:
         try:
             content = git.out("cat-file", "blob", f"{at}:{document.key}")
         except GitCommandFailed as failed:
+            # A MISSING DOCUMENT AND A MISSING CORPUS ARE DIFFERENT ANSWERS,
+            # and `cat-file` fails the same way for both: a repository deleted
+            # after it resolved, a `.git` that went away, or a commit object
+            # pruned out from under `at` were all reported as "this document is
+            # not here" (Copilot review of openDox-code#26, round 9). The
+            # corpus is asked first, and only a corpus that is still readable
+            # gets to say the document is unknown.
+            self._revalidate(git, corpus)
+            if git.run("cat-file", "-e", f"{at}^{{commit}}").returncode != 0:
+                raise _refuse(
+                    CORPUS_UNREADABLE, corpus.location,
+                    f"revision {at} is no longer in the object store, so this "
+                    "corpus cannot answer for any document at it") from failed
             raise _refuse(DOCUMENT_UNKNOWN, document.key,
                           f"not present at revision {at} ({failed})") from failed
         return Document(id=document, content=content, revision=at)
@@ -659,6 +672,19 @@ class LocalGitCorpus:
                           f"the object database under {corpus.location} is not "
                           "writable; the document remains unsaved rather than "
                           "being written by a fallback")
+        # A NUL IN THE KEY IS REFUSED BEFORE THE PROTOCOL SEES IT. The index
+        # is fed `--index-info -z`, whose record terminator is NUL, and
+        # `DocumentId.key` is opaque — so `a.md\0b` would have been truncated
+        # to `a.md`, or read as two records, and the receipt would have named a
+        # path the write did not make (Copilot review of openDox-code#26, round
+        # 9). The option-safety the stdin form buys is exactly this one
+        # delimiter's worth of care.
+        if "\0" in document.key:
+            raise _refuse(
+                WRITE_PATH_UNREACHABLE, document.key,
+                "the document key contains a NUL byte, which is the record "
+                "terminator git's index protocol uses; a path that cannot be "
+                "written unambiguously is not written at all")
         git = self._git(corpus)
         try:
             blob = git.out("hash-object", "-w", "--stdin",

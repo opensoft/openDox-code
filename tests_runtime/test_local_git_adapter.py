@@ -998,3 +998,50 @@ def test_a_symlink_swapped_in_after_the_check_cannot_be_written_through(
 
     assert list(elsewhere.iterdir()) == [], (
         "the act wrote the repository through the symlink")
+
+
+# -- Copilot's ninth round on #26 --------------------------------------------
+
+
+def test_a_nul_in_a_document_key_is_refused_and_not_truncated(
+        adapter, repository: Path) -> None:
+    """The index protocol's record terminator is NUL, and the key is opaque.
+
+    `a.md\\0b` would have been truncated to `a.md` — or read as two records —
+    and the receipt would have named a path the write did not make (Copilot
+    review of openDox-code#26, round 9).
+    """
+    corpus = _resolve(adapter, repository)
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus,
+                           ca.DocumentId(corpus=corpus.ref.name, key="a.md\0b"),
+                           b"# a\n", actor=ACTOR,
+                           basis_revision=corpus.revision)
+    assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+    # And nothing of either spelling arrived.
+    fresh = _resolve(adapter, repository)
+    assert [d.key for d in adapter.list_documents(fresh)] == []
+
+
+def test_a_corpus_that_went_away_is_not_reported_as_a_missing_document(
+        adapter, repository: Path) -> None:
+    """`cat-file` fails the same way for both, and they are different answers.
+
+    A repository deleted after it resolved, or a commit pruned out from under
+    the resolved revision, was reported as `DOCUMENT_UNKNOWN` — "this document
+    is not here" for a corpus that cannot answer for any document at all
+    (Copilot review of openDox-code#26, round 9).
+    """
+    import shutil
+
+    corpus = _resolve(adapter, repository)
+    document = ca.DocumentId(corpus=corpus.ref.name, key="never-written.md")
+    # A readable corpus really does say the document is unknown.
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(corpus, document)
+    assert caught.value.refusal.kind == ca.DOCUMENT_UNKNOWN
+
+    shutil.rmtree(repository)
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(corpus, document)
+    assert caught.value.refusal.kind == ca.CORPUS_ABSENT
