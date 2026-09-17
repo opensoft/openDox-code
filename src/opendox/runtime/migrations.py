@@ -523,11 +523,24 @@ class MigrationRunner:
     # -- apply ------------------------------------------------------------
 
     def bootstrap_ledger(self, conn: Any = None) -> None:
+        """Create the ledger if it is absent — IN THE SELECTED SCHEMA OR NOT AT ALL.
+
+        `LEDGER_DDL` is unqualified, which is right: it must land wherever the
+        connection's `search_path` selects. But `current_schema()` is that
+        path's FALLBACK, so on a connection configured for a schema that no
+        longer exists this `create table` landed in `public` and COMMITTED —
+        and `applied()`, which asks `selected_schema` and refuses, ran
+        afterwards: a fail-closed run that had already mutated another schema
+        (Copilot review of openDox-code#25, round 15). The guard is asked
+        before the DDL, so a run that will refuse refuses before it writes.
+        """
         if conn is not None:
+            selected_schema(conn)
             with conn.transaction():
                 conn.execute(LEDGER_DDL)
             return
         with self._db.transaction() as owned:
+            selected_schema(owned)
             owned.execute(LEDGER_DDL)
 
     def apply(self) -> list[str]:

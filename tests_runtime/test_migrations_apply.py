@@ -894,6 +894,23 @@ def test_a_selected_schema_that_does_not_exist_is_refused_not_answered(
         with admin.transaction() as conn:
             conn.execute(f"create table public.users ({canary} text)")
         try:
+            # THE RUN REFUSES BEFORE IT WRITES ANYTHING. `bootstrap_ledger`'s
+            # `create table` is unqualified — which is right, it must land
+            # where the path selects — so on a connection whose selected schema
+            # is gone it created the ledger in `public` and COMMITTED, and the
+            # guard in `applied()` ran afterwards: a fail-closed run that had
+            # already mutated another schema (Copilot review of
+            # openDox-code#25, round 15).
+            before = _tables_in(admin, "public")
+            with Database(postgres_dsn, schema=missing) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations")
+                with pytest.raises(migrations.MigrationError):
+                    runner.apply()
+            assert _tables_in(admin, "public") == before, (
+                "the refused run created tables in `public`")
+            assert migrations.LEDGER_TABLE not in _tables_in(admin, "public")
+
             # The reader refuses rather than reading `public`'s ledger.
             with Database(postgres_dsn, schema=missing) as db:
                 runner = migrations.MigrationRunner(
