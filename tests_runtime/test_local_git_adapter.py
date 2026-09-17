@@ -1938,3 +1938,52 @@ def test_a_location_that_cannot_be_inspected_is_a_named_refusal(
         assert "could not be inspected" in str(caught.value)
     finally:
         parent.chmod(0o755)
+
+
+def test_the_served_ref_is_the_one_head_names_at_the_moment_of_the_write(
+        adapter: lga.LocalGitCorpus, repository: Path) -> None:
+    """The behaviour this act DECLARES, pinned rather than argued.
+
+    Copilot's twelfth round asked for the served ref to be bound at RESOLUTION:
+    a corpus resolved on `main` at commit A, with HEAD then switched to another
+    branch also at A, has its write advance that other branch. That is what
+    happens, and it is what `_served_ref` says in terms — "the ref `write_back`
+    moves: the one HEAD points at" — because this corpus resolves a REVISION,
+    not a branch: `list_documents` and `read` are revision-addressed, so
+    nothing the caller read depends on which branch served it.
+
+    IT IS NOT FIXED HERE, AND THE REASON IS THE INTERFACE. Binding the ref at
+    resolution means carrying it on `ResolvedCorpus`, which is
+    `opendox.corpus_adapter`'s — the NEUTRAL contract openxFactory pins by
+    commit and digest, and which this act may not widen. The alternative, an
+    adapter-side memo keyed on a value object, would make the guarantee true
+    only when one instance both resolves and writes: a claim this act would be
+    making and not keeping. Registered as residue for the act that governs
+    branch selection.
+
+    WHAT IS GUARANTEED IS UNCHANGED, and its own case is
+    `test_a_stale_corpus_loses_its_dispatch_rather_than_overwriting`: the
+    commit lands only where the corpus resolved, so no concurrent writer's work
+    is overwritten and nothing is lost. That is asserted here too, on the
+    branch that did advance.
+    """
+    corpus = adapter.resolve(ca.CorpusRef(name="project-1",
+                                          location=str(repository)))
+    head = corpus.revision
+    assert head is not None
+    _git(repository, "update-ref", "refs/heads/other", head)
+    _git(repository, "symbolic-ref", "HEAD", "refs/heads/other")
+
+    receipt = adapter.write_back(
+        corpus, ca.DocumentId(corpus="project-1", key="notes.md"),
+        b"# notes\n", actor=ACTOR, basis_revision=head)
+
+    assert _git(repository, "rev-parse", "refs/heads/other") == (
+        receipt.correlation_id), "the ref HEAD names did not advance"
+    assert _git(repository, "rev-parse", "refs/heads/main") == head, (
+        "a branch the write did not name was moved")
+    # AND THE DOCUMENT IS SERVED BY THE CORPUS AS IT NOW STANDS.
+    served = adapter.resolve(ca.CorpusRef(name="project-1",
+                                          location=str(repository)))
+    assert ca.DocumentId(corpus="project-1", key="notes.md") in (
+        adapter.list_documents(served))
