@@ -1002,9 +1002,26 @@ jobs:
       #              are the whole of the move (no broker URL this runtime
       #              prints can carry a credential, and every applyable
       #              overlay supplies what the base leaves empty). THE
-      #              CURRENT FIGURE for this branch; the PR description
-      #              states it at this same commit, `pytest -q
-      #              tests_runtime/` is 443 and the neutral conformance
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 443 there.
+      #  273 passed  at `build/3-6-repository-act` `b41540e4` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              TWENTY-THREE. `check` ran a program the CORPUS named:
+      #              a tracked file with a `filter=` attribute makes `git
+      #              diff --name-only` run that driver's `clean`, because
+      #              deciding whether the file DIFFERS means normalizing it
+      #              (MEASURED: it RAN on this invocation, did not with `-c
+      #              filter.<n>.clean=`, and RAN again with
+      #              `core.attributesfile` emptied — the attribute is the
+      #              repository's). And three ways past round 21's own
+      #              containment check: `file://` is percent-decoded by git
+      #              before it opens the path, a Windows drive or UNC share
+      #              is a PATH and was read as scp syntax, and a relative
+      #              destination is the REPOSITORY's rather than this
+      #              process's. THE CURRENT FIGURE for this branch; the PR
+      #              description states it at this same commit, `pytest -q
+      #              tests_runtime/` is 446 and the neutral conformance
       #              corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
