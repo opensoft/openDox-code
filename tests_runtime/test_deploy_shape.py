@@ -1046,6 +1046,10 @@ def test_the_managed_prerequisite_substitutes_nothing_by_hand() -> None:
     contains a SPACE (`Svc Role`) with a password containing a quote, that role
     logged in with that password, and `pg_default_acl` shows the grantor is the
     MIGRATION OWNER and the grantee is `"Svc Role"`.
+
+    THAT NAME IS NOT A SUPPORTED SERVED ROLE, and the case below says so: the
+    block will create it and this runtime refuses it, because the ledger
+    narrowing interpolates a role name as syntax (round 14).
     """
     runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
     section = runbook.split("**A managed database instead of the bundled "
@@ -1062,3 +1066,34 @@ def test_the_managed_prerequisite_substitutes_nothing_by_hand() -> None:
             f"{name!r} no longer comes from the environment")
     assert "%I" in block and "%L" in block, (
         "the block no longer quotes its identifiers and its literal")
+
+
+def test_the_runbook_and_the_runtime_agree_on_the_served_role_s_grammar() -> None:
+    """The prerequisite accepted a role the runtime then refuses.
+
+    The block quotes every name with `%I`, so it will create a served role
+    whose name holds a space — measured in round 13, and true. But
+    `config.load_migration_settings` refuses that name before `migrate`
+    connects, and `MigrationRunner.protect_ledger` refuses it again, because
+    the ledger narrowing interpolates a role name into a `revoke` as SYNTAX.
+    An operator could therefore complete the documented prerequisite and still
+    not be able to start (Copilot review of openDox-code#25, round 14,
+    suppressed). The runbook states the grammar now, and this pins the
+    STATEMENT and the two REFUSALS to one spelling.
+    """
+    from opendox.runtime import config, migrations
+
+    grammar = "[A-Za-z_][A-Za-z0-9_]{0,62}"
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    assert grammar in runbook, (
+        "the managed-database prerequisite no longer states the grammar the "
+        "served role's name must satisfy")
+    assert grammar in config._ROLE_NAME.pattern
+    assert grammar in migrations._PLAIN_IDENTIFIER.pattern
+
+    # And the refusal is real, in both halves, against the name the round-13
+    # measurement used.
+    with pytest.raises(config.ConfigurationError):
+        config._role_name({config.PREFIX + "RUNTIME_PG_ROLE": "Svc Role"})
+    assert config._role_name(
+        {config.PREFIX + "RUNTIME_PG_ROLE": "svc_role"}) == "svc_role"

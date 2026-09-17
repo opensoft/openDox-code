@@ -522,7 +522,7 @@ def test_readiness_refuses_an_unmigrated_database_by_name(
             assert body["status"] == "not-ready"
             assert body["checks"]["database"] == "ok"
             assert body["checks"]["schema"].startswith("pending: 0001,0002")
-            assert "opendox-runtime migrate" in body["checks"]["schema"]
+            assert "opendox-runtime runtime migrate" in body["checks"]["schema"]
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")

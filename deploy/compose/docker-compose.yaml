@@ -171,7 +171,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # THE PRIVILEGED DSN AND NOTHING ELSE. `opendox-runtime migrate` reads
+      # THE PRIVILEGED DSN AND NOTHING ELSE. `opendox-runtime runtime migrate` reads
       # `load_migration_settings`, which requires this variable alone — so this
       # container carries no served identity, no broker and no second
       # credential. It used to also receive `OPENDOX_DATABASE_URL` set to this

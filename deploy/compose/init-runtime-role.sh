@@ -3,7 +3,7 @@
 # database's first start. Runs from `/docker-entrypoint-initdb.d/`, so it runs
 # exactly once per data volume and never against an existing database.
 #
-# WHY TWO ROLES AT ALL. `opendox-runtime migrate` applies DDL and needs to own
+# WHY TWO ROLES AT ALL. `opendox-runtime runtime migrate` applies DDL and needs to own
 # the schema; the served API needs to read and write six tables and must not be
 # able to drop one. A single role makes the API's blast radius the whole
 # schema for no benefit, and the compose file's separate `migrate` service
@@ -37,7 +37,7 @@
 # script cannot narrow it: it runs on the database's FIRST START, before any
 # migration exists, so the default privileges above are all it can set. The
 # narrowing belongs where the table is created and the privileged identity is
-# already connected — `opendox-runtime migrate`, which runs
+# already connected — `opendox-runtime runtime migrate`, which runs
 # `MigrationRunner.protect_ledger` when `OPENDOX_RUNTIME_PG_ROLE` names this
 # role. SELECT is kept, because `/readyz` reads the ledger.
 set -eu

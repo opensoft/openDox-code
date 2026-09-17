@@ -501,7 +501,7 @@ class MigrationRunner:
 
           * a migration whose file has CHANGED since it was applied — `apply()`
             refuses it with `MigrationChecksumDriftError`, and without this
-            method `/readyz` and `opendox-runtime status` both reported
+            method `/readyz` and `opendox-runtime runtime status` both reported
             `schema: applied` for a database the runner would refuse;
           * a migration whose file is GONE — the ledger says it ran and the
             tree cannot say what it did, which makes a deleted migration

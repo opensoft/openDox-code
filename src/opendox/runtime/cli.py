@@ -233,7 +233,7 @@ def cmd_init(args: argparse.Namespace) -> int:
                   "directories_created": created,
                   "canonical_sha256": digest,
                   "migrations_on_disk": pending,
-                  "next": "opendox-runtime migrate"}, ok=True)
+                  "next": "opendox-runtime runtime migrate"}, ok=True)
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
