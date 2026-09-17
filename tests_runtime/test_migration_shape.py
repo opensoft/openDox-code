@@ -460,14 +460,26 @@ def test_the_whole_run_is_read_before_the_ledger_is_bootstrapped(
 
 
 class _SearchPath:
-    """A connection that answers `selected_schema`'s one question."""
+    """A connection that answers `selected_schema`'s two questions.
 
-    def __init__(self, schema: str | None, search_path: str) -> None:
-        self._row = (schema, search_path)
+    The second is the EXISTENCE probe: `selected_schema` walks the whole
+    configured path and asks Postgres which of the entries it would have
+    skipped are real, so a fake that answered only the first question would let
+    the walk pass vacuously (Copilot review of openDox-code#25, round 16).
+    """
+
+    def __init__(self, schema: str | None, search_path: str,
+                 present: tuple[str, ...] = (), user: str = "svc") -> None:
+        self._row = (schema, search_path, user)
+        self._present = present
 
     def execute(self, sql: str, params: tuple | None = None) -> _Cursor:
-        assert " ".join(sql.split()).startswith("select current_schema()"), sql
-        return _Cursor([self._row])
+        text = " ".join(sql.split())
+        if text.startswith("select current_schema()"):
+            return _Cursor([self._row])
+        assert "pg_catalog.pg_namespace" in text, sql
+        asked = (params or ([],))[0]
+        return _Cursor([(name,) for name in asked if name in self._present])
 
 
 def test_a_schema_resolved_by_search_path_fallback_is_refused() -> None:
@@ -487,9 +499,19 @@ def test_a_schema_resolved_by_search_path_fallback_is_refused() -> None:
     both places).
     """
     with pytest.raises(migrations.MigrationError) as caught:
-        migrations.selected_schema(_SearchPath("public", "tenant, public"))
+        migrations.selected_schema(
+            _SearchPath("public", "tenant, public", present=("public",)))
     assert "tenant" in str(caught.value)
     assert "public" in str(caught.value)
+
+    # AND THE WHOLE PATH IS WALKED, not only its head: `"$user"` first, with
+    # neither the role's schema nor `tenant` present, used to stop the walk at
+    # the exempt entry and accept `public` (round 16).
+    with pytest.raises(migrations.MigrationError) as caught:
+        migrations.selected_schema(
+            _SearchPath("public", '"$user", tenant, public',
+                        present=("public",)))
+    assert "tenant" in str(caught.value)
 
 
 def test_the_configured_schema_is_answered_and_the_default_path_is_not_refused(
@@ -502,11 +524,20 @@ def test_the_configured_schema_is_answered_and_the_default_path_is_not_refused(
     schema gets that name, or a refusal.
     """
     assert migrations.selected_schema(
-        _SearchPath("tenant", "tenant, public")) == "tenant"
+        _SearchPath("tenant", "tenant, public",
+                    present=("tenant", "public"))) == "tenant"
     assert migrations.selected_schema(
-        _SearchPath("public", '"$user", public')) == "public"
+        _SearchPath("public", '"$user", public', present=("public",))) == \
+        "public"
     assert migrations.selected_schema(
-        _SearchPath("odd name", '"odd name", public')) == "odd name"
+        _SearchPath("odd name", '"odd name", public',
+                    present=("odd name", "public"))) == "odd name"
+    # A session answered by its OWN schema stops the walk there, which is what
+    # `"$user"` means: `tenant` after it is not something this connection was
+    # refused, it is something it never reached.
+    assert migrations.selected_schema(
+        _SearchPath("svc", '"$user", tenant, public', present=("svc",),
+                    user="svc")) == "svc"
     # No schema at all is still refused, and says why.
     with pytest.raises(migrations.MigrationError) as caught:
         migrations.selected_schema(_SearchPath(None, "tenant"))

@@ -252,24 +252,15 @@ class CachingJwks:
         keyset = self.keyset()
         key = self._match(keyset, kid)
         if key is None:
-            if self._may_refresh_on_miss():
-                # Key rotation: refresh ONCE, and at most once per cooldown —
-                # see `DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS` for the
-                # amplification this bound removes.
-                keyset = self.keyset(force_refresh=True)
-            else:
-                # AND A DENIED THREAD RE-READS BEFORE IT REFUSES. The cooldown
-                # is exactly the state in which ANOTHER thread is fetching, so
-                # the thread it denies was the one holding the OLD key set —
-                # and it raised `InvalidSignatureError` for a valid token whose
-                # new `kid` had arrived by the time the request was handled
-                # (Copilot review of openDox-code#25, round 15, suppressed).
-                # `keyset()` takes the same lock the refresh holds, so this
-                # WAITS for the fetch in flight and then reads its result;
-                # `force_refresh=False` means it fetches nothing itself, which
-                # is what keeps the cooldown's bound intact.
-                keyset = self.keyset()
-            key = self._match(keyset, kid)
+            # Key rotation: refresh ONCE, and at most once per cooldown — see
+            # `DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS` for the amplification
+            # that bound removes — and ANSWER from whatever that one refresh
+            # produced. The claim and the fetch are one lock acquisition, so a
+            # thread the cooldown denies waits for the fetch in flight instead
+            # of reading the key set it already had and refusing a valid token
+            # (Copilot review of openDox-code#25, rounds 15 and 16). See
+            # `keyset_after_miss`.
+            key = self._match(self.keyset_after_miss(), kid)
         if key is None:
             raise InvalidSignatureError("no broker signing key matched the token")
         return key
@@ -288,11 +279,44 @@ class CachingJwks:
         the serialized one (Copilot review of openDox-code#25, round 9).
         """
         with self._lock:
-            now = time.monotonic()
-            if (now - self._last_miss_refresh) < self._miss_cooldown:
-                return False
-            self._last_miss_refresh = now
-            return True
+            return self._claim_refresh_locked()
+
+    def _claim_refresh_locked(self) -> bool:
+        """`_may_refresh_on_miss`'s decision, WITH THE LOCK ALREADY HELD."""
+        now = time.monotonic()
+        if (now - self._last_miss_refresh) < self._miss_cooldown:
+            return False
+        self._last_miss_refresh = now
+        return True
+
+    def keyset_after_miss(self) -> PyJWKSet:
+        """The key set to answer a `kid` MISS with — claim and fetch under ONE lock.
+
+        The claim and the refresh used to be two acquisitions: a thread could
+        be denied by the cooldown, leave the lock, and read the cache BEFORE
+        the claiming thread had taken the lock to fetch — so it saw the OLD key
+        set and rejected a valid token carrying a newly rotated `kid`. Re-reading
+        after the denial narrowed that window; it did not close it, because the
+        denial and the re-read were themselves two acquisitions (Copilot review
+        of openDox-code#25, rounds 15 and 16).
+
+        Holding the lock across the claim AND the fetch closes it: a denied
+        thread cannot get the lock until the claiming thread's fetch has
+        finished, so what it reads is the fetch's result. The cooldown still
+        bounds FETCHES — exactly one per cooldown — which is the property it
+        exists for; what it no longer bounds is ANSWERS.
+
+        `keyset()` already holds the lock across `_load_keyset()`, so this adds
+        no new property: the same lock is held across the same call.
+        """
+        with self._lock:
+            if self._claim_refresh_locked():
+                self._keyset = self._load_keyset()
+                self._loaded_monotonic = time.monotonic()
+            keyset = self._keyset
+        if keyset is None:                       # never primed; prime it now
+            return self.keyset()
+        return keyset
 
     @staticmethod
     def _match(keyset: PyJWKSet, kid: str | None) -> PyJWK | None:

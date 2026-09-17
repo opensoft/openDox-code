@@ -552,10 +552,30 @@ jobs:
       #              the access preflight asked about every table in the
       #              schema and not about the schema's own `usage`; and the
       #              page budget bounded what the application received
-      #              rather than what Postgres read. THE CURRENT FIGURE ON
-      #              `build/3-5-runtime`, which this branch carries by
-      #              merge; THAT PR's description states it at this same
-      #              commit, and `pytest -q tests_runtime/` is 235 there.
+      #              rather than what Postgres read. `pytest -q
+      #              tests_runtime/` is 235 here.
+      #  132 passed  at `build/3-5-runtime` `c663874e` — UNCHANGED once more:
+      #              round SIXTEEN's two findings are both refinements of
+      #              round fifteen's own fixes and both are measured in the
+      #              DB-backed job. The whole configured `search_path` is
+      #              walked now, not only its head (`"$user", tenant,
+      #              public` with neither present stopped at the exempt
+      #              entry and accepted `public`), and the cooldown claim
+      #              and the refresh are ONE lock acquisition (re-reading
+      #              after a denial narrowed that window; it did not close
+      #              it). `pytest -q tests_runtime/` is 236 here.
+      #  132 passed  at `build/3-5-runtime` `5d86d8b8` — UNCHANGED, and the
+      #              same five modules: round sixteen's SUPPRESSED comments
+      #              are a gap this round itself opened (restricting the
+      #              access preflight to the coordination tables made a
+      #              DROPPED one invisible, since the query is driven by
+      #              `pg_class` — the set is compared now), a setting that
+      #              promised an OIDC discovery this runtime does not make,
+      #              and a migration comment naming a test that does not
+      #              exist. THE CURRENT FIGURE ON `build/3-5-runtime`,
+      #              which this branch carries by merge; THAT PR's
+      #              description states it at this same commit, and `pytest
+      #              -q tests_runtime/` is 236 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this

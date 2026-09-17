@@ -6,7 +6,7 @@
 -- `opendox.runtime.migrations.MigrationRunner` creates it with
 -- `create table if not exists` BEFORE it applies anything. That copy lives in
 -- `LEDGER_DDL` and this file is the reviewable one;
--- `tests_runtime/test_migration_shape.py::test_ledger_ddl_matches_this_file`
+-- `tests_runtime/test_migration_shape.py::test_the_ledger_ddl_matches_the_migration_that_declares_it`
 -- asserts the two are textually identical, so the bootstrap can never drift
 -- into a shape no migration declares. The pattern, and the reason, are
 -- `xFactory-Hermes-Install`'s (`persistence/migrations.py` "Ledger bootstrap",
