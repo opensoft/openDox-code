@@ -246,6 +246,12 @@ _SESSION_COLUMNS = "id, user_id, project_id, started_at, last_seen_at, ended_at"
 _DRAFT_COLUMNS = (
     "id, session_id, project_id, document_key, body, basis_revision, updated_at")
 
+#: The same list, qualified. `list_drafts` joins `drafts` to a derived table
+#: that also carries `id`, so an unqualified list there is ambiguous — and one
+#: spelling derived from the other is what keeps the two in step.
+_DRAFT_COLUMNS_QUALIFIED = ", ".join(
+    f"d.{name.strip()}" for name in _DRAFT_COLUMNS.split(","))
+
 
 #: The subject name `_one` reports for a missing map row. A constant because
 #: it is the same subject in three places, and three literals are three places
@@ -704,9 +710,17 @@ class CoordinationStore:
                 f"a draft page byte budget of {budget} can return no row at "
                 "all; the budget bounds the bytes BEFORE a row, so it must be "
                 "at least 1")
+        # THE BODIES ARE FETCHED FOR THE ROWS THE BUDGET KEEPS, and not for
+        # the whole candidate page. The inner query used to carry every
+        # `body` through the window and the sort before the outer predicate
+        # dropped them, so a page of 500 one-megabyte drafts still made
+        # Postgres read and move ~500 MB to return a short prefix — the
+        # database cost this cap exists to bound (Copilot review of
+        # openDox-code#25, round 15, suppressed). The inner query now selects
+        # IDS and sizes; the bodies are joined back on the ids that survive.
         rows = self._conn.execute(
-            f"select {_DRAFT_COLUMNS} from ("
-            f"  select {_DRAFT_COLUMNS}, coalesce(sum(octet_length(d.body)) "
+            f"select {_DRAFT_COLUMNS_QUALIFIED} from drafts d join ("
+            "  select d.id, coalesce(sum(octet_length(d.body)) "
             "     over (order by d.id rows between unbounded preceding "
             "           and 1 preceding), 0) as bytes_before "
             "  from drafts d "
@@ -717,7 +731,8 @@ class CoordinationStore:
             "     where s.id = d.session_id and s.user_id = %s)) "
             "  and (%s::text is null or d.project_id = %s) "
             "  and (%s::text is null or d.id > %s) order by d.id limit %s"
-            ") page where page.bytes_before < %s order by page.id",
+            ") page on page.id = d.id "
+            " where page.bytes_before < %s order by d.id",
             (session_id, session_id,
              list(session_ids) if session_ids is not None else None,
              list(session_ids) if session_ids is not None else None,

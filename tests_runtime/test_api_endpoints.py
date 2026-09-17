@@ -1410,3 +1410,32 @@ def test_a_claim_that_stops_arriving_leaves_the_last_one_and_says_so(
         assert (third.email, third.display_name) == ("two@example.invalid",
                                                      "Two")
         assert third.last_seen_at >= second.last_seen_at
+
+
+def test_the_page_budget_is_applied_before_the_bodies_are_fetched() -> None:
+    """The cap bounded what the APPLICATION received and not what Postgres read.
+
+    The inner query selected every `body` and carried it through the window
+    function and the sort before the outer predicate dropped it, so a page of
+    500 one-megabyte drafts still made the database read and move roughly 500
+    MB to return a short prefix — the cost this cap exists to remove (Copilot
+    review of openDox-code#25, round 15, suppressed). The inner query selects
+    IDS and sizes now; the bodies are joined back on the ids that survive.
+
+    Asserted on the statement, because that IS the fix: the behaviour — which
+    rows come back, and that at least one always does — is measured by the case
+    above, and is unchanged.
+    """
+    import inspect
+
+    from opendox.runtime.identity import CoordinationStore
+
+    source = inspect.getsource(CoordinationStore.list_drafts)
+    inner = source.split('from drafts d join (', 1)[1].split(') page on', 1)[0]
+    assert "octet_length(d.body)" in inner, (
+        "the running sum no longer measures the bodies")
+    assert "d.body" not in inner.replace("octet_length(d.body)", ""), (
+        "the inner query still selects a body it does not return")
+    assert "select d.id," in inner, inner
+    # And the outer query is the one that names the columns a caller gets.
+    assert "page on page.id = d.id" in source, source

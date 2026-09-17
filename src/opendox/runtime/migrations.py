@@ -66,6 +66,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from opendox.runtime.identity import TABLES as COORDINATION_TABLES
+
 #: Repository-root-relative default location of the ordered SQL migrations.
 DEFAULT_MIGRATIONS_DIR = Path("migrations")
 
@@ -690,6 +692,11 @@ class MigrationRunner:
     #: `protect_ledger`.
     SERVED_PRIVILEGES: tuple[str, ...] = ("SELECT", "INSERT", "UPDATE", "DELETE")
 
+    #: The tables those rights are required ON: the coordination tables this
+    #: runtime applies, and nothing else that happens to share the schema.
+    #: RULING Q1's own list, imported from the module that declares it.
+    SERVED_TABLES: tuple[str, ...] = COORDINATION_TABLES
+
     def verify_runtime_access(self, conn: Any = None) -> None:
         """Refuse a run whose served role cannot read and write what it applied.
 
@@ -721,6 +728,32 @@ class MigrationRunner:
         # this check answer for `public` — measuring the privileges of tables
         # this run did not create (Copilot review of openDox-code#25, round
         # 14, the same shape one method along).
+        schema = selected_schema(conn)
+        # AND `USAGE` ON THE SCHEMA, WHICH NO TABLE GRANT IMPLIES. A role can
+        # hold every privilege on every table and still not be able to name one
+        # of them: without `usage` on the schema, `select * from users` is
+        # "permission denied for schema". The check claimed to answer "can the
+        # served role use what this run applied" and did not ask the one
+        # question that gates all the others (Copilot review of
+        # openDox-code#25, round 15, suppressed).
+        usable = conn.execute("select has_schema_privilege(%s, %s, 'usage')",
+                              (self._runtime_role, schema)).fetchone()
+        if not usable or not usable[0]:
+            raise RuntimeAccessMissingError(
+                f"{self._runtime_role!r} has no USAGE on schema {schema!r}, so "
+                "it cannot name a table in it whatever grants those tables "
+                "carry. `grant usage on schema … to <runtime role>` "
+                "(docs/runtime.md, the managed-database note)")
+        # THE COORDINATION TABLES, NOT EVERY TABLE IN THE SCHEMA. This scanned
+        # `relkind = 'r'` across the whole schema, so a table that has nothing
+        # to do with this runtime — another application sharing the schema, an
+        # operator's scratch table — FAILED the migration run for a privilege
+        # the served role was never meant to hold; and the run says in terms
+        # that the served role needs these rights on the tables IT applied
+        # (Copilot review of openDox-code#25, round 15, suppressed). The list
+        # is RULING Q1's own, imported rather than retyped, and
+        # `test_applying_creates_exactly_the_six_tables_and_the_ledger` holds
+        # it to what the migrations create.
         missing = conn.execute(
             "select c.relname, p.privilege "
             "  from pg_catalog.pg_class c "
@@ -728,11 +761,12 @@ class MigrationRunner:
             "  cross join unnest(%s::text[]) as p(privilege) "
             " where n.nspname = %s "
             "   and c.relkind = 'r' "
+            "   and c.relname = any(%s::text[]) "
             "   and c.relname <> %s "
             "   and not has_table_privilege(%s, c.oid, p.privilege) "
             " order by c.relname, p.privilege",
-            (list(self.SERVED_PRIVILEGES), selected_schema(conn), LEDGER_TABLE,
-             self._runtime_role)).fetchall()
+            (list(self.SERVED_PRIVILEGES), schema, list(self.SERVED_TABLES),
+             LEDGER_TABLE, self._runtime_role)).fetchall()
         if not missing:
             return
         named = ", ".join(f"{row[0]}:{row[1]}" for row in missing)

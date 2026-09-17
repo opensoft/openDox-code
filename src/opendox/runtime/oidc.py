@@ -251,11 +251,24 @@ class CachingJwks:
     def select_key(self, kid: str | None) -> PyJWK:
         keyset = self.keyset()
         key = self._match(keyset, kid)
-        if key is None and self._may_refresh_on_miss():
-            # Key rotation: refresh ONCE, and at most once per cooldown — see
-            # `DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS` for the amplification
-            # this bound removes.
-            keyset = self.keyset(force_refresh=True)
+        if key is None:
+            if self._may_refresh_on_miss():
+                # Key rotation: refresh ONCE, and at most once per cooldown —
+                # see `DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS` for the
+                # amplification this bound removes.
+                keyset = self.keyset(force_refresh=True)
+            else:
+                # AND A DENIED THREAD RE-READS BEFORE IT REFUSES. The cooldown
+                # is exactly the state in which ANOTHER thread is fetching, so
+                # the thread it denies was the one holding the OLD key set —
+                # and it raised `InvalidSignatureError` for a valid token whose
+                # new `kid` had arrived by the time the request was handled
+                # (Copilot review of openDox-code#25, round 15, suppressed).
+                # `keyset()` takes the same lock the refresh holds, so this
+                # WAITS for the fetch in flight and then reads its result;
+                # `force_refresh=False` means it fetches nothing itself, which
+                # is what keeps the cooldown's bound intact.
+                keyset = self.keyset()
             key = self._match(keyset, kid)
         if key is None:
             raise InvalidSignatureError("no broker signing key matched the token")
