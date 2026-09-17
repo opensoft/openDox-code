@@ -691,9 +691,29 @@ jobs:
       #              #25's round FOURTEEN by merge and adding nothing of
       #              this branch's own: the rise of four is that branch's
       #              search-path refusal, its printed-invocation sweep and
-      #              its served-role grammar. THE CURRENT FIGURE for this
-      #              branch; the PR description states it at this same
-      #              commit, and `pytest -q tests_runtime/` is 397 here.
+      #              its served-role grammar. `pytest -q tests_runtime/` is
+      #              397 here.
+      #  243 passed  at `build/3-6-repository-act` `0f0c4a3d` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after
+      #              rounds FIFTEEN and SIXTEEN: a push can no longer be
+      #              made to run a program the pushed repository's own
+      #              config names (`--receive-pack=git-receive-pack`,
+      #              measured both ways with a planted executable); the
+      #              `-c` channel `GIT_CONFIG_PARAMETERS` is stripped like
+      #              every other repository-selecting override; the root
+      #              re-check and every call after it are ONE OBJECT in the
+      #              adapter and in both acts (a descriptor opened
+      #              `O_NOFOLLOW`, git handed `/proc/self/fd/<n>` — measured
+      #              against the previous head, where a swapped name made
+      #              `write_back` commit into a CLONE and return a receipt);
+      #              a credential holding a space is no longer cut in half
+      #              by the DSN pattern running first; the map pre-check
+      #              catches the store's `NotFoundError` alone; and three
+      #              probes that raised where a refusal is owed. THE CURRENT
+      #              FIGURE for this branch; the PR description states it at
+      #              this same commit, and `pytest -q tests_runtime/` is 402
+      #              here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
