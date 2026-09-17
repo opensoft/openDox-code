@@ -602,13 +602,27 @@ class CoordinationStore:
         rather than by the interval between two. A session closed before this
         statement begins is `NotFoundError`; one closed after it begins was
         open when the draft was saved, which is the true answer.
+
+        AND THE PREDICATE LOCKS THE SESSION ROW (`for update`), because
+        "evaluated by the statement that writes" is not the same as
+        "serialized with the close". Under READ COMMITTED the `exists`
+        subquery reads the snapshot the statement began with, so a
+        `close_session` that commits AFTER that snapshot and BEFORE this
+        transaction commits left the draft written into a sitting that had
+        ended — the exact window the round-10 fix was for, one level down
+        (Copilot review of openDox-code#25, round 13). `for update` makes the
+        subquery WAIT on a close that is in flight and then re-evaluate
+        against the committed row, so the two acts are ordered rather than
+        overlapping: either the save commits first and the close follows it, or
+        the save sees the ended session and refuses. Measured with two real
+        connections, both ways.
         """
         row = _conflict_if_duplicate(
             lambda: self._conn.execute(
                 f"insert into drafts ({_DRAFT_COLUMNS}) "
                 "select %s, %s, %s, %s, %s, %s, now() "
                 "where exists (select 1 from sessions "
-                "where id = %s and ended_at is null) "
+                "where id = %s and ended_at is null for update) "
                 "on conflict (session_id, document_key) do update set "
                 "body = excluded.body, "
                 "basis_revision = excluded.basis_revision, "
