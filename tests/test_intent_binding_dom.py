@@ -3,27 +3,75 @@
 opensoft/openxFactory#656 comment 5642758731; split-opendox-two-layer-product
 § 3.4, slice S2).
 
-Drives the REAL `dispose.js`, `wheel.js` and `intent-binding.js` under node,
-mirroring `tests/test_intent_tray_dom.py`'s and `tests/test_wheel_verbs_dom.py`'s
-own DOM-shim harness for this exact pair of views. Nothing here reads a
-module's SOURCE (that is `tests/test_intent_binding_shape.py`'s job); every
-claim below is made by actually loading the module graph and, where useful,
-mounting and inspecting the resulting tree — so a passing test means the
-behaviour exists, not that the code looks right.
+Drives the REAL `wheel.js` and `intent-binding.js` under node — the closure
+`WHEEL_CLOSURE` below names and `_write_tree` copies. (`dispose.js` was the
+third until slice S5 moved it to openXdox-code's package data; it is neither in
+that closure nor in this bundle, and the probes that mounted it went with it,
+as the comments below record.)
+
+THE DOM SHIM IS THIS FILE'S OWN: `_DOM_SHIM`, defined in this module below the
+imports, IS the implementation — there is no other to find. The PATTERN came
+from `tests/test_intent_tray_dom.py` and `tests/test_wheel_verbs_dom.py`, which
+carried a shim of this shape for DIFFERENT views. Measured in this
+repository's history at BOTH ends, because the wheel suite's own list moved
+between them (Copilot review of openDox-code#24, at the merge-forward): at
+`8efb3cf5` the tray suite copied `views/dispose.js`, `views/helpers.js` and
+`views/intent-feed.js`, and the wheel suite those three plus
+`views/wheel-model.js`; by the commit this act deletes, § 3.4 slice S7 had
+added `views/display.js` to the wheel suite's `_run` copy list as well, making
+it five. The union is five distinct modules and NOT ONE of them is the
+`views/wheel.js` + `views/intent-binding.js` pair this file drives — which is
+the only thing the list is here to establish, and it holds at either end.
+What is inherited is the INSTRUMENT, not the coverage; both were RETIRED at
+this leg on 2026-09-13 (RULED `openxFactory#656` comment 5656343213, citing
+RULED OQ-F). Only ONE of them drove `views/intent-feed.js` — the tray suite,
+whose header calls itself "DOM behaviour of the HOSTED dispose tray and the
+intent-feed overlay"; the wheel suite's own comment says the module "rides
+along because dispose.js imports it" and that it "drives the LOCAL path only —
+no `opts.intent` is ever passed". What both needed and neither could find here
+is the copy loop's contents: `intent-feed.js` arrived at NEITHER leg
+(RULED OQ-F `not_moved`), and `dispose.js`, which both mount, went to
+openXdox-code at slice S5.
+They are named here as the historical source of the shape and nothing else —
+following either name finds openxFactory's carve manifest and this
+repository's history, not a file in the tree.
+
+Nothing here reads a module's SOURCE (that is
+`tests/test_intent_binding_shape.py`'s job); every claim below is made by
+actually loading the module graph and, where useful, mounting and inspecting
+the resulting tree — so a passing test means the behaviour exists, not that the
+code looks right.
 
 IN `.github/workflows/validate.yml`'s explicit list SINCE SLICE S8, and that
 is a change from what this header said at S2. It was written narrowed out of
-the required check with its siblings — every DOM probe of `web/`, including
-`test_intent_tray_dom.py`, the carried-over test of this SAME pair of views,
-is narrowed out under RULED Q-L5 (b′) until the BUILD arc inverts the
-openDox -> openXdox dependency — and it said *"un-narrowing that class of test
-is slice S8's job, not S2's."* **S8 has done that job for this file** (Copilot
-review of openDox-code#23): it is named in the workflow's list and the
-required check runs it. The siblings are still omitted, and for a measured
-reason rather than by inheritance: neither is among the suites S8 repairs and
-each is red alone at this head, so naming either would put the required check
-red for another act's defect. Skipped outright where `node` is not on PATH,
-which is why naming it is safe on a runner that has none.
+the required check with its two siblings, `test_intent_tray_dom.py` and
+`test_wheel_verbs_dom.py`, under RULED Q-L5 (b′) — and NOT because every DOM
+probe of `web/` was narrowed out, a broader claim this header used to make and
+which is false: `test_view_registry.py`, `test_split_route_tails.py` and
+`test_gate_loop_contributed.py` were already ON the allow-list and all three
+drive real `web/` modules under node behind a DOM stand-in of their own
+(Copilot review of openDox-code#24, which caught the broad claim being
+reintroduced here after the workflow's own comment had withdrawn it). What was
+narrowed out was these three files, for the reason S2 gave: the list is an
+allow-list admitted file by file. S2 said *"un-narrowing that class of test is
+slice S8's job, not S2's."* **S8 has
+done that job for this file** (Copilot review of openDox-code#23): it is named
+in the workflow's list and the required check runs it.
+
+**THE TWO SIBLINGS ARE NOT OMITTED ANY MORE, THEY ARE RETIRED**, and the
+deletion is in this commit. RULED `openxFactory#656` comment 5656343213 (Brett
+Heap, 2026-09-13, citing RULED OQ-F) retired both at this leg. What each of
+them DID with `views/intent-feed.js` differs, and the paragraph above says so:
+the tray suite drove it, the wheel suite copied it only so `dispose.js`'s
+static import would resolve. What they share is the copy loop and what it
+cannot find here — that module is RULED OQ-F `not_moved`, at NEITHER leg, and
+`views/dispose.js`, which both mount, went to openXdox-code at slice S5. S8's own reason for leaving them out of the list — neither is among the
+suites S8 repairs and each is red alone at that head, so naming either would
+have put the required check red for another act's defect — was the right answer
+to the question S8 could ask, and the ruling answers a different one: not
+whether the list should name them, but whether they should be here at all.
+Skipped outright where `node` is not on PATH, which is why naming this file is
+safe on a runner that has none.
 """
 
 from __future__ import annotations

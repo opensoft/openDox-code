@@ -91,13 +91,78 @@ jobs:
       # probe of a `web/` view, and un-narrowing that class of test was
       # slice S8's job, not S2's. **S8 has since done that job for this one
       # file** — `tests/test_intent_binding_dom.py` is named in the list below
-      # — and the two siblings are still deliberately omitted, MEASURED and not
-      # assumed: neither is among the six suites this slice repairs, and each
-      # run alone under this exact invocation at this head is RED for a defect
-      # this slice does not own (`test_intent_tray_dom.py` 23 failed,
-      # `test_wheel_verbs_dom.py` 8 failed), so naming either would put the
-      # required check red for another act's work. This paragraph therefore
-      # records S2's state and the list below records today's.
+      # — and the two siblings are NOT on it because THEY NO LONGER EXIST
+      # HERE. RULED `openxFactory#656` comment 5656343213 (Brett Heap,
+      # 2026-09-13, citing RULED OQ-F) RETIRED both at this leg.
+      #
+      # NEITHER CAN RUN HERE, AND THE TWO DO NOT FAIL FOR QUITE THE SAME
+      # REASON -- measured in the two files themselves before they were
+      # deleted, because an earlier draft of this paragraph said both DROVE
+      # `views/intent-feed.js` and only one did (Copilot review of
+      # openDox-code#24). The TRAY suite drove it: its own header reads "DOM
+      # behaviour of the HOSTED dispose tray and the intent-feed overlay", it
+      # imports `emitIntent` from that module, and it passes `intent:`
+      # payloads throughout. The WHEEL suite did NOT, and said so in its own
+      # words -- "`intent-feed.js` rides along because dispose.js imports it
+      # ... This probe drives the LOCAL path only -- no `opts.intent` is ever
+      # passed" -- so it copied the feed to make a static import resolve and
+      # nothing more. Saying both drove it OVERSTATED the coverage this
+      # retirement gives up, which is the one thing a retirement's record
+      # must not do.
+      #
+      # WHAT THEY SHARE IS THE COPY LOOP AND WHAT IT CANNOT FIND HERE.
+      # `views/intent-feed.js` is RULED OQ-F `not_moved`: it STAYED at
+      # openxFactory and arrived at NEITHER leg. And `views/dispose.js`,
+      # which BOTH suites mount, moved to openXdox-code at § 3.4 slice S5 and
+      # is not at this leg either (`find . -name dispose.js` is empty here and
+      # finds `src/openxdox/web/views/dispose.js` there). So openxFactory's
+      # carve manifest carries the `retired:` block and this commit carries
+      # the deletion. S8's own reason for
+      # omitting them was right for the question S8 could ask — measured at
+      # its head, `test_intent_tray_dom.py` 23 failed and
+      # `test_wheel_verbs_dom.py` 8 failed, so naming either would have put the
+      # required check red for another act's defect — and the ruling answers a
+      # DIFFERENT question: not "should the list name them" but "should they be
+      # here at all". THERE IS NO NARROWED SIBLING LEFT TO UN-NARROW HERE.
+      # This paragraph records S2's state, then S8's, then the ruling's; the
+      # list below records today's.
+      #
+      # TWO SENTENCES ELSEWHERE IN THE TREE STILL NAME THE RETIRED SUITES, AND
+      # THEY STAY — recorded here so the residue is DECLARED rather than found.
+      # `tests/test_account_menu_dom.py`:4 sends a reader to
+      # `test_wheel_verbs_dom.py` for the DOM shim, and
+      # `tests/test_doxbench_tile_verbs.py`:19 names it as an instrument in
+      # use. Both files are `moved_with_declared_edit` carve rows whose ONLY
+      # declared edit is `path constants`, at carve line 30 and carve line 34
+      # respectively, and at a leg every line on which an arrived file differs
+      # from its carve blob has to fall in one of RULING OQ-1's three CLOSED
+      # classes — `import rewrites`, `path constants`, `adapter calls`. A
+      # comment naming a retired sibling is none of the three. The repair was
+      # made and then WITHDRAWN on that ground (`ebf1425`, restored at
+      # `d9b7f0f4`), and the withdrawal is not a guess about the verifier:
+      # `scripts/verify-carve-arrival.py --phase B`, run against a destination
+      # carrying only that one edit, refuses it by name —
+      # "arrival-undeclared-edit — tests/test_account_menu_dom.py was edited at
+      # carve-commit line(s) [4] which the row … does not declare; it declares
+      # [30] under class(es) path constants" — and the same for line [19] of
+      # the other. Filing either under a class it does not belong to would put
+      # a false description in the floor's own record to make a comment read
+      # better (openxFactory `docs/opendox-cutover-runbook.md` § 5.8 step 4:
+      # "AND THE REPAIR STOPS AT A CARVED FILE"). So the repair covers only
+      # the prose THIS LEG OWNS — this workflow, and the files the leg created
+      # under a declared admission. What would move those two sentences: a
+      # ruling widening OQ-1's class vocabulary, or some other act amending
+      # those rows for a reason the vocabulary already covers.
+      #
+      # `tests/test_account_menu_dom.py` is now ON the list below, so the
+      # required check RUNS the file whose line 4 still names a retired
+      # sibling. That changes nothing: the sentence is a comment, and the
+      # reason it is unrepaired is unchanged — the file is a
+      # `moved_with_declared_edit` carve row whose only declared edit is
+      # `path constants` at carve line 30, and a comment naming a retired
+      # sibling is none of RULING OQ-1's three CLOSED classes. Its companion
+      # `tests/test_doxbench_tile_verbs.py` is NOT on the list, so that
+      # sentence is not executed by anything either way.
       #
       # § 3.4 SLICE S3 adds `tests/test_view_registry.py`, on exactly the same
       # footing as its three neighbours and for the same reason: it asserts a
