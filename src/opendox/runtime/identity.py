@@ -285,9 +285,29 @@ class CoordinationStore:
         """FIRST LOGIN WRITES THE ROW; every later login refreshes it.
 
         `(issuer, subject)` is the broker's identity and the natural key — see
-        `migrations/0001_…sql`. `email` and `display_name` are refreshed from
-        the token's claims on every login and are never authoritative here:
-        the broker owns them, this row records what it last said.
+        `migrations/0001_…sql`. `email` and `display_name` are never
+        authoritative here: the broker owns them, and this row is a copy for
+        display.
+
+        AN ABSENT CLAIM LEAVES THE LAST ONE, AND THAT IS THE DECISION
+        (`coalesce`). The docstring used to say the fields are "refreshed from
+        the token's claims on every login" and "this row records what it last
+        said", which the `coalesce` does not do: a claim that stops arriving
+        leaves the previous value in place (Copilot review of openDox-code#25,
+        round 13, suppressed). The sentence is what was wrong, not the SQL.
+        This runtime sees ONE TOKEN PER REQUEST, not a profile event: whether a
+        given token carries `email` depends on the scopes that token was issued
+        for, so an access token without the claim is the broker saying nothing
+        about the address — not saying it is gone. Assigning `excluded.email`
+        directly would make the stored value FLAP between requests made with
+        different tokens by the same person.
+
+        THE CONSEQUENCE IS STATED RATHER THAN HIDDEN: a value REMOVED at the
+        broker is not cleared here, and this row can therefore show an address
+        the broker no longer holds until a token arrives with a different one.
+        These fields are a display copy and nothing authorizes on them —
+        `(issuer, subject)` is the identity, and every authorization in this
+        module asks `memberships.role`.
         """
         row = self._conn.execute(
             f"insert into users ({_USER_COLUMNS}) "
@@ -615,13 +635,27 @@ class CoordinationStore:
         rather than by the interval between two. A session closed before this
         statement begins is `NotFoundError`; one closed after it begins was
         open when the draft was saved, which is the true answer.
+
+        AND THE PREDICATE LOCKS THE SESSION ROW (`for update`), because
+        "evaluated by the statement that writes" is not the same as
+        "serialized with the close". Under READ COMMITTED the `exists`
+        subquery reads the snapshot the statement began with, so a
+        `close_session` that commits AFTER that snapshot and BEFORE this
+        transaction commits left the draft written into a sitting that had
+        ended — the exact window the round-10 fix was for, one level down
+        (Copilot review of openDox-code#25, round 13). `for update` makes the
+        subquery WAIT on a close that is in flight and then re-evaluate
+        against the committed row, so the two acts are ordered rather than
+        overlapping: either the save commits first and the close follows it, or
+        the save sees the ended session and refuses. Measured with two real
+        connections, both ways.
         """
         row = _conflict_if_duplicate(
             lambda: self._conn.execute(
                 f"insert into drafts ({_DRAFT_COLUMNS}) "
                 "select %s, %s, %s, %s, %s, %s, now() "
                 "where exists (select 1 from sessions "
-                "where id = %s and ended_at is null) "
+                "where id = %s and ended_at is null for update) "
                 "on conflict (session_id, document_key) do update set "
                 "body = excluded.body, "
                 "basis_revision = excluded.basis_revision, "

@@ -989,3 +989,76 @@ def test_the_run_verifies_the_served_role_can_use_what_it_applied() -> None:
         "the runbook names a check the runner does not have")
     assert issubclass(migrations.RuntimeAccessMissingError,
                       migrations.MigrationError)
+
+
+# -- Copilot's thirteenth round on #25 ----------------------------------------
+
+
+def test_the_repository_root_this_package_documents_is_a_mount_target() -> None:
+    """A container mount target cannot be relative, and this value is one.
+
+    The application's own default is the RELATIVE `var/projects` — right for a
+    developer running `opendox-runtime` directly — and the compose file uses
+    the configured root as the `project_repositories` volume's target, so an
+    operator who copied that default into `.env` got an invalid mount instead
+    of a running stack (Copilot review of openDox-code#25, round 13,
+    suppressed). Measured on Docker Compose v5.5.1: `docker compose config`
+    ACCEPTS the relative target and the daemon refuses at container creation
+    with "mount path must be absolute", so the failure is loud and names the
+    path. What this holds is the documented value and the single expression.
+
+    NOT A REGRESSION TEST, AND IT SAYS SO: it passes against the previous head,
+    because the committed default was already absolute. The value that can be
+    relative is the one in an operator's OWN `.env`, which this repository does
+    not hold — so the remedy is the sentence beside it in `.env.example` and in
+    the compose file, and what a test can do is keep the documented default
+    absolute and keep the two places from drifting into two expressions.
+    """
+    documented = [line.split("=", 1)[1]
+                  for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+                  if line.startswith("OPENDOX_PROJECT_REPOSITORY_ROOT=")]
+    assert documented, ".env.example no longer documents the repository root"
+    assert Path(documented[0]).is_absolute(), (
+        f"the documented repository root {documented[0]!r} is relative; the "
+        "compose package uses it as a container mount target")
+
+    compose = (COMPOSE / "docker-compose.yaml").read_text(encoding="utf-8")
+    expression = ("${OPENDOX_PROJECT_REPOSITORY_ROOT:-"
+                  + documented[0] + "}")
+    assert compose.count(expression) == 2, (
+        "the service's environment and the volume's mount target no longer "
+        f"come from one expression ({expression!r}); an operator who changes "
+        "the root would write repositories outside the volume")
+
+
+def test_the_managed_prerequisite_substitutes_nothing_by_hand() -> None:
+    """A placeholder copied verbatim creates a role literally named for it.
+
+    The block still carried `'<runtime role>'`, `"<database>"` and
+    `"<migration owner>"`, so an operator who pasted it got a role and a
+    database named after the placeholders and the real served role with no
+    access at all (Copilot review of openDox-code#25, round 13, suppressed).
+    Every name now arrives through psql's `\\getenv` and is quoted by
+    `format`'s `%I`; the password by `%L`.
+
+    MEASURED against postgres 16.15 before this was written, by running the
+    block verbatim with the four variables set: it created a role whose name
+    contains a SPACE (`Svc Role`) with a password containing a quote, that role
+    logged in with that password, and `pg_default_acl` shows the grantor is the
+    MIGRATION OWNER and the grantee is `"Svc Role"`.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    section = runbook.split("**A managed database instead of the bundled "
+                            "Postgres.**", 1)[1].split("\n## ", 1)[0]
+    block = section.split("```sql", 1)[1].split("```", 1)[0]
+    for placeholder in ("<runtime role>", "<database>", "<migration owner>",
+                        "<runtime password>"):
+        assert placeholder not in block, (
+            f"the prerequisite still carries the placeholder {placeholder!r}, "
+            "which an operator can copy verbatim into a real database")
+    for name in ("runtime_role", "migration_owner", "database",
+                 "runtime_password"):
+        assert f"\\getenv {name} OPENDOX_" in block, (
+            f"{name!r} no longer comes from the environment")
+    assert "%I" in block and "%L" in block, (
+        "the block no longer quotes its identifiers and its literal")

@@ -314,9 +314,20 @@ def get_store(request: Request) -> Iterator[Any]:
     """One transaction per request, opened on first use, and one store over it.
 
     A request that writes three rows writes them atomically because they share
-    this connection; a request that only reads still gets one consistent
-    snapshot; and a request that is refused before it reads anything opens no
-    transaction at all.
+    this connection, and a request that is refused before it reads anything
+    opens no transaction at all.
+
+    WHAT IT DOES NOT GIVE, stated because this docstring promised it: a
+    request that only reads does NOT see one snapshot across its statements.
+    The isolation level is PostgreSQL's default READ COMMITTED, in which every
+    statement takes a NEW snapshot, so two reads in one request can see two
+    committed states (Copilot review of openDox-code#25, round 13, suppressed).
+    The atomicity above is real and is what the transaction is for; the
+    cross-statement read consistency was a guarantee nothing here configures.
+    A route that needs it asks for it — no route does, because every one of
+    them reads a row and answers — and the place to ask would be the isolation
+    level, which is a declared act with its own cost (a serialization failure
+    is a retry the API does not currently have).
     """
     context = _context(request)
     store = _LazyStore(context.database)

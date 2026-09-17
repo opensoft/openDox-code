@@ -487,6 +487,27 @@ jobs:
       #              was never granted now fails instead of serving, and the
       #              drafts listing bounded in bytes as well as in rows): 223
       #              passed there at this commit.
+      #  126 passed  at `build/3-5-runtime` `95b34ad9` — UNCHANGED, and that
+      #              is the entry: round THIRTEEN's one THREAD is a write
+      #              ordering, so its case is DB-backed and the hermetic
+      #              figure did not move there. `pytest -q tests_runtime/` is
+      #              224 at that commit (was 223).
+      #  128 passed  at `build/3-5-runtime` `d9a6dd3a` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round thirteen's five SUPPRESSED comments:
+      #              the compose package's repository root held absolute (it
+      #              is a container mount target, and the application's own
+      #              default is relative), and the managed-database
+      #              prerequisite made to substitute nothing by hand — every
+      #              name through psql's `\getenv`, quoted by `%I`. Round
+      #              thirteen's other three are a docstring that promised a
+      #              snapshot READ COMMITTED does not give, a docstring that
+      #              promised a refresh `coalesce` does not do, and the
+      #              workflow/description figures, answered by measurement.
+      #              THE CURRENT FIGURE ON `build/3-5-runtime`, which this
+      #              branch carries by merge; THAT PR's description states it
+      #              at this same commit, and `pytest -q tests_runtime/` is
+      #              227 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this

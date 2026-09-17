@@ -100,6 +100,22 @@ services:
       # set the documented root wrote repositories outside the volume — onto a
       # read-only filesystem, or into a layer that dies with the container
       # (Copilot review of openDox-code#25). One expression, both places.
+      #
+      # AND IN THIS PACKAGE IT MUST BE ABSOLUTE. The application's own default
+      # is the RELATIVE `var/projects` — right for a developer running
+      # `opendox-runtime` directly — and a container mount target cannot be
+      # relative, so an operator who copies that default into `.env` gets an
+      # invalid mount rather than a running stack (Copilot review of
+      # openDox-code#25, round 13, suppressed). MEASURED on Docker Compose
+      # v5.5.1: `docker compose config` ACCEPTS the relative target and the
+      # daemon refuses at container creation —
+      #   invalid mount path: 'var/projects' mount path must be absolute
+      # — so the failure is loud, names the path and happens before anything
+      # runs, which is why this stays one expression rather than becoming a
+      # fixed literal that would make the documented setting mean nothing here
+      # again. `.env.example` says it beside the value, and
+      # `tests_runtime/test_deploy_shape.py` holds the documented default
+      # absolute and both places to the same expression.
       - project_repositories:${OPENDOX_PROJECT_REPOSITORY_ROOT:-/var/lib/opendox/projects}
     networks:
       - internal

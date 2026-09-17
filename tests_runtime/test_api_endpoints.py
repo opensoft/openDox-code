@@ -1292,3 +1292,113 @@ def test_a_draft_page_is_bounded_in_bytes_and_not_only_in_rows(
     assert identity.MAX_PAGE_BODY_BYTES == MAX_REQUEST_BODY_BYTES, (
         "the page budget and the request cap have drifted apart; the rule is "
         "that a page carries no more body bytes than one draft may")
+
+
+# -- Copilot's thirteenth round on #25 ----------------------------------------
+
+
+def test_a_close_in_flight_orders_the_draft_write_instead_of_racing_it(
+        client, database, postgres_dsn: str, mint_token) -> None:
+    """"Evaluated by the write" is not the same as "serialized with the close".
+
+    Round 10 put the session-open predicate INTO the insert, which closed the
+    interval between the route's check and the write. It did not close the one
+    inside the statement: under READ COMMITTED the `exists` subquery reads the
+    snapshot the statement began with, so a `close_session` committing AFTER
+    that snapshot and BEFORE this transaction commits still left the draft
+    written into a sitting that had ended (Copilot review of openDox-code#25,
+    round 13). `for update` makes the subquery WAIT on a close that is in
+    flight and re-evaluate against the committed row.
+
+    MEASURED WITH TWO REAL CONNECTIONS, and the assertion that fails against
+    the old shape is the FIRST one: with the close uncommitted, the write is
+    still running. Against the old shape it has already finished — successfully
+    — and the draft is in the database before the session is closed.
+    """
+    import threading
+
+    from opendox.runtime import identity
+    from opendox.runtime.db import Database
+
+    token = mint_token(subject="close-order")
+    project = _project_with(client, token, "close-order")
+    session = client.post("/api/v1/sessions", json={"project_id": project["id"]},
+                          headers=_auth(token)).json()
+
+    closing = Database(postgres_dsn, schema=database.schema,
+                       application_name="opendox-test-closer")
+    outcome: dict[str, object] = {}
+
+    def _save() -> None:
+        try:
+            with database.transaction() as conn:
+                identity.CoordinationStore(conn).put_draft(
+                    session_id=session["id"], project_id=project["id"],
+                    document_key="ordered.md", body="x")
+            outcome["result"] = "saved"
+        except BaseException as exc:            # noqa: BLE001 - recorded
+            outcome["result"] = exc
+
+    with closing:
+        with closing.connection() as holder:
+            # The close is IN FLIGHT: the row is updated and not committed.
+            holder.execute("update sessions set ended_at = now() "
+                           "where id = %s", (session["id"],))
+            writer = threading.Thread(target=_save, daemon=True)
+            writer.start()
+            writer.join(timeout=3.0)
+            assert writer.is_alive(), (
+                "the draft write finished while a close was in flight; it read "
+                "the session out of its own snapshot instead of waiting for "
+                f"the row (outcome: {outcome.get('result')!r})")
+            holder.commit()
+        writer.join(timeout=15.0)
+
+    assert not writer.is_alive(), "the write never finished after the commit"
+    assert isinstance(outcome["result"], identity.NotFoundError), outcome
+    with database.connection() as conn:
+        rows = conn.execute("select count(*) from drafts where session_id = %s",
+                            (session["id"],)).fetchone()
+    assert rows[0] == 0, "a draft was written into a session that had ended"
+
+
+def test_a_claim_that_stops_arriving_leaves_the_last_one_and_says_so(
+        database, mint_token) -> None:
+    """`coalesce` is the decision; the docstring was what was wrong.
+
+    It said the display fields are "refreshed from the token's claims on every
+    login" and that the row "records what it last said", which `coalesce` does
+    not do: a claim that stops arriving leaves the previous value (Copilot
+    review of openDox-code#25, round 13, suppressed). This runtime sees ONE
+    TOKEN PER REQUEST, not a profile event — whether a token carries `email`
+    depends on the scopes it was issued for — so assigning `excluded.email`
+    directly would make the stored value FLAP between requests made with
+    different tokens by the same person. Both halves are measured here, and the
+    docstring now states the consequence: a value REMOVED at the broker is not
+    cleared until a token arrives with a different one.
+    """
+    from opendox.runtime import identity
+
+    with database.transaction() as conn:
+        store = identity.CoordinationStore(conn)
+        first = store.upsert_user(issuer="https://broker.test/realms/opendox",
+                                  subject="claims-come-and-go",
+                                  email="one@example.invalid",
+                                  display_name="One")
+        assert (first.email, first.display_name) == ("one@example.invalid",
+                                                     "One")
+        # A LATER TOKEN THAT CARRIES THE CLAIMS refreshes them.
+        second = store.upsert_user(issuer="https://broker.test/realms/opendox",
+                                   subject="claims-come-and-go",
+                                   email="two@example.invalid",
+                                   display_name="Two")
+        assert second.id == first.id
+        assert (second.email, second.display_name) == ("two@example.invalid",
+                                                       "Two")
+        # A LATER TOKEN THAT CARRIES NEITHER leaves them.
+        third = store.upsert_user(issuer="https://broker.test/realms/opendox",
+                                  subject="claims-come-and-go")
+        assert third.id == first.id
+        assert (third.email, third.display_name) == ("two@example.invalid",
+                                                     "Two")
+        assert third.last_seen_at >= second.last_seen_at

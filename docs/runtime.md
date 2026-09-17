@@ -170,31 +170,50 @@ migration owner creates the six tables and the served role has no privilege on
 any of them: the Job succeeds, `/readyz` reports a database that answers and an
 applied schema, and every API request then fails with `permission denied for
 table …` (Copilot review of openDox-code#25, round 10). Run this once, on the
-managed database, as an administrator, BEFORE the migration Job — `<migration
-owner>` is the role in `opendox-db-migration`'s DSN and `<runtime role>` is
-both the role in `opendox-db-runtime`'s DSN and the `runtime_pg_role` value in
-the ConfigMap:
+managed database, as an administrator, BEFORE the migration Job.
+`OPENDOX_MIGRATION_PG_USER` is the role in `opendox-db-migration`'s DSN, and
+`OPENDOX_RUNTIME_PG_ROLE` is both the role in `opendox-db-runtime`'s DSN and
+the `runtime_pg_role` value in the ConfigMap — one name, three places, which is
+the rule this install already states for that role.
+
+NOTHING BELOW IS SUBSTITUTED BY HAND. Every name and the password come from
+the environment, through psql's own `\getenv`, and every one of them is quoted
+by `format` — `%I` for an identifier, `%L` for a literal — so a name or a
+password holding a quote is a name or a password rather than a syntax error,
+and neither the password nor a mistyped placeholder can reach the database
+(Copilot review of openDox-code#25, rounds 12 and 13). Set the four, then run
+the block:
+
+```sh
+read -rs OPENDOX_RUNTIME_PG_PASSWORD && export OPENDOX_RUNTIME_PG_PASSWORD
+export OPENDOX_RUNTIME_PG_ROLE=...      # the user in opendox-db-runtime's DSN
+export OPENDOX_MIGRATION_PG_USER=...    # the user in opendox-db-migration's DSN
+export OPENDOX_PG_DB=...                # the database both DSNs name
+```
 
 ```sql
--- THE PASSWORD IS NEVER TYPED INTO SQL. Export it, and let psql read it from
--- its own environment: `%L` quotes whatever it finds, so a password holding a
--- `'` is a password and not a syntax error — and it stays out of this file and
--- out of `~/.psql_history` (Copilot review of openDox-code#25, round 12). This
--- is the same shape the bundled `init-runtime-role.sh` uses; run it as
---   read -rs OPENDOX_RUNTIME_PG_PASSWORD && export OPENDOX_RUNTIME_PG_PASSWORD
+\getenv runtime_role OPENDOX_RUNTIME_PG_ROLE
+\getenv migration_owner OPENDOX_MIGRATION_PG_USER
+\getenv database OPENDOX_PG_DB
 \getenv runtime_password OPENDOX_RUNTIME_PG_PASSWORD
-select format('create role %I login password %L', '<runtime role>',
+select format('create role %I login password %L', :'runtime_role',
               :'runtime_password')
 \gexec
-grant connect on database "<database>" to "<runtime role>";
-grant usage on schema public to "<runtime role>";
+select format('grant connect on database %I to %I', :'database',
+              :'runtime_role')
+\gexec
+select format('grant usage on schema public to %I', :'runtime_role')
+\gexec
 -- tables that already exist, if this database has been migrated before
-grant select, insert, update, delete on all tables in schema public
-  to "<runtime role>";
+select format('grant select, insert, update, delete on all tables in schema '
+              'public to %I', :'runtime_role')
+\gexec
 -- and everything the migration owner creates from here on, so a later
 -- migration that adds a table needs no second visit
-alter default privileges for role "<migration owner>" in schema public
-  grant select, insert, update, delete on tables to "<runtime role>";
+select format('alter default privileges for role %I in schema public grant '
+              'select, insert, update, delete on tables to %I',
+              :'migration_owner', :'runtime_role')
+\gexec
 ```
 
 The migration run then NARROWS that role on the ledger alone
