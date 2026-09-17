@@ -559,12 +559,39 @@ jobs:
       #              write path measured where a write lands, the
       #              emptiness check and the initialization sharing one
       #              descriptor, and the CLI's evidence boundary running
-      #              both halves of the credential rule. THE CURRENT
-      #              FIGURE for this branch; the PR description states it
-      #              at this same commit. Round twelve's remaining fix —
-      #              the general remote-helper form refused at the attach
-      #              AND before the push — is in the DB-backed job: 342
-      #              passed there at this commit.
+      #              both halves of the credential rule. Round twelve's
+      #              remaining fix — the general remote-helper form refused
+      #              at the attach AND before the push — is in the
+      #              DB-backed job: 342 passed there at this commit.
+      #  219 passed  at `build/3-6-repository-act` `08a99abb` (2026-09-17,
+      #              same python, pytest and git; extras unimportable) —
+      #              the same six modules, carrying #25's round 12 by merge
+      #              and adding this branch's own. THE RULING FIRST (RULED
+      #              openxFactory#656 comment 5714365086): `resolve` pins
+      #              the repository ROOT and refuses a location that is
+      #              INSIDE another repository — which used to resolve, list
+      #              keys it could not read, and COMMIT into that repository
+      #              — and `LocalGitCorpus` grows the three per-corpus
+      #              construction data (`write_path`, `kind_field`,
+      #              `required_fields`, each defaulting to what this class
+      #              already did) with the file-location refusal corrected
+      #              to `corpus-unreadable`. Then round twelve's own: the
+      #              redaction of a credential that holds a SPACE, in both
+      #              halves; the write path answered where a write lands
+      #              (`refs/heads`, and a HEAD `_served_ref` would refuse);
+      #              three probes that raised where a refusal is owed; the
+      #              unborn test limited to branches; the parent chain
+      #              opened `O_NOFOLLOW` component by component; and three
+      #              more named refusals in the act. ALSO FIRST MEASURED
+      #              HERE and corrected in five places: python 3.12's
+      #              `Path.resolve()` raises `RuntimeError` for a symlink
+      #              LOOP, not `OSError`. THE CURRENT FIGURE for this
+      #              branch; the PR description states it at this same
+      #              commit. Round twelve's DB-backed cases — the push
+      #              destination rewritten by `pushInsteadOf`, the remote
+      #              carrying only a push URL, and the helper-transport
+      #              message — are in the other job: 369 passed there at
+      #              this commit.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
