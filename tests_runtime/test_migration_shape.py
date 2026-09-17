@@ -597,3 +597,47 @@ def test_a_selected_schema_this_connection_may_not_use_is_refused() -> None:
     assert migrations.selected_schema(
         _SearchPath("tenant", "tenant, public",
                     present=("tenant", "public"))) == "tenant"
+
+
+def test_a_user_named_schema_this_role_may_not_use_is_not_exempt() -> None:
+    """`"$user"` is exempt for being ABSENT, not for being unreachable.
+
+    Round 19 made every NAMED entry ahead of the answer prove it is usable and
+    left `"$user"` skipped unconditionally. PostgreSQL skips an existing schema
+    the role lacks `usage` on exactly as it skips an absent one, so a schema
+    named for the role, present and denied, still fell through to `public` —
+    the same silent fallback, wearing the default path's name (Copilot review
+    of openDox-code#25, round 20).
+
+    `"$user"` goes through the same probe now, under the role's own name, and
+    is forgiven only for not existing.
+    """
+    # Present and DENIED: refused, and the refusal says where the entry came
+    # from, because `"$user"` is not a name an operator can grep the DSN for.
+    with pytest.raises(migrations.MigrationError) as caught:
+        migrations.selected_schema(
+            _SearchPath("public", '"$user", public', present=("svc", "public"),
+                        denied=("svc",), user="svc"))
+    message = str(caught.value)
+    assert "svc" in message and "may not USE" in message, message
+    assert '"$user"' in message, message
+
+    # ABSENT: exempt, which is PostgreSQL's own default path and must not
+    # refuse a plain install.
+    assert migrations.selected_schema(
+        _SearchPath("public", '"$user", public', present=("public",),
+                    user="svc")) == "public"
+
+    # PRESENT AND USABLE, and it is the answer: the walk stops there.
+    assert migrations.selected_schema(
+        _SearchPath("svc", '"$user", public', present=("svc", "public"),
+                    user="svc")) == "svc"
+
+    # And the entry after it is still judged on its own: `"$user"` absent,
+    # `tenant` present but denied, `public` answering.
+    with pytest.raises(migrations.MigrationError) as caught:
+        migrations.selected_schema(
+            _SearchPath("public", '"$user", tenant, public',
+                        present=("tenant", "public"), denied=("tenant",),
+                        user="svc"))
+    assert "tenant" in str(caught.value)

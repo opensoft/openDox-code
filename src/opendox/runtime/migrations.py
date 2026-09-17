@@ -386,11 +386,16 @@ def selected_schema(conn: Any) -> str:
     entry ahead of the one PostgreSQL resolved must exist; the rule is
     "nothing this connection asked for was skipped".
 
-    `"$user"` IS EXEMPT, and only it: it is not a schema NAME but the first
-    entry of PostgreSQL's own DEFAULT `search_path`, where an absent user
-    schema is skipped BY DESIGN — so a plain install is not refused for having
-    one. It is resolved against `current_user` so that a session whose OWN
-    schema is the answer stops the walk there, which is what that path means.
+    `"$user"` IS EXEMPT WHEN IT IS ABSENT, and only then: it is not a schema
+    NAME but the first entry of PostgreSQL's own DEFAULT `search_path`, where
+    an absent user schema is skipped BY DESIGN — so a plain install is not
+    refused for having one. It is resolved against `current_user` so that a
+    session whose OWN schema is the answer stops the walk there, which is what
+    that path means. But an EXISTING schema named for this role that the role
+    may not USE is skipped by PostgreSQL exactly like an absent one, and that
+    is the same silent fallback wearing the default path's name — so `"$user"`
+    goes through the same probe as every other entry and is forgiven only for
+    not existing (Copilot review of openDox-code#25, round 20).
 
     AND THE QUESTION IS "CAN THIS CONNECTION USE IT", NOT "DOES IT EXIST".
     PostgreSQL skips a search-path entry the session lacks USAGE on exactly as
@@ -422,11 +427,23 @@ def selected_schema(conn: Any) -> str:
     configured = [entry for entry in
                   (_unquoted(entry) for entry in path.split(",")) if entry]
     skipped: list[str] = []
+    user_entry: int | None = None        # `"$user"`'s position in `skipped`
     for entry in configured:
         if entry == "$user":
             if schema == user:
                 break                    # the session's own schema answered
-            continue                     # absent, and absent BY DESIGN
+            # NOT SKIPPED UNCONDITIONALLY. `"$user"` is exempt when the role's
+            # schema is ABSENT, which is PostgreSQL's own default and must not
+            # refuse a plain install — but an EXISTING schema named for this
+            # role that the role may not USE is skipped by PostgreSQL exactly
+            # like an absent one, and that is the same silent fallback wearing
+            # the default path's name (Copilot review of openDox-code#25, round
+            # 20). So it joins the probe under the role's own name and is
+            # forgiven below only if it turns out not to exist.
+            if user:
+                user_entry = len(skipped)
+                skipped.append(user)
+            continue
         if entry == schema:
             break                        # what this connection asked for
         skipped.append(entry)
@@ -437,10 +454,17 @@ def selected_schema(conn: Any) -> str:
             "where nspname = any(%s::text[])", (skipped,)).fetchall()
         usable = {found[0] for found in rows if found[1]}
         denied = {found[0] for found in rows if not found[1]}
-        missing = [entry for entry in skipped if entry not in usable]
+        missing = [entry for position, entry in enumerate(skipped)
+                   if entry not in usable
+                   and not (position == user_entry and entry not in denied)]
         if missing:
+            from_user = (user_entry is not None
+                         and missing[0] == skipped[user_entry]
+                         and skipped[user_entry] in denied)
             why = ("exists, and this connection may not USE it"
                    if missing[0] in denied else "does not exist")
+            if from_user:
+                why += ' (it is the `"$user"` entry of the search path)'
             remedy = (f"Grant usage on {missing[0]!r} to this role"
                       if missing[0] in denied else f"Create {missing[0]!r}")
             raise MigrationError(

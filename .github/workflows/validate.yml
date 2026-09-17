@@ -624,11 +624,24 @@ jobs:
       #              candidate body — `textoctetlen` reads the varlena
       #              header, so over 200 rows of 1 MiB it costs 0.3 ms
       #              against `count(*)`'s 0.3 ms and `max(md5(body))`'s
-      #              381.9 ms. THE CURRENT FIGURE ON `build/3-5-runtime`,
-      #              which this branch carries by merge; THAT PR's
-      #              description states it at this same commit — its head
-      #              `77aebfb0` adds only the record — and `pytest -q
-      #              tests_runtime/` is 245 there.
+      #              381.9 ms. SUPERSEDED on `build/3-5-runtime` by the
+      #              entry below, which this branch also carries; `pytest
+      #              -q tests_runtime/` was 246 there.
+      #  139 passed  at `build/3-5-runtime` `39db0b0f` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY's one finding: `"$user"` is
+      #              exempt for being ABSENT, not for being unreachable.
+      #              Round 19 made every NAMED entry prove it is usable and
+      #              left `"$user"` skipped unconditionally, and PostgreSQL
+      #              skips an existing schema the role may not USE exactly as
+      #              it skips an absent one — so a schema named for the role,
+      #              present and denied, still fell through to `public`. It
+      #              goes through the same probe now and is forgiven only for
+      #              not existing. THE CURRENT FIGURE ON
+      #              `build/3-5-runtime`, which this branch carries by
+      #              merge; THAT PR's description states it at this same
+      #              commit — its head `a10bd085` adds only the record —
+      #              and `pytest -q tests_runtime/` is 246 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
