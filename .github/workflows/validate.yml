@@ -672,9 +672,20 @@ jobs:
       #              bracket); and `runtime_pg_role` is an edit the
       #              managed-database overlay cannot make, so the Job would
       #              narrow the bundled role while the real served role keeps
-      #              the ledger. THE CURRENT FIGURE; the PR description
-      #              states it at this same commit, and `pytest -q
-      #              tests_runtime/` is 251 here.
+      #              the ledger. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 251 there.
+      #  145 passed  at `build/3-5-runtime` `a4d0eddf` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-FIVE's one finding: the
+      #              broker URL is a TRUST ANCHOR and its scheme was
+      #              unchecked. `HttpJwksSource` fetches it and the keys it
+      #              returns verify every token, so over `http://` anyone on
+      #              the path replaces the key set and mints tokens whose
+      #              `iss` and `aud` still pass. `https` or a LOOPBACK host,
+      #              judged by `ipaddress` so the exception cannot be spoofed
+      #              by a name. THE CURRENT FIGURE; the PR description states
+      #              it at this same commit, and `pytest -q tests_runtime/`
+      #              is 252 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
