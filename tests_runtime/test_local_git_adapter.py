@@ -1263,6 +1263,14 @@ def test_the_initialization_is_bound_to_the_directory_it_verified(
 
     The race is made deterministic by performing the swap at the only moment it
     could happen: after the handle is verified and before the first git call.
+
+    AND THE ACT NOW REFUSES, which round 13 added and this case had to take on:
+    the descriptor decides where the history goes, but `create_repository`
+    records a NAME in the map row, so an act that SUCCEEDED here left the row
+    pointing at the decoy and the next `resolve(corpus_ref_for(row))` served it
+    (Copilot review of openDox-code#26, round 13). Both halves are asserted:
+    the history is in the directory this act verified, the decoy is untouched,
+    and nothing is recorded.
     """
     from opendox.runtime import repository_act
 
@@ -1279,13 +1287,14 @@ def test_the_initialization_is_bound_to_the_directory_it_verified(
         return real(git, where, **kwargs)
 
     monkeypatch.setattr(repository_act, "_initialize_with", _swap_then_initialize)
-    commit = repository_act.initialize_repository(
-        location, project_id="project-raced", actor=ACTOR)
+    with pytest.raises(repository_act.RepositoryActRefused) as caught:
+        repository_act.initialize_repository(
+            location, project_id="project-raced", actor=ACTOR)
+    assert "no longer names the directory" in str(caught.value)
 
     moved = _swap_then_initialize.moved
     assert (moved / "HEAD").is_file(), (
         "the history was not written into the directory this act verified")
-    assert _git(moved, "rev-parse", "HEAD") == commit
     assert not any(decoy.iterdir()), (
         f"git wrote into the swapped-in path: {sorted(decoy.iterdir())}")
 
@@ -1987,3 +1996,179 @@ def test_the_served_ref_is_the_one_head_names_at_the_moment_of_the_write(
                                           location=str(repository)))
     assert ca.DocumentId(corpus="project-1", key="notes.md") in (
         adapter.list_documents(served))
+
+
+# -- Copilot's thirteenth round on #26 ---------------------------------------
+
+
+def test_an_ambient_git_dir_cannot_redirect_this_runtimes_git(
+        adapter: lga.LocalGitCorpus, repository: Path,
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GIT_DIR` OUTRANKS `-C`, and every invocation inherited the environment.
+
+    A runtime started with one of these set — a unit file that inherited it, a
+    process started from inside a git hook, which is exactly where they are set
+    — resolved, initialized or pushed a DIFFERENT repository than the one the
+    map row names, silently (Copilot review of openDox-code#26, round 13). The
+    repository-selection variables are stripped from every `git` this package
+    runs, and the call's own (`GIT_INDEX_FILE`, the commit identity) are
+    layered on top of the sanitized copy.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    initialize_repository(elsewhere, project_id="elsewhere", actor=ACTOR)
+    mine = adapter.resolve(ca.CorpusRef(name="project-1",
+                                        location=str(repository))).revision
+    theirs = adapter.resolve(ca.CorpusRef(name="elsewhere",
+                                          location=str(elsewhere))).revision
+    assert mine != theirs, "the two repositories share a commit; pick another"
+
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                 "GIT_OBJECT_DIRECTORY"):
+        monkeypatch.setenv(name, str(elsewhere))
+    corpus = adapter.resolve(ca.CorpusRef(name="project-1",
+                                          location=str(repository)))
+    assert corpus.revision == mine, (
+        "an ambient GIT_* variable redirected the adapter to another "
+        "repository than the one it was given")
+    assert corpus.location == str(repository.resolve())
+    # AND A WRITE STILL LANDS IN THE MAPPED ONE.
+    receipt = adapter.write_back(
+        corpus, ca.DocumentId(corpus="project-1", key="notes.md"),
+        b"# notes\n", actor=ACTOR, basis_revision=str(corpus.revision))
+    assert _git(repository, "rev-parse", "HEAD") == receipt.correlation_id
+    assert _git(elsewhere, "rev-parse", "HEAD") == theirs
+
+
+def test_a_pass_parameter_is_a_credential_in_both_halves_of_the_rule() -> None:
+    """`password` does not cover `pass`, and the match is a SEARCH.
+
+    So `?password=` and `?my_password=` were caught by the needle `password`
+    while `?pass=secret` — a name a great many services use — was accepted by
+    the refusal and returned unchanged by the redaction (Copilot review of
+    openDox-code#26, round 13). `pass` is the shorter needle and matches all
+    three.
+    """
+    from opendox.runtime import repository_act
+
+    assert lga.names_a_secret_parameter("https://host/r.git?pass=secret")
+    assert lga.redact_credentials("https://host/r.git?pass=secret") == (
+        "https://host/r.git?pass=<redacted>")
+    with pytest.raises(repository_act.RepositoryActRefused):
+        repository_act.refuse_credential_bearing_remote(
+            "https://host/r.git?pass=secret")
+    # The longer spellings still match, through the same needle.
+    for name in ("password", "my_password", "passwd"):
+        assert lga.names_a_secret_parameter(f"https://host/r.git?{name}=x"), name
+
+
+def test_a_control_character_is_refused_even_when_it_is_not_whitespace(
+) -> None:
+    """`isspace()` is not "is a control character".
+
+    ESC, DEL and the rest of the C0/C1 sets are not whitespace, so they passed
+    and were stored in `remote_url` and written into `.git/config` — after
+    which a terminal reading the map's response interprets them, and an ESC
+    sequence can rewrite what an operator sees (Copilot review of
+    openDox-code#26, round 13).
+    """
+    from opendox.runtime import repository_act
+
+    for control in ("\x1b[2J", "\x7f", "\x01", "\u200e", "\u202e"):
+        with pytest.raises(repository_act.RepositoryActRefused) as caught:
+            repository_act.refuse_credential_bearing_remote(
+                f"https://host/x{control}.git")
+        assert "control character" in str(caught.value), repr(control)
+        # AND THE VALUE IS NOT ECHOED, which is the other half of this refusal.
+        assert control not in str(caught.value)
+    # A PLAIN SPACE STAYS LEGAL: a local path may contain one.
+    repository_act.refuse_credential_bearing_remote("/srv/my repos/x.git")
+
+
+def test_the_helper_transport_predicate_is_what_git_actually_does() -> None:
+    """Measured on git 2.43.0, because the grammar and the behaviour differ.
+
+    The review reported `evil_helper::anything` as a bypass (Copilot review of
+    openDox-code#26, round 13). It is not: git parses that as SSH to a host
+    named `evil_helper`, because `_` is not a scheme character. What IS a
+    bypass is a name beginning with a DIGIT — and the empty name — both of
+    which git resolves as helpers and this predicate required to start with a
+    letter.
+
+        evil::anything   -> git: 'remote-evil' is not a git command
+        9evil::anything  -> git: 'remote-9evil' is not a git command   <- MISSED
+        ::anything       -> git: 'remote-' is not a git command        <- MISSED
+        evil_helper::x, +evil::x, .evil::x, ev~il::x  -> ssh, not a helper
+    """
+    from opendox.runtime import repository_act
+
+    for refused in ("evil::anything", "9evil::anything", "::anything",
+                    "ev-il::x", "ev.il::x", "ev+il::x", "EVIL::x"):
+        with pytest.raises(repository_act.RepositoryActRefused) as caught:
+            repository_act.refuse_command_executing_remote(refused)
+        assert "runs a command" in str(caught.value), refused
+    # NOT the helper form, on this git — and not refused here either, because a
+    # refusal that does not match git's behaviour refuses legal destinations.
+    for allowed in ("evil_helper::anything", "+evil::x", ".evil::x",
+                    "ev~il::x", "https://example.invalid/x.git",
+                    "git@example.invalid:x.git", "/srv/projects/x.git",
+                    "/srv/a::b.git", "C:\\repo"):
+        repository_act.refuse_command_executing_remote(allowed)
+
+
+def test_an_explicit_revision_on_a_vanished_corpus_names_the_corpus(
+        adapter: lga.LocalGitCorpus, repository: Path) -> None:
+    """A deleted repository fails `rev-parse` too.
+
+    `_resolve_revision` translates that into `REVISION_UNKNOWN`, so an
+    explicit-revision read reported "this repository cannot serve that
+    revision" for a repository that could no longer serve any (Copilot review
+    of openDox-code#26, round 13). The corpus is asked first, as it is
+    everywhere else in this module.
+    """
+    import shutil
+
+    corpus = adapter.resolve(ca.CorpusRef(name="project-1",
+                                          location=str(repository)))
+    head = str(corpus.revision)
+    shutil.rmtree(repository)
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(corpus, ca.DocumentId(corpus="project-1", key="a.md"),
+                     revision=head)
+    assert caught.value.refusal.kind == ca.CORPUS_ABSENT, (
+        "a vanished repository was reported as an unserveable revision")
+
+
+def test_a_path_repointed_during_initialization_records_no_map_row(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The descriptor decides where the history goes; the ROW records a NAME.
+
+    `create_repository` commits `location` in the map row, so a path re-pointed
+    while the repository was being initialized left the row naming a directory
+    the history is not in — and the next
+    `LocalGitCorpus.resolve(corpus_ref_for(row))` serves the decoy (Copilot
+    review of openDox-code#26, round 13). The act asks once more at the last
+    moment it can still refuse.
+    """
+    from opendox.runtime import repository_act
+
+    location = tmp_path / "project-1"
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    real_initialize = repository_act._initialize_with
+    swapped = {"done": False}
+
+    def _repoint_after_the_history(git, where, **kw):
+        commit = real_initialize(git, where, **kw)
+        if not swapped["done"]:
+            swapped["done"] = True
+            location.rename(tmp_path / "moved-aside")
+            decoy.rename(location)
+        return commit
+
+    monkeypatch.setattr(repository_act, "_initialize_with",
+                        _repoint_after_the_history)
+    with pytest.raises(repository_act.RepositoryActRefused) as caught:
+        repository_act.initialize_repository(location, project_id="project-1",
+                                             actor=ACTOR)
+    assert swapped["done"], "the race this test drives did not happen"
+    assert "no longer names the directory" in str(caught.value)

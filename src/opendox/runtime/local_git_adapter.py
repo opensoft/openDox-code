@@ -161,6 +161,44 @@ def _refuse(kind: str, subject: str, detail: str) -> CorpusRefused:
     return CorpusRefused(Refusal(kind=kind, subject=subject, detail=detail))
 
 
+#: Environment variables that SELECT A REPOSITORY or inject configuration, and
+#: which are therefore stripped from every `git` this package runs.
+#:
+#: `-C <root>` names the repository; `GIT_DIR`, `GIT_WORK_TREE` and their
+#: relatives OUTRANK IT, so a runtime started with one of them set — a unit
+#: file that inherited it, a process started from inside a git hook, which is
+#: exactly where these are set — would have resolved, initialized or pushed a
+#: DIFFERENT repository than the one the map row names, silently (Copilot
+#: review of openDox-code#26, round 13). `GIT_CONFIG` and the
+#: `GIT_CONFIG_COUNT`/`KEY`/`VALUE` triple are the same hazard for settings:
+#: they are pure override channels with no legitimate use for this service.
+#:
+#: `GIT_INDEX_FILE` is on the list and is still SET PER CALL by `write_back`,
+#: which is the point of the order: the ambient value is removed and the call's
+#: own is layered on top.
+#:
+#: `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are deliberately NOT stripped.
+#: They name the operator's own git configuration, which a push may legitimately
+#: need (a CA bundle, a credential helper, a proxy), and an actor who can set
+#: the service's environment can do more than redirect its git. What is removed
+#: is the set that silently changes WHICH REPOSITORY a command means.
+_GIT_ENVIRONMENT_OVERRIDES = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG", "GIT_CONFIG_COUNT",
+    "GIT_INDEX_VERSION", "GIT_PREFIX",
+})
+
+
+def _sanitized_git_environment() -> dict[str, str]:
+    """`os.environ` without the repository-selection and config overrides."""
+    return {name: value for name, value in os.environ.items()
+            if name not in _GIT_ENVIRONMENT_OVERRIDES
+            and not name.startswith("GIT_CONFIG_KEY_")
+            and not name.startswith("GIT_CONFIG_VALUE_")}
+
+
 @dataclass(frozen=True)
 class GitRunner:
     """Every `git` invocation this package makes, in one place.
@@ -193,9 +231,22 @@ class GitRunner:
     def run(self, *args: str, stdin: bytes | None = None,
             env: dict[str, str] | None = None,
             timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
-        argv = [self.executable, "-C", str(self.root), "--literal-pathspecs",
-                *args]
-        merged = {**os.environ, **(env or {})}
+        # `core.hooksPath` POINTED AT NOTHING, ON EVERY INVOCATION. A
+        # repository this service manages is WRITABLE by it, and `git push`
+        # runs the LOCAL `pre-push` hook before it contacts the remote — so a
+        # `hooks/pre-push` in a project repository executed arbitrary code in
+        # the runtime's own process, which `protocol.ext.allow=never` says
+        # nothing about because a hook is not a transport (Copilot review of
+        # openDox-code#26, round 13). MEASURED on git 2.43.0 both ways: a
+        # planted `hooks/pre-push` RAN on an ordinary push and did not run with
+        # this option, and the push succeeded either way. It is set here rather
+        # than on the push because no act of this runtime wants a repository's
+        # hooks to run in its process, and one place cannot be forgotten by a
+        # later call.
+        argv = [self.executable, "-C", str(self.root),
+                "-c", "core.hooksPath=" + os.devnull,
+                "--literal-pathspecs", *args]
+        merged = {**_sanitized_git_environment(), **(env or {})}
         try:
             return subprocess.run(argv, input=stdin, capture_output=True,
                                   check=False, env=merged, timeout=timeout,
@@ -305,8 +356,13 @@ _CREDENTIAL_SHAPED = re.compile(
 #: review of openDox-code#26). The key list is the same one that refusal uses;
 #: they are two halves of one rule and are kept in step by
 #: `test_the_two_halves_of_the_credential_rule_name_the_same_keys`.
+#: `pass` IS ON THE LIST AND `password` DOES NOT COVER IT. The match is a
+#: SEARCH for one of these inside the decoded parameter name, so `password`
+#: matches `?password=` and `?my_password=` — and not `?pass=`, which is a
+#: name a great many services use (Copilot review of openDox-code#26, round
+#: 13). `pass` is the shorter needle and matches all three.
 SECRET_PARAMETER_KEYS = (
-    "token|secret|password|passwd|pwd|key|credential|auth|sig|signature")
+    "token|secret|pass|pwd|key|credential|auth|sig|signature")
 _SECRET_KEY = re.compile(SECRET_PARAMETER_KEYS, re.IGNORECASE)
 
 #: EVERY query or fragment parameter, whose NAME is then DECODED and tested —
@@ -759,8 +815,19 @@ class LocalGitCorpus:
              revision: str | None = None) -> Document:
         """The bytes at a declared revision; NEVER a silent fallback."""
         git = self._git(corpus)
-        at = corpus.revision if revision is None else self._resolve_revision(
-            git, revision, corpus.location)
+        if revision is None:
+            at = corpus.revision
+        else:
+            # THE CORPUS IS ASKED FIRST, as it is everywhere else in this
+            # module. `_resolve_revision` translates a `rev-parse` failure into
+            # `REVISION_UNKNOWN`, and a repository DELETED or made unreadable
+            # after it resolved fails `rev-parse` too — so an explicit-revision
+            # read reported "this repository cannot serve that revision" for a
+            # repository that could no longer serve any (Copilot review of
+            # openDox-code#26, round 13). The same check the document lookup
+            # below already makes, one branch earlier.
+            self._revalidate(git, corpus)
+            at = self._resolve_revision(git, revision, corpus.location)
         if at is None:
             # The same revalidation `list_documents` does, for the same
             # reason: an unborn corpus whose repository has since gone answered

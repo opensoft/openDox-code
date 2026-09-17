@@ -1420,3 +1420,75 @@ def test_the_helper_transport_refusal_names_the_helper_it_refuses(
     assert "`evil::`" in message and "git-remote-evil" in message, message
     assert "<name>::<address>" in message, (
         "the message does not describe the general form the predicate matches")
+
+
+def test_a_pre_push_hook_in_a_project_repository_does_not_run(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`git push` runs the LOCAL `pre-push` hook before it contacts the remote.
+
+    The repositories this service manages are WRITABLE by it, so a
+    `hooks/pre-push` in one executed arbitrary code in the runtime's own
+    process — and `protocol.ext.allow=never` says nothing about it, because a
+    hook is not a transport (Copilot review of openDox-code#26, round 13).
+    Every `git` this package runs now carries `-c core.hooksPath=/dev/null`.
+
+    MEASURED BOTH WAYS on git 2.43.0 before it was written: a planted
+    `hooks/pre-push` RAN on an ordinary push and did not run with the option,
+    and the push succeeded either way. THE MARKER IS A REAL FILE the hook
+    creates, so the old shape's failure is the hook RUNNING rather than an
+    assertion about intent.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "destination.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(destination)],
+                   check=True, capture_output=True, env=_GIT_ENV)
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+
+    marker = tmp_path / "PRE-PUSH-RAN"
+    hooks = created.location / "hooks"
+    hooks.mkdir(exist_ok=True)
+    hook = hooks / "pre-push"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    assert act.push_to_remote(store, project_id=project.id) == str(destination)
+    assert not marker.exists(), (
+        "a hook in a project repository ran in the runtime's own process")
+    # AND THE PUSH REALLY HAPPENED, so this is not a vacuous pass. The
+    # destination's own HEAD is unborn (a bare `git init` names a branch it has
+    # no commit on), so the ref the push moved is the one to ask about.
+    assert _git(destination, "rev-parse", "--verify",
+                f"refs/heads/{act.DEFAULT_BRANCH}") == _git(
+                    created.location, "rev-parse", "HEAD")
+
+
+def test_two_push_destinations_are_refused_by_COUNT_and_not_by_a_delimiter(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """A joined string is not an injective comparison.
+
+    The effective push URLs were joined with `" and "` and compared against the
+    map row, so a mapped local path that happens to LOOK like the join — `a and
+    b` against push URLs `a` and `b` — satisfied the comparison while `git
+    push` sent the corpus to two unrecorded destinations (Copilot review of
+    openDox-code#26, round 13). The count is asked first now, and a delimiter
+    decides nothing.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    joined = f"{first} and {second}"
+    # The map records the string that USED to equal the join of the two.
+    store.attach_remote(project_id=project.id, remote_url=joined)
+    _git(created.location, "config", "remote.origin.url", joined)
+    _git(created.location, "config", "--add", "remote.origin.pushurl",
+         str(first))
+    _git(created.location, "config", "--add", "remote.origin.pushurl",
+         str(second))
+
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "2 destinations" in str(caught.value), caught.value
+    assert str(first) in str(caught.value) and str(second) in str(caught.value)

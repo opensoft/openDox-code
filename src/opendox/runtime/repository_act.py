@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,7 +142,23 @@ MAX_REMOTE_URL_CHARS = 2048
 #: openDox-code#26, round 12). Naming `ext` and `fd` alone was the narrow
 #: reading of a general mechanism. A single colon — `https://…`, `host:path`,
 #: `C:\repo` — is not this form and is unaffected.
-_COMMAND_TRANSPORT = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*::")
+#: MEASURED ON GIT 2.43.0 RATHER THAN READ OFF THE URL GRAMMAR, because the two
+#: differ and the difference was a bypass. The review reported
+#: `evil_helper::anything` as one (Copilot review of openDox-code#26, round
+#: 13); it is NOT — git parses that as SSH to a host named `evil_helper`,
+#: because `_` is not a scheme character. What IS one is a name beginning with
+#: a DIGIT, which this pattern required to be a letter:
+#:
+#:     evil::anything          -> git: 'remote-evil' is not a git command
+#:     9evil::anything         -> git: 'remote-9evil' is not a git command   <- MISSED
+#:     ::anything              -> git: 'remote-' is not a git command        <- MISSED
+#:     +evil::x .evil::x ev~il::x ev%il::x evil_helper::x -> ssh, not a helper
+#:     -evil::x                -> git refuses it as an option
+#:
+#: So the helper route is taken for a prefix of `[A-Za-z0-9+.-]` whose FIRST
+#: character is alphanumeric, and for the empty prefix. That is the predicate
+#: now, and the table above is the evidence for each end of it.
+_COMMAND_TRANSPORT = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9+.\-]*)?::")
 
 
 #: Query or fragment keys that carry a secret. USERINFO IS NOT THE ONLY PLACE:
@@ -207,11 +224,23 @@ def refuse_credential_bearing_remote(remote_url: str) -> None:
     # here; `local_git_adapter`'s parameter patterns step over whitespace
     # instead, which is what closes `…/x? token=…` for both halves of the
     # credential rule (Copilot review of openDox-code#26, round 10).
-    if any(character.isspace() and character != " " for character in remote_url):
+    # AND `isspace()` IS NOT "IS A CONTROL CHARACTER". ESC, DEL, NUL and the
+    # rest of the C0/C1 sets are not whitespace, so they passed this check and
+    # were stored in `remote_url` and written into `.git/config` — after which
+    # a terminal reading the map's response interprets them and an ESC sequence
+    # can rewrite what an operator sees (Copilot review of openDox-code#26,
+    # round 13). The question is asked of the Unicode CATEGORY now: `Cc`
+    # (control) and `Cf` (format — the bidirectional overrides, which reorder a
+    # URL on screen without changing it), with the plain space kept legal
+    # because a local path may contain one.
+    if any(character != " "
+           and (unicodedata.category(character) in {"Cc", "Cf"}
+                or character.isspace())
+           for character in remote_url):
         raise RepositoryActRefused(
-            "the remote URL contains a control character (a newline, tab or "
-            "carriage return). It is not echoed here; percent-encode it or "
-            "send the URL alone.")
+            "the remote URL contains a control character (a newline, tab, "
+            "escape, or another C0/C1 or format character). It is not echoed "
+            "here; percent-encode it or send the URL alone.")
     try:
         parts = urllib.parse.urlsplit(remote_url)
         _ = parts.port          # `port` parses lazily and is where it raises
@@ -612,8 +641,34 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
         # review of openDox-code#26, round 10). Every git call of this act is
         # inside the handle's lifetime for the same reason.
         git = _runner_bound_to(owned, location, executable)
-        return _initialize_with(git, location, project_id=project_id,
-                                actor=actor, branch=branch)
+        commit = _initialize_with(git, location, project_id=project_id,
+                                  actor=actor, branch=branch)
+        # AND THE NAME STILL LEADS HERE AFTERWARDS, which is a different
+        # question from the one asked above. The descriptor decides where the
+        # history was written and the handle held it safely throughout — but
+        # `create_repository` records `location` in the map row, so a path
+        # re-pointed DURING the initialization leaves the row naming a
+        # directory the history is not in, and the next
+        # `LocalGitCorpus.resolve(corpus_ref_for(row))` serves the decoy
+        # (Copilot review of openDox-code#26, round 13). Asked once more, at
+        # the last moment the act can still refuse: the caller's transaction
+        # rolls the row back with this exception.
+        try:
+            settled = os.stat(location)
+        except OSError as exc:
+            raise RepositoryActRefused(
+                f"{location} could not be re-examined after the repository was "
+                f"initialized ({type(exc).__name__}); the map row must name "
+                "the directory the history is in, so the act is refused and "
+                "the row rolls back") from exc
+        if (created.st_dev, created.st_ino) != (settled.st_dev,
+                                                settled.st_ino):
+            raise RepositoryActRefused(
+                f"{location} no longer names the directory this act "
+                "initialized; the path changed while the repository was being "
+                "created, so the map row would point at another directory. "
+                "Nothing is recorded.")
+        return commit
     finally:
         os.close(owned)
 
@@ -844,7 +899,7 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
 
 
 def _configured_remote_url(git: GitRunner, remote_name: str, *,
-                           for_push: bool = False) -> str | None:
+                           for_push: bool = False) -> str | list[str] | None:
     """What git has under `<remote_name>`, or None when it has no such remote.
 
     `for_push` asks for the EFFECTIVE PUSH URL. `git push` uses
@@ -866,18 +921,17 @@ def _configured_remote_url(git: GitRunner, remote_name: str, *,
     # `remote.origin.pushurl` entries and a push is sent to EACH of them, so
     # `get-url --push` — which prints only the first — let an extra push URL
     # match the map while the corpus also went to an unrecorded destination
-    # (Copilot review of openDox-code#26, round 6). The caller compares this
-    # with the map row, so more than one URL can never equal it: the whole
-    # list is returned, joined, and a second destination fails the comparison
-    # while NAMING itself in the refusal.
-    urls = [line.strip() for line
+    # (Copilot review of openDox-code#26, round 6).
+    #
+    # AND THE LIST IS RETURNED AS A LIST. It used to be joined with `" and "`
+    # and compared against the map row as one string, which is not injective:
+    # a mapped local path `a and b` equals the join of push URLs `a` and `b`,
+    # so a repository pushing to two unrecorded destinations could pass the
+    # comparison (Copilot review of openDox-code#26, round 13). The caller
+    # requires EXACTLY ONE and compares that one; a delimiter decides nothing.
+    return [line.strip() for line
             in existing.stdout.decode("utf-8", "replace").splitlines()
-            if line.strip()]
-    if not urls:
-        return None
-    if len(urls) == 1:
-        return urls[0]
-    return " and ".join(urls)
+            if line.strip()] or None
 
 
 def _pushable_branch(git: GitRunner, location: str) -> str:
@@ -954,7 +1008,7 @@ def push_to_remote(store: Any, *, project_id: str,
     # openDox-code#26, round 6).
     try:
         configured = _configured_remote_url(git, REMOTE_NAME)
-        effective = _configured_remote_url(git, REMOTE_NAME, for_push=True)
+        destinations = _configured_remote_url(git, REMOTE_NAME, for_push=True)
         branch = _pushable_branch(git, str(row.location))
     except GitCommandFailed as failed:
         raise RepositoryActRefused(
@@ -965,6 +1019,19 @@ def push_to_remote(store: Any, *, project_id: str,
             f"the map records a remote for project {project_id} but the "
             f"repository at {row.location} has no {REMOTE_NAME!r}; re-attach "
             "the remote so the two agree before pushing")
+    # EXACTLY ONE PUSH DESTINATION, ASKED AS A COUNT and not as a string. A
+    # repository configured with two `pushurl` entries pushes to BOTH, and a
+    # comparison of a joined string against the map row can be satisfied by a
+    # map row that happens to look like the join (round 13).
+    if destinations is not None and len(destinations) != 1:
+        raise RepositoryActRefused(
+            f"the repository at {row.location} would push to "
+            f"{len(destinations)} destinations under {REMOTE_NAME!r} "
+            f"({', '.join(redact_credentials(url) for url in destinations)}) "
+            f"while the map records one. Nothing is pushed: a destination the "
+            "map cannot record is a destination this act cannot make. "
+            "Re-attach the remote to settle it.")
+    effective = destinations[0] if destinations else None
     for what, found in (("fetches from", configured),
                         ("would push to", effective)):
         if found != row.remote_url:
