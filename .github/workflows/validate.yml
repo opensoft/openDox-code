@@ -531,9 +531,19 @@ jobs:
       #              `public` and COMMITTED before round fourteen's guard
       #              refused one call later — a fail-closed run that had
       #              already mutated another schema. The guard is asked
-      #              before the DDL now. THE CURRENT FIGURE; the PR
-      #              description states it at this same commit, and `pytest
-      #              -q tests_runtime/` is 232 here.
+      #              before the DDL now. `pytest -q tests_runtime/` is 232
+      #              here.
+      #  132 passed  at `build/3-5-runtime` `541b0329` — UNCHANGED again,
+      #              and for the same reason: round fifteen's four
+      #              SUPPRESSED comments are all measured in the DB-backed
+      #              job. A concurrent rotation refused a valid token (the
+      #              miss cooldown bounds FETCHES and was bounding ANSWERS);
+      #              the access preflight asked about every table in the
+      #              schema and not about the schema's own `usage`; and the
+      #              page budget bounded what the application received
+      #              rather than what Postgres read. THE CURRENT FIGURE; the
+      #              PR description states it at this same commit, and
+      #              `pytest -q tests_runtime/` is 235 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
