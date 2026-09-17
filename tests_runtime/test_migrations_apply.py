@@ -894,6 +894,23 @@ def test_a_selected_schema_that_does_not_exist_is_refused_not_answered(
         with admin.transaction() as conn:
             conn.execute(f"create table public.users ({canary} text)")
         try:
+            # THE RUN REFUSES BEFORE IT WRITES ANYTHING. `bootstrap_ledger`'s
+            # `create table` is unqualified — which is right, it must land
+            # where the path selects — so on a connection whose selected schema
+            # is gone it created the ledger in `public` and COMMITTED, and the
+            # guard in `applied()` ran afterwards: a fail-closed run that had
+            # already mutated another schema (Copilot review of
+            # openDox-code#25, round 15).
+            before = _tables_in(admin, "public")
+            with Database(postgres_dsn, schema=missing) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations")
+                with pytest.raises(migrations.MigrationError):
+                    runner.apply()
+            assert _tables_in(admin, "public") == before, (
+                "the refused run created tables in `public`")
+            assert migrations.LEDGER_TABLE not in _tables_in(admin, "public")
+
             # The reader refuses rather than reading `public`'s ledger.
             with Database(postgres_dsn, schema=missing) as db:
                 runner = migrations.MigrationRunner(
@@ -930,3 +947,67 @@ def test_a_selected_schema_that_does_not_exist_is_refused_not_answered(
         finally:
             with admin.transaction() as conn:
                 conn.execute("drop table if exists public.users")
+
+
+def test_the_access_preflight_asks_about_this_runtimes_tables_and_the_schema(
+        postgres_dsn: str) -> None:
+    """Two findings in one check, and they pull in opposite directions.
+
+    It scanned EVERY ordinary table in the selected schema, so a table that has
+    nothing to do with this runtime — another application sharing the schema,
+    an operator's scratch table — failed the migration run for a privilege the
+    served role was never meant to hold. And it asked `has_table_privilege`
+    alone, which no amount of table grants makes sufficient: without `usage` on
+    the SCHEMA a role cannot name those tables at all, so a run could pass this
+    check and every API query still fail `permission denied for schema`
+    (Copilot review of openDox-code#25, round 15, suppressed).
+
+    Measured both ways in one schema: a stranger's table the served role cannot
+    touch, and the same role with and without `usage`.
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    role = "t_scoped_" + uuid.uuid4().hex[:8]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            conn.execute(f"create role {role}")
+            conn.execute(f"grant usage on schema {schema} to {role}")
+            # A STRANGER'S TABLE, created BEFORE the default privileges so the
+            # served role holds nothing on it — which is the whole point: it is
+            # not this runtime's table.
+            conn.execute(f"create table {schema}.somebody_elses (id text)")
+            conn.execute(
+                f"alter default privileges in schema {schema} "
+                f"grant select, insert, update, delete on tables to {role}")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations", runtime_role=role)
+                # It applies: the stranger's table is not this runtime's to
+                # have rights on. Against the previous head this raised
+                # `RuntimeAccessMissingError` naming `somebody_elses`.
+                assert runner.apply() == ["0001", "0002"]
+
+            # AND THE SCHEMA'S OWN `usage` IS ASKED. Take it away and the same
+            # run refuses, naming the schema — against the previous head it
+            # passed, because every table privilege was still held.
+            with admin.transaction() as conn:
+                conn.execute(f"revoke usage on schema {schema} from {role}")
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations", runtime_role=role)
+                with pytest.raises(migrations.RuntimeAccessMissingError) as caught:
+                    runner.verify_runtime_access()
+            assert "USAGE" in str(caught.value)
+            assert schema in str(caught.value)
+            assert role in str(caught.value)
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+                conn.execute(f"drop owned by {role}")
+                conn.execute(f"drop role if exists {role}")

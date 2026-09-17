@@ -2752,3 +2752,54 @@ def test_every_operation_goes_through_the_bound_runner() -> None:
     # establishes the location in the first place: neither takes one of its
     # own, which is why they are not in the list.
     assert "self._bound(" not in inspect.getsource(lga.LocalGitCorpus.resolve)
+
+
+def test_a_project_id_holding_a_nul_is_refused_by_name(tmp_path: Path) -> None:
+    """`ValueError` is not `OSError`, and this act translates the second.
+
+    `Path`, `os.open` and `os.mkdir` all raise `ValueError` for an embedded
+    NUL, so a malformed project id walked past every handler in this module and
+    reached the API as a 500 in place of the named refusal the act promises for
+    every reason it will not create a repository (Copilot review of
+    openDox-code#26, round 17, suppressed). It is the same guard `write_back`
+    puts on `DocumentId.key`, one module over.
+    """
+    from opendox.runtime import repository_act
+
+    with pytest.raises(repository_act.RepositoryActRefused) as caught:
+        repository_act.repository_location(tmp_path, "project\x00one")
+    assert "usable project id" in str(caught.value)
+    # And nothing was created on the way to finding out.
+    assert sorted(tmp_path.iterdir()) == []
+    # The premise, measured: the value this guard stops would have raised
+    # `ValueError`, which this act does not catch.
+    with pytest.raises(ValueError):
+        (tmp_path / "project\x00one").mkdir()
+
+
+def test_a_known_destination_is_removed_from_gits_own_diagnostic() -> None:
+    """The pattern half of the credential rule cannot match across a line.
+
+    Deliberately: `redact_credentials` runs over git's multi-line stderr, and a
+    userinfo class that admitted a newline would join a `scheme://` on one line
+    to an unrelated `user@host` on another. So a LEGACY row whose credential
+    spans a line could still ride the failure text git echoes back (Copilot
+    review of openDox-code#26, round 17, suppressed). A caller that HOLDS the
+    value does not need a pattern.
+    """
+    from opendox.runtime import repository_act
+
+    legacy = "https://user:secret\npassword@host/repo.git"
+    echoed = (f"fatal: unable to access '{legacy}': Could not resolve host\n"
+              "hint: check the remote and try again")
+    cleaned = repository_act._without(echoed, legacy)
+    assert "secret" not in cleaned
+    assert "password@host" not in cleaned
+    assert "<redacted-url>" in cleaned
+    # The rest of the diagnostic survives, which is the whole reason the
+    # pattern is not widened instead.
+    assert "Could not resolve host" in cleaned
+    assert "hint: check the remote and try again" in cleaned
+    # And the pattern alone does NOT catch it, which is the measurement that
+    # makes this helper necessary rather than redundant.
+    assert "secret" in lga.redact_credentials(echoed)

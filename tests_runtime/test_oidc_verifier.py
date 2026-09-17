@@ -462,3 +462,97 @@ def test_an_object_without_load_is_not_a_jwks_source() -> None:
             return {"keys": []}
 
     assert not isinstance(_NotASource(), oidc.JwksSource)
+
+
+# -- Copilot's fifteenth round on #25 ----------------------------------------
+
+
+def test_a_thread_denied_by_the_cooldown_re_reads_before_it_refuses(
+        jwks_path: str, mint_token, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cooldown denies exactly the thread that is waiting for the answer.
+
+    Two valid requests arrive during one rotation. Both read the OLD key set
+    and miss; one claims the miss refresh and fetches; the other is refused a
+    refresh by the cooldown — and used to raise `InvalidSignatureError` against
+    the key set it was already holding, for a token whose new `kid` had arrived
+    by the time the request was handled (Copilot review of openDox-code#25,
+    round 15, suppressed). The cooldown is the right bound on FETCHES; it was
+    being used as a bound on ANSWERS.
+
+    `keyset()` takes the same lock the refresh holds, so a denied thread now
+    waits for the fetch in flight and reads its result. It fetches nothing
+    itself, so the amplification bound is untouched — asserted below by the
+    load count.
+
+    THE ORDER IS FORCED, not raced: the denied thread is held between its read
+    of the old key set and its cooldown question, which is the only window in
+    which the defect exists. A thread that arrives LATER blocks on the lock and
+    gets the new key set from the cache, which is why an unordered version of
+    this case passes against the previous head.
+    """
+    import threading
+
+    current = json.loads(Path(jwks_path).read_text(encoding="utf-8"))
+    previous = {"keys": [dict(current["keys"][0], kid="the-previous-key")]}
+    state = {"served": previous, "loads": 0}
+    fetching = threading.Event()
+    release = threading.Event()
+    denied_has_the_old_set = threading.Event()
+    refresh_claimed = threading.Event()
+
+    class BlockingSource:
+        def load(self) -> dict:
+            state["loads"] += 1
+            if state["loads"] > 1:       # the priming read returns at once
+                fetching.set()
+                release.wait(5)
+            return state["served"]
+
+    cache = oidc.CachingJwks(BlockingSource(), ttl_seconds=3600)
+    verifier = oidc.TokenVerifier(issuer=TEST_ISSUER, audience=TEST_AUDIENCE,
+                                  jwks=cache)
+    cache.keyset()                       # primes with the OLD key set
+    state["served"] = current            # the broker rotates
+
+    real_match = oidc.CachingJwks._match          # a staticmethod
+
+    def _match_holding_the_denied_thread(keyset, kid):
+        found = real_match(keyset, kid)
+        if found is None and threading.current_thread().name == "denied":
+            denied_has_the_old_set.set()
+            refresh_claimed.wait(5)
+        return found
+
+    monkeypatch.setattr(oidc.CachingJwks, "_match",
+                        staticmethod(_match_holding_the_denied_thread))
+
+    token = mint_token(subject="rotated")
+    outcome: dict[str, object] = {}
+
+    def _verify(name: str) -> None:
+        try:
+            outcome[name] = verifier.verify(token).subject
+        except Exception as exc:         # noqa: BLE001 - reported, not raised
+            outcome[name] = exc
+
+    denied = threading.Thread(target=_verify, args=("denied",), name="denied")
+    denied.start()
+    assert denied_has_the_old_set.wait(5), "the denied thread never missed"
+
+    refresher = threading.Thread(target=_verify, args=("refresher",),
+                                 name="refresher")
+    refresher.start()
+    assert fetching.wait(5), "the refresh this case needs never started"
+    refresh_claimed.set()                # the denied thread asks the cooldown
+    time.sleep(0.05)                     # ... and is now waiting on the lock
+    release.set()
+    for thread in (denied, refresher):
+        thread.join(5)
+
+    assert outcome["refresher"] == "rotated", outcome
+    assert outcome["denied"] == "rotated", (
+        "a valid token was refused because another thread was already "
+        f"fetching the key set it needed: {outcome['denied']!r}")
+    # AND THE COOLDOWN'S OWN BOUND IS UNTOUCHED: one priming read and one
+    # refresh, not two.
+    assert state["loads"] == 2, state

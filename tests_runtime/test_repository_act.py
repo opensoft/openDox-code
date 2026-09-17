@@ -858,7 +858,7 @@ def test_a_repository_created_on_another_branch_is_pushable(
         created.initial_commit)
 
 
-def test_the_api_never_hands_back_a_legacy_rows_credential(
+def test_the_api_never_hands_back_a_legacy_row_s_credential(
         client_with_repositories, mint_token, database) -> None:
     """A row written before the credential rule can still carry one.
 
@@ -1601,7 +1601,7 @@ def test_a_mapped_location_inside_another_repository_is_refused_by_the_acts(
 # -- Copilot's sixteenth round on #26 -----------------------------------------
 
 
-def test_a_push_cannot_be_made_to_run_the_repositorys_own_receive_pack(
+def test_a_push_cannot_be_made_to_run_the_repository_s_own_receive_pack(
         store, project, project_repository_root: Path, tmp_path: Path) -> None:
     """`git push` runs the DESTINATION's `receive-pack` — and for a local
     destination it runs it HERE, as a program the PUSHING repository's config

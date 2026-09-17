@@ -348,7 +348,15 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
     project was renamed would make every `location` in the map a statement with
     a shelf life.
     """
-    if not project_id or "/" in project_id or project_id in {".", ".."}:
+    # A NUL IS REFUSED HERE, not by `ValueError` three calls down. `Path`,
+    # `os.open` and `os.mkdir` raise `ValueError` — NOT `OSError` — for an
+    # embedded NUL, so this act's translation did not catch it and a malformed
+    # project id reached the API as a 500 in place of the named refusal it
+    # promises for every reason it will not create a repository (Copilot review
+    # of openDox-code#26, round 17, suppressed). It is the same guard
+    # `write_back` puts on `DocumentId.key`, one module over.
+    if (not project_id or "/" in project_id or "\0" in project_id
+            or project_id in {".", ".."}):
         raise RepositoryActRefused(
             f"{project_id!r} is not a usable project id for a directory name")
     # ABSOLUTE, ALWAYS. `OPENDOX_PROJECT_REPOSITORY_ROOT` defaults to the
@@ -855,6 +863,18 @@ def _bound_to_mapped_repository(row: Any,
         os.close(handle)
 
 
+def _without(text: str, secret: str | None) -> str:
+    """`text` with a KNOWN value taken out of it, wherever it appears.
+
+    The credential rule's pattern half cannot match a value that spans a line,
+    and deliberately so. A caller that HOLDS the value does not need a pattern
+    (Copilot review of openDox-code#26, round 17).
+    """
+    if not secret:
+        return text
+    return text.replace(secret, "<redacted-url>")
+
+
 def _refuse_unless_repository_root(git: GitRunner, location: Path) -> None:
     """Refuse a mapped location that is INSIDE a repository instead of being one.
 
@@ -1231,8 +1251,17 @@ def _push_to_remote_with(git: GitRunner, row: Any) -> str:
         # `refuse_credential_bearing_remote` existed can still carry a
         # credential, and this message reaches an API response (Copilot review
         # of openDox-code#26).
+        # AND GIT'S OWN STDERR HAS THE KNOWN DESTINATION TAKEN OUT OF IT.
+        # `GitCommandFailed` redacts its stderr with `redact_credentials`,
+        # whose userinfo class excludes a newline on purpose (round 14: a
+        # pattern cannot tell a URL's own newline from a diagnostic's), so a
+        # LEGACY row holding `https://user:secret\n@host/repo` could still ride
+        # the failure text git echoes back (Copilot review of openDox-code#26,
+        # round 17, suppressed). This path does not need a pattern: it KNOWS
+        # the destination, so the literal value is removed before the text is
+        # exposed.
         raise RepositoryActRefused(
             f"the push to {redact_remote_url(row.remote_url)} failed "
-            f"({failed}); the project is unchanged and is still served from "
-            f"{row.location}") from failed
+            f"({_without(str(failed), row.remote_url)}); the project is "
+            f"unchanged and is still served from {row.location}") from failed
     return row.remote_url

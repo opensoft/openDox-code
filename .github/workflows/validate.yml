@@ -532,10 +532,30 @@ jobs:
       #              ledger narrowing interpolates a role name as SYNTAX,
       #              so it must be a plain identifier; the runbook says so
       #              now and a case pins the statement to both refusals).
-      #              THE CURRENT FIGURE ON `build/3-5-runtime`, which this
-      #              branch carries by merge; THAT PR's description states
-      #              it at this same commit, and `pytest -q tests_runtime/`
-      #              is 232 there.
+      #              `pytest -q tests_runtime/` is 232 here.
+      #  132 passed  at `build/3-5-runtime` `c9009634` — UNCHANGED, and the
+      #              same five modules: round FIFTEEN's one finding is in
+      #              the DB-backed job, where the case that measures it
+      #              lives. `bootstrap_ledger` runs before `applied()` and
+      #              its `create table` is unqualified, so on a connection
+      #              whose selected schema is gone the ledger was created in
+      #              `public` and COMMITTED before round fourteen's guard
+      #              refused one call later — a fail-closed run that had
+      #              already mutated another schema. The guard is asked
+      #              before the DDL now. `pytest -q tests_runtime/` is 232
+      #              here.
+      #  132 passed  at `build/3-5-runtime` `541b0329` — UNCHANGED again,
+      #              and for the same reason: round fifteen's four
+      #              SUPPRESSED comments are all measured in the DB-backed
+      #              job. A concurrent rotation refused a valid token (the
+      #              miss cooldown bounds FETCHES and was bounding ANSWERS);
+      #              the access preflight asked about every table in the
+      #              schema and not about the schema's own `usage`; and the
+      #              page budget bounded what the application received
+      #              rather than what Postgres read. THE CURRENT FIGURE ON
+      #              `build/3-5-runtime`, which this branch carries by
+      #              merge; THAT PR's description states it at this same
+      #              commit, and `pytest -q tests_runtime/` is 235 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
