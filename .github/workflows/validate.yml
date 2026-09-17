@@ -657,9 +657,24 @@ jobs:
       #              before `load_settings` looked at the port. Exec form for
       #              the first; the second reads the value from `os.environ`
       #              and holds no interpolation — MEASURED with an injected
-      #              value: exit 1, `ValueError`, no marker. THE CURRENT
-      #              FIGURE; the PR description states it at this same
-      #              commit, and `pytest -q tests_runtime/` is 249 here.
+      #              value: exit 1, `ValueError`, no marker. SUPERSEDED by
+      #              the entry below; `pytest -q tests_runtime/` was 249
+      #              there.
+      #  144 passed  at `build/3-5-runtime` `65376475` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-FOUR, which is round 22's
+      #              own guard in three places. A broker URL carries a
+      #              credential in its QUERY as surely as in its userinfo and
+      #              that guard read only the authority; `urlsplit` RAISES
+      #              `ValueError` for a malformed URL from inside the
+      #              function that owes a `ConfigurationError` naming the
+      #              variable (MEASURED on python 3.12 with an unmatched IPv6
+      #              bracket); and `runtime_pg_role` is an edit the
+      #              managed-database overlay cannot make, so the Job would
+      #              narrow the bundled role while the real served role keeps
+      #              the ledger. THE CURRENT FIGURE; the PR description
+      #              states it at this same commit, and `pytest -q
+      #              tests_runtime/` is 251 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
