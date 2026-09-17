@@ -30,9 +30,25 @@ pytestmark = pytest.mark.skipif(
 ACTOR = "Student One"
 
 
+#: The same hermetic environment `test_local_git_adapter.py` gives every `git`
+#: it runs, and for the same reason: a case that takes its committer identity
+#: (or any other setting) from the developer's GLOBAL config passes on a
+#: workstation and fails on a runner, which has none. Both files point the
+#: config files at nothing and supply an identity, so the two see one git.
+_GIT_ENV = {
+    **os.environ,
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+    "GIT_AUTHOR_NAME": "openDox tests",
+    "GIT_AUTHOR_EMAIL": "tests@opendox.invalid",
+    "GIT_COMMITTER_NAME": "openDox tests",
+    "GIT_COMMITTER_EMAIL": "tests@opendox.invalid",
+}
+
+
 def _git(root: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
-                          text=True, check=True).stdout.strip()
+                          text=True, check=True, env=_GIT_ENV).stdout.strip()
 
 
 @pytest.fixture()
@@ -1302,3 +1318,105 @@ def test_a_legacy_helper_row_is_refused_before_the_push_runs_it(
     assert "runs a command" in str(caught.value)
     assert not marker.exists(), (
         "the remote helper was executed by this runtime's own push")
+
+
+# -- Copilot's twelfth round on #26, continued -------------------------------
+
+
+def test_a_remote_carrying_only_a_push_url_is_still_repairable(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """The one repair this act offers has to reach the state that needs it.
+
+    A repository carrying `remote.origin.pushurl` and NO `remote.origin.url` —
+    legacy, or hand-edited — is exactly the state `push_to_remote` refuses, so
+    `attach_remote` must be able to settle it (Copilot review of
+    openDox-code#26, round 12, suppressed).
+
+    THE FINDING'S PREMISE IS VERSION-DEPENDENT, AND IT IS MEASURED HERE RATHER
+    THAN ASSUMED: on git 2.43.0 `git remote get-url origin` in that state exits
+    0 and prints the literal `origin` (`git remote -v` shows an empty fetch
+    URL), so the repair branch was already taken. A git that exits non-zero
+    instead would have fallen through to `remote add`, which fails ("remote
+    origin already exists"). The act now asks the CONFIG SECTION, so the repair
+    does not depend on which of the two answers the local git gives — and this
+    case asserts the OUTCOME, which is the same either way.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    stale = tmp_path / "stale.git"
+    _git(created.location, "config", "remote.origin.pushurl", str(stale))
+    assert _git(created.location, "config", "--get-regexp",
+                "^remote[.]origin[.]"), "the premise is gone"
+
+    destination = tmp_path / "destination.git"
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+
+    assert _git(created.location, "remote", "get-url",
+                "origin") == str(destination)
+    assert _git(created.location, "remote", "get-url", "--push", "--all",
+                "origin") == str(destination), (
+        "the stale push URL survived the one repair this act offers")
+
+
+def test_a_push_destination_rewritten_by_config_is_refused_not_followed(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`insteadOf` / `pushInsteadOf`, and the finding about them is FALSE here.
+
+    The review's claim was that a rewrite can make the INSPECTED values equal
+    the map row while `git push` sends the corpus somewhere else. Measured on
+    git 2.43.0, the opposite is true — `get-url` and `get-url --push` are
+    themselves rewritten, so a rewrite makes them DIFFER from the map and this
+    act refuses:
+
+        remote.origin.url            = <destination>
+        url.<other>.insteadOf        = <destination's prefix>
+        git remote get-url origin    -> <other>          (rewritten)
+        git remote get-url --push --all origin -> <other> (rewritten)
+        git push origin …            -> "failed to push some refs to '<other>'"
+
+    The last two lines are the same value, which is the whole point: what this
+    act inspects IS where the push would go. This case pins that, because a
+    property held by git's behaviour is one a later git could change.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "destination.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(destination)],
+                   check=True, capture_output=True, env=_GIT_ENV)
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+    # A push with no rewrite in force is the control: it works.
+    assert act.push_to_remote(store, project_id=project.id) == str(destination)
+
+    elsewhere = tmp_path / "elsewhere.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(elsewhere)],
+                   check=True, capture_output=True, env=_GIT_ENV)
+    _git(created.location, "config", f"url.{elsewhere}.pushInsteadOf",
+         str(destination))
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "would push to" in str(caught.value)
+    assert str(elsewhere) in str(caught.value), (
+        "the refusal does not name the destination the rewrite would have used")
+    # AND NOTHING WENT THERE.
+    assert subprocess.run(["git", "-C", str(elsewhere), "rev-parse",
+                           "--verify", "HEAD"], capture_output=True,
+                          env=_GIT_ENV).returncode != 0
+
+
+def test_the_helper_transport_refusal_names_the_helper_it_refuses(
+) -> None:
+    """`evil::anything` was refused with a message about `ext::` and `fd::`.
+
+    The predicate covers every `<name>::<address>` form — round 12's own fix —
+    and the message named the two spellings git ships, so an owner attaching
+    `evil::anything` got a diagnosis about a transport they had not used
+    (Copilot review of openDox-code#26, round 12, suppressed twice).
+    """
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.refuse_command_executing_remote("evil::anything")
+    message = str(caught.value)
+    assert "`evil::`" in message and "git-remote-evil" in message, message
+    assert "<name>::<address>" in message, (
+        "the message does not describe the general form the predicate matches")

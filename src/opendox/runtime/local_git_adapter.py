@@ -553,6 +553,12 @@ class LocalGitCorpus:
         # it into a 500 (Copilot review of openDox-code#26, round 12,
         # suppressed). A missing path and an unreadable one are still different
         # answers.
+        #
+        # AND `RuntimeError`, WHICH IS THE LOOP CASE ITSELF. MEASURED on python
+        # 3.12: `Path.resolve()` does not let `ELOOP` through — it raises
+        # `RuntimeError("Symlink loop from …")` — so the handler this comment
+        # describes did not catch the example it names. Found by writing the
+        # test for the sibling fix in `repository_act.repository_location`.
         try:
             if not location.exists():
                 raise _refuse(CORPUS_ABSENT, ref.location,
@@ -578,7 +584,7 @@ class LocalGitCorpus:
                               "the location is a file, not a repository "
                               "directory")
             resolved_location = location.resolve()
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             raise _refuse(CORPUS_UNREADABLE, ref.location,
                           f"the location could not be read ({exc.__class__.__name__})"
                           ) from exc
@@ -1145,7 +1151,7 @@ class LocalGitCorpus:
         named = answer.stdout.decode("utf-8", "surrogateescape").strip()
         try:
             return Path(named).resolve()
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             raise _refuse(CORPUS_UNREADABLE, subject,
                           f"the repository root {named} could not be read "
                           f"({exc.__class__.__name__})") from exc
@@ -1192,7 +1198,7 @@ class LocalGitCorpus:
         # Absent and unreadable stay different answers.
         try:
             present = Path(corpus.location).exists()
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             raise _refuse(
                 CORPUS_UNREADABLE, corpus.location,
                 f"the location could not be read ({exc.__class__.__name__})"

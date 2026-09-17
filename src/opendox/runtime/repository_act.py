@@ -263,10 +263,14 @@ def refuse_command_executing_remote(remote_url: str) -> None:
     before this rule existed.
     """
     if _COMMAND_TRANSPORT.match(remote_url.strip()):
+        helper = remote_url.strip().split("::", 1)[0]
         raise RepositoryActRefused(
-            "the remote URL names a transport that runs a command "
-            "(`ext::` or `fd::`). This act attaches a destination, never an "
-            "executable; use a URL or a filesystem path.")
+            f"the remote URL names a transport that runs a command: "
+            f"`{helper}::` makes git resolve and execute `git-remote-{helper}` "
+            "from PATH. Every `<name>::<address>` form does — `ext::` and "
+            "`fd::` are only the two that ship with git — and this act "
+            "attaches a destination, never an executable; use a URL or a "
+            "filesystem path.")
 
 __all__ = [
     "ADAPTER_NAME",
@@ -320,7 +324,27 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
     # repository would look absent or, worse, be the wrong tree (Copilot review
     # of openDox-code#26). `resolve()` also collapses `..` and a symlinked
     # root, so the row records one canonical name for one directory.
-    return (Path(root).expanduser().resolve() / project_id)
+    #
+    # AND IT IS TRANSLATED. `expanduser()` and `resolve()` both raise for a
+    # root that cannot be read — a symlink loop, an ancestor that is not
+    # searchable, a `~` with no home — and this line is reached by
+    # `create_repository` before anything else, so a misconfigured
+    # `OPENDOX_PROJECT_REPOSITORY_ROOT` reached the API as a 500 instead of the
+    # named refusal this act promises for every reason it will not create a
+    # repository (Copilot review of openDox-code#26, round 12, suppressed).
+    # `RuntimeError` AS WELL AS `OSError`, and it is not defensive: MEASURED on
+    # python 3.12, `Path.resolve()` turns a symlink LOOP into
+    # `RuntimeError("Symlink loop from …")` rather than letting `ELOOP`
+    # through, so an `except OSError` would have missed the very case this
+    # translation is for. (The same measurement corrected the adapter's
+    # `resolve`, which had the identical handler.)
+    try:
+        return (Path(root).expanduser().resolve() / project_id)
+    except (OSError, RuntimeError) as exc:
+        raise RepositoryActRefused(
+            f"the configured repository root could not be resolved "
+            f"({type(exc).__name__}); set OPENDOX_PROJECT_REPOSITORY_ROOT to a "
+            "directory this process can read") from exc
 
 
 def refuse_unusable_location(location: Path) -> None:
@@ -339,19 +363,39 @@ def refuse_unusable_location(location: Path) -> None:
     # tree, which is precisely the adoption this function exists to refuse
     # (Copilot review of openDox-code#26). `lexists` so a dangling one is
     # refused too rather than silently replaced.
-    if location.is_symlink() or (os.path.lexists(location)
-                                 and not location.exists()):
+    # AND THE PROBES THEMSELVES ARE TRANSLATED. `is_symlink()`, `lexists()`
+    # and `exists()` all raise `PermissionError` for a path whose parent has
+    # stopped being searchable, and `OSError` for a symlink loop — and they sat
+    # OUTSIDE every handler, so a location this act could not inspect escaped
+    # as a raw filesystem error where both callers translate only
+    # `RepositoryActRefused` (Copilot review of openDox-code#26, round 12,
+    # suppressed twice). The whole preflight asks its questions inside one
+    # translation now, and a path that cannot be inspected is refused for
+    # exactly the reason the emptiness check below is: this act cannot tell an
+    # empty directory from somebody else's history.
+    try:
+        linked = location.is_symlink() or (os.path.lexists(location)
+                                           and not location.exists())
+        present = location.exists()
+        a_directory = location.is_dir()
+    except (OSError, RuntimeError) as exc:
+        raise RepositoryActRefused(
+            f"{location} could not be inspected ({type(exc).__name__}); this "
+            "act will not create a repository at a path it cannot read, "
+            "because it cannot tell an empty directory from somebody else's "
+            "history") from exc
+    if linked:
         raise RepositoryActRefused(
             f"{location} is a symbolic link. A repository is created at a real "
             "directory this act owns; writing through a link would put the "
             "project's history wherever the link points, which is a directory "
             "nobody accounted for.")
-    if location.exists() and not location.is_dir():
+    if present and not a_directory:
         raise RepositoryActRefused(
             f"{location} exists and is not a directory, so this project's "
             "repository cannot be created there. Remove it, or point "
             "OPENDOX_PROJECT_REPOSITORY_ROOT somewhere else.")
-    if location.is_dir():
+    if a_directory:
         # THE EMPTINESS CHECK IS INSIDE THE ERROR TRANSLATION. `iterdir()` on a
         # directory the service can `stat` but not READ raises
         # `PermissionError`, and this call sat outside every `try`, so it
@@ -488,7 +532,7 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
             # link or a directory (round 8). `dir_fd` means the lookup happens
             # in the directory this call holds rather than by re-walking a path
             # another process can re-point (round 12).
-            parent = os.open(location.parent, os.O_RDONLY | os.O_DIRECTORY)
+            parent = _open_no_follow_chain(location.parent)
             try:
                 leaf = location.name
                 try:
@@ -538,8 +582,22 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
         # written; this comparison decides whether the map row's `location`
         # will find it again, and a path re-pointed underneath the act is
         # refused rather than recorded.
-        created = os.fstat(owned)
-        seen = os.stat(location)
+        # AND THIS COMPARISON'S OWN FAILURE IS NAMED. `os.stat(location)`
+        # raises `FileNotFoundError` for a path removed under the act and
+        # `PermissionError` for an ancestor that stopped being searchable, and
+        # it sat in a `try/finally` with no `OSError` handler — so the one
+        # check that decides whether the map row will find this directory again
+        # escaped as a 500 (Copilot review of openDox-code#26, round 12,
+        # suppressed twice). A path that cannot be re-examined is refused for
+        # the same reason a path that changed is.
+        try:
+            created = os.fstat(owned)
+            seen = os.stat(location)
+        except OSError as exc:
+            raise RepositoryActRefused(
+                f"{location} could not be re-examined after it was created "
+                f"({type(exc).__name__}); the map row must name a directory "
+                "this act can still find, so nothing is written") from exc
         if (created.st_dev, created.st_ino) != (seen.st_dev, seen.st_ino):
             raise RepositoryActRefused(
                 f"{location} is not the directory this act created; the path "
@@ -558,6 +616,46 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
                                 actor=actor, branch=branch)
     finally:
         os.close(owned)
+
+
+def _open_no_follow_chain(directory: Path) -> int:
+    """A descriptor for `directory`, opened COMPONENT BY COMPONENT, no-follow.
+
+    The leaf was created relative to a held parent descriptor, and that
+    descriptor was obtained by opening `location.parent` BY PATHNAME — which
+    follows every symlink in it. A concurrent replacement of the parent (or of
+    any ancestor) with a link therefore made the descriptor, `git init`, and
+    the later `stat(location)` all name a directory outside the canonical
+    repository root, and the inode comparison compared that place with itself
+    and passed (Copilot review of openDox-code#26, round 12, twice). Opening
+    each component with `O_NOFOLLOW` refuses the substitution instead: a
+    component that has become a link fails with `ELOOP`, which the caller's
+    handler turns into the act's named refusal.
+
+    THIS REFUSES NO LEGITIMATE SETUP, and that is a fact about where the path
+    comes from rather than an assumption: `repository_location` already returns
+    a `resolve()`d path, so an operator's symlinked root — `/var` on a BSD, a
+    symlinked mount — is already collapsed before this is reached, and a link
+    appearing in the chain afterwards is exactly the race this refuses. A
+    caller that passes an unresolved path of its own (this function is public)
+    gets the same rule applied to what it asked for.
+
+    The descriptor returned is the DIRECTORY ITSELF and not its name, so every
+    lookup the caller then makes with `dir_fd=` happens in the object this walk
+    verified.
+    """
+    walked = Path(os.path.abspath(directory))
+    handle = os.open(walked.anchor or os.sep, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in walked.relative_to(walked.anchor or os.sep).parts:
+            nxt = os.open(component, os.O_RDONLY | os.O_DIRECTORY
+                          | getattr(os, "O_NOFOLLOW", 0), dir_fd=handle)
+            os.close(handle)
+            handle = nxt
+    except BaseException:
+        os.close(handle)
+        raise
+    return handle
 
 
 def _runner_bound_to(handle: int, location: Path,
@@ -686,7 +784,22 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
     git = GitRunner(Path(row.location), executable)
     try:
         existing = git.run("remote", "get-url", remote_name)
-        if existing.returncode == 0:
+        # AND THE REMOTE'S EXISTENCE IS ASKED OF THE CONFIG SECTION, not of
+        # `get-url` alone. A repository carrying `remote.origin.pushurl` and no
+        # `remote.origin.url` — legacy, or hand-edited — is the case, and what
+        # git does with it is version-dependent, so this does not depend on the
+        # answer: MEASURED on git 2.43.0, `git remote get-url origin` there
+        # exits 0 and prints the literal `origin` (`git remote -v` shows the
+        # fetch URL empty), so the repair branch was already taken and
+        # `--replace-all` created the missing key. Where a git exits non-zero
+        # instead, this used to fall through to `remote add`, which fails
+        # ("remote origin already exists") and left the one repair this act
+        # offers unable to reach the one state that needs it (Copilot review of
+        # openDox-code#26, round 12, suppressed). `--get-regexp` answers "is
+        # there a remote here" from the config itself.
+        section = git.run("config", "--get-regexp",
+                          "^remote\\." + re.escape(remote_name) + "\\.")
+        if existing.returncode == 0 or section.returncode == 0:
             # `config --replace-all`, NOT `remote set-url`. Git permits several
             # `remote.origin.url` entries, and `set-url` on a remote that has
             # them does not replace the first — measured on git 2.43.0, it

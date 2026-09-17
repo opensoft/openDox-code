@@ -1848,3 +1848,93 @@ def test_a_temporary_index_that_cannot_be_removed_refuses_by_name(
                            basis_revision=str(corpus.revision))
     assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
     assert "index" in caught.value.refusal.detail
+
+
+def test_a_parent_replaced_by_a_symlink_cannot_move_the_repository(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The leaf was created relative to a parent opened BY PATHNAME.
+
+    Which follows every symlink in it. A concurrent replacement of
+    `location.parent` — or of any ancestor — with a link therefore made the
+    held descriptor, `git init` and the later `stat(location)` all name a
+    directory outside the canonical repository root, and the inode comparison
+    compared that place with itself and passed (Copilot review of
+    openDox-code#26, round 12, twice). The parent chain is opened component by
+    component with `O_NOFOLLOW` now, so the substitution is refused instead of
+    followed.
+
+    The race is made deterministic by performing the swap in
+    `refuse_unusable_location`, which the act calls immediately before the
+    open. Against the old shape this test fails: the act SUCCEEDS and the
+    repository is initialized inside the decoy.
+    """
+    from opendox.runtime import repository_act
+
+    root = tmp_path / "canonical"
+    root.mkdir()
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    location = root / "project-1"
+    real_preflight = repository_act.refuse_unusable_location
+    swapped = {"done": False}
+
+    def _swap_the_parent(path: Path) -> None:
+        real_preflight(path)
+        if not swapped["done"]:
+            swapped["done"] = True
+            root.rename(tmp_path / "canonical-moved")
+            root.symlink_to(decoy, target_is_directory=True)
+
+    monkeypatch.setattr(repository_act, "refuse_unusable_location",
+                        _swap_the_parent)
+    with pytest.raises(repository_act.RepositoryActRefused):
+        repository_act.initialize_repository(location, project_id="project-1",
+                                             actor=ACTOR)
+    assert swapped["done"], "the race this test drives did not happen"
+    assert list(decoy.iterdir()) == [], (
+        "the repository was initialized through the link, in a directory "
+        "nobody named")
+
+
+def test_a_root_that_cannot_be_resolved_is_a_named_refusal(
+        tmp_path: Path) -> None:
+    """`expanduser()`/`resolve()` raise, and this is the act's FIRST line.
+
+    A misconfigured `OPENDOX_PROJECT_REPOSITORY_ROOT` — a symlink loop, an
+    ancestor that is not searchable — reached the API as a 500 rather than the
+    named refusal this act promises for every reason it will not create a
+    repository (Copilot review of openDox-code#26, round 12, suppressed).
+    """
+    from opendox.runtime import repository_act
+
+    loop = tmp_path / "loop"
+    loop.symlink_to(tmp_path / "loop-2")
+    (tmp_path / "loop-2").symlink_to(loop)
+    with pytest.raises(repository_act.RepositoryActRefused) as caught:
+        repository_act.repository_location(loop, "project-1")
+    assert "could not be resolved" in str(caught.value)
+
+
+@not_root
+def test_a_location_that_cannot_be_inspected_is_a_named_refusal(
+        tmp_path: Path) -> None:
+    """The preflight's own probes sat outside every handler.
+
+    `is_symlink()`, `lexists()` and `exists()` all raise `PermissionError` for
+    a path whose parent is not searchable, and both callers translate only
+    `RepositoryActRefused` — so a location this act could not inspect escaped
+    as a raw filesystem error (Copilot review of openDox-code#26, round 12,
+    suppressed twice).
+    """
+    from opendox.runtime import repository_act
+
+    parent = tmp_path / "unsearchable"
+    parent.mkdir()
+    location = parent / "project-1"
+    parent.chmod(0o000)
+    try:
+        with pytest.raises(repository_act.RepositoryActRefused) as caught:
+            repository_act.refuse_unusable_location(location)
+        assert "could not be inspected" in str(caught.value)
+    finally:
+        parent.chmod(0o755)
