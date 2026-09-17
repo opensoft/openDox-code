@@ -79,6 +79,7 @@ from opendox.runtime.local_git_adapter import (
     GitCommandFailed,
     GitRunner,
     carries_a_control_character,
+    decoded_ref_name,
     git_available,
     git_identity,
     names_a_secret_parameter,
@@ -1128,7 +1129,7 @@ def _pushable_branch(git: GitRunner, location: str) -> str:
     # wrong in a way a 500 is not.) `surrogateescape` round-trips through
     # `subprocess`, which encodes arguments the same way (Copilot review of
     # openDox-code#26, round 17).
-    ref = symbolic.stdout.decode("utf-8", "surrogateescape").strip()
+    ref = decoded_ref_name(symbolic.stdout)
     if not ref.startswith("refs/heads/"):
         raise RepositoryActRefused(
             f"HEAD in {location} names {ref!r}, which is not a branch")

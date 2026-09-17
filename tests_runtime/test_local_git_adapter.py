@@ -2987,3 +2987,109 @@ def test_a_refused_project_id_is_not_echoed_back_in_the_refusal() -> None:
     # path is still the root joined with it.
     usable = repository_location("/srv/projects", "9f2c-a-real-id")
     assert usable == Path("/srv/projects/9f2c-a-real-id")
+
+
+def test_the_subcommand_is_the_same_answer_for_the_guard_and_the_message(
+        tmp_path: Path) -> None:
+    """`-c <name>=<value>` opens the push, and both readers of it were wrong.
+
+    `repository_act` pushes with `("-c", "protocol.ext.allow=never", "push",
+    …)`. Two places ask which of those is the subcommand, and each asked a
+    different question:
+
+    * `GitCommandFailed` took `args[0]`, so a failed push reported itself as
+      `git -c exited 128` — a refusal that names no operation (Copilot review
+      of openDox-code#26, round 19).
+    * `_argv` took the first argument not starting with `-`, which for this
+      vector is the `-c` VALUE, `protocol.ext.allow=never`. It is not an
+      identifier, so `-c alias.<subcommand>=` was silently NOT added, and round
+      18's guard was absent on precisely the call that reaches a remote. The
+      review found the first; the second was under it.
+
+    MEASURED against the previous head, on this exact vector:
+
+        _argv(push)  ->  no `alias.` option at all
+        str(failed)  ->  "git -c exited 128: fatal: remote gone"
+
+    `subcommand_of` is the one rule now, and this pins both readers to it.
+    """
+    import inspect
+    import subprocess as _subprocess
+
+    from opendox.runtime import repository_act as act
+
+    vector = ("-c", "protocol.ext.allow=never", "push",
+              "--receive-pack=git-receive-pack", "origin", "main")
+    assert lga.subcommand_of(vector) == "push"
+
+    argv = lga.GitRunner(tmp_path)._argv(vector)
+    assert "alias.push=" in argv, argv
+
+    failed = lga.GitCommandFailed(vector, _subprocess.CompletedProcess(
+        args=[], returncode=128, stdout=b"", stderr=b"fatal: remote gone"))
+    assert str(failed).startswith("git push exited 128"), str(failed)
+
+    # THE VECTOR IS THE ACT'S OWN, not one invented here: if the push stops
+    # opening with `-c`, this case is measuring a shape that no longer exists.
+    source = inspect.getsource(act._push_to_remote_with)
+    assert 'out_bounded("-c", "protocol.ext.allow=never",' in source, (
+        "the push no longer opens with a `-c` pair; re-derive this case")
+
+    # And an ordinary vector is unchanged by the new rule.
+    assert lga.subcommand_of(("rev-parse", "--git-dir")) == "rev-parse"
+    assert lga.subcommand_of(("--literal-pathspecs", "status")) == "status"
+    assert lga.subcommand_of(()) == ""
+
+
+def test_a_branch_name_ending_in_non_ascii_whitespace_is_not_trimmed(
+        adapter, tmp_path: Path) -> None:
+    """`.strip()` removed more than git wrote, in all three places that decode.
+
+    A ref name is bytes; `git check-ref-format` forbids ASCII control
+    characters, which is `\\n` and `\\r` — and nothing else `str.strip()`
+    removes. `"\\xa0".isspace()` is True in python, so a branch legally named
+    `feature\\xa0` was trimmed to `feature`: the write path would advance a
+    DIFFERENT ref and the push would target one that does not exist (Copilot
+    review of openDox-code#26, round 19, which named the act; the adapter had
+    it twice).
+
+    MEASURED: git 2.43.0 accepts the name (`check-ref-format --branch` exits 0)
+    and `symbolic-ref HEAD` writes `refs/heads/feature\\302\\240\\n`.
+    Against the previous head `_pushable_branch` answered `'feature'` for
+    that repository — a branch that does not exist.
+    """
+    from opendox.runtime.repository_act import _pushable_branch
+
+    branch = "feature "
+    location = _repository_at(tmp_path / "corpus", "corpus")
+    _git(location, "branch", "-m", branch)
+
+    assert lga.decoded_ref_name(b"refs/heads/" + branch.encode() + b"\n") == \
+        "refs/heads/" + branch
+    assert _pushable_branch(lga.GitRunner(location), str(location)) == branch
+
+    # The adapter agrees, through the path that decides what a write advances.
+    corpus = _resolve(adapter, location)
+    receipt = adapter.write_back(
+        corpus, ca.DocumentId("corpus", "n.md"), b"n\n", actor="Writer",
+        basis_revision=corpus.revision,
+        reason="a branch with a non-breaking space")
+    assert receipt.correlation_id
+    head = subprocess.run(["git", "-C", str(location), "symbolic-ref", "HEAD"],
+                          capture_output=True, env=_GIT_ENV).stdout
+    assert head.decode("utf-8", "surrogateescape").rstrip("\r\n") == \
+        "refs/heads/" + branch, head
+    # And the write landed on THAT branch, not on a trimmed neighbour: the
+    # commit it made is the one `refs/heads/feature\xa0` now points at, and
+    # the trimmed name does not exist at all.
+    assert subprocess.run(
+        ["git", "-C", str(location), "rev-parse", "--verify", "--quiet",
+         "refs/heads/" + branch], capture_output=True,
+        env=_GIT_ENV).returncode == 0
+    assert subprocess.run(
+        ["git", "-C", str(location), "rev-parse", "--verify", "--quiet",
+         "refs/heads/feature"], capture_output=True,
+        env=_GIT_ENV).returncode != 0, (
+        "a branch this write invented by trimming the name it was given")
+    listed = adapter.list_documents(_resolve(adapter, location))
+    assert "n.md" in {document.key for document in listed}, listed

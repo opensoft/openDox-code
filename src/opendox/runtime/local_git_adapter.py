@@ -244,6 +244,49 @@ _GIT_ENVIRONMENT_OVERRIDES = frozenset({
 })
 
 
+def subcommand_of(args: tuple[str, ...] | list[str]) -> str:
+    """The git SUBCOMMAND in a vector that may open with `-c <name>=<value>`.
+
+    ONE RULE, IN THE TWO PLACES THAT ASK. The first cut asked two different
+    questions and both were wrong for the same vector, `("-c",
+    "protocol.ext.allow=never", "push", …)`, which is how this act pushes:
+
+    * `GitCommandFailed` took `args[0]`, so every failed push reported itself
+      as `git -c exited 128` and the refusal an operator reads named no
+      operation at all (Copilot review of openDox-code#26, round 19).
+    * `GitRunner._argv` took the first argument not starting with `-`, which is
+      the `-c` VALUE — `protocol.ext.allow=never`, not a subcommand — so the
+      alias guard round 18 added was silently dropped on exactly the call that
+      reaches a remote. The reviewer found the first; the second was under it.
+
+    A `-c` consumes the argument after it, and every other option is skipped.
+    """
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg == "-c":
+            skip = True
+        elif not arg.startswith("-"):
+            return arg
+    return ""
+
+
+def decoded_ref_name(stdout: bytes) -> str:
+    """`symbolic-ref`'s answer as a ref NAME: the bytes, minus the newline.
+
+    `.strip()` REMOVED MORE THAN GIT WROTE. A ref name is bytes with only a
+    short list of forbidden characters, and `git check-ref-format` forbids
+    ASCII control characters — which is `\n` and `\r`, and nothing else that
+    `str.strip()` removes. `"\xa0".isspace()` is True in python, so a branch
+    legally named `feature\xa0` was trimmed to `feature`: the write path then
+    advanced a DIFFERENT ref, and the push targeted a ref that does not exist
+    (Copilot review of openDox-code#26, round 19). git writes exactly one
+    trailing newline, so exactly that is what comes off.
+    """
+    return stdout.decode("utf-8", "surrogateescape").rstrip("\r\n")
+
+
 def _sanitized_git_environment() -> dict[str, str]:
     """`os.environ` without the repository-selection and config overrides."""
     return {name: value for name, value in os.environ.items()
@@ -389,7 +432,7 @@ class GitRunner:
         alias.<subcommand>=` makes that a property of THIS call rather than of
         a rule a later git could relax, and costs one option.
         """
-        subcommand = next((arg for arg in args if not arg.startswith("-")), "")
+        subcommand = subcommand_of(args)
         alias = ([] if not subcommand.replace("-", "").isalnum()
                  else ["-c", f"alias.{subcommand}="])
         return [self.executable, "-C", str(self.root),
@@ -787,7 +830,7 @@ class GitCommandFailed(Exception):
                  completed: subprocess.CompletedProcess[bytes]) -> None:
         self.args_run = args
         self.completed = completed
-        subcommand = args[0] if args else "(none)"
+        subcommand = subcommand_of(args) or "(none)"
         stderr = completed.stderr.decode("utf-8", "replace").strip()
         super().__init__(
             f"git {subcommand} exited {completed.returncode}: "
@@ -1839,7 +1882,7 @@ class LocalGitCorpus:
             # `UnicodeDecodeError` out of a function that owes a refusal
             # (Copilot review of openDox-code#26, round 17). Same round trip
             # the pathnames get.
-            ref = symbolic.stdout.decode("utf-8", "surrogateescape").strip()
+            ref = decoded_ref_name(symbolic.stdout)
             if self._probe(git, "show-ref", "--verify", "--quiet", ref,
                            kind=CORPUS_UNREADABLE,
                            subject=subject).returncode != 0:
@@ -1901,7 +1944,7 @@ class LocalGitCorpus:
             # `UnicodeDecodeError` out of a function that owes a refusal
             # (Copilot review of openDox-code#26, round 17). Same round trip
             # the pathnames get.
-            ref = symbolic.stdout.decode("utf-8", "surrogateescape").strip()
+            ref = decoded_ref_name(symbolic.stdout)
             # A BRANCH, and not merely a symbolic ref. `symbolic-ref HEAD` can
             # legally name a tag or a remote-tracking ref, and `update-ref`
             # would then have advanced THAT — a write moving a tag instead of a
