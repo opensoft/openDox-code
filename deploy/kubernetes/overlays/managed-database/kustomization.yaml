@@ -63,10 +63,27 @@ configMapGenerator:
       disableNameSuffixHash: true
     literals:
       - migration_wait_host=
+  - name: opendox-oidc
+    behavior: merge
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - oidc_issuer=https://keycloak.dev.example/realms/opendox
+      - oidc_audience=opendox-runtime
 
-# The broker and the image are the environment's, exactly as in `dev`: this
-# overlay changes the DATABASE topology and nothing else, so a real environment
-# layers its own values over it or copies these three blocks.
+# AND THE BROKER, BECAUSE THE RUNBOOK BUILDS THIS OVERLAY DIRECTLY. The base's
+# `opendox-oidc` ConfigMap deliberately leaves `oidc_issuer` and
+# `oidc_audience` EMPTY — they are an environment's facts, not a repository's —
+# so an overlay that supplies neither renders a Deployment that fails
+# `load_settings` before it serves. `overlays/dev` carries a worked example for
+# exactly that reason and this one had none, while the runbook told an operator
+# to apply it (Copilot review of openDox-code#25, round 22). The values below
+# are the same worked example, and a real environment replaces them — it is the
+# `dev` overlay's own sentence, and it is the reason this file is a worked
+# example rather than a deployment.
+
+# The image is the environment's, exactly as in `dev`: an `newTag:` here pins
+# nothing and says so, and a real environment replaces it with `digest:`.
 images:
   - name: ghcr.io/opensoft/opendox-runtime
     newTag: "0.0.0"

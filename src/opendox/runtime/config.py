@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import re
+import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -183,9 +184,14 @@ class RuntimeSettings:
             "RuntimeSettings(database_url=<redacted>, "
             "migration_database_url="
             f"{'<redacted>' if self.migration_database_url else 'None'}, "
-            f"oidc_issuer={self.oidc_issuer!r}, "
+            # REDACTED TOO, and not because `load_settings` allows userinfo
+            # here — it refuses it. A `RuntimeSettings` built by hand, in a
+            # test or by a future caller, does not go through that door, and
+            # this method's whole promise is about what reaches a log line
+            # (Copilot review of openDox-code#25, round 22).
+            f"oidc_issuer={redacted_url(self.oidc_issuer)!r}, "
             f"oidc_audience={self.oidc_audience!r}, "
-            f"oidc_jwks_url={self.oidc_jwks_url!r}, "
+            f"oidc_jwks_url={redacted_url(self.oidc_jwks_url)!r}, "
             f"oidc_algorithms={self.oidc_algorithms!r}, "
             f"oidc_jwks_ttl_seconds={self.oidc_jwks_ttl_seconds!r}, "
             f"oidc_leeway_seconds={self.oidc_leeway_seconds!r}, "
@@ -212,6 +218,59 @@ class RuntimeSettings:
     def discovery_url(self) -> str:
         """The issuer's discovery document, for `opendox runtime status`."""
         return self.oidc_issuer.rstrip("/") + "/.well-known/openid-configuration"
+
+
+def redacted_url(value: str | None) -> str | None:
+    """A URL with any userinfo replaced, for evidence and for `repr`.
+
+    STDLIB ONLY, and deliberately small: this module is on the hermetic
+    import-weight list, so it cannot reach for `local_git_adapter`'s redactor —
+    and it does not need the general one. The values here are broker endpoints
+    whose only credential-bearing shape is userinfo, which `urlsplit` names
+    exactly (Copilot review of openDox-code#25, round 22).
+    """
+    if not value:
+        return value
+    split = urllib.parse.urlsplit(value)
+    if "@" not in split.netloc:
+        return value
+    host = split.netloc.rsplit("@", 1)[1]
+    return urllib.parse.urlunsplit(
+        (split.scheme, "<redacted>@" + host, split.path, split.query,
+         split.fragment))
+
+
+def _broker_url(env: Mapping[str, str], setting: Setting, *,
+                required: bool) -> str | None:
+    """A broker endpoint, REFUSED when it carries URL userinfo.
+
+    `oidc_issuer` and an explicit `oidc_jwks_url` are PUBLIC endpoints: the
+    issuer is a value tokens are compared against and the key set is fetched
+    unauthenticated. `load_settings` accepted any string, so
+    `https://svc:pw@broker/realms/x` was a legal configuration — and then
+    `repr(settings)` printed it, `opendox-runtime runtime status` printed the
+    derived JWKS URL and the discovery URL built from it, and this module's
+    promise that a credential never reaches a log was false for a value that
+    had never been a DSN (Copilot review of openDox-code#25, round 22, in both
+    places).
+
+    REFUSED RATHER THAN REDACTED, and that is the choice: redaction would make
+    the evidence safe and leave the configuration wrong — a broker that needs
+    userinfo to serve its key set is not a broker this runtime can use, because
+    `jwks_url()` is also what the verifier fetches and what an operator is told
+    to check. The two `repr`/evidence paths redact it as well, because a
+    settings object built by hand in a test or a future caller does not go
+    through here.
+    """
+    value = _require(env, setting) if required else _optional(env, setting)
+    if value and "@" in urllib.parse.urlsplit(value).netloc:
+        raise ConfigurationError(
+            f"{setting.name} carries a credential in its URL. It is a PUBLIC "
+            "endpoint — the issuer is compared against a token's `iss` and the "
+            "key set is fetched unauthenticated — and a credential there would "
+            "be printed by `status` and by any log line holding the settings. "
+            "Set it without userinfo")
+    return value
 
 
 def _require(env: Mapping[str, str], setting: Setting) -> str:
@@ -356,9 +415,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
     return RuntimeSettings(
         database_url=_require(env, _by_name(PREFIX + "DATABASE_URL")),
         migration_database_url=_optional(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL")),
-        oidc_issuer=_require(env, _by_name(PREFIX + "OIDC_ISSUER")),
+        oidc_issuer=_broker_url(env, _by_name(PREFIX + "OIDC_ISSUER"),
+                                required=True) or "",
         oidc_audience=_require(env, _by_name(PREFIX + "OIDC_AUDIENCE")),
-        oidc_jwks_url=_optional(env, _by_name(PREFIX + "OIDC_JWKS_URL")),
+        oidc_jwks_url=_broker_url(env, _by_name(PREFIX + "OIDC_JWKS_URL"),
+                                  required=False),
         oidc_algorithms=algorithms,
         oidc_jwks_ttl_seconds=_positive_int(env, _by_name(PREFIX + "OIDC_JWKS_TTL_SECONDS")),
         oidc_leeway_seconds=_positive_int(env, _by_name(PREFIX + "OIDC_LEEWAY_SECONDS")),
