@@ -1116,3 +1116,86 @@ def test_a_selected_schema_this_role_may_not_use_is_refused_not_answered(
                 conn.execute(f"drop schema if exists {schema} cascade")
                 conn.execute(f"drop owned by {role}")
                 conn.execute(f"drop role if exists {role}")
+
+
+def test_the_draft_page_budget_does_not_read_the_bodies_it_sizes(
+        postgres_dsn: str) -> None:
+    """ANSWERED BY MEASUREMENT, twice reported, and no change.
+
+    The review holds that `octet_length(d.body)` forces PostgreSQL to
+    detoast every candidate body before the window can compute `bytes_before`,
+    so a page of 500 one-megabyte drafts still makes the database process ~500
+    MB and only the client transfer is bounded (Copilot review of
+    openDox-code#25, round 19 and again at the head before it).
+
+    It does not. `textoctetlen` takes the raw length out of the varlena header
+    — `toast_raw_datum_size`, which reads a TOAST POINTER and not the chunks it
+    points at. MEASURED on postgres 16.15 over 200 rows of 1 MiB of
+    incompressible ASCII, a 208 MB relation, best of three:
+
+        sum(octet_length(body))                  0.3 ms
+        count(*)                                 0.3 ms
+        this act's windowed inner query          0.7 ms
+        sum(length(body))     (counts CHARS)   463.5 ms
+        max(md5(body))        (reads bytes)    381.9 ms
+
+    Sizing is the cost of counting; reading is three orders of magnitude more.
+
+    This case drives the same shapes at a size a test can afford and asserts
+    the RATIO, which is what the claim is about — with enough headroom (the
+    measured ratio at this size is ~36x and the bar is 4x) that it fails on a
+    real regression and not on a slow runner.
+    """
+    import secrets
+    import time
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            conn.execute(f"create table {schema}.drafts "
+                         "(id text primary key, body text not null)")
+        try:
+            body = secrets.token_hex(128 * 1024)      # 256 KiB, incompressible
+            with admin.transaction() as conn:
+                for index in range(40):
+                    conn.execute(
+                        f"insert into {schema}.drafts values (%s, %s)",
+                        (f"{index:04d}", body))
+                conn.execute(f"analyze {schema}.drafts")
+
+            def best_of_three(sql: str) -> float:
+                timings = []
+                for _ in range(3):
+                    with admin.connection() as conn:
+                        started = time.monotonic()
+                        conn.execute(sql).fetchall()
+                        timings.append(time.monotonic() - started)
+                return min(timings)
+
+            sized = best_of_three(
+                f"select d.id, coalesce(sum(octet_length(d.body)) over "
+                "(order by d.id rows between unbounded preceding and 1 "
+                f"preceding), 0) from {schema}.drafts d order by d.id "
+                "limit 500")
+            detoasted = best_of_three(
+                f"select max(md5(d.body)) from {schema}.drafts d")
+
+            assert detoasted > sized * 4, (
+                f"sizing {sized*1000:.2f} ms vs reading {detoasted*1000:.2f} "
+                "ms: `octet_length` is reading the bodies, so the page "
+                "budget bounds the fetch and not the database's work")
+
+            # THE PREMISE, so this is not measuring an empty table: the bodies
+            # really are out of line, which is when detoasting costs anything.
+            with admin.connection() as conn:
+                assert conn.execute(
+                    "select pg_total_relation_size(%s)",
+                    (f"{schema}.drafts",)).fetchone()[0] > 8 * 1024 * 1024
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")

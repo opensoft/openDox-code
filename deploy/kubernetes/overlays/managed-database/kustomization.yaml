@@ -1,0 +1,72 @@
+# THE MANAGED-DATABASE PATH, AS A THING THAT EXISTS rather than a paragraph.
+# `docs/runtime.md` told an operator to point both DSNs at a managed database
+# and empty `migration_wait_host`, and stopped there — while the base still
+# carries `postgres-statefulset.yaml` and `postgres-service.yaml`. Following
+# those steps started a SECOND database nobody uses, and failed on the
+# `opendox-postgres` Secret the StatefulSet mounts and this path never creates
+# (Copilot review of openDox-code#25, round 19, suppressed). An overlay is the
+# only place kustomize can remove a base resource, so the instruction that
+# needs one ships with one.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opendox
+
+resources:
+  - ../../base
+
+# The bundled Postgres, removed. `$patch: delete` names the resource by kind
+# and name; the Service goes with it, because a Service in front of no pods is
+# a name that resolves to nothing and would make `migration_wait_host` look
+# reachable.
+patches:
+  - target:
+      kind: StatefulSet
+      name: opendox-postgres
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: opendox-postgres
+      $patch: delete
+  - target:
+      kind: Service
+      name: opendox-postgres
+    patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: opendox-postgres
+      $patch: delete
+  # And the init script that created the served role on the bundled Postgres's
+  # FIRST START. A managed database runs no init script — which is exactly why
+  # the runbook makes provisioning that role a prerequisite — so shipping the
+  # ConfigMap would leave an artefact nothing mounts and imply a bootstrap that
+  # does not happen here.
+  - target:
+      kind: ConfigMap
+      name: opendox-postgres-init
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: opendox-postgres-init
+      $patch: delete
+
+# AND THE WAIT IS EMPTIED HERE, not left to a hand edit of the ConfigMap. The
+# migration Job's readiness gate exits immediately when this is empty, which is
+# right: there is no Service in this cluster to wait for.
+configMapGenerator:
+  - name: opendox-runtime-config
+    behavior: merge
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - migration_wait_host=
+
+# The broker and the image are the environment's, exactly as in `dev`: this
+# overlay changes the DATABASE topology and nothing else, so a real environment
+# layers its own values over it or copies these three blocks.
+images:
+  - name: ghcr.io/opensoft/opendox-runtime
+    newTag: "0.0.0"

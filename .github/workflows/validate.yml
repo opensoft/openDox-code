@@ -600,11 +600,35 @@ jobs:
       #              uploaded to the docker daemon on every `--build`
       #              (MEASURED with docker server 29.6.2 by copying the
       #              context into a `busybox` image, before and after, and
-      #              the real image still builds and runs). THE CURRENT
-      #              FIGURE ON `build/3-5-runtime`, which this branch carries
-      #              by merge; THAT PR's description states it at this same
-      #              commit — its head `23c49133` adds only the record — and
-      #              `pytest -q tests_runtime/` is 240 there.
+      #              the real image still builds and runs). SUPERSEDED on
+      #              `build/3-5-runtime` by the entry below, which this
+      #              branch also carries; `pytest -q tests_runtime/` was
+      #              240 there.
+      #  138 passed  at `build/3-5-runtime` `b9408bf5` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round nineteen's SUPPRESSED comments:
+      #              four real, two false and measured so. `/readyz` made
+      #              THREE pool checkouts under a `timeoutSeconds` this file
+      #              derives from ONE (measured: "this probe checked out 3
+      #              pooled connections"); the migration Job's wait counted
+      #              120 attempts and called it 240s while each attempt can
+      #              cost 4s (measured: three attempts claiming 6s took
+      #              12.1s), and is a `time.monotonic()` deadline now; the
+      #              install block put a password in `kubectl`'s own argv
+      #              where `/proc/<pid>/cmdline` shows it; and the
+      #              managed-database path ships the overlay that removes
+      #              the bundled Postgres (measured with kustomize v5.4.3).
+      #              FALSE: `STDLIB_ONLY_MODULES` is reported to omit
+      #              `identity`, which is line 43 of it. FALSE, and reported
+      #              twice: `octet_length(body)` is held to detoast every
+      #              candidate body — `textoctetlen` reads the varlena
+      #              header, so over 200 rows of 1 MiB it costs 0.3 ms
+      #              against `count(*)`'s 0.3 ms and `max(md5(body))`'s
+      #              381.9 ms. THE CURRENT FIGURE ON `build/3-5-runtime`,
+      #              which this branch carries by merge; THAT PR's
+      #              description states it at this same commit — its head
+      #              `77aebfb0` adds only the record — and `pytest -q
+      #              tests_runtime/` is 245 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this

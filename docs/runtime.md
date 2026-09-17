@@ -143,24 +143,58 @@ kubectl apply -f deploy/kubernetes/base/namespace.yaml
 # superuser password and the least-privileged role's, because the base creates
 # that role on first start; a secret with only `password` leaves the pod unable
 # to resolve `runtime-password` and the install does not come up.
+#
+# AND NOT ON A COMMAND LINE. A `--from-literal` argument carrying the value
+# puts it in the shell's history file and in `/proc/<pid>/cmdline`, where every other
+# process on the host can read it for as long as `kubectl` runs — which is the
+# same exposure the managed-database block below already avoids with `read
+# -rs`, so these two paths said different things about the same secret (Copilot
+# review of openDox-code#25, round 19, suppressed). `--from-file` takes the
+# value from a file whose name is the KEY, so the password is never an
+# argument.
+umask 077 && secrets="$(mktemp -d)"
+read -rs -p 'postgres superuser password: ' pw && printf %s "$pw" > "$secrets/password"
+read -rs -p 'served role password: '      rpw && printf %s "$rpw" > "$secrets/runtime-password"
+unset pw rpw
 kubectl -n opendox create secret generic opendox-postgres \
-    --from-literal=password=... \
-    --from-literal=runtime-password=...
+    --from-file=password="$secrets/password" \
+    --from-file=runtime-password="$secrets/runtime-password"
 # `opendox-db-runtime`'s DSN authenticates as the SERVED role, and that role's
 # NAME is `runtime_pg_role` in the `opendox-runtime-config` ConfigMap. They
 # must be the same role: the migration run narrows the named one's rights on
 # the ledger, so narrowing a role nobody serves as leaves the real served role
 # able to rewrite it. An overlay that changes this DSN's user changes that
 # literal in the same commit.
-kubectl -n opendox create secret generic opendox-db-runtime   --from-literal=dsn=...
-kubectl -n opendox create secret generic opendox-db-migration --from-literal=dsn=...
+# A DSN CARRIES A PASSWORD, so it takes the same route.
+read -rs -p 'served DSN: '    dsn  && printf %s "$dsn"  > "$secrets/runtime-dsn"
+read -rs -p 'migration DSN: ' mdsn && printf %s "$mdsn" > "$secrets/migration-dsn"
+unset dsn mdsn
+kubectl -n opendox create secret generic opendox-db-runtime \
+    --from-file=dsn="$secrets/runtime-dsn"
+kubectl -n opendox create secret generic opendox-db-migration \
+    --from-file=dsn="$secrets/migration-dsn"
+rm -rf "$secrets"
 kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
 ```
 
-**A managed database instead of the bundled Postgres.** Point both DSNs at it
-and set `migration_wait_host=` (empty) in the `opendox-runtime-config`
-ConfigMap: the migration Job's readiness gate then exits immediately instead of
-waiting four minutes for a Service this cluster does not have.
+**A managed database instead of the bundled Postgres.** Build the
+`managed-database` overlay instead of `dev`, and create only the two DSN
+Secrets — not `opendox-postgres`:
+
+```sh
+kustomize build deploy/kubernetes/overlays/managed-database | kubectl apply -f -
+```
+
+That overlay removes `postgres-statefulset.yaml`, `postgres-service.yaml` and
+the init-script ConfigMap from the base, and sets `migration_wait_host=`
+(empty) so the migration Job's readiness gate exits immediately instead of
+waiting four minutes for a Service this cluster does not have. **Pointing the
+DSNs at a managed database is not enough on its own**: the base still carries
+the bundled Postgres, so an install that only changed the DSNs started a second
+database nobody uses and failed on the `opendox-postgres` Secret the
+StatefulSet mounts and this path never creates (Copilot review of
+openDox-code#25, round 19, suppressed). An overlay is the only place kustomize
+can remove a base resource, which is why the instruction ships with one.
 
 **And provision the served role FIRST — this is a prerequisite, not a
 suggestion.** The bundled Postgres creates and grants that role on its first

@@ -1115,53 +1115,67 @@ def create_app(*, settings: RuntimeSettings | None = None,
         """
         checks: dict[str, str] = {}
         ok = True
+        # ONE POOL CHECKOUT FOR EVERY DATABASE QUESTION THIS PROBE ASKS, and
+        # that is a BUDGET claim rather than a tidiness one. The readiness
+        # probe's `timeoutSeconds` is derived — and asserted, in
+        # `test_deploy_shape.py` — from ONE checkout wait plus the JWKS
+        # timeout. This path took THREE: `select 1`, then `plan()` and
+        # `drift()`, each of which calls `applied()` and checked out again. A
+        # pool under contention therefore made a probe wait three
+        # `DEFAULT_CHECKOUT_TIMEOUT_SECONDS` under a budget covering one, so
+        # kubelet could cut off an in-flight probe and the next one would
+        # overlap it (Copilot review of openDox-code#25, round 19, suppressed).
+        # `applied()` already took a connection for the advisory lock's sake;
+        # `plan()` and `drift()` pass one through to it now.
         try:
             with app.state.context.database.connection() as conn:
                 conn.execute("select 1")
-            checks["database"] = "ok"
+                checks["database"] = "ok"
+                try:
+                    # THE PINNED CANONICAL FILE IS VERIFIED BEFORE THE PLAN IS
+                    # CALCULATED. `plan()` and `drift()` compare the ledger
+                    # with what `discover()` FINDS, and `discover()` returns
+                    # `[]` for a migrations directory that exists and is empty
+                    # — so an image that lost `0001`, or a wrong
+                    # `OPENDOX_MIGRATIONS_DIR`, made both answers empty on a
+                    # FRESH database and readiness reported `schema: applied`
+                    # and admitted traffic to an install with no coordination
+                    # schema at all (Copilot review of openDox-code#25).
+                    # `verify_canonical_digest` is the same gate `apply()` runs
+                    # first and `status` reports, and it refuses an absent
+                    # `0001` as loudly as a changed one.
+                    migrations.verify_canonical_digest(
+                        app.state.context.settings.migrations_dir)
+                    runner = migrations.MigrationRunner(
+                        app.state.context.database,
+                        migrations_dir=(
+                            app.state.context.settings.migrations_dir))
+                    pending = [m.version for m in runner.plan(conn)]
+                    drifted = runner.drift(conn)
+                    if pending:
+                        checks["schema"] = (
+                            "pending: " + ",".join(pending)
+                            + " — run `opendox-runtime runtime migrate`")
+                        ok = False
+                    elif drifted:
+                        # NOTHING PENDING IS NOT THE SAME AS MATCHING THIS
+                        # TREE: a migration whose file changed, or vanished, is
+                        # invisible to `plan()` and is REFUSED by `apply()`.
+                        # Readiness that ignored it called an image the runner
+                        # would not migrate healthy (Copilot review of
+                        # openDox-code#25).
+                        checks["schema"] = "drifted: " + ",".join(drifted)
+                        ok = False
+                    else:
+                        checks["schema"] = "applied"
+                # reported, never raised at a probe
+                except Exception as exc:  # noqa: BLE001
+                    checks["schema"] = f"unreadable: {type(exc).__name__}"
+                    ok = False
         # reported, never raised at a probe
         except Exception as exc:  # noqa: BLE001
             checks["database"] = f"unavailable: {type(exc).__name__}"
             ok = False
-        if checks["database"] == "ok":
-            try:
-                # THE PINNED CANONICAL FILE IS VERIFIED BEFORE THE PLAN IS
-                # CALCULATED. `plan()` and `drift()` compare the ledger with
-                # what `discover()` FINDS, and `discover()` returns `[]` for a
-                # migrations directory that exists and is empty — so an image
-                # that lost `0001`, or a wrong `OPENDOX_MIGRATIONS_DIR`, made
-                # both answers empty on a FRESH database and readiness reported
-                # `schema: applied` and admitted traffic to an install with no
-                # coordination schema at all (Copilot review of
-                # openDox-code#25). `verify_canonical_digest` is the same gate
-                # `apply()` runs first and `status` reports, and it refuses an
-                # absent `0001` as loudly as a changed one.
-                migrations.verify_canonical_digest(
-                    app.state.context.settings.migrations_dir)
-                runner = migrations.MigrationRunner(
-                    app.state.context.database,
-                    migrations_dir=app.state.context.settings.migrations_dir)
-                pending = [m.version for m in runner.plan()]
-                drifted = runner.drift()
-                if pending:
-                    checks["schema"] = (
-                        "pending: " + ",".join(pending)
-                        + " — run `opendox-runtime runtime migrate`")
-                    ok = False
-                elif drifted:
-                    # NOTHING PENDING IS NOT THE SAME AS MATCHING THIS TREE: a
-                    # migration whose file changed, or vanished, is invisible
-                    # to `plan()` and is REFUSED by `apply()`. Readiness that
-                    # ignored it called an image the runner would not migrate
-                    # healthy (Copilot review of openDox-code#25).
-                    checks["schema"] = "drifted: " + ",".join(drifted)
-                    ok = False
-                else:
-                    checks["schema"] = "applied"
-            # reported, never raised at a probe
-            except Exception as exc:  # noqa: BLE001
-                checks["schema"] = f"unreadable: {type(exc).__name__}"
-                ok = False
         try:
             app.state.context.verifier.probe_keys()
             checks["broker_keys"] = "ok"
