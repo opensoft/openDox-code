@@ -831,3 +831,51 @@ def test_no_broker_url_this_runtime_prints_can_carry_a_credential() -> None:
     assert redacted_url("https://broker/realms/x") == "https://broker/realms/x"
     assert cli._redacted_settings(settings)["OPENDOX_OIDC_JWKS_URL"] == \
         "https://broker/realms/x/protocol/openid-connect/certs"
+
+
+def test_a_credential_in_a_broker_urls_query_is_refused_like_one_in_its_userinfo(
+) -> None:
+    """Round 22's guard looked only at the authority.
+
+    `https://broker/certs?token=…` carries a credential as surely as
+    `https://svc:pw@broker/…`, and `redacted_url` preserved the query — so both
+    `repr(settings)` and `status` printed it (Copilot review of
+    openDox-code#25, round 24). And `urlsplit` RAISES for a malformed URL, from
+    inside a function whose whole contract is a `ConfigurationError` naming the
+    variable: MEASURED on python 3.12, `urlsplit("https://[::1/x")` raises
+    `ValueError("Invalid IPv6 URL")`, which escaped as a traceback.
+    """
+    from opendox.runtime.config import (ConfigurationError, load_settings,
+                                        redacted_url)
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime",
+            PREFIX + "OIDC_ISSUER": "https://broker/realms/x"}
+    for name, value, why in (
+            ("OIDC_JWKS_URL", "https://broker/certs?token=ghp_secret",
+             "query parameter"),
+            ("OIDC_JWKS_URL", "https://broker/certs#access_token=abc",
+             "query parameter"),
+            ("OIDC_ISSUER", "https://svc:pw@broker/realms/x", "userinfo"),
+    ):
+        env = dict(base)
+        env[PREFIX + name] = value
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(env)
+        assert PREFIX + name in str(caught.value)
+        assert why in str(caught.value), (value, caught.value)
+
+    # A malformed URL is a REFUSAL naming the variable, not a traceback.
+    env = dict(base)
+    env[PREFIX + "OIDC_ISSUER"] = "https://[::1/x"
+    with pytest.raises(ConfigurationError) as caught:
+        load_settings(env)
+    assert PREFIX + "OIDC_ISSUER" in str(caught.value)
+    assert "parse" in str(caught.value)
+
+    # AND THE REDACTOR COVERS WHAT THE GUARD REFUSES, for a settings object
+    # built by hand: the secret parameter goes, the rest of the URL stays.
+    assert redacted_url("https://broker/certs?token=ghp_x&format=jwk") == \
+        "https://broker/certs?token=<redacted>&format=jwk"
+    assert redacted_url("https://broker/realms/x") == "https://broker/realms/x"
+    assert redacted_url("https://[::1/x") == "<redacted-url>"

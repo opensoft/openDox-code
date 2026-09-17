@@ -184,6 +184,16 @@ Secrets — not `opendox-postgres`:
 kustomize build deploy/kubernetes/overlays/managed-database | kubectl apply -f -
 ```
 
+**Set `runtime_pg_role` in that overlay to the role you provisioned** — the
+user in `opendox-db-runtime`'s DSN. The base's value, `opendox_runtime`, is the
+role the BUNDLED Postgres creates on first start; a managed database runs no
+init script, so the role is whichever one you created. If the two differ the
+migration Job narrows `opendox_runtime` — or fails because it does not exist —
+while the role actually serving keeps the right to rewrite the ledger (Copilot
+review of openDox-code#25, round 24). It is the same name as
+`OPENDOX_RUNTIME_PG_ROLE` in the prerequisite below: one name, now in four
+places.
+
 That overlay removes `postgres-statefulset.yaml`, `postgres-service.yaml` and
 the init-script ConfigMap from the base, and sets `migration_wait_host=`
 (empty) so the migration Job's readiness gate exits immediately instead of

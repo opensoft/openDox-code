@@ -1406,3 +1406,36 @@ def test_no_healthcheck_puts_an_operators_value_into_code_it_runs() -> None:
     assert done.returncode != 0
     assert b"ValueError" in done.stderr, done.stderr
     assert not Path("/tmp/PWNED").exists()
+
+
+def test_the_managed_database_path_names_the_role_the_job_narrows() -> None:
+    """One name, and a managed database makes it the operator's choice.
+
+    The overlay clears the wait host and inherits the base's
+    `runtime_pg_role=opendox_runtime` — which is the role the BUNDLED Postgres
+    creates on first start. A managed database runs no init script, so the
+    served role is whichever one the operator provisioned and put in
+    `opendox-db-runtime`'s DSN; if the two differ, the migration Job narrows
+    `opendox_runtime` (or fails because it does not exist) while the role
+    actually serving keeps the right to rewrite the ledger (Copilot review of
+    openDox-code#25, round 24).
+
+    The overlay cannot know that name, so what is asserted is that the required
+    edit is STATED in both places an operator reads — the overlay and the
+    runbook's managed-database section — rather than inherited in silence.
+    """
+    overlay = (KUBERNETES / "overlays" / "managed-database"
+               / "kustomization.yaml").read_text(encoding="utf-8")
+    assert "runtime_pg_role" in overlay, (
+        "the overlay inherits the bundled Postgres's role name without saying "
+        "so; a managed install narrows the wrong role")
+
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    managed = runbook.split("**A managed database instead of the bundled "
+                            "Postgres.**", 1)
+    assert len(managed) == 2, "the managed-database section moved"
+    section = managed[1].split("\n## ", 1)[0]
+    assert "runtime_pg_role" in section, (
+        "the managed-database instructions never mention the ConfigMap value "
+        "the migration Job narrows")
+    assert "opendox-db-runtime" in section

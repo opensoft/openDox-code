@@ -220,6 +220,40 @@ class RuntimeSettings:
         return self.oidc_issuer.rstrip("/") + "/.well-known/openid-configuration"
 
 
+#: PARAMETER NAMES WHOSE VALUE IS A CREDENTIAL. A broker URL can carry one in
+#: its QUERY as easily as in its userinfo — `https://broker/certs?token=…` — and
+#: the userinfo guard looked only at the authority, so that form was accepted
+#: and then printed by `repr(settings)` and by `status` (Copilot review of
+#: openDox-code#25, round 24). `opendox.runtime.local_git_adapter` holds the
+#: same list for the REMOTE rule on the sibling PR, and a case there pins the
+#: two spellings together; this module cannot import it, because that module
+#: does not exist on this branch.
+SECRET_PARAMETER_KEYS = (
+    "token", "access_token", "api_key", "apikey", "key", "secret",
+    "password", "passwd", "pwd", "auth", "authorization", "credential",
+    "credentials", "sig", "signature", "session",
+)
+_SECRET_PARAMETER = re.compile("|".join(SECRET_PARAMETER_KEYS), re.IGNORECASE)
+
+
+def _split_url(name: str, value: str) -> urllib.parse.SplitResult:
+    """`urlsplit`, with its `ValueError` inside this module's own boundary.
+
+    MEASURED on python 3.12: `urlsplit("https://[::1/x")` raises
+    `ValueError("Invalid IPv6 URL")`. This call sits in `load_settings`, whose
+    whole contract is that a bad variable produces a `ConfigurationError`
+    NAMING it — so a malformed broker URL escaped as a raw `ValueError` and the
+    CLI printed a traceback where it promises a refusal (Copilot review of
+    openDox-code#25, round 24).
+    """
+    try:
+        return urllib.parse.urlsplit(value)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"{name} is not a URL this runtime can parse ({exc}); set it to "
+            "the broker endpoint, without userinfo") from exc
+
+
 def redacted_url(value: str | None) -> str | None:
     """A URL with any userinfo replaced, for evidence and for `repr`.
 
@@ -231,13 +265,41 @@ def redacted_url(value: str | None) -> str | None:
     """
     if not value:
         return value
-    split = urllib.parse.urlsplit(value)
-    if "@" not in split.netloc:
+    try:
+        split = urllib.parse.urlsplit(value)
+    except ValueError:
+        return "<redacted-url>"           # unparseable: shown whole or not at all
+    netloc = split.netloc
+    if "@" in netloc:
+        netloc = "<redacted>@" + netloc.rsplit("@", 1)[1]
+    query = _redacted_query(split.query)
+    fragment = _redacted_query(split.fragment)
+    if (netloc, query, fragment) == (split.netloc, split.query, split.fragment):
         return value
-    host = split.netloc.rsplit("@", 1)[1]
     return urllib.parse.urlunsplit(
-        (split.scheme, "<redacted>@" + host, split.path, split.query,
-         split.fragment))
+        (split.scheme, netloc, split.path, query, fragment))
+
+
+def _redacted_query(query: str) -> str:
+    """Every credential-shaped parameter's VALUE replaced, the rest kept.
+
+    The host is not the secret and neither is `?format=jwk`: an operator has to
+    be able to see which endpoint was configured, which is the same trade the
+    remote redactor makes on the sibling PR.
+    """
+    if not query:
+        return query
+    parts = []
+    for part in re.split(r"([&;])", query):
+        if part in ("&", ";"):
+            parts.append(part)
+            continue
+        name, sep, _ = part.partition("=")
+        parts.append(name + sep + "<redacted>"
+                     if sep and _SECRET_PARAMETER.search(
+                         urllib.parse.unquote(name))
+                     else part)
+    return "".join(parts)
 
 
 def _broker_url(env: Mapping[str, str], setting: Setting, *,
@@ -254,6 +316,13 @@ def _broker_url(env: Mapping[str, str], setting: Setting, *,
     had never been a DSN (Copilot review of openDox-code#25, round 22, in both
     places).
 
+    IN THE QUERY AS WELL AS IN THE AUTHORITY, since round 24:
+    `https://broker/certs?token=…` carries a credential just as surely and the
+    first cut looked only at `netloc`. And the parse itself is inside this
+    module's boundary — `urlsplit` raises `ValueError` for an unmatched IPv6
+    bracket, which is a malformed VARIABLE and owes a `ConfigurationError`
+    naming it rather than a traceback.
+
     REFUSED RATHER THAN REDACTED, and that is the choice: redaction would make
     the evidence safe and leave the configuration wrong — a broker that needs
     userinfo to serve its key set is not a broker this runtime can use, because
@@ -263,13 +332,23 @@ def _broker_url(env: Mapping[str, str], setting: Setting, *,
     through here.
     """
     value = _require(env, setting) if required else _optional(env, setting)
-    if value and "@" in urllib.parse.urlsplit(value).netloc:
+    if not value:
+        return value
+    split = _split_url(setting.name, value)
+    carried = ("userinfo" if "@" in split.netloc else
+               "a credential-shaped query parameter"
+               if any(_SECRET_PARAMETER.search(
+                   urllib.parse.unquote(part.partition("=")[0]))
+                   for part in re.split(r"[&;]", split.query + "&"
+                                        + split.fragment) if "=" in part)
+               else None)
+    if carried:
         raise ConfigurationError(
-            f"{setting.name} carries a credential in its URL. It is a PUBLIC "
-            "endpoint — the issuer is compared against a token's `iss` and the "
-            "key set is fetched unauthenticated — and a credential there would "
-            "be printed by `status` and by any log line holding the settings. "
-            "Set it without userinfo")
+            f"{setting.name} carries a credential in its URL ({carried}). It "
+            "is a PUBLIC endpoint — the issuer is compared against a token's "
+            "`iss` and the key set is fetched unauthenticated — and a "
+            "credential there would be printed by `status` and by any log line "
+            "holding the settings. Set it without one")
     return value
 
 
