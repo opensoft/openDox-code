@@ -637,11 +637,31 @@ jobs:
       #              it skips an absent one — so a schema named for the role,
       #              present and denied, still fell through to `public`. It
       #              goes through the same probe now and is forgiven only for
-      #              not existing. THE CURRENT FIGURE ON
-      #              `build/3-5-runtime`, which this branch carries by
-      #              merge; THAT PR's description states it at this same
-      #              commit — its head `a10bd085` adds only the record —
-      #              and `pytest -q tests_runtime/` is 246 there.
+      #              not existing. SUPERSEDED on `build/3-5-runtime` by the
+      #              entry below, which this branch also carries; `pytest
+      #              -q tests_runtime/` was 246 there.
+      #  141 passed  at `build/3-5-runtime` `8fe2f3fd` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-TWO's two findings, which
+      #              are one defect in two places and one in a third. The
+      #              broker's URLs were UNCHECKED and PRINTED: `oidc_issuer`
+      #              and an explicit `oidc_jwks_url` are PUBLIC endpoints and
+      #              `load_settings` took any string, so MEASURED against the
+      #              previous head `https://svc:pw@broker/realms/x` was
+      #              accepted and then printed by `repr(settings)`, by
+      #              `status`'s derived JWKS URL and by its discovery URL —
+      #              three credentials from a value that had never been a
+      #              DSN. Refused at the door (the verifier FETCHES that URL)
+      #              and redacted at both printing boundaries anyway, host
+      #              kept. And round 19's managed-database overlay supplied
+      #              no broker values while the runbook told an operator to
+      #              build it, so it rendered a Deployment that fails
+      #              `load_settings`; the guard derives the rule from the
+      #              base. THE CURRENT FIGURE ON `build/3-5-runtime`, which
+      #              this branch carries by merge; THAT PR's description
+      #              states it at this same commit — its head `334b9b61`
+      #              adds only the record — and `pytest -q tests_runtime/`
+      #              is 248 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this

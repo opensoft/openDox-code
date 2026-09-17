@@ -1083,3 +1083,63 @@ def test_every_repository_verb_hands_the_id_it_was_given_to_the_redactor(
             f"{verb.__name__} formats {handlers - guarded} message(s) without "
             "the identifier it was given")
         assert guarded >= 2, (verb.__name__, guarded)
+
+
+def test_no_broker_url_this_runtime_prints_can_carry_a_credential() -> None:
+    """The issuer and the key set are PUBLIC endpoints, and were unchecked.
+
+    `load_settings` accepted any string for `OPENDOX_OIDC_ISSUER` and for an
+    explicit `OPENDOX_OIDC_JWKS_URL`, so `https://svc:pw@broker/realms/x` was a
+    legal configuration — and then `repr(settings)` printed it, `status`
+    printed the DERIVED JWKS URL and the discovery URL built from it, and this
+    runtime's promise that a credential never reaches a log was false for a
+    value that had never been a DSN (Copilot review of openDox-code#25, round
+    22, reported in both places).
+
+    MEASURED against the previous head with that issuer:
+
+        load_settings          ACCEPTED it
+        repr(settings)         oidc_issuer='https://svc:pw@broker/realms/x'
+        status OIDC_JWKS_URL   https://svc:pw@broker/realms/x/protocol/…
+        status broker_discovery https://svc:pw@broker/realms/x/.well-known/…
+
+    Refused at the door, because redaction alone would leave the configuration
+    wrong: `jwks_url()` is also what the verifier FETCHES. And redacted at the
+    two printing boundaries anyway, because a `RuntimeSettings` built by hand —
+    in a test, or by a future caller — does not go through that door.
+    """
+    import dataclasses
+
+    from opendox.runtime.config import (ConfigurationError, load_settings,
+                                        redacted_url)
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for name in ("OIDC_ISSUER", "OIDC_JWKS_URL"):
+        env = dict(base, **{PREFIX + "OIDC_ISSUER": "https://broker/realms/x"})
+        env[PREFIX + name] = "https://svc:pw@broker/realms/x"
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(env)
+        assert PREFIX + name in str(caught.value), caught.value
+        assert "credential" in str(caught.value)
+
+    settings = load_settings(
+        dict(base, **{PREFIX + "OIDC_ISSUER": "https://broker/realms/x"}))
+    assert settings.jwks_url() == \
+        "https://broker/realms/x/protocol/openid-connect/certs"
+
+    # AND THE PRINTING BOUNDARIES DO NOT ASSUME THE LOADING ONE.
+    by_hand = dataclasses.replace(
+        settings, oidc_issuer="https://svc:pw@broker/realms/x")
+    assert "pw" not in repr(by_hand), repr(by_hand)
+    assert "<redacted>@broker" in repr(by_hand), repr(by_hand)
+    printed = cli._redacted_settings(by_hand)
+    assert "pw" not in json.dumps(printed), printed
+    assert "broker" in json.dumps(printed), (
+        "the host went with the credential; an operator cannot check a URL "
+        "that is not there")
+
+    # NOT an over-redaction: an ordinary URL is printed as it is.
+    assert redacted_url("https://broker/realms/x") == "https://broker/realms/x"
+    assert cli._redacted_settings(settings)["OPENDOX_OIDC_JWKS_URL"] == \
+        "https://broker/realms/x/protocol/openid-connect/certs"

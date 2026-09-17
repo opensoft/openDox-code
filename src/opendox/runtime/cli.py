@@ -71,6 +71,7 @@ from opendox.runtime.config import (
     SECRET_NAMES,
     SETTINGS,
     ConfigurationError,
+    redacted_url,
     RuntimeSettings,
     load_migration_settings,
     load_settings,
@@ -214,9 +215,14 @@ def _redacted_settings(settings: RuntimeSettings) -> dict[str, Any]:
     values = {
         "OPENDOX_DATABASE_URL": settings.database_url,
         "OPENDOX_MIGRATION_DATABASE_URL": settings.migration_database_url,
-        "OPENDOX_OIDC_ISSUER": settings.oidc_issuer,
+        # THE BROKER URLS ARE REDACTED HERE TOO. `load_settings` refuses
+        # userinfo in the issuer and in an explicit JWKS URL — but this report
+        # prints a DERIVED value, and a settings object can also be built by
+        # hand, so the boundary that prints does not assume the boundary that
+        # loads (Copilot review of openDox-code#25, round 22).
+        "OPENDOX_OIDC_ISSUER": redacted_url(settings.oidc_issuer),
         "OPENDOX_OIDC_AUDIENCE": settings.oidc_audience,
-        "OPENDOX_OIDC_JWKS_URL": settings.jwks_url(),
+        "OPENDOX_OIDC_JWKS_URL": redacted_url(settings.jwks_url()),
         "OPENDOX_OIDC_ALGORITHMS": ",".join(settings.oidc_algorithms),
         "OPENDOX_OIDC_JWKS_TTL_SECONDS": settings.oidc_jwks_ttl_seconds,
         "OPENDOX_OIDC_LEEWAY_SECONDS": settings.oidc_leeway_seconds,
@@ -551,11 +557,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 
         build_verifier(settings).probe_keys()
         report["broker_keys"] = "reachable"
-        report["broker_discovery"] = settings.discovery_url()
+        report["broker_discovery"] = redacted_url(settings.discovery_url())
     # same
     except Exception as exc:  # noqa: BLE001
         report["broker_keys"] = f"unreachable: {type(exc).__name__}"
-        report["broker_discovery"] = settings.discovery_url()
+        report["broker_discovery"] = redacted_url(settings.discovery_url())
         ok = False
 
     return _emit(report, ok=ok)

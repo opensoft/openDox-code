@@ -1291,3 +1291,59 @@ def test_the_managed_database_path_ships_the_overlay_it_requires() -> None:
     runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
     assert "overlays/managed-database" in runbook, (
         "the runbook does not tell an operator this overlay exists")
+
+
+def test_every_applyable_overlay_supplies_the_settings_the_base_leaves_empty(
+) -> None:
+    """The base leaves the broker's facts EMPTY, deliberately.
+
+    `opendox-oidc` carries `oidc_issuer=` and `oidc_audience=` with no values
+    because they are an environment's facts and not a repository's — so an
+    overlay the runbook tells an operator to BUILD must supply them, or the
+    Deployment it renders fails `load_settings` before it serves.
+    `overlays/dev` carries a worked example for exactly that reason;
+    `overlays/managed-database` was added without one while the runbook told an
+    operator to apply it (Copilot review of openDox-code#25, round 22).
+
+    Derived from the base rather than hand-kept: every `OPENDOX_*` setting the
+    base declares EMPTY and `config.SETTINGS` marks required must be supplied
+    by each overlay, whatever overlays exist later.
+    """
+    overlays = sorted(path for path in (KUBERNETES / "overlays").iterdir()
+                      if (path / "kustomization.yaml").is_file())
+    assert overlays, "no overlay was found, so this test measured nothing"
+
+    base = yaml.safe_load(
+        (KUBERNETES / "base" / "kustomization.yaml").read_text(
+            encoding="utf-8"))
+    generated = next(generator for generator in base["configMapGenerator"]
+                     if generator["name"] == "opendox-oidc")
+    empty = {literal.partition("=")[0]
+             for literal in generated["literals"]
+             if literal.partition("=")[2] == ""
+             and literal.partition("=")[0] in {"oidc_issuer", "oidc_audience"}}
+    assert empty, (
+        "the base no longer leaves the broker's facts empty; re-derive this")
+
+    for overlay in overlays:
+        declared = yaml.safe_load(
+            (overlay / "kustomization.yaml").read_text(encoding="utf-8"))
+        supplied: set[str] = set()
+        for generator in declared.get("configMapGenerator") or ():
+            if generator.get("name") != "opendox-oidc":
+                continue
+            for literal in generator.get("literals") or ():
+                key, _, value = literal.partition("=")
+                if value:
+                    supplied.add(key)
+        assert empty <= supplied, (
+            f"overlay {overlay.name} supplies {sorted(supplied)} and the base "
+            f"leaves {sorted(empty)} empty; `kustomize build "
+            f"deploy/kubernetes/overlays/{overlay.name}` renders a Deployment "
+            "that cannot start")
+
+    # And the runbook points an operator at one of them for each path.
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    for overlay in overlays:
+        assert f"overlays/{overlay.name}" in runbook, (
+            f"overlay {overlay.name} is never named in the runbook")
