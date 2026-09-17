@@ -1464,3 +1464,42 @@ def test_a_readiness_probe_makes_one_pool_checkout(
     assert len(checkouts) == 1, (
         f"this probe checked out {len(checkouts)} pooled connections; the "
         "budget the manifests assert covers one")
+
+
+def test_no_authorization_answer_echoes_the_path_it_refused(
+        client, mint_token) -> None:
+    """`_require_role` runs BEFORE any act has looked at the identifier.
+
+    It reads the project id straight off the request path, and the repository
+    routes § 3.6 adds made that reachable with arbitrary text — so `GET
+    /projects/user:secret@host/repository` returned the caller's value in a 403
+    body, ahead of every redaction the acts apply to their own refusals
+    (Copilot review of openDox-code#26, round 24).
+
+    An authorization answer needs the SUBJECT and the RULE, not the object's
+    name: the caller sent the path and gets back which rule refused it. The
+    same rule is applied to the session/project mismatch one message over,
+    where the STORED project is still named — that one is a row this runtime
+    wrote — and the requested one is not.
+    """
+    import urllib.parse
+
+    token = mint_token(subject="path-echo")
+    secretish = "user:secret@host"
+    quoted = urllib.parse.quote(secretish, safe="")
+    for path in (f"/api/v1/projects/{quoted}",
+                 f"/api/v1/projects/{quoted}/repository",
+                 f"/api/v1/projects/{quoted}/repository/remote",
+                 f"/api/v1/projects/{quoted}/repository/push"):
+        for call in (client.get, client.post, client.put):
+            response = call(path, headers=_auth(token))
+            if response.status_code in (404, 405):
+                continue
+            assert "secret" not in response.text, (path, response.text)
+            assert secretish not in response.text, (path, response.text)
+
+    # AND THE REFUSAL IS STILL AN ANSWER: it names the rule.
+    refused = client.get(f"/api/v1/projects/{quoted}", headers=_auth(token))
+    assert refused.status_code in (403, 404), refused.text
+    if refused.status_code == 403:
+        assert refused.json()["detail"]["code"].startswith("authz."), refused.text

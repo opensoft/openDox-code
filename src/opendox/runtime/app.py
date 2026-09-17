@@ -409,9 +409,15 @@ def _require_own_open_session(store: Any, *,
     if session.project_id != project_id:
         raise HTTPException(
             status_code=409,
+            # THE STORED PROJECT IS NAMED, THE REQUESTED ONE IS NOT: the
+            # first is a row this runtime wrote, the second is whatever the
+            # caller put in the path (Copilot review of openDox-code#26, round
+            # 24, which named `_require_role`; this is the same rule, one
+            # message over).
             detail={"code": "coordination.session_project_mismatch",
                     "message": f"session {session_id} is open on project "
-                               f"{session.project_id}, not {project_id}"})
+                               f"{session.project_id}, which is not the "
+                               "project this path names"})
     if require_open and session.ended_at is not None:
         raise HTTPException(
             status_code=409,
@@ -423,21 +429,32 @@ def _require_own_open_session(store: Any, *,
 
 def _require_role(store: Any, *, user: identity.User,
                   project_id: str, allowed: tuple[str, ...]) -> identity.Membership:
-    """Authorization, asked about the ROW and answered by `memberships.role`."""
+    """Authorization, asked about the ROW and answered by `memberships.role`.
+
+    AND THE PROJECT ID IS NOT ECHOED. This is reached BEFORE any act has
+    validated the identifier — it comes straight off the request path — and the
+    repository routes added by § 3.6 made that reachable with arbitrary text:
+    `GET /projects/user:secret@host/repository` returned the caller's value in
+    a 403 body, ahead of every redaction the acts apply to their own refusals
+    (Copilot review of openDox-code#26, round 24). An authorization answer
+    needs the SUBJECT and the RULE, not the object's name: the caller sent the
+    path and gets back which rule refused it.
+    """
     try:
         membership = store.membership_for(user_id=user.id, project_id=project_id)
     except identity.NotFoundError as exc:
         raise HTTPException(
             status_code=403,
             detail={"code": "authz.not_a_member",
-                    "message": f"user {user.id} has no membership in project "
-                               f"{project_id}"}) from exc
+                    "message": f"user {user.id} has no membership in the "
+                               "project this path names"}) from exc
     if membership.role not in allowed:
         raise HTTPException(
             status_code=403,
             detail={"code": "authz.role_insufficient",
                     "message": f"role {membership.role!r} is not one of "
-                               f"{list(allowed)} for project {project_id}"})
+                               f"{list(allowed)} on the project this path "
+                               "names"})
     return membership
 
 
