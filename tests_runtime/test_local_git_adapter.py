@@ -2803,3 +2803,122 @@ def test_a_known_destination_is_removed_from_gits_own_diagnostic() -> None:
     # And the pattern alone does NOT catch it, which is the measurement that
     # makes this helper necessary rather than redundant.
     assert "secret" in lga.redact_credentials(echoed)
+
+
+# -- Copilot's eighteenth round on #26 ---------------------------------------
+
+
+def test_an_alias_cannot_shadow_a_command_this_runner_invokes(
+        adapter, repository: Path) -> None:
+    """NOT A REGRESSION TEST, and the measurement is why.
+
+    The review reports that a mapped repository can define `[alias] remote =
+    !…` and have this runner execute it (Copilot review of openDox-code#26,
+    round 18). MEASURED on git 2.43.0: an alias that shadows a BUILT-IN command
+    is IGNORED —
+
+        [alias] remote = !touch MARKER   `git remote` ran the built-in
+        [alias] status = !touch MARKER   `git status` ran the built-in
+        [alias] revparse = !touch MARKER `git revparse` RAN THE ALIAS
+
+    — and every command this runner invokes is a built-in, so the channel is
+    closed by git itself. `-c alias.<subcommand>=` is added anyway, because it
+    makes that a property of THIS call rather than of a rule a later git could
+    relax, and it costs one option.
+    """
+    marker = repository / "ALIAS-RAN"
+    for name in ("remote", "rev-parse", "ls-tree", "config"):
+        _git(repository, "config", f"alias.{name}", f"!touch {marker}; echo x")
+
+    corpus = _resolve(adapter, repository)
+    assert adapter.list_documents(corpus) == ()
+    assert not marker.exists(), "a repository's own alias ran in this runtime"
+    assert "-c" in lga.GitRunner(repository)._argv(("rev-parse", "--git-dir"))
+    assert "alias.rev-parse=" in lga.GitRunner(repository)._argv(
+        ("rev-parse", "--git-dir"))
+
+    # THE MECHANISM IS REAL under a name git does not own, which is the half
+    # that says the absence above means something.
+    subprocess.run(["git", "-C", str(repository), "config", "alias.notabuiltin",
+                    f"!touch {marker}; echo x"], check=True, env=_GIT_ENV)
+    subprocess.run(["git", "-C", str(repository), "notabuiltin"],
+                   capture_output=True, env=_GIT_ENV)
+    assert marker.exists(), "this git does not run `!` aliases at all"
+
+
+def test_a_bounded_push_keeps_the_environment_every_other_call_gets(
+        tmp_path: Path) -> None:
+    """`out_bounded` handed `Popen` four variables and no `PATH`.
+
+    `run()` builds its environment from `_sanitized_git_environment()` and
+    layers the call's own on top; this round's output cap passed the call's own
+    STRAIGHT to `Popen`, so the push ran without `PATH` and without
+    `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` — which this package keeps on
+    purpose, because they are the operator's own git: a credential helper, a
+    proxy, a CA bundle. Inspection worked and the push it was inspecting for
+    could not (Copilot review of openDox-code#26, round 18; a regression this
+    round's own cap introduced).
+    """
+    reporter = tmp_path / "git"
+    reporter.write_text("#!/bin/sh\nenv\n", encoding="utf-8")
+    reporter.chmod(0o755)
+    seen = lga.GitRunner(tmp_path, str(reporter)).out_bounded(
+        "push", timeout=30).decode()
+    variables = dict(line.split("=", 1) for line in seen.splitlines()
+                     if "=" in line)
+    assert "PATH" in variables, sorted(variables)
+    assert variables.get("GIT_TERMINAL_PROMPT") == "0"
+    assert "GIT_SSH_COMMAND" in variables
+    # And the repository-SELECTING overrides are still stripped, which is the
+    # property the sanitizer exists for.
+    assert "GIT_DIR" not in variables
+
+
+def test_a_read_cannot_be_served_from_an_enclosing_repository(
+        adapter, tmp_path: Path) -> None:
+    """`git -C` WALKS UP, and a descriptor does not stop that.
+
+    The binding stops a pathname SWAP; it does not stop DISCOVERY. A location
+    that stops being a repository while sitting inside another checkout was
+    served from the enclosing one — the defect RULED 5714365086 Q-F3 closed at
+    resolution, reachable again through every operation that reopens the
+    location (Copilot review of openDox-code#26, round 18). `_bound` applies
+    the same root rule the write path and the repository acts already applied.
+
+    Driven the way it is reachable in this product: `create_repository` is
+    interrupted, or a repository is removed, leaving an ordinary directory
+    where the map row still points — and the root above it is somebody's
+    checkout.
+    """
+    import shutil
+
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    location = _repository_at(outer / "corpus", "corpus")
+    corpus = _resolve(adapter, location)
+
+    # The corpus stops being a repository, and its parent becomes one.
+    shutil.rmtree(location)
+    location.mkdir()
+    _git(outer, "init", "--initial-branch=main", ".")
+    (outer / "a.md").write_text("a\n", encoding="utf-8")
+    _git(outer, "add", "a.md")
+    _git(outer, "commit", "-m", "first")
+
+    # Against the previous head `git -C <location>` finds the OUTER repository
+    # and every one of these answers for it — and refuses only BY ACCIDENT,
+    # because this outer repository does not happen to contain the resolved
+    # revision. That is the same accident round 16 measured on the write path:
+    # with a CLONE in the way, the operation succeeds against the wrong
+    # history. So the assertion is on WHICH refusal arrives — one that names
+    # the repository that was found — and not merely that one does.
+    for operation in (lambda: adapter.list_documents(corpus),
+                      lambda: adapter.read(
+                          corpus, ca.DocumentId("corpus", "a.md")),
+                      lambda: adapter.check(corpus)):
+        with pytest.raises(ca.CorpusRefused) as caught:
+            operation()
+        assert caught.value.refusal.kind in {ca.CORPUS_UNREADABLE,
+                                             ca.CORPUS_ABSENT}, caught.value
+        assert str(outer.resolve()) in caught.value.refusal.detail or \
+            "no longer" in caught.value.refusal.detail, caught.value

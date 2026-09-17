@@ -364,24 +364,42 @@ class GitRunner:
     #: other caller — behaves exactly as before.
     inherit_fd: int | None = None
 
+    def _argv(self, args: tuple[str, ...]) -> list[str]:
+        """The command line, with this package's two policy options on it.
+
+        `core.hooksPath` POINTED AT NOTHING, ON EVERY INVOCATION. A repository
+        this service manages is WRITABLE by it, and `git push` runs the LOCAL
+        `pre-push` hook before it contacts the remote — so a `hooks/pre-push`
+        in a project repository executed arbitrary code in the runtime's own
+        process, which `protocol.ext.allow=never` says nothing about because a
+        hook is not a transport (Copilot review of openDox-code#26, round 13).
+        MEASURED on git 2.43.0 both ways: a planted `hooks/pre-push` RAN on an
+        ordinary push and did not run with this option, and the push succeeded
+        either way. It is set here rather than on the push because no act of
+        this runtime wants a repository's hooks to run in its process, and one
+        place cannot be forgotten by a later call.
+
+        AND THE SUBCOMMAND'S OWN ALIAS IS EMPTIED, which is defence in depth
+        and is labelled as such: MEASURED on git 2.43.0, an alias that shadows
+        a BUILT-IN command is IGNORED — `[alias] remote = !touch …` did not run
+        for `git remote`, nor `[alias] status` for `git status`, while an alias
+        under a non-built-in name (`revparse`) did run. Every command this
+        runner invokes is a built-in, so the reported channel is closed by git
+        itself here (Copilot review of openDox-code#26, round 18). `-c
+        alias.<subcommand>=` makes that a property of THIS call rather than of
+        a rule a later git could relax, and costs one option.
+        """
+        subcommand = next((arg for arg in args if not arg.startswith("-")), "")
+        alias = ([] if not subcommand.replace("-", "").isalnum()
+                 else ["-c", f"alias.{subcommand}="])
+        return [self.executable, "-C", str(self.root),
+                "-c", "core.hooksPath=" + os.devnull, *alias,
+                "--literal-pathspecs", *args]
+
     def run(self, *args: str, stdin: bytes | None = None,
             env: dict[str, str] | None = None,
             timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
-        # `core.hooksPath` POINTED AT NOTHING, ON EVERY INVOCATION. A
-        # repository this service manages is WRITABLE by it, and `git push`
-        # runs the LOCAL `pre-push` hook before it contacts the remote — so a
-        # `hooks/pre-push` in a project repository executed arbitrary code in
-        # the runtime's own process, which `protocol.ext.allow=never` says
-        # nothing about because a hook is not a transport (Copilot review of
-        # openDox-code#26, round 13). MEASURED on git 2.43.0 both ways: a
-        # planted `hooks/pre-push` RAN on an ordinary push and did not run with
-        # this option, and the push succeeded either way. It is set here rather
-        # than on the push because no act of this runtime wants a repository's
-        # hooks to run in its process, and one place cannot be forgotten by a
-        # later call.
-        argv = [self.executable, "-C", str(self.root),
-                "-c", "core.hooksPath=" + os.devnull,
-                "--literal-pathspecs", *args]
+        argv = self._argv(args)          # see `_argv` for the two options
         merged = {**_sanitized_git_environment(), **(env or {})}
         try:
             return subprocess.run(argv, input=stdin, capture_output=True,
@@ -421,9 +439,7 @@ class GitRunner:
         it — so the memory a remote can make this process hold is a constant
         and not a function of how long the remote is willing to talk.
         """
-        argv = [self.executable, "-C", str(self.root),
-                "-c", "core.hooksPath=" + os.devnull,
-                "--literal-pathspecs", *args]
+        argv = self._argv(args)
         try:
             child = subprocess.Popen(                    # noqa: S603 - fixed argv
                 argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -515,7 +531,17 @@ class GitRunner:
             **(env or {}),
         }
         try:
-            completed = self._run_bounded(args, merged, timeout)
+            # THE SANITIZED INHERITED ENVIRONMENT IS THE BASE, as it is for
+            # `run`. `_run_bounded` took the mapping it was handed and passed
+            # it straight to `Popen`, so the push ran with four variables and
+            # no `PATH` — and without `GIT_CONFIG_GLOBAL`/`SYSTEM`, which this
+            # package keeps on purpose because they are the operator's own git
+            # (a credential helper, a proxy, a CA bundle). Inspection worked
+            # and the push it was inspecting for could not (Copilot review of
+            # openDox-code#26, round 18, and it is a regression this round's
+            # own output cap introduced).
+            completed = self._run_bounded(
+                args, {**_sanitized_git_environment(), **merged}, timeout)
         except subprocess.TimeoutExpired as expired:
             raise GitCommandFailed(
                 args, subprocess.CompletedProcess(
@@ -1617,8 +1643,39 @@ class LocalGitCorpus:
                 "rather than read through a name that may lead elsewhere"
             ) from exc
         try:
-            yield runner_bound_to(handle, Path(corpus.location),
+            git = runner_bound_to(handle, Path(corpus.location),
                                   self._executable)
+            # AND THE ROOT RULE IS THE SAME ONE `resolve` APPLIES. `git -C`
+            # discovers a repository by WALKING UP, and the descriptor stops a
+            # pathname swap without stopping that: a location replaced by an
+            # ordinary subdirectory of another checkout was served from the
+            # ENCLOSING repository — the very defect RULED 5714365086 Q-F3
+            # closed at resolution, reachable again through every operation
+            # that reopens the location (Copilot review of openDox-code#26,
+            # round 18). `write_back` and the repository acts already re-check
+            # it; this is where the reads get it.
+            root = self._repository_root(git, corpus.location)
+            if root != Path(corpus.location).resolve():
+                raise _refuse(
+                    kind, subject,
+                    f"this operation is bound to the repository at {root}, and "
+                    f"{corpus.location} no longer resolves to it: either the "
+                    "location is inside that repository rather than being it, "
+                    "or the name was re-pointed after the corpus resolved")
+        except (OSError, RuntimeError) as exc:
+            os.close(handle)
+            raise _refuse(
+                kind, subject,
+                f"{corpus.location} could not be re-examined "
+                f"({exc.__class__.__name__})") from exc
+        except BaseException:
+            os.close(handle)
+            raise
+        # THE YIELD IS OUTSIDE THE TRANSLATION and inside a `finally`: an
+        # exception from the CALLER's body is the caller's, and the handle is
+        # released whatever it is.
+        try:
+            yield git
         finally:
             os.close(handle)
 
