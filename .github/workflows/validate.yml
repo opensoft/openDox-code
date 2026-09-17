@@ -979,10 +979,20 @@ jobs:
       #              one rule for all five sites and removes exactly the one
       #              newline git wrote; the rest of the ambiguity is closed
       #              where the name is chosen, by refusing a control
-      #              character in a project id. THE CURRENT FIGURE for this
-      #              branch; the PR description states it at this same
-      #              commit, `pytest -q tests_runtime/` is 441 and the
-      #              neutral conformance corpus is 17 of 17.
+      #              character in a project id. SUPERSEDED by the entry
+      #              below; `pytest -q tests_runtime/` was 441 there.
+      #  271 passed  at `build/3-6-repository-act` `52b9b74e` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — UNCHANGED in this branch's own
+      #              code and the same six modules: this head carries #25's
+      #              round TWENTY-TWO by merge, whose two new hermetic cases
+      #              are the whole of the move (no broker URL this runtime
+      #              prints can carry a credential, and every applyable
+      #              overlay supplies what the base leaves empty). THE
+      #              CURRENT FIGURE for this branch; the PR description
+      #              states it at this same commit, `pytest -q
+      #              tests_runtime/` is 443 and the neutral conformance
+      #              corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
