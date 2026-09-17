@@ -94,8 +94,13 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         PREFIX + "OIDC_JWKS_URL", None, False, False,
-        "the broker's JWKS URL; derived from the issuer's discovery document "
-        "when unset, which is the shape a Keycloak realm publishes",
+        "the broker's JWKS URL. When unset it is the issuer with "
+        "`/protocol/openid-connect/certs` appended — the fixed Keycloak "
+        "endpoint, NOT a discovery request: nothing here reads "
+        "`.well-known/openid-configuration`, so a broker that publishes a "
+        "different `jwks_uri` must set this (Copilot review of "
+        "openDox-code#25, round 16, suppressed: the setting promised a "
+        "discovery this runtime does not make)",
     ),
     Setting(
         PREFIX + "OIDC_ALGORITHMS", "RS256", False, False,

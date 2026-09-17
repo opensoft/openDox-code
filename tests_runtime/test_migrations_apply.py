@@ -1006,6 +1006,23 @@ def test_the_access_preflight_asks_about_this_runtimes_tables_and_the_schema(
             assert "USAGE" in str(caught.value)
             assert schema in str(caught.value)
             assert role in str(caught.value)
+
+            # AND A TABLE THAT IS NOT THERE IS REPORTED MISSING. The query is
+            # driven by `pg_class`, so a dropped coordination table produced no
+            # row and was never added to `missing` — a rerun after `users` was
+            # removed reported success and the API failed on the relation later
+            # (Copilot review of openDox-code#25, round 16, suppressed).
+            # Restricting the scan to the coordination tables in the same round
+            # is what made the gap reachable.
+            with admin.transaction() as conn:
+                conn.execute(f"grant usage on schema {schema} to {role}")
+                conn.execute(f"drop table {schema}.users cascade")
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations", runtime_role=role)
+                with pytest.raises(migrations.RuntimeAccessMissingError) as gone:
+                    runner.verify_runtime_access()
+            assert "missing users" in str(gone.value), str(gone.value)
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")

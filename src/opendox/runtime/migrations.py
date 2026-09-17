@@ -791,6 +791,28 @@ class MigrationRunner:
             " order by c.relname, p.privilege",
             (list(self.SERVED_PRIVILEGES), schema, list(self.SERVED_TABLES),
              LEDGER_TABLE, self._runtime_role)).fetchall()
+        # AND A TABLE THAT IS NOT THERE IS MISSING, not absent from the
+        # answer. The query is driven by `pg_class`, so a required coordination
+        # table that was DROPPED produces no row at all and was never added to
+        # `missing` — a rerun after `users` was removed reported success and
+        # the API failed on the relation later (Copilot review of
+        # openDox-code#25, round 16, suppressed). Restricting the scan to
+        # `SERVED_TABLES` in the same round is what made the gap reachable, so
+        # the set is compared rather than assumed.
+        present = {found[0] for found in conn.execute(
+            "select c.relname from pg_catalog.pg_class c "
+            "  join pg_catalog.pg_namespace n on n.oid = c.relnamespace "
+            " where n.nspname = %s and c.relkind = 'r' "
+            "   and c.relname = any(%s::text[])",
+            (schema, list(self.SERVED_TABLES))).fetchall()}
+        absent = [table for table in self.SERVED_TABLES if table not in present]
+        if absent:
+            raise RuntimeAccessMissingError(
+                f"the schema {schema!r} this run applied is missing "
+                f"{', '.join(absent)}; the coordination tables RULING Q1 names "
+                "have to be there for the served role to use them, and a run "
+                "that reports success without them leaves the API to fail on "
+                "the relation instead")
         if not missing:
             return
         named = ", ".join(f"{row[0]}:{row[1]}" for row in missing)
