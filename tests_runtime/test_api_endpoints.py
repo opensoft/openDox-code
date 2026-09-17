@@ -1227,3 +1227,76 @@ def test_a_chunked_body_over_the_cap_is_refused_as_it_arrives(
         rows = conn.execute("select count(*) from drafts where session_id = %s",
                             (session["id"],)).fetchone()
     assert rows[0] == 0
+
+
+# -- Copilot's twelfth round on #25 -------------------------------------------
+
+
+def test_a_draft_page_is_bounded_in_bytes_and_not_only_in_rows(
+        client, database, mint_token) -> None:
+    """A row limit is not a size limit when a row is a document.
+
+    `PUT /drafts` caps one body at `MAX_REQUEST_BODY_BYTES` (1 MiB), and this
+    listing returned up to `MAX_PAGE_SIZE` (500) of them — roughly 500 MiB
+    fetched, serialized and held in a worker for ONE request, with a handful of
+    concurrent callers enough to exhaust the process (Copilot review of
+    openDox-code#25, round 12, suppressed). A page now carries no more body
+    bytes than a single draft may, and ALWAYS AT LEAST ONE ROW so a draft
+    larger than the budget is still readable and `after` can always advance.
+
+    THE BODIES ARE GROWN IN SQL, and that is the point rather than a shortcut:
+    the cap on the way IN is per draft, so the only way to make a page too
+    large is with drafts that are each individually legal.
+    """
+    from opendox.runtime import identity
+    from opendox.runtime.app import MAX_REQUEST_BODY_BYTES
+
+    # THE BUDGET IS NAMED THROUGH THE REQUEST CAP, which exists in both shapes,
+    # so what fails against the old one is the COUNT and not an import.
+    budget = MAX_REQUEST_BODY_BYTES
+
+    owner = mint_token(subject="page-bytes-owner")
+    project = _project_with(client, owner, "page-bytes")
+    session = client.post("/api/v1/sessions",
+                          json={"project_id": project["id"]},
+                          headers=_auth(owner)).json()
+    keys = [f"big-{index}.md" for index in range(3)]
+    for key in keys:
+        saved = client.put("/api/v1/drafts",
+                           json={"session_id": session["id"],
+                                 "project_id": project["id"],
+                                 "document_key": key, "body": "x"},
+                           headers=_auth(owner))
+        assert saved.status_code == 200, saved.text
+
+    # Three legal drafts whose bodies together exceed the budget.
+    chunk = 600 * 1024
+    with database.transaction() as conn:
+        conn.execute("update drafts set body = repeat('x', %s)", (chunk,))
+
+    page = client.get("/api/v1/drafts?limit=500", headers=_auth(owner)).json()
+    assert len(page) == 2, (
+        f"the page returned {len(page)} drafts and "
+        f"{sum(len(d['body']) for d in page)} body bytes; the budget is "
+        f"{budget}")
+    rest = client.get(f"/api/v1/drafts?limit=500&after={page[-1]['id']}",
+                      headers=_auth(owner)).json()
+    assert len(rest) == 1, rest
+    assert {d["document_key"] for d in page} | {d["document_key"]
+                                                for d in rest} == set(keys), (
+        "the two pages are not the whole listing; `after` no longer walks it")
+
+    # AND A DRAFT BIGGER THAN THE WHOLE BUDGET IS STILL RETURNED: the budget is
+    # the bytes BEFORE a row, so the first row of a page is never excluded and
+    # pagination can always make progress.
+    with database.transaction() as conn:
+        conn.execute("update drafts set body = repeat('x', %s)", (2 * budget,))
+    single = client.get("/api/v1/drafts?limit=500", headers=_auth(owner)).json()
+    assert len(single) == 1, len(single)
+    assert len(single[0]["body"]) == 2 * budget
+
+    # AND THE TWO NUMBERS ARE ONE NUMBER. Asserted last, so the behaviour above
+    # is what a run against the old shape fails on.
+    assert identity.MAX_PAGE_BODY_BYTES == MAX_REQUEST_BODY_BYTES, (
+        "the page budget and the request cap have drifted apart; the rule is "
+        "that a page carries no more body bytes than one draft may")

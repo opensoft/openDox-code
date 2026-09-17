@@ -170,6 +170,22 @@ class LedgerNarrowingIneffectiveError(MigrationError):
     """
 
 
+class RuntimeAccessMissingError(MigrationError):
+    """The configured runtime role cannot use the schema the run just applied.
+
+    The bundled bootstrap grants that role its rights on the database's FIRST
+    START, as `$POSTGRES_USER`, so `alter default privileges` covers only the
+    tables `$POSTGRES_USER` goes on to create. The migration DSN's user is
+    configured separately: point it at another owner — or skip the
+    managed-database prerequisite entirely — and the run creates the six tables
+    with no privilege for the served role at all. `/readyz` then reports a
+    reachable database and an applied schema while every API request fails with
+    `permission denied for table …` (Copilot review of openDox-code#25, round
+    12). The run asks Postgres directly instead, and a run that cannot be
+    served is a failed run.
+    """
+
+
 class MigrationChecksumDriftError(MigrationError):
     """An already-applied migration's file has changed since it was applied."""
 
@@ -471,8 +487,9 @@ class MigrationRunner:
         release it when the backend exits anyway; releasing it explicitly is
         what makes a retry in the SAME process immediate).
 
-        The canonical gate runs FIRST, before the ledger is even bootstrapped,
-        so a tree carrying the wrong `0001` changes nothing at all.
+        THE WHOLE RUN'S BYTES ARE READ FIRST, and the canonical gate runs on
+        them, before the ledger is even bootstrapped — so a tree carrying the
+        wrong `0001` changes nothing at all.
         """
         with self._db.connection() as lock:
             lock.execute("select pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
@@ -488,6 +505,42 @@ class MigrationRunner:
                              (MIGRATION_LOCK_KEY,))
                 lock.commit()
 
+    def snapshot_run(self) -> list[tuple[Migration, bytes]]:
+        """Every migration and ITS BYTES, read once, with the gate applied.
+
+        NO DATABASE. This is discovery plus one read per file plus the
+        canonical digest check, so `apply()` can take its whole view of the
+        tree BEFORE it mutates anything.
+
+        WHY THE WHOLE RUN AND NOT JUST `0001` (Copilot review of
+        openDox-code#25, round 12). The gate used to hash the canonical file,
+        `bootstrap_ledger()` and `protect_ledger()` then COMMITTED, and the
+        loop re-read the bytes and re-checked the pin. A migrations directory
+        that changes under the process — which this runner explicitly supports,
+        and which is why the per-file snapshot exists at all — could therefore
+        pass the gate, have the ledger table and its privilege changes
+        committed, and only then raise `CanonicalDigestMismatchError`: the
+        promised "a tree carrying the wrong `0001` changes nothing at all" was
+        not kept, because by then two things had changed. One read of every
+        file, before the first `commit`, is the version of that promise a
+        mutable directory cannot walk past — and it is `Migration.snapshot()`'s
+        own rule ("one read, one digest, one execution") widened from a file to
+        a run.
+        """
+        run = [(migration, migration.snapshot())
+               for migration in self.discover()]
+        for migration, raw in run:
+            if not migration.is_canonical:
+                continue
+            actual = Migration.digest_of(raw)
+            if actual != CANONICAL_MIGRATION_SHA256:
+                raise CanonicalDigestMismatchError(
+                    expected=CANONICAL_MIGRATION_SHA256, actual=actual)
+            return run
+        raise MigrationError(
+            f"no canonical migration ({CANONICAL_MIGRATION_VERSION}) found in "
+            f"{self._migrations_dir}")
+
     def _apply_locked(self, lock: Any) -> list[str]:
         """`apply`'s body, ON THE CONNECTION THAT OWNS THE RUN'S LOCK.
 
@@ -495,7 +548,7 @@ class MigrationRunner:
         database through `self._db.transaction()`, which checks out another
         pool connection the advisory lock does not cover — see `_session`.
         """
-        verify_canonical_digest(self._migrations_dir)
+        run = self.snapshot_run()
         self.bootstrap_ledger(lock)
         lock.commit()
 
@@ -511,7 +564,7 @@ class MigrationRunner:
         lock.commit()
 
         applied_rows = self.applied(lock)
-        on_disk = {m.version for m in self.discover()}
+        on_disk = {migration.version for migration, _ in run}
         vanished = sorted(row.version for row in applied_rows
                           if row.version not in on_disk)
         if vanished:
@@ -525,20 +578,16 @@ class MigrationRunner:
         recorded = {row.version: row.checksum for row in applied_rows}
         applied_now: list[str] = []
 
-        for migration in self.discover():
+        for migration, raw in run:
             # THE BYTES ARE TAKEN ONCE AND EVERYTHING BELOW IS ABOUT THEM: the
-            # digest recorded in the ledger, the pin re-checked for `0001`, and
-            # the SQL executed. Three separate reads meant the gate could pass
-            # on one version of the file and the run execute another (Copilot
-            # review of openDox-code#25, round 11).
-            raw = migration.snapshot()
+            # digest recorded in the ledger, the pin checked for `0001`, and the
+            # SQL executed. Three separate reads meant the gate could pass on
+            # one version of the file and the run execute another (Copilot
+            # review of openDox-code#25, round 11); `snapshot_run()` above now
+            # takes that one read BEFORE the ledger is bootstrapped, so the pin
+            # has already been checked against exactly these bytes and there is
+            # nothing left here to re-check (round 12).
             current = Migration.digest_of(raw)
-            if migration.is_canonical and current != CANONICAL_MIGRATION_SHA256:
-                # The gate at the top of this run verified the file; this
-                # verifies THE BYTES ABOUT TO RUN, which is the only version of
-                # the check a mutable directory cannot walk past.
-                raise CanonicalDigestMismatchError(
-                    expected=CANONICAL_MIGRATION_SHA256, actual=current)
             if migration.version in recorded:
                 if recorded[migration.version] != current:
                     raise MigrationChecksumDriftError(
@@ -562,7 +611,69 @@ class MigrationRunner:
         # then have re-granted the ledger along with its own tables.
         self.protect_ledger(lock)
         lock.commit()
+        # AND THE SERVED ROLE'S ACCESS IS MEASURED, for the same reason the
+        # narrowing above is: a grant that was never made is invisible until a
+        # request fails. This is the LAST act of the run, after the narrowing,
+        # so it reads the privileges the install will actually serve with.
+        self.verify_runtime_access(lock)
         return applied_now
+
+    #: The rights the served role must hold on every coordination table. The
+    #: ledger is the one exception and is checked in the other direction by
+    #: `protect_ledger`.
+    SERVED_PRIVILEGES: tuple[str, ...] = ("SELECT", "INSERT", "UPDATE", "DELETE")
+
+    def verify_runtime_access(self, conn: Any = None) -> None:
+        """Refuse a run whose served role cannot read and write what it applied.
+
+        A no-op when no role is configured, exactly like `protect_ledger`: a
+        single-role install is legal and has nothing to check.
+
+        THE LEDGER IS EXCLUDED, because `protect_ledger` has just taken three
+        of these four privileges away from it on purpose.
+
+        The question is asked as `has_table_privilege`, which accounts for
+        ownership and for group membership, so a role granted through a group
+        passes — the check is "can this role use this table", not "is there a
+        grant row naming it".
+        """
+        if not self._runtime_role:
+            return
+        if conn is not None:
+            self._check_runtime_access(conn)
+            return
+        with self._db.connection() as owned:
+            self._check_runtime_access(owned)
+
+    def _check_runtime_access(self, conn: Any) -> None:
+        # The role name is a PARAMETER here: `has_table_privilege` is a
+        # function call, not an identifier position.
+        missing = conn.execute(
+            "select c.relname, p.privilege "
+            "  from pg_catalog.pg_class c "
+            "  join pg_catalog.pg_namespace n on n.oid = c.relnamespace "
+            "  cross join unnest(%s::text[]) as p(privilege) "
+            " where n.nspname = current_schema() "
+            "   and c.relkind = 'r' "
+            "   and c.relname <> %s "
+            "   and not has_table_privilege(%s, c.oid, p.privilege) "
+            " order by c.relname, p.privilege",
+            (list(self.SERVED_PRIVILEGES), LEDGER_TABLE,
+             self._runtime_role)).fetchall()
+        if not missing:
+            return
+        named = ", ".join(f"{row[0]}:{row[1]}" for row in missing)
+        raise RuntimeAccessMissingError(
+            f"{self._runtime_role!r} cannot use the schema this run applied — "
+            f"missing {named}. The bootstrap that creates the role sets "
+            "default privileges FOR THE ROLE THAT RUNS IT, so a migration DSN "
+            "authenticating as a different owner creates tables the served "
+            "role has no rights on, and a managed database that skipped the "
+            "documented prerequisite grants nothing at all. Grant them with "
+            "`grant select, insert, update, delete on all tables in schema "
+            "… to <runtime role>` and `alter default privileges for role "
+            "<migration owner> …` (docs/runtime.md, the managed-database "
+            "note), or serve as the role the bootstrap granted.")
 
     def protect_ledger(self, conn: Any = None) -> None:
         """Narrow the SERVED role's rights on the ledger to SELECT.

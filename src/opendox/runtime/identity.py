@@ -69,6 +69,22 @@ ROLES: tuple[str, ...] = ("owner", "member", "reader")
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
+#: AND BOUNDED IN BYTES, not only in rows — for the one listing that returns
+#: bytes. A draft is the single place this schema holds a document body, each
+#: capped at the API's request limit (1 MiB, `app.MAX_REQUEST_BODY_BYTES`, and
+#: `tests_runtime/test_api_endpoints.py` asserts the two numbers are the same
+#: number). `MAX_PAGE_SIZE` rows of them is half a gigabyte fetched, serialized
+#: and held in a worker for ONE request, and a handful of concurrent callers is
+#: then an outage — a row limit is not a size limit when a row is a document
+#: (Copilot review of openDox-code#25, round 12, suppressed).
+#:
+#: A page therefore carries no more body bytes than a single draft may, AND
+#: ALWAYS AT LEAST ONE ROW: the budget is applied to the bytes BEFORE each row,
+#: so a draft larger than the whole budget is still returned (and pagination
+#: can always make progress) while the page stops at the first row that would
+#: cross it. The page is a PREFIX either way, so `after` walks the rest.
+MAX_PAGE_BODY_BYTES = 1_048_576
+
 
 class CoordinationError(Exception):
     """A refused coordination operation, named. Carries no secret material."""
@@ -617,7 +633,8 @@ class CoordinationStore:
                     owned_by: str | None = None,
                     project_id: str | None = None,
                     limit: int | None = None,
-                    after: str | None = None) -> list[Draft]:
+                    after: str | None = None,
+                    max_bytes: int | None = None) -> list[Draft]:
         """One page of drafts, with EVERY FILTER APPLIED IN THE QUERY.
 
         `owned_by` is the ownership filter and is the one the API uses: a
@@ -634,23 +651,45 @@ class CoordinationStore:
         `session_ids` is kept for callers that already hold an explicit,
         bounded set. An EMPTY list is "no sessions, therefore no drafts" and is
         answered without a query; `None` is "do not filter by session".
+
+        AND THE PAGE IS BOUNDED IN BYTES AS WELL AS IN ROWS, in the query
+        (`MAX_PAGE_BODY_BYTES` — see that constant for the size, the reason and
+        the always-at-least-one-row rule). In SQL rather than in the handler
+        because the cost this bounds is the FETCH: a filter applied after
+        `fetchall()` would already have pulled every body across the connection
+        and built it in memory, which is the half-gigabyte the cap exists to
+        refuse. The running sum is taken over the rows BEFORE each row, so the
+        result is a prefix of the page the row limit would have returned and
+        `after` pagination is unchanged.
         """
         if session_ids is not None and not session_ids:
             return []
+        budget = MAX_PAGE_BODY_BYTES if max_bytes is None else max_bytes
+        if budget < 1:
+            raise CoordinationError(
+                f"a draft page byte budget of {budget} can return no row at "
+                "all; the budget bounds the bytes BEFORE a row, so it must be "
+                "at least 1")
         rows = self._conn.execute(
-            f"select {_DRAFT_COLUMNS} from drafts d "
-            "where (%s::text is null or d.session_id = %s) "
-            "and (%s::text[] is null or d.session_id = any(%s)) "
-            "and (%s::text is null or exists ("
-            "  select 1 from sessions s"
-            "   where s.id = d.session_id and s.user_id = %s)) "
-            "and (%s::text is null or d.project_id = %s) "
-            "and (%s::text is null or d.id > %s) order by d.id limit %s",
+            f"select {_DRAFT_COLUMNS} from ("
+            f"  select {_DRAFT_COLUMNS}, coalesce(sum(octet_length(d.body)) "
+            "     over (order by d.id rows between unbounded preceding "
+            "           and 1 preceding), 0) as bytes_before "
+            "  from drafts d "
+            "  where (%s::text is null or d.session_id = %s) "
+            "  and (%s::text[] is null or d.session_id = any(%s)) "
+            "  and (%s::text is null or exists ("
+            "    select 1 from sessions s"
+            "     where s.id = d.session_id and s.user_id = %s)) "
+            "  and (%s::text is null or d.project_id = %s) "
+            "  and (%s::text is null or d.id > %s) order by d.id limit %s"
+            ") page where page.bytes_before < %s order by page.id",
             (session_id, session_id,
              list(session_ids) if session_ids is not None else None,
              list(session_ids) if session_ids is not None else None,
              owned_by, owned_by,
-             project_id, project_id, after, after, clamp_limit(limit)),
+             project_id, project_id, after, after, clamp_limit(limit),
+             budget),
         ).fetchall()
         return [Draft(*row) for row in rows]
 

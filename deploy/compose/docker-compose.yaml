@@ -38,6 +38,14 @@ services:
       # reads.
       OPENDOX_RUNTIME_PG_USER: ${OPENDOX_RUNTIME_PG_ROLE:-opendox_runtime}
       OPENDOX_RUNTIME_PG_PASSWORD: ${OPENDOX_RUNTIME_PG_PASSWORD}
+      # THE ROLE THE MIGRATION RUNS AS — the user inside
+      # `OPENDOX_MIGRATION_DATABASE_URL`. `alter default privileges` belongs to
+      # the role that creates the object, so the bootstrap has to name this one
+      # or a migration owner that is not `POSTGRES_USER` creates tables the
+      # served role has no rights on (Copilot review of openDox-code#25, round
+      # 12). EMPTY means "the same role as POSTGRES_USER", which is the bundled
+      # shape; the init script applies that default.
+      OPENDOX_MIGRATION_PG_USER: ${OPENDOX_MIGRATION_PG_USER:-}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - pg_data:/var/lib/postgresql/data

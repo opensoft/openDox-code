@@ -74,6 +74,16 @@ spec:
                 secretKeyRef:
                   name: opendox-postgres
                   key: runtime-password
+            # AND THE MIGRATION OWNER THE BOOTSTRAP AIMS DEFAULT PRIVILEGES AT.
+            # From the same ConfigMap an overlay edits when it repoints
+            # `opendox-db-migration` at another owner; empty is the bundled
+            # shape and the script then uses `POSTGRES_USER` (Copilot review of
+            # openDox-code#25, round 12).
+            - name: OPENDOX_MIGRATION_PG_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: migration_pg_user
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

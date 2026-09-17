@@ -659,6 +659,15 @@ def test_a_role_whose_name_is_not_lower_case_is_narrowed_as_itself(
             # not a plannable statement), and this role is dropped below.
             conn.execute(
                 f'create role "{role}" login password ' "'throwaway-local'")
+            # AND GRANTED, because `verify_runtime_access` is now the last act
+            # of a run: a served role that cannot use the schema the run
+            # applied fails the run (Copilot review of openDox-code#25, round
+            # 12). This test is about the case of the NAME, so it grants the
+            # rights a real install grants and keeps its own subject.
+            conn.execute(f'grant usage on schema {schema} to "{role}"')
+            conn.execute(
+                f"alter default privileges in schema {schema} "
+                f'grant select, insert, update, delete on tables to "{role}"')
         try:
             with Database(postgres_dsn, schema=schema) as db:
                 runner = migrations.MigrationRunner(
@@ -734,6 +743,121 @@ def test_status_calls_an_unmigrated_database_unhealthy_and_blames_the_tree(
             assert report["database"] == "reachable", report
             assert report["migrations"].startswith("unreadable: "), report
             assert report["ok"] is False and code == 1
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+
+
+# -- Copilot's twelfth round on #25 -------------------------------------------
+
+
+def test_a_run_whose_served_role_was_never_granted_fails_instead_of_serving(
+        postgres_dsn: str) -> None:
+    """A skipped prerequisite used to surface as the first request, not the run.
+
+    `alter default privileges` belongs to the role that CREATES the table, and
+    the bundled bootstrap runs as `$POSTGRES_USER`; the migration DSN is
+    configured separately. Point it at another owner — or run a managed
+    database whose operator skipped the documented prerequisite — and the run
+    created the six tables with no privilege for the served role at all: the
+    Job succeeded, `/readyz` reported a reachable database and an applied
+    schema, and every API query failed `permission denied for table …` (Copilot
+    review of openDox-code#25, round 12). The run asks Postgres instead.
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    role = "t_ungranted_" + uuid.uuid4().hex[:8]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            # The role EXISTS and can reach the ledger, so `protect_ledger`
+            # succeeds: what is missing is exactly the grant the bootstrap
+            # would have made on the tables this run creates.
+            conn.execute(f"create role {role}")
+            conn.execute(f"grant usage on schema {schema} to {role}")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations", runtime_role=role)
+                # A `MigrationError` FIRST, which exists in both shapes: what
+                # fails against the old one is that the run SUCCEEDS, not that
+                # a name is missing.
+                with pytest.raises(migrations.MigrationError) as caught:
+                    runner.apply()
+            assert isinstance(caught.value, migrations.RuntimeAccessMissingError)
+            message = str(caught.value)
+            assert role in message
+            for expected in ("users:SELECT", "users:INSERT", "sessions:UPDATE",
+                             "drafts:DELETE"):
+                assert expected in message, (expected, message)
+            # The LEDGER is not among them: `protect_ledger` has just taken
+            # three of those four away from it on purpose.
+            assert f"{migrations.LEDGER_TABLE}:" not in message, message
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+                conn.execute(f"drop role if exists {role}")
+
+
+def test_a_migrations_directory_rewritten_mid_run_runs_the_bytes_it_gated(
+        postgres_dsn: str, tmp_path: Path) -> None:
+    """The gate's "nothing at all" used to mean "the ledger and its grants".
+
+    `verify_canonical_digest()` hashed `0001`; `bootstrap_ledger()` and
+    `protect_ledger()` then COMMITTED; and only the loop's re-read raised
+    `CanonicalDigestMismatchError`. A directory that changes under the process
+    — which this runner supports by design — therefore left the ledger table
+    and its privilege changes behind on a run that refused (Copilot review of
+    openDox-code#25, round 12). `snapshot_run()` reads every file and runs the
+    gate BEFORE the first commit, so a rewrite from that moment on is not part
+    of this run at all: it completes on the bytes it gated, and the ledger
+    records their digest — the pin.
+
+    Measured both ways before it was written: against the old shape this raises
+    `CanonicalDigestMismatchError` and leaves `opendox_schema_migrations`
+    behind as the only table in the schema.
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    for name in ("0001_identity_and_coordination.sql",
+                 "0002_migration_state.sql"):
+        shutil.copyfile(ROOT / "migrations" / name, tmp_path / name)
+    canonical = tmp_path / "0001_identity_and_coordination.sql"
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(db, migrations_dir=tmp_path)
+                bootstrap = runner.bootstrap_ledger
+
+                def _rewrite_then_bootstrap(conn=None):
+                    canonical.write_bytes(b"create table intruder ();\n")
+                    return bootstrap(conn)
+
+                runner.bootstrap_ledger = _rewrite_then_bootstrap  # type: ignore[method-assign]
+                applied = runner.apply()
+
+                assert applied == ["0001", "0002"], applied
+                assert canonical.read_bytes() == b"create table intruder ();\n", (
+                    "the rewrite did not happen, so this test measured nothing")
+                present = _tables_in(db, schema)
+                assert "intruder" not in present, (
+                    "the rewritten bytes were executed")
+                assert set(identity.TABLES) | {migrations.LEDGER_TABLE} <= present
+                recorded = {row.version: row.checksum for row in runner.applied()}
+                assert (recorded["0001"]
+                        == migrations.CANONICAL_MIGRATION_SHA256), (
+                    "the ledger recorded the digest of bytes that did not run")
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")

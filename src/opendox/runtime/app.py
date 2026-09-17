@@ -727,6 +727,18 @@ def list_drafts(store: StoreDep, principal: PrincipalDep,
     # drafts of the later ones and was refused their own session by name
     # (Copilot review of openDox-code#25, suppressed comment). `owned_by` asks
     # `sessions.user_id` in SQL, which has no page to fall off.
+    #
+    # AND THE PAGE IS BOUNDED IN BYTES, not only in rows. This is the one
+    # listing in the API that returns document bodies, each capped at
+    # `MAX_REQUEST_BODY_BYTES` on the way in; `MAX_PAGE_SIZE` of them is ~500
+    # MiB fetched, serialized and held per request, so a few concurrent callers
+    # exhaust a worker with entirely legitimate requests (Copilot review of
+    # openDox-code#25, round 12, suppressed). `identity.MAX_PAGE_BODY_BYTES` is
+    # the same number as the request cap — a page carries no more body bytes
+    # than one draft may — and the store applies it IN THE QUERY, so the bytes
+    # are never fetched. A short page is therefore ordinary: the answer is a
+    # prefix and `after` walks the rest, which is how this route already
+    # paginates.
     found = store.list_drafts(session_id=session_id, owned_by=principal.id,
                               project_id=project_id, limit=limit, after=after)
     return [_draft_json(d) for d in found]
