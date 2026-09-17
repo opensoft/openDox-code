@@ -799,6 +799,21 @@ jobs:
       #              states it at this same commit, `pytest -q
       #              tests_runtime/` is 413 and the neutral conformance
       #              corpus is 17 of 17.
+      #  253 passed  at `build/3-6-repository-act` `97e86216` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              EIGHTEEN: the bounded push lost its environment (a
+      #              regression this branch's own output cap introduced — it
+      #              ran with four variables and no `PATH`), and a READ
+      #              could still be served from an ENCLOSING repository,
+      #              because a descriptor stops a pathname swap and not
+      #              git's discovery. Aliases are answered by MEASUREMENT
+      #              and the guard kept: on git 2.43.0 an alias that shadows
+      #              a BUILT-IN is ignored, and every command this runner
+      #              invokes is one. THE CURRENT FIGURE for this branch; the
+      #              PR description states it at this same commit, `pytest
+      #              -q tests_runtime/` is 416 and the neutral conformance
+      #              corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
