@@ -1368,3 +1368,45 @@ def test_a_close_in_flight_orders_the_draft_write_instead_of_racing_it(
         rows = conn.execute("select count(*) from drafts where session_id = %s",
                             (session["id"],)).fetchone()
     assert rows[0] == 0, "a draft was written into a session that had ended"
+
+
+def test_a_claim_that_stops_arriving_leaves_the_last_one_and_says_so(
+        database, mint_token) -> None:
+    """`coalesce` is the decision; the docstring was what was wrong.
+
+    It said the display fields are "refreshed from the token's claims on every
+    login" and that the row "records what it last said", which `coalesce` does
+    not do: a claim that stops arriving leaves the previous value (Copilot
+    review of openDox-code#25, round 13, suppressed). This runtime sees ONE
+    TOKEN PER REQUEST, not a profile event — whether a token carries `email`
+    depends on the scopes it was issued for — so assigning `excluded.email`
+    directly would make the stored value FLAP between requests made with
+    different tokens by the same person. Both halves are measured here, and the
+    docstring now states the consequence: a value REMOVED at the broker is not
+    cleared until a token arrives with a different one.
+    """
+    from opendox.runtime import identity
+
+    with database.transaction() as conn:
+        store = identity.CoordinationStore(conn)
+        first = store.upsert_user(issuer="https://broker.test/realms/opendox",
+                                  subject="claims-come-and-go",
+                                  email="one@example.invalid",
+                                  display_name="One")
+        assert (first.email, first.display_name) == ("one@example.invalid",
+                                                     "One")
+        # A LATER TOKEN THAT CARRIES THE CLAIMS refreshes them.
+        second = store.upsert_user(issuer="https://broker.test/realms/opendox",
+                                   subject="claims-come-and-go",
+                                   email="two@example.invalid",
+                                   display_name="Two")
+        assert second.id == first.id
+        assert (second.email, second.display_name) == ("two@example.invalid",
+                                                       "Two")
+        # A LATER TOKEN THAT CARRIES NEITHER leaves them.
+        third = store.upsert_user(issuer="https://broker.test/realms/opendox",
+                                  subject="claims-come-and-go")
+        assert third.id == first.id
+        assert (third.email, third.display_name) == ("two@example.invalid",
+                                                     "Two")
+        assert third.last_seen_at >= second.last_seen_at
