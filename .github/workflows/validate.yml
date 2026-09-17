@@ -751,6 +751,22 @@ jobs:
       #              description states it at this same commit, `pytest -q
       #              tests_runtime/` is 407 and the neutral conformance
       #              corpus is 17 of 17.
+      #  250 passed  at `build/3-6-repository-act` `c554006e` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, carrying
+      #              #25's round FIFTEEN by merge and adding the two of
+      #              round seventeen's SUPPRESSED comments that were real
+      #              defects: a project id holding a NUL was refused by
+      #              `ValueError` — which this act does not catch — and so
+      #              reached the API as a 500 instead of a named refusal;
+      #              and git's own stderr could still carry a LEGACY row's
+      #              multiline credential, which the credential PATTERN
+      #              cannot match by design, so the push path takes the
+      #              destination it already KNOWS out of the text instead.
+      #              THE CURRENT FIGURE for this branch; the PR description
+      #              states it at this same commit, `pytest -q
+      #              tests_runtime/` is 412 and the neutral conformance
+      #              corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
