@@ -38,10 +38,37 @@ pytestmark = pytest.mark.skipif(
 ACTOR = "Student One"
 
 
+#: The environment EVERY `git` this module runs gets, and it is not a
+#: convenience.
+#:
+#: `git commit-tree` needs a committer, and this module's one direct use of it
+#: (the gitlink listing case, round 10) took it from the developer's GLOBAL
+#: config — which every workstation here has and NO CI runner does. The case
+#: therefore passed for its author and exited 128 in both jobs, which is the
+#: third instance on this act of one rule: a result measured under an
+#: environment the job does not have is not that job's result (the first was
+#: `importorskip` in a job that installs `.[test]` alone; the second was a
+#: hermetic figure measured with the `runtime` extra present).
+#:
+#: So the global and system config files are taken OUT of the picture as well
+#: as an identity put in: with `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` pointed
+#: at nothing, a workstation and a runner see the same git, and a case that
+#: depends on ambient configuration fails in both places instead of one.
+_GIT_ENV = {
+    **os.environ,
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+    "GIT_AUTHOR_NAME": "openDox tests",
+    "GIT_AUTHOR_EMAIL": "tests@opendox.invalid",
+    "GIT_COMMITTER_NAME": "openDox tests",
+    "GIT_COMMITTER_EMAIL": "tests@opendox.invalid",
+}
+
+
 def _git(root: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(root), *args],
                           capture_output=True, text=True,
-                          check=True).stdout.strip()
+                          check=True, env=_GIT_ENV).stdout.strip()
 
 
 @pytest.fixture()
