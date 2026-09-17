@@ -417,10 +417,18 @@ jobs:
       # its word lists, a mount that forwards no option spells nothing at all,
       # and a fallback that keeps the previous vocabulary is a missing RESET
       # rather than a literal. Measured at `0b4e8bbf` with this file alone
-      # dropped in: 10 of its 12 tests FAIL, each for its own defect. The two
+      # dropped in: 11 of its 13 tests FAIL, each for its own defect. The two
       # that pass there are deliberate — `applyTokens`' return contract is
       # unchanged by the fix, and `insertSection` already honoured
       # `options.display`, which is precisely why `runAddSection` omitting it
       # was invisible.
+      # THE THIRTEENTH TEST is the BEHAVIOURAL half of the `docs.js` claim,
+      # added on Copilot's review of this pull request at `b4efe155`: it runs
+      # the real `docHaystack` body under node against a `vocab` double that
+      # renames one stage and reads the haystack it RETURNS, because a regex
+      # over source text can only say what a function says. The measurement
+      # that earned it is in the same review: the pattern it joins matched a
+      # body with `d.stage,` deleted from the returned array, since the
+      # `d.stage ?` guard satisfies it alone.
       - name: pytest (S7 residue)
         run: python -m pytest -q tests/test_display_facet_leaves.py --noconftest

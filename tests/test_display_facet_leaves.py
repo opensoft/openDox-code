@@ -349,12 +349,53 @@ def test_the_docs_search_indexes_both_spellings_of_the_stage():
     assert "vocab.documentStageWord(d.stage)" in body, (
         "docHaystack indexes the raw stage enum alone, so a search for the "
         "stage word the row renders finds nothing")
-    assert re.search(r"\bd\.stage\b(?!\s*\))", body), (
-        "docHaystack no longer indexes the raw enum -- a search for "
-        "`brainstorm` must go on working")
+    # AS AN ARRAY ELEMENT, which is the only place the RAW enum is indexed
+    # (Copilot review of openDox-code#28 at `b4efe155`, and it is right by
+    # measurement): this read `\bd\.stage\b(?!\s*\))`, which the GUARD
+    # `d.stage ? vocab.documentStageWord(d.stage) : ""` satisfies on its own --
+    # deleting `d.stage,` from the returned array leaves that guard behind and
+    # the old assertion green, with raw-enum search regressed and nothing red.
+    # Measured on the real body with the element removed: the old pattern still
+    # matched, this one does not.
+    assert re.search(r"\bd\.stage\s*,", body), (
+        "docHaystack no longer indexes the raw enum as an array element -- a "
+        "search for `brainstorm` must go on working")
     # The filter and the haystack are the same function, so the index the test
     # reads is the index the search uses.
     assert "docHaystack(d).includes(state.search)" in _text(DOCS_JS)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_docs_haystack_really_carries_both_spellings(tmp_path):
+    """The same claim as above, made BEHAVIOURALLY rather than by pattern.
+
+    A regex over source text can only ever say what the function SAYS. This
+    runs the real `docHaystack` body -- extracted verbatim from the module and
+    given the smallest `vocab` double that renames one stage -- and reads the
+    haystack it returns, so the assertion is about the index a search actually
+    uses. Asked for by Copilot's review of this pull request at `b4efe155`
+    ("or add a behavioral search assertion"), and it is the stronger half of
+    the answer: a source edit that drops either spelling turns this red no
+    matter how the remaining text happens to be shaped.
+    """
+    haystack = re.search(r"function docHaystack\(d\) \{(.*?)\n\}",
+                         _text(DOCS_JS), re.S)
+    assert haystack, "views/docs.js declares no docHaystack(d)"
+    out = _run_node(
+        "const vocab = { documentStageWord: (s) => "
+        "(s === 'brainstorm' ? 'jotted' : s) };\n"
+        "function docHaystack(d) {" + haystack.group(1) + "\n}\n"
+        "console.log(JSON.stringify({haystack: docHaystack("
+        + json.dumps({"path": "ideation/brainstorm/x.md", "summary": "a note",
+                      "kind": "document", "stage": "brainstorm",
+                      "topics": ["carve"]}) + ")}));\n", tmp_path)
+    assert "brainstorm" in out["haystack"], (
+        "the RAW enum is not in the haystack: a search for `brainstorm` finds "
+        f"nothing -- {out['haystack']!r}")
+    assert "jotted" in out["haystack"], (
+        "the FACET-RESOLVED word is not in the haystack: a host that renames "
+        f"the stage hides the document from a search for what it renders -- "
+        f"{out['haystack']!r}")
 
 
 # ---------------------------------------------------------------------------
