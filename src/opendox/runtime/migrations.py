@@ -533,17 +533,23 @@ class MigrationRunner:
         return [AppliedMigration(version=r[0], name=r[1], checksum=r[2],
                                  reversible=r[3]) for r in rows]
 
-    def plan(self) -> list[Migration]:
+    def plan(self, conn: Any = None) -> list[Migration]:
         """The pending migrations, in the order they would be applied.
 
         VERSIONS ONLY, and `drift()` is where the rest of the answer is: see
         that method for why "nothing pending" is not the same as "this database
         matches this tree".
+
+        `conn` IS THE PROBE'S HANDLE, and it is the same argument `applied()`
+        already took: `/readyz` asks three questions under ONE `timeoutSeconds`
+        and each of them checked out its own pooled connection, so under pool
+        contention the probe's budget covered one wait and paid three (Copilot
+        review of openDox-code#25, round 19, suppressed).
         """
-        already = {row.version for row in self.applied()}
+        already = {row.version for row in self.applied(conn)}
         return [m for m in self.discover() if m.version not in already]
 
-    def drift(self) -> list[str]:
+    def drift(self, conn: Any = None) -> list[str]:
         """Applied migrations this tree can no longer account for.
 
         TWO KINDS, both of which `plan()` CANNOT see because it compares
@@ -559,10 +565,12 @@ class MigrationRunner:
 
         Returns the versions, sorted, with a one-word reason each, so a caller
         can name them. Empty is the only clean answer.
+
+        `conn` is `plan()`'s, for the same reason: one probe, one checkout.
         """
         on_disk = {m.version: m for m in self.discover()}
         out: list[str] = []
-        for row in self.applied():
+        for row in self.applied(conn):
             migration = on_disk.get(row.version)
             if migration is None:
                 out.append(f"{row.version}:missing")

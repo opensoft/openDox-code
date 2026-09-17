@@ -1155,3 +1155,139 @@ def test_the_build_context_carries_only_what_the_dockerfile_copies() -> None:
     assert "deploy" not in allowed and "deploy/compose/.env" not in allowed
     assert not any(rule.startswith("!deploy") for rule in rules), (
         "`deploy/` is re-included, so the filled-in `.env` travels again")
+
+
+def test_the_migration_wait_ends_on_the_clock_not_after_a_count() -> None:
+    """120 attempts is not 240 seconds, and the message said 240 seconds.
+
+    `socket.create_connection(..., timeout=2)` can spend its WHOLE two seconds
+    before the `sleep(2)` that follows, so a loop counted to 120 ran for up to
+    480s while the line it ends with — and the runbook that quotes it — said
+    240s (Copilot review of openDox-code#25, round 19, suppressed).
+
+    MEASURED against a non-routable address, where every connect burns its full
+    timeout, with the counts scaled down by 40:
+
+        the shape this replaced   3 x (2s connect + 2s sleep), claiming 6s
+                                  -> 12.1s, exactly twice its stated budget
+
+    The loop is a `time.monotonic()` deadline now: the same four minutes
+    whatever each attempt costs. Both halves are asserted here — the shape, so
+    a counted loop cannot come back, and one real run, so the shape is not
+    merely spelled correctly.
+    """
+    import subprocess
+    import time
+
+    job = yaml.safe_load(
+        (KUBERNETES / "base" / "migration-job.yaml").read_text(
+            encoding="utf-8"))
+    script = job["spec"]["template"]["spec"]["initContainers"][0]["command"][-1]
+
+    assert "time.monotonic()" in script, script
+    assert "for _ in range(" not in script, (
+        "the readiness wait counts attempts again; a count is not a clock")
+
+    # AND IT REALLY ENDS THERE. The deadline is scaled down for the run; the
+    # port is one nothing listens on, so each attempt returns at once and the
+    # loop's own bound is what stops it.
+    started = time.monotonic()
+    done = subprocess.run(
+        ["python3", "-c", script.replace("time.monotonic() + 240",
+                                         "time.monotonic() + 1")],
+        capture_output=True,
+        env={"OPENDOX_MIGRATION_WAIT_HOST": "127.0.0.1",
+             "OPENDOX_MIGRATION_WAIT_PORT": "1", "PATH": "/usr/bin:/bin"})
+    elapsed = time.monotonic() - started
+    assert done.returncode == 1, done
+    assert b"did not accept connections in 240s" in done.stderr, done.stderr
+    assert 1 <= elapsed < 4, (
+        f"a one-second deadline took {elapsed:.1f}s")
+
+    # An empty wait host is still an immediate exit 0 — a managed database has
+    # nothing in this cluster to wait for.
+    assert subprocess.run(
+        ["python3", "-c", script], capture_output=True,
+        env={"OPENDOX_MIGRATION_WAIT_HOST": "", "PATH": "/usr/bin:/bin"}
+    ).returncode == 0
+
+
+def test_no_documented_command_puts_a_secret_in_its_own_argv() -> None:
+    """`--from-literal=password=…` is readable in `/proc/<pid>/cmdline`.
+
+    The runbook told an operator to put the Postgres passwords and both DSNs on
+    a `kubectl` command line — where they land in the shell's history file and
+    in every other process's view of the host for as long as `kubectl` runs —
+    while the managed-database block one page down already took the same class
+    of secret through `read -rs`. Two paths, one secret, different rules
+    (Copilot review of openDox-code#25, round 19, suppressed).
+
+    MEASURED with a `kubectl` on PATH that prints its own argv: the documented
+    block passes `--from-file=password=/tmp/…/password` and nothing else, and
+    removes the directory it wrote.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    secret_shaped = re.compile(
+        r"--from-literal=(?P<key>[\w.-]*(?:password|dsn|secret|token)[\w.-]*)=",
+        re.IGNORECASE)
+    offenders = [line.strip() for line in runbook.splitlines()
+                 if secret_shaped.search(line)]
+    assert not offenders, (
+        "these documented commands carry a secret in their own argv:\n"
+        + "\n".join(offenders))
+    # And the replacement is the one that keeps it off: a file whose NAME is
+    # the key, written under `umask 077` and removed afterwards.
+    assert "umask 077" in runbook
+    assert "--from-file=password=" in runbook
+    assert 'rm -rf "$secrets"' in runbook
+
+
+def test_the_managed_database_path_ships_the_overlay_it_requires() -> None:
+    """Pointing the DSNs elsewhere does not remove the bundled Postgres.
+
+    The runbook's managed-database paragraph said to point both DSNs at the
+    managed database and empty `migration_wait_host` — and stopped, while the
+    base still lists `postgres-statefulset.yaml` and `postgres-service.yaml`.
+    Following it started a second database nobody uses and failed on the
+    `opendox-postgres` Secret the StatefulSet mounts and that path never
+    creates (Copilot review of openDox-code#25, round 19, suppressed). An
+    overlay is the only place kustomize can remove a base resource, so the
+    instruction ships with one.
+
+    MEASURED with kustomize v5.4.3 — `kustomize build
+    deploy/kubernetes/overlays/managed-database` renders Namespace, the two
+    ConfigMaps, the runtime Service, the PVC, the Deployment and the migration
+    Job, and NEITHER `StatefulSet/opendox-postgres`, `Service/opendox-postgres`
+    nor `ConfigMap/opendox-postgres-init`, with `migration_wait_host` empty.
+    The binary is not on the CI runner, so what is asserted here is the
+    overlay's own declaration and the runbook pointing at it.
+    """
+    overlay = (KUBERNETES / "overlays" / "managed-database"
+               / "kustomization.yaml")
+    assert overlay.exists(), (
+        "the runbook's managed-database path has no overlay to build")
+    declared = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+    assert declared["resources"] == ["../../base"]
+
+    removed = {(patch["target"]["kind"], patch["target"]["name"])
+               for patch in declared["patches"]
+               if "$patch: delete" in patch["patch"]}
+    assert removed == {("StatefulSet", "opendox-postgres"),
+                       ("Service", "opendox-postgres"),
+                       ("ConfigMap", "opendox-postgres-init")}, removed
+
+    # Every one of those is in the base, or this overlay is deleting nothing.
+    base = yaml.safe_load(
+        (KUBERNETES / "base" / "kustomization.yaml").read_text(
+            encoding="utf-8"))
+    assert "postgres-statefulset.yaml" in base["resources"]
+    assert "postgres-service.yaml" in base["resources"]
+
+    generated = {entry["name"]: entry
+                 for entry in declared["configMapGenerator"]}
+    assert "migration_wait_host=" in \
+        generated["opendox-runtime-config"]["literals"]
+
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    assert "overlays/managed-database" in runbook, (
+        "the runbook does not tell an operator this overlay exists")

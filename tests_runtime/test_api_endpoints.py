@@ -1439,3 +1439,36 @@ def test_the_page_budget_is_applied_before_the_bodies_are_fetched() -> None:
     assert "select d.id," in inner, inner
     # And the outer query is the one that names the columns a caller gets.
     assert "page on page.id = d.id" in source, source
+
+
+def test_a_readiness_probe_makes_one_pool_checkout(
+        client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The probe's budget covers ONE checkout wait, and this asked for three.
+
+    `test_deploy_shape.py` derives the readiness probe's `timeoutSeconds` from
+    one `DEFAULT_CHECKOUT_TIMEOUT_SECONDS` plus the JWKS timeout, and holds it
+    strictly over both. `/readyz` then checked out for `select 1`, again inside
+    `plan()` and again inside `drift()` — each of which calls `applied()` — so
+    a pool under contention made the probe wait three of those under a budget
+    that covers one. kubelet cuts an over-budget probe off mid-flight and the
+    next one overlaps it (Copilot review of openDox-code#25, round 19,
+    suppressed).
+
+    The count is the assertion, because the wait itself is a race: three
+    checkouts is the defect whether or not a given run contends.
+    """
+    database = client.app.state.context.database
+    checkouts = []
+    real = database.connection
+
+    def _counted(*args: object, **kwargs: object):
+        checkouts.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(database, "connection", _counted)
+    body = client.get("/readyz").json()
+    assert body["checks"]["database"] == "ok", body
+    assert body["checks"]["schema"] == "applied", body
+    assert len(checkouts) == 1, (
+        f"this probe checked out {len(checkouts)} pooled connections; the "
+        "budget the manifests assert covers one")

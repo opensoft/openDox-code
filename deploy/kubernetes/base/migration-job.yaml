@@ -119,14 +119,25 @@ spec:
                   # A managed database: nothing in this cluster to wait for.
                   sys.exit(0)
               port = int(os.environ.get("OPENDOX_MIGRATION_WAIT_PORT") or 5432)
-              # 120 x 2s = four minutes: longer than a first-start initdb,
+              # FOUR MINUTES ON THE CLOCK, not 120 attempts that each cost an
+              # unknown amount of it. `create_connection(..., timeout=2)` can
+              # spend its whole 2s before the `sleep(2)`, so the counted loop
+              # ran for up to 480s while the message it ends with said 240s —
+              # and a Job whose retry budget is stated in the runbook then took
+              # twice what the runbook said (Copilot review of openDox-code#25,
+              # round 19, suppressed). A deadline is the same four minutes
+              # whatever each attempt costs: longer than a first-start initdb,
               # shorter than a human's patience.
-              for _ in range(120):
+              deadline = time.monotonic() + 240
+              while True:
                   try:
                       with socket.create_connection((host, port), timeout=2):
                           sys.exit(0)
                   except OSError:
-                      time.sleep(2)
+                      pass
+                  if time.monotonic() >= deadline:
+                      break
+                  time.sleep(min(2, max(0, deadline - time.monotonic())))
               sys.stderr.write(
                   f"{host}:{port} did not accept connections in 240s\n")
               sys.exit(1)
