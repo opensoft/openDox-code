@@ -507,9 +507,23 @@ jobs:
       #              under a promise that it would not. `selected_schema`
       #              asks both questions together and refuses when they
       #              disagree; `"$user"` is not compared, because it is not
-      #              a name. THE CURRENT FIGURE; the PR description states
-      #              it at this same commit, and `pytest -q tests_runtime/`
-      #              is 230 here.
+      #              a name. `pytest -q tests_runtime/` is 230 here.
+      #  132 passed  at `build/3-5-runtime` `a69ba82f` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round fourteen's five SUPPRESSED
+      #              comments, which are two defects: the command this
+      #              service PRINTS was not a command (every verb lives
+      #              under the `runtime` group, so the shortened spelling
+      #              exits 2 — it was `init`'s `next`, `/readyz`'s advice to
+      #              an operator, the runbook's transcript, and a case that
+      #              PINNED it), and the managed-database prerequisite
+      #              accepted a served role this runtime then refuses (the
+      #              ledger narrowing interpolates a role name as SYNTAX,
+      #              so it must be a plain identifier; the runbook says so
+      #              now and a case pins the statement to both refusals).
+      #              THE CURRENT FIGURE; the PR description states it at
+      #              this same commit, and `pytest -q tests_runtime/` is
+      #              232 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
