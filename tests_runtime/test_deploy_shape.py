@@ -687,9 +687,22 @@ def test_the_compose_probe_and_the_repository_mount_follow_their_settings(
     compose = _load_yaml(COMPOSE / "docker-compose.yaml")
     service = compose["services"]["opendox"]
     probe = " ".join(str(part) for part in service["healthcheck"]["test"])
-    assert "${" + PREFIX + "BIND_PORT" in probe, (
+    # THE PROBE FOLLOWS THE CONFIGURED PORT — and since round 23 it reads it
+    # from the ENVIRONMENT rather than having it interpolated into its own
+    # source, so what is asserted is that the two are the same variable and
+    # that the script holds no interpolation at all.
+    assert PREFIX + "BIND_PORT" in probe, (
         "the healthcheck names a literal port; a configured one is unhealthy")
+    assert "os.environ" in probe, (
+        "the port is interpolated into this script instead of being read from "
+        "the environment; see the round-23 finding")
+    assert "${" not in probe, (
+        "an operator's value is interpolated into a script this container "
+        "executes: " + probe)
     assert "localhost:8080/livez" not in probe
+    assert service["environment"][PREFIX + "BIND_PORT"].startswith(
+        "${" + PREFIX + "BIND_PORT"), (
+        "the container is not given the port the probe reads")
 
     mounts = service["volumes"]
     assert any("${" + PREFIX + "PROJECT_REPOSITORY_ROOT" in str(m)
@@ -1347,3 +1360,49 @@ def test_every_applyable_overlay_supplies_the_settings_the_base_leaves_empty(
     for overlay in overlays:
         assert f"overlays/{overlay.name}" in runbook, (
             f"overlay {overlay.name} is never named in the runbook")
+
+
+def test_no_healthcheck_puts_an_operators_value_into_code_it_runs() -> None:
+    """Compose interpolates `${VAR}` BEFORE the container sees the string.
+
+    So `CMD-SHELL` made an operator's `.env` value shell SOURCE, and the
+    application probe made it python SOURCE — both evaluated on every health
+    probe, and the python one before `config.load_settings` had looked at the
+    port at all (Copilot review of openDox-code#25, round 23, in both places).
+
+    MEASURED on the script this file now declares, with
+    `OPENDOX_BIND_PORT="8080'),None) or __import__('os').system('touch
+    /tmp/PWNED')#"` in the environment: exit 1 with a `ValueError`, and no
+    marker — the value is data that `int()` refuses, not code.
+
+    The rule is asserted over EVERY service, so a healthcheck added later is
+    covered by it: exec form, and no `${` in any argument that is a script.
+    """
+    import subprocess
+
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    for name, service in compose["services"].items():
+        check = service.get("healthcheck")
+        if not check:
+            continue
+        test = check["test"]
+        assert isinstance(test, list) and test[0] == "CMD", (
+            f"{name}'s healthcheck is {test[0] if isinstance(test, list) else test!r}; "
+            "CMD-SHELL makes every interpolated value shell source")
+        # An interpolated value may be an ARGUMENT — that is the point of exec
+        # form — but never part of a `-c` script.
+        for index, part in enumerate(test):
+            if index and test[index - 1] == "-c":
+                assert "${" not in str(part), (
+                    f"{name}'s healthcheck interpolates a value into the "
+                    f"script it runs: {part}")
+
+    # And the application's probe really does refuse a hostile value.
+    script = compose["services"]["opendox"]["healthcheck"]["test"][-1]
+    hostile = "8080'),None) or __import__('os').system('touch /tmp/PWNED')#"
+    done = subprocess.run(
+        ["python3", "-c", script], capture_output=True,
+        env={"PATH": "/usr/bin:/bin", PREFIX + "BIND_PORT": hostile})
+    assert done.returncode != 0
+    assert b"ValueError" in done.stderr, done.stderr
+    assert not Path("/tmp/PWNED").exists()

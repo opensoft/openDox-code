@@ -657,11 +657,24 @@ jobs:
       #              no broker values while the runbook told an operator to
       #              build it, so it rendered a Deployment that fails
       #              `load_settings`; the guard derives the rule from the
-      #              base. THE CURRENT FIGURE ON `build/3-5-runtime`, which
-      #              this branch carries by merge; THAT PR's description
-      #              states it at this same commit — its head `334b9b61`
-      #              adds only the record — and `pytest -q tests_runtime/`
-      #              is 248 there.
+      #              base. SUPERSEDED on `build/3-5-runtime` by the entry
+      #              below, which this branch also carries; `pytest -q
+      #              tests_runtime/` was 248 there.
+      #  142 passed  at `build/3-5-runtime` `8779a776` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-THREE: compose interpolates
+      #              `${VAR}` BEFORE the container sees the string, so
+      #              `CMD-SHELL` made an operator's `.env` value SHELL source
+      #              (a value with a space already became two arguments) and
+      #              the application probe made it PYTHON source, evaluated
+      #              before `load_settings` looked at the port. Exec form for
+      #              the first; the second reads the value from `os.environ`
+      #              and holds no interpolation — MEASURED with an injected
+      #              value: exit 1, `ValueError`, no marker. THE CURRENT
+      #              FIGURE ON `build/3-5-runtime`, which this branch
+      #              carries by merge; THAT PR's description states it at
+      #              this same commit — its head `5cb49226` adds only the
+      #              record — and `pytest -q tests_runtime/` is 249 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
