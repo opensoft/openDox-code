@@ -275,8 +275,25 @@ class GitRunner:
 #: replaced, exactly as `git@host:repo` is. `test_a_bracketed_ipv6_scp_remote_
 #: is_redacted_like_any_other_userinfo` pins that for every IPv6 shape, because
 #: a property this pattern holds by luck is a property a later edit can lose.
+#: AND THE SCHEME FORM'S USERINFO MAY CONTAIN A SPACE. `[^\s/@]*` stopped at
+#: one, so `https://user:secret value@host/repo.git` — a legacy row, which this
+#: act deliberately keeps readable and pushable — did not match the scheme
+#: branch at all and the password was returned unchanged through map responses,
+#: push failures and the CLI's evidence (Copilot review of openDox-code#26,
+#: round 12). `repository_act._URL_USERINFO` (`[^/@]*@`) already REFUSES that
+#: shape for a new attachment; the two halves of the rule disagreed about the
+#: same character.
+#:
+#: THE SCP BRANCH IS DELIBERATELY NOT WIDENED, and this is the reason rather
+#: than an omission. It is anchored by nothing but a lookbehind, so admitting a
+#: space into `[^\s/:@]+` would let the match START at an earlier word and a
+#: sentence such as "please tell bob a@b:c" would be redacted whole. It also
+#: cannot carry a password: scp form is `user@host:path` with no password
+#: field, and the class excludes `:` for exactly that reason. The scheme branch
+#: is anchored by `scheme://` and the class still excludes `/` and a newline,
+#: so widening it cannot reach past the authority it is already inside.
 _CREDENTIAL_SHAPED = re.compile(
-    r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s/@]*@[^\s]*|(?<![\w.])[^\s/:@]+@[^\s/:@]+:[^\s]*")
+    r"[A-Za-z][A-Za-z0-9+.\-]*://[^/@\n]*@[^\s]*|(?<![\w.])[^\s/:@]+@[^\s/:@]+:[^\s]*")
 
 #: A CREDENTIAL-SHAPED QUERY OR FRAGMENT PARAMETER, whose VALUE is replaced.
 #: Userinfo is not the only place a secret rides: `https://host/r.git?token=…`
@@ -309,8 +326,19 @@ _SECRET_KEY = re.compile(SECRET_PARAMETER_KEYS, re.IGNORECASE)
 #: (Copilot review of openDox-code#26, round 10). Spaces and tabs are stepped
 #: over rather than admitted into the name, so the name that is decoded and
 #: judged is the one git would use.
+#: AND THE VALUE RUNS TO THE NEXT DELIMITER, NOT TO THE NEXT SPACE. `[^&#\s]*`
+#: stopped a credential at the first whitespace, so `?token= ghp_secret` had its
+#: EMPTY value replaced and the secret printed beside the marker, and
+#: `?token=secret with more` kept everything after `secret` (Copilot review of
+#: openDox-code#26, round 12). A query parameter's value ends at `&` or `#` —
+#: nothing else ends it — and this module deliberately permits whitespace inside
+#: a remote string, so a space is part of the value and a redaction that stops
+#: there is one a secret can be walked past by putting a space in it. The
+#: newline is the one boundary kept: `redact_credentials` runs over git's own
+#: multi-line stderr, and a credential on one line must not take the diagnostic
+#: on the next with it.
 _ANY_PARAMETER = re.compile(
-    r"(?P<lead>[?&#][ \t]*(?P<name>[^=&#\s]*)[ \t]*=)(?P<value>[^&#\s]*)")
+    r"(?P<lead>[?&#][ \t]*(?P<name>[^=&#\s]*)[ \t]*=)(?P<value>[^&#\n]*)")
 _ANY_PARAMETER_ANCHORED = re.compile(
     r"(?:^|[?&#])[ \t]*(?P<name>[^=&#\s]*)[ \t]*=")
 def _decoded_parameter_name(name: str) -> str:
@@ -625,20 +653,32 @@ class LocalGitCorpus:
             # THE PLACES A WRITE ACTUALLY TOUCHES, not the directory that
             # contains them. `write_back` hashes an object (`objects/`), writes
             # a temporary index (the git dir itself) and moves a ref
-            # (`refs/`), so a repository whose root is writable and whose
-            # `objects/` is read-only advertised an available write path and
-            # then failed inside the commit — which is exactly the discovery
-            # order this interface's own rule forbids: "a read-only corpus is a
-            # fact about the corpus" (Copilot review of openDox-code#26, round
-            # 12, suppressed). `refs/` may not exist in a repository using only
-            # packed refs, and an absent one is answered by the git dir's own
-            # writability, since that is where it would be created.
+            # (`refs/heads/<branch>`), so a repository whose root is writable
+            # and whose `objects/` is read-only advertised an available write
+            # path and then failed inside the commit — which is exactly the
+            # discovery order this interface's own rule forbids: "a read-only
+            # corpus is a fact about the corpus" (Copilot review of
+            # openDox-code#26, round 12, suppressed).
+            #
+            # THE SERVED REF'S OWN PARENT, not `refs/`. `update-ref` writes and
+            # locks `refs/heads/<branch>`, so a `refs/` that is writable while
+            # `refs/heads/` is not advertised a usable write path and the
+            # refusal arrived after the blob, the tree and the commit had been
+            # created — unreachable objects, and the same forbidden discovery
+            # order one level down (round 12, suppressed). A directory that
+            # does not exist yet is answered by the nearest ancestor that does,
+            # since that is where it would be created — a repository using only
+            # packed refs has no `refs/heads/` until the first write.
+            #
+            # AND EXECUTE AS WELL AS WRITE. `os.access(d, W_OK)` is true for a
+            # directory with no SEARCH permission, in which git can create
+            # nothing at all (round 12): both bits are what "a write can land
+            # here" means for a directory.
+            served = self._writable_ref_home(git, git_dir, str(location))
             reachable = all(
-                os.access(path, os.W_OK)
-                for path in (git_dir, git_dir / "objects",
-                             git_dir / "refs" if (git_dir / "refs").is_dir()
-                             else git_dir))
-        except (GitCommandFailed, OSError):
+                os.access(path, os.W_OK | os.X_OK)
+                for path in (git_dir, git_dir / "objects", served))
+        except (GitCommandFailed, OSError, CorpusRefused):
             reachable = False
 
         return ResolvedCorpus(
@@ -974,6 +1014,7 @@ class LocalGitCorpus:
             # REF and not the index (Copilot review of openDox-code#26).
             index = git_dir / f"opendox-index-{os.getpid()}-{uuid.uuid4().hex}"
             index_env = {"GIT_INDEX_FILE": str(index)}
+            uncleaned: OSError | None = None
             try:
                 if corpus.revision is not None:
                     git.out("read-tree", corpus.revision, env=index_env)
@@ -1003,7 +1044,27 @@ class LocalGitCorpus:
                         env=index_env)
                 tree = git.out("write-tree", env=index_env).decode().strip()
             finally:
-                index.unlink(missing_ok=True)
+                # THE CLEANUP IS TRANSLATED TOO, AND NOT FROM INSIDE THE
+                # `finally`. `unlink` can raise `OSError` — a git directory
+                # whose permissions changed under the write, a temporary path
+                # replaced — and the outer handler translates only
+                # `GitCommandFailed`, so that escaped `write_back` as an OS
+                # exception where the adapter owes `WRITE_PATH_UNREACHABLE`
+                # (Copilot review of openDox-code#26, round 12, suppressed).
+                # Raising from a `finally` would REPLACE an in-flight failure
+                # with a cleanup one, so it is recorded here and raised below,
+                # where an exception already on its way still wins.
+                try:
+                    index.unlink(missing_ok=True)
+                except OSError as exc:
+                    uncleaned = exc
+            if uncleaned is not None:
+                raise _refuse(
+                    WRITE_PATH_UNREACHABLE, corpus.write_path,
+                    f"the temporary index {index.name} could not be removed "
+                    f"({uncleaned.__class__.__name__}); this write path has "
+                    "become unreachable and the document remains unsaved"
+                ) from uncleaned
 
             message = self._message(document, actor, basis_revision, reason)
             parents: list[str] = []
@@ -1030,6 +1091,30 @@ class LocalGitCorpus:
 
     def _git(self, corpus: ResolvedCorpus) -> GitRunner:
         return GitRunner(Path(corpus.location), self._executable)
+
+    def _writable_ref_home(self, git: GitRunner, git_dir: Path,
+                           subject: str) -> Path:
+        """The directory `update-ref` would write the SERVED ref into.
+
+        `refs/heads/<branch>`'s parent where HEAD names a branch, walked up to
+        the nearest ancestor that exists (a repository using only packed refs
+        has no `refs/heads/` until the first write, and git creates it).
+
+        A HEAD that `_served_ref` REFUSES — detached, or naming a tag or a
+        remote-tracking ref — has no ref home at all, and the whole point of
+        answering the write path at resolution is that such a corpus must say
+        so THEN: `resolve` advertised an available write path, and `write_back`
+        hashed the blob, wrote the tree and created the commit before refusing
+        at `_served_ref`, leaving unreachable objects behind (Copilot review of
+        openDox-code#26, round 12, suppressed). `_served_ref` raises, the
+        caller's `except` turns it into `write_path_available=False`, and the
+        commit is never started.
+        """
+        ref = self._served_ref(git, subject)
+        home = git_dir / Path(ref).parent
+        while not home.is_dir() and home != git_dir:
+            home = home.parent
+        return home
 
     def _repository_root(self, git: GitRunner, subject: str) -> Path:
         """The repository this runner's `-C` directory IS, resolved.
@@ -1097,7 +1182,22 @@ class LocalGitCorpus:
         answer a HEALTHY empty repository gives (Copilot review of
         openDox-code#26, round 6). One question, asked in each of them.
         """
-        if not Path(corpus.location).exists():
+        # THE PROBE IS TRANSLATED, like `resolve`'s. `Path.exists()` raises
+        # `PermissionError` for a path whose parent has stopped being
+        # searchable and `OSError` for a symlink loop, and this call sat
+        # outside every handler — so a repository that became INACCESSIBLE
+        # after it resolved leaked an OS exception out of `list_documents`,
+        # `read` and `check`, where the adapter promises `CORPUS_UNREADABLE`
+        # (Copilot review of openDox-code#26, round 12, suppressed twice).
+        # Absent and unreadable stay different answers.
+        try:
+            present = Path(corpus.location).exists()
+        except OSError as exc:
+            raise _refuse(
+                CORPUS_UNREADABLE, corpus.location,
+                f"the location could not be read ({exc.__class__.__name__})"
+            ) from exc
+        if not present:
             raise _refuse(CORPUS_ABSENT, corpus.location,
                           "the repository is no longer at this location")
         if self._probe(git, "rev-parse", "--git-dir",
@@ -1162,7 +1262,17 @@ class LocalGitCorpus:
                 listed = self._probe(git, "for-each-ref",
                                      "--format=%(objectname)", ref,
                                      kind=CORPUS_UNREADABLE, subject=subject)
-                if (listed.returncode == 0
+                # AND ONLY A BRANCH CAN BE UNBORN. `symbolic-ref HEAD` can
+                # legally name a tag or a remote-tracking ref, and an absent
+                # ref under `refs/tags/` or `refs/remotes/` produces exactly
+                # the same silence — so a malformed HEAD pointing outside
+                # `refs/heads/` resolved as a legal EMPTY corpus, and
+                # `list_documents` and `check` answered for it instead of
+                # refusing (Copilot review of openDox-code#26, round 12,
+                # suppressed). "The first commit has not been made yet" is a
+                # statement about a branch; anywhere else it is a broken HEAD.
+                if (ref.startswith("refs/heads/")
+                        and listed.returncode == 0
                         and not listed.stdout.decode().strip()
                         and not listed.stderr.decode().strip()):
                     return None      # unborn: the ref is named, and is absent

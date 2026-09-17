@@ -1643,3 +1643,208 @@ def test_a_corpus_that_declares_its_kind_in_a_header_is_classified_by_it(
                  for document in adapter.list_documents(corpus)}
     assert {answer.kind for answer in by_suffix.values()} == {"text"}
     assert all(answer.missing_fields == () for answer in by_suffix.values())
+
+
+# -- Copilot's twelfth round on #26, continued -------------------------------
+
+
+def test_a_credential_is_redacted_whole_even_with_a_space_in_it() -> None:
+    """A redaction that stops at a space is one a secret can be walked past.
+
+    `[^&#\\s]*` ended a parameter's value at the first whitespace, so
+    `?token= ghp_secret` had its EMPTY value replaced and the secret printed
+    beside the marker, and `?token=secret with more` kept everything after the
+    first word. And the userinfo form's `[^\\s/@]*` did not match at all where
+    the password held a space, so a legacy row's credential was returned
+    unchanged — while `repository_act._URL_USERINFO` (`[^/@]*@`) REFUSES that
+    very shape for a new attachment: the two halves of one rule disagreed about
+    one character (Copilot review of openDox-code#26, round 12).
+
+    Each of these is unchanged or partly visible against the old shape.
+    """
+    assert lga.redact_credentials(
+        "https://host/r.git?token= ghp_secret") == (
+        "https://host/r.git?token=<redacted>")
+    assert lga.redact_credentials(
+        "https://host/r.git?token=secret with space") == (
+        "https://host/r.git?token=<redacted>")
+    assert lga.redact_credentials(
+        "https://user:secret value@host/repo.git") == "<redacted-url>"
+    # AND A MULTI-LINE MESSAGE KEEPS ITS OTHER LINES: a credential on one line
+    # must not take the diagnostic on the next with it.
+    redacted = lga.redact_credentials(
+        "fatal: could not read from https://host/r.git?token=abc\n"
+        "hint: check the remote and try again")
+    assert redacted.endswith("hint: check the remote and try again")
+    assert "abc" not in redacted
+    # AND ORDINARY TEXT IS STILL ORDINARY TEXT.
+    assert lga.redact_credentials(
+        "a sentence about ?a+b=1 and nothing else") == (
+        "a sentence about ?a+b=1 and nothing else")
+
+
+@not_root
+def test_the_write_path_is_unavailable_where_the_served_ref_cannot_be_written(
+        adapter: lga.LocalGitCorpus, repository: Path) -> None:
+    """`update-ref` writes `refs/heads/<branch>`, not `refs/`.
+
+    A `refs/` that is writable while `refs/heads/` is not advertised a usable
+    write path, and the refusal arrived after the blob, the tree and the commit
+    had been created — unreachable objects, and the forbidden discovery order
+    one level down (Copilot review of openDox-code#26, round 12, suppressed).
+    """
+    heads = repository / "refs" / "heads"
+    assert heads.is_dir()
+    heads.chmod(0o500)
+    try:
+        corpus = adapter.resolve(ca.CorpusRef(name="ref-home",
+                                              location=str(repository)))
+        assert corpus.write_path_available is False, (
+            "an unwritable `refs/heads` was advertised as a usable write path")
+    finally:
+        heads.chmod(0o755)
+
+
+@not_root
+def test_a_directory_that_cannot_be_searched_is_not_a_write_path(
+        adapter: lga.LocalGitCorpus, repository: Path) -> None:
+    """Creating a file needs WRITE and SEARCH; the check asked for one of them.
+
+    `os.access(d, os.W_OK)` is true for a directory git can create nothing in,
+    so the predicate did not say what its own comment said (Copilot review of
+    openDox-code#26, round 12). It asks for both bits now.
+
+    NOT A REGRESSION TEST, AND IT SAYS SO: this passes against the old shape
+    too, because the missing SEARCH bit is not reachable through `resolve` —
+    git cannot read a repository with such a directory in it, so the corpus is
+    refused `corpus-unreadable` BEFORE the write path is ever computed. The
+    table below is the measurement that establishes that, on git 2.43.0, and
+    it is pinned here so a later change that makes the shape reachable finds a
+    predicate already asking the right question.
+    """
+    heads = repository / "refs" / "heads"
+    measured = {}
+    for mode in (0o200, 0o300, 0o500):
+        heads.chmod(mode)
+        try:
+            corpus = adapter.resolve(ca.CorpusRef(name="perm",
+                                                  location=str(repository)))
+            measured[mode] = corpus.write_path_available
+        except ca.CorpusRefused as refused:
+            measured[mode] = refused.refusal.kind
+        finally:
+            heads.chmod(0o755)
+    assert measured == {
+        0o200: ca.CORPUS_UNREADABLE,   # writable, NOT searchable: unreadable
+        0o300: True,                   # writable and searchable
+        0o500: False,                  # searchable, NOT writable
+    }, measured
+
+
+def test_a_head_that_cannot_be_written_says_so_at_resolution(
+        adapter: lga.LocalGitCorpus, repository: Path) -> None:
+    """A detached HEAD is a corpus that can be READ and not written.
+
+    `write_path_available` measured filesystem permissions alone, so `resolve`
+    advertised a usable write path and `write_back` then hashed the blob, wrote
+    the tree and created the commit before `_served_ref` refused — leaving
+    unreachable objects behind for a refusal the corpus could have made at
+    resolution (Copilot review of openDox-code#26, round 12, suppressed).
+    """
+    head = _git(repository, "rev-parse", "HEAD")
+    (repository / "HEAD").write_text(f"{head}\n", encoding="utf-8")
+    corpus = adapter.resolve(ca.CorpusRef(name="detached",
+                                          location=str(repository)))
+    assert corpus.revision == head, "a detached HEAD is still readable"
+    assert corpus.write_path_available is False, (
+        "a detached HEAD has no branch for a commit to advance, and resolution "
+        "is where a corpus says it cannot be written")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus,
+                           ca.DocumentId(corpus="detached", key="notes.md"),
+                           b"# notes\n", actor=ACTOR, basis_revision=head)
+    assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+
+
+def test_only_a_branch_can_be_unborn(adapter: lga.LocalGitCorpus,
+                                     tmp_path: Path) -> None:
+    """An absent ref under `refs/tags` is a BROKEN HEAD, not an empty corpus.
+
+    `for-each-ref` is silent for an absent ref wherever it lives, so a HEAD
+    pointing at `refs/tags/whatever` resolved with `revision=None` and
+    `list_documents` answered `()` — the empty corpus a healthy repository
+    gives (Copilot review of openDox-code#26, round 12, suppressed). "The first
+    commit has not been made yet" is a statement about a branch.
+    """
+    location = tmp_path / "head-at-a-tag"
+    location.mkdir()
+    _git(location, "init", "--bare", "--initial-branch=main", ".")
+    (location / "HEAD").write_text("ref: refs/tags/nothing\n", encoding="utf-8")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.resolve(ca.CorpusRef(name="tagged", location=str(location)))
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+
+    # The real unborn case still resolves as a legal empty corpus.
+    unborn = tmp_path / "unborn"
+    unborn.mkdir()
+    _git(unborn, "init", "--bare", "--initial-branch=main", ".")
+    corpus = adapter.resolve(ca.CorpusRef(name="unborn", location=str(unborn)))
+    assert corpus.revision is None
+    assert adapter.list_documents(corpus) == ()
+
+
+def test_a_location_that_cannot_be_probed_refuses_rather_than_raising(
+        adapter: lga.LocalGitCorpus, repository: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_revalidate`'s `Path.exists()` raises for an unsearchable parent.
+
+    It sat outside every handler, so a repository that became INACCESSIBLE
+    after it resolved leaked an OS exception out of `list_documents`, `read`
+    and `check`, where this adapter promises `CORPUS_UNREADABLE` (Copilot
+    review of openDox-code#26, round 12, suppressed twice). Absent and
+    unreadable stay different answers.
+    """
+    corpus = adapter.resolve(ca.CorpusRef(name="project-1",
+                                          location=str(repository)))
+    real_exists = Path.exists
+
+    def _unsearchable(self, *args, **kwargs):
+        if str(self) == corpus.location:
+            raise PermissionError(13, "Permission denied")
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", _unsearchable)
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(corpus, ca.DocumentId(corpus="project-1", key="no.md"))
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+
+
+def test_a_temporary_index_that_cannot_be_removed_refuses_by_name(
+        adapter: lga.LocalGitCorpus, repository: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cleanup is inside the write path's own promise.
+
+    `index.unlink(missing_ok=True)` can raise `OSError`, and the handler around
+    it translated only `GitCommandFailed` — so a git directory whose
+    permissions changed under the write escaped `write_back` as an OS exception
+    where the adapter owes `WRITE_PATH_UNREACHABLE` (Copilot review of
+    openDox-code#26, round 12, suppressed). It is recorded and raised AFTER the
+    `finally`, so an exception already on its way still wins.
+    """
+    corpus = adapter.resolve(ca.CorpusRef(name="project-1",
+                                          location=str(repository)))
+    real_unlink = Path.unlink
+
+    def _refuses(self, *args, **kwargs):
+        if self.name.startswith("opendox-index-"):
+            raise PermissionError(13, "Permission denied")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _refuses)
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus,
+                           ca.DocumentId(corpus="project-1", key="notes.md"),
+                           b"# notes\n", actor=ACTOR,
+                           basis_revision=str(corpus.revision))
+    assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+    assert "index" in caught.value.refusal.detail
