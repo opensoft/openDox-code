@@ -504,10 +504,38 @@ jobs:
       #              snapshot READ COMMITTED does not give, a docstring that
       #              promised a refresh `coalesce` does not do, and the
       #              workflow/description figures, answered by measurement.
+      #              `pytest -q tests_runtime/` is 227 here.
+      #  130 passed  at `build/3-5-runtime` `c1327207` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round fourteen's single defect, reported
+      #              in two places: `current_schema()` IS the search-path
+      #              fallback this module's qualification was defending
+      #              against. It answers the first EXISTING schema on the
+      #              path, never the first CONFIGURED one — measured on
+      #              postgres 16.15 — so a DSN selecting a dropped or absent
+      #              schema had `applied()` read `public`'s ledger and
+      #              `runtime reset` drop `public`'s coordination tables
+      #              under a promise that it would not. `selected_schema`
+      #              asks both questions together and refuses when they
+      #              disagree; `"$user"` is not compared, because it is not
+      #              a name. `pytest -q tests_runtime/` is 230 here.
+      #  132 passed  at `build/3-5-runtime` `a69ba82f` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round fourteen's five SUPPRESSED
+      #              comments, which are two defects: the command this
+      #              service PRINTS was not a command (every verb lives
+      #              under the `runtime` group, so the shortened spelling
+      #              exits 2 — it was `init`'s `next`, `/readyz`'s advice to
+      #              an operator, the runbook's transcript, and a case that
+      #              PINNED it), and the managed-database prerequisite
+      #              accepted a served role this runtime then refuses (the
+      #              ledger narrowing interpolates a role name as SYNTAX,
+      #              so it must be a plain identifier; the runbook says so
+      #              now and a case pins the statement to both refusals).
       #              THE CURRENT FIGURE ON `build/3-5-runtime`, which this
-      #              branch carries by merge; THAT PR's description states it
-      #              at this same commit, and `pytest -q tests_runtime/` is
-      #              227 there.
+      #              branch carries by merge; THAT PR's description states
+      #              it at this same commit, and `pytest -q tests_runtime/`
+      #              is 232 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this

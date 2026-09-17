@@ -1111,7 +1111,7 @@ def create_app(*, settings: RuntimeSettings | None = None,
         it turns a not-yet-migrated install READY and sends it traffic that
         fails on missing relations (Copilot review of openDox-code#25). A
         pending migration is `not-ready`, named, and the run that fixes it is
-        `opendox-runtime migrate`.
+        `opendox-runtime runtime migrate`.
         """
         checks: dict[str, str] = {}
         ok = True
@@ -1146,7 +1146,7 @@ def create_app(*, settings: RuntimeSettings | None = None,
                 if pending:
                     checks["schema"] = (
                         "pending: " + ",".join(pending)
-                        + " — run `opendox-runtime migrate`")
+                        + " — run `opendox-runtime runtime migrate`")
                     ok = False
                 elif drifted:
                     # NOTHING PENDING IS NOT THE SAME AS MATCHING THIS TREE: a

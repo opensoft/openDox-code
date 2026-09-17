@@ -252,7 +252,7 @@ def cmd_init(args: argparse.Namespace) -> int:
                   "directories_created": created,
                   "canonical_sha256": digest,
                   "migrations_on_disk": pending,
-                  "next": "opendox-runtime migrate"}, ok=True)
+                  "next": "opendox-runtime runtime migrate"}, ok=True)
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
@@ -562,7 +562,7 @@ def cmd_reset(args: argparse.Namespace) -> int:
                              (migrations.MIGRATION_LOCK_KEY,))
                 lock.commit()
                 try:
-                    # QUALIFIED WITH `current_schema()`, for the reason
+                    # QUALIFIED WITH THE SELECTED SCHEMA, for the reason
                     # `MigrationRunner.applied` is: a connection's
                     # `search_path` is `<schema>,public`, so an UNQUALIFIED
                     # `drop table if exists users` in a schema that has no
@@ -574,13 +574,16 @@ def cmd_reset(args: argparse.Namespace) -> int:
                     # `psycopg.sql`, which is the only safe way to put a name
                     # into DDL, and the schema is reported in the evidence so
                     # an operator can see WHERE the drop landed.
-                    schema_row = lock.execute(
-                        "select current_schema()").fetchone()
-                    schema = schema_row[0] if schema_row else None
-                    if not schema:
-                        raise migrations.MigrationError(
-                            "this connection has no current schema; `reset` "
-                            "will not drop through a search-path fallback")
+                    #
+                    # AND THE SCHEMA IS ASKED OF `selected_schema`, BECAUSE
+                    # `current_schema()` IS ITSELF THE FALLBACK: it answers the
+                    # first EXISTING schema on the path, so a DSN selecting a
+                    # `tenant` that no longer exists qualified every drop as
+                    # `public.*` and this verb deleted another install's
+                    # coordination tables under a promise that it would not
+                    # (Copilot review of openDox-code#25, round 14). Measured
+                    # on postgres 16.15; the refusal names both schemas.
+                    schema = migrations.selected_schema(lock)
                     with lock.transaction():
                         for table in DROP_ORDER:
                             lock.execute(

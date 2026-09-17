@@ -43,7 +43,7 @@ COPY src ./src
 # linux, `psycopg[binary]` by name, so the flag costs nothing.
 RUN python -m pip install --no-cache-dir --only-binary :all: ".[runtime]"
 
-# The ordered SQL travels with the image: `opendox-runtime migrate` reads
+# The ordered SQL travels with the image: `opendox-runtime runtime migrate` reads
 # `migrations/` relative to the working directory, and an image whose migration
 # job had to mount the repository would be a migration job that could run
 # against SQL the image had never seen.

@@ -41,7 +41,7 @@ APPLICATION_NAME = "opendox-runtime"
 #: How long a caller waits for a pooled connection before the wait becomes a
 #: failure. BOUNDED, and bounded by this module rather than by psycopg's
 #: default, because the callers differ: a request handler that waits thirty
-#: seconds has already lost, and `opendox-runtime status` waiting thirty
+#: seconds has already lost, and `opendox-runtime runtime status` waiting thirty
 #: seconds to report "unreachable" is a diagnostic nobody runs twice. Each
 #: caller passes its own; this is the value a served request uses.
 DEFAULT_CHECKOUT_TIMEOUT_SECONDS = 10.0

@@ -62,7 +62,7 @@ Required, with no default: `OPENDOX_DATABASE_URL`, `OPENDOX_OIDC_ISSUER`,
 it** rather than falling back to a local database or an unpinned issuer.
 
 `OPENDOX_MIGRATION_DATABASE_URL` is separate on purpose and
-`opendox-runtime migrate` will not borrow the served DSN if it is unset. The
+`opendox-runtime runtime migrate` will not borrow the served DSN if it is unset. The
 compose package and the Kubernetes base keep the two identities in different
 containers; the refusal is what stops a convenience undoing that.
 
@@ -175,6 +175,19 @@ managed database, as an administrator, BEFORE the migration Job.
 `OPENDOX_RUNTIME_PG_ROLE` is both the role in `opendox-db-runtime`'s DSN and
 the `runtime_pg_role` value in the ConfigMap — one name, three places, which is
 the rule this install already states for that role.
+
+AND THAT ROLE'S NAME MUST BE A PLAIN SQL IDENTIFIER — `[A-Za-z_][A-Za-z0-9_]{0,62}`
+— because the migration run narrows it on the ledger with a `revoke`, where SQL
+takes a role name as SYNTAX and not as a value:
+`config.load_migration_settings` refuses anything else before `migrate`
+connects, and `MigrationRunner.protect_ledger` refuses it again for a caller
+that did not come through the loader. The block below still quotes every name
+with `%I`, and that is not redundant under this rule: `OPENDOX_MIGRATION_PG_USER`
+and `OPENDOX_PG_DB` are under no such constraint, and a served role that IS a
+plain identifier can still collide with an SQL keyword. The block by itself
+accepted a served role this runtime then refuses — measured, a name holding a
+space — which is a prerequisite an operator could complete and still not start
+(Copilot review of openDox-code#25, round 14).
 
 NOTHING BELOW IS SUBSTITUTED BY HAND. Every name and the password come from
 the environment, through psql's own `\getenv`, and every one of them is quoted
@@ -370,7 +383,7 @@ Every figure below is that run's own output.
 ```
 $ opendox-runtime runtime init
 { "ok": true, "canonical_sha256": "6db4710578b012a3318…", "directories_created": ["/tmp/smoke-projects"],
-  "migrations_on_disk": ["0001","0002"], "next": "opendox-runtime migrate" }
+  "migrations_on_disk": ["0001","0002"], "next": "opendox-runtime runtime migrate" }
 
 $ opendox-runtime runtime migrate
 { "ok": true, "applied": ["0001","0002"], "planned": [] }

@@ -861,3 +861,72 @@ def test_a_migrations_directory_rewritten_mid_run_runs_the_bytes_it_gated(
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")
+
+
+def test_a_selected_schema_that_does_not_exist_is_refused_not_answered(
+        postgres_dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`current_schema()` IS the fallback this qualification was defending against.
+
+    It answers the first EXISTING schema on the path, never the first
+    configured one — so a DSN selecting a `tenant` that was dropped, renamed or
+    never created qualified every statement as `public.*`: `applied()` reported
+    another schema's ledger as this one's, and `reset`, whose whole promise is
+    "this schema's coordination state and nothing else", dropped `public`'s
+    coordination tables (Copilot review of openDox-code#25, round 14, reported
+    in both places).
+
+    MEASURED THE WAY THE DEFECT WOULD APPEAR: a `users` table in `public`, a
+    schema that is never created, and a DSN that selects it.
+    """
+    import io
+    import json
+    import uuid
+    from contextlib import redirect_stdout
+
+    from opendox.runtime import cli
+    from opendox.runtime.config import PREFIX
+    from opendox.runtime.db import Database
+
+    missing = "t_" + uuid.uuid4().hex[:12]          # never created
+    canary = "public_users_" + uuid.uuid4().hex[:8]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create table public.users ({canary} text)")
+        try:
+            # The reader refuses rather than reading `public`'s ledger.
+            with Database(postgres_dsn, schema=missing) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations")
+                with pytest.raises(migrations.MigrationError) as caught:
+                    runner.applied()
+            assert missing in str(caught.value)
+            assert "public" in str(caught.value)
+
+            # And the verb that DROPS refuses before it drops anything.
+            separator = "&" if "?" in postgres_dsn else "?"
+            monkeypatch.setenv(
+                PREFIX + "MIGRATION_DATABASE_URL",
+                f"{postgres_dsn}{separator}"
+                f"options=-csearch_path%3D{missing}%2Cpublic")
+            args = cli.build_parser().parse_args(
+                ["runtime", "reset", "--confirm", cli.RESET_CONFIRMATION])
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = args.func(args)
+            evidence = json.loads(buffer.getvalue())
+            assert code != 0, evidence
+            assert evidence["refusal"] == "MigrationError", evidence
+            assert missing in evidence["message"]
+
+            with admin.connection() as conn:
+                surviving = conn.execute(
+                    "select column_name from information_schema.columns "
+                    "where table_schema = 'public' and table_name = 'users'"
+                ).fetchall()
+                assert [row[0] for row in surviving] == [canary], (
+                    "`public.users` was dropped by a reset whose own schema "
+                    "does not exist")
+        finally:
+            with admin.transaction() as conn:
+                conn.execute("drop table if exists public.users")

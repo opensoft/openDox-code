@@ -150,7 +150,7 @@ spec:
               drop:
                 - ALL
           env:
-            # THE PRIVILEGED DSN AND NOTHING ELSE. `opendox-runtime migrate`
+            # THE PRIVILEGED DSN AND NOTHING ELSE. `opendox-runtime runtime migrate`
             # reads `load_migration_settings`, which requires this variable
             # alone, so this pod carries no served identity and no broker
             # binding. It used to also receive `OPENDOX_DATABASE_URL` from the

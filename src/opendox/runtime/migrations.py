@@ -348,6 +348,61 @@ def verify_canonical_digest(
     return actual
 
 
+def _unquoted(entry: str) -> str:
+    """One `search_path` entry, with PostgreSQL's quoting removed."""
+    entry = entry.strip()
+    if len(entry) >= 2 and entry.startswith('"') and entry.endswith('"'):
+        return entry[1:-1].replace('""', '"')
+    return entry
+
+
+def selected_schema(conn: Any) -> str:
+    """`current_schema()`, REFUSED when it is a search-path FALLBACK.
+
+    `current_schema()` is the first EXISTING schema on the path, never the
+    first CONFIGURED one. MEASURED on postgres 16.15 with no `tenant` schema:
+
+        set search_path = tenant, public;
+        select current_schema();        -- public
+        select current_schemas(false);  -- {public}
+        show search_path;               -- tenant, public
+
+    So a connection that selects a schema which was dropped, renamed or never
+    created reads and WRITES another one in silence. Every caller here
+    qualifies with this answer precisely so that it cannot fall through — and
+    the answer itself was the fallback: `applied()` reported `public`'s ledger
+    as the selected schema's, after which `plan()` called a fresh schema
+    migrated and `/readyz` called it ready, and the CLI's `reset`, whose whole
+    promise is "this schema's coordination state and nothing else", dropped
+    `public.*` (Copilot review of openDox-code#25, round 14, in both places).
+
+    ONLY THE FIRST ENTRY IS COMPARED, and `"$user"` is not compared at all: it
+    is not a schema NAME but the first entry of PostgreSQL's own DEFAULT
+    `search_path`, where an absent user schema is skipped BY DESIGN. A plain
+    install is therefore not refused for having one, and a connection that
+    names a schema gets that name or a refusal.
+    """
+    row = conn.execute(
+        "select current_schema(), current_setting('search_path')").fetchone()
+    schema = row[0] if row else None
+    if not schema:
+        raise MigrationError(
+            "this connection has no current schema; no statement here will "
+            "run through a search-path fallback to find one")
+    configured = [_unquoted(entry)
+                  for entry in ((row[1] if len(row) > 1 else "") or "").split(",")]
+    configured = [entry for entry in configured if entry]
+    if configured and configured[0] not in {"$user", schema}:
+        raise MigrationError(
+            f"this connection selects the schema {configured[0]!r}, which does "
+            f"not exist: PostgreSQL's search-path fallback answered "
+            f"{schema!r} instead, and every statement here would read and "
+            f"write THAT schema. Create {configured[0]!r}, or point the DSN at "
+            "the schema this database actually holds — the coordination state "
+            "is not moved by silently choosing another one")
+    return str(schema)
+
+
 class MigrationRunner:
     """Applies ordered SQL to a database, fail-closed.
 
@@ -398,7 +453,7 @@ class MigrationRunner:
         is the state of a fresh database and must be distinguishable from a
         database that cannot be read at all.
 
-        QUALIFIED WITH `current_schema()`, and that is not decoration. A
+        QUALIFIED WITH THE SELECTED SCHEMA, and that is not decoration. A
         connection's `search_path` is `<schema>,public`, so an unqualified
         `to_regclass('opendox_schema_migrations')` finds a ledger in `public`
         when the selected schema has none — after which `plan()` reports a
@@ -406,14 +461,13 @@ class MigrationRunner:
         review of openDox-code#25). The same search path is what let a test
         harness write its tables into `public` once, so this is the second time
         the shape has bitten; it is pinned here.
+
+        AND THE QUALIFICATION IS ASKED OF `selected_schema`, NOT OF
+        `current_schema()`, because that function IS the fallback: see it for
+        the measurement and for the third instance of this shape.
         """
         with self._session(conn) as conn:
-            schema_row = conn.execute("select current_schema()").fetchone()
-            schema = schema_row[0] if schema_row else None
-            if not schema:
-                raise MigrationError(
-                    "this connection has no current schema; the ledger cannot "
-                    "be resolved without one")
+            schema = selected_schema(conn)
             # `quote_ident` and CONCATENATION, not `format('%I.%I', …)`:
             # psycopg's client-side placeholder scanner reads `%I` as a
             # placeholder it does not know and refuses the whole statement, so
@@ -447,7 +501,7 @@ class MigrationRunner:
 
           * a migration whose file has CHANGED since it was applied — `apply()`
             refuses it with `MigrationChecksumDriftError`, and without this
-            method `/readyz` and `opendox-runtime status` both reported
+            method `/readyz` and `opendox-runtime runtime status` both reported
             `schema: applied` for a database the runner would refuse;
           * a migration whose file is GONE — the ledger says it ran and the
             tree cannot say what it did, which makes a deleted migration
@@ -648,17 +702,23 @@ class MigrationRunner:
     def _check_runtime_access(self, conn: Any) -> None:
         # The role name is a PARAMETER here: `has_table_privilege` is a
         # function call, not an identifier position.
+        # THE SELECTED SCHEMA, not `current_schema()` in the predicate: the
+        # run applied its DDL into the schema `selected_schema` names, and a
+        # connection whose configured schema is missing would otherwise have
+        # this check answer for `public` — measuring the privileges of tables
+        # this run did not create (Copilot review of openDox-code#25, round
+        # 14, the same shape one method along).
         missing = conn.execute(
             "select c.relname, p.privilege "
             "  from pg_catalog.pg_class c "
             "  join pg_catalog.pg_namespace n on n.oid = c.relnamespace "
             "  cross join unnest(%s::text[]) as p(privilege) "
-            " where n.nspname = current_schema() "
+            " where n.nspname = %s "
             "   and c.relkind = 'r' "
             "   and c.relname <> %s "
             "   and not has_table_privilege(%s, c.oid, p.privilege) "
             " order by c.relname, p.privilege",
-            (list(self.SERVED_PRIVILEGES), LEDGER_TABLE,
+            (list(self.SERVED_PRIVILEGES), selected_schema(conn), LEDGER_TABLE,
              self._runtime_role)).fetchall()
         if not missing:
             return

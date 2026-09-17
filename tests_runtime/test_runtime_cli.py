@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 
@@ -872,3 +873,58 @@ def test_the_evidence_boundary_redacts_a_credential_parameter_too() -> None:
 
 def _safe_carrier(text: str) -> str:
     return cli._safe_message(RuntimeError(text))
+
+
+#: Everything this repository's text is scanned for the console script in.
+#: Source, runbook, deploy files and the suites themselves, because a test that
+#: PINS an unrunnable command is how the defect below survived a round.
+_SCANNED = ("src", "docs", "deploy", "tests_runtime")
+_SCANNED_SUFFIXES = {".py", ".md", ".yaml", ".yml", ".sh", ".example", ".sql",
+                     ".toml", ".cfg", ""}
+_CONSOLE_SCRIPT = "opendox-runtime"
+
+
+def _scanned_files() -> list[Path]:
+    root = Path(__file__).resolve().parents[1]
+    found: list[Path] = []
+    for directory in _SCANNED:
+        for path in sorted((root / directory).rglob("*")):
+            if path.is_file() and path.suffix in _SCANNED_SUFFIXES:
+                found.append(path)
+    return found
+
+
+def test_every_printed_invocation_names_the_command_group() -> None:
+    """A command this runtime PRINTS must be a command this parser accepts.
+
+    `register()` nests every verb under `runtime`, so the shortened spelling —
+    the console script followed straight by a verb — exits 2 with argparse's
+    usage error. It was what `runtime init`'s evidence emitted as its `next`,
+    what `/readyz` told an operator to run when migrations are pending, what
+    the runbook's transcript showed, and what a case in
+    `test_api_endpoints.py` PINNED — so an operator who copied the answer the
+    service gave them could not make the service ready (Copilot review of
+    openDox-code#25, round 14, suppressed, four places). Measured through the
+    parser below, then swept, so the next one cannot be written silently.
+    """
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit) as refused:
+        parser.parse_args([cli.VERBS[1]])          # the bare verb, no group
+    assert refused.value.code == 2
+    assert parser.parse_args(["runtime", cli.VERBS[1]]).func is cli.cmd_migrate
+
+    pattern = re.compile(_CONSOLE_SCRIPT + r"\s+([a-z][a-z-]*)")
+    offenders: list[str] = []
+    for path in _scanned_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
+            for match in pattern.finditer(line):
+                if match.group(1) in cli.VERBS:
+                    offenders.append(f"{path.name}:{number}: {line.strip()}")
+    assert not offenders, (
+        "these name the console script followed straight by a verb, which "
+        "this parser refuses with exit 2; every verb lives under the "
+        "`runtime` command group:\n" + "\n".join(offenders))

@@ -386,7 +386,7 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
     the run is already using (so there is no second credential in the
     container, and nothing is silently *more* privileged than the run itself),
     the issuer and audience are unusable sentinels, and `publish_openapi` is
-    off. `opendox-runtime migrate` and `reset` use it; `serve` and `status` do
+    off. `opendox-runtime runtime migrate` and `reset` use it; `serve` and `status` do
     not, because those are the served runtime and must have the real thing.
     """
     env = os.environ if env is None else env

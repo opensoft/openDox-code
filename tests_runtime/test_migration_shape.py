@@ -258,7 +258,11 @@ class _DocumentedConnection:
         text = " ".join(sql.split())
         self.log.append(text)
         if text.startswith("select current_schema()"):
-            return _Cursor([("public",)])
+            # TWO COLUMNS, because `selected_schema` asks for two: the schema
+            # PostgreSQL resolved and the `search_path` that was configured.
+            # A fake that answers only the first would let the comparison
+            # between them pass vacuously here.
+            return _Cursor([("public", "public")])
         if "to_regclass" in text:
             return _Cursor([(self._ledger_exists,)])
         if text.startswith("select version, name, checksum, reversible"):
@@ -302,7 +306,7 @@ class _ExecuteOnlyConnection:
 
     def execute(self, sql: str, params: tuple | None = None) -> _Cursor:
         if " ".join(sql.split()).startswith("select current_schema()"):
-            return _Cursor([("public",)])
+            return _Cursor([("public", "public")])
         return _Cursor([])
 
 
@@ -453,3 +457,57 @@ def test_the_whole_run_is_read_before_the_ledger_is_bootstrapped(
         f"a refused run reached the database: {mutating}")
     assert any("pg_advisory_lock" in line.lower() for line in db.log), (
         "the run did not even take its lock, so this test measured nothing")
+
+
+class _SearchPath:
+    """A connection that answers `selected_schema`'s one question."""
+
+    def __init__(self, schema: str | None, search_path: str) -> None:
+        self._row = (schema, search_path)
+
+    def execute(self, sql: str, params: tuple | None = None) -> _Cursor:
+        assert " ".join(sql.split()).startswith("select current_schema()"), sql
+        return _Cursor([self._row])
+
+
+def test_a_schema_resolved_by_search_path_fallback_is_refused() -> None:
+    """`current_schema()` is the first EXISTING schema, not the configured one.
+
+    MEASURED on postgres 16.15 with no `tenant` schema:
+
+        set search_path = tenant, public;
+        select current_schema();        -- public
+        select current_schemas(false);  -- {public}
+        show search_path;               -- tenant, public
+
+    Every statement in this module qualifies with that answer PRECISELY so it
+    cannot fall through — and the answer itself was the fallback, so
+    `applied()` read another schema's ledger and `runtime reset` dropped
+    another schema's tables (Copilot review of openDox-code#25, round 14, in
+    both places).
+    """
+    with pytest.raises(migrations.MigrationError) as caught:
+        migrations.selected_schema(_SearchPath("public", "tenant, public"))
+    assert "tenant" in str(caught.value)
+    assert "public" in str(caught.value)
+
+
+def test_the_configured_schema_is_answered_and_the_default_path_is_not_refused(
+) -> None:
+    """The other side of the same rule, and the one that must not over-refuse.
+
+    `"$user"` is not a schema NAME — it is the first entry of PostgreSQL's own
+    DEFAULT `search_path`, where an absent user schema is skipped BY DESIGN. A
+    plain install is not refused for having one; a connection that NAMES a
+    schema gets that name, or a refusal.
+    """
+    assert migrations.selected_schema(
+        _SearchPath("tenant", "tenant, public")) == "tenant"
+    assert migrations.selected_schema(
+        _SearchPath("public", '"$user", public')) == "public"
+    assert migrations.selected_schema(
+        _SearchPath("odd name", '"odd name", public')) == "odd name"
+    # No schema at all is still refused, and says why.
+    with pytest.raises(migrations.MigrationError) as caught:
+        migrations.selected_schema(_SearchPath(None, "tenant"))
+    assert "no current schema" in str(caught.value)
