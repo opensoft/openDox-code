@@ -921,10 +921,32 @@ jobs:
       #              new hermetic cases are the whole of the move (a
       #              readiness probe holding ONE pool checkout, a migration
       #              wait that ends on the clock, and the managed-database
-      #              overlay). THE CURRENT FIGURE for this branch; the PR
-      #              description states it at this same commit, `pytest -q
-      #              tests_runtime/` is 428 and the neutral conformance
-      #              corpus is 17 of 17.
+      #              overlay). SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 428 there.
+      #  268 passed  at `build/3-6-repository-act` `f5dd586a` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              TWENTY-ONE's ten threads: eight fixed, one already
+      #              answered by the head before it, one registered. A
+      #              DESTINATION'S OWN `pre-receive` ran in this process (git
+      #              2.43.0, measured three ways: plain push RAN, `git -c
+      #              core.hooksPath=/dev/null push` RAN, the option carried
+      #              on `--receive-pack` did NOT and the push still landed);
+      #              a repository-local `credential.helper` was a program
+      #              this runtime executed during a push (measured against a
+      #              401 endpoint), refused rather than overridden so the
+      #              operator's own global helper survives; nothing tied the
+      #              destination to the project, so a push could be aimed at
+      #              a sibling repository under the root this service owns; a
+      #              refusal raised while BINDING took `corpus-unreadable`, a
+      #              kind `write_back` does not declare; `GIT_PROXY_COMMAND`
+      #              was not stripped; a libpq `password=` in a stored remote
+      #              was returned verbatim; a project id was not checked as
+      #              one native path component; and `ValueError` was missing
+      #              from the root's translation. THE CURRENT FIGURE for this
+      #              branch; the PR description states it at this same
+      #              commit, `pytest -q tests_runtime/` is 439 and the
+      #              neutral conformance corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
