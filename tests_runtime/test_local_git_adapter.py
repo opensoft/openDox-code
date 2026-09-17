@@ -2574,3 +2574,181 @@ def test_a_write_is_bound_to_the_repository_the_root_check_verified(
     for where in (tmp_path / "moved-aside", repository):
         assert _git(where, "rev-list", "--count", "HEAD") == "1", where
         assert _git(where, "ls-tree", "-r", "--name-only", "HEAD") == "", where
+
+
+# -- Copilot's seventeenth round on #26 --------------------------------------
+
+
+def test_asking_a_repository_what_changed_runs_no_program_of_its_own(
+        adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """NOT A REGRESSION TEST — it passes against the previous head, and the
+    measurement is why.
+
+    The review reported that `check` can execute an arbitrary program, because
+    `git diff` honours `diff.external` and the runner preserved
+    `GIT_EXTERNAL_DIFF` (Copilot review of openDox-code#26, round 17). The
+    mechanism is real; this call site does not reach it. MEASURED on git
+    2.43.0, with `diff.external` set in the repository and `GIT_EXTERNAL_DIFF`
+    set in the environment:
+
+        git diff                       external driver RAN
+        git diff HEAD                  external driver RAN
+        git diff --name-only           did NOT run
+        git diff --name-only -z HEAD   did NOT run
+
+    An external driver renders a diff BODY, and `--name-only` renders none, so
+    `check`'s question never reaches it either way.
+
+    The guard is kept and the case is labelled, which is this act's rule for a
+    premise that turned out to be false: `--no-ext-diff --no-textconv` on the
+    command and `GIT_EXTERNAL_DIFF` in the sanitizer cost nothing, and they are
+    what makes the ABSENCE above a property of this call rather than a property
+    of the flag set it happens to use.
+    """
+    working = tmp_path / "checkout"
+    working.mkdir()
+    _git(working, "init", "--initial-branch=main", ".")
+    (working / "a.md").write_text("one\n", encoding="utf-8")
+    _git(working, "add", "a.md")
+    _git(working, "commit", "-m", "first")
+    (working / "a.md").write_text("two\n", encoding="utf-8")   # a divergence
+
+    marker = tmp_path / "external-diff-ran"
+    planted = tmp_path / "evil-diff"
+    planted.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8")
+    planted.chmod(0o755)
+    _git(working, "config", "diff.external", str(planted))
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", str(planted))
+
+    corpus = adapter.resolve(ca.CorpusRef(name="checkout",
+                                          location=str(working)))
+    findings = adapter.check(corpus)
+    assert [finding.subject for finding in findings] == ["a.md"]
+    assert not marker.exists(), (
+        "`check` executed the program the repository's own config named")
+    assert "GIT_EXTERNAL_DIFF" in lga._GIT_ENVIRONMENT_OVERRIDES
+
+    # THE MECHANISM IS REAL, and this is the half of the measurement that says
+    # so: the same repository, the same planted program, a diff that renders a
+    # BODY.
+    subprocess.run(["git", "-C", str(working), "diff"],
+                   capture_output=True, env={**_GIT_ENV,
+                                             "GIT_EXTERNAL_DIFF": str(planted)})
+    assert marker.exists(), (
+        "this git honours neither `diff.external` nor `GIT_EXTERNAL_DIFF`, so "
+        "the absence above says nothing")
+
+
+def test_a_branch_name_that_is_not_utf_8_is_served_and_not_raised(
+        adapter, tmp_path: Path) -> None:
+    """A ref name is BYTES; git forbids only a short list of characters.
+
+    The strict `.decode()` on `symbolic-ref` raised `UnicodeDecodeError` out of
+    `resolve` for an otherwise valid repository — an exception where this
+    interface owes a corpus or a refusal (Copilot review of openDox-code#26,
+    round 17). `surrogateescape` is the same round trip the pathnames get.
+    """
+    location = tmp_path / "odd-branch"
+    location.mkdir()
+    _git(location, "init", "--initial-branch=main", ".")
+    # A branch whose name is a non-UTF-8 byte. `subprocess` encodes arguments
+    # with the filesystem encoding and `surrogateescape`, so this is the same
+    # round trip in both directions.
+    odd = b"br-\xff".decode("utf-8", "surrogateescape")
+    _git(location, "symbolic-ref", "HEAD", f"refs/heads/{odd}")
+
+    corpus = adapter.resolve(ca.CorpusRef(name="odd", location=str(location)))
+    assert corpus.revision is None            # unborn, and legal
+    assert adapter.list_documents(corpus) == ()
+    # And the write path is answered for the ref that name refers to.
+    assert corpus.write_path_available
+
+
+def test_the_output_of_a_network_operation_is_bounded_as_well_as_its_clock(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`out_bounded` capped the wall clock and not the bytes.
+
+    `run()` captures both pipes to EOF with no limit, so a remote that answers
+    — a hostile one, or a broken one in a loop — could stream for the whole
+    timeout and have every byte held in this process while the request holds
+    the caller's database transaction and the map row's lock (Copilot review of
+    openDox-code#26, round 17).
+
+    Driven with a `git` that is a script writing more than the cap: the runner
+    kills it and refuses, rather than returning what it sent.
+    """
+    noisy = tmp_path / "git"
+    noisy.write_text(
+        "#!/bin/sh\n"
+        f"exec dd if=/dev/zero bs=65536 count={(lga.MAX_REMOTE_OUTPUT_BYTES // 65536) + 32}"
+        " 2>/dev/null\n",
+        encoding="utf-8")
+    noisy.chmod(0o755)
+    runner = lga.GitRunner(tmp_path, str(noisy))
+    with pytest.raises(lga.GitCommandFailed) as caught:
+        runner.out_bounded("push", timeout=30)
+    assert "more than" in str(caught.value)
+    assert str(lga.MAX_REMOTE_OUTPUT_BYTES) in str(caught.value)
+
+    # A short answer is unaffected: the cap is a cap, not a filter.
+    quiet = tmp_path / "quiet-git"
+    quiet.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+    quiet.chmod(0o755)
+    assert lga.GitRunner(tmp_path, str(quiet)).out_bounded(
+        "push", timeout=30) == b"ok\n"
+
+
+def test_the_push_acts_branch_name_is_the_one_head_points_at_byte_for_byte(
+        tmp_path: Path) -> None:
+    """`replace` is not a decode, it is a rewrite.
+
+    `_pushable_branch` decoded `symbolic-ref` with `errors="replace"`, so a
+    branch whose name is not UTF-8 came back with U+FFFD in it — and the push
+    that followed named a ref that does not exist. (The review reported a
+    STRICT decode raising `UnicodeDecodeError` into a 500; this decode was
+    never strict. What it did was quieter and wrong in a way a 500 is not —
+    Copilot review of openDox-code#26, round 17.) `surrogateescape` round-trips
+    through `subprocess`, which encodes arguments the same way.
+    """
+    from opendox.runtime import repository_act
+
+    location = tmp_path / "odd"
+    location.mkdir()
+    _git(location, "init", "--initial-branch=main", ".")
+    odd = b"br-\xff".decode("utf-8", "surrogateescape")
+    _git(location, "symbolic-ref", "HEAD", f"refs/heads/{odd}")
+
+    branch = repository_act._pushable_branch(
+        lga.GitRunner(location), str(location))
+    assert branch == odd, repr(branch)
+    assert "�" not in branch
+    # And the name round-trips back INTO git, which is the whole point. Read
+    # as BYTES here, because this file's own `_git` helper decodes strictly.
+    head = subprocess.run(["git", "-C", str(location), "symbolic-ref", "HEAD"],
+                          capture_output=True, check=True, env=_GIT_ENV)
+    assert head.stdout.decode("utf-8", "surrogateescape").strip() == \
+        f"refs/heads/{branch}"
+
+
+def test_every_operation_goes_through_the_bound_runner() -> None:
+    """A guard, and it is labelled: it pins a SHAPE, not a behaviour.
+
+    Round 16 bound `write_back` to an open directory and round 17 extended that
+    to the operations that read, because each of them made several git calls
+    through a runner that re-resolved the PATHNAME every time (Copilot review
+    of openDox-code#26). The behaviour is measured by
+    `test_a_write_is_bound_to_the_repository_the_root_check_verified`; what
+    cannot be measured from outside is that a LATER operation still goes
+    through `_bound`, so it is asserted here instead of being assumed.
+    """
+    import inspect
+
+    for name in ("list_documents", "read", "check", "write_back"):
+        source = inspect.getsource(getattr(lga.LocalGitCorpus, name))
+        assert "self._bound(" in source, (
+            f"{name} takes a runner on a pathname rather than on the "
+            "directory it opened")
+    # `classify` reads through `read`, and `resolve` is the operation that
+    # establishes the location in the first place: neither takes one of its
+    # own, which is why they are not in the list.
+    assert "self._bound(" not in inspect.getsource(lga.LocalGitCorpus.resolve)

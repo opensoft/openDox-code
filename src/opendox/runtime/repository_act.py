@@ -1078,7 +1078,16 @@ def _pushable_branch(git: GitRunner, location: str) -> str:
         raise RepositoryActRefused(
             f"HEAD in {location} is detached, so there is no branch to push; "
             "point HEAD at a branch first")
-    ref = symbolic.stdout.decode("utf-8", "replace").strip()
+    # `surrogateescape`, NOT `replace`. A ref name is BYTES — git forbids only
+    # a short list of characters — and `replace` turns a byte it cannot decode
+    # into U+FFFD, so the branch this act then PUSHES is a different name from
+    # the one HEAD points at, and the push fails naming a ref that does not
+    # exist. (The review reported a strict decode raising `UnicodeDecodeError`
+    # into a 500; this decode was never strict — what it did was quieter and
+    # wrong in a way a 500 is not.) `surrogateescape` round-trips through
+    # `subprocess`, which encodes arguments the same way (Copilot review of
+    # openDox-code#26, round 17).
+    ref = symbolic.stdout.decode("utf-8", "surrogateescape").strip()
     if not ref.startswith("refs/heads/"):
         raise RepositoryActRefused(
             f"HEAD in {location} names {ref!r}, which is not a branch")

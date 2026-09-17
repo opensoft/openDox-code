@@ -86,12 +86,15 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import unicodedata
 import urllib.parse
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 from opendox.corpus_adapter import (
     CORPUS_ABSENT,
@@ -124,6 +127,11 @@ ADAPTER_NAME = "local-git"
 #: carries it, `WriteReceipt.dispatched_to` repeats it, and a corpus that
 #: cannot reach it is read-only rather than silently direct-writing.
 WRITE_PATH = "local-git-commit"
+
+#: The most output this runtime will hold from ONE network operation, on each
+#: of the child's two streams. A push's real output is a few hundred bytes; a
+#: remote that sends four orders of magnitude more is not talking to us.
+MAX_REMOTE_OUTPUT_BYTES = 4 * 1024 * 1024
 
 #: The default branch a created repository is initialized on.
 DEFAULT_BRANCH = "main"
@@ -218,6 +226,12 @@ _GIT_ENVIRONMENT_OVERRIDES = frozenset({
     "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
     "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG", "GIT_CONFIG_COUNT",
     "GIT_INDEX_VERSION", "GIT_PREFIX",
+    # `GIT_EXTERNAL_DIFF` NAMES A PROGRAM, and `git diff` runs it. `check`
+    # asks a project repository what changed, so an ambient value made that
+    # question arbitrary code execution in this runtime — the environment half
+    # of the `diff.external` finding (Copilot review of openDox-code#26, round
+    # 17). The command-line half is `--no-ext-diff --no-textconv` on the diff.
+    "GIT_EXTERNAL_DIFF",
     # `GIT_CONFIG_PARAMETERS` IS THE `-c` CHANNEL ITSELF. It is how git hands
     # its own `-c` settings to the commands it runs, and it is read on the way
     # IN as well: an ambient value set the same settings a command line would,
@@ -397,6 +411,79 @@ class GitRunner:
                     argv, returncode=127, stdout=b"",
                     stderr=(f"{self.executable}: {exc}").encode())) from exc
 
+    def _run_bounded(self, args: tuple[str, ...], env: dict[str, str],
+                     timeout: float) -> subprocess.CompletedProcess[bytes]:
+        """`run`, with the child's OUTPUT capped as well as its clock.
+
+        `subprocess.run(capture_output=True)` reads both pipes to EOF with no
+        limit. This reads them on two threads, stops at
+        `MAX_REMOTE_OUTPUT_BYTES` each, and kills the child when either passes
+        it — so the memory a remote can make this process hold is a constant
+        and not a function of how long the remote is willing to talk.
+        """
+        argv = [self.executable, "-C", str(self.root),
+                "-c", "core.hooksPath=" + os.devnull,
+                "--literal-pathspecs", *args]
+        try:
+            child = subprocess.Popen(                    # noqa: S603 - fixed argv
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=env,
+                pass_fds=() if self.inherit_fd is None else (self.inherit_fd,))
+        except (OSError, ValueError) as exc:
+            raise GitCommandFailed(
+                args, subprocess.CompletedProcess(
+                    argv, returncode=127, stdout=b"",
+                    stderr=(f"{self.executable}: {exc}").encode())) from exc
+        captured: dict[str, bytes] = {}
+        overflowed: set[str] = set()
+
+        def _drain(name: str, stream: IO[bytes]) -> None:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_REMOTE_OUTPUT_BYTES:
+                    overflowed.add(name)
+                    child.kill()
+                    break
+                chunks.append(chunk)
+            captured[name] = b"".join(chunks)
+
+        readers = [threading.Thread(target=_drain, args=(name, stream),
+                                    daemon=True)
+                   for name, stream in (("stdout", child.stdout),
+                                        ("stderr", child.stderr))]
+        for reader in readers:
+            reader.start()
+        try:
+            returncode = child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+            raise
+        finally:
+            for reader in readers:
+                reader.join(5)
+            for stream in (child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()
+        if overflowed:
+            raise GitCommandFailed(
+                args, subprocess.CompletedProcess(
+                    argv, returncode=returncode, stdout=b"",
+                    stderr=(f"the remote sent more than "
+                            f"{MAX_REMOTE_OUTPUT_BYTES} bytes on "
+                            f"{'/'.join(sorted(overflowed))} and was stopped; "
+                            "no output from it is reported, because a stream "
+                            "this size is not a message").encode()))
+        return subprocess.CompletedProcess(
+            argv, returncode=returncode,
+            stdout=captured.get("stdout", b""),
+            stderr=captured.get("stderr", b""))
+
     def out_bounded(self, *args: str, timeout: float,
                     env: dict[str, str] | None = None) -> bytes:
         """`out`, with a wall-clock bound and NO interactive prompting.
@@ -409,6 +496,16 @@ class GitRunner:
         `GIT_TERMINAL_PROMPT=0` refuses the terminal, an empty `GIT_ASKPASS`
         and `SSH_ASKPASS` refuse the graphical one, and `BatchMode=yes` refuses
         ssh's.
+
+        AND THE OUTPUT IS BOUNDED TOO, which the wall clock is not. `run()`
+        captures with a pipe and no limit, so a remote that answers — a hostile
+        one, or a broken one in a loop — could stream gigabytes of stderr for
+        the whole timeout and have every byte held in this process's memory
+        while the request holds the caller's database transaction and the map
+        row's lock (Copilot review of openDox-code#26, round 17). A push's real
+        output is a few hundred bytes; `MAX_REMOTE_OUTPUT_BYTES` is four orders
+        of magnitude above that, and a stream that passes it is killed and
+        refused rather than believed.
         """
         merged = {
             "GIT_TERMINAL_PROMPT": "0",
@@ -418,7 +515,7 @@ class GitRunner:
             **(env or {}),
         }
         try:
-            completed = self.run(*args, env=merged, timeout=timeout)
+            completed = self._run_bounded(args, merged, timeout)
         except subprocess.TimeoutExpired as expired:
             raise GitCommandFailed(
                 args, subprocess.CompletedProcess(
@@ -979,7 +1076,14 @@ class LocalGitCorpus:
                           f"this corpus declares {list(corpus.scopes)}; a "
                           "silent widening is indistinguishable from a correct "
                           "answer")
-        git = self._git(corpus)
+        with self._bound(corpus, CORPUS_UNREADABLE, corpus.location,
+                         absent=CORPUS_ABSENT) as git:
+            return self._list_documents_bound(git, corpus, scope)
+
+
+    def _list_documents_bound(self, git: GitRunner, corpus: ResolvedCorpus,
+                              scope: str) -> tuple[DocumentId, ...]:
+        """`list_documents`'s git half, on a runner bound to an open directory."""
         if corpus.revision is None:
             # A repository with no commits yet. LEGAL, and empty — not absent.
             # REVALIDATED FIRST, because this path touched git at all only by
@@ -1027,7 +1131,14 @@ class LocalGitCorpus:
     def read(self, corpus: ResolvedCorpus, document: DocumentId,
              revision: str | None = None) -> Document:
         """The bytes at a declared revision; NEVER a silent fallback."""
-        git = self._git(corpus)
+        with self._bound(corpus, CORPUS_UNREADABLE, corpus.location,
+                         absent=CORPUS_ABSENT) as git:
+            return self._read_bound(git, corpus, document, revision)
+
+
+    def _read_bound(self, git: GitRunner, corpus: ResolvedCorpus,
+                    document: DocumentId, revision: str | None) -> Document:
+        """`read`'s git half, on a runner bound to an open directory."""
         if revision is None:
             at = corpus.revision
         else:
@@ -1189,7 +1300,14 @@ class LocalGitCorpus:
         # openDox-code#26). The interface is emphatic that a corpus failure is
         # refused; `()` is a verdict and a verdict must not be manufactured out
         # of an error.
-        git = self._git(corpus)
+        with self._bound(corpus, CORPUS_UNREADABLE, corpus.location,
+                         absent=CORPUS_ABSENT) as git:
+            return self._check_bound(git, corpus, subjects)
+
+
+    def _check_bound(self, git: GitRunner, corpus: ResolvedCorpus,
+                     subjects: tuple[DocumentId, ...] | None) -> tuple[Finding, ...]:
+        """`check`'s git half, on a runner bound to an open directory."""
         try:
             bare = git.out("rev-parse", "--is-bare-repository").decode().strip()
         except GitCommandFailed as failed:
@@ -1217,7 +1335,18 @@ class LocalGitCorpus:
                     "rather than reported as clean")
             return ()
         try:
-            raw = git.out("diff", "--name-only", "-z", corpus.revision)
+            # `--no-ext-diff` AND `--no-textconv`, because a repository can
+            # name a PROGRAM. `diff.external` and a `diff.<driver>.textconv`
+            # are ordinary config in the repository this adapter was pointed
+            # at, and `git diff` runs them — so merely ASKING a project
+            # repository what changed executed code in this runtime's process,
+            # which is the same class as the `pre-push` hook and the `ext::`
+            # transport and was covered by neither (Copilot review of
+            # openDox-code#26, round 17). The environment channel
+            # `GIT_EXTERNAL_DIFF` is stripped by `_sanitized_git_environment`
+            # for the same reason.
+            raw = git.out("diff", "--no-ext-diff", "--no-textconv",
+                          "--name-only", "-z", corpus.revision)
         except GitCommandFailed as failed:
             raise _refuse(CORPUS_UNREADABLE, corpus.location,
                           f"the checkout could not be compared with "
@@ -1278,33 +1407,18 @@ class LocalGitCorpus:
                 "the document key contains a NUL byte, which is the record "
                 "terminator git's index protocol uses; a path that cannot be "
                 "written unambiguously is not written at all")
-        try:
-            # AND THE CHECK AND THE USE ARE ONE OBJECT. The re-check below
-            # asked about a PATHNAME, and every call after it — `hash-object`,
-            # `read-tree`, `commit-tree`, `update-ref` — resolved that pathname
-            # again, so a location renamed or re-linked in between put the
-            # commit in a different repository after this function had proved
-            # it would not (Copilot review of openDox-code#26, round 16). The
-            # directory is opened `O_NOFOLLOW` component by component and git
-            # is handed `/proc/self/fd/<n>` for that descriptor, which is the
-            # binding `repository_act.initialize_repository` already uses;
-            # `runner_bound_to` states the platform ladder.
-            handle = open_no_follow_chain(Path(corpus.location))
-        except (OSError, RuntimeError) as exc:
-            raise _refuse(
-                WRITE_PATH_UNREACHABLE, corpus.write_path,
-                f"{corpus.location} could not be opened without following a "
-                f"link ({exc.__class__.__name__}); nothing is written, "
-                "because the repository the commit would land in cannot be "
-                "held open") from exc
-        try:
+        # AND THE CHECK AND THE USE ARE ONE OBJECT — see `_bound`, which every
+        # operation now goes through: the re-check below asked about a
+        # PATHNAME, and every call after it (`hash-object`, `read-tree`,
+        # `commit-tree`, `update-ref`) resolved that pathname again, so a
+        # location renamed or re-linked in between put the commit in a
+        # different repository after this function had proved it would not
+        # (Copilot review of openDox-code#26, round 16).
+        with self._bound(corpus, WRITE_PATH_UNREACHABLE,
+                         corpus.write_path) as git:
             return self._write_back_bound(
-                runner_bound_to(handle, Path(corpus.location),
-                                self._executable),
-                corpus, document, content, actor=actor,
+                git, corpus, document, content, actor=actor,
                 basis_revision=basis_revision, reason=reason)
-        finally:
-            os.close(handle)
 
     def _write_back_bound(self, git: GitRunner, corpus: ResolvedCorpus,
                           document: DocumentId, content: bytes, *, actor: str,
@@ -1458,6 +1572,55 @@ class LocalGitCorpus:
 
     def _git(self, corpus: ResolvedCorpus) -> GitRunner:
         return GitRunner(Path(corpus.location), self._executable)
+
+    @contextmanager
+    def _bound(self, corpus: ResolvedCorpus, kind: str, subject: str,
+               absent: str | None = None) -> Iterator[GitRunner]:
+        """A runner whose `-C` is an OPEN DIRECTORY, for the whole operation.
+
+        Every operation used to take `self._git(corpus)` and then make several
+        git calls through it, each of which re-resolved the PATHNAME — so a
+        location renamed or re-linked part way through an operation was a
+        different repository for the rest of it: `read` could revalidate one
+        directory and serve bytes from another, and `check` could compare a
+        replacement's working tree (Copilot review of openDox-code#26, round
+        17). The directory is opened `O_NOFOLLOW` component by component and
+        git is handed `/proc/self/fd/<n>`, which is the binding
+        `repository_act.initialize_repository` uses and `runner_bound_to`
+        states the platform ladder for.
+
+        WHAT THIS DOES NOT CLOSE, and it is registered rather than implied: an
+        operation binds what `corpus.location` names AT ITS OWN START, not what
+        `resolve` named. A repository replaced by another VALID repository
+        between the two is served, because proving otherwise means carrying a
+        resolution-time identity on `ResolvedCorpus` — which belongs to
+        `opendox.corpus_adapter`, the NEUTRAL contract openxFactory pins by
+        commit and digest and this act may not widen. Same reason, and the same
+        residue, as binding the served ref at resolution (round 12).
+        """
+        try:
+            handle = open_no_follow_chain(Path(corpus.location))
+        except FileNotFoundError as gone:
+            # A CORPUS THAT WENT AWAY IS ABSENT, NOT UNREADABLE, wherever the
+            # caller says so: `_revalidate` has always drawn that line and this
+            # helper now runs before it, so it has to draw the same one.
+            # `write_back` passes no `absent` kind, because the two it may
+            # raise do not include `CORPUS_ABSENT`.
+            raise _refuse(
+                absent or kind, subject,
+                f"{corpus.location} is no longer there") from gone
+        except (OSError, RuntimeError) as exc:
+            raise _refuse(
+                kind, subject,
+                f"{corpus.location} could not be opened without following a "
+                f"link ({exc.__class__.__name__}); this corpus is refused "
+                "rather than read through a name that may lead elsewhere"
+            ) from exc
+        try:
+            yield runner_bound_to(handle, Path(corpus.location),
+                                  self._executable)
+        finally:
+            os.close(handle)
 
     def _writable_ref_home(self, git: GitRunner, common_dir: Path,
                            subject: str) -> Path:
@@ -1614,7 +1777,12 @@ class LocalGitCorpus:
         symbolic = self._probe(git, "symbolic-ref", "--quiet", "HEAD",
                                kind=CORPUS_UNREADABLE, subject=subject)
         if symbolic.returncode == 0:
-            ref = symbolic.stdout.decode().strip()
+            # A REF NAME IS BYTES. git permits anything but a short list of
+            # characters, so a branch whose name is not UTF-8 raised
+            # `UnicodeDecodeError` out of a function that owes a refusal
+            # (Copilot review of openDox-code#26, round 17). Same round trip
+            # the pathnames get.
+            ref = symbolic.stdout.decode("utf-8", "surrogateescape").strip()
             if self._probe(git, "show-ref", "--verify", "--quiet", ref,
                            kind=CORPUS_UNREADABLE,
                            subject=subject).returncode != 0:
@@ -1671,7 +1839,12 @@ class LocalGitCorpus:
         symbolic = self._probe(git, "symbolic-ref", "--quiet", "HEAD",
                                kind=WRITE_PATH_UNREACHABLE, subject=subject)
         if symbolic.returncode == 0:
-            ref = symbolic.stdout.decode().strip()
+            # A REF NAME IS BYTES. git permits anything but a short list of
+            # characters, so a branch whose name is not UTF-8 raised
+            # `UnicodeDecodeError` out of a function that owes a refusal
+            # (Copilot review of openDox-code#26, round 17). Same round trip
+            # the pathnames get.
+            ref = symbolic.stdout.decode("utf-8", "surrogateescape").strip()
             # A BRANCH, and not merely a symbolic ref. `symbolic-ref HEAD` can
             # legally name a tag or a remote-tracking ref, and `update-ref`
             # would then have advanced THAT — a write moving a tag instead of a
