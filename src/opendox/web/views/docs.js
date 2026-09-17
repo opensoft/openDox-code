@@ -40,8 +40,16 @@ function docDate(d) {
 }
 
 // Lower-cased match haystack for the global search (path/title/stage/topics).
+// BOTH SPELLINGS OF THE STAGE, since slice S7 (Copilot review, PR #21): the row
+// DISPLAYS `vocab.documentStageWord(d.stage)` but the value it matched on was
+// only the raw enum, so a host that maps `brainstorm` to `jotted` left every
+// such document hidden from a search for the word the user can SEE. The raw
+// enum stays — a search for `brainstorm` must go on working, and a host may map
+// two enums onto one word — and the facet-resolved word is appended beside it.
 function docHaystack(d) {
-  return [d.path, d.summary, d.kind, d.stage, ...(d.topics || [])]
+  return [d.path, d.summary, d.kind, d.stage,
+          d.stage ? vocab.documentStageWord(d.stage) : "",
+          ...(d.topics || [])]
     .filter(Boolean).join(" ").toLowerCase();
 }
 

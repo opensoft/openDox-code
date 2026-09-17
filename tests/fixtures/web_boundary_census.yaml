@@ -191,9 +191,9 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 # shape and `test_the_declared_totals_are_re_derived_from_the_rows` can refuse a
 # drift between the two. Measured at slice S4 (see the S4 block above).
 totals:
-  A: {files: 26, loc: 17883}
+  A: {files: 26, loc: 17904}
   B: {files: 1, loc: 73}
-  C: {files: 14, loc: 12564}
+  C: {files: 14, loc: 12617}
   "?": {files: 1, loc: 1435}
 files:
   - path: app.js
@@ -228,8 +228,8 @@ files:
 
   - path: views/board.js
     class: C
-    loc: 306
-    note: "four lifecycle columns; 25 governance literals"
+    loc: 318
+    note: "four lifecycle columns; 25 governance literals loc 306 -> 318 on the § 3.4 SLICE S7 RESIDUE (Copilot review 5192900474 on openDox-code#21 @ c7a216c, suppressed comment 1): brainstormCard()'s date metadata resolved the CAPTURED status through the facet instead of spelling openDox's own `captured` beside a heading that already resolved it. Invisible to assertion 4 -- `captured` is in neither _STATUS_WORDS nor _STAGE_WORDS -- which is why a review round and not this census found it."
 
   - path: views/bullseye.js
     class: A
@@ -254,11 +254,11 @@ files:
 
   - path: views/display.js
     class: A
-    loc: 679
+    loc: 692
     exempt: [SNAPSHOT_FIELDS, ACT_IDS, TILE_KINDS, SCOPE_KINDS, TAB_IDS,
              SESSION_SCOPE_KINDS, SESSION_BRANCH_NAMESPACES, SNAPSHOT_VALUES,
              DRILL_KINDS, DRAFT_PATHS, SECTION_ORDER]
-    note: "S7 ADDITION (created, no manifest row -- RULED OQ-C): the DISPLAY FACET's client half. Carries ROLE names (STAGE_ROLES / STATUS_ROLES / AREA_ROLES / TOKEN_ROLES) and openDox's OWN neutral words (NEUTRAL_DISPLAY), never a registered domain's -- which is what keeps it class A while every class-C file reads its vocabulary through it. SNAPSHOT_FIELDS is the one domain-shaped table in it and is a DECLARED § 2.2 rule 3 exemption (see declared_exemptions below): the snapshot's own field names and the closed `changes[].status` enum, which are openDox's schema and not a domain's mapping. Import-free by design, like helpers.js and view_extension.js"
+    note: "S7 ADDITION (created, no manifest row -- RULED OQ-C): the DISPLAY FACET's client half. Carries ROLE names (STAGE_ROLES / STATUS_ROLES / AREA_ROLES / TOKEN_ROLES) and openDox's OWN neutral words (NEUTRAL_DISPLAY), never a registered domain's -- which is what keeps it class A while every class-C file reads its vocabulary through it. SNAPSHOT_FIELDS is the one domain-shaped table in it and is a DECLARED § 2.2 rule 3 exemption (see declared_exemptions below): the snapshot's own field names and the closed `changes[].status` enum, which are openDox's schema and not a domain's mapping. Import-free by design, like helpers.js and view_extension.js loc 679 -> 692 on the § 3.4 SLICE S7 RESIDUE (Copilot review 5192900474, suppressed comment 2): applyTokens() REMOVES every `--st-<role>` in the closed TOKEN_ROLES family before it sets the declared ones, so a role the new facet does not declare cannot keep the previous facet's inline colour -- an inline custom property beats the stylesheet's theme-aware default, so the stale value had been winning."
 
   - path: views/doc-wheel.js
     class: C
@@ -267,9 +267,9 @@ files:
 
   - path: views/docs.js
     class: A
-    loc: 204
+    loc: 212
     tail: areaOrder
-    note: "Q1: stays openDox/class A; AREA_ORDER :18 hardcoded ideation/brainstorm and ideation/staging. PARAMETERIZED AT S7: the area map is the profile's, read through display.areas() / display.areaOf(path), and the tail is now the derived `areaOrder` / `areaOf` pair that reads it"
+    note: "Q1: stays openDox/class A; AREA_ORDER :18 hardcoded ideation/brainstorm and ideation/staging. PARAMETERIZED AT S7: the area map is the profile's, read through display.areas() / display.areaOf(path), and the tail is now the derived `areaOrder` / `areaOf` pair that reads it loc 204 -> 212 on the § 3.4 SLICE S7 RESIDUE (Copilot review 5192900474 on openDox-code#21 @ c7a216c, thread 1): docHaystack() appends `vocab.documentStageWord(d.stage)` beside the raw enum, so a search for the stage word the row DISPLAYS finds the document; the raw enum stays, because `brainstorm` must go on matching and a host may map two enums onto one word."
 
   - path: views/doxbench-chat-model.js
     class: A
@@ -304,8 +304,8 @@ files:
 
   - path: views/explorer.js
     class: C
-    loc: 325
-    note: "Q2 RULING: class C outright (was \"?\" in the note's own table) -- a projection whose only domain content is the artifact-folder vocabulary; classifyChangeFile; reads staged_topics[].files / changes[].files"
+    loc: 342
+    note: "Q2 RULING: class C outright (was \"?\" in the note's own table) -- a projection whose only domain content is the artifact-folder vocabulary; classifyChangeFile; reads staged_topics[].files / changes[].files loc 325 -> 342 on the § 3.4 SLICE S7 RESIDUE (Copilot review 5192900474, suppressed comment 3): the STALE-TILE fallback title -- the one branch resolveExplorerTarget cannot reach, and the only place a human sees the tile KIND rather than its id -- renders the DRILL_KINDS seam key through its own stage role (new export `drillKindWord`) instead of verbatim."
 
   - path: views/funnel.js
     class: C
@@ -340,8 +340,8 @@ files:
 
   - path: views/lineage.js
     class: C
-    loc: 186
-    note: "stats strip and lineage/readiness overlay; 10 governance literals"
+    loc: 198
+    note: "stats strip and lineage/readiness overlay; 10 governance literals loc 186 -> 198 on the § 3.4 SLICE S7 RESIDUE (Copilot review 5192900474, suppressed comment 4): renderStats() resets to neutralDisplay() where the caller declares no facet, instead of `|| vocab` keeping the PREVIOUS render's words -- the one site of eleven in views/ that carried the withdrawn host's vocabulary forward rather than coming up visibly un-domained."
 
   - path: views/model.js
     class: C
@@ -387,8 +387,8 @@ files:
 
   - path: views/staging-workbench.js
     class: C
-    loc: 3459
-    note: "full-screen workbench scoped to one topic-bearing tile loc 3397 -> 3402 on this PR's round-2 review (Copilot): the two contributed columns are per-mount `const`s inside mountStagingWorkbench rather than module-level `let`s, so two live workbenches cannot share them."
+    loc: 3471
+    note: "full-screen workbench scoped to one topic-bearing tile loc 3397 -> 3402 on this PR's round-2 review (Copilot): the two contributed columns are per-mount `const`s inside mountStagingWorkbench rather than module-level `let`s, so two live workbenches cannot share them. loc 3459 -> 3471 on the § 3.4 SLICE S7 RESIDUE (Copilot review 5192900474 on openDox-code#21 @ c7a216c, thread 2 and suppressed comment 5): the nested renderDocWheel is mounted WITH `display: vocab` (doc-wheel.js resets its module vocabulary to `opts.display || neutralDisplay()` on every render, so one pane had rendered in two vocabularies), and runAddSection() hands `display: vocab` to insertSection, so the only interactive add route places and duplicate-checks against the HOST's canonical heading order rather than the neutral SECTION_ORDER."
 
   - path: views/swb-model-intake.js
     class: A

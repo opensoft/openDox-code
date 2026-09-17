@@ -620,6 +620,19 @@ export class Display {
   // than being overwritten by an inline copy of one theme's value.
   applyTokens(element) {
     if (!element || !element.style) return;
+    // CLEARED BEFORE SET (Copilot review 5192900474 on PR #21, suppressed
+    // comment 2; slice S7 residue). Applying a facet only ever ADDED inline
+    // custom properties, so a role the NEW facet does not declare kept the
+    // OLD one's colour: re-reading `/capabilities` after a host swap, or a
+    // node probe that applies a declaring facet and then a neutral one to the
+    // same element, left `:root` speaking two profiles at once — and an inline
+    // property beats the stylesheet's theme-aware default, so the stale value
+    // won. The closed `TOKEN_ROLES` family is removed first, which is why this
+    // cannot strand a role: `--st-<role>` is set by nothing else, and a role
+    // the facet DOES declare is written back in the loop below.
+    for (const role of TOKEN_ROLES) {
+      element.style.removeProperty("--st-" + role);
+    }
     for (const role of this._declaredTokens) {
       element.style.setProperty("--st-" + role, this.token(role));
     }
