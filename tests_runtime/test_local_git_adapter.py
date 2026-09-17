@@ -754,7 +754,16 @@ def test_the_adapter_advertises_no_branch_it_does_not_use() -> None:
     assert "branch" not in parameters, (
         "the adapter takes a `branch` again; either it controls the served ref "
         "— which `_served_ref` argues it must not — or it must not be offered")
-    assert set(parameters) == {"self", "executable"}
+    # AND THE SURFACE IS CLOSED. It was `{self, executable}`; RULED
+    # openxFactory#656 comment 5714365086 (Q-F2 (a)) added the THREE per-corpus
+    # construction data, and no fourth — the list is here so a later parameter
+    # is a decision somebody makes rather than one that accumulates.
+    assert set(parameters) == {"self", "executable", "write_path",
+                               "kind_field", "required_fields"}
+    # EVERY ONE OF THEM DEFAULTS TO WHAT THIS CLASS ALREADY DID.
+    assert parameters["write_path"].default == lga.WRITE_PATH
+    assert parameters["kind_field"].default is None
+    assert parameters["required_fields"].default == ()
 
 
 # -- Copilot's sixth round on #26 --------------------------------------------
@@ -1417,3 +1426,220 @@ def test_the_directory_the_emptiness_check_saw_is_the_one_initialized(
     # held, and not in the one the name was re-pointed at.
     assert not (moved / "HEAD").exists()
     assert not (location / "HEAD").exists()
+
+
+# -- RULED openxFactory#656 comment 5714365086 (Q-F2 / Q-F3) ------------------
+
+
+def _repository_at(location: Path, name: str) -> Path:
+    initialize_repository(location, project_id=name, actor=ACTOR)
+    return location
+
+
+def test_a_directory_inside_another_repository_is_refused_and_not_adopted(
+        adapter, tmp_path: Path) -> None:
+    """`rev-parse --git-dir` WALKS UP, and this reader followed it out.
+
+    Pointed at an ordinary directory inside somebody else's checkout, `resolve`
+    answered for THAT repository at ITS head: `list_documents` served keys
+    relative to the prefix, `read` resolved them from the repository root and
+    refused them as `DOCUMENT_UNKNOWN`, and `write_back` committed into the
+    enclosing repository and moved its branch — a write into a repository the
+    caller never named, at a path the caller never named (helper `floor37`,
+    2026-09-17, measured end to end; RULED openxFactory#656 comment
+    5714365086, Q-F3 (a)).
+
+    It is reachable in this product: `OPENDOX_PROJECT_REPOSITORY_ROOT` defaults
+    to the RELATIVE `var/projects`, so a `var/projects/<id>` that exists and is
+    not a repository sits inside whatever checkout the process started in.
+
+    Measured against the old shape before this was written: `resolve` returned
+    a corpus whose revision was the ENCLOSING repository's HEAD.
+    """
+    enclosing = tmp_path / "somebody-elses"
+    enclosing.mkdir()
+    _git(enclosing, "init", "--initial-branch=main", ".")
+    (enclosing / "a.md").write_text("a\n", encoding="utf-8")
+    _git(enclosing, "add", "a.md")
+    _git(enclosing, "commit", "-m", "first")
+    before = _git(enclosing, "rev-parse", "HEAD")
+
+    inside = enclosing / "sub"
+    inside.mkdir()
+    (inside / "alpha.md").write_text("# alpha\n", encoding="utf-8")
+
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.resolve(ca.CorpusRef(name="inside", location=str(inside)))
+    assert caught.value.refusal.kind == ca.CORPUS_UNCLASSIFIABLE
+    assert str(enclosing.resolve()) in caught.value.refusal.detail, (
+        "the refusal does not name the repository this location is inside, "
+        "which is the one thing that tells an operator what happened")
+    # AND NOTHING MOVED, which is the half of the defect that mattered.
+    assert _git(enclosing, "rev-parse", "HEAD") == before
+
+
+def test_a_repository_root_passed_explicitly_still_resolves(
+        adapter, tmp_path: Path) -> None:
+    """The other half of the ruling: pinning the root refuses nothing legal.
+
+    The repository this act creates is BARE and its location IS its root; a
+    repository openDox did not create has a work tree and `--show-toplevel` is
+    its root. Both are served, and a repository nested inside another one — a
+    legal thing to have on disk — is served when it is named itself.
+    """
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    _git(outer, "init", "--initial-branch=main", ".")
+    (outer / "a.md").write_text("a\n", encoding="utf-8")
+    _git(outer, "add", "a.md")
+    _git(outer, "commit", "-m", "first")
+    # A repository of its own, INSIDE the outer one's working tree.
+    nested = _repository_at(outer / "nested", "nested")
+
+    for location in (outer, nested):
+        corpus = adapter.resolve(ca.CorpusRef(name=location.name,
+                                              location=str(location)))
+        assert corpus.location == str(location.resolve())
+        assert corpus.revision is not None
+    # And the nested one serves ITS history, not the outer one's.
+    outer_corpus = adapter.resolve(
+        ca.CorpusRef(name="outer", location=str(outer)))
+    nested_corpus = adapter.resolve(
+        ca.CorpusRef(name="nested", location=str(nested)))
+    assert outer_corpus.revision != nested_corpus.revision
+
+
+def test_a_write_back_will_not_commit_into_an_enclosing_repository(
+        adapter, tmp_path: Path) -> None:
+    """The guard is asked again on the one operation that writes.
+
+    A `ResolvedCorpus` comes from `resolve`, which now refuses this — but this
+    is the call that can put a commit in somebody else's history, and the cost
+    of being sure is one `rev-parse`.
+    """
+    enclosing = tmp_path / "enclosing"
+    enclosing.mkdir()
+    _git(enclosing, "init", "--initial-branch=main", ".")
+    (enclosing / "a.md").write_text("a\n", encoding="utf-8")
+    _git(enclosing, "add", "a.md")
+    _git(enclosing, "commit", "-m", "first")
+    head = _git(enclosing, "rev-parse", "HEAD")
+    inside = enclosing / "sub"
+    inside.mkdir()
+
+    # Hand-built, exactly as a caller holding a stale row would have one.
+    corpus = ca.ResolvedCorpus(
+        ref=ca.CorpusRef(name="inside", location=str(inside)),
+        location=str(inside), revision=head, scopes=(ca.SCOPE_ALL,),
+        write_path=lga.WRITE_PATH, write_path_available=True)
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus,
+                           ca.DocumentId(corpus="inside", key="alpha.md"),
+                           b"# alpha\n", actor=ACTOR, basis_revision=head)
+    assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+    assert _git(enclosing, "rev-parse", "HEAD") == head, (
+        "the commit landed in the enclosing repository anyway")
+
+
+def test_a_location_that_is_a_file_is_unreadable_and_not_unclassifiable(
+        adapter, tmp_path: Path) -> None:
+    """A one-word vocabulary defect, and the interface's own comments settle it.
+
+    `CORPUS_UNREADABLE` is "it is there and cannot be read";
+    `CORPUS_UNCLASSIFIABLE` is "the CORPUS's shape, not a document's". A
+    regular file at the location is the first, the neutral conformance corpus
+    holds every reader to it, and openxFactory's own adapter answers it — this
+    one answered the other and failed that check (RULED 5714365086, Q-F2 (a)).
+    A DIRECTORY that is not a repository keeps `CORPUS_UNCLASSIFIABLE`.
+    """
+    a_file = tmp_path / "a-file"
+    a_file.write_text("not a repository\n", encoding="utf-8")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.resolve(ca.CorpusRef(name="f", location=str(a_file)))
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(ca.CorpusRefused) as second:
+        adapter.resolve(ca.CorpusRef(name="d", location=str(plain)))
+    assert second.value.refusal.kind == ca.CORPUS_UNCLASSIFIABLE
+
+
+def test_a_corpus_that_declares_no_write_path_is_read_only_and_stays_still(
+        repository: Path) -> None:
+    """`write_back`'s `CORPUS_READ_ONLY` branch was correct and unreachable.
+
+    Every resolution advertised `local-git-commit`, so a corpus that declares
+    NO governed write path could not be expressed — and a write at one
+    RETURNED A RECEIPT and moved a ref. Degrading a refusal to a result is the
+    one thing a reader over a corpus it does not own must never do (RULED
+    5714365086, Q-F2 (a); measured by helper `floor37` as conformance checks
+    `read-only-declared-at-resolution`, `write-back-refuses-read-only` and
+    `write-back-leaves-the-tree`).
+    """
+    reader = lga.LocalGitCorpus(write_path=None)
+    corpus = reader.resolve(ca.CorpusRef(name="project-1",
+                                         location=str(repository)))
+    assert corpus.write_path is None
+    assert corpus.write_path_available is False
+    head = _git(repository, "rev-parse", "HEAD")
+
+    with pytest.raises(ca.CorpusRefused) as caught:
+        reader.write_back(corpus, ca.DocumentId(corpus="project-1",
+                                                key="notes.md"),
+                          b"# notes\n", actor=ACTOR, basis_revision=head)
+    assert caught.value.refusal.kind == ca.CORPUS_READ_ONLY
+    assert _git(repository, "rev-parse", "HEAD") == head, (
+        "the tree moved under a write that was refused")
+    # Reading it is unaffected: read-only is a write fact.
+    assert reader.list_documents(corpus) == ()
+
+
+def test_a_corpus_that_declares_its_kind_in_a_header_is_classified_by_it(
+        adapter, repository: Path) -> None:
+    """Three documents, three answers — and by suffix there was only one.
+
+    A corpus that declares its shape in a header (`Type:`, which is how the
+    neutral conformance corpus is written) was classified by FILE SUFFIX, so
+    one complete document, one missing a required field and one with no
+    recognizable shape at all came back as three `text` documents with nothing
+    missing and nothing unrecognizable (RULED 5714365086, Q-F2 (a)).
+    """
+    head = _git(repository, "rev-parse", "HEAD")
+    written = {
+        "complete.md": b"Type: note\nTitle: A note\n\nbody\n",
+        "field-absent.md": b"Type: note\n\nbody\n",
+        "unrecognizable.md": b"just a body, no header\n",
+    }
+    revision = head
+    for key, content in written.items():
+        corpus = adapter.resolve(ca.CorpusRef(name="project-1",
+                                              location=str(repository)))
+        receipt = adapter.write_back(corpus,
+                                     ca.DocumentId(corpus="project-1", key=key),
+                                     content, actor=ACTOR,
+                                     basis_revision=revision)
+        revision = receipt.correlation_id
+
+    reader = lga.LocalGitCorpus(kind_field="Type",
+                                required_fields=("Type", "Title"))
+    corpus = reader.resolve(ca.CorpusRef(name="project-1",
+                                         location=str(repository)))
+    answers = {document.key: reader.classify(corpus, document)
+               for document in reader.list_documents(corpus)}
+
+    complete = answers["complete.md"]
+    assert (complete.kind, complete.missing_fields) == ("note", ())
+    assert complete.unclassifiable is None
+    absent = answers["field-absent.md"]
+    assert (absent.kind, absent.missing_fields) == ("note", ("Title",))
+    assert absent.unclassifiable is None
+    unrecognizable = answers["unrecognizable.md"]
+    assert unrecognizable.kind is None
+    assert "Type" in (unrecognizable.unclassifiable or "")
+
+    # AND THE DEFAULT READER STILL ANSWERS BY SUFFIX, for the same three.
+    by_suffix = {document.key: adapter.classify(corpus, document)
+                 for document in adapter.list_documents(corpus)}
+    assert {answer.kind for answer in by_suffix.values()} == {"text"}
+    assert all(answer.missing_fields == () for answer in by_suffix.values())

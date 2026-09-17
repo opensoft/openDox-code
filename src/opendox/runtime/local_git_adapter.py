@@ -141,6 +141,12 @@ KINDS_BY_SUFFIX: dict[str, str] = {
     ".toml": "structured",
 }
 
+#: How far into a document a HEADER is looked for, where a corpus declares one
+#: (`kind_field`; see `LocalGitCorpus.__init__`). The block ends at the first
+#: blank line — this is only the bound for a document that has no blank line
+#: near its top, so classifying one is never a scan of its whole body.
+MAX_HEADER_LINES = 64
+
 #: The corpus's ONE verdict of its own, and it is a fact about git rather than
 #: a rule about documents: RULING C3 says "documents are always git-backed", so
 #: a tracked file whose checkout differs from the resolved commit is a document
@@ -454,6 +460,41 @@ class LocalGitCorpus:
     no seventh, and nothing inherited.
     """
 
+    #: THE THREE PER-CORPUS CONSTRUCTION DATA, and why they are parameters.
+    #: RULED openxFactory#656 comment 5714365086 (Brett Heap, 2026-09-17, by
+    #: interactive multi-choice), Q-F2 (a). `split-opendox-two-layer-product`
+    #: § 3.7's neutral conformance corpus is READ by this class, and a read-only
+    #: measurement of it (helper `floor37`, 2026-09-17) put this reader at
+    #: **11 of 17** checks: five of the six failures had one cause, and it was
+    #: architectural rather than sloppy — what openxFactory's own adapter takes
+    #: as per-corpus construction data, this class asserted as module
+    #: constants. A reader that hard-codes a corpus's terms can only answer for
+    #: corpora that happen to share them.
+    #:
+    #:   * `write_path` — the DECLARED governed write path. `WRITE_PATH` is
+    #:     RULING C3's "commits are the write path" and stays the DEFAULT, but
+    #:     a corpus that declares NO governed write path is a legal corpus this
+    #:     reader may be pointed at, and it was impossible to express: every
+    #:     resolution advertised `local-git-commit`, so `write_back`'s own
+    #:     `CORPUS_READ_ONLY` branch — correct, and three lines long — was
+    #:     unreachable, and a write at a read-only corpus RETURNED A RECEIPT and
+    #:     moved a ref. Degrading a refusal to a result is the one thing a
+    #:     reader over a corpus it does not own must never do.
+    #:   * `kind_field` / `required_fields` — the classification vocabulary.
+    #:     `KINDS_BY_SUFFIX` is what a plain local git repository knows and
+    #:     stays the default; a corpus that declares its kind in a header (the
+    #:     neutral corpus does, as `Type:`) was classified by file suffix
+    #:     instead, so three documents holding one complete, one
+    #:     field-absent and one unrecognizable came back as three `text`
+    #:     documents with nothing missing and nothing unrecognizable.
+    #:
+    #: The defaults ARE today's behaviour, exactly: nothing in this leg passes
+    #: any of the three, and `test_the_defaults_are_the_behaviour_this_class_had`
+    #: holds them to it. What changes is that the reader can now be HANDED a
+    #: corpus's terms instead of asserting its own — which is the pattern
+    #: `corpus_adapter`'s own header endorses ("a module of plain functions has
+    #: nowhere to carry per-corpus construction data").
+    #:
     #: THERE IS NO `branch` PARAMETER, and its absence is the decision.
     #: `__init__` took one and stored it, and nothing ever read it: the ref
     #: `write_back` moves is the one HEAD points at (see `_served_ref`, which
@@ -462,8 +503,14 @@ class LocalGitCorpus:
     #: (Copilot review of openDox-code#26). A parameter that cannot change an
     #: outcome is removed rather than wired up, because wiring it up would
     #: reintroduce the assumption `_served_ref` exists to refuse.
-    def __init__(self, *, executable: str = "git") -> None:
+    def __init__(self, *, executable: str = "git",
+                 write_path: str | None = WRITE_PATH,
+                 kind_field: str | None = None,
+                 required_fields: tuple[str, ...] = ()) -> None:
         self._executable = executable
+        self._write_path = write_path
+        self._kind_field = kind_field
+        self._required_fields = tuple(required_fields)
 
     # -- resolve ----------------------------------------------------------
 
@@ -485,7 +532,21 @@ class LocalGitCorpus:
                               "created by the repository act before it is "
                               "resolved")
             if not location.is_dir():
-                raise _refuse(CORPUS_UNCLASSIFIABLE, ref.location,
+                # `CORPUS_UNREADABLE`, NOT `CORPUS_UNCLASSIFIABLE`, and the
+                # interface's own comments are the argument: `CORPUS_UNREADABLE`
+                # is "it is there and cannot be read", `CORPUS_UNCLASSIFIABLE`
+                # is "the CORPUS's shape, not a document's". A regular file at
+                # the location is the first: there is something there and no
+                # corpus can be read out of it. The neutral conformance
+                # corpus's own `not-a-directory` case holds every reader to
+                # `corpus-unreadable`, openxFactory's adapter answers that, and
+                # this one answered the other — a one-word vocabulary defect
+                # that made an otherwise conformant reader fail a check
+                # (RULED openxFactory#656 comment 5714365086, Q-F2 (a);
+                # measured by helper `floor37`, 2026-09-17).
+                # `CORPUS_UNCLASSIFIABLE` keeps the case it is for: a DIRECTORY
+                # that is not a git repository, below.
+                raise _refuse(CORPUS_UNREADABLE, ref.location,
                               "the location is a file, not a repository "
                               "directory")
             resolved_location = location.resolve()
@@ -500,6 +561,37 @@ class LocalGitCorpus:
             raise _refuse(CORPUS_UNCLASSIFIABLE, str(location),
                           f"the directory is not a git repository ({failed})"
                           ) from failed
+        # THE REPOSITORY THIS LOCATION *IS*, NEVER THE ONE IT IS INSIDE.
+        # `rev-parse --git-dir` WALKS UP: an ordinary directory inside somebody
+        # else's checkout answers it, so this resolved that checkout — at the
+        # ENCLOSING repository's HEAD — instead of refusing. Three things then
+        # went wrong together, measured end to end by helper `floor37`
+        # (2026-09-17) on one ordinary repository and one ordinary
+        # subdirectory: `list_documents` ran `ls-tree` with `-C <location>` and
+        # returned keys relative to that PREFIX, while `read` asked `cat-file
+        # blob <rev>:<key>`, which git resolves from the repository ROOT — so a
+        # document the listing served was refused `DOCUMENT_UNKNOWN`, the
+        # listing/read contract this module fixed for gitlinks broken again by
+        # another route — and `write_back` COMMITTED INTO THAT REPOSITORY and
+        # moved its branch, writing at the root a path the caller never named.
+        # It is reachable inside this product: `OPENDOX_PROJECT_REPOSITORY_ROOT`
+        # defaults to the RELATIVE `var/projects`, so a `var/projects/<id>`
+        # directory that exists and is not a repository — a create interrupted,
+        # a repository removed, a directory restored from a backup — sits
+        # inside whatever checkout the process was started in.
+        # `refuse_unusable_location` guards the CREATE path; nothing guarded
+        # this one.
+        # RULED openxFactory#656 comment 5714365086, Q-F3 (a): fixed here, now.
+        root = self._repository_root(git, str(location))
+        if root != resolved_location:
+            raise _refuse(
+                CORPUS_UNCLASSIFIABLE, str(location),
+                f"this directory is not a git repository; it is INSIDE one, "
+                f"whose root is {root}. A corpus is a repository, not a path "
+                "within one: resolving it here would serve keys relative to "
+                "this prefix, read them from the repository root, and write "
+                "back into a repository nobody named. Point the corpus at "
+                f"{root}, or create a repository here.")
 
         # A PINNED REVISION DOES NOT NEED HEAD. `CorpusRef.revision` is the
         # pinned form of this interface, and asking `_head` first meant a
@@ -517,6 +609,16 @@ class LocalGitCorpus:
         # the interface's rule: "a read-only corpus is a fact about the corpus,
         # and discovering it by attempting a write is how a caller ends up with
         # a half-built edit and nowhere to put it."
+        #
+        # AND A CORPUS THAT DECLARES NONE IS ANSWERED WITHOUT ASKING THE
+        # FILESYSTEM ANYTHING: `write_path=None` is read-only by declaration,
+        # not by reachability, and probing for a write path a corpus does not
+        # have would be this reader inventing one (RULED 5714365086, Q-F2).
+        if self._write_path is None:
+            return ResolvedCorpus(
+                ref=ref, location=str(resolved_location), revision=revision,
+                scopes=(SCOPE_ALL,), write_path=None,
+                write_path_available=False)
         try:
             git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
                            .decode().strip())
@@ -548,7 +650,7 @@ class LocalGitCorpus:
             location=str(resolved_location),
             revision=revision,
             scopes=(SCOPE_ALL,),
-            write_path=WRITE_PATH,
+            write_path=self._write_path,
             write_path_available=reachable,
         )
 
@@ -650,11 +752,27 @@ class LocalGitCorpus:
                  document: DocumentId) -> Classification:
         """Never omits: an unrecognized shape is REPORTED, naming the document.
 
-        `required_fields` is empty for every kind, and that is the honest
-        answer rather than an unfinished one: obligations are governance, and a
-        plain local git repository has none. A descendant that governs its
-        corpus declares them; this one would be inventing them.
+        TWO VOCABULARIES, and which one is in force is a CONSTRUCTION DATUM
+        (RULED openxFactory#656 comment 5714365086, Q-F2 (a) — see `__init__`).
+
+        WITHOUT `kind_field` — the default, and what this class has always done
+        — the shape is the file SUFFIX and `required_fields` is empty for every
+        kind. That is the honest answer for a plain local git repository rather
+        than an unfinished one: obligations are governance, and a pre-governed
+        repository has none.
+
+        WITH `kind_field` the corpus declares its own shape in a document
+        HEADER, which is how the neutral conformance corpus is written
+        (`Type:`), and this reader was classifying such a corpus by file
+        suffix: three documents holding one complete, one field-absent and one
+        unrecognizable came back as three `text` documents with nothing missing
+        and nothing unrecognizable — a listing of shapes the corpus does not
+        have. The header is the leading run of `Name: value` lines up to the
+        first blank line, which is the corpus's own convention and no more
+        parsing than that.
         """
+        if self._kind_field is not None:
+            return self._classify_by_header(corpus, document)
         del corpus
         suffix = Path(document.key).suffix.lower()
         kind = KINDS_BY_SUFFIX.get(suffix)
@@ -667,6 +785,46 @@ class LocalGitCorpus:
                     "still readable"))
         return Classification(id=document, kind=kind, required_fields=(),
                               missing_fields=())
+
+    def _classify_by_header(self, corpus: ResolvedCorpus,
+                            document: DocumentId) -> Classification:
+        """`classify` where the corpus declares its kind in a header."""
+        header = self._header_of(corpus, document)
+        kind = header.get(self._kind_field or "")
+        if kind is None:
+            return Classification(
+                id=document, kind=None, required_fields=(), missing_fields=(),
+                unclassifiable=(
+                    f"{document.key!r} carries no {self._kind_field!r} header; "
+                    "it is still listed and still readable"))
+        return Classification(
+            id=document, kind=kind, required_fields=self._required_fields,
+            missing_fields=tuple(field for field in self._required_fields
+                                 if field not in header))
+
+    def _header_of(self, corpus: ResolvedCorpus,
+                   document: DocumentId) -> dict[str, str]:
+        """The leading `Name: value` block, read THROUGH THIS ADAPTER'S `read`.
+
+        Through `read` and not through the filesystem, so a classification is
+        made of the same bytes a consumer would be served — at the corpus's
+        resolved revision, never the working tree — and so a corpus that has
+        become unreadable refuses here too instead of classifying out of
+        nothing.
+
+        BOUNDED: at most `MAX_HEADER_LINES` lines are examined and the block
+        ends at the first blank line, so a document with no header costs one
+        read and a few string operations rather than a scan of its whole body.
+        """
+        text = self.read(corpus, document).content.decode("utf-8", "replace")
+        header: dict[str, str] = {}
+        for line in text.splitlines()[:MAX_HEADER_LINES]:
+            if not line.strip():
+                break
+            name, separator, value = line.partition(":")
+            if separator:
+                header[name.strip()] = value.strip()
+        return header
 
     # -- check ------------------------------------------------------------
 
@@ -787,6 +945,18 @@ class LocalGitCorpus:
                 "terminator git's index protocol uses; a path that cannot be "
                 "written unambiguously is not written at all")
         git = self._git(corpus)
+        # AND THE ROOT IS ASKED AGAIN, ON THE ONE OPERATION THAT WRITES.
+        # `resolve` refuses a location that is inside another repository
+        # (see it for the defect and the ruling), and a `ResolvedCorpus` comes
+        # from `resolve` — but this is the call that can commit into somebody
+        # else's history, and the cost of being sure is one `rev-parse`.
+        root = self._repository_root(git, corpus.location)
+        if root != Path(corpus.location).resolve():
+            raise _refuse(
+                WRITE_PATH_UNREACHABLE, corpus.location,
+                f"this location is inside the repository at {root} rather than "
+                "being one; nothing is written, because the commit would land "
+                "in a repository nobody named")
         try:
             blob = git.out("hash-object", "-w", "--stdin",
                            stdin=content).decode().strip()
@@ -853,12 +1023,47 @@ class LocalGitCorpus:
             raise _refuse(WRITE_PATH_UNREACHABLE, corpus.write_path,
                           f"the commit could not be made ({failed}); the "
                           "document remains unsaved") from failed
-        return WriteReceipt(correlation_id=commit, dispatched_to=WRITE_PATH)
+        return WriteReceipt(correlation_id=commit,
+                            dispatched_to=corpus.write_path)
 
     # -- internals --------------------------------------------------------
 
     def _git(self, corpus: ResolvedCorpus) -> GitRunner:
         return GitRunner(Path(corpus.location), self._executable)
+
+    def _repository_root(self, git: GitRunner, subject: str) -> Path:
+        """The repository this runner's `-C` directory IS, resolved.
+
+        A BARE repository's root is its git directory — the shape this act
+        creates — and a repository with a work tree has `--show-toplevel`.
+        Asked in that order because inside a bare repository (and inside a
+        `.git` directory) `--show-toplevel` is a fatal error, not an answer.
+
+        Both are resolved before they are compared, so a symlinked path and the
+        directory it names are one answer rather than two.
+        """
+        bare = self._probe(git, "rev-parse", "--is-bare-repository",
+                           kind=CORPUS_UNREADABLE, subject=subject)
+        if bare.returncode != 0:
+            raise _refuse(CORPUS_UNREADABLE, subject,
+                          "the repository would not say whether it is bare: "
+                          + bare.stderr.decode("utf-8", "replace").strip())
+        question = ("--absolute-git-dir"
+                    if bare.stdout.decode().strip() == "true"
+                    else "--show-toplevel")
+        answer = self._probe(git, "rev-parse", question,
+                             kind=CORPUS_UNREADABLE, subject=subject)
+        if answer.returncode != 0:
+            raise _refuse(CORPUS_UNREADABLE, subject,
+                          f"the repository would not name its root ({question}): "
+                          + answer.stderr.decode("utf-8", "replace").strip())
+        named = answer.stdout.decode("utf-8", "surrogateescape").strip()
+        try:
+            return Path(named).resolve()
+        except OSError as exc:
+            raise _refuse(CORPUS_UNREADABLE, subject,
+                          f"the repository root {named} could not be read "
+                          f"({exc.__class__.__name__})") from exc
 
     @staticmethod
     def _probe(git: GitRunner, *args: str, kind: str,
