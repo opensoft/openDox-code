@@ -423,12 +423,17 @@ jobs:
       #              canonical gate, and the filename assertion that is now the
       #              runner's own regex rather than a looser restatement.
       #
-      #              READING THIS LIST: the LAST entry is the current figure
-      #              and the PR description states that one at that same
-      #              commit. An earlier entry is the measurement that was
-      #              current when it was written, not a competing claim; the
-      #              commit that records a figure changes no test, so each
-      #              figure also holds at the head that carries its record.
+      #              READING THIS LIST: the LAST entry for a branch is the
+      #              current figure and the PR description states that one at
+      #              that same commit. An earlier entry is the measurement
+      #              that was current when it was written, not a competing
+      #              claim, and SAYS SO in its own words — a reader who lands
+      #              on one entry should not have to reach this note to learn
+      #              it is history (Copilot review of openDox-code#26, round
+      #              18, which read a superseded entry as the branch's claim
+      #              about its own head). The commit that records a figure
+      #              changes no test, so each figure also holds at the head
+      #              that carries its record.
       #  111 passed  at `build/3-5-runtime` `2161a23a` (same day, same python
       #              and pytest) — the same five modules, after round
       #              EIGHT: `serve` telling a startup failure from a
@@ -480,9 +485,9 @@ jobs:
       #              single-quoted SQL literal, the runbook's claim that the
       #              run checks that prerequisite, and the canonical gate
       #              covering the WHOLE run's bytes before the ledger is
-      #              bootstrapped. THE CURRENT FIGURE ON `build/3-5-runtime`,
-      #              which this branch carries by merge; THAT PR's description
-      #              states it at this same commit. ROUND TWELVE'S OTHER TWO
+      #              bootstrapped. SUPERSEDED on `build/3-5-runtime` by a
+      #              later entry below; THAT PR's description stated it at
+      #              this same commit when it was current. ROUND TWELVE'S OTHER TWO
       #              FIXES ARE IN THE DB-BACKED JOB (a run whose served role
       #              was never granted now fails instead of serving, and the
       #              drafts listing bounded in bytes as well as in rows): 223
@@ -572,10 +577,11 @@ jobs:
       #              `pg_class` — the set is compared now), a setting that
       #              promised an OIDC discovery this runtime does not make,
       #              and a migration comment naming a test that does not
-      #              exist. THE CURRENT FIGURE ON `build/3-5-runtime`,
-      #              which this branch carries by merge; THAT PR's
-      #              description states it at this same commit, and `pytest
-      #              -q tests_runtime/` is 236 there.
+      #              exist. THE CURRENT FIGURE ON `build/3-5-runtime`, which
+      #              this branch carries by merge; THAT PR's description
+      #              states it at this same commit — its head `2c56b65b` adds
+      #              only the record — and `pytest -q tests_runtime/` is 236
+      #              there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
@@ -604,15 +610,15 @@ jobs:
       #              embedded NUL.
       #  167 passed  at `build/3-6-repository-act` `080ef296` (same day, same
       #              python, pytest and git) — the same six modules, carrying
-      #              #25's rounds 6 and 7 by merge. THE CURRENT FIGURE for this
-      #              branch, stated at the same commit as in the PR
-      #              description.
+      #              #25's rounds 6 and 7 by merge. SUPERSEDED by a later
+      #              entry below; it was stated at the same commit as in the
+      #              PR description while it was current.
       #  171 passed  at `build/3-6-repository-act` `46f1e5bb` (same day,
       #              same python, pytest and git) — the same six modules,
       #              carrying #25's round 8 by merge, and measured with
       #              the `runtime` extra made UNIMPORTABLE, which is this
-      #              job's own install. THE CURRENT FIGURE for this
-      #              branch; the PR description states it at this commit.
+      #              job's own install. SUPERSEDED by a later entry below;
+      #              the PR description stated it at this commit.
       #  172 passed  at `build/3-6-repository-act` `dd672184` (same day,
       #              same python, pytest and git; extras unimportable)
       #              — the same six modules, after the repository
@@ -633,8 +639,8 @@ jobs:
       #              directory handle it verified, a space inside a URL
       #              no longer hiding a credential parameter, a control
       #              character refused, an over-long URL refused unread,
-      #              and the bracketed-IPv6 pin. THE CURRENT FIGURE for
-      #              this branch; the PR description states it at this
+      #              and the bracketed-IPv6 pin. SUPERSEDED by a later
+      #              entry below; the PR description stated it at this
       #              same commit. Round ten's other cases — the command
       #              transport, the two-URL repair, the `--unset-all`
       #              status and both redaction paths — are in the
@@ -674,8 +680,8 @@ jobs:
       #              more named refusals in the act. ALSO FIRST MEASURED
       #              HERE and corrected in five places: python 3.12's
       #              `Path.resolve()` raises `RuntimeError` for a symlink
-      #              LOOP, not `OSError`. THE CURRENT FIGURE for this
-      #              branch; the PR description states it at this same
+      #              LOOP, not `OSError`. SUPERSEDED by a later entry
+      #              below; the PR description stated it at this same
       #              commit. Round twelve's DB-backed cases — the push
       #              destination rewritten by `pushInsteadOf`, the remote
       #              carrying only a push URL, and the helper-transport
@@ -767,10 +773,10 @@ jobs:
       #              `diff.external` or `GIT_EXTERNAL_DIFF` on git 2.43.0 —
       #              an external driver renders a diff BODY — and the case
       #              carries the table and is labelled NOT a regression
-      #              test. THE CURRENT FIGURE for this branch; the PR
-      #              description states it at this same commit, `pytest -q
-      #              tests_runtime/` is 407 and the neutral conformance
-      #              corpus is 17 of 17.
+      #              test. SUPERSEDED by a later entry below; the PR
+      #              description stated it at this same commit, `pytest -q
+      #              tests_runtime/` was 407 and the neutral conformance
+      #              corpus 17 of 17.
       #  250 passed  at `build/3-6-repository-act` `c554006e` (2026-09-17,
       #              same python, pytest and git; extras unimportable, no
       #              ambient git config) — the same six modules, carrying
@@ -783,10 +789,10 @@ jobs:
       #              multiline credential, which the credential PATTERN
       #              cannot match by design, so the push path takes the
       #              destination it already KNOWS out of the text instead.
-      #              THE CURRENT FIGURE for this branch; the PR description
-      #              states it at this same commit, `pytest -q
-      #              tests_runtime/` is 412 and the neutral conformance
-      #              corpus is 17 of 17.
+      #              SUPERSEDED by a later entry below; the PR description
+      #              stated it at this same commit, `pytest -q
+      #              tests_runtime/` was 412 and the neutral conformance
+      #              corpus 17 of 17.
       #  250 passed  at `build/3-6-repository-act` `9858d6a5` (2026-09-17,
       #              same python, pytest and git; extras unimportable, no
       #              ambient git config) — UNCHANGED, and the same six
@@ -795,10 +801,10 @@ jobs:
       #              `search_path` walked rather than only its head, and
       #              the JWKS cooldown's claim and refresh made ONE lock
       #              acquisition — are both measured in the DB-backed job.
-      #              THE CURRENT FIGURE for this branch; the PR description
-      #              states it at this same commit, `pytest -q
-      #              tests_runtime/` is 413 and the neutral conformance
-      #              corpus is 17 of 17.
+      #              SUPERSEDED by a later entry below; the PR description
+      #              stated it at this same commit, `pytest -q
+      #              tests_runtime/` was 413 and the neutral conformance
+      #              corpus 17 of 17.
       #  253 passed  at `build/3-6-repository-act` `97e86216` (2026-09-17,
       #              same python, pytest and git; extras unimportable, no
       #              ambient git config) — the same six modules, after round
