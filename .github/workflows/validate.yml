@@ -613,6 +613,26 @@ jobs:
       #              carrying only a push URL, and the helper-transport
       #              message — are in the other job: 369 passed there at
       #              this commit.
+      #  227 passed  at `build/3-6-repository-act` `b06aa294` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, and
+      #              with NO ambient git config) — the same six modules,
+      #              carrying #25's round 13 by merge and adding this
+      #              branch's own eight: a `pre-push` hook in a project
+      #              repository no longer runs in this runtime's process
+      #              (`-c core.hooksPath=/dev/null` on every invocation);
+      #              an ambient `GIT_DIR`/`GIT_WORK_TREE` can no longer
+      #              outrank `-C`; the helper-transport predicate matches
+      #              what git MEASURABLY does (`9evil::` and `::` were
+      #              missed, `evil_helper::` is ssh and is not one); a
+      #              control character is refused by Unicode CATEGORY and
+      #              not by `isspace()`; `pass` joins the shared credential
+      #              vocabulary; an explicit-revision read revalidates the
+      #              corpus first; two push destinations are refused by
+      #              COUNT rather than by a joined string; and the map row's
+      #              name is re-verified after the history is written. THE
+      #              CURRENT FIGURE for this branch; the PR description
+      #              states it at this same commit, and `pytest -q
+      #              tests_runtime/` is 381 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
