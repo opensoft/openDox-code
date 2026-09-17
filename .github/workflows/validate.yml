@@ -839,10 +839,26 @@ jobs:
       #              git's discovery. Aliases are answered by MEASUREMENT
       #              and the guard kept: on git 2.43.0 an alias that shadows
       #              a BUILT-IN is ignored, and every command this runner
-      #              invokes is one. THE CURRENT FIGURE for this branch; the
-      #              PR description states it at this same commit, `pytest
-      #              -q tests_runtime/` is 416 and the neutral conformance
-      #              corpus is 17 of 17.
+      #              invokes is one. SUPERSEDED by the entry below; the PR
+      #              description stated it at this same commit, `pytest -q
+      #              tests_runtime/` was 416 and the neutral conformance
+      #              corpus 17 of 17.
+      #  257 passed  at `build/3-6-repository-act` `81d565a0` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, carrying
+      #              #25's round NINETEEN by merge (three of the four new
+      #              cases here are its) and adding this branch's own: the
+      #              refusal that echoed a project id NOTHING had validated.
+      #              Round 10 answered that site by routing the message
+      #              through the redactors; this round measured that those
+      #              redactors are shaped for URLs and for libpq conninfo and
+      #              do not cover arbitrary caller text — `user:secret@host/
+      #              path` and `//user:pw@h/x` both reach the branch and both
+      #              come back whole — so the act names WHICH rule was broken
+      #              and does not repeat the value. THE CURRENT FIGURE for
+      #              this branch; the PR description states it at this same
+      #              commit, `pytest -q tests_runtime/` is 421 and the
+      #              neutral conformance corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
