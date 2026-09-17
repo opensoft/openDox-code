@@ -355,10 +355,31 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
     # promises for every reason it will not create a repository (Copilot review
     # of openDox-code#26, round 17, suppressed). It is the same guard
     # `write_back` puts on `DocumentId.key`, one module over.
+    #
+    # AND THE VALUE IS NOT ECHOED BACK. This branch is the one place in this
+    # act that is reached by an identifier NOTHING has validated — every other
+    # message naming a project id names one the map already holds — and it put
+    # that identifier straight into a refusal that the CLI prints and the API
+    # returns. The redactors are shaped for URLs and for libpq conninfo, not
+    # for arbitrary caller text, and they do not cover it: MEASURED, both
+    # `'user:secret@host/path'` and `'//user:pw@h/x'` reach this branch (each
+    # holds a `/`) and come back through `redact_credentials` VERBATIM, secret
+    # included (Copilot review of openDox-code#26, round 19). The report named
+    # `https://user:secret\n@host`, which `repr` happens to rescue by escaping
+    # the newline into a form the URL pattern then matches — the class is real
+    # even where that one example is not. A path-component rule has nothing to
+    # say that needs the value: it says WHICH rule was broken, and the caller
+    # already holds what it sent.
+    reason = ("is empty" if not project_id
+              else "holds a '/'" if "/" in project_id
+              else "holds a NUL" if "\0" in project_id
+              else "is '.' or '..'")
     if (not project_id or "/" in project_id or "\0" in project_id
             or project_id in {".", ".."}):
         raise RepositoryActRefused(
-            f"{project_id!r} is not a usable project id for a directory name")
+            f"that project id {reason}, so it is not a usable project id for "
+            "a directory name (the value is not echoed: it is caller-"
+            "controlled text and this refusal is evidence)")
     # ABSOLUTE, ALWAYS. `OPENDOX_PROJECT_REPOSITORY_ROOT` defaults to the
     # RELATIVE `var/projects`, and a relative path written into the durable map
     # resolves against whatever working directory the next process happens to

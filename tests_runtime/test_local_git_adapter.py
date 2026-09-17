@@ -2922,3 +2922,68 @@ def test_a_read_cannot_be_served_from_an_enclosing_repository(
                                              ca.CORPUS_ABSENT}, caught.value
         assert str(outer.resolve()) in caught.value.refusal.detail or \
             "no longer" in caught.value.refusal.detail, caught.value
+
+
+def test_a_refused_project_id_is_not_echoed_back_in_the_refusal() -> None:
+    """The one identifier in this act that NOTHING has validated.
+
+    Every other message here names a project id the map already holds; this
+    branch is reached by whatever the caller sent, and it put that value
+    straight into a refusal the CLI prints and the API returns. The redactors
+    are shaped for URLs and for libpq conninfo, not for arbitrary text, and
+    they do not cover it (Copilot review of openDox-code#26, round 19).
+
+    MEASURED against the previous head, through `redact_credentials` — the
+    strongest redactor either surface applies:
+
+        'user:secret@host/path'  ->  "'user:secret@host/path' is not a usable
+                                      project id for a directory name"
+        '//user:pw@h/x'          ->  "'//user:pw@h/x' is not a usable …"
+
+    Both hold a `/`, so both reach this branch, and both come back verbatim.
+    (The report named `https://user:secret\\n@host`, which `repr` happens to
+    rescue by escaping the newline into a form the URL pattern then matches.
+    The class is real where that one example is not, which is why the case
+    below drives the two shapes that survive.)
+
+    A path-component rule has nothing to say that needs the value: it says
+    WHICH rule was broken, and the caller already holds what it sent.
+    """
+    from opendox.runtime.local_git_adapter import redact_credentials
+    from opendox.runtime.repository_act import (RepositoryActRefused,
+                                                repository_location)
+
+    for sent, secret, reason in (
+            ("user:secret@host/path", "secret", "holds a '/'"),
+            ("//user:pw@h/x", "pw", "holds a '/'"),
+            ("https://user:hunter2\n@host", "hunter2", "holds a '/'"),
+            ("a\x00b", "a\x00b", "holds a NUL"),
+            ("", "", "is empty"),      # nothing to leak; the reason is the point
+    ):
+        with pytest.raises(RepositoryActRefused) as caught:
+            repository_location("/nonexistent-root-for-this-case", sent)
+        message = str(caught.value)
+        assert reason in message, (sent, message)
+        assert "usable project id" in message, message
+        # The value is absent from the refusal AND from what a surface would
+        # print after redacting it — the second is the claim that matters,
+        # because redaction is what used to be relied on here.
+        for rendered in (message, redact_credentials(message)):
+            # (The empty id has nothing to look for; it is here for the reason
+            # the refusal names, not for the containment check.)
+            if sent:
+                assert sent not in rendered, (sent, rendered)
+                assert secret not in rendered, (secret, rendered)
+
+    # `.` and `..` are their own case: the refusal NAMES that rule, and the
+    # rule's name is the value, which is not a secret and is the only way to
+    # say which rule it was. They are checked for the reason, not for absence.
+    for traversal in (".", ".."):
+        with pytest.raises(RepositoryActRefused) as caught:
+            repository_location("/nonexistent-root-for-this-case", traversal)
+        assert "is '.' or '..'" in str(caught.value)
+
+    # NOT an over-refusal: an id this act can use is still returned, and the
+    # path is still the root joined with it.
+    usable = repository_location("/srv/projects", "9f2c-a-real-id")
+    assert usable == Path("/srv/projects/9f2c-a-real-id")

@@ -806,7 +806,9 @@ def test_a_repository_refusal_is_redacted_like_every_other_message(
     caller-supplied id shaped like a DSN came back with its password in the
     evidence object, and in whatever collects that (Copilot review of
     openDox-code#26, round 10). A message built from caller-supplied text is
-    redacted like any other this CLI emits.
+    redacted like any other this CLI emits — and, since round 19, the
+    identifier is not put into that message in the first place, because
+    redaction that is shaped for URLs is not a guarantee about arbitrary text.
     """
     import sys
     import types
@@ -860,7 +862,17 @@ def test_a_repository_refusal_is_redacted_like_every_other_message(
     assert evidence["refusal"] == "repository"
     printed = json.dumps(evidence)
     assert "hunter2" not in printed, printed
-    assert "<redacted" in printed, printed
+    # ROUND 19 REPLACED THE REMEDY, so this assertion changed with it. The
+    # round-10 fix routed this message through the redactors and asserted the
+    # marker; round 19 found that those redactors are shaped for URLs and for
+    # libpq conninfo and do not cover arbitrary caller text — measured, both
+    # `user:secret@host/path` and `//user:pw@h/x` reach this refusal and come
+    # back verbatim. So the act does not echo the identifier at all, and the
+    # marker is no longer there to find. The claim is the stronger one: the
+    # WHOLE value is absent, not just the part a pattern recognized.
+    assert "postgresql://someone" not in printed, printed
+    assert "db.internal" not in printed, printed
+    assert "holds a '/'" in printed, printed
 
 
 def test_the_evidence_boundary_redacts_a_credential_parameter_too() -> None:
@@ -970,6 +982,8 @@ def test_a_credential_holding_a_space_is_not_cut_in_half_by_the_dsn_pattern(
     # And the fallback still covers what the general rule does not.
     plain = cli._safe_message(RuntimeError("postgresql://host:5432/db is down"))
     assert "<redacted>" in plain, plain
+
+
 def test_a_libpq_password_holding_a_space_is_redacted_whole() -> None:
     """libpq QUOTES a value containing spaces, and the pattern stopped at one.
 
