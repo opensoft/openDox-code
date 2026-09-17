@@ -1205,13 +1205,13 @@ function outlineEmpty(pane, message) {
 
 // One line per state, and each one is about the TOPIC's stage of migration
 // rather than about a fault in the file.
-function outlineStateLine(model, display) {
+function outlineStateLine(model) {
   if (model.state === "conforming") {
     return "conforming — the three required sections are present and every open "
       + "question carries its four sub-fields";
   }
   if (model.state === "pre-template") {
-    return "a " + display.one(SELECTION) + " from before the outline template — "
+    return "a " + vocab.one(SELECTION) + " from before the outline template — "
       + "it carries none of the required sections yet, which is the opt-in "
       + "posture, not a fault. The shape is earned when it is next worked, "
       + "never by opening it here.";
@@ -1276,7 +1276,7 @@ function addSectionRefusal(outcome) {
 // `required` marks the GAP-ROW route, where the caller asks by the contract's own
 // label and the section lands under its canonical heading and seed. The free-form
 // route leaves it false and gets the human's heading verbatim.
-async function runAddSection(seam, path, note, title, after, required, display) {
+async function runAddSection(seam, path, note, title, after, required) {
   note.hidden = false;
   const live = seam.buffer();
   if (!live) {
@@ -1303,7 +1303,7 @@ async function runAddSection(seam, path, note, title, after, required, display) 
   // argument. It is the same `vocab` this module installed at mount.
   const patch = insertSection(live.text, {
     title, after, required, addedBy: seam.actor, date: provenanceDate(),
-    display,
+    display: vocab,
   });
   if (!patch.ok) {
     // The MODEL's reasons are this tab's own sentences (it is our pure module,
@@ -1337,7 +1337,7 @@ async function runAddSection(seam, path, note, title, after, required, display) 
 // authority teaches the reader nothing, but there is no write path to reach —
 // the same posture viewer.js's "open in editor" button and the docs tile's
 // load/save verbs already take where the capability is absent.
-function mountAddSection(host, model, path, seam, display) {
+function mountAddSection(host, model, path, seam) {
   const note = el("div", "swb-outlinenote");
   note.setAttribute("aria-live", "polite");
   note.hidden = true;
@@ -1365,7 +1365,7 @@ function mountAddSection(host, model, path, seam, display) {
       try {
         const asked = intent();
         await runAddSection(seam, path, note, asked.title, asked.after,
-                            asked.required === true, display);
+                            asked.required === true);
       } finally {
         btn.disabled = false;
       }
@@ -1433,7 +1433,7 @@ function mountAddSection(host, model, path, seam, display) {
 }
 
 // The whole index, rendered from the loaded text the viewer handed back.
-function renderOutlineIndex(host, text, path, seam, display) {
+function renderOutlineIndex(host, text, path, seam) {
   host.innerHTML = "";
   const model = outlineModel(text);
   // "AS STORED" is not decoration. This index describes the SAVED fragment while
@@ -1445,8 +1445,7 @@ function renderOutlineIndex(host, text, path, seam, display) {
   header.title = "the sections in the SAVED fragment; the canvas beside this "
     + "holds your unsaved edits, so the two differ by exactly that much";
   host.appendChild(header);
-  host.appendChild(el("div", "swb-lensnote swb-outlinestate",
-    outlineStateLine(model, display)));
+  host.appendChild(el("div", "swb-lensnote swb-outlinestate", outlineStateLine(model)));
   if (!model.sections.length) {
     host.appendChild(el("div", "swb-empty",
       "this fragment carries no `## ` sections outside its code fences"));
@@ -1462,7 +1461,7 @@ function renderOutlineIndex(host, text, path, seam, display) {
     }
     host.appendChild(row);
   }
-  mountAddSection(host, model, path, seam, display);
+  mountAddSection(host, model, path, seam);
 }
 
 // `sourceBase` is the ACTIVE (repository, ref)'s own keyed `/source/` base
@@ -1480,8 +1479,7 @@ function renderOutlineIndex(host, text, path, seam, display) {
 // narrow window onto the outline buffer — read the live text and its settled
 // identity, hand back the whole next text — and nothing more: no transport, no
 // gate action, and no second state authority over the buffer.
-function renderOutlinePanel(pane, snapshot, scope, create, sourceBase, edit, sections,
-                            display) {
+function renderOutlinePanel(pane, snapshot, scope, create, sourceBase, edit, sections) {
   pane.innerHTML = "";
   // task 5.6: "new fragment in this topic" — offered for STAGED scopes only and
   // HIDDEN (never disabled) for a cluster or a possible, which have no staging
@@ -1531,7 +1529,7 @@ function renderOutlinePanel(pane, snapshot, scope, create, sourceBase, edit, sec
   // over there without changing what is rendered here.
   const doc = (snapshot.documents || []).find((d) => d.path === path) || null;
   renderViewer(host, { path, doc, sourceBase, edit,
-    onText: (text) => renderOutlineIndex(index, text, path, sections, display) });
+    onText: (text) => renderOutlineIndex(index, text, path, sections) });
 }
 
 // ---- the full-screen shell (task 4.2) ------------------------------------------
@@ -1621,8 +1619,7 @@ export function mountStagingWorkbench(container, snapshot,
   // module AND into the pure model it derives through, which is why the model
   // exports `setDisplay` rather than taking the facet on every signature.
   vocab = display || neutralDisplay();
-  const mountDisplay = vocab;
-  setDisplay(mountDisplay);
+  setDisplay(vocab);
   let shellSnapshot = snapshot;
   let shellActive = active;
   let shellIndex = index;
@@ -2091,7 +2088,7 @@ export function mountStagingWorkbench(container, snapshot,
       renderLensPanel(pane, snapshot, scope, lensSession, create);
     } else {
       renderOutlinePanel(pane, snapshot, scope, create, sourceBase, edit,
-        outlineSectionSeam(), mountDisplay);
+        outlineSectionSeam());
     }
   }
 

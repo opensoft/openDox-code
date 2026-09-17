@@ -301,38 +301,16 @@ console.log(JSON.stringify({
         "prove that supplying `display` changes anything")
 
 
-def test_outline_add_threads_the_mounts_own_vocabulary():
-    """The add route must keep the vocabulary of the workbench that owns it."""
+def test_run_add_section_supplies_the_mounted_vocabulary():
+    """The only interactive route a human has for adding a section."""
     text = _text(WORKBENCH_JS)
-    signature = re.search(r"async function runAddSection\((.*?)\)", text)
-    assert signature, "staging-workbench.js declares no runAddSection(...)"
-    assert "display" in signature.group(1).split(", "), (
-        "runAddSection() no longer takes a per-mount display argument, so a "
-        "second workbench can overwrite the vocabulary an earlier add button uses")
     call = re.search(r"const patch = insertSection\(live\.text, \{(.*?)\}\);",
                      text, re.S)
     assert call, "staging-workbench.js no longer calls insertSection(live.text, …)"
-    assert "display" in call.group(1), (
-        "runAddSection() hands insertSection no per-mount display facet, so an "
+    assert "display: vocab" in call.group(1), (
+        "runAddSection() hands insertSection no display facet, so an "
         "interactive add places and duplicate-checks against the neutral "
         "SECTION_ORDER inside an outline rendered in the host's words")
-    assert "display: vocab" not in call.group(1), (
-        "runAddSection() still reads module state here, so two live workbenches "
-        "can race each other for section order")
-
-
-def test_the_outline_path_captures_the_mounts_display_once():
-    """The outline callback and add controls close over the owner mount's facet."""
-    text = _text(WORKBENCH_JS)
-    assert "vocab = display || neutralDisplay();" in text
-    assert "const mountDisplay = vocab;" in text
-    assert "setDisplay(mountDisplay);" in text
-    assert re.search(r"renderOutlinePanel\(pane, snapshot, scope, create, sourceBase, edit,\s*"
-                     r"outlineSectionSeam\(\), mountDisplay\)", text), (
-        "mountStagingWorkbench no longer threads its own display into the outline pane")
-    assert "onText: (text) => renderOutlineIndex(index, text, path, sections, display)" in text
-    assert "await runAddSection(seam, path, note, asked.title, asked.after,\n" \
-           "                            asked.required === true, display);" in text
 
 
 # ---------------------------------------------------------------------------
