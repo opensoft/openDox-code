@@ -1064,8 +1064,28 @@ jobs:
       #              session mismatch one message over still names the STORED
       #              project and not the requested one. THE CURRENT FIGURE
       #              for this branch; the PR description states it at this
-      #              same commit, `pytest -q tests_runtime/` is 449 and the
-      #              neutral conformance corpus is 17 of 17.
+      #              same commit, `pytest -q tests_runtime/` was 449 and the
+      #              neutral conformance corpus 17 of 17. SUPERSEDED below.
+      #  276 passed  at `build/3-6-repository-act` `61973332` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              TWENTY-FIVE. Round 21's hook guard was SABOTAGE on a
+      #              network destination: `--receive-pack` is the command
+      #              executed THERE, so `core.hooksPath=<devnull>` disabled a
+      #              governed factory's own `pre-receive` on every SSH or
+      #              HTTPS push — the guard and the sabotage are one string,
+      #              and whose process runs the hooks is what decides. The
+      #              public `initialize_repository` let `ValueError` escape
+      #              for a NUL (the preflight reads such a path as ABSENT, so
+      #              the refusal has to be at the `mkdir`), and a LEGACY row
+      #              holding `file://[bad` raised `ValueError` inside the
+      #              containment check and answered 500. `basis_revision` is
+      #              RULED, not fixed: openxFactory#656 comment 5701772032
+      #              makes it a commit TRAILER and the compare-and-swap the
+      #              adjudicator. THE CURRENT FIGURE for this branch; the PR
+      #              description states it at this same commit, `pytest -q
+      #              tests_runtime/` is 453 and the neutral conformance
+      #              corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
