@@ -706,10 +706,18 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
                             | getattr(os, "O_NOFOLLOW", 0))
     except RepositoryActRefused:
         raise
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # `ValueError` TOO, for the reason the project id and the root already
+        # have it: `Path.mkdir` and `os.open` raise it — NOT `OSError` — for an
+        # embedded NUL, and `initialize_repository` is PUBLIC. A direct caller
+        # that did not come through `create_repository`'s own guard therefore
+        # got a raw exception where this act promises a named refusal for every
+        # reason it will not create a repository (Copilot review of
+        # openDox-code#26, round 25). The preflight cannot catch it either: a
+        # path holding a NUL reads as ABSENT, so the refusal has to be here.
         raise RepositoryActRefused(
-            f"the directory {location} could not be created ({exc}); the map "
-            "row is rolled back with the caller's transaction") from exc
+            f"the directory could not be created ({type(exc).__name__}); the "
+            "map row is rolled back with the caller's transaction") from exc
     try:
         # EMPTINESS IS ASKED OF THE DESCRIPTOR, not of the name. `os.listdir`
         # takes a file descriptor, so this is a question about the directory
@@ -1316,7 +1324,19 @@ def _refuse_a_destination_this_service_owns(destinations: tuple[str, ...],
     """
     owned = Path(location).parent
     for destination in destinations:
-        path = _destination_as_a_local_path(destination, location)
+        try:
+            path = _destination_as_a_local_path(destination, location)
+        except ValueError as exc:
+            # A LEGACY ROW CAN HOLD A VALUE `urlsplit` REFUSES. Only NEW
+            # attachments pass the validating path, and `file://[bad` raises
+            # `ValueError` here — before this function's own translation — so
+            # the push leaked a raw exception and the API answered 500 instead
+            # of a named refusal (Copilot review of openDox-code#26, round 25).
+            # The URL is NOT echoed: it is a stored value this act has already
+            # decided it cannot read.
+            raise RepositoryActRefused(
+                "this project's remote is not a destination this act can "
+                f"read ({type(exc).__name__}); re-attach the remote") from exc
         if path is None:
             continue
         try:
@@ -1331,6 +1351,28 @@ def _refuse_a_destination_this_service_owns(destinations: tuple[str, ...],
                 "root this service owns, which is this project's own "
                 "repository or another project's. A push moves the project "
                 "into a GOVERNED destination; re-attach a remote that is one")
+
+
+def _receive_pack_for(destination: str | None, location: Any) -> str:
+    """`--receive-pack=…`, with the hook guard on the LOCAL case and only it.
+
+    Round 21 put `git -c core.hooksPath=<devnull> receive-pack` on every push,
+    to stop a LOCAL destination's `pre-receive` running in this process. For a
+    network destination that same option runs on the SERVER — `--receive-pack`
+    is the command executed THERE — so it disabled a governed factory's own
+    `pre-receive`/`update`/`post-receive`, which is the policy that destination
+    exists to apply (Copilot review of openDox-code#26, round 25). The guard
+    and the sabotage are the same string; what decides is WHOSE process runs
+    the hooks.
+
+    A network destination still gets the pinned plain receiver, which is round
+    16's property: the program is one THIS act names and not one the pushing
+    repository's `remote.<name>.receivepack` chose.
+    """
+    local = destination is not None and _destination_as_a_local_path(
+        destination, location) is not None
+    return ("--receive-pack=git -c core.hooksPath=" + os.devnull
+            + " receive-pack") if local else "--receive-pack=git-receive-pack"
 
 
 def _push_to_remote_with(git: GitRunner, row: Any) -> str:
@@ -1449,9 +1491,7 @@ def _push_to_remote_with(git: GitRunner, row: Any) -> str:
         # rather than one the repository names, which is the property round 16
         # pinned.
         git.out_bounded("-c", "protocol.ext.allow=never",
-                        "push",
-                        "--receive-pack=git -c core.hooksPath=" + os.devnull
-                        + " receive-pack",
+                        "push", _receive_pack_for(effective, row.location),
                         REMOTE_NAME,
                         f"refs/heads/{branch}:refs/heads/{branch}",
                         timeout=PUSH_TIMEOUT_SECONDS)

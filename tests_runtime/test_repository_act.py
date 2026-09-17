@@ -1951,3 +1951,90 @@ def test_the_owned_destination_check_reads_a_path_the_way_git_does(
     # And a real host is still a host.
     assert classify("https://host/x.git", owned) is None
     assert classify("git@host:org/r.git", owned) is None
+
+
+def test_the_hook_guard_is_for_a_local_destination_and_only_one(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`--receive-pack` is the command executed on the DESTINATION.
+
+    Round 21 put `git -c core.hooksPath=<devnull> receive-pack` on every push,
+    to stop a LOCAL destination's `pre-receive` running in this process. For a
+    NETWORK destination that same option runs on the server, so it disabled a
+    governed factory's own `pre-receive`/`update`/`post-receive` — the policy
+    that destination exists to apply (Copilot review of openDox-code#26, round
+    25). The guard and the sabotage are one string; what decides is whose
+    process runs the hooks.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    local = tmp_path / "governed.git"
+    _git(tmp_path, "init", "--bare", "--initial-branch=main", str(local))
+
+    assert act._receive_pack_for(str(local), created.location) == \
+        "--receive-pack=git -c core.hooksPath=" + os.devnull + " receive-pack"
+    assert act._receive_pack_for("file://" + str(local), created.location) == \
+        "--receive-pack=git -c core.hooksPath=" + os.devnull + " receive-pack"
+    for network in ("https://forge.test/org/repo.git",
+                    "git@forge.test:org/repo.git",
+                    "ssh://git@forge.test/org/repo.git"):
+        assert act._receive_pack_for(network, created.location) == \
+            "--receive-pack=git-receive-pack", network
+    assert act._receive_pack_for(None, created.location) == \
+        "--receive-pack=git-receive-pack"
+
+    # And the local case still does what round 21 measured.
+    marker = tmp_path / "pre-receive-ran"
+    hook = local / "hooks" / "pre-receive"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8")
+    hook.chmod(0o755)
+    act.attach_remote(store, project_id=project.id, remote_url=str(local))
+    assert act.push_to_remote(store, project_id=project.id) == str(local)
+    assert not marker.exists()
+
+
+def test_a_public_initialize_repository_refuses_a_nul_by_name(
+        tmp_path: Path) -> None:
+    """`Path.mkdir` raises `ValueError`, and this helper is PUBLIC.
+
+    `create_repository` guards the project id, but a direct caller of
+    `initialize_repository` does not come through it — and the preflight cannot
+    catch a NUL either, because a path holding one reads as ABSENT. So the act
+    promised a named refusal for every reason it will not create a repository
+    and gave a raw `ValueError` (Copilot review of openDox-code#26, round 25).
+    """
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.initialize_repository(tmp_path / "a\x00b", project_id="p",
+                                  actor=ACTOR)
+    assert "could not be created" in str(caught.value)
+    assert "ValueError" in str(caught.value)
+    assert sorted(tmp_path.iterdir()) == []
+    # The premise, measured: the value this now translates does raise it.
+    with pytest.raises(ValueError):
+        (tmp_path / "a\x00b").mkdir()
+
+
+def test_a_legacy_remote_that_cannot_be_parsed_is_a_refusal_not_a_500(
+        store, project, project_repository_root: Path) -> None:
+    """Only NEW attachments pass the validating path.
+
+    A row written before `refuse_credential_bearing_remote` — or by any other
+    caller of the store — can hold `file://[bad`, and `urlsplit` raises
+    `ValueError` for it INSIDE the containment check, before that function's
+    own translation. So the push leaked a raw exception and the API answered
+    500 where this act promises a named refusal (Copilot review of
+    openDox-code#26, round 25).
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    malformed = "file://[bad"
+    # Written the way a LEGACY row is: through the store, not through the act.
+    store.attach_remote(project_id=project.id, remote_url=malformed)
+    _git(created.location, "remote", "add", act.REMOTE_NAME, malformed)
+
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "ValueError" in str(caught.value) or "not a destination" in \
+        str(caught.value), caught.value
+    # The stored value is not echoed: this act has decided it cannot read it.
+    assert malformed not in str(caught.value)
