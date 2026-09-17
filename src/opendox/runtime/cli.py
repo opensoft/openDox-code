@@ -119,7 +119,29 @@ DROP_ORDER: tuple[str, ...] = (
 _DSN_SHAPED = re.compile(
     r"(?i)\b(?:postgres(?:ql)?|postgresql\+\w+)://\S*"
     r"|[A-Za-z][A-Za-z0-9+.\-]*://[^\s/@]*@\S*"
-    r"|\bpassword\s*=\s*\S+")
+    # A LIBPQ KEYWORD/VALUE PASSWORD, IN THE FORMS LIBPQ ITSELF ACCEPTS. The
+    # first cut was `password\s*=\s*\S+`, which ends at whitespace — and libpq
+    # documents that a value CONTAINING SPACES is written in single quotes,
+    # with `\'` and `\\` escaped inside. So the valid conninfo
+    # `password='secret value'` matched only `password='secret`, and this
+    # module printed `<redacted> value'` — half the password in the evidence,
+    # beside the marker that says it was removed (Copilot review of
+    # openDox-code#25, round 19). psycopg passes an arbitrary conninfo through
+    # and its driver errors quote it back, so this is the shape a real failure
+    # takes.
+    #
+    # THE CLOSING QUOTE IS OPTIONAL and neither quoted form crosses a newline:
+    # a truncated message must redact MORE rather than less, and must not
+    # swallow the next line of a multi-line error. The double-quoted form is
+    # not libpq quoting at all — it is here because a value that opens with `"`
+    # is as likely to be a password somebody quoted by hand, and redacting it
+    # costs nothing.
+    #
+    # `sslpassword` IS NAMED, because `\b` before `password` does not reach it
+    # (`l` and `p` are both word characters) and a private key's passphrase is
+    # the same secret by another keyword.
+    r"|\b(?:ssl)?password\s*=\s*"
+    r"""(?:'(?:[^'\\\n]|\\.)*'?|"(?:[^"\\\n]|\\.)*"?|\S+)""")
 
 
 def _safe_message(exc: BaseException) -> str:

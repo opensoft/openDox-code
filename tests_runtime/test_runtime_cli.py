@@ -727,3 +727,47 @@ def test_every_printed_invocation_names_the_command_group() -> None:
         "these name the console script followed straight by a verb, which "
         "this parser refuses with exit 2; every verb lives under the "
         "`runtime` command group:\n" + "\n".join(offenders))
+
+
+def test_a_libpq_password_holding_a_space_is_redacted_whole() -> None:
+    """libpq QUOTES a value containing spaces, and the pattern stopped at one.
+
+    The keyword/value shape, which has no authority for a URL rule to
+    match, so `_DSN_SHAPED` is the only redactor that sees it — and `password\\s*=\\s*\\S+`
+    ends at whitespace, while libpq documents that a value containing spaces is
+    written in single quotes with `\\'` and `\\\\` escaped inside. So the VALID
+    conninfo `password='secret value'` was redacted as `<redacted> value'`,
+    half the password printed beside the marker that says it was removed
+    (Copilot review of openDox-code#25, round 19). psycopg accepts an arbitrary
+    conninfo and its driver errors quote it back, which is how a real failure
+    arrives here.
+
+    Every case below fails against the previous head; the last three are the
+    ones that say the widening did not become an over-match.
+    """
+    for carried, gone in (
+            ("connection failed: host=db user=opendox "
+             "password='secret value' dbname=opendox", ("secret", "value")),
+            ('connection to server failed: password="two words here" host=db',
+             ("two", "words", "here")),
+            (r"password='it\'s quoted' host=db", ("quoted",)),
+            # A private key's passphrase is the same secret by another keyword,
+            # and `\b` before `password` does not reach it.
+            ("sslpassword='key phrase' host=db", ("key", "phrase")),
+            # A TRUNCATED message redacts MORE, not less.
+            ("truncated: password='unterminated secret", ("secret",)),
+    ):
+        redacted = cli._safe_message(RuntimeError(carried))
+        assert "<redacted>" in redacted, redacted
+        for word in gone:
+            assert word not in redacted, (word, redacted)
+
+    # NOT an over-match: the unquoted form still ends at whitespace, a quoted
+    # value does not swallow the next line of a multi-line error, and a keyword
+    # that merely starts with `password` is not a password.
+    plain = cli._safe_message(RuntimeError("password=simple host=db.internal"))
+    assert plain == "<redacted> host=db.internal", plain
+    lines = cli._safe_message(RuntimeError("password='a b'\nhost=db is up"))
+    assert lines.endswith("\nhost=db is up"), lines
+    assert cli._safe_message(RuntimeError("passwordless=fine host=db")) == \
+        "passwordless=fine host=db"

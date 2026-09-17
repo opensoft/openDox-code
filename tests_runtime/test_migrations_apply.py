@@ -1028,3 +1028,91 @@ def test_the_access_preflight_asks_about_this_runtimes_tables_and_the_schema(
                 conn.execute(f"drop schema if exists {schema} cascade")
                 conn.execute(f"drop owned by {role}")
                 conn.execute(f"drop role if exists {role}")
+
+
+def test_a_selected_schema_this_role_may_not_use_is_refused_not_answered(
+        postgres_dsn: str) -> None:
+    """"Exists" is not the question PostgreSQL asks of a `search_path` entry.
+
+    Round 16 made the walk cover the whole configured path and probed the
+    skipped entries against `pg_namespace`. That probe proves the schema is
+    THERE; `search_path` resolution asks whether THIS ROLE may use it, and
+    PostgreSQL skips an entry without `usage` exactly as it skips an absent
+    one. So an existing but unauthorized `tenant` left `missing` empty, the
+    fallback `public` was accepted, and every statement of the run went to
+    `public` — which in a multi-tenant install is the isolation failure the
+    grant exists to prevent (Copilot review of openDox-code#25, round 19).
+
+    Driven against a real server, because the claim is about the server: a
+    schema that exists, a role that holds no grant on it, and the DSN that
+    selects it.
+
+    AGAINST THE PREVIOUS HEAD THIS RUN DOES NOT REFUSE. It accepts `public`
+    and proceeds, and what stops it is `psycopg.errors.InsufficientPrivilege:
+    permission denied for schema public` — an ACCIDENT of this role's grants,
+    from a run that was already writing into the wrong schema. A role that does
+    hold `public` (the default on a plain install, where `public` is world-
+    writable before PG15 and often re-granted after it) gets no error at all:
+    the coordination tables land in `public` and the run reports success.
+    """
+    import uuid
+
+    from psycopg.conninfo import make_conninfo
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    role = "r_" + uuid.uuid4().hex[:12]
+    secret = uuid.uuid4().hex
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.connection() as conn:
+            database = conn.execute("select current_database()").fetchone()[0]
+        with admin.transaction() as conn:
+            # Every identifier here is generated above from a uuid or read back
+            # from the server; none of it is input.
+            conn.execute(f"create schema {schema}")
+            conn.execute(f"create role {role} login password '{secret}'")
+            conn.execute(f"grant connect on database {database} to {role}")
+            conn.execute(f"revoke all on schema {schema} from public")
+        try:
+            as_role = make_conninfo(postgres_dsn, user=role, password=secret)
+
+            # THE PREMISE, MEASURED FIRST: the schema is there, this role may
+            # not use it, and PostgreSQL therefore answers `public`.
+            with Database(as_role, schema=schema) as db, db.connection() as c:
+                assert c.execute("select current_schema()").fetchone()[0] == \
+                    "public"
+                assert c.execute(
+                    "select count(*) from pg_catalog.pg_namespace where "
+                    "nspname = %s", (schema,)).fetchone()[0] == 1
+                assert c.execute(
+                    "select has_schema_privilege(current_user, %s, 'usage')",
+                    (schema,)).fetchone()[0] is False
+
+            before = _tables_in(admin, "public")
+            with Database(as_role, schema=schema) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=ROOT / "migrations")
+                with pytest.raises(migrations.MigrationError) as caught:
+                    runner.apply()
+            message = str(caught.value)
+            assert schema in message and "public" in message
+            assert "may not USE" in message, message
+            assert _tables_in(admin, "public") == before, (
+                "the refused run wrote into `public`, which is the schema the "
+                "fallback chose and not the one the DSN selected")
+
+            # THE OTHER SIDE OF THE RULE: the grant is what was missing, and
+            # with it the same connection is answered rather than refused.
+            with admin.transaction() as conn:
+                conn.execute(f"grant usage on schema {schema} to {role}")
+            with Database(as_role, schema=schema) as db, db.connection() as c:
+                assert migrations.selected_schema(c) == schema
+                assert c.execute("select current_schema()").fetchone()[0] == \
+                    schema
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+                conn.execute(f"drop owned by {role}")
+                conn.execute(f"drop role if exists {role}")

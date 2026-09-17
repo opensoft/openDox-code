@@ -1097,3 +1097,61 @@ def test_the_runbook_and_the_runtime_agree_on_the_served_role_s_grammar() -> Non
         config._role_name({config.PREFIX + "RUNTIME_PG_ROLE": "Svc Role"})
     assert config._role_name(
         {config.PREFIX + "RUNTIME_PG_ROLE": "svc_role"}) == "svc_role"
+
+
+def test_the_build_context_carries_only_what_the_dockerfile_copies() -> None:
+    """`deploy/compose/.env` was uploaded to the docker daemon on every build.
+
+    `docker-compose.yaml` builds with `context: ../..` — the whole repository,
+    because the Dockerfile installs this package from source — and the build
+    context is uploaded to the daemon or to a remote builder BEFORE any
+    instruction runs. A filled-in `deploy/compose/.env` is git-ignored, which
+    is not a build-context rule, so it travelled with every `docker compose …
+    --build` carrying its DSN and its password, even though the Dockerfile
+    never copies it into the image (Copilot review of openDox-code#25, round
+    19).
+
+    MEASURED with the docker daemon this workstation runs (server 29.6.2), by
+    building `FROM busybox; COPY . /ctx` against this same context:
+
+        before  /ctx/deploy/compose/ holds .env, .env.example, Dockerfile,
+                docker-compose.yaml, init-runtime-role.sh
+                /ctx holds .git, .pytest_cache, __pycache__, tests, docs, …
+        after   /ctx holds README.md, migrations, pyproject.toml, src
+                /ctx/deploy does not exist
+
+    and the real image still builds from it and runs (`opendox-runtime --help`
+    inside `opendox-runtime:dockerignore-probe`).
+
+    THE GUARD IS DERIVED FROM THE DOCKERFILE, not hand-kept: a `COPY` added
+    without its source re-included fails here rather than at somebody's build.
+    """
+    dockerignore = ROOT / ".dockerignore"
+    assert dockerignore.exists(), (
+        "the compose build context is the repository root and nothing "
+        "excludes anything from it")
+    lines = [line.strip() for line in
+             dockerignore.read_text(encoding="utf-8").splitlines()]
+    rules = [line for line in lines if line and not line.startswith("#")]
+    assert rules[0] == "*", (
+        "this file is an allowlist by design — everything excluded, then the "
+        f"Dockerfile's own COPY sources named back in; it starts {rules[0]!r}")
+    allowed = {rule[1:] for rule in rules[1:] if rule.startswith("!")}
+
+    dockerfile = (COMPOSE / "Dockerfile").read_text(encoding="utf-8")
+    copied: set[str] = set()
+    for line in dockerfile.splitlines():
+        if line.startswith("COPY "):
+            parts = line.split()[1:]
+            copied.update(part for part in parts[:-1] if not
+                          part.startswith("--"))
+    assert copied, "no COPY line was found, so this test measured nothing"
+    assert copied <= allowed, (
+        f"the Dockerfile copies {sorted(copied - allowed)}, which this "
+        "context excludes: the image build would fail")
+
+    # And the file this finding is about is NOT in the context, by the first
+    # rule rather than by an entry somebody remembered to write.
+    assert "deploy" not in allowed and "deploy/compose/.env" not in allowed
+    assert not any(rule.startswith("!deploy") for rule in rules), (
+        "`deploy/` is re-included, so the filled-in `.env` travels again")

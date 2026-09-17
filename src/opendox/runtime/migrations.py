@@ -391,6 +391,23 @@ def selected_schema(conn: Any) -> str:
     schema is skipped BY DESIGN — so a plain install is not refused for having
     one. It is resolved against `current_user` so that a session whose OWN
     schema is the answer stops the walk there, which is what that path means.
+
+    AND THE QUESTION IS "CAN THIS CONNECTION USE IT", NOT "DOES IT EXIST".
+    PostgreSQL skips a search-path entry the session lacks USAGE on exactly as
+    it skips one that is absent, so an EXISTING but unauthorized entry passed
+    a `pg_namespace` existence probe and the fallback was accepted — the very
+    outcome this function exists to refuse, one privilege along (Copilot review
+    of openDox-code#25, round 19). MEASURED on postgres 16.15, as a role with
+    no grant on a schema that exists:
+
+        set search_path = m_probe, public;
+        select current_schema();                                  -- public
+        select current_schemas(false);                            -- {public}
+        select count(*) from pg_namespace where nspname='m_probe'; -- 1
+        select has_schema_privilege(current_user,'m_probe','usage'); -- f
+
+    The refusal names WHICH of the two it is, because the remedy differs:
+    create the schema, or grant usage on it.
     """
     row = conn.execute("select current_schema(), "
                        "current_setting('search_path'), current_user"
@@ -414,16 +431,23 @@ def selected_schema(conn: Any) -> str:
             break                        # what this connection asked for
         skipped.append(entry)
     if skipped:
-        present = {found[0] for found in conn.execute(
-            "select nspname from pg_catalog.pg_namespace "
-            "where nspname = any(%s::text[])", (skipped,)).fetchall()}
-        missing = [entry for entry in skipped if entry not in present]
+        rows = conn.execute(
+            "select nspname, has_schema_privilege(current_user, oid, 'usage') "
+            "from pg_catalog.pg_namespace "
+            "where nspname = any(%s::text[])", (skipped,)).fetchall()
+        usable = {found[0] for found in rows if found[1]}
+        denied = {found[0] for found in rows if not found[1]}
+        missing = [entry for entry in skipped if entry not in usable]
         if missing:
+            why = ("exists, and this connection may not USE it"
+                   if missing[0] in denied else "does not exist")
+            remedy = (f"Grant usage on {missing[0]!r} to this role"
+                      if missing[0] in denied else f"Create {missing[0]!r}")
             raise MigrationError(
-                f"this connection selects {missing[0]!r}, which does not "
-                f"exist: PostgreSQL's search-path fallback answered {schema!r} "
+                f"this connection selects {missing[0]!r}, which {why}: "
+                f"PostgreSQL's search-path fallback answered {schema!r} "
                 "instead, and every statement here would read and write THAT "
-                f"schema. Create {missing[0]!r}, or point the DSN at the "
+                f"schema. {remedy}, or point the DSN at the "
                 "schema this database actually holds — the coordination state "
                 "is not moved by silently choosing another one")
     return str(schema)
