@@ -710,10 +710,27 @@ jobs:
       #              a credential holding a space is no longer cut in half
       #              by the DSN pattern running first; the map pre-check
       #              catches the store's `NotFoundError` alone; and three
-      #              probes that raised where a refusal is owed. THE CURRENT
-      #              FIGURE for this branch; the PR description states it at
-      #              this same commit, and `pytest -q tests_runtime/` is 402
-      #              here.
+      #              probes that raised where a refusal is owed. `pytest -q
+      #              tests_runtime/` is 402 here.
+      #  248 passed  at `build/3-6-repository-act` `8a69f712` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              SEVENTEEN: a network operation's OUTPUT is bounded as
+      #              well as its clock (a remote that answers could stream
+      #              for the whole timeout into this process's memory while
+      #              the caller's transaction and row lock were held); every
+      #              operation is bound to an OPEN DIRECTORY rather than to
+      #              a pathname, as `write_back` already was; and a ref name
+      #              is bytes, in all three places this act decodes one. The
+      #              external-diff finding is answered by MEASUREMENT and
+      #              the guard kept: `git diff --name-only` does not run
+      #              `diff.external` or `GIT_EXTERNAL_DIFF` on git 2.43.0 —
+      #              an external driver renders a diff BODY — and the case
+      #              carries the table and is labelled NOT a regression
+      #              test. THE CURRENT FIGURE for this branch; the PR
+      #              description states it at this same commit, `pytest -q
+      #              tests_runtime/` is 407 and the neutral conformance
+      #              corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
