@@ -521,9 +521,19 @@ jobs:
       #              ledger narrowing interpolates a role name as SYNTAX,
       #              so it must be a plain identifier; the runbook says so
       #              now and a case pins the statement to both refusals).
-      #              THE CURRENT FIGURE; the PR description states it at
-      #              this same commit, and `pytest -q tests_runtime/` is
-      #              232 here.
+      #              `pytest -q tests_runtime/` is 232 here.
+      #  132 passed  at `build/3-5-runtime` `c9009634` — UNCHANGED, and the
+      #              same five modules: round FIFTEEN's one finding is in
+      #              the DB-backed job, where the case that measures it
+      #              lives. `bootstrap_ledger` runs before `applied()` and
+      #              its `create table` is unqualified, so on a connection
+      #              whose selected schema is gone the ledger was created in
+      #              `public` and COMMITTED before round fourteen's guard
+      #              refused one call later — a fail-closed run that had
+      #              already mutated another schema. The guard is asked
+      #              before the DDL now. THE CURRENT FIGURE; the PR
+      #              description states it at this same commit, and `pytest
+      #              -q tests_runtime/` is 232 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
