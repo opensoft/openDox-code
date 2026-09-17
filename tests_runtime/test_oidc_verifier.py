@@ -556,3 +556,80 @@ def test_a_thread_denied_by_the_cooldown_re_reads_before_it_refuses(
     # AND THE COOLDOWN'S OWN BOUND IS UNTOUCHED: one priming read and one
     # refresh, not two.
     assert state["loads"] == 2, state
+
+
+def test_the_cooldown_claim_and_the_refresh_are_one_lock_acquisition(
+        jwks_path: str, mint_token, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-reading after a denial narrowed the window; it did not close it.
+
+    The claim and the fetch were two acquisitions, so a denied thread could
+    leave the lock and read the cache BEFORE the claiming thread had taken it
+    to fetch — and reject a valid token carrying the newly rotated `kid`
+    against the key set it already had (Copilot review of openDox-code#25,
+    round 16). Holding the lock across the claim AND the fetch closes it.
+
+    The case drives exactly that window: the claiming thread is paused between
+    its claim and its fetch, and the denied thread runs during the pause. It
+    hooks whichever method the shape under test claims the cooldown in, so it
+    runs against both — against the previous head the denied thread is refused
+    with `InvalidSignatureError`, because there the pause is OUTSIDE the lock.
+    """
+    import threading
+
+    current = json.loads(Path(jwks_path).read_text(encoding="utf-8"))
+    previous = {"keys": [dict(current["keys"][0], kid="the-previous-key")]}
+    state = {"served": previous, "loads": 0}
+
+    class Source:
+        def load(self) -> dict:
+            state["loads"] += 1
+            return state["served"]
+
+    cache = oidc.CachingJwks(Source(), ttl_seconds=3600)
+    verifier = oidc.TokenVerifier(issuer=TEST_ISSUER, audience=TEST_AUDIENCE,
+                                  jwks=cache)
+    cache.keyset()                       # primes with the OLD key set
+    state["served"] = current            # the broker rotates
+
+    claimed = threading.Event()
+    denied_ran = threading.Event()
+    # The shape under test: the coupled claim, or the older standalone one.
+    hook = ("_claim_refresh_locked"
+            if hasattr(oidc.CachingJwks, "_claim_refresh_locked")
+            else "_may_refresh_on_miss")
+    real_claim = getattr(oidc.CachingJwks, hook)
+
+    def _claim_then_pause(self, *args, **kwargs):
+        allowed = real_claim(self, *args, **kwargs)
+        if allowed:
+            claimed.set()
+            denied_ran.wait(5)           # the window, forced open
+        return allowed
+
+    monkeypatch.setattr(oidc.CachingJwks, hook, _claim_then_pause)
+
+    token = mint_token(subject="rotated")
+    outcome: dict[str, object] = {}
+
+    def _verify(name: str) -> None:
+        try:
+            outcome[name] = verifier.verify(token).subject
+        except Exception as exc:         # noqa: BLE001 - reported, not raised
+            outcome[name] = exc
+
+    claimer = threading.Thread(target=_verify, args=("claimer",))
+    claimer.start()
+    assert claimed.wait(5), "the claim this case needs never happened"
+
+    denied = threading.Thread(target=_verify, args=("denied",))
+    denied.start()
+    time.sleep(0.05)                     # it is inside the window now
+    denied_ran.set()
+    for thread in (claimer, denied):
+        thread.join(5)
+
+    assert outcome["claimer"] == "rotated", outcome
+    assert outcome["denied"] == "rotated", (
+        "a valid token was refused inside the window between the cooldown "
+        f"claim and the refresh it claims: {outcome['denied']!r}")
+    assert state["loads"] == 2, state    # one priming read, one refresh

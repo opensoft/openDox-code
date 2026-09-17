@@ -378,30 +378,54 @@ def selected_schema(conn: Any) -> str:
     promise is "this schema's coordination state and nothing else", dropped
     `public.*` (Copilot review of openDox-code#25, round 14, in both places).
 
-    ONLY THE FIRST ENTRY IS COMPARED, and `"$user"` is not compared at all: it
-    is not a schema NAME but the first entry of PostgreSQL's own DEFAULT
-    `search_path`, where an absent user schema is skipped BY DESIGN. A plain
-    install is therefore not refused for having one, and a connection that
-    names a schema gets that name or a refusal.
+    THE WHOLE CONFIGURED PATH IS WALKED, not only its first entry. Comparing
+    the first entry alone left `search_path = "$user", tenant, public` with
+    neither the role's schema nor `tenant` present: `$user` was exempt, so the
+    walk stopped and `public` was accepted — the same silent fallback one
+    position along (Copilot review of openDox-code#25, round 16). Every NAMED
+    entry ahead of the one PostgreSQL resolved must exist; the rule is
+    "nothing this connection asked for was skipped".
+
+    `"$user"` IS EXEMPT, and only it: it is not a schema NAME but the first
+    entry of PostgreSQL's own DEFAULT `search_path`, where an absent user
+    schema is skipped BY DESIGN — so a plain install is not refused for having
+    one. It is resolved against `current_user` so that a session whose OWN
+    schema is the answer stops the walk there, which is what that path means.
     """
-    row = conn.execute(
-        "select current_schema(), current_setting('search_path')").fetchone()
+    row = conn.execute("select current_schema(), "
+                       "current_setting('search_path'), current_user"
+                       ).fetchone()
     schema = row[0] if row else None
     if not schema:
         raise MigrationError(
             "this connection has no current schema; no statement here will "
             "run through a search-path fallback to find one")
-    configured = [_unquoted(entry)
-                  for entry in ((row[1] if len(row) > 1 else "") or "").split(",")]
-    configured = [entry for entry in configured if entry]
-    if configured and configured[0] not in {"$user", schema}:
-        raise MigrationError(
-            f"this connection selects the schema {configured[0]!r}, which does "
-            f"not exist: PostgreSQL's search-path fallback answered "
-            f"{schema!r} instead, and every statement here would read and "
-            f"write THAT schema. Create {configured[0]!r}, or point the DSN at "
-            "the schema this database actually holds — the coordination state "
-            "is not moved by silently choosing another one")
+    path = (row[1] if len(row) > 1 else "") or ""
+    user = row[2] if len(row) > 2 else None
+    configured = [entry for entry in
+                  (_unquoted(entry) for entry in path.split(",")) if entry]
+    skipped: list[str] = []
+    for entry in configured:
+        if entry == "$user":
+            if schema == user:
+                break                    # the session's own schema answered
+            continue                     # absent, and absent BY DESIGN
+        if entry == schema:
+            break                        # what this connection asked for
+        skipped.append(entry)
+    if skipped:
+        present = {found[0] for found in conn.execute(
+            "select nspname from pg_catalog.pg_namespace "
+            "where nspname = any(%s::text[])", (skipped,)).fetchall()}
+        missing = [entry for entry in skipped if entry not in present]
+        if missing:
+            raise MigrationError(
+                f"this connection selects {missing[0]!r}, which does not "
+                f"exist: PostgreSQL's search-path fallback answered {schema!r} "
+                "instead, and every statement here would read and write THAT "
+                f"schema. Create {missing[0]!r}, or point the DSN at the "
+                "schema this database actually holds — the coordination state "
+                "is not moved by silently choosing another one")
     return str(schema)
 
 
