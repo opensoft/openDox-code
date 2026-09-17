@@ -377,7 +377,9 @@ def test_the_brainstorm_cards_date_metadata_resolves_the_status():
     assert "vocab.status(VOCABULARY.DOCUMENT, STATUS_ROLE.CAPTURED)" in body
     # The SCHEMA key is untouched: `d.dates.captured` is the snapshot's own
     # field name (§ 2.2 rule 3), not a rendered word.
-    assert "d.dates.captured" in body and "d.dates?.captured" in body
+    # Split, so a failure names WHICH half went (SonarCloud python:S9073).
+    assert "d.dates?.captured" in body, "the optional-chained read is gone"
+    assert "d.dates.captured" in body, "the date value itself is no longer rendered"
 
 
 # ---------------------------------------------------------------------------
