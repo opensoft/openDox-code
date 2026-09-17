@@ -79,6 +79,7 @@ from opendox.runtime.local_git_adapter import (
     GitCommandFailed,
     GitRunner,
     carries_a_control_character,
+    decoded_path,
     decoded_ref_name,
     git_available,
     git_identity,
@@ -389,6 +390,15 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
               if (windows is not None
                   and (windows.drive or windows.is_absolute()
                        or len(windows.parts) != 1))
+              # A CONTROL CHARACTER, because git terminates a pathname with a
+              # newline and `rev-parse` has no `-z`: a location whose name
+              # contained one could not be read back unambiguously, and the
+              # root comparison every act makes is that read (Copilot review of
+              # openDox-code#26, round 22). It is the same predicate
+              # `refuse_command_executing_remote` uses, for a related reason —
+              # a value an operator reads as two lines.
+              else "holds a control character"
+              if carries_a_control_character(project_id)
               else None)
     if reason is not None:
         raise RepositoryActRefused(
@@ -942,8 +952,7 @@ def _refuse_unless_repository_root(git: GitRunner, location: Path) -> None:
         bare = git.out("rev-parse", "--is-bare-repository").decode().strip()
         question = ("--absolute-git-dir" if bare == "true"
                     else "--show-toplevel")
-        root = Path(git.out("rev-parse", question)
-                    .decode("utf-8", "surrogateescape").strip()).resolve()
+        root = Path(decoded_path(git.out("rev-parse", question))).resolve()
         named = location.resolve()
     except GitCommandFailed as failed:
         raise RepositoryActRefused(

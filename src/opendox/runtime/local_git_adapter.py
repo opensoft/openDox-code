@@ -279,6 +279,29 @@ def subcommand_of(args: tuple[str, ...] | list[str]) -> str:
     return ""
 
 
+def decoded_path(stdout: bytes) -> str:
+    """A PATHNAME git printed, with git's one line ending taken off and no more.
+
+    `.strip()` REMOVED MORE THAN GIT WROTE, again — the same defect round 19
+    found on a ref name, at the sites that read a path. A project id is refused
+    for `/`, a NUL, `.`/`..` and for not being one path component, so
+    `"project "` is a LEGAL id: a repository created at a location ending in a
+    space had its root read back as the trimmed name, and the comparison that
+    is supposed to prove "this is the repository the caller named" refused it
+    (Copilot review of openDox-code#26, round 22).
+
+    EXACTLY ONE TRAILING NEWLINE, and nothing else. `rev-parse` has no `-z`, so
+    a pathname really is terminated by a `\n` it could itself contain; what
+    this can do is refuse to guess — it removes the terminator git wrote and
+    leaves every other byte alone. The other half of that ambiguity is closed
+    where the name is chosen: `repository_act.repository_location` refuses a
+    project id carrying a control character, so no location this act creates
+    can contain one.
+    """
+    text = stdout.decode("utf-8", "surrogateescape")
+    return text[:-1] if text.endswith("\n") else text
+
+
 def decoded_ref_name(stdout: bytes) -> str:
     """`symbolic-ref`'s answer as a ref NAME: the bytes, minus the newline.
 
@@ -1091,8 +1114,8 @@ class LocalGitCorpus:
             # interface promises a corpus or a refusal (Copilot review of
             # openDox-code#26, round 16, suppressed). `surrogateescape` is the
             # same round trip `ls-tree`'s pathnames already get.
-            git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
-                           .decode("utf-8", "surrogateescape").strip())
+            git_dir = Path(decoded_path(
+                git.out("rev-parse", "--absolute-git-dir")))
             # AND THE SHARED HALF OF IT, WHICH IS WHERE TWO OF THE THREE LIVE.
             # In a LINKED WORKTREE `--absolute-git-dir` is
             # `<main>/.git/worktrees/<name>`, which holds no `objects/` and no
@@ -1116,9 +1139,8 @@ class LocalGitCorpus:
             # own `--git-common-dir` answers the relative `.git`, which would
             # then be probed against THIS PROCESS's working directory.
             common_dir = Path(
-                git.out("rev-parse", "--path-format=absolute",
-                        "--git-common-dir")
-                .decode("utf-8", "surrogateescape").strip())
+                decoded_path(git.out("rev-parse", "--path-format=absolute",
+                                     "--git-common-dir")))
             # THE PLACES A WRITE ACTUALLY TOUCHES, not the directory that
             # contains them. `write_back` hashes an object (`objects/`), writes
             # a temporary index (the git dir itself) and moves a ref
@@ -1584,8 +1606,8 @@ class LocalGitCorpus:
             # `<location>/.git` for a checkout and `<location>` itself for the
             # BARE repository the act creates — so it is asked for rather than
             # assumed.
-            git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
-                           .decode("utf-8", "surrogateescape").strip())
+            git_dir = Path(decoded_path(
+                git.out("rev-parse", "--absolute-git-dir")))
             # A UNIQUE NAME PER CALL. Keyed on the process id alone, two
             # concurrent writes to the same repository in ONE process shared
             # `GIT_INDEX_FILE`: their `read-tree`/`update-index`/`write-tree`
@@ -1826,7 +1848,7 @@ class LocalGitCorpus:
             raise _refuse(CORPUS_UNREADABLE, subject,
                           f"the repository would not name its root ({question}): "
                           + answer.stderr.decode("utf-8", "replace").strip())
-        named = answer.stdout.decode("utf-8", "surrogateescape").strip()
+        named = decoded_path(answer.stdout)
         try:
             return Path(named).resolve()
         except (OSError, RuntimeError) as exc:

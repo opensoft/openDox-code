@@ -3208,3 +3208,58 @@ def test_a_libpq_password_in_a_stored_remote_is_redacted() -> None:
     assert lga.redact_remote_url("postgresql://u:p@h/db") == "<redacted-url>"
     assert lga.redact_remote_url("https://host/r.git?token=ghp_x") == \
         "https://host/r.git?token=<redacted>"
+
+
+def test_a_repository_whose_name_ends_in_a_space_is_read_back_whole(
+        adapter, tmp_path: Path) -> None:
+    """`.strip()` truncated the ROOT git named, so the root check refused itself.
+
+    A project id is refused for `/`, a NUL, `.`/`..`, a control character and
+    for not being one path component — so `"project "` is a LEGAL id, and this
+    act creates a repository at a location ending in a space. Reading the root
+    back with `.strip()` named the TRIMMED directory, and the comparison that
+    proves "this is the repository the caller named" therefore refused a
+    repository this act had just created (Copilot review of openDox-code#26,
+    round 22, on the adapter AND on the act; both read a path that way).
+
+    MEASURED against the previous head, on a repository this act had just
+    created at `<tmp>/project `:
+
+        adapter.resolve  ->  REFUSED corpus-unclassifiable, "this
+                             directory is not a git repository; it is
+                             INSIDE one, whose root is <tmp>/project"
+        the act's root check -> REFUSED, naming the same trimmed path
+
+    — a path that does not exist, invented by the reader.
+
+    `decoded_path` removes the ONE newline git wrote and nothing else. It
+    cannot do better than that — `rev-parse` has no `-z`, so a pathname really
+    is terminated by a byte it could contain — and the other half of that
+    ambiguity is closed where the name is chosen: `repository_location` refuses
+    a control character now.
+    """
+    from opendox.runtime.repository_act import _refuse_unless_repository_root
+
+    assert lga.decoded_path(b"/srv/projects/project \n") == \
+        "/srv/projects/project "
+    assert lga.decoded_path(b"/srv/x") == "/srv/x"          # no terminator
+    assert lga.decoded_path(b"/srv/x\n\n") == "/srv/x\n"    # exactly one
+
+    location = _repository_at(tmp_path / "project ", "project ")
+    assert str(location).endswith(" ")
+
+    # The adapter reads it back, and every operation on it answers.
+    corpus = _resolve(adapter, location)
+    assert corpus.location == str(location)
+    assert adapter.list_documents(corpus) == ()      # a fresh repository
+    assert adapter.check(corpus) is not None
+    receipt = adapter.write_back(
+        corpus, ca.DocumentId("project ", "n.md"), b"n\n", actor="W",
+        basis_revision=corpus.revision or "", reason="a trailing space")
+    assert receipt.correlation_id
+    # and the write is visible through a fresh resolve of the same name.
+    assert {document.key for document in
+            adapter.list_documents(_resolve(adapter, location))} == {"n.md"}
+
+    # And the ACT's own root check agrees, which is the other reported site.
+    _refuse_unless_repository_root(lga.GitRunner(location), location)

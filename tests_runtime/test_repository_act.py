@@ -1875,3 +1875,24 @@ def test_a_repository_root_holding_a_nul_is_a_refusal_not_a_500(
         act.repository_location("/tmp/root\x00x", "a-project")
     assert "repository root could not be resolved" in str(caught.value)
     assert "ValueError" in str(caught.value)
+
+
+def test_a_project_id_holding_a_control_character_is_refused(
+        tmp_path: Path) -> None:
+    """git terminates a pathname with a newline and `rev-parse` has no `-z`.
+
+    So a location whose NAME contains one could not be read back
+    unambiguously, and the root comparison every act makes is that read. The
+    ambiguity is closed where the name is chosen rather than guessed at where
+    it is parsed (Copilot review of openDox-code#26, round 22). It is the same
+    predicate `refuse_command_executing_remote` uses.
+    """
+    for sent in ("project\nname", "project\rname", "a\x01b", "a‎b"):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.repository_location(tmp_path, sent)
+        assert "control character" in str(caught.value), (sent, caught.value)
+        assert sent not in str(caught.value)
+    # A SPACE IS NOT ONE, and must not become one: it is the legal id the case
+    # above depends on.
+    assert act.repository_location("/srv/projects", "project ") == \
+        Path("/srv/projects/project ")
