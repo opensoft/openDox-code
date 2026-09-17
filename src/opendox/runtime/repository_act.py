@@ -1245,22 +1245,49 @@ def _refuse_repository_local_command_config(git: GitRunner, location: Any) -> No
                     "config, which this runtime keeps")
 
 
-def _destination_as_a_local_path(destination: str) -> Path | None:
+#: A DRIVE-LETTER OR UNC PATH, which git reads as a LOCAL path and not as
+#: `host:path`. `C:/srv/x` has a `:` in its first component, so the scp rule
+#: below claimed it — and the containment check was skipped on the platform
+#: this module's own pathname fallback exists for (Copilot review of
+#: openDox-code#26, round 23).
+_WINDOWS_LOCAL_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def _destination_as_a_local_path(destination: str,
+                                 location: Any) -> Path | None:
     """The filesystem path a destination names, or `None` if it names a host.
 
-    git's own rule, narrowed to what this act has to decide: a `file://` URL is
-    a path, a value with any other `scheme://` is not, and an `scp`-style
-    `user@host:path` is not. Everything else git treats as a local path, which
-    is how this act's own destinations are written.
+    git's own rule, narrowed to what this act has to decide — and each of the
+    three corrections below was a way PAST the containment check, not a
+    cosmetic one (Copilot review of openDox-code#26, round 23):
+
+    * **`file://` IS PERCENT-DECODED FIRST.** git decodes the path before it
+      opens it, so `file:///…/projects%2Fanother.git` opens
+      `…/projects/another.git` while an undecoded comparison sees one component
+      and calls it a sibling OUTSIDE the root. Encoded traversal (`%2e%2e`) is
+      the same trick.
+    * **A WINDOWS DRIVE OR A UNC SHARE IS A PATH, not `host:path`.** `C:` in
+      the first component made `C:/…/sibling.git` look like scp syntax and
+      skipped the check entirely — on the very platform this module's pathname
+      fallback says it runs.
+    * **A RELATIVE DESTINATION IS THE REPOSITORY'S, not this process's.** `git
+      -C <location> push ../another.git` resolves against the mapped
+      repository; `Path(destination).resolve()` resolved against whatever
+      working directory the service happens to have, so `../another-project` in
+      the map compared as something else entirely.
     """
     if destination.startswith("file://"):
-        return Path(urllib.parse.urlsplit(destination).path or "/")
+        return Path(urllib.parse.unquote(
+            urllib.parse.urlsplit(destination).path or "/"))
+    if _WINDOWS_LOCAL_PATH.match(destination):
+        return Path(destination)
     if "://" in destination:
         return None
     head = destination.split("/", 1)[0]
     if ":" in head:                       # `user@host:path`, or `host:path`
         return None
-    return Path(destination)
+    named = Path(destination)
+    return named if named.is_absolute() else Path(location) / named
 
 
 def _refuse_a_destination_this_service_owns(destinations: tuple[str, ...],
@@ -1289,7 +1316,7 @@ def _refuse_a_destination_this_service_owns(destinations: tuple[str, ...],
     """
     owned = Path(location).parent
     for destination in destinations:
-        path = _destination_as_a_local_path(destination)
+        path = _destination_as_a_local_path(destination, location)
         if path is None:
             continue
         try:

@@ -1467,7 +1467,24 @@ class LocalGitCorpus:
             # openDox-code#26, round 17). The environment channel
             # `GIT_EXTERNAL_DIFF` is stripped by `_sanitized_git_environment`
             # for the same reason.
-            raw = git.out("diff", "--no-ext-diff", "--no-textconv",
+            # AND EVERY CLEAN/SMUDGE FILTER THE REPOSITORY DEFINES IS
+            # EMPTIED. `--no-ext-diff` and `--no-textconv` cover the two
+            # drivers round 17 found and say nothing about `filter.<name>`: a
+            # tracked file carrying a `filter=` attribute makes `git diff
+            # --name-only` run that driver's `clean` command, because deciding
+            # whether the file DIFFERS means normalizing it first. MEASURED on
+            # git 2.43.0 — a planted `filter.evil.clean` RAN under exactly the
+            # invocation below, and did not run with `-c filter.evil.clean=`
+            # (Copilot review of openDox-code#26, round 23).
+            #
+            # THE NAMES COME FROM THE REPOSITORY'S OWN CONFIG, which is the
+            # channel that matters: a driver defined in the OPERATOR's global
+            # git is the operator's program, the same trust boundary that keeps
+            # `GIT_CONFIG_GLOBAL`. `core.attributesFile` cannot help — MEASURED,
+            # the filter still ran with it emptied — because the attribute is
+            # in the repository's own `.gitattributes`.
+            raw = git.out(*self._emptied_filters(git, corpus.location),
+                          "diff", "--no-ext-diff", "--no-textconv",
                           "--name-only", "-z", corpus.revision)
         except GitCommandFailed as failed:
             raise _refuse(CORPUS_UNREADABLE, corpus.location,
@@ -1793,6 +1810,32 @@ class LocalGitCorpus:
             yield git
         finally:
             os.close(handle)
+
+    def _emptied_filters(self, git: GitRunner, subject: str) -> tuple[str, ...]:
+        """`-c filter.<name>.clean=` … for every driver this repository names.
+
+        One `git config` read, and a `-c` pair per driver and per verb. A
+        repository that defines none — which is every repository this act
+        creates — pays one probe and adds no options.
+
+        It is the READ path's version of the rule `repository_act` applies to
+        the push: a program named by the repository this service was pointed at
+        is not a program this service runs. The read cannot refuse the way the
+        push does, because `check` owes an answer about a corpus somebody else
+        may legitimately have filtered — so the driver is EMPTIED for this
+        call, which makes the answer conservative (a filtered file reads as
+        changed) rather than executable.
+        """
+        listed = self._probe(git, "config", "--local", "--name-only",
+                             "--get-regexp", r"^filter\..*\.(clean|smudge|process)$",
+                             kind=CORPUS_UNREADABLE, subject=subject)
+        if listed.returncode != 0:
+            return ()                     # exit 1 is "none set", which is usual
+        options: list[str] = []
+        for key in listed.stdout.decode("utf-8", "replace").split():
+            if key.startswith("filter.") and key.count(".") >= 2:
+                options += ["-c", key + "="]
+        return tuple(options)
 
     def _writable_ref_home(self, git: GitRunner, common_dir: Path,
                            subject: str) -> Path:

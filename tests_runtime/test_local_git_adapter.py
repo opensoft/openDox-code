@@ -3263,3 +3263,56 @@ def test_a_repository_whose_name_ends_in_a_space_is_read_back_whole(
 
     # And the ACT's own root check agrees, which is the other reported site.
     _refuse_unless_repository_root(lga.GitRunner(location), location)
+
+
+def test_check_does_not_run_a_filter_the_corpus_names(
+        adapter, tmp_path: Path) -> None:
+    """`--no-ext-diff` and `--no-textconv` say nothing about `filter.<name>`.
+
+    A tracked file carrying a `filter=` attribute makes `git diff --name-only`
+    run that driver's `clean` command, because deciding whether the file
+    DIFFERS means normalizing it first. So merely ASKING a project repository
+    what changed executed a program the repository chose — the same class round
+    17 closed for `diff.external`, through a door it did not cover (Copilot
+    review of openDox-code#26, round 23).
+
+    MEASURED on git 2.43.0, on exactly the invocation `check` makes:
+
+        git diff --no-ext-diff --no-textconv --name-only     clean RAN
+        + `-c filter.evil.clean=`                            did NOT run
+        + `-c core.attributesfile=/dev/null`                 clean RAN
+
+    — the last because the ATTRIBUTE is in the repository's own
+    `.gitattributes`, so only the driver can be emptied.
+    """
+    # A CHECKOUT, not the bare repository this act creates: a clean filter is
+    # about a WORKTREE file, and `check` returns early for a bare corpus.
+    location = tmp_path / "corpus"
+    location.mkdir()
+    _git(location, "init", "--initial-branch=main", ".")
+    marker = tmp_path / "CLEAN_RAN"
+    (location / "a.md").write_text("hello\n", encoding="utf-8")
+    (location / ".gitattributes").write_text("*.md filter=evil\n",
+                                             encoding="utf-8")
+    _git(location, "add", "-A")
+    _git(location, "commit", "-m", "with an attribute")
+    _git(location, "config", "filter.evil.clean",
+         f"sh -c 'touch {marker}; cat'")
+    _git(location, "config", "filter.evil.smudge", "cat")
+    (location / "a.md").write_text("changed\n", encoding="utf-8")
+
+    corpus = _resolve(adapter, location)
+    findings = adapter.check(corpus)
+    assert not marker.exists(), (
+        "a filter the corpus named ran in this process during `check`")
+    # AND THE ANSWER IS STILL AN ANSWER: the changed file is reported.
+    assert any(finding.subject == "a.md" for finding in findings), findings
+
+    # THE PREMISE, measured rather than assumed: that driver really does run
+    # under the plain invocation.
+    subprocess.run(["git", "-C", str(location), "diff", "--no-ext-diff",
+                    "--no-textconv", "--name-only"],
+                   capture_output=True, env=_GIT_ENV)
+    assert marker.exists(), (
+        "this git does not run a clean filter for `diff --name-only`, so the "
+        "case above proves nothing on this platform")

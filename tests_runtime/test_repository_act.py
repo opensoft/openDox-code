@@ -1896,3 +1896,58 @@ def test_a_project_id_holding_a_control_character_is_refused(
     # above depends on.
     assert act.repository_location("/srv/projects", "project ") == \
         Path("/srv/projects/project ")
+
+
+def test_the_owned_destination_check_reads_a_path_the_way_git_does(
+        store, project, project_repository_root: Path) -> None:
+    """Three ways past round 21's containment check, each a real one.
+
+    * **`file://` is percent-decoded by git before it opens the path.** So
+      `file:///…/projects%2Fanother.git` opens `…/projects/another.git` while
+      an undecoded comparison sees ONE component and calls it a sibling outside
+      the root. `%2e%2e` is the same trick for traversal.
+    * **A Windows drive or a UNC share is a PATH, not `host:path`.** `C:` in
+      the first component made `C:/…/sibling.git` look like scp syntax and
+      skipped the check entirely — on the platform this module's own pathname
+      fallback exists for.
+    * **A relative destination is the REPOSITORY's, not this process's.** `git
+      -C <location> push ../another.git` resolves against the mapped
+      repository; the check resolved against whatever working directory the
+      service happened to have.
+
+    (Copilot review of openDox-code#26, round 23.) Each shape is driven
+    through the real act here, and each is accepted against the previous head.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    sibling = Path(project_repository_root) / "another-project.git"
+    _git(Path(project_repository_root), "init", "--bare",
+         "--initial-branch=main", str(sibling))
+
+    encoded = ("file://" + str(Path(project_repository_root)).rstrip("/")
+               + "%2F" + sibling.name)
+    traversal = ("file://" + str(created.location) + "/%2e%2e/"
+                 + sibling.name)
+    relative = "../" + sibling.name
+    for aimed_at in (encoded, traversal, relative):
+        act.attach_remote(store, project_id=project.id, remote_url=aimed_at)
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.push_to_remote(store, project_id=project.id)
+        assert "this service owns" in str(caught.value), (aimed_at, caught.value)
+    assert subprocess.run(
+        ["git", "-C", str(sibling), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{act.DEFAULT_BRANCH}"],
+        capture_output=True, env=_GIT_ENV).returncode != 0, (
+        "one of those destinations was written to")
+
+    # The classifier itself, on the shapes a POSIX host cannot exercise end to
+    # end but a Windows one would.
+    classify = act._destination_as_a_local_path
+    owned = str(Path(project_repository_root) / "p")
+    assert classify("C:/srv/projects/sibling.git", owned) == \
+        Path("C:/srv/projects/sibling.git")
+    assert classify("C:\\srv\\x", owned) == Path("C:\\srv\\x")
+    assert classify("\\\\server\\share", owned) == Path("\\\\server\\share")
+    # And a real host is still a host.
+    assert classify("https://host/x.git", owned) is None
+    assert classify("git@host:org/r.git", owned) is None
