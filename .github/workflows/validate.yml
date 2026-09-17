@@ -855,10 +855,29 @@ jobs:
       #              do not cover arbitrary caller text — `user:secret@host/
       #              path` and `//user:pw@h/x` both reach the branch and both
       #              come back whole — so the act names WHICH rule was broken
-      #              and does not repeat the value. THE CURRENT FIGURE for
-      #              this branch; the PR description states it at this same
-      #              commit, `pytest -q tests_runtime/` is 421 and the
-      #              neutral conformance corpus is 17 of 17.
+      #              and does not repeat the value. SUPERSEDED by the entry
+      #              below; `pytest -q tests_runtime/` was 421 there.
+      #  259 passed  at `build/3-6-repository-act` `578b0dee` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              nineteen's SUPPRESSED comments and a guard they
+      #              uncovered. This act pushes with `-c
+      #              protocol.ext.allow=never` BEFORE the subcommand, and the
+      #              two readers of that vector disagreed:
+      #              `GitCommandFailed` took `args[0]` and reported `git -c
+      #              exited 128`, which the review found — and under it,
+      #              `_argv` took the first argument not starting with `-`,
+      #              which is the `-c` VALUE, so round 18's `-c
+      #              alias.<subcommand>=` was silently absent on the one call
+      #              that reaches a remote. One rule now, in both places. And
+      #              a ref name is bytes minus ONE newline: `.strip()` also
+      #              removes `\xa0`, which git permits in a branch name, so
+      #              `feature\xa0` was trimmed to a branch that does not
+      #              exist — measured in all three places that decode a ref.
+      #              THE CURRENT FIGURE for this branch; the PR description
+      #              states it at this same commit, `pytest -q
+      #              tests_runtime/` is 423 and the neutral conformance
+      #              corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
