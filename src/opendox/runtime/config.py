@@ -26,6 +26,7 @@ instead of failing to start with the same ImportError it was about to explain.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import urllib.parse
@@ -302,6 +303,23 @@ def _redacted_query(query: str) -> str:
     return "".join(parts)
 
 
+def _is_loopback(host: str | None) -> bool:
+    """`localhost`, `127.0.0.0/8` or `::1` — a host with no network to attack.
+
+    Judged by `ipaddress` where the host is a literal, so `127.0.0.1`,
+    `127.5.5.5` and `[::1]` are all one answer and a name that merely LOOKS
+    like one (`127.0.0.1.evil.test`) is not.
+    """
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _broker_url(env: Mapping[str, str], setting: Setting, *,
                 required: bool) -> str | None:
     """A broker endpoint, REFUSED when it carries URL userinfo.
@@ -342,6 +360,21 @@ def _broker_url(env: Mapping[str, str], setting: Setting, *,
                    for part in re.split(r"[&;]", split.query + "&"
                                         + split.fragment) if "=" in part)
                else None)
+    # AND THE SCHEME IS THE TRUST ANCHOR'S OWN. `HttpJwksSource` FETCHES this
+    # URL and the keys it returns are what every token is verified against, so
+    # over `http://` a network attacker replaces the key set and mints tokens
+    # whose `iss` and `aud` still pass — the whole verification reduced to
+    # whoever controls the path (Copilot review of openDox-code#25, round 25).
+    # `https` or a LOOPBACK host, and only those: a developer running a broker
+    # on `127.0.0.1` has no network for anyone to be on, and every other
+    # `http://` is refused rather than warned about.
+    if split.scheme != "https" and not _is_loopback(split.hostname):
+        raise ConfigurationError(
+            f"{setting.name} is {split.scheme or '(no scheme)'}://, and this "
+            "is a TRUST ANCHOR: the key set fetched from it is what every "
+            "token is verified against, so anyone on the path between this "
+            "runtime and that host could replace it. Use https, or a loopback "
+            "host for local development")
     if carried:
         raise ConfigurationError(
             f"{setting.name} carries a credential in its URL ({carried}). It "
