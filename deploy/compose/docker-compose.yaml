@@ -54,7 +54,20 @@ services:
       - internal
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${OPENDOX_PG_USER:-opendox} -d ${OPENDOX_PG_DB:-opendox}"]
+      # EXEC FORM, so an operator's `.env` value is an ARGUMENT and not shell
+      # source. `CMD-SHELL` receives the string AFTER compose interpolation, so
+      # `OPENDOX_PG_USER=x; touch /tmp/pwned` ran in this container on every
+      # health probe — and a value with a space silently became two arguments
+      # long before that (Copilot review of openDox-code#25, round 23). `CMD`
+      # passes the list to `exec` with no shell between, so the value can be
+      # anything and is still one argument.
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - ${OPENDOX_PG_USER:-opendox}
+        - -d
+        - ${OPENDOX_PG_DB:-opendox}
       interval: 10s
       timeout: 5s
       retries: 5
@@ -134,9 +147,18 @@ services:
         # `OPENDOX_BIND_PORT`, and a healthcheck that always probed 8080 made
         # any other configured port a permanently unhealthy container — the
         # server listening and the orchestrator restarting it (Copilot review
-        # of openDox-code#25). `${VAR:-default}` is interpolated by compose,
-        # so the value and the probe cannot drift.
-        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:${OPENDOX_BIND_PORT:-8080}/livez',timeout=3).status==200 else 1)"
+        # of openDox-code#25).
+        #
+        # AND THE SCRIPT IS FIXED, WITH THE VALUE READ FROM THE ENVIRONMENT.
+        # Compose interpolates `${VAR}` into this string before python sees it,
+        # so the value was python SOURCE: `OPENDOX_BIND_PORT=8080'),None) or
+        # __import__('os').system('…` executed in the application container on
+        # every probe, before `config.load_settings` ever looked at the port
+        # (Copilot review of openDox-code#25, round 23). The container already
+        # HAS the variable — the `environment:` block above sets it from the
+        # same `.env` — so python reads it itself and the script holds no
+        # interpolated text at all.
+        - "import os,urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:%s/livez' % int(os.environ.get('OPENDOX_BIND_PORT') or 8080),timeout=3).status==200 else 1)"
       interval: 15s
       timeout: 5s
       retries: 5
