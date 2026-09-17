@@ -63,6 +63,19 @@ configMapGenerator:
       disableNameSuffixHash: true
     literals:
       - migration_wait_host=
+      # AND `runtime_pg_role` IS AN EDIT THIS OVERLAY CANNOT MAKE FOR YOU, so
+      # it is stated here rather than inherited silently. The base's value is
+      # `opendox_runtime`, which is the role the BUNDLED Postgres creates on
+      # first start — and a managed database runs no init script, so the role
+      # is whichever one YOU provisioned and put in `opendox-db-runtime`'s DSN.
+      # If the two differ, the migration Job narrows `opendox_runtime` (or
+      # fails because it does not exist) while the role actually serving keeps
+      # the right to rewrite the ledger (Copilot review of openDox-code#25,
+      # round 24). `docs/runtime.md` makes it a numbered step of the
+      # managed-database path; uncomment and set it, or layer an overlay that
+      # does:
+      #
+      #   - runtime_pg_role=<the user in opendox-db-runtime's DSN>
   - name: opendox-oidc
     behavior: merge
     options:
