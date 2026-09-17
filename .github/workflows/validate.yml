@@ -943,9 +943,25 @@ jobs:
       #              was not stripped; a libpq `password=` in a stored remote
       #              was returned verbatim; a project id was not checked as
       #              one native path component; and `ValueError` was missing
-      #              from the root's translation. THE CURRENT FIGURE for this
+      #              from the root's translation. SUPERSEDED by the entry
+      #              below; `pytest -q tests_runtime/` was 439 there.
+      #  269 passed  at `build/3-6-repository-act` `45b7675b` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              TWENTY-TWO: `.strip()` removed more than git wrote at
+      #              the sites that read a PATH, which is round 19's ref-name
+      #              defect one call along. `"project "` is a LEGAL project
+      #              id, so this act creates a location ending in a space —
+      #              and MEASURED against the previous head, `resolve` and
+      #              the act's own root check both REFUSED a repository this
+      #              act had just created, naming the TRIMMED path as the
+      #              repository it is supposedly inside. `decoded_path` is
+      #              one rule for all five sites and removes exactly the one
+      #              newline git wrote; the rest of the ambiguity is closed
+      #              where the name is chosen, by refusing a control
+      #              character in a project id. THE CURRENT FIGURE for this
       #              branch; the PR description states it at this same
-      #              commit, `pytest -q tests_runtime/` is 439 and the
+      #              commit, `pytest -q tests_runtime/` is 441 and the
       #              neutral conformance corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
