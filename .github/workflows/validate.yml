@@ -416,9 +416,14 @@ jobs:
       #              READING THIS LIST: the LAST entry is the current figure
       #              and the PR description states that one at that same
       #              commit. An earlier entry is the measurement that was
-      #              current when it was written, not a competing claim; the
-      #              commit that records a figure changes no test, so each
-      #              figure also holds at the head that carries its record.
+      #              current when it was written, not a competing claim, and
+      #              SAYS SO in its own words — a reader who lands on one
+      #              entry should not have to reach this note to learn it is
+      #              history (Copilot's round-18 review of the sibling PR
+      #              #26 read a superseded entry as that branch's claim
+      #              about its own head). The commit that records a figure
+      #              changes no test, so each figure also holds at the head
+      #              that carries its record.
       #  111 passed  at `build/3-5-runtime` `2161a23a` (same day, same python
       #              and pytest) — the same five modules, after round
       #              EIGHT: `serve` telling a startup failure from a
@@ -470,8 +475,9 @@ jobs:
       #              single-quoted SQL literal, the runbook's claim that the
       #              run checks that prerequisite, and the canonical gate
       #              covering the WHOLE run's bytes before the ledger is
-      #              bootstrapped. THE CURRENT FIGURE; the PR description
-      #              states it at this same commit. ROUND TWELVE'S OTHER TWO
+      #              bootstrapped. SUPERSEDED by a later entry below; the PR
+      #              description stated it at this same commit while it was
+      #              current. ROUND TWELVE'S OTHER TWO
       #              FIXES ARE IN THE DB-BACKED JOB (a run whose served role
       #              was never granted now fails instead of serving, and the
       #              drafts listing bounded in bytes as well as in rows): 223
@@ -561,9 +567,34 @@ jobs:
       #              `pg_class` — the set is compared now), a setting that
       #              promised an OIDC discovery this runtime does not make,
       #              and a migration comment naming a test that does not
-      #              exist. THE CURRENT FIGURE; the PR description states
-      #              it at this same commit, and `pytest -q tests_runtime/`
-      #              is 236 here.
+      #              exist. SUPERSEDED by the entry below; the PR
+      #              description stated it at this same commit, and `pytest
+      #              -q tests_runtime/` was 236 there.
+      #  135 passed  at `build/3-5-runtime` `01b9876c`
+      #              (2026-09-17, same python and pytest; extras
+      #              unimportable) — the same five modules, after round
+      #              NINETEEN, whose three findings were all measured and
+      #              all real. A libpq password holding a SPACE is quoted,
+      #              and `password\s*=\s*\S+` ends at whitespace, so the
+      #              valid conninfo `password='secret value'` was redacted
+      #              as `<redacted> value'` — half the password beside the
+      #              marker that says it was removed. `search_path`
+      #              resolution asks whether THIS ROLE may use a schema and
+      #              not whether it exists, so an existing `tenant` with no
+      #              `usage` grant passed the round-16 existence probe and
+      #              the run went to `public`; MEASURED on postgres 16.15,
+      #              `pg_namespace` has it, `has_schema_privilege` is false
+      #              and `current_schema()` answers `public`. And the
+      #              compose build context is the whole repository, so a
+      #              filled-in `deploy/compose/.env` — git-ignored, which is
+      #              not a build-context rule — was uploaded to the docker
+      #              daemon on every `--build`; MEASURED with docker server
+      #              29.6.2 by copying the context into a `busybox` image,
+      #              both before (`.env` present) and after (the context is
+      #              the four paths the Dockerfile COPYs), and the real
+      #              image still builds and runs. THE CURRENT FIGURE; the PR
+      #              description states it at this same commit, and `pytest
+      #              -q tests_runtime/` is 240 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
