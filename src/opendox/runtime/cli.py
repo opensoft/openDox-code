@@ -147,7 +147,15 @@ def _safe_message(exc: BaseException) -> str:
     """
     from opendox.runtime.local_git_adapter import redact_credentials
 
-    return redact_credentials(_DSN_SHAPED.sub("<redacted>", str(exc)))
+    # THE FULL REDACTION RUNS FIRST, AND THE DSN PATTERN IS THE FALLBACK.
+    # `_DSN_SHAPED` ends its match at whitespace, so with it applied first a
+    # credential holding a space — `postgresql://u:secret value@host`, the very
+    # shape round 12 widened the userinfo class to catch — was CUT at the
+    # space: `<redacted> value@host`, with half the password printed beside the
+    # marker (Copilot review of openDox-code#26, round 15). The general rule
+    # matches the whole authority, so it goes first and this only has to cover
+    # what it leaves: a DSN with no userinfo at all.
+    return _DSN_SHAPED.sub("<redacted>", redact_credentials(str(exc)))
 
 
 def _emit(payload: dict[str, Any], *, ok: bool) -> int:

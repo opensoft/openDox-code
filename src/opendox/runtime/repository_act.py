@@ -65,11 +65,14 @@ from __future__ import annotations
 import os
 import re
 import urllib.parse
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from opendox.corpus_adapter import CorpusRef
+from opendox.runtime.identity import NotFoundError
 from opendox.runtime.local_git_adapter import (
     ADAPTER_NAME,
     DEFAULT_BRANCH,
@@ -79,7 +82,9 @@ from opendox.runtime.local_git_adapter import (
     git_available,
     git_identity,
     names_a_secret_parameter,
+    open_no_follow_chain,
     redact_remote_url,
+    runner_bound_to,
 )
 
 #: The ONE remote this runtime configures and pushes to. A constant and not a
@@ -462,19 +467,21 @@ def corpus_ref_for(row: Any, *, name: str | None = None) -> CorpusRef:
 def _mapped_repository(store: Any, project_id: str) -> Any:
     """This project's map row, or `None` where it has none.
 
-    `store` is deliberately `Any` — `create_repository` runs inside the
-    caller's transaction and this module is stdlib-only by the package's
-    import-weight contract — so the store's "no such row" arrives as an
-    exception type this module does not import. It is therefore asked the only
-    way an untyped collaborator can be asked, and the breadth is SAFE rather
-    than sloppy: a store failure that is not a missing row is raised again,
-    immediately, by the `create_project_repository` on the very next line
-    against the very same connection. Nothing is swallowed, and the fallback is
-    exactly the behaviour this act had before it asked at all.
+    ONLY "no such row" IS CAUGHT. The first cut caught `Exception`, on the
+    argument that any other store failure would be raised again by the
+    `create_project_repository` on the very next line — which is true of THIS
+    store and is not a property of a collaborator typed `Any`: a connection
+    error would have been reported as "not mapped", and a non-transactional
+    store could then have written a map row without ever having read the
+    authoritative one (Copilot review of openDox-code#26, round 16). The
+    store's own `NotFoundError` is imported instead; `opendox.runtime.identity`
+    is stdlib-only by this package's import-weight contract, which
+    `tests_runtime/test_runtime_surface.py` measures, so naming it here costs
+    this module nothing it does not already carry.
     """
     try:
         return store.repository_for_project(project_id)
-    except Exception:                      # the store's own NotFoundError
+    except NotFoundError:
         return None
 
 
@@ -648,7 +655,22 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
         # `refuse_unusable_location` allows (an empty directory this act may
         # use) verified on the object that will be initialized, not on a
         # pathname that can be re-pointed between the two.
-        if os.listdir(owned):
+        # AND THIS PROBE IS TRANSLATED TOO. `os.listdir` on a descriptor can
+        # fail — `EIO` on a failing filesystem, `ENOTDIR` if the object under
+        # the handle is no longer a directory — and it sat in a `try/finally`
+        # with no `OSError` handler, so the one check that decides whether this
+        # act may use the directory escaped as an API 500 instead of the named
+        # refusal this act promises for every reason it will not create a
+        # repository (Copilot review of openDox-code#26, round 16, suppressed).
+        try:
+            occupied = os.listdir(owned)
+        except OSError as exc:
+            raise RepositoryActRefused(
+                f"{location} could not be read through the descriptor this act "
+                f"opened ({type(exc).__name__}); it will not create a "
+                "repository in a directory it cannot tell empty from full"
+            ) from exc
+        if occupied:
             raise RepositoryActRefused(
                 f"{location} is not empty; this act creates a "
                 "repository at a directory it owns and adopts none")
@@ -726,6 +748,15 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
         os.close(owned)
 
 
+#: MOVED DOWN TO THE ADAPTER, and re-bound here under the names this module
+#: has always used. `local_git_adapter` owns `GitRunner` and its `inherit_fd`,
+#: and `write_back` needs the same check-and-use binding this act invented —
+#: so the implementation lives with the runner and there is ONE of it (Copilot
+#: review of openDox-code#26, round 16).
+_open_no_follow_chain = open_no_follow_chain
+_runner_bound_to = runner_bound_to
+
+
 def _directory_by_name(location: Path) -> os.stat_result:
     """`stat` for `location` reached WITHOUT following a symlink anywhere.
 
@@ -749,89 +780,6 @@ def _directory_by_name(location: Path) -> os.stat_result:
         finally:
             os.close(handle)
     return os.lstat(location)
-
-
-def _open_no_follow_chain(directory: Path, *, create: bool = False) -> int:
-    """A descriptor for `directory`, opened COMPONENT BY COMPONENT, no-follow.
-
-    `create=True` also MAKES a missing component, in the directory this walk is
-    already holding open, so the parents of a new repository are created under
-    the same rule they are opened under; see `initialize_repository` for the
-    tree that a pathname `mkdir(parents=True)` wrote into before refusing.
-
-    The leaf was created relative to a held parent descriptor, and that
-    descriptor was obtained by opening `location.parent` BY PATHNAME — which
-    follows every symlink in it. A concurrent replacement of the parent (or of
-    any ancestor) with a link therefore made the descriptor, `git init`, and
-    the later `stat(location)` all name a directory outside the canonical
-    repository root, and the inode comparison compared that place with itself
-    and passed (Copilot review of openDox-code#26, round 12, twice). Opening
-    each component with `O_NOFOLLOW` refuses the substitution instead: a
-    component that has become a link fails with `ELOOP`, which the caller's
-    handler turns into the act's named refusal.
-
-    THIS REFUSES NO LEGITIMATE SETUP, and that is a fact about where the path
-    comes from rather than an assumption: `repository_location` already returns
-    a `resolve()`d path, so an operator's symlinked root — `/var` on a BSD, a
-    symlinked mount — is already collapsed before this is reached, and a link
-    appearing in the chain afterwards is exactly the race this refuses. A
-    caller that passes an unresolved path of its own (this function is public)
-    gets the same rule applied to what it asked for.
-
-    The descriptor returned is the DIRECTORY ITSELF and not its name, so every
-    lookup the caller then makes with `dir_fd=` happens in the object this walk
-    verified.
-    """
-    walked = Path(os.path.abspath(directory))
-    handle = os.open(walked.anchor or os.sep, os.O_RDONLY | os.O_DIRECTORY)
-    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        for component in walked.relative_to(walked.anchor or os.sep).parts:
-            try:
-                nxt = os.open(component, flags, dir_fd=handle)
-            except FileNotFoundError:
-                if not create:
-                    raise
-                try:
-                    os.mkdir(component, dir_fd=handle)
-                except FileExistsError:
-                    # Another process got there first. The open below is the
-                    # check that what it made is a real directory and not a
-                    # link, so the race needs no second decision here.
-                    pass
-                nxt = os.open(component, flags, dir_fd=handle)
-            os.close(handle)
-            handle = nxt
-    except BaseException:
-        os.close(handle)
-        raise
-    return handle
-
-
-def _runner_bound_to(handle: int, location: Path,
-                     executable: str) -> GitRunner:
-    """A runner whose `-C` is the OPEN DIRECTORY, where the OS offers one.
-
-    `/proc/self/fd/<n>` — and `/dev/fd/<n>`, which is the same thing on Linux
-    and the BSD spelling elsewhere — resolves, IN THE CHILD, to the directory
-    the descriptor refers to, whatever has happened to the name since. The
-    descriptor has to be inherited for that to mean anything, which is what
-    `GitRunner.inherit_fd` does; `subprocess` closes inherited descriptors by
-    default. Measured on this container (Linux 6.18, git 2.43.0): with the
-    directory renamed away and a symlink put in its place after the handle was
-    opened, `git -C /proc/self/fd/<n>` still wrote into the real directory and
-    wrote nothing through the link.
-
-    WHERE NEITHER PATH EXISTS the runner falls back to the pathname, which is
-    the behaviour this act had before — the inode comparison above still
-    refuses a path that changed, and this note is here so a reader knows which
-    guarantee holds on which platform rather than assuming the stronger one.
-    """
-    for base in ("/proc/self/fd", "/dev/fd"):
-        if os.path.isdir(base):
-            return GitRunner(Path(base) / str(handle), executable,
-                             inherit_fd=handle)
-    return GitRunner(location, executable)
 
 
 def _initialize_with(git: GitRunner, location: Path, *, project_id: str,
@@ -877,7 +825,37 @@ def _initialize_with(git: GitRunner, location: Path, *, project_id: str,
 
 
 
-def _refuse_unless_repository_root(location: Path, executable: str) -> None:
+@contextmanager
+def _bound_to_mapped_repository(row: Any,
+                                executable: str) -> Iterator[GitRunner]:
+    """A runner on the mapped directory, held OPEN across check and use.
+
+    `_refuse_unless_repository_root` proved a fact about a PATHNAME and both
+    callers then re-opened that pathname for every `git` they ran, so a rename
+    or a symlink swap in between could still send `remote set-url` or the push
+    into another repository — the check and the use were two different objects
+    (Copilot review of openDox-code#26, round 16). The directory is opened
+    `O_NOFOLLOW` component by component and git is handed `/proc/self/fd/<n>`
+    for that descriptor, which is the binding `initialize_repository` already
+    uses and which `runner_bound_to` states the platform ladder for.
+    """
+    location = Path(row.location)
+    try:
+        handle = open_no_follow_chain(location)
+    except (OSError, RuntimeError) as exc:
+        raise RepositoryActRefused(
+            f"{location} could not be opened without following a link "
+            f"({type(exc).__name__}); this act will not run git against a "
+            "directory it cannot hold open") from exc
+    try:
+        git = runner_bound_to(handle, location, executable)
+        _refuse_unless_repository_root(git, location)
+        yield git
+    finally:
+        os.close(handle)
+
+
+def _refuse_unless_repository_root(git: GitRunner, location: Path) -> None:
     """Refuse a mapped location that is INSIDE a repository instead of being one.
 
     `git -C <path>` WALKS UP. `LocalGitCorpus.resolve` refuses that for reads
@@ -892,8 +870,10 @@ def _refuse_unless_repository_root(location: Path, executable: str) -> None:
     its git directory — the shape this act creates — and a repository with a
     work tree has `--show-toplevel`; `--show-toplevel` is a fatal error inside
     a bare one, so the question is chosen rather than guessed.
+
+    ASKED OF THE RUNNER THE CALLER WILL USE, never of a path this function
+    opens for itself; see `_bound_to_mapped_repository`.
     """
-    git = GitRunner(location, executable)
     try:
         bare = git.out("rev-parse", "--is-bare-repository").decode().strip()
         question = ("--absolute-git-dir" if bare == "true"
@@ -920,7 +900,7 @@ def _refuse_unless_repository_root(location: Path, executable: str) -> None:
 
 
 def _local_git_row(store: Any, project_id: str, *,
-                   executable: str = "git", for_update: bool = False) -> Any:
+                   for_update: bool = False) -> Any:
     """The map row, REFUSED unless this adapter is the one that owns it.
 
     The map carries an `adapter` column precisely so a project can be served by
@@ -931,8 +911,8 @@ def _local_git_row(store: Any, project_id: str, *,
     else's to act on.
 
     AND OWNING THE ROW IS NOT THE SAME AS THE ROW NAMING A REPOSITORY — see
-    `_refuse_unless_repository_root`, which is the second half of the question
-    both callers were asking only half of.
+    `_bound_to_mapped_repository`, which is the second half of the question
+    both callers were asking only half of, asked on the handle they then use.
     """
     # `for_update` LOCKS the row for the rest of the caller's transaction —
     # see the store's own note; the acts that read a destination and then use
@@ -944,7 +924,6 @@ def _local_git_row(store: Any, project_id: str, *,
             f"project {project_id} is mapped to the {row.adapter!r} adapter, "
             f"not {ADAPTER_NAME!r}; this act runs git against a plain local "
             "repository and must not touch another adapter's corpus")
-    _refuse_unless_repository_root(Path(row.location), executable)
     return row
 
 
@@ -966,8 +945,7 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
     """
     refuse_credential_bearing_remote(remote_url)
     refuse_command_executing_remote(remote_url)
-    row = _local_git_row(store, project_id, executable=executable,
-                         for_update=True)
+    row = _local_git_row(store, project_id, for_update=True)
     remote_name = REMOTE_NAME
     # THE DURABLE FACT IS WRITTEN FIRST, INSIDE THE CALLER'S TRANSACTION, and
     # git is configured after it. The order was the other way round, which left
@@ -979,7 +957,14 @@ def attach_remote(store: Any, *, project_id: str, remote_url: str,
     # repeat of this act repairs, because a `git` failure here raises and the
     # caller's transaction rolls the row back with it.
     updated = store.attach_remote(project_id=project_id, remote_url=remote_url)
-    git = GitRunner(Path(row.location), executable)
+    with _bound_to_mapped_repository(row, executable) as git:
+        return _attach_remote_with(git, row, updated, remote_url,
+                                   remote_name)
+
+
+def _attach_remote_with(git: GitRunner, row: Any, updated: Any,
+                        remote_url: str, remote_name: str) -> Any:
+    """`attach_remote`'s git half, on a runner bound to an open directory."""
     try:
         existing = git.run("remote", "get-url", remote_name)
         # AND THE REMOTE'S EXISTENCE IS ASKED OF THE CONFIG SECTION, not of
@@ -1116,8 +1101,7 @@ def push_to_remote(store: Any, *, project_id: str,
     # went to the newly attached destination while this call returned the stale
     # URL — defeating the destination-of-record guarantee the comparison exists
     # to make (Copilot review of openDox-code#26, round 6).
-    row = _local_git_row(store, project_id, executable=executable,
-                         for_update=True)
+    row = _local_git_row(store, project_id, for_update=True)
     if not row.remote_url:
         raise RepositoryActRefused(
             f"project {project_id} has no attached remote; attach one first "
@@ -1129,7 +1113,12 @@ def push_to_remote(store: Any, *, project_id: str,
     # run. `-c protocol.ext.allow=never` below covers `ext` and says nothing
     # about `git-remote-evil` (Copilot review of openDox-code#26, round 12).
     refuse_command_executing_remote(row.remote_url)
-    git = GitRunner(Path(row.location), executable)
+    with _bound_to_mapped_repository(row, executable) as git:
+        return _push_to_remote_with(git, row)
+
+
+def _push_to_remote_with(git: GitRunner, row: Any) -> str:
+    """`push_to_remote`'s git half, on a runner bound to an open directory."""
 
     # THE MAP IS THE DESTINATION OF RECORD, AND GIT IS ASKED WHETHER IT AGREES.
     # This pushed to whatever `origin` happened to be configured as and never
@@ -1160,7 +1149,7 @@ def push_to_remote(store: Any, *, project_id: str,
             f"the push ({failed}); nothing is pushed") from failed
     if configured is None:
         raise RepositoryActRefused(
-            f"the map records a remote for project {project_id} but the "
+            f"the map records a remote for project {row.project_id} but the "
             f"repository at {row.location} has no {REMOTE_NAME!r}; re-attach "
             "the remote so the two agree before pushing")
     # EXACTLY ONE PUSH DESTINATION, ASKED AS A COUNT and not as a string. A
@@ -1213,8 +1202,19 @@ def push_to_remote(store: Any, *, project_id: str,
         # openDox-code#26, round 10). A command-line `-c` outranks every
         # config file, so the policy travels with the push instead of being
         # assumed of the machine.
+        # AND THE RECEIVE-PACK IS NAMED ON THE COMMAND LINE. `git push` runs
+        # the destination's `receive-pack`, and for a LOCAL or `file://`
+        # destination it runs it HERE — as a program chosen by
+        # `remote.<name>.receivepack` in the pushing repository's own config.
+        # The repositories this service manages are writable by it and by
+        # whoever can reach their directory, so that key was a command this
+        # runtime would execute on every push, which is the same class of
+        # defect as the `ext::` transport and the `pre-push` hook and was
+        # covered by neither (Copilot review of openDox-code#26, round 16).
+        # `--receive-pack` on the command line outranks the config value.
         git.out_bounded("-c", "protocol.ext.allow=never",
-                        "push", REMOTE_NAME,
+                        "push", "--receive-pack=git-receive-pack",
+                        REMOTE_NAME,
                         f"refs/heads/{branch}:refs/heads/{branch}",
                         timeout=PUSH_TIMEOUT_SECONDS)
     except GitCommandFailed as failed:

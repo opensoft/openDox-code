@@ -621,7 +621,11 @@ def test_a_project_verb_never_prints_a_dsn_it_caught_itself(
     assert evidence["ok"] is False
     assert evidence["refusal"] == "RuntimeError"
     assert "hunter2" not in evidence["message"], evidence["message"]
-    assert "<redacted>" in evidence["message"], evidence["message"]
+    # EITHER MARKER. Round 15 put the general credential rule FIRST, so a DSN
+    # that carries userinfo is replaced whole as `<redacted-url>` and
+    # `_DSN_SHAPED`'s `<redacted>` is the fallback for one that does not. What
+    # this case is about is that the secret does not survive either way.
+    assert "<redacted" in evidence["message"], evidence["message"]
 
 
 # -- Copilot's tenth round on #25 --------------------------------------------
@@ -807,9 +811,23 @@ def test_a_repository_refusal_is_redacted_like_every_other_message(
     import sys
     import types
 
+    class _Cursor:
+        def fetchone(self) -> None:
+            return None
+
+        def fetchall(self) -> list:
+            return []
+
     class _Connection:
-        def execute(self, sql: str, params: tuple | None = None) -> None:
-            raise AssertionError("the refusal happens before any statement")
+        def execute(self, sql: str, params: tuple | None = None) -> "_Cursor":
+            # THE MAP IS ASKED FIRST, and only the map: round 14 moved the
+            # authoritative row ahead of `repository_location`, so a project
+            # that is already mapped is told so rather than being told about a
+            # filesystem. Nothing else may run before the refusal, which is
+            # what this assertion is now for.
+            assert "project_repositories" in sql, sql
+            assert sql.strip().lower().startswith("select"), sql
+            return _Cursor()
 
     class _Database:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -842,7 +860,7 @@ def test_a_repository_refusal_is_redacted_like_every_other_message(
     assert evidence["refusal"] == "repository"
     printed = json.dumps(evidence)
     assert "hunter2" not in printed, printed
-    assert "<redacted>" in printed, printed
+    assert "<redacted" in printed, printed
 
 
 def test_the_evidence_boundary_redacts_a_credential_parameter_too() -> None:
@@ -928,3 +946,27 @@ def test_every_printed_invocation_names_the_command_group() -> None:
         "these name the console script followed straight by a verb, which "
         "this parser refuses with exit 2; every verb lives under the "
         "`runtime` command group:\n" + "\n".join(offenders))
+
+
+def test_a_credential_holding_a_space_is_not_cut_in_half_by_the_dsn_pattern(
+) -> None:
+    """Two redactions in the wrong order printed half the password.
+
+    `_DSN_SHAPED` ends its match at whitespace, so applied FIRST it cut
+    `postgresql://u:secret value@host/db` at the space and left
+    `<redacted> value@host/db` — the remainder of the credential beside the
+    marker, in the one place this runtime promises there is none. It is the
+    same shape round 12 widened the adapter's userinfo class for: a stored
+    value may hold a space (Copilot review of openDox-code#26, round 15).
+
+    The general rule matches the whole authority, so it goes first; the DSN
+    pattern is the fallback for a DSN with no userinfo at all.
+    """
+    carried = "could not connect to postgresql://u:secret value@host/db"
+    redacted = cli._safe_message(RuntimeError(carried))
+    assert "secret" not in redacted, redacted
+    assert "value@host" not in redacted, redacted
+    assert "<redacted-url>" in redacted
+    # And the fallback still covers what the general rule does not.
+    plain = cli._safe_message(RuntimeError("postgresql://host:5432/db is down"))
+    assert "<redacted>" in plain, plain

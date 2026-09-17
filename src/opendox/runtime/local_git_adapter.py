@@ -218,6 +218,15 @@ _GIT_ENVIRONMENT_OVERRIDES = frozenset({
     "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
     "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG", "GIT_CONFIG_COUNT",
     "GIT_INDEX_VERSION", "GIT_PREFIX",
+    # `GIT_CONFIG_PARAMETERS` IS THE `-c` CHANNEL ITSELF. It is how git hands
+    # its own `-c` settings to the commands it runs, and it is read on the way
+    # IN as well: an ambient value set the same settings a command line would,
+    # so a runtime started from inside a git invocation — a hook, an alias, a
+    # `filter-branch` — inherited `core.hooksPath` or `protocol.*.allow` from
+    # whatever set it, which is exactly the redirection the rest of this list
+    # exists to refuse (Copilot review of openDox-code#26, rounds 15 and 16).
+    # MEASURED on git 2.43.0 and pinned by a case.
+    "GIT_CONFIG_PARAMETERS",
 })
 
 
@@ -227,6 +236,89 @@ def _sanitized_git_environment() -> dict[str, str]:
             if name not in _GIT_ENVIRONMENT_OVERRIDES
             and not name.startswith("GIT_CONFIG_KEY_")
             and not name.startswith("GIT_CONFIG_VALUE_")}
+
+
+def open_no_follow_chain(directory: Path, *, create: bool = False) -> int:
+    """A descriptor for `directory`, opened COMPONENT BY COMPONENT, no-follow.
+
+    `create=True` also MAKES a missing component, in the directory this walk is
+    already holding open, so the parents of a new repository are created under
+    the same rule they are opened under; see `initialize_repository` for the
+    tree that a pathname `mkdir(parents=True)` wrote into before refusing.
+
+    The leaf was created relative to a held parent descriptor, and that
+    descriptor was obtained by opening `location.parent` BY PATHNAME — which
+    follows every symlink in it. A concurrent replacement of the parent (or of
+    any ancestor) with a link therefore made the descriptor, `git init`, and
+    the later `stat(location)` all name a directory outside the canonical
+    repository root, and the inode comparison compared that place with itself
+    and passed (Copilot review of openDox-code#26, round 12, twice). Opening
+    each component with `O_NOFOLLOW` refuses the substitution instead: a
+    component that has become a link fails with `ELOOP`, which the caller's
+    handler turns into the act's named refusal.
+
+    THIS REFUSES NO LEGITIMATE SETUP, and that is a fact about where the path
+    comes from rather than an assumption: `repository_location` already returns
+    a `resolve()`d path, so an operator's symlinked root — `/var` on a BSD, a
+    symlinked mount — is already collapsed before this is reached, and a link
+    appearing in the chain afterwards is exactly the race this refuses. A
+    caller that passes an unresolved path of its own (this function is public)
+    gets the same rule applied to what it asked for.
+
+    The descriptor returned is the DIRECTORY ITSELF and not its name, so every
+    lookup the caller then makes with `dir_fd=` happens in the object this walk
+    verified.
+    """
+    walked = Path(os.path.abspath(directory))
+    handle = os.open(walked.anchor or os.sep, os.O_RDONLY | os.O_DIRECTORY)
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        for component in walked.relative_to(walked.anchor or os.sep).parts:
+            try:
+                nxt = os.open(component, flags, dir_fd=handle)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(component, dir_fd=handle)
+                except FileExistsError:
+                    # Another process got there first. The open below is the
+                    # check that what it made is a real directory and not a
+                    # link, so the race needs no second decision here.
+                    pass
+                nxt = os.open(component, flags, dir_fd=handle)
+            os.close(handle)
+            handle = nxt
+    except BaseException:
+        os.close(handle)
+        raise
+    return handle
+
+
+def runner_bound_to(handle: int, location: Path,
+                     executable: str) -> GitRunner:
+    """A runner whose `-C` is the OPEN DIRECTORY, where the OS offers one.
+
+    `/proc/self/fd/<n>` — and `/dev/fd/<n>`, which is the same thing on Linux
+    and the BSD spelling elsewhere — resolves, IN THE CHILD, to the directory
+    the descriptor refers to, whatever has happened to the name since. The
+    descriptor has to be inherited for that to mean anything, which is what
+    `GitRunner.inherit_fd` does; `subprocess` closes inherited descriptors by
+    default. Measured on this container (Linux 6.18, git 2.43.0): with the
+    directory renamed away and a symlink put in its place after the handle was
+    opened, `git -C /proc/self/fd/<n>` still wrote into the real directory and
+    wrote nothing through the link.
+
+    WHERE NEITHER PATH EXISTS the runner falls back to the pathname, which is
+    the behaviour this act had before — the inode comparison above still
+    refuses a path that changed, and this note is here so a reader knows which
+    guarantee holds on which platform rather than assuming the stronger one.
+    """
+    for base in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(base):
+            return GitRunner(Path(base) / str(handle), executable,
+                             inherit_fd=handle)
+    return GitRunner(location, executable)
 
 
 @dataclass(frozen=True)
@@ -795,8 +887,15 @@ class LocalGitCorpus:
                 scopes=(SCOPE_ALL,), write_path=None,
                 write_path_available=False)
         try:
+            # DECODED THE WAY EVERY OTHER PATH OUT OF GIT IS, and for the
+            # same reason: a filesystem path is bytes, not UTF-8, so a
+            # repository whose location holds a non-UTF-8 byte raised
+            # `UnicodeDecodeError` out of `resolve` — an exception where this
+            # interface promises a corpus or a refusal (Copilot review of
+            # openDox-code#26, round 16, suppressed). `surrogateescape` is the
+            # same round trip `ls-tree`'s pathnames already get.
             git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
-                           .decode().strip())
+                           .decode("utf-8", "surrogateescape").strip())
             # AND THE SHARED HALF OF IT, WHICH IS WHERE TWO OF THE THREE LIVE.
             # In a LINKED WORKTREE `--absolute-git-dir` is
             # `<main>/.git/worktrees/<name>`, which holds no `objects/` and no
@@ -821,7 +920,8 @@ class LocalGitCorpus:
             # then be probed against THIS PROCESS's working directory.
             common_dir = Path(
                 git.out("rev-parse", "--path-format=absolute",
-                        "--git-common-dir").decode().strip())
+                        "--git-common-dir")
+                .decode("utf-8", "surrogateescape").strip())
             # THE PLACES A WRITE ACTUALLY TOUCHES, not the directory that
             # contains them. `write_back` hashes an object (`objects/`), writes
             # a temporary index (the git dir itself) and moves a ref
@@ -1178,24 +1278,59 @@ class LocalGitCorpus:
                 "the document key contains a NUL byte, which is the record "
                 "terminator git's index protocol uses; a path that cannot be "
                 "written unambiguously is not written at all")
-        git = self._git(corpus)
-        # AND THE ROOT IS ASKED AGAIN, ON THE ONE OPERATION THAT WRITES.
-        # `resolve` refuses a location that is inside another repository
-        # (see it for the defect and the ruling), and a `ResolvedCorpus` comes
-        # from `resolve` — but this is the call that can commit into somebody
-        # else's history, and the cost of being sure is one `rev-parse`.
-        #
-        # AND EVERY WAY THAT QUESTION CAN FAIL IS `WRITE_PATH_UNREACHABLE`.
-        # `_repository_root` is `resolve`'s helper and refuses with
-        # `CORPUS_UNREADABLE`, which is a kind `write_back` does not declare
-        # (the interface gives it exactly two: `CORPUS_READ_ONLY` and
-        # `WRITE_PATH_UNREACHABLE`), so a git that vanished between `resolve`
-        # and this call sent a caller branching on `err.refusal.kind` a kind
-        # this operation never promised (Copilot review of openDox-code#26,
-        # round 13, suppressed). The failure is real and is still refused —
-        # it is reported as the kind this operation owes. `Path.resolve` is
-        # inside the same guard for the same reason, and because a symlink
-        # loop under the location raises `RuntimeError`, not `OSError`.
+        try:
+            # AND THE CHECK AND THE USE ARE ONE OBJECT. The re-check below
+            # asked about a PATHNAME, and every call after it — `hash-object`,
+            # `read-tree`, `commit-tree`, `update-ref` — resolved that pathname
+            # again, so a location renamed or re-linked in between put the
+            # commit in a different repository after this function had proved
+            # it would not (Copilot review of openDox-code#26, round 16). The
+            # directory is opened `O_NOFOLLOW` component by component and git
+            # is handed `/proc/self/fd/<n>` for that descriptor, which is the
+            # binding `repository_act.initialize_repository` already uses;
+            # `runner_bound_to` states the platform ladder.
+            handle = open_no_follow_chain(Path(corpus.location))
+        except (OSError, RuntimeError) as exc:
+            raise _refuse(
+                WRITE_PATH_UNREACHABLE, corpus.write_path,
+                f"{corpus.location} could not be opened without following a "
+                f"link ({exc.__class__.__name__}); nothing is written, "
+                "because the repository the commit would land in cannot be "
+                "held open") from exc
+        try:
+            return self._write_back_bound(
+                runner_bound_to(handle, Path(corpus.location),
+                                self._executable),
+                corpus, document, content, actor=actor,
+                basis_revision=basis_revision, reason=reason)
+        finally:
+            os.close(handle)
+
+    def _write_back_bound(self, git: GitRunner, corpus: ResolvedCorpus,
+                          document: DocumentId, content: bytes, *, actor: str,
+                          basis_revision: str, reason: str) -> WriteReceipt:
+        """`write_back`'s git half, on a runner bound to an open directory.
+
+        AND THE ROOT IS ASKED AGAIN, ON THE ONE OPERATION THAT WRITES.
+        `resolve` refuses a location that is inside another repository (see it
+        for the defect and the ruling), and a `ResolvedCorpus` comes from
+        `resolve` — but this is the call that can commit into somebody else's
+        history, and the cost of being sure is one `rev-parse`. It is asked of
+        the DESCRIPTOR the caller opened, so the repository this proves is the
+        repository every call below writes to.
+
+        AND EVERY WAY THAT QUESTION CAN FAIL IS `WRITE_PATH_UNREACHABLE`.
+        `_repository_root` is `resolve`'s helper and refuses with
+        `CORPUS_UNREADABLE`, which is a kind `write_back` does not declare (the
+        interface gives it exactly two: `CORPUS_READ_ONLY` and
+        `WRITE_PATH_UNREACHABLE`), so a git that vanished between `resolve` and
+        this call sent a caller branching on `err.refusal.kind` a kind this
+        operation never promised (Copilot review of openDox-code#26, round 13,
+        suppressed). The failure is real and is still refused — it is reported
+        as the kind this operation owes. `Path.resolve` is inside the same
+        guard for the same reason, and because a symlink loop under the
+        location raises `RuntimeError`, not `OSError`.
+        """
         try:
             root = self._repository_root(git, corpus.location)
             named = Path(corpus.location).resolve()
@@ -1214,11 +1349,20 @@ class LocalGitCorpus:
                 "repository the commit would land in cannot be named"
             ) from exc
         if root != named:
+            # TWO FACTS, ONE COMPARISON, and the message says both because the
+            # write refuses either way: the location may be INSIDE another
+            # repository (the defect RULED 5714365086 Q-F3 closed), or the NAME
+            # may have been re-pointed since the descriptor was opened — which
+            # this comparison can now see precisely because `root` comes from
+            # the held directory and `named` from the path (round 16).
             raise _refuse(
                 WRITE_PATH_UNREACHABLE, corpus.location,
-                f"this location is inside the repository at {root} rather than "
-                "being one; nothing is written, because the commit would land "
-                "in a repository nobody named")
+                f"this write is bound to the repository at {root}, and "
+                f"{corpus.location} no longer resolves to it: either the "
+                "location is inside that repository rather than being it, or "
+                "the name was re-pointed after the corpus resolved. Nothing "
+                "is written, because a commit must land in the repository the "
+                "caller named and nowhere else")
         try:
             blob = git.out("hash-object", "-w", "--stdin",
                            stdin=content).decode().strip()
@@ -1227,7 +1371,7 @@ class LocalGitCorpus:
             # BARE repository the act creates — so it is asked for rather than
             # assumed.
             git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
-                           .decode().strip())
+                           .decode("utf-8", "surrogateescape").strip())
             # A UNIQUE NAME PER CALL. Keyed on the process id alone, two
             # concurrent writes to the same repository in ONE process shared
             # `GIT_INDEX_FILE`: their `read-tree`/`update-index`/`write-tree`

@@ -660,7 +660,10 @@ def test_a_push_is_bounded_and_never_waits_for_a_password(
 
     created = act.create_repository(store, project_id=project.id,
                                     root=project_repository_root, actor=ACTOR)
-    source = inspect.getsource(act.push_to_remote)
+    # THE GIT HALF, which is where the invocation lives: round 16 bound the
+    # act to an open directory, so `push_to_remote` now delegates to
+    # `_push_to_remote_with` on a runner it holds.
+    source = inspect.getsource(act._push_to_remote_with)
     assert "out_bounded" in source
     assert "PUSH_TIMEOUT_SECONDS" in source
     assert act.PUSH_TIMEOUT_SECONDS > 0
@@ -1277,7 +1280,14 @@ def test_a_pushurl_that_cannot_be_cleared_fails_the_attach(
                           remote_url=str(destination))
     assert "could not be attached" in str(caught.value)
     # And the `5` that means "no such key" is still not a failure.
-    monkeypatch.undo()
+    #
+    # ONLY THE RUNNER IS RESTORED. `monkeypatch.undo()` here reverted EVERY
+    # patch this test holds — including the autouse fixture's
+    # `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` and identity — so the second
+    # attach ran under whatever git configuration the machine has, which is the
+    # very asymmetry this module's `_GIT_ENV` exists to remove (Copilot review
+    # of openDox-code#26, round 16, suppressed).
+    monkeypatch.setattr(lga.GitRunner, "run", real_run)
     act.attach_remote(store, project_id=project.id,
                       remote_url=str(destination))
 
@@ -1586,3 +1596,104 @@ def test_a_mapped_location_inside_another_repository_is_refused_by_the_acts(
 
     with pytest.raises(act.RepositoryActRefused):
         act.push_to_remote(store, project_id=project.id)
+
+
+# -- Copilot's sixteenth round on #26 -----------------------------------------
+
+
+def test_a_push_cannot_be_made_to_run_the_repositorys_own_receive_pack(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`git push` runs the DESTINATION's `receive-pack` — and for a local
+    destination it runs it HERE, as a program the PUSHING repository's config
+    chooses.
+
+    `remote.<name>.receivepack` was therefore a command this runtime would
+    execute on every push of a repository it manages — and these repositories
+    are writable by the service and by whoever can reach their directory. It is
+    the same class of defect as the `ext::` transport and the `pre-push` hook,
+    and was covered by neither (Copilot review of openDox-code#26, round 16).
+    `--receive-pack` on the command line outranks the config value.
+
+    MEASURED BOTH WAYS by planting a real executable whose only job is to
+    leave a file behind.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "governed.git"
+    _git(tmp_path, "init", "--bare", "--initial-branch=main", str(destination))
+    marker = tmp_path / "receive-pack-ran"
+    planted = tmp_path / "evil-receive-pack"
+    planted.write_text(f"#!/bin/sh\ntouch {marker}\nexec git-receive-pack \"$@\"\n",
+                       encoding="utf-8")
+    planted.chmod(0o755)
+    _git(created.location, "config", f"remote.{act.REMOTE_NAME}.receivepack",
+         str(planted))
+
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+    assert act.push_to_remote(store, project_id=project.id) == str(destination)
+    assert not marker.exists(), (
+        "the repository's own `receivepack` config chose the program this "
+        "push executed")
+
+    # THE PREMISE, measured rather than assumed: without the pin, git runs it.
+    subprocess.run(
+        ["git", "-C", str(created.location), "push", act.REMOTE_NAME,
+         f"refs/heads/{act.DEFAULT_BRANCH}:refs/heads/probe"],
+        check=True, capture_output=True, env=_GIT_ENV)
+    assert marker.exists(), (
+        "this git does not honour `remote.<name>.receivepack` for a local "
+        "destination, so the case above proves nothing on this platform")
+
+
+def test_the_acts_are_bound_to_the_repository_they_verified(
+        store, project, project_repository_root: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The root check proved a fact about a NAME and the git calls re-opened it.
+
+    So a rename or a symlink swap between the check and the use could still
+    send `remote set-url` or the push into another repository — the check and
+    the use were two different objects (Copilot review of openDox-code#26,
+    round 16). Both acts run on a runner bound to a descriptor opened
+    `O_NOFOLLOW`, which is the binding `initialize_repository` already uses.
+
+    The race is driven at the only moment it can happen: after the descriptor
+    is open and before the act's first git call.
+    """
+    if not Path("/proc/self/fd").is_dir():
+        pytest.skip("no /proc/self/fd on this platform, where the act "
+                    "documents the pathname fallback as the weaker guarantee")
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    decoy = tmp_path / "decoy.git"
+    subprocess.run(["git", "clone", "--bare", "-q", str(created.location),
+                    str(decoy)], check=True, env=_GIT_ENV)
+    real = act._attach_remote_with
+    swapped = {"done": False}
+
+    def _swap_then_attach(git, *args, **kwargs):
+        if not swapped["done"]:
+            swapped["done"] = True
+            created.location.rename(tmp_path / "moved-aside")
+            decoy.rename(created.location)
+        return real(git, *args, **kwargs)
+
+    monkeypatch.setattr(act, "_attach_remote_with", _swap_then_attach)
+    act.attach_remote(store, project_id=project.id,
+                      remote_url="https://example.invalid/r.git")
+    assert swapped["done"], "the race this test drives did not happen"
+
+    # The remote landed in the directory the act verified, not in the decoy
+    # that took its name.
+    moved = tmp_path / "moved-aside"
+    assert _git(moved, "config", "--get",
+                f"remote.{act.REMOTE_NAME}.url") == "https://example.invalid/r.git"
+    configured = subprocess.run(
+        ["git", "-C", str(created.location), "config", "--get",
+         f"remote.{act.REMOTE_NAME}.url"],
+        capture_output=True, text=True, env=_GIT_ENV)
+    # The decoy is a CLONE, so it has an `origin` of its own — the clone
+    # source. What it must not have is the URL this act attached.
+    assert configured.stdout.strip() != "https://example.invalid/r.git", (
+        "the decoy that took the name was reconfigured by this act")
+    assert str(created.location) in configured.stdout, configured.stdout

@@ -2470,3 +2470,107 @@ def test_a_name_relinked_to_the_same_directory_is_still_refused(
         "no longer names" in str(caught.value), str(caught.value)
     # The history is where the act put it; the map row is not written.
     assert (_relink_then_initialize.moved / "HEAD").is_file()
+
+
+# -- Copilot's fifteenth and sixteenth rounds on #26 --------------------------
+
+
+def test_an_ambient_config_parameters_channel_cannot_reconfigure_this_git(
+        adapter, repository: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GIT_CONFIG_PARAMETERS` IS the `-c` channel, and it was not stripped.
+
+    It is how git hands its own `-c` settings to the commands it runs, and it
+    is read on the way IN as well — so a runtime started from inside a git
+    invocation (a hook, an alias, a `filter-branch`) inherited whatever that
+    process had set. Round 13 stripped `GIT_DIR`, `GIT_CONFIG` and the
+    count/key/value form and left this one, which reaches the same settings by
+    another name (Copilot review of openDox-code#26, rounds 15 and 16).
+
+    Driven with `core.hooksPath`, because it is the one this package sets on
+    every invocation and therefore the one whose subversion is measurable.
+    """
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS",
+                       f"'core.hooksPath={hooks}' 'protocol.ext.allow=always'")
+    # The premise, measured: git DOES read this channel.
+    ambient = subprocess.run(
+        ["git", "-C", str(repository), "config", "--get", "core.hooksPath"],
+        capture_output=True, text=True, env={**_GIT_ENV,
+                                             "GIT_CONFIG_PARAMETERS":
+                                             f"'core.hooksPath={hooks}'"})
+    assert ambient.stdout.strip() == str(hooks), ambient
+
+    # And this package's runner does not.
+    git = lga.GitRunner(repository)
+    assert git.run("config", "--get", "core.hooksPath").stdout.decode().strip() \
+        == os.devnull, "an ambient GIT_CONFIG_PARAMETERS reached this runner"
+    assert git.run("config", "--get", "protocol.ext.allow").returncode != 0
+    assert "GIT_CONFIG_PARAMETERS" in lga._GIT_ENVIRONMENT_OVERRIDES
+    # The corpus still resolves and still writes, with the channel set.
+    corpus = _resolve(adapter, repository)
+    assert adapter.write_back(corpus, ca.DocumentId("project-1", "a.md"),
+                              b"# a\n", actor=ACTOR,
+                              basis_revision=corpus.revision or "")
+
+
+def test_a_write_is_bound_to_the_repository_the_root_check_verified(
+        adapter, repository: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The re-check proved a fact about a NAME, and the write used the name.
+
+    Every call after it — `hash-object`, `read-tree`, `commit-tree`,
+    `update-ref` — went through `self._git(corpus)`, which resolves
+    `corpus.location` again, so a location renamed or re-linked between the
+    check and the commit put the write in a different repository after this
+    function had proved it would not (Copilot review of openDox-code#26, round
+    16). The directory is opened `O_NOFOLLOW` and git is handed
+    `/proc/self/fd/<n>` for that descriptor, which is the binding
+    `repository_act.initialize_repository` already uses.
+
+    The race is made deterministic by performing the swap at the only moment it
+    could happen: after the descriptor is open and before the first git call.
+    """
+    if not Path("/proc/self/fd").is_dir():        # the ladder's lower rung
+        pytest.skip("no /proc/self/fd on this platform, where the act "
+                    "documents the pathname fallback as the weaker guarantee")
+    # A CLONE, deliberately: it holds the resolved commit, so the write that
+    # follows the swapped name can SUCCEED there. MEASURED against the previous
+    # head with exactly this shape — the swap driven from inside the root
+    # re-check — `write_back` returned a receipt and the decoy came out with
+    # two commits and `a.md` in its tree while the real corpus was untouched.
+    # (With an unrelated repository as the decoy the old code failed at
+    # `read-tree` instead: a confusing refusal rather than a write into the
+    # wrong history. The clone is the case that loses data.)
+    decoy = tmp_path / "decoy"
+    subprocess.run(["git", "clone", "--bare", "-q", str(repository),
+                    str(decoy)], check=True, env=_GIT_ENV)
+    corpus = _resolve(adapter, repository)
+    real = lga.LocalGitCorpus._write_back_bound
+    swapped = {"done": False}
+
+    def _swap_then_write(self, git, *args, **kwargs):
+        if not swapped["done"]:
+            swapped["done"] = True
+            repository.rename(tmp_path / "moved-aside")
+            decoy.rename(repository)
+        return real(self, git, *args, **kwargs)
+
+    monkeypatch.setattr(lga.LocalGitCorpus, "_write_back_bound",
+                        _swap_then_write)
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus, ca.DocumentId("project-1", "a.md"),
+                           b"# a\n", actor=ACTOR,
+                           basis_revision=corpus.revision or "")
+    assert swapped["done"], "the race this test drives did not happen"
+    assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+    assert "re-pointed" in caught.value.refusal.detail
+
+    # NEITHER repository received the commit. Against the previous head the
+    # DECOY did: `self._git(corpus)` resolved the name again, the decoy's own
+    # root matched it, and the write landed in a repository the caller never
+    # named.
+    for where in (tmp_path / "moved-aside", repository):
+        assert _git(where, "rev-list", "--count", "HEAD") == "1", where
+        assert _git(where, "ls-tree", "-r", "--name-only", "HEAD") == "", where
