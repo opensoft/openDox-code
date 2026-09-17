@@ -477,11 +477,24 @@ jobs:
       #              drafts listing bounded in bytes as well as in rows): 223
       #              passed there at this commit.
       #  126 passed  at `build/3-5-runtime` `95b34ad9` — UNCHANGED, and that
-      #              is the entry: round THIRTEEN's one finding is a write
+      #              is the entry: round THIRTEEN's one THREAD is a write
       #              ordering, so its case is DB-backed and the hermetic
-      #              figure does not move. `pytest -q tests_runtime/` is 224
-      #              there (was 223). THE CURRENT FIGURES; the PR description
-      #              states them at this same commit.
+      #              figure did not move there. `pytest -q tests_runtime/` is
+      #              224 at that commit (was 223).
+      #  128 passed  at `build/3-5-runtime` `d9a6dd3a` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round thirteen's five SUPPRESSED comments:
+      #              the compose package's repository root held absolute (it
+      #              is a container mount target, and the application's own
+      #              default is relative), and the managed-database
+      #              prerequisite made to substitute nothing by hand — every
+      #              name through psql's `\getenv`, quoted by `%I`. Round
+      #              thirteen's other three are a docstring that promised a
+      #              snapshot READ COMMITTED does not give, a docstring that
+      #              promised a refresh `coalesce` does not do, and the
+      #              workflow/description figures, answered by measurement.
+      #              THE CURRENT FIGURE; the PR description states it at this
+      #              same commit, and `pytest -q tests_runtime/` is 227 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
