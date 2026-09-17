@@ -3093,3 +3093,118 @@ def test_a_branch_name_ending_in_non_ascii_whitespace_is_not_trimmed(
         "a branch this write invented by trimming the name it was given")
     listed = adapter.list_documents(_resolve(adapter, location))
     assert "n.md" in {document.key for document in listed}, listed
+
+
+def test_the_environment_sanitizer_strips_every_command_naming_variable(
+        tmp_path: Path) -> None:
+    """`GIT_PROXY_COMMAND` names a program and git executes it.
+
+    It is `core.gitProxy`'s environment half, honoured for a `git://` remote —
+    and the transport guard says nothing about it: `protocol.ext.allow=never`
+    refuses the `ext::` transport, and this is the `git://` one running an
+    ambient command instead (Copilot review of openDox-code#26, round 21). It
+    joins `GIT_EXTERNAL_DIFF` and `GIT_CONFIG_PARAMETERS`, which are on this
+    list for exactly the same reason.
+
+    The assertion is on the LIST as a rule rather than on one name: every
+    variable this module strips must be one git reads, and every variable that
+    names a COMMAND must be stripped.
+    """
+    for named in ("GIT_EXTERNAL_DIFF", "GIT_CONFIG_PARAMETERS",
+                  "GIT_PROXY_COMMAND"):
+        assert named in lga._GIT_ENVIRONMENT_OVERRIDES, named
+
+    # And it really is removed from what a child gets, through the same
+    # builder the bounded path uses.
+    reporter = tmp_path / "git"
+    reporter.write_text("#!/bin/sh\nenv\n", encoding="utf-8")
+    reporter.chmod(0o755)
+    seen = lga.GitRunner(tmp_path, str(reporter)).out_bounded(
+        "push", timeout=30).decode()
+    variables = {line.split("=", 1)[0] for line in seen.splitlines()
+                 if "=" in line}
+    assert "GIT_PROXY_COMMAND" not in variables, sorted(variables)
+    assert "PATH" in variables
+
+
+def test_a_refusal_raised_while_binding_takes_the_operations_own_kind(
+        adapter, tmp_path: Path) -> None:
+    """`_repository_root` says CORPUS_UNREADABLE, which `write_back` never declares.
+
+    Round 18 put the root re-check inside `_bound`, BEFORE the yield —
+    and `_write_back_bound`'s own remap of that kind is after it, so it is
+    never reached. A checkout whose `.git` is removed after `resolve` therefore
+    sent a caller branching on `err.refusal.kind` a kind this operation does
+    not promise: the interface gives `write_back` exactly two (Copilot review
+    of openDox-code#26, round 21).
+
+    MEASURED both ways on that shape:
+
+        previous head   corpus-unreadable      (not declared)
+        here            write-path-unreachable (declared), with the original
+                        kind kept in the detail
+    """
+    import shutil
+
+    location = _repository_at(tmp_path / "corpus", "corpus")
+    corpus = _resolve(adapter, location)
+    # A DIRECTORY THAT IS NO LONGER A REPOSITORY, in whichever shape this
+    # helper builds: a work tree's `.git`, or a bare repository's own files.
+    if (location / ".git").exists():
+        shutil.rmtree(location / ".git")
+    else:
+        for entry in ("HEAD", "objects", "refs", "config"):
+            target = location / entry
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+    assert location.is_dir()
+
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus, ca.DocumentId("corpus", "a.md"), b"x\n",
+                           actor="W", basis_revision=corpus.revision or "",
+                           reason="r")
+    assert caught.value.refusal.kind in {ca.CORPUS_READ_ONLY,
+                                         ca.WRITE_PATH_UNREACHABLE}, \
+        caught.value.refusal
+    # Nothing is hidden: the kind the probe itself used is in the detail.
+    assert ca.CORPUS_UNREADABLE in caught.value.refusal.detail
+
+    # And a READ, whose declared kinds include that one, is unchanged.
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.list_documents(corpus)
+    assert caught.value.refusal.kind in {ca.CORPUS_UNREADABLE,
+                                         ca.CORPUS_ABSENT}, caught.value.refusal
+
+
+def test_a_libpq_password_in_a_stored_remote_is_redacted() -> None:
+    """A remote is an arbitrary string, and the two rules read URLs.
+
+    `redact_remote_url` delegates to `redact_credentials`, whose two shapes are
+    userinfo and a query/fragment parameter. `host=db password=hunter2` is
+    neither, so the attach response, the map endpoints and the CLI returned it
+    verbatim (Copilot review of openDox-code#26, round 21).
+
+    Only the password field goes — `host=db` stays, for the same reason the
+    query form keeps its host: a destination an operator cannot locate is a
+    refusal that costs more than it protects.
+    """
+    for carried, gone in (
+            ("host=db password=hunter2", "hunter2"),
+            ("host=db password='two words' port=5432", "two words"),
+            ('host=db password="quoted here"', "quoted here"),
+            ("sslpassword=keypass host=db", "keypass"),
+    ):
+        redacted = lga.redact_remote_url(carried)
+        assert gone not in redacted, (carried, redacted)
+        assert "<redacted" in redacted, redacted
+    assert "host=db" in lga.redact_remote_url("host=db password=hunter2")
+
+    # NOT an over-match: an ordinary remote is untouched, and the two shapes
+    # that were already covered still answer as they did.
+    assert lga.redact_remote_url("https://host/repo.git") == \
+        "https://host/repo.git"
+    assert lga.redact_remote_url("postgresql://u:p@h/db") == "<redacted-url>"
+    assert lga.redact_remote_url("https://host/r.git?token=ghp_x") == \
+        "https://host/r.git?token=<redacted>"

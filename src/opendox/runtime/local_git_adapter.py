@@ -241,6 +241,13 @@ _GIT_ENVIRONMENT_OVERRIDES = frozenset({
     # exists to refuse (Copilot review of openDox-code#26, rounds 15 and 16).
     # MEASURED on git 2.43.0 and pinned by a case.
     "GIT_CONFIG_PARAMETERS",
+    # `GIT_PROXY_COMMAND` NAMES A PROGRAM TOO, and git executes it for a
+    # `git://` remote — the environment's half of `core.gitProxy`. The
+    # transport guard says nothing about it: `protocol.ext.allow=never` refuses
+    # the `ext::` transport, and this is the `git://` one running an ambient
+    # command instead (Copilot review of openDox-code#26, round 21). It joins
+    # the two other command-naming variables on this list.
+    "GIT_PROXY_COMMAND",
 })
 
 
@@ -736,6 +743,24 @@ def names_a_secret_parameter(text: str) -> bool:
                for match in _ANY_PARAMETER_ANCHORED.finditer(text))
 
 
+#: A LIBPQ KEYWORD/VALUE PASSWORD, in the forms libpq itself accepts. A remote
+#: is an arbitrary string, and a value such as `host=db password=hunter2` is
+#: neither a URL with userinfo nor a query parameter, so both halves of the
+#: rule above looked straight through it and the attach response, the map
+#: endpoints and the CLI returned it verbatim (Copilot review of
+#: openDox-code#26, round 21). libpq documents that a value containing spaces
+#: is single-quoted with `\'` and `\\` escaped inside; the closing quote is
+#: OPTIONAL here and neither quoted form crosses a newline, because a truncated
+#: value must redact MORE rather than less and must not swallow the next line
+#: of a diagnostic. `sslpassword` is named because `\b` before `password` does
+#: not reach it. `opendox.runtime.cli._DSN_SHAPED` spells the same rule for the
+#: CLI's own fallback, and
+#: `test_the_two_libpq_password_patterns_agree` keeps them in step.
+_LIBPQ_PASSWORD = re.compile(
+    r"(?i)\b(?:ssl)?password\s*=\s*"
+    r"""(?:'(?:[^'\\\n]|\\.)*'?|"(?:[^"\\\n]|\\.)*"?|\S+)""")
+
+
 def redact_credentials(text: str) -> str:
     """Replace anything shaped like a credential-bearing URL with a marker.
 
@@ -759,14 +784,20 @@ def redact_credentials(text: str) -> str:
     still say which host would not answer — the host is not the secret, and a
     push failure an operator cannot locate is a refusal that costs more than it
     protects.
+
+    THREE, SINCE ROUND 21: a libpq KEYWORD/VALUE password is neither, and a
+    remote is an arbitrary string — `host=db password=hunter2` was stored and
+    returned by the attach response, the map endpoints and the CLI with the
+    password in it. Only the password field goes; `host=db` stays, for the same
+    reason the query form keeps its host.
     """
     def _redact_value(match: re.Match[str]) -> str:
         if _SECRET_KEY.search(_decoded_parameter_name(match.group("name"))):
             return match.group("lead") + "<redacted>"
         return match.group(0)
 
-    return _ANY_PARAMETER.sub(
-        _redact_value, _CREDENTIAL_SHAPED.sub("<redacted-url>", text))
+    return _LIBPQ_PASSWORD.sub("<redacted>", _ANY_PARAMETER.sub(
+        _redact_value, _CREDENTIAL_SHAPED.sub("<redacted-url>", text)))
 
 
 def carries_a_control_character(value: str) -> bool:
@@ -1711,6 +1742,25 @@ class LocalGitCorpus:
                 kind, subject,
                 f"{corpus.location} could not be re-examined "
                 f"({exc.__class__.__name__})") from exc
+        except CorpusRefused as refused:
+            # AND A REFUSAL RAISED IN HERE TAKES THIS OPERATION'S KIND.
+            # `_repository_root` is `resolve`'s helper and says
+            # `CORPUS_UNREADABLE` — a kind `write_back` does not declare, the
+            # interface giving it exactly two — so removing a checkout's `.git`
+            # after `resolve` made the probe above refuse with a kind the
+            # operation never promised, and `_write_back_bound`'s own remap is
+            # AFTER the yield and never reached (Copilot review of
+            # openDox-code#26, round 21). The refusal is real and is still
+            # made; what changes is that it arrives in this operation's
+            # vocabulary, with the original kind kept in the detail so nothing
+            # is hidden from whoever reads it.
+            os.close(handle)
+            if refused.refusal.kind == kind:
+                raise
+            raise _refuse(
+                kind, subject,
+                f"{refused.refusal.detail} [{refused.refusal.kind}]"
+            ) from refused
         except BaseException:
             os.close(handle)
             raise

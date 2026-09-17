@@ -149,11 +149,15 @@ _DSN_SHAPED = re.compile(
     r"""(?:'(?:[^'\\\n]|\\.)*'?|"(?:[^"\\\n]|\\.)*"?|\S+)""")
 
 
-def _safe_message(exc: BaseException) -> str:
+def _safe_message(exc: BaseException, *caller_values: str | None) -> str:
     """An exception's text with every DSN- or credential-shaped run removed.
 
     Applied to EVERY operational message this CLI emits, rather than to the
     ones somebody remembered: the contract is that evidence is redacted.
+
+    THREE PASSES SINCE ROUND 21, and the first is not a pattern at all: a
+    value this CALL was given is removed by identity before any rule is asked,
+    because an identifier is not a shape a rule can recognise.
 
     TWO PASSES, BECAUSE A CREDENTIAL IS NOT ONLY A DSN. `_DSN_SHAPED` covers a
     connection string and a `scheme://user:secret@host` run; it says nothing
@@ -177,7 +181,21 @@ def _safe_message(exc: BaseException) -> str:
     # marker (Copilot review of openDox-code#26, round 15). The general rule
     # matches the whole authority, so it goes first and this only has to cover
     # what it leaves: a DSN with no userinfo at all.
-    return _DSN_SHAPED.sub("<redacted>", redact_credentials(str(exc)))
+    text = str(exc)
+    # AND ANY VALUE THIS CALL WAS GIVEN IS REMOVED BEFORE THE PATTERNS RUN.
+    # The patterns recognise URLs and libpq conninfo; a caller-controlled
+    # IDENTIFIER is neither, and the repository verbs hand one to a store whose
+    # `NotFoundError` echoes it — `project attach-remote --project-id
+    # 'user:secret@host/path'` printed `secret` through the generic handler,
+    # because that shape matches no rule here (Copilot review of
+    # openDox-code#26, round 21). This is the same technique the push refusal
+    # already uses for the destination it KNOWS: a value does not have to be
+    # recognised when it is known.
+    for value in caller_values:
+        if value and len(value) >= 2:
+            text = text.replace(repr(value), "<caller value>")
+            text = text.replace(value, "<caller value>")
+    return _DSN_SHAPED.sub("<redacted>", redact_credentials(text))
 
 
 def _emit(payload: dict[str, Any], *, ok: bool) -> int:
@@ -694,11 +712,12 @@ def cmd_create_repository(args: argparse.Namespace) -> int:
                         "initial_commit": created.initial_commit}
     except repository_act.RepositoryActRefused as exc:
         return _emit({"verb": "create-repository", "refusal": "repository",
-                      "message": _safe_message(exc)}, ok=False)
+                      "message": _safe_message(exc, args.project_id)},
+                     ok=False)
     except Exception as exc:  # noqa: BLE001 - reported as evidence, not a traceback
         return _emit({"verb": "create-repository",
                       "refusal": type(exc).__name__,
-                      "message": _safe_message(exc)}, ok=False)
+                      "message": _safe_message(exc, args.project_id)}, ok=False)
     return _emit(evidence, ok=True)
 
 
@@ -728,10 +747,11 @@ def cmd_attach_remote(args: argparse.Namespace) -> int:
                                 "push, not a migration"}
     except repository_act.RepositoryActRefused as exc:
         return _emit({"verb": "attach-remote", "refusal": "repository",
-                      "message": _safe_message(exc)}, ok=False)
+                      "message": _safe_message(exc, args.project_id)},
+                     ok=False)
     except Exception as exc:  # noqa: BLE001 - same
         return _emit({"verb": "attach-remote", "refusal": type(exc).__name__,
-                      "message": _safe_message(exc)}, ok=False)
+                      "message": _safe_message(exc, args.project_id)}, ok=False)
     return _emit(evidence, ok=True)
 
 
@@ -753,10 +773,11 @@ def cmd_push(args: argparse.Namespace) -> int:
                         "note": "a push, not a migration (RULING C3)"}
     except repository_act.RepositoryActRefused as exc:
         return _emit({"verb": "push", "refusal": "repository",
-                      "message": _safe_message(exc)}, ok=False)
+                      "message": _safe_message(exc, args.project_id)},
+                     ok=False)
     except Exception as exc:  # noqa: BLE001 - same
         return _emit({"verb": "push", "refusal": type(exc).__name__,
-                      "message": _safe_message(exc)}, ok=False)
+                      "message": _safe_message(exc, args.project_id)}, ok=False)
     return _emit(evidence, ok=True)
 
 

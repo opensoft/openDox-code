@@ -1697,3 +1697,181 @@ def test_the_acts_are_bound_to_the_repository_they_verified(
     assert configured.stdout.strip() != "https://example.invalid/r.git", (
         "the decoy that took the name was reconfigured by this act")
     assert str(created.location) in configured.stdout, configured.stdout
+
+
+# -- Copilot's twenty-first round on #26 --------------------------------------
+
+
+def test_a_push_does_not_run_the_destinations_hooks(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """The client's `core.hooksPath` does not reach the RECEIVING process.
+
+    `--receive-pack=git-receive-pack` pins the receiver's EXECUTABLE and says
+    nothing about the destination's `pre-receive`, `update` or `post-receive`.
+    For a local destination — which this act accepts by design — `git push`
+    forks that receiver in this process tree, and it reads the DESTINATION's
+    config and runs the destination's hooks here (Copilot review of
+    openDox-code#26, round 21).
+
+    MEASURED on git 2.43.0, three ways:
+
+        plain push                                     pre-receive RAN
+        `git -c core.hooksPath=/dev/null push`         pre-receive RAN
+        the option carried on `--receive-pack`         did NOT run, push landed
+
+    so the option has to travel as the RECEIVING command's own `-c`. The value
+    is still one this act chooses rather than one the repository names, which
+    is the property round 16 pinned and the case above still holds.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "governed.git"
+    _git(tmp_path, "init", "--bare", "--initial-branch=main", str(destination))
+    marker = tmp_path / "pre-receive-ran"
+    hook = destination / "hooks" / "pre-receive"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+    assert act.push_to_remote(store, project_id=project.id) == str(destination)
+    assert not marker.exists(), (
+        "the destination's `pre-receive` ran in this process during the push")
+    # And the push LANDED, so the guard did not buy the property with a
+    # failure.
+    assert subprocess.run(
+        ["git", "-C", str(destination), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{act.DEFAULT_BRANCH}"],
+        capture_output=True, env=_GIT_ENV).returncode == 0
+
+    # THE PREMISE, measured: this hook really does run on an ordinary push.
+    subprocess.run(
+        ["git", "-C", str(created.location), "push", act.REMOTE_NAME,
+         f"refs/heads/{act.DEFAULT_BRANCH}:refs/heads/probe"],
+        check=True, capture_output=True, env=_GIT_ENV)
+    assert marker.exists(), (
+        "this git does not run a destination `pre-receive` for a local push, "
+        "so the case above proves nothing on this platform")
+
+
+def test_a_repository_local_credential_helper_refuses_the_push(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """git runs a `!command` credential helper, and the repository can set one.
+
+    `GIT_TERMINAL_PROMPT=0` and an empty `GIT_ASKPASS` refuse a PROMPT; they
+    say nothing about a helper. These repositories are writable by this service
+    and by whoever can reach their directory, so a `credential.helper` in the
+    repository's OWN config was arbitrary code this runtime would execute
+    during a push (Copilot review of openDox-code#26, round 21).
+
+    MEASURED on git 2.43.0 against a local endpoint answering 401: a
+    repository-local `credential.helper = !f() { touch MARKER; echo
+    username=x; echo password=y; }; f` RAN during the push, and `-c
+    credential.helper=` stopped it.
+
+    REFUSED RATHER THAN OVERRIDDEN. `-c credential.helper=` resets the WHOLE
+    list including the OPERATOR's global helper — the configuration this
+    package deliberately preserves, and how a real destination authenticates at
+    all. The value that cannot be trusted is the one in the repository this
+    service writes to, so the check is scoped to that file.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "governed.git"
+    _git(tmp_path, "init", "--bare", "--initial-branch=main", str(destination))
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+
+    marker = tmp_path / "helper-ran"
+    _git(created.location, "config", "credential.helper",
+         f"!f() {{ touch {marker}; echo username=x; echo password=y; }}; f")
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "credential.helper" in str(caught.value), caught.value
+    assert not marker.exists()
+    # Nothing was pushed: the refusal is before the push, not after it.
+    assert subprocess.run(
+        ["git", "-C", str(destination), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{act.DEFAULT_BRANCH}"],
+        capture_output=True, env=_GIT_ENV).returncode != 0
+
+    # AND THE OPERATOR'S OWN CONFIG IS NOT WHAT IS REFUSED: unset the local
+    # one and the same push is made.
+    _git(created.location, "config", "--unset-all", "credential.helper")
+    assert act.push_to_remote(store, project_id=project.id) == str(destination)
+
+
+def test_a_push_is_refused_when_it_names_a_repository_this_service_owns(
+        store, project, project_repository_root: Path) -> None:
+    """Nothing tied the destination to the project.
+
+    `git push` to a local destination runs `git-receive-pack` against it with
+    this service's own credentials, and this service owns every repository
+    under `OPENDOX_PROJECT_REPOSITORY_ROOT` — so an owner could point `origin`
+    at ANOTHER PROJECT'S repository and have the runtime write into it (Copilot
+    review of openDox-code#26, round 21). The root is `location.parent` by
+    construction, so this needs no new setting to know what it owns.
+
+    Registered rather than implied: outside that root a local path is still
+    accepted, because RULING C3 makes the move a push to a governed factory and
+    an allowlist of governed destinations is a contract this act does not hold.
+    What is closed is the one destination this service can reach with no
+    operator credential at all: its own.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    sibling = Path(project_repository_root) / "another-project"
+    _git(Path(project_repository_root), "init", "--bare",
+         "--initial-branch=main", str(sibling))
+
+    for aimed_at in (str(sibling), str(created.location),
+                     str(project_repository_root),
+                     "file://" + str(sibling)):
+        act.attach_remote(store, project_id=project.id, remote_url=aimed_at)
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.push_to_remote(store, project_id=project.id)
+        assert "this service owns" in str(caught.value), (aimed_at, caught.value)
+    # And the sibling is untouched.
+    assert subprocess.run(
+        ["git", "-C", str(sibling), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{act.DEFAULT_BRANCH}"],
+        capture_output=True, env=_GIT_ENV).returncode != 0
+
+
+def test_a_project_id_that_is_not_one_path_component_is_refused(
+        tmp_path: Path) -> None:
+    """`/` is not the only separator a `Path` join honours.
+
+    This module carries a Windows pathname fallback, so it says it is meant to
+    run there — and on Windows `PureWindowsPath("C:/srv/projects") /
+    "C:\\\\outside"` is `C:\\\\outside`: the root is discarded entirely, and
+    `"..\\\\outside"` walks out of it (Copilot review of openDox-code#26, round
+    21). MEASURED with `PureWindowsPath`, which is why the check asks that
+    flavour on every host: the answer must not depend on where it runs.
+    """
+    for sent in ("..\\outside", "C:\\outside", "a\\b", "\\\\server\\share"):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.repository_location(tmp_path, sent)
+        assert "single path component" in str(caught.value), (sent, caught.value)
+        assert sent not in str(caught.value)
+    # NOT an over-refusal.
+    assert act.repository_location("/srv/projects", "9f2c-a-real-id") == \
+        Path("/srv/projects/9f2c-a-real-id")
+
+
+def test_a_repository_root_holding_a_nul_is_a_refusal_not_a_500(
+) -> None:
+    """`Path.resolve()` raises `ValueError`, which this handler did not catch.
+
+    The same guard the project id already had, on the OTHER half of the join: a
+    malformed `OPENDOX_PROJECT_REPOSITORY_ROOT` reached the API as a 500 in
+    place of the named refusal this act promises for every reason it will not
+    create a repository (Copilot review of openDox-code#26, round 21).
+    MEASURED on python 3.12: `Path("/tmp/root\\x00x").expanduser().resolve()`
+    raises `ValueError("embedded null byte")`.
+    """
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.repository_location("/tmp/root\x00x", "a-project")
+    assert "repository root could not be resolved" in str(caught.value)
+    assert "ValueError" in str(caught.value)

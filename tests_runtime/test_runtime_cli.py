@@ -1026,3 +1026,60 @@ def test_a_libpq_password_holding_a_space_is_redacted_whole() -> None:
     assert lines.endswith("\nhost=db is up"), lines
     assert cli._safe_message(RuntimeError("passwordless=fine host=db")) == \
         "passwordless=fine host=db"
+
+
+def test_a_caller_supplied_identifier_is_removed_from_evidence_by_identity(
+) -> None:
+    """A pattern cannot recognise an identifier, and the store echoes one.
+
+    `_safe_message` knows two shapes, a URL and a libpq conninfo. A project id
+    is neither — and `CoordinationStore.repository_for_project` puts the id it
+    was given into `NotFoundError`, so `project attach-remote --project-id
+    'user:secret@host/path'` printed `secret` through the generic handler
+    (Copilot review of openDox-code#26, round 21).
+
+    The repair is not a wider pattern. The CLI KNOWS what it passed, so it
+    removes that value by identity before any rule is asked — the same
+    technique the push refusal already uses for the destination it knows.
+    """
+    from opendox.runtime.identity import NotFoundError
+
+    sent = "user:secret@host/path"
+    echoed = NotFoundError(
+        f"no project_repositories row (project_id={sent!r})")
+
+    # Against the previous head this is what the evidence carried.
+    assert "secret" in cli._safe_message(echoed)
+    # Given the value, it goes — in the repr form the store used and plain.
+    removed = cli._safe_message(echoed, sent)
+    assert sent not in removed and "secret" not in removed, removed
+    assert "<caller value>" in removed, removed
+
+    # The patterns still run, and a short or empty value is not a wildcard
+    # that blanks the message.
+    assert "<redacted-url>" in cli._safe_message(
+        RuntimeError("could not reach postgresql://u:p@h/db"), "ab")
+    assert cli._safe_message(RuntimeError("a plain failure"), None, "", "x") \
+        == "a plain failure"
+
+
+def test_every_repository_verb_hands_the_id_it_was_given_to_the_redactor(
+) -> None:
+    """One boundary, and it is asserted rather than remembered.
+
+    The three repository verbs are the ones that take a caller-controlled
+    identifier and hand it to a store; each of them has two handlers, the named
+    refusal and the generic one. All six must pass that identifier, or the one
+    that does not is the leak (Copilot review of openDox-code#26, round 21).
+    """
+    import inspect
+
+    for verb in (cli.cmd_create_repository, cli.cmd_attach_remote,
+                 cli.cmd_push):
+        source = inspect.getsource(verb)
+        handlers = source.count("_safe_message(exc")
+        guarded = source.count("_safe_message(exc, args.project_id)")
+        assert handlers == guarded, (
+            f"{verb.__name__} formats {handlers - guarded} message(s) without "
+            "the identifier it was given")
+        assert guarded >= 2, (verb.__name__, guarded)

@@ -68,7 +68,7 @@ import urllib.parse
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from opendox.corpus_adapter import CorpusRef
@@ -371,12 +371,26 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
     # even where that one example is not. A path-component rule has nothing to
     # say that needs the value: it says WHICH rule was broken, and the caller
     # already holds what it sent.
+    #
+    # AND IT IS A SINGLE NATIVE PATH COMPONENT, judged by the STRICTEST
+    # flavour rather than by this host's. `/` is not the only separator a
+    # `Path` join honours: on Windows `PureWindowsPath("C:/srv/projects") /
+    # "C:\\outside"` is `C:\\outside` — the root is discarded entirely — and
+    # `"..\\outside"` walks out of it, while this module's own fallback says
+    # the package is meant to run there (Copilot review of openDox-code#26,
+    # round 21). Asking `PureWindowsPath` on every host means the answer does
+    # not depend on where the check happens to run.
+    windows = PureWindowsPath(project_id) if project_id else None
     reason = ("is empty" if not project_id
               else "holds a '/'" if "/" in project_id
               else "holds a NUL" if "\0" in project_id
-              else "is '.' or '..'")
-    if (not project_id or "/" in project_id or "\0" in project_id
-            or project_id in {".", ".."}):
+              else "is '.' or '..'" if project_id in {".", ".."}
+              else "is not a single path component"
+              if (windows is not None
+                  and (windows.drive or windows.is_absolute()
+                       or len(windows.parts) != 1))
+              else None)
+    if reason is not None:
         raise RepositoryActRefused(
             f"that project id {reason}, so it is not a usable project id for "
             "a directory name (the value is not echoed: it is caller-"
@@ -403,9 +417,17 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
     # through, so an `except OSError` would have missed the very case this
     # translation is for. (The same measurement corrected the adapter's
     # `resolve`, which had the identical handler.)
+    #
+    # AND `ValueError`, for the same reason the project id is checked for a NUL
+    # above: `Path.resolve()` raises it — NOT `OSError` — for an embedded NUL
+    # in the ROOT, so a malformed `OPENDOX_PROJECT_REPOSITORY_ROOT` reached the
+    # API as a 500 in place of the refusal this act promises (Copilot review of
+    # openDox-code#26, round 21). MEASURED on python 3.12:
+    # `Path("/tmp/root\x00x").expanduser().resolve()` raises
+    # `ValueError("embedded null byte")`.
     try:
         return (Path(root).expanduser().resolve() / project_id)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise RepositoryActRefused(
             f"the configured repository root could not be resolved "
             f"({type(exc).__name__}); set OPENDOX_PROJECT_REPOSITORY_ROOT to a "
@@ -1168,6 +1190,113 @@ def push_to_remote(store: Any, *, project_id: str,
         return _push_to_remote_with(git, row)
 
 
+#: Config keys whose value git EXECUTES, and which a repository this service
+#: owns must therefore not set in its OWN config file. The operator's global
+#: and system git keep them — that is why `GIT_CONFIG_GLOBAL`/`_SYSTEM` are
+#: preserved rather than stripped — so the rule is about SCOPE and not about
+#: the feature.
+_EXECUTED_LOCAL_KEYS = ("credential.helper", "core.gitProxy", "core.sshCommand",
+                        "uploadpack.packObjectsHook", "core.fsmonitor",
+                        "diff.external")
+
+
+def _refuse_repository_local_command_config(git: GitRunner, location: Any) -> None:
+    """Refuse a push from a repository whose OWN config names a program.
+
+    `credential.helper` is the one the review named, and it is the sharpest:
+    git runs a `!command` helper when an HTTPS push is asked for credentials,
+    and the terminal and askpass guards say nothing about helpers. MEASURED on
+    git 2.43.0 against a local endpoint answering 401 — a repository-local
+    `credential.helper = !f() { touch MARKER; …; }; f` RAN during the push, and
+    `-c credential.helper=` stopped it (Copilot review of openDox-code#26,
+    round 21).
+
+    REFUSED RATHER THAN OVERRIDDEN, and that is the whole point. `-c
+    credential.helper=` resets the WHOLE list, including the operator's global
+    helper — the configuration this package deliberately preserves, which is
+    how a real destination is authenticated at all. The value that must not be
+    trusted is the one in the repository this service WRITES TO, so the check
+    is scoped to that file: the operator keeps their helper, and a repository
+    that grew one is refused by name instead of being pushed with it.
+
+    The other keys are the same rule's other instances, checked in the same
+    pass because a list with one entry is a list somebody forgets to extend.
+    """
+    for key in _EXECUTED_LOCAL_KEYS:
+        for scope in ("--local", "--worktree"):
+            probe = git.run("config", scope, "--get-all", key)
+            if probe.returncode == 0 and probe.stdout.strip():
+                raise RepositoryActRefused(
+                    f"the repository at {location} sets {key!r} in its own "
+                    f"git config ({scope.lstrip('-')} scope). git runs that "
+                    "value as a program, and this service writes to this "
+                    "repository, so it is refused rather than pushed with. "
+                    "Remove it with `git config --unset-all " + key + "`; an "
+                    "operator's own helper belongs in the global or system "
+                    "config, which this runtime keeps")
+
+
+def _destination_as_a_local_path(destination: str) -> Path | None:
+    """The filesystem path a destination names, or `None` if it names a host.
+
+    git's own rule, narrowed to what this act has to decide: a `file://` URL is
+    a path, a value with any other `scheme://` is not, and an `scp`-style
+    `user@host:path` is not. Everything else git treats as a local path, which
+    is how this act's own destinations are written.
+    """
+    if destination.startswith("file://"):
+        return Path(urllib.parse.urlsplit(destination).path or "/")
+    if "://" in destination:
+        return None
+    head = destination.split("/", 1)[0]
+    if ":" in head:                       # `user@host:path`, or `host:path`
+        return None
+    return Path(destination)
+
+
+def _refuse_a_destination_this_service_owns(destinations: tuple[str, ...],
+                                            location: Any) -> None:
+    """Refuse a push aimed INSIDE this service's own repository root.
+
+    The act accepts a local destination by design — a governed factory is a
+    repository, and RULING C3 makes the move a push — and `git push` to one
+    runs `git-receive-pack` against it with this service's own credentials.
+    Nothing tied the destination to the project, so an owner could point
+    `origin` at ANOTHER PROJECT'S repository under the same root and have this
+    runtime write into it (Copilot review of openDox-code#26, round 21).
+
+    The root is `location.parent` by construction — `repository_location` is
+    `<root>/<project id>` — so this needs no new setting to know what it owns.
+    A destination that resolves to this project's own repository, to a sibling,
+    or to the root itself is refused by name.
+
+    WHAT THIS DOES NOT DO, registered rather than implied: there is no
+    allowlist tying a destination to a governed factory. Outside this root a
+    local path is still accepted, because that is what the ruling asks for and
+    an allowlist is a contract with an owner — the governed-destination
+    registry — that this act does not have. What is closed is the one
+    destination this service can reach WITHOUT any credential of the operator's
+    at all: its own.
+    """
+    owned = Path(location).parent
+    for destination in destinations:
+        path = _destination_as_a_local_path(destination)
+        if path is None:
+            continue
+        try:
+            resolved = path.expanduser().resolve()
+            root = owned.resolve()
+            here = Path(location).resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue                      # unreadable: other guards answer
+        if resolved == here or resolved == root or root in resolved.parents:
+            raise RepositoryActRefused(
+                "this project's remote names a path inside the repository "
+                "root this service owns, which is this project's own "
+                "repository or another project's. A push moves the project "
+                "into a GOVERNED destination; re-attach a remote that is one")
+
+
 def _push_to_remote_with(git: GitRunner, row: Any) -> str:
     """`push_to_remote`'s git half, on a runner bound to an open directory."""
 
@@ -1191,6 +1320,7 @@ def _push_to_remote_with(git: GitRunner, row: Any) -> str:
     # refusal this act promises for a missing git runtime (Copilot review of
     # openDox-code#26, round 6).
     try:
+        _refuse_repository_local_command_config(git, row.location)
         configured = _configured_remote_url(git, REMOTE_NAME)
         destinations = _configured_remote_url(git, REMOTE_NAME, for_push=True)
         branch = _pushable_branch(git, str(row.location))
@@ -1226,6 +1356,12 @@ def _push_to_remote_with(git: GitRunner, row: Any) -> str:
                 f"{redact_remote_url(row.remote_url)}. Nothing is pushed: the "
                 "destination of record and the destination git would use are "
                 "not the same place. Re-attach the remote to settle it.")
+
+    # AND IT IS NOT A PLACE THIS SERVICE OWNS. Checked after the two agree, so
+    # the value judged is the one git would use and the one the map records.
+    _refuse_a_destination_this_service_owns(
+        tuple(url for url in (configured, effective, row.remote_url) if url),
+        row.location)
 
     # THE BRANCH IS THE REPOSITORY'S OWN AND IS NOT A PARAMETER (resolved in
     # the handler above). It was a caller-supplied override defaulting to
@@ -1263,8 +1399,23 @@ def _push_to_remote_with(git: GitRunner, row: Any) -> str:
         # defect as the `ext::` transport and the `pre-push` hook and was
         # covered by neither (Copilot review of openDox-code#26, round 16).
         # `--receive-pack` on the command line outranks the config value.
+        # AND THE RECEIVER RUNS WITH THE DESTINATION'S HOOKS OFF. For a LOCAL
+        # destination — which this act accepts by design, a governed factory
+        # being a repository — `git push` forks `git-receive-pack` IN THIS
+        # PROCESS TREE, and that process reads the DESTINATION's config and
+        # runs its `pre-receive`, `update` and `post-receive` hooks. The
+        # client's own `core.hooksPath` does not reach it: MEASURED on git
+        # 2.43.0, a planted `pre-receive` RAN under `git -c
+        # core.hooksPath=/dev/null push`, and did NOT run when the option was
+        # carried on `--receive-pack` instead — where it becomes the receiving
+        # command's own `-c` — with the push still landing (Copilot review of
+        # openDox-code#26, round 21). The value is still one THIS act chooses
+        # rather than one the repository names, which is the property round 16
+        # pinned.
         git.out_bounded("-c", "protocol.ext.allow=never",
-                        "push", "--receive-pack=git-receive-pack",
+                        "push",
+                        "--receive-pack=git -c core.hooksPath=" + os.devnull
+                        + " receive-pack",
                         REMOTE_NAME,
                         f"refs/heads/{branch}:refs/heads/{branch}",
                         timeout=PUSH_TIMEOUT_SECONDS)
