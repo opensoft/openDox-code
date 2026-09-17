@@ -787,6 +787,18 @@ jobs:
       #              states it at this same commit, `pytest -q
       #              tests_runtime/` is 412 and the neutral conformance
       #              corpus is 17 of 17.
+      #  250 passed  at `build/3-6-repository-act` `9858d6a5` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — UNCHANGED, and the same six
+      #              modules: this head carries #25's round SIXTEEN by
+      #              merge, whose two findings — the whole configured
+      #              `search_path` walked rather than only its head, and
+      #              the JWKS cooldown's claim and refresh made ONE lock
+      #              acquisition — are both measured in the DB-backed job.
+      #              THE CURRENT FIGURE for this branch; the PR description
+      #              states it at this same commit, `pytest -q
+      #              tests_runtime/` is 413 and the neutral conformance
+      #              corpus is 17 of 17.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
