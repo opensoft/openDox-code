@@ -51,6 +51,27 @@ def _git(root: Path, *args: str) -> str:
                           text=True, check=True, env=_GIT_ENV).stdout.strip()
 
 
+#: THE PROCESS'S OWN ENVIRONMENT, and not only `_git`'s. The mapping above is
+#: passed to the `subprocess.run` in `_git`, which is this file's DIRECT use of
+#: git — but the code under test runs git through `GitRunner`, which inherits
+#: `os.environ` and builds its own environment from it. So the hermetic claim
+#: was true of the assertions and false of the act they assert about: a
+#: developer's global `url.<base>.insteadOf`, `init.templateDir` or
+#: `protocol.*.allow` still reached every repository this suite creates,
+#: configures and pushes (Copilot review of openDox-code#26, round 14,
+#: suppressed). `monkeypatch.setenv` puts the same settings where the runner
+#: will find them, and `GitRunner`'s sanitizer keeps them: it strips the
+#: repository-SELECTING variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG`…)
+#: and never `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, which are the two that
+#: make a workstation and a runner see one git.
+@pytest.fixture(autouse=True)
+def _hermetic_git_for_the_whole_process(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in _GIT_ENV.items():
+        if name.startswith("GIT_"):
+            monkeypatch.setenv(name, value)
+
+
 @pytest.fixture()
 def owner(store) -> identity.User:
     return store.upsert_user(issuer="https://broker.test/realms/opendox",
@@ -1492,3 +1513,76 @@ def test_two_push_destinations_are_refused_by_COUNT_and_not_by_a_delimiter(
         act.push_to_remote(store, project_id=project.id)
     assert "2 destinations" in str(caught.value), caught.value
     assert str(first) in str(caught.value) and str(second) in str(caught.value)
+
+
+# -- Copilot's fourteenth round on #26 ---------------------------------------
+
+
+def test_an_already_mapped_project_is_told_so_whatever_the_root_is_doing(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """The map is authoritative, and the ORDER is what makes that true.
+
+    `repository_location` ran before the row was asked for, so a repeat create
+    for an already-mapped project answered "the configured repository root
+    could not be resolved" on a host whose `OPENDOX_PROJECT_REPOSITORY_ROOT`
+    had since become unreadable and `ConflictError` on a host where it had not:
+    the same act giving two answers about one durable fact (Copilot review of
+    openDox-code#26, round 14). It is the `git_available` finding one step
+    further up, and it gets the same fix.
+    """
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    # A root nothing can resolve: a symlink pointing at itself. MEASURED on
+    # python 3.12 — `Path.resolve()` raises `RuntimeError`, not `OSError`.
+    broken = tmp_path / "loop"
+    broken.symlink_to(broken)
+    with pytest.raises(RuntimeError):
+        broken.resolve()
+
+    with pytest.raises(identity.ConflictError) as caught:
+        act.create_repository(store, project_id=project.id, root=broken,
+                              actor=ACTOR)
+    assert project.id in str(caught.value)
+
+
+def test_a_mapped_location_inside_another_repository_is_refused_by_the_acts(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`git -C` WALKS UP, and these are the acts that reconfigure and push.
+
+    `_local_git_row` verified only the adapter LABEL, so a row whose directory
+    had been removed — or written by hand as `checkout/subdir` — let
+    `attach_remote` set `remote.origin.url` on the ENCLOSING checkout and
+    `push_to_remote` push that checkout's branch to this project's remote
+    (Copilot review of openDox-code#26, round 14). `LocalGitCorpus.resolve`
+    already refuses exactly this shape (RULED 5714365086 Q-F3); the acts now
+    ask the same question.
+    """
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    enclosing = tmp_path / "enclosing"
+    enclosing.mkdir()
+    _git(enclosing, "init", "--initial-branch=main", ".")
+    (enclosing / "a.md").write_text("a\n", encoding="utf-8")
+    _git(enclosing, "add", "a.md")
+    _git(enclosing, "commit", "-m", "first")
+    inside = enclosing / "sub"
+    inside.mkdir()
+    # The legacy row this finding is about, written the way a legacy row is.
+    store._conn.execute(
+        "update project_repositories set location = %s where project_id = %s",
+        (str(inside), project.id))
+
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.attach_remote(store, project_id=project.id,
+                          remote_url="https://example.invalid/r.git")
+    assert "is INSIDE" in str(caught.value)
+    assert str(enclosing.resolve()) in str(caught.value)
+    # AND THE ENCLOSING REPOSITORY WAS NOT RECONFIGURED, which is the harm.
+    configured = subprocess.run(
+        ["git", "-C", str(enclosing), "config", "--get-regexp", "^remote\\."],
+        capture_output=True, text=True, env=_GIT_ENV)
+    assert configured.returncode == 1, configured.stdout
+    assert configured.stdout == ""
+
+    with pytest.raises(act.RepositoryActRefused):
+        act.push_to_remote(store, project_id=project.id)

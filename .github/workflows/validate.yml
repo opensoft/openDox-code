@@ -334,7 +334,7 @@ jobs:
       # `chore/retire-intent-feed-suites` (#24), whose only hunk in this file
       # is inside that comment block.
       #
-      # WHY THE RUNTIME TESTS ARE SPLIT IN TWO. The five modules named here are
+      # WHY THE RUNTIME TESTS ARE SPLIT IN TWO. The six modules named here are
       # HERMETIC: they import the standard library, `PyYAML` (this package's
       # own base dependency) and the stdlib-only half of `opendox.runtime`, and
       # they read files. They therefore run under THIS job's existing

@@ -673,7 +673,7 @@ def cmd_attach_remote(args: argparse.Namespace) -> int:
     """RULING C3: "a remote can be attached later"."""
     from opendox.runtime import repository_act
     from opendox.runtime.identity import CoordinationStore
-    from opendox.runtime.local_git_adapter import redact_credentials
+    from opendox.runtime.local_git_adapter import redact_remote_url
 
     settings, database = _store_and_settings(args)
     if database is None:
@@ -690,7 +690,7 @@ def cmd_attach_remote(args: argparse.Namespace) -> int:
             # redacted, not that it is redacted where we remembered.
             evidence = {"verb": "attach-remote",
                         "project_id": args.project_id,
-                        "remote_url": redact_credentials(row.remote_url),
+                        "remote_url": redact_remote_url(row.remote_url),
                         "note": "no local content changed; the move is a "
                                 "push, not a migration"}
     except repository_act.RepositoryActRefused as exc:
@@ -706,7 +706,7 @@ def cmd_push(args: argparse.Namespace) -> int:
     """Move the project into a governed factory. RULING C3: this is a PUSH."""
     from opendox.runtime import repository_act
     from opendox.runtime.identity import CoordinationStore
-    from opendox.runtime.local_git_adapter import redact_credentials
+    from opendox.runtime.local_git_adapter import redact_remote_url
 
     settings, database = _store_and_settings(args)
     if database is None:
@@ -716,7 +716,7 @@ def cmd_push(args: argparse.Namespace) -> int:
             remote_url = repository_act.push_to_remote(
                 CoordinationStore(conn), project_id=args.project_id)
             evidence = {"verb": "push", "project_id": args.project_id,
-                        "pushed_to": redact_credentials(remote_url),
+                        "pushed_to": redact_remote_url(remote_url),
                         "note": "a push, not a migration (RULING C3)"}
     except repository_act.RepositoryActRefused as exc:
         return _emit({"verb": "push", "refusal": "repository",

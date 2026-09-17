@@ -731,10 +731,10 @@ def push_project_repository(project_id: str, store: StoreDep,
     # exactly that), so a SUCCESSFUL push of such a row was the one path that
     # handed its embedded credential back verbatim while the CLI and every
     # failure path redacted (Copilot review of openDox-code#26).
-    from opendox.runtime.local_git_adapter import redact_credentials
+    from opendox.runtime.local_git_adapter import redact_remote_url
 
     return {"project_id": project_id,
-            "pushed_to": redact_credentials(remote_url),
+            "pushed_to": redact_remote_url(remote_url),
             "note": "a push, not a migration (RULING C3)"}
 
 
@@ -954,12 +954,12 @@ def _repository_json(r: identity.ProjectRepository) -> dict[str, Any]:
     in it comes back unchanged, so the column stays readable for what it is
     for.
     """
-    from opendox.runtime.local_git_adapter import redact_credentials
+    from opendox.runtime.local_git_adapter import redact_remote_url
 
     return {"id": r.id, "project_id": r.project_id, "adapter": r.adapter,
             "location": r.location,
             "remote_url": (None if r.remote_url is None
-                           else redact_credentials(r.remote_url)),
+                           else redact_remote_url(r.remote_url)),
             "created_at": _iso(r.created_at)}
 
 

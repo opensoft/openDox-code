@@ -86,8 +86,10 @@ import os
 import re
 import shutil
 import subprocess
+import unicodedata
 import urllib.parse
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -159,6 +161,34 @@ _SAFE_ACTOR = re.compile(r"[^A-Za-z0-9._-]+")
 
 def _refuse(kind: str, subject: str, detail: str) -> CorpusRefused:
     return CorpusRefused(Refusal(kind=kind, subject=subject, detail=detail))
+
+
+#: Every boundary `str.splitlines()` splits on, as one pattern: the three
+#: ordinary endings plus the vertical tab, form feed, the three ASCII
+#: separators, NEL and the two unicode separators. Written out because
+#: `_leading_lines` must yield exactly what `splitlines` would, and a smaller
+#: set would silently reclassify a document that uses one of them.
+_LINE_BOUNDARY = re.compile("\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
+
+
+def _leading_lines(text: str, limit: int) -> Iterator[str]:
+    """`text.splitlines()[:limit]`, WITHOUT building the list of every line.
+
+    The slice is the point: a bounded header scan that allocates the whole
+    document first is not bounded. `test_the_bounded_line_scan_is_splitlines_
+    exactly` holds this to `str.splitlines` over every shape that distinguishes
+    them — trailing terminator, empty text, consecutive terminators, `\r\n`
+    against `\r` then `\n`, and each exotic boundary on its own.
+    """
+    start = 0
+    for _ in range(limit):
+        boundary = _LINE_BOUNDARY.search(text, start)
+        if boundary is None:
+            if start < len(text):
+                yield text[start:]
+            return
+        yield text[start:boundary.start()]
+        start = boundary.end()
 
 
 #: Environment variables that SELECT A REPOSITORY or inject configuration, and
@@ -481,6 +511,54 @@ def redact_credentials(text: str) -> str:
         _redact_value, _CREDENTIAL_SHAPED.sub("<redacted-url>", text))
 
 
+def carries_a_control_character(value: str) -> bool:
+    """A C0/C1 control, a unicode FORMAT character, or whitespace but a space.
+
+    One predicate for the two halves of one rule.
+    `repository_act.refuse_command_executing_remote` REFUSES a new remote that
+    answers this — a newline or a `\r` splits a value across what an operator
+    reads as two lines, and the bidirectional overrides (category `Cf`) reorder
+    a URL on screen without changing it — and `redact_remote_url` below refuses
+    to PRINT a legacy one that does. A plain space stays legal: a local path may
+    contain one, and the credential rule's own userinfo class admits it.
+    """
+    return any(character != " "
+               and (unicodedata.category(character) in {"Cc", "Cf"}
+                    or character.isspace())
+               for character in value)
+
+
+def redact_remote_url(url: str) -> str:
+    """`redact_credentials` for a value that is ONE URL rather than a diagnostic.
+
+    `_CREDENTIAL_SHAPED`'s userinfo class EXCLUDES A NEWLINE, deliberately: the
+    pattern is applied to git's stderr and to exception text, where a
+    `scheme://…` on one line and an unrelated `user@host` three lines later
+    would otherwise be joined into one match and both lines of evidence
+    destroyed. The cost is that a LEGACY row holding
+    `https://user:secret\n@host/repo` — written before
+    `refuse_credential_bearing_remote` existed — was returned unredacted by the
+    map endpoints, the CLI and push refusals (Copilot review of
+    openDox-code#26, round 14).
+
+    Widening the class is the wrong repair, and this is why it is written down
+    rather than tried: the two cases are not distinguishable by pattern (an
+    unrelated `@` on a later line is inside the same `/`-free run as the URL
+    above it), so the pattern would trade a rare leak for a routine loss of
+    diagnostics.
+
+    The DISTINCTION IS THE CALLER'S, and it is decisive: these call sites pass
+    a stored `remote_url` — one value, not a page of text — and a stored remote
+    may not contain a control character at all, because
+    `refuse_command_executing_remote` refuses one. A value that carries one is
+    therefore legacy and cannot be shown in part, so it is replaced WHOLE,
+    which is what the userinfo form already gets from `redact_credentials`.
+    """
+    if carries_a_control_character(url):
+        return "<redacted-url>"
+    return redact_credentials(url)
+
+
 class GitCommandFailed(Exception):
     """An internal signal. Never escapes: every caller converts it to a Refusal.
 
@@ -600,7 +678,6 @@ class LocalGitCorpus:
 
     def resolve(self, ref: CorpusRef) -> ResolvedCorpus:
         """Which checkout, which revision, which scopes, which write path."""
-        location = Path(ref.location).expanduser()
         # THE FILESYSTEM PROBES ARE TRANSLATED TOO. `exists()`, `is_dir()` and
         # `resolve()` all raise `PermissionError` for a path whose parent is
         # present and not searchable, and `resolve()` can raise `OSError` for a
@@ -616,6 +693,14 @@ class LocalGitCorpus:
         # describes did not catch the example it names. Found by writing the
         # test for the sibling fix in `repository_act.repository_location`.
         try:
+            # `expanduser()` IS INSIDE THE TRANSLATION, not above it. MEASURED
+            # on python 3.12.3: `Path("~nosuchuser12345/x").expanduser()`
+            # raises `RuntimeError: Could not determine home directory.` — and
+            # `ref.location` is a caller's string. That one construction above
+            # the `try` was the last way a caller's location could still reach
+            # the API as a 500 instead of this function's refusal (Copilot
+            # review of openDox-code#26, round 14, suppressed).
+            location = Path(ref.location).expanduser()
             if not location.exists():
                 raise _refuse(CORPUS_ABSENT, ref.location,
                               "no such path; a plain local git repository is "
@@ -712,6 +797,31 @@ class LocalGitCorpus:
         try:
             git_dir = Path(git.out("rev-parse", "--absolute-git-dir")
                            .decode().strip())
+            # AND THE SHARED HALF OF IT, WHICH IS WHERE TWO OF THE THREE LIVE.
+            # In a LINKED WORKTREE `--absolute-git-dir` is
+            # `<main>/.git/worktrees/<name>`, which holds no `objects/` and no
+            # `refs/` at all — those belong to the COMMON directory, and
+            # `os.access` on a path that does not exist is `False`, so every
+            # linked worktree resolved read-only however writable it was
+            # (Copilot review of openDox-code#26, round 13, suppressed).
+            # Measured on git 2.43.0, `git worktree add ../wt -b side`:
+            #
+            #     --absolute-git-dir             <main>/.git/worktrees/wt
+            #     --path-format=absolute
+            #                 --git-common-dir   <main>/.git
+            #     objects/ under the git dir     ABSENT
+            #     objects/ under the common dir  present
+            #     refs/heads/ under the common   present
+            #     index under the git dir        present
+            #
+            # For an ordinary checkout and for the BARE repository this act
+            # creates the two answers are the same directory, so this is the
+            # same probe there. `--path-format=absolute` is required: on its
+            # own `--git-common-dir` answers the relative `.git`, which would
+            # then be probed against THIS PROCESS's working directory.
+            common_dir = Path(
+                git.out("rev-parse", "--path-format=absolute",
+                        "--git-common-dir").decode().strip())
             # THE PLACES A WRITE ACTUALLY TOUCHES, not the directory that
             # contains them. `write_back` hashes an object (`objects/`), writes
             # a temporary index (the git dir itself) and moves a ref
@@ -736,10 +846,13 @@ class LocalGitCorpus:
             # directory with no SEARCH permission, in which git can create
             # nothing at all (round 12): both bits are what "a write can land
             # here" means for a directory.
-            served = self._writable_ref_home(git, git_dir, str(location))
+            # The git dir stays in the list on its own account: `write_back`
+            # writes its TEMPORARY INDEX there, and a worktree's index is its
+            # own rather than the common directory's.
+            served = self._writable_ref_home(git, common_dir, str(location))
             reachable = all(
                 os.access(path, os.W_OK | os.X_OK)
-                for path in (git_dir, git_dir / "objects", served))
+                for path in (git_dir, common_dir / "objects", served))
         except (GitCommandFailed, OSError, CorpusRefused):
             reachable = False
 
@@ -928,10 +1041,18 @@ class LocalGitCorpus:
         BOUNDED: at most `MAX_HEADER_LINES` lines are examined and the block
         ends at the first blank line, so a document with no header costs one
         read and a few string operations rather than a scan of its whole body.
+
+        BOUNDED IN THE SCAN AS WELL AS IN THE LOOP. This read
+        `text.splitlines()[:MAX_HEADER_LINES]`, and `splitlines` builds the
+        list of EVERY line before the slice takes sixty-four of them — so
+        classifying one document in a corpus of large ones allocated each whole
+        body a second time, under a comment promising it did not (Copilot
+        review of openDox-code#26, round 14, suppressed). `_leading_lines`
+        yields the same lines and stops.
         """
         text = self.read(corpus, document).content.decode("utf-8", "replace")
         header: dict[str, str] = {}
-        for line in text.splitlines()[:MAX_HEADER_LINES]:
+        for line in _leading_lines(text, MAX_HEADER_LINES):
             if not line.strip():
                 break
             name, separator, value = line.partition(":")
@@ -1063,8 +1184,36 @@ class LocalGitCorpus:
         # (see it for the defect and the ruling), and a `ResolvedCorpus` comes
         # from `resolve` — but this is the call that can commit into somebody
         # else's history, and the cost of being sure is one `rev-parse`.
-        root = self._repository_root(git, corpus.location)
-        if root != Path(corpus.location).resolve():
+        #
+        # AND EVERY WAY THAT QUESTION CAN FAIL IS `WRITE_PATH_UNREACHABLE`.
+        # `_repository_root` is `resolve`'s helper and refuses with
+        # `CORPUS_UNREADABLE`, which is a kind `write_back` does not declare
+        # (the interface gives it exactly two: `CORPUS_READ_ONLY` and
+        # `WRITE_PATH_UNREACHABLE`), so a git that vanished between `resolve`
+        # and this call sent a caller branching on `err.refusal.kind` a kind
+        # this operation never promised (Copilot review of openDox-code#26,
+        # round 13, suppressed). The failure is real and is still refused —
+        # it is reported as the kind this operation owes. `Path.resolve` is
+        # inside the same guard for the same reason, and because a symlink
+        # loop under the location raises `RuntimeError`, not `OSError`.
+        try:
+            root = self._repository_root(git, corpus.location)
+            named = Path(corpus.location).resolve()
+        except CorpusRefused as refused:
+            raise _refuse(
+                WRITE_PATH_UNREACHABLE, corpus.write_path,
+                f"the repository holding {corpus.location} could not be "
+                f"identified ({refused.refusal.detail}); nothing is written, "
+                "because a commit can only be made into the repository this "
+                "corpus IS") from refused
+        except (OSError, RuntimeError) as exc:
+            raise _refuse(
+                WRITE_PATH_UNREACHABLE, corpus.write_path,
+                f"{corpus.location} could not be resolved "
+                f"({exc.__class__.__name__}); nothing is written, because the "
+                "repository the commit would land in cannot be named"
+            ) from exc
+        if root != named:
             raise _refuse(
                 WRITE_PATH_UNREACHABLE, corpus.location,
                 f"this location is inside the repository at {root} rather than "
@@ -1139,7 +1288,8 @@ class LocalGitCorpus:
                     "become unreachable and the document remains unsaved"
                 ) from uncleaned
 
-            message = self._message(document, actor, basis_revision, reason)
+            message = self._message(document, actor, basis_revision, reason,
+                                    corpus.write_path)
             parents: list[str] = []
             if corpus.revision is not None:
                 parents = ["-p", corpus.revision]
@@ -1165,13 +1315,17 @@ class LocalGitCorpus:
     def _git(self, corpus: ResolvedCorpus) -> GitRunner:
         return GitRunner(Path(corpus.location), self._executable)
 
-    def _writable_ref_home(self, git: GitRunner, git_dir: Path,
+    def _writable_ref_home(self, git: GitRunner, common_dir: Path,
                            subject: str) -> Path:
         """The directory `update-ref` would write the SERVED ref into.
 
         `refs/heads/<branch>`'s parent where HEAD names a branch, walked up to
         the nearest ancestor that exists (a repository using only packed refs
         has no `refs/heads/` until the first write, and git creates it).
+
+        Resolved against the COMMON directory, which is where `refs/heads`
+        lives for every worktree of a repository; see `resolve` for the
+        measurement.
 
         A HEAD that `_served_ref` REFUSES — detached, or naming a tag or a
         remote-tracking ref — has no ref home at all, and the whole point of
@@ -1184,8 +1338,8 @@ class LocalGitCorpus:
         commit is never started.
         """
         ref = self._served_ref(git, subject)
-        home = git_dir / Path(ref).parent
-        while not home.is_dir() and home != git_dir:
+        home = common_dir / Path(ref).parent
+        while not home.is_dir() and home != common_dir:
             home = home.parent
         return home
 
@@ -1423,7 +1577,17 @@ class LocalGitCorpus:
 
     @staticmethod
     def _message(document: DocumentId, actor: str, basis_revision: str,
-                 reason: str) -> str:
+                 reason: str, write_path: str) -> str:
+        """The trailer names THIS CORPUS's write path, not the default.
+
+        `write_path` became a per-corpus construction datum (RULED 5714365086
+        Q-F2) and `WriteReceipt.dispatched_to` already carries the constructed
+        value — but the commit trailer still spelled the module default, so a
+        corpus constructed with another write path produced a receipt and a
+        commit that disagreed about where the write went (Copilot review of
+        openDox-code#26, round 13, suppressed). The commit is the durable
+        record; it has to be the one that is right.
+        """
         subject = f"Write {document.key}"
         body = [subject, ""]
         if reason:
@@ -1431,5 +1595,5 @@ class LocalGitCorpus:
         body.append(f"Corpus: {document.corpus}")
         body.append(f"Basis-Revision: {basis_revision}")
         body.append(f"Dispatched-By: {actor}")
-        body.append(f"Write-Path: {WRITE_PATH}")
+        body.append(f"Write-Path: {write_path}")
         return "\n".join(body) + "\n"

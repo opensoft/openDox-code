@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import random
 import subprocess
 from pathlib import Path
 
@@ -69,6 +70,27 @@ def _git(root: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(root), *args],
                           capture_output=True, text=True,
                           check=True, env=_GIT_ENV).stdout.strip()
+
+
+#: THE PROCESS'S OWN ENVIRONMENT, and not only `_git`'s. The mapping above is
+#: passed to the `subprocess.run` in `_git`, which is this file's DIRECT use of
+#: git — but the code under test runs git through `GitRunner`, which inherits
+#: `os.environ` and builds its own environment from it. So the hermetic claim
+#: was true of the assertions and false of the act they assert about: a
+#: developer's global `url.<base>.insteadOf`, `init.templateDir` or
+#: `protocol.*.allow` still reached every repository this suite creates,
+#: configures and pushes (Copilot review of openDox-code#26, round 14,
+#: suppressed). `monkeypatch.setenv` puts the same settings where the runner
+#: will find them, and `GitRunner`'s sanitizer keeps them: it strips the
+#: repository-SELECTING variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG`…)
+#: and never `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, which are the two that
+#: make a workstation and a runner see one git.
+@pytest.fixture(autouse=True)
+def _hermetic_git_for_the_whole_process(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in _GIT_ENV.items():
+        if name.startswith("GIT_"):
+            monkeypatch.setenv(name, value)
 
 
 @pytest.fixture()
@@ -1271,6 +1293,13 @@ def test_the_initialization_is_bound_to_the_directory_it_verified(
     (Copilot review of openDox-code#26, round 13). Both halves are asserted:
     the history is in the directory this act verified, the decoy is untouched,
     and nothing is recorded.
+
+    ROUND 14 MOVED WHICH HALF ANSWERS, and the assertion follows it rather than
+    being loosened: the swapped-in name is a SYMLINK, and the identity check is
+    now made through a no-follow walk (`_directory_by_name`), which refuses a
+    linked component outright instead of reaching the inode comparison behind
+    it. Same `try`, same moment, same act refused — a different sentence, and
+    the stronger one.
     """
     from opendox.runtime import repository_act
 
@@ -1290,7 +1319,8 @@ def test_the_initialization_is_bound_to_the_directory_it_verified(
     with pytest.raises(repository_act.RepositoryActRefused) as caught:
         repository_act.initialize_repository(
             location, project_id="project-raced", actor=ACTOR)
-    assert "no longer names the directory" in str(caught.value)
+    assert "could not be re-examined after the repository was initialized" in \
+        str(caught.value), str(caught.value)
 
     moved = _swap_then_initialize.moved
     assert (moved / "HEAD").is_file(), (
@@ -2172,3 +2202,271 @@ def test_a_path_repointed_during_initialization_records_no_map_row(
                                              actor=ACTOR)
     assert swapped["done"], "the race this test drives did not happen"
     assert "no longer names the directory" in str(caught.value)
+
+
+def test_a_write_back_refuses_with_the_kind_write_back_declares(
+        adapter, repository: Path) -> None:
+    """The root re-check is right and its REFUSAL KIND was somebody else's.
+
+    `_repository_root` is `resolve`'s helper and refuses `CORPUS_UNREADABLE`;
+    `write_back` declares exactly two kinds, and `CORPUS_UNREADABLE` is not one
+    of them (`corpus_adapter.py`: "raises `CORPUS_READ_ONLY` and
+    `WRITE_PATH_UNREACHABLE` and NO other kind"). A corpus that became
+    unreadable between `resolve` and the write therefore reached a caller
+    branching on `err.refusal.kind` as a kind this operation never promised
+    (Copilot review of openDox-code#26, round 13, suppressed). The failure is
+    still refused — as the kind this operation owes.
+
+    Drives it the only way a caller can: the repository goes away after it was
+    resolved, which is precisely the window the re-check exists for.
+    """
+    import shutil
+
+    corpus = _resolve(adapter, repository)
+    assert corpus.write_path_available
+    shutil.rmtree(repository)
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus, ca.DocumentId("project-1", "a.md"),
+                           b"# a\n", actor=ACTOR,
+                           basis_revision=corpus.revision or "")
+    assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE, (
+        "the write refused with a kind `write_back` does not declare")
+    # And it names the write path, which is what `WRITE_PATH_UNREACHABLE`'s
+    # subject means everywhere else in this adapter.
+    assert caught.value.refusal.subject == corpus.write_path
+
+
+def test_the_commit_trailer_names_the_write_path_this_corpus_declares(
+        tmp_path: Path) -> None:
+    """RULED 5714365086 Q-F2 made `write_path` a per-corpus datum; the commit
+    kept spelling the module default.
+
+    `WriteReceipt.dispatched_to` already carried the constructed value, so a
+    corpus built with another write path produced a receipt and a commit that
+    disagreed about where the write went — and the commit is the durable
+    record (Copilot review of openDox-code#26, round 13, suppressed).
+    """
+    repository = _repository_at(tmp_path / "project-1", "project-1")
+    adapter = lga.LocalGitCorpus(write_path="governed-commit")
+    receipt, _ = _write(adapter, repository, "a.md", b"# a\n")
+    message = _git(repository, "log", "-1", "--format=%B",
+                   receipt.correlation_id)
+
+    assert receipt.dispatched_to == "governed-commit"
+    assert "Write-Path: governed-commit" in message, message
+    assert lga.WRITE_PATH not in message, (
+        "the commit trailer spelled the module default rather than the write "
+        "path this corpus was constructed with")
+    # The default is unchanged for a default corpus: this is a new parameter,
+    # not a new behaviour.
+    plain = _repository_at(tmp_path / "project-2", "project-2")
+    plain_receipt, _ = _write(lga.LocalGitCorpus(), plain, "a.md", b"# a\n")
+    assert f"Write-Path: {lga.WRITE_PATH}" in _git(
+        plain, "log", "-1", "--format=%B", plain_receipt.correlation_id)
+
+
+def test_a_linked_worktree_can_reach_its_write_path(
+        adapter, tmp_path: Path) -> None:
+    """`--absolute-git-dir` is NOT where a worktree's objects and refs are.
+
+    Measured on git 2.43.0, `git worktree add ../wt -b side`: the worktree's
+    git dir is `<main>/.git/worktrees/wt`, which holds the INDEX and neither
+    `objects/` nor `refs/`; those are the COMMON directory's, which
+    `--path-format=absolute --git-common-dir` names. `os.access` on a path
+    that does not exist is `False`, so every linked worktree resolved
+    `write_path_available=False` however writable it was, and this adapter's
+    own rule — "a read-only corpus is a fact about the corpus" — reported a
+    fact that was not true (Copilot review of openDox-code#26, round 13,
+    suppressed).
+
+    Run against the shape it forbids, the probe answers `False` here and the
+    write below never happens.
+    """
+    main = tmp_path / "main"
+    main.mkdir()
+    _git(main, "init", "--initial-branch=main", ".")
+    (main / "a.md").write_text("a\n", encoding="utf-8")
+    _git(main, "add", "a.md")
+    _git(main, "commit", "-m", "first")
+    worktree = tmp_path / "wt"
+    _git(main, "worktree", "add", "-b", "side", str(worktree))
+    # The premise, measured rather than assumed.
+    git_dir = Path(_git(worktree, "rev-parse", "--absolute-git-dir"))
+    common = Path(_git(worktree, "rev-parse", "--path-format=absolute",
+                       "--git-common-dir"))
+    assert git_dir != common
+    assert not (git_dir / "objects").exists()
+    assert (common / "objects").is_dir()
+
+    corpus = adapter.resolve(ca.CorpusRef(name="wt", location=str(worktree)))
+    assert corpus.location == str(worktree.resolve())
+    assert corpus.write_path_available, (
+        "a writable linked worktree was resolved read-only")
+
+    # And the write it advertised actually lands, on the worktree's own branch.
+    receipt = adapter.write_back(corpus, ca.DocumentId("wt", "b.md"),
+                                 b"# b\n", actor=ACTOR,
+                                 basis_revision=corpus.revision or "")
+    assert _git(worktree, "rev-parse", "refs/heads/side") == \
+        receipt.correlation_id
+    assert _git(main, "rev-parse", "refs/heads/main") != receipt.correlation_id
+
+
+# -- Copilot's fourteenth round on #26 ---------------------------------------
+
+
+def test_the_bounded_line_scan_is_splitlines_exactly() -> None:
+    """`_leading_lines` replaces `splitlines()[:n]`, so it must BE it.
+
+    The replacement exists because `splitlines` materializes every line before
+    the slice takes sixty-four; a header scan that allocates the whole document
+    first is not the bounded scan its comment promises (Copilot review of
+    openDox-code#26, round 14, suppressed). Equivalence is the whole claim, so
+    it is measured over every shape that distinguishes the two: a trailing
+    terminator, an empty document, consecutive terminators, `\r\n` against `\r`
+    then `\n`, and each of the exotic boundaries `str.splitlines` splits on and
+    a `\n`-only reader would miss.
+    """
+    boundaries = ["\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e",
+                  "\x85", " ", " "]
+    cases = ["", "a", "a\n", "a\n\nb", "\n", "\r\n", "\n\r", "a\rb\nc"]
+    for boundary in boundaries:
+        cases += [boundary, f"a{boundary}", f"{boundary}a",
+                  f"a{boundary}b{boundary}c"]
+    random.seed(20260917)
+    alphabet = ["a", "b", " ", *boundaries]
+    cases += ["".join(random.choice(alphabet)
+                      for _ in range(random.randint(0, 12)))
+              for _ in range(2000)]
+    for text in cases:
+        for limit in (0, 1, 2, 3, lga.MAX_HEADER_LINES):
+            assert list(lga._leading_lines(text, limit)) == \
+                text.splitlines()[:limit], (text, limit)
+
+
+def test_a_location_whose_home_cannot_be_determined_is_refused(adapter) -> None:
+    """`expanduser()` raises, and it sat above the translation.
+
+    MEASURED on python 3.12.3: `Path("~nosuchuser12345/x").expanduser()` raises
+    `RuntimeError: Could not determine home directory.` — and `ref.location` is
+    a caller's string, so that one construction was the last way a location
+    could reach the API as a 500 rather than this interface's refusal (Copilot
+    review of openDox-code#26, round 14, suppressed).
+    """
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.resolve(ca.CorpusRef(name="x",
+                                     location="~nosuchuser12345/corpus"))
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+
+
+def test_a_legacy_remote_whose_credential_spans_a_line_is_not_printed() -> None:
+    """The half of the credential rule that a PATTERN cannot close.
+
+    `_CREDENTIAL_SHAPED`'s userinfo class excludes a newline so that the
+    redactor applied to git's stderr cannot join a `scheme://` on one line to
+    an unrelated `user@host` on another — and the price was that a LEGACY row
+    holding `https://user:secret\n@host/repo` came back unredacted through the
+    map endpoints, the CLI and push refusals (Copilot review of
+    openDox-code#26, round 14). Widening the class would trade a rare leak for
+    a routine loss of evidence; the distinction is the CALLER's, and
+    `redact_remote_url` is the caller that holds one URL rather than a page of
+    diagnostics.
+    """
+    legacy = "https://user:secret\n@host/repo.git"
+    assert lga.redact_remote_url(legacy) == "<redacted-url>"
+    assert "secret" not in lga.redact_remote_url(legacy)
+    # A remote with no control character is unchanged in kind: the same
+    # redaction it always had, host and all.
+    assert lga.redact_remote_url("https://host/repo.git") == \
+        "https://host/repo.git"
+    assert lga.redact_remote_url("https://user:pw@host/repo.git") == \
+        "<redacted-url>"
+
+    # AND THE DIAGNOSTIC REDACTOR IS STILL NARROW — this half is a PINNING
+    # assertion and NOT a regression test: it passes against the shape before
+    # this round too, and it is here so that a later widening of the pattern
+    # cannot pass unnoticed.
+    diagnostic = ("fatal: unable to access 'https://docs.example.com'\n"
+                  "error: key for git@host rejected\n")
+    assert "https://docs.example.com" in lga.redact_credentials(diagnostic)
+
+
+def test_the_control_character_rule_is_one_predicate_in_both_halves() -> None:
+    """The refusing half and the printing half ask the same question."""
+    from opendox.runtime import repository_act
+
+    for value in ("https://host/r\n.git", "https://host/r\t.git",
+                  "https://host/r‮.git"):
+        assert lga.carries_a_control_character(value), value
+        with pytest.raises(repository_act.RepositoryActRefused):
+            repository_act.refuse_credential_bearing_remote(value)
+        assert lga.redact_remote_url(value) == "<redacted-url>"
+    # A PLAIN SPACE IS NOT ONE. A local path may contain one, and both halves
+    # have to agree about that too.
+    assert not lga.carries_a_control_character("/srv/my projects/repo.git")
+
+
+def test_a_refused_parent_chain_creates_nothing_in_the_linked_tree(
+        tmp_path: Path) -> None:
+    """A refused act that had already written directories is a mutation.
+
+    `location.parent.mkdir(parents=True, exist_ok=True)` resolves the chain BY
+    PATHNAME, which follows every link in it. For `<root>/link/new/<id>` where
+    `link` points outside the configured root, it created `<outside>/new` and
+    only THEN did the no-follow walk refuse (Copilot review of openDox-code#26,
+    round 14, suppressed). The parents are created component by component now,
+    inside the directory the walk has already opened `O_NOFOLLOW`.
+    """
+    from opendox.runtime import repository_act
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(repository_act.RepositoryActRefused):
+        repository_act.initialize_repository(
+            root / "link" / "new" / "project-1", project_id="project-1",
+            actor=ACTOR)
+    assert not (outside / "new").exists(), (
+        "the refused act created directories inside the linked tree")
+    assert not any(outside.iterdir()), sorted(outside.iterdir())
+
+
+@pytest.mark.skipif(os.open not in os.supports_dir_fd,
+                    reason="this platform has no `dir_fd`, where the act "
+                           "documents `lstat` as the weaker guarantee")
+def test_a_name_relinked_to_the_same_directory_is_still_refused(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The identity check compared DESTINATIONS, and a symlink has the same one.
+
+    Round 13 added the post-initialization check so the map row cannot name a
+    directory the history is not in — but it asked `os.stat(location)`, which
+    FOLLOWS the link. Move the verified directory aside and point `location` at
+    it: the device and inode match, the act succeeds, and the durable map now
+    holds a name somebody can re-target afterwards to serve another repository
+    (Copilot review of openDox-code#26, round 14, suppressed).
+    """
+    from opendox.runtime import repository_act
+
+    location = tmp_path / "project-relinked"
+    real = repository_act._initialize_with
+
+    def _relink_then_initialize(git, where, **kwargs):
+        commit = real(git, where, **kwargs)
+        moved = tmp_path / "the-real-directory"
+        where.rename(moved)
+        where.symlink_to(moved, target_is_directory=True)
+        _relink_then_initialize.moved = moved
+        return commit
+
+    monkeypatch.setattr(repository_act, "_initialize_with",
+                        _relink_then_initialize)
+    with pytest.raises(repository_act.RepositoryActRefused) as caught:
+        repository_act.initialize_repository(
+            location, project_id="project-relinked", actor=ACTOR)
+    assert "re-examined" in str(caught.value) or \
+        "no longer names" in str(caught.value), str(caught.value)
+    # The history is where the act put it; the map row is not written.
+    assert (_relink_then_initialize.moved / "HEAD").is_file()
