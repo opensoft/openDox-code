@@ -362,15 +362,25 @@ def test_a_double_with_only_execute_cannot_drive_the_runner() -> None:
 
 def test_a_canonical_migration_swapped_after_the_gate_never_runs(
         tmp_path) -> None:
-    """The byte pin has to cover the bytes that EXECUTE, not a earlier read.
+    """The byte pin has to cover the bytes that EXECUTE, not an earlier read.
 
     `apply()` verified `0001`'s digest, then `discover()` found the file again
     and `read_sql()` read it a third time to execute it. A migrations directory
     that can change under the process — a mounted volume, a deploy that
     rewrites it — could therefore pass the pin and run something else, and the
     ledger would record the digest of the bytes that did NOT run (Copilot
-    review of openDox-code#25, round 11). One read per migration now, and the
-    canonical digest is re-checked against exactly those bytes.
+    review of openDox-code#25, round 11).
+
+    ROUND 12 MOVED THE ANSWER EARLIER, AND THIS TEST WITH IT. Round 11 read
+    each file once inside the loop and re-checked the pin there, so the swap
+    below raised — but only AFTER `bootstrap_ledger()` and `protect_ledger()`
+    had committed, which made "a tree carrying the wrong `0001` changes nothing
+    at all" false by two changes. `snapshot_run()` now takes every file's bytes
+    and runs the gate BEFORE the first commit, so a directory rewritten from
+    here on cannot reach the run at all: the swap is simply not part of it, the
+    run completes on the bytes it gated, and the replacement never executes.
+    That last line is the property both rounds are about, and it is the one
+    assertion this test kept.
 
     The swap is made deterministic by performing it while the runner is
     bootstrapping the ledger — after the gate, before the loop.
@@ -392,7 +402,54 @@ def test_a_canonical_migration_swapped_after_the_gate_never_runs(
 
     db.conn.execute = _swap_on_the_ledger_ddl              # type: ignore[method-assign]
     runner = migrations.MigrationRunner(db, migrations_dir=directory)
-    with pytest.raises(migrations.CanonicalDigestMismatchError):
-        runner.apply()
+    assert runner.apply() == [migrations.CANONICAL_MIGRATION_VERSION]
+    assert target.read_bytes() == replacement, (
+        "the swap did not happen, so this test measured nothing")
     assert not any(replacement.decode() in line for line in db.log), (
         "the replacement bytes were executed after the gate had passed")
+    assert any("create table users" in line.lower() for line in db.log), (
+        "the bytes the gate verified were not the bytes that ran")
+
+
+def test_the_whole_run_is_read_before_the_ledger_is_bootstrapped(
+        tmp_path) -> None:
+    """The gate's promise is "nothing at all", and it used to mean "two things".
+
+    `verify_canonical_digest()` hashed the file; `bootstrap_ledger()` and
+    `protect_ledger()` then COMMITTED the ledger table and its privilege
+    changes; only then did the loop re-read the bytes and raise
+    `CanonicalDigestMismatchError`. A migrations directory that changes under
+    the process therefore left the database mutated by a run that refused
+    (Copilot review of openDox-code#25, round 12). Every read now happens
+    before the first statement.
+
+    NOT ROUND 12'S REGRESSION, AND IT SAYS SO: a tree already wrong when
+    `apply()` is called was refused at the gate in BOTH shapes, so this passes
+    against either. The regression is its sibling
+    `test_a_canonical_migration_swapped_after_the_gate_never_runs`, which
+    rewrites the directory mid-run and does fail against the old shape. What
+    THIS pins is the other half of the promise — that a refusal's whole
+    footprint is the advisory lock — so no later round can satisfy the sibling
+    by moving a mutation earlier instead of moving the reads.
+    """
+    directory = tmp_path / "migrations"
+    directory.mkdir()
+    canonical = MIGRATIONS / f"{migrations.CANONICAL_MIGRATION_VERSION}_identity_and_coordination.sql"
+    (directory / canonical.name).write_bytes(
+        canonical.read_bytes() + b"\n-- edited\n")
+
+    db = _DocumentedDatabase()
+    runner = migrations.MigrationRunner(db, migrations_dir=directory)
+    with pytest.raises(migrations.CanonicalDigestMismatchError):
+        runner.apply()
+    # NOTHING THAT CHANGES THE DATABASE. The advisory lock and its
+    # commit/rollback markers are the run's whole footprint; the ledger DDL,
+    # the grant and the revoke are all past the gate now.
+    mutating = [line for line in db.log
+                if any(verb in line.lower()
+                       for verb in ("create table", "grant ", "revoke ",
+                                    "insert into", "alter "))]
+    assert mutating == [], (
+        f"a refused run reached the database: {mutating}")
+    assert any("pg_advisory_lock" in line.lower() for line in db.log), (
+        "the run did not even take its lock, so this test measured nothing")

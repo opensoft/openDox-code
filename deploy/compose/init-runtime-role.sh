@@ -13,6 +13,22 @@
 # everything created later by the migration owner (`alter default privileges`),
 # so a 0003 that adds a table does not need this file edited.
 #
+# AND `alter default privileges` IS AIMED AT THE MIGRATION OWNER BY NAME.
+# Default privileges belong to the role that CREATES the object, and this
+# script runs as `$POSTGRES_USER`; the migration service's DSN is configured
+# separately and may authenticate as a different owner. In that valid
+# configuration `0001` created the six tables owned by that role, with no
+# default privilege for the served one — the Job succeeded, `/readyz` reported
+# an applied schema, and every API query failed `permission denied` (Copilot
+# review of openDox-code#25, round 12). `OPENDOX_MIGRATION_PG_USER` names that
+# owner, defaulting to `$POSTGRES_USER` (the bundled single-owner shape, which
+# is what compose and the StatefulSet ship). The role must already exist —
+# `ON_ERROR_STOP=1` makes a name nobody created a loud first-start failure
+# rather than a silent absence of grants — and `MigrationRunner.
+# verify_runtime_access` asks Postgres at the end of every run whether the
+# served role can actually use what was applied, so a mismatch that reaches a
+# migration fails the migration instead of the first request.
+#
 # THE MIGRATION LEDGER IS THE ONE EXCEPTION, AND IT IS NARROWED ELSEWHERE.
 # `opendox_schema_migrations` is the runner's tamper-evident record, and a
 # served role that could INSERT, UPDATE or DELETE there could hide an applied
@@ -33,6 +49,7 @@ if [ -z "${OPENDOX_RUNTIME_PG_PASSWORD:-}" ]; then
 fi
 
 runtime_user="${OPENDOX_RUNTIME_PG_USER:-opendox_runtime}"
+migration_owner="${OPENDOX_MIGRATION_PG_USER:-$POSTGRES_USER}"
 
 # THE PASSWORD IS NEVER AN ARGUMENT. `-v runtime_password=…` puts it in
 # `psql`'s argv, where `ps`, `/proc/<pid>/cmdline` and any host tooling that
@@ -45,7 +62,8 @@ runtime_user="${OPENDOX_RUNTIME_PG_USER:-opendox_runtime}"
 psql -v ON_ERROR_STOP=1 \
      --username "$POSTGRES_USER" \
      --dbname "$POSTGRES_DB" \
-     -v runtime_user="$runtime_user" <<'SQL'
+     -v runtime_user="$runtime_user" \
+     -v migration_owner="$migration_owner" <<'SQL'
 \getenv runtime_password OPENDOX_RUNTIME_PG_PASSWORD
 select format('create role %I login password %L', :'runtime_user',
               :'runtime_password')
@@ -58,7 +76,8 @@ select format('grant usage on schema public to %I', :'runtime_user')
 select format('grant select, insert, update, delete on all tables in schema '
               'public to %I', :'runtime_user')
 \gexec
-select format('alter default privileges in schema public grant select, '
-              'insert, update, delete on tables to %I', :'runtime_user')
+select format('alter default privileges for role %I in schema public grant '
+              'select, insert, update, delete on tables to %I',
+              :'migration_owner', :'runtime_user')
 \gexec
 SQL

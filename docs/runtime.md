@@ -176,7 +176,16 @@ both the role in `opendox-db-runtime`'s DSN and the `runtime_pg_role` value in
 the ConfigMap:
 
 ```sql
-create role "<runtime role>" login password '<runtime password>';
+-- THE PASSWORD IS NEVER TYPED INTO SQL. Export it, and let psql read it from
+-- its own environment: `%L` quotes whatever it finds, so a password holding a
+-- `'` is a password and not a syntax error — and it stays out of this file and
+-- out of `~/.psql_history` (Copilot review of openDox-code#25, round 12). This
+-- is the same shape the bundled `init-runtime-role.sh` uses; run it as
+--   read -rs OPENDOX_RUNTIME_PG_PASSWORD && export OPENDOX_RUNTIME_PG_PASSWORD
+\getenv runtime_password OPENDOX_RUNTIME_PG_PASSWORD
+select format('create role %I login password %L', '<runtime role>',
+              :'runtime_password')
+\gexec
 grant connect on database "<database>" to "<runtime role>";
 grant usage on schema public to "<runtime role>";
 -- tables that already exist, if this database has been migrated before
@@ -196,6 +205,21 @@ write, so it cannot rewrite the runner's own tamper-evident record. That
 narrowing is the one privilege difference between the bundled and the managed
 path; the four statements above are the rest of what the bundled init script
 does, spelled for an operator who has to do it by hand.
+
+**And the run CHECKS this, so a prerequisite that was skipped is a failed
+migration and not a failed request.** `MigrationRunner.verify_runtime_access`
+is the last act of every run: it asks Postgres — through `has_table_privilege`,
+which counts ownership and group membership — whether the configured
+`runtime_pg_role` holds `select, insert, update, delete` on every table in the
+schema except the ledger, and raises `RuntimeAccessMissingError` naming the
+missing `table:privilege` pairs when it does not. Without it the Job succeeded,
+`/readyz` reported an applied schema, and the first API request was where the
+install found out (Copilot review of openDox-code#25, round 12). The same check
+covers the bundled path's own mismatch: `alter default privileges` belongs to
+the role that creates the table, so a migration DSN authenticating as somebody
+other than `POSTGRES_USER` needs `OPENDOX_MIGRATION_PG_USER` (compose) or the
+`migration_pg_user` ConfigMap key (Kubernetes) set to that owner, and the
+first-start bootstrap aims the default privileges there.
 
 **Re-running the migration Job.** A Job's pod template is immutable, so a
 second `kubectl apply` after the first run does not start a new migration. Ask

@@ -466,12 +466,27 @@ jobs:
       #              documented `compose run` carrying `--build` (it does not
       #              build by policy), and the migration Job's retry budget
       #              covering a database that is still recovering when the TCP
-      #              wait returns. THE CURRENT FIGURE; the PR description
-      #              states it at this same commit. Round eleven's other fix —
-      #              the streamed body cap answering 413 rather than FastAPI's
-      #              400 — is in the DB-backed job: 216 passed there at this
-      #              commit.
-      #
+      #              wait returns. Round eleven's other fix — the streamed
+      #              body cap answering 413 rather than FastAPI's 400 — is in
+      #              the DB-backed job: 216 passed there at this commit.
+      #  126 passed  at `build/3-5-runtime` `2052e1e6` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round TWELVE: the first-start role
+      #              bootstrap aiming `alter default privileges` at the
+      #              MIGRATION OWNER rather than at whoever runs the script
+      #              (with the name wired through compose, the ConfigMap and
+      #              the StatefulSet), the managed-database prerequisite
+      #              reading the password through `\getenv`/`%L` instead of a
+      #              single-quoted SQL literal, the runbook's claim that the
+      #              run checks that prerequisite, and the canonical gate
+      #              covering the WHOLE run's bytes before the ledger is
+      #              bootstrapped. THE CURRENT FIGURE ON `build/3-5-runtime`,
+      #              which this branch carries by merge; THAT PR's description
+      #              states it at this same commit. ROUND TWELVE'S OTHER TWO
+      #              FIXES ARE IN THE DB-BACKED JOB (a run whose served role
+      #              was never granted now fails instead of serving, and the
+      #              drafts listing bounded in bytes as well as in rows): 223
+      #              passed there at this commit.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this

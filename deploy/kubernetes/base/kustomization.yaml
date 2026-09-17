@@ -102,3 +102,11 @@ configMapGenerator:
       # changes the DSN's user changes this in the same commit; the runbook
       # says so beside the Secret it names.
       - runtime_pg_role=opendox_runtime
+      # The role the migration Job's DSN authenticates as, for the first-start
+      # bootstrap's `alter default privileges FOR ROLE`. EMPTY is the bundled
+      # shape (the migration connects as the StatefulSet's `POSTGRES_USER`);
+      # an overlay pointing `opendox-db-migration` at another owner sets this
+      # to that owner in the same commit, or the served role is granted nothing
+      # on the tables the run creates (Copilot review of openDox-code#25,
+      # round 12).
+      - migration_pg_user=

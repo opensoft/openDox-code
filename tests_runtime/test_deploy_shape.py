@@ -35,6 +35,11 @@ ENV_EXAMPLE = COMPOSE / ".env.example"
 COMPOSE_ONLY = frozenset({
     "OPENDOX_PG_USER", "OPENDOX_PG_PASSWORD", "OPENDOX_PG_DB",
     "OPENDOX_RUNTIME_PG_PASSWORD",
+    # Read by the first-start role bootstrap, never by the runtime: it names
+    # the role the MIGRATION connects as, so `alter default privileges` can be
+    # aimed at the owner that will create the tables (Copilot review of
+    # openDox-code#25, round 12).
+    "OPENDOX_MIGRATION_PG_USER",
     "OPENDOX_IMAGE", "OPENDOX_SOURCE_REVISION",
 })
 
@@ -892,3 +897,95 @@ def test_the_migration_job_can_outlast_a_database_that_is_recovering() -> None:
     assert job["spec"]["backoffLimit"] >= 5, (
         "the Job's retry budget is too small to cover a database that is "
         "still recovering when the TCP wait returns")
+
+
+# -- Copilot's twelfth round on #25 -------------------------------------------
+
+
+def test_the_bootstrap_aims_default_privileges_at_the_migration_owner() -> None:
+    """Default privileges belong to the role that CREATES the table.
+
+    This script runs as `$POSTGRES_USER`, and the migration service's DSN is
+    configured separately: point it at another owner and `0001` created the six
+    tables with no default privilege for the served role — the Job succeeded,
+    `/readyz` reported an applied schema, and every API query failed
+    `permission denied` (Copilot review of openDox-code#25, round 12). The
+    grant now names the owner, and the name reaches the script from the same
+    place in both deployment shapes.
+    """
+    for path in (COMPOSE / "init-runtime-role.sh",
+                 KUBERNETES / "base" / "init-runtime-role.sh"):
+        script = path.read_text(encoding="utf-8")
+        executed = "\n".join(line for line in script.splitlines()
+                             if not line.lstrip().startswith("#"))
+        assert "alter default privileges for role %I" in executed, (
+            f"{path.name} sets default privileges for whoever runs the script, "
+            "not for the role that will create the tables")
+        assert ('migration_owner="${OPENDOX_MIGRATION_PG_USER:-$POSTGRES_USER}"'
+                in executed), (
+            f"{path.name} does not take the migration owner from the "
+            "environment, defaulting to the bundled single-owner shape")
+        assert '-v migration_owner="$migration_owner"' in executed, (
+            f"{path.name} never passes the owner into psql")
+
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    postgres_env = compose["services"]["postgres"]["environment"]
+    assert "OPENDOX_MIGRATION_PG_USER" in postgres_env, (
+        "the compose Postgres service cannot be told who the migration owner "
+        "is, so the bootstrap can only ever grant for POSTGRES_USER")
+
+    statefulset = _load_yaml(KUBERNETES / "base" / "postgres-statefulset.yaml")
+    owner = next(e for e in _containers(statefulset)[0]["env"]
+                 if e["name"] == "OPENDOX_MIGRATION_PG_USER")
+    key = owner["valueFrom"]["configMapKeyRef"]
+    assert key["name"] == "opendox-runtime-config", key
+    kustomization = (KUBERNETES / "base" / "kustomization.yaml").read_text(
+        encoding="utf-8")
+    assert f"- {key['key']}=" in kustomization, (
+        f"the StatefulSet reads {key['key']!r} from a ConfigMap that does not "
+        "declare it; the pod would not start")
+
+
+def test_the_managed_prerequisite_never_types_the_password_into_sql() -> None:
+    """A password holding a `'` was a syntax error, or worse, a changed password.
+
+    The runbook told an operator to substitute the value inside a single-quoted
+    SQL literal, while the bundled script it is derived from has used psql's own
+    `\\getenv` and `%L` since round 11 (Copilot review of openDox-code#25, round
+    12, suppressed). The two now do the same thing, and the secret never enters
+    the SQL, this file, or `~/.psql_history`.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    section = runbook.split("**A managed database instead of the bundled "
+                            "Postgres.**", 1)[1].split("\n## ", 1)[0]
+    assert "\\getenv runtime_password OPENDOX_RUNTIME_PG_PASSWORD" in section, (
+        "the managed-database prerequisite does not read the password from the "
+        "environment the way the bundled bootstrap does")
+    assert "login password %L" in section, (
+        "the prerequisite does not quote the password as a SQL literal through "
+        "`format`'s %L")
+    assert "password '" not in section, (
+        "the prerequisite still asks an operator to paste a password inside a "
+        "single-quoted SQL literal")
+
+
+def test_the_run_verifies_the_served_role_can_use_what_it_applied() -> None:
+    """The runbook's prerequisite is now measured by the run, and says so.
+
+    A skipped prerequisite used to surface as a successful Job, a `/readyz`
+    reporting an applied schema and a first request refused `permission denied`
+    (Copilot review of openDox-code#25, rounds 10 and 12). `verify_runtime_access`
+    is the last act of a run, so the failure lands on the migration.
+    """
+    from opendox.runtime import migrations
+
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    section = runbook.split("**A managed database instead of the bundled "
+                            "Postgres.**", 1)[1].split("\n## ", 1)[0]
+    assert "verify_runtime_access" in section, (
+        "the runbook does not say that the run checks the prerequisite it asks "
+        "for")
+    assert hasattr(migrations.MigrationRunner, "verify_runtime_access"), (
+        "the runbook names a check the runner does not have")
+    assert issubclass(migrations.RuntimeAccessMissingError,
+                      migrations.MigrationError)
