@@ -1191,3 +1191,40 @@ def test_a_credential_in_a_broker_urls_query_is_refused_like_one_in_its_userinfo
         "https://broker/certs?token=<redacted>&format=jwk"
     assert redacted_url("https://broker/realms/x") == "https://broker/realms/x"
     assert redacted_url("https://[::1/x") == "<redacted-url>"
+
+
+def test_the_broker_url_must_be_https_because_it_is_the_trust_anchor() -> None:
+    """The key set fetched from it is what every token is verified against.
+
+    So over `http://` a network attacker replaces the key set and mints tokens
+    whose `iss` and `aud` still pass — the whole verification reduced to
+    whoever controls the path. Round 22 refused a credential IN the URL and
+    said nothing about the scheme (Copilot review of openDox-code#25, round
+    25).
+
+    A LOOPBACK host is the one exception, and it is exact rather than
+    name-shaped: `ipaddress` judges a literal, so `127.5.5.5` and `[::1]` are
+    the same answer and `127.0.0.1.evil.test` is not one at all.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for issuer in ("https://broker/realms/x", "http://localhost:8080/realms/x",
+                   "http://127.0.0.1:8080/realms/x", "http://[::1]:8080/x"):
+        assert load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+
+    for issuer in ("http://broker/realms/x",
+                   "http://127.0.0.1.evil.test/realms/x",
+                   "ftp://broker/x", "broker/realms/x"):
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+        assert "TRUST ANCHOR" in str(caught.value), (issuer, caught.value)
+
+    # The explicit key-set URL is judged by the same rule, since it is the one
+    # actually fetched.
+    with pytest.raises(ConfigurationError) as caught:
+        load_settings(dict(base, **{
+            PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_JWKS_URL": "http://broker/certs"}))
+    assert PREFIX + "OIDC_JWKS_URL" in str(caught.value)

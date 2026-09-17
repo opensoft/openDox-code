@@ -686,11 +686,23 @@ jobs:
       #              bracket); and `runtime_pg_role` is an edit the
       #              managed-database overlay cannot make, so the Job would
       #              narrow the bundled role while the real served role keeps
-      #              the ledger. THE CURRENT FIGURE ON
-      #              `build/3-5-runtime`, which this branch carries by
-      #              merge; THAT PR's description states it at this same
-      #              commit — its head `5700d566` adds only the record —
-      #              and `pytest -q tests_runtime/` is 251 there.
+      #              the ledger. SUPERSEDED on `build/3-5-runtime` by the
+      #              entry below, which this branch also carries; `pytest
+      #              -q tests_runtime/` was 251 there.
+      #  145 passed  at `build/3-5-runtime` `a4d0eddf` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-FIVE's one finding: the
+      #              broker URL is a TRUST ANCHOR and its scheme was
+      #              unchecked. `HttpJwksSource` fetches it and the keys it
+      #              returns verify every token, so over `http://` anyone on
+      #              the path replaces the key set and mints tokens whose
+      #              `iss` and `aud` still pass. `https` or a LOOPBACK host,
+      #              judged by `ipaddress` so the exception cannot be spoofed
+      #              by a name. THE CURRENT FIGURE ON `build/3-5-runtime`,
+      #              which this branch carries by merge; THAT PR's
+      #              description states it at this same commit — its head
+      #              `99c21185` adds only the record — and `pytest -q
+      #              tests_runtime/` is 252 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
