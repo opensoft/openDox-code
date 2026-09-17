@@ -385,4 +385,5 @@ jobs:
           tests/test_lens_labels_at_scale.py
           tests/test_smoke_signals.py
           tests/test_wheel_paint_and_reach.py
+          tests/test_binding_stylesheets.py
           --noconftest
