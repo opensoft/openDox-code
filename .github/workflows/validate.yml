@@ -476,6 +476,12 @@ jobs:
       #              was never granted now fails instead of serving, and the
       #              drafts listing bounded in bytes as well as in rows): 223
       #              passed there at this commit.
+      #  126 passed  at `build/3-5-runtime` `95b34ad9` — UNCHANGED, and that
+      #              is the entry: round THIRTEEN's one finding is a write
+      #              ordering, so its case is DB-backed and the hermetic
+      #              figure does not move. `pytest -q tests_runtime/` is 224
+      #              there (was 223). THE CURRENT FIGURES; the PR description
+      #              states them at this same commit.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
