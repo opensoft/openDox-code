@@ -614,9 +614,21 @@ jobs:
       #              candidate body — `textoctetlen` reads the varlena
       #              header, so over 200 rows of 1 MiB it costs 0.3 ms
       #              against `count(*)`'s 0.3 ms and `max(md5(body))`'s
-      #              381.9 ms. THE CURRENT FIGURE; the PR description states
-      #              it at this same commit, and `pytest -q tests_runtime/`
-      #              is 245 here.
+      #              381.9 ms. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 245 there.
+      #  139 passed  at `build/3-5-runtime` `39db0b0f` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY's one finding: `"$user"` is
+      #              exempt for being ABSENT, not for being unreachable.
+      #              Round 19 made every NAMED entry prove it is usable and
+      #              left `"$user"` skipped unconditionally, and PostgreSQL
+      #              skips an existing schema the role may not USE exactly as
+      #              it skips an absent one — so a schema named for the role,
+      #              present and denied, still fell through to `public`. It
+      #              goes through the same probe now and is forgiven only for
+      #              not existing. THE CURRENT FIGURE; the PR description
+      #              states it at this same commit, and `pytest -q
+      #              tests_runtime/` is 246 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
