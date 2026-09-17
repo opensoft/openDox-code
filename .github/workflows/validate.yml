@@ -629,10 +629,36 @@ jobs:
       #              vocabulary; an explicit-revision read revalidates the
       #              corpus first; two push destinations are refused by
       #              COUNT rather than by a joined string; and the map row's
-      #              name is re-verified after the history is written. THE
-      #              CURRENT FIGURE for this branch; the PR description
+      #              name is re-verified after the history is written, and
+      #              `pytest -q tests_runtime/` is 381 here.
+      #  236 passed  at `build/3-6-repository-act` `338d3050` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, and
+      #              with NO ambient git config — which this round made
+      #              true of the code under test as well as of the suites'
+      #              own `subprocess.run`) — the same six modules, adding
+      #              this branch's round-fourteen nine: `write_back` no
+      #              longer leaks `corpus-unreadable`, a kind it does not
+      #              declare, out of the root re-check; the commit trailer
+      #              names the write path THIS corpus was constructed with;
+      #              a LINKED WORKTREE can reach its write path (its
+      #              `objects/` and `refs/` are the COMMON directory's, and
+      #              `--absolute-git-dir` names neither — measured on git
+      #              2.43.0); the bounded header scan no longer allocates
+      #              the whole document, and is held to `str.splitlines`
+      #              over 2,051 inputs; `expanduser()` is inside the
+      #              translation (`~nosuchuser/x` raises `RuntimeError` on
+      #              python 3.12.3); a legacy remote whose credential spans
+      #              a line is replaced WHOLE, by the caller that holds one
+      #              URL, rather than by widening a pattern that would eat
+      #              unrelated diagnostic lines; the acts that reconfigure
+      #              and push refuse a mapped location INSIDE another
+      #              repository, as `resolve` already does; a refused act
+      #              creates no directory in a linked tree; and the
+      #              post-initialization identity check no longer accepts a
+      #              symlink pointing back at the directory it verified.
+      #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit, and `pytest -q
-      #              tests_runtime/` is 381 here.
+      #              tests_runtime/` is 392 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
