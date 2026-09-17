@@ -577,11 +577,34 @@ jobs:
       #              `pg_class` — the set is compared now), a setting that
       #              promised an OIDC discovery this runtime does not make,
       #              and a migration comment naming a test that does not
-      #              exist. THE CURRENT FIGURE ON `build/3-5-runtime`, which
-      #              this branch carries by merge; THAT PR's description
-      #              states it at this same commit — its head `2c56b65b` adds
-      #              only the record — and `pytest -q tests_runtime/` is 236
-      #              there.
+      #              exist. SUPERSEDED by the entry below; THAT PR's
+      #              description stated it at this same commit, and `pytest
+      #              -q tests_runtime/` was 236 there.
+      #  135 passed  at `build/3-5-runtime` `01b9876c` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round NINETEEN, whose three findings were
+      #              all measured and all real. A libpq password holding a
+      #              SPACE is quoted, and `password\s*=\s*\S+` ends at
+      #              whitespace, so the valid conninfo `password='secret
+      #              value'` was redacted as `<redacted> value'` — half the
+      #              password beside the marker that says it was removed.
+      #              `search_path` resolution asks whether THIS ROLE may use
+      #              a schema and not whether it exists, so an existing
+      #              `tenant` with no `usage` grant passed the round-16
+      #              existence probe and the run went to `public` (MEASURED
+      #              on postgres 16.15: `pg_namespace` has it,
+      #              `has_schema_privilege` is false, `current_schema()`
+      #              answers `public`). And the compose build context is the
+      #              whole repository, so a filled-in `deploy/compose/.env` —
+      #              git-ignored, which is not a build-context rule — was
+      #              uploaded to the docker daemon on every `--build`
+      #              (MEASURED with docker server 29.6.2 by copying the
+      #              context into a `busybox` image, before and after, and
+      #              the real image still builds and runs). THE CURRENT
+      #              FIGURE ON `build/3-5-runtime`, which this branch carries
+      #              by merge; THAT PR's description states it at this same
+      #              commit — its head `23c49133` adds only the record — and
+      #              `pytest -q tests_runtime/` is 240 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this

@@ -462,24 +462,37 @@ def test_the_whole_run_is_read_before_the_ledger_is_bootstrapped(
 class _SearchPath:
     """A connection that answers `selected_schema`'s two questions.
 
-    The second is the EXISTENCE probe: `selected_schema` walks the whole
+    The second is the USABILITY probe: `selected_schema` walks the whole
     configured path and asks Postgres which of the entries it would have
-    skipped are real, so a fake that answered only the first question would let
-    the walk pass vacuously (Copilot review of openDox-code#25, round 16).
+    skipped this connection could actually have used, so a fake that answered
+    only the first question would let the walk pass vacuously (Copilot review
+    of openDox-code#25, round 16). It returns TWO columns because round 19
+    found that "exists" is the wrong question — `denied` is the set that exists
+    and carries no `usage` for this role, which PostgreSQL skips exactly as it
+    skips an absent one.
     """
 
     def __init__(self, schema: str | None, search_path: str,
-                 present: tuple[str, ...] = (), user: str = "svc") -> None:
+                 present: tuple[str, ...] = (), user: str = "svc",
+                 denied: tuple[str, ...] = ()) -> None:
         self._row = (schema, search_path, user)
         self._present = present
+        self._denied = denied
+        assert set(denied) <= set(present), (
+            "a schema that does not exist cannot be the one this connection "
+            "may not use; that is the other case")
 
     def execute(self, sql: str, params: tuple | None = None) -> _Cursor:
         text = " ".join(sql.split())
         if text.startswith("select current_schema()"):
             return _Cursor([self._row])
         assert "pg_catalog.pg_namespace" in text, sql
+        assert "has_schema_privilege" in text, (
+            "the probe asks only whether the schema EXISTS, which PostgreSQL "
+            "does not treat as the question: " + sql)
         asked = (params or ([],))[0]
-        return _Cursor([(name,) for name in asked if name in self._present])
+        return _Cursor([(name, name not in self._denied)
+                        for name in asked if name in self._present])
 
 
 def test_a_schema_resolved_by_search_path_fallback_is_refused() -> None:
@@ -542,3 +555,45 @@ def test_the_configured_schema_is_answered_and_the_default_path_is_not_refused(
     with pytest.raises(migrations.MigrationError) as caught:
         migrations.selected_schema(_SearchPath(None, "tenant"))
     assert "no current schema" in str(caught.value)
+
+
+def test_a_selected_schema_this_connection_may_not_use_is_refused() -> None:
+    """PostgreSQL skips an unauthorized entry exactly as it skips an absent one.
+
+    The existence probe proved the wrong thing: `pg_namespace` answers "this
+    schema is here", and `search_path` resolution asks "can THIS ROLE use it".
+    So an existing `tenant` with no `usage` grant left `missing` empty and the
+    fallback `public` was accepted and returned — the outcome this whole
+    function exists to refuse, one privilege along, and the one that matters in
+    a multi-tenant install, where the grant is the isolation (Copilot review of
+    openDox-code#25, round 19).
+
+    MEASURED on postgres 16.15 as a role holding no grant on a schema that
+    exists — the case `test_migrations_apply.py` drives against a real server:
+
+        set search_path = m_probe, public;
+        select current_schema();                                     -- public
+        select count(*) from pg_namespace where nspname = 'm_probe';  -- 1
+        select has_schema_privilege(current_user, 'm_probe', 'usage'); -- f
+    """
+    with pytest.raises(migrations.MigrationError) as caught:
+        migrations.selected_schema(
+            _SearchPath("public", "tenant, public",
+                        present=("tenant", "public"), denied=("tenant",)))
+    message = str(caught.value)
+    assert "tenant" in message and "public" in message
+    # The refusal says WHICH of the two it is, because the remedies differ.
+    assert "may not USE" in message, message
+    assert "Grant usage" in message, message
+    assert "does not exist" not in message, message
+
+    # The other side, unchanged: absent still reads as absent.
+    with pytest.raises(migrations.MigrationError) as caught:
+        migrations.selected_schema(
+            _SearchPath("public", "tenant, public", present=("public",)))
+    assert "does not exist" in str(caught.value)
+
+    # And a grant that IS held is not a refusal.
+    assert migrations.selected_schema(
+        _SearchPath("tenant", "tenant, public",
+                    present=("tenant", "public"))) == "tenant"
