@@ -85,6 +85,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import unicodedata
@@ -637,6 +638,41 @@ class GitRunner:
                             f"{redact_credentials(str(exc))}").encode(),
                 )) from exc
 
+    @staticmethod
+    def _stop_the_whole_group(child: subprocess.Popen[bytes]) -> None:
+        """SIGKILL the child's process GROUP, then reap the child.
+
+        `child.kill()` signals the top-level `git` and nothing else, and a
+        push's real work is in its DESCENDANTS: `ssh` for a network
+        destination, `git-receive-pack` for a local one. Those hold the pipes
+        this method is draining and they keep running after the parent dies —
+        so a timed-out or overflowing push could go on to COMPLETE THE REMOTE
+        WRITE after this act had refused, told its caller nothing was sent and
+        rolled the map row back (Copilot review of openDox-code#26, at
+        `ebad9d65`). For a local destination that write is into a real
+        repository on this machine.
+
+        The group exists because `Popen` was given `start_new_session=True`, so
+        it contains this child and everything it spawned and nothing else.
+        `ProcessLookupError` is the ordinary race — the child exited between
+        the decision and the signal — and `PermissionError`/`OSError` cover a
+        platform that will not let a process signal its own group; in every
+        case the single-process `kill()` still runs, which is strictly what
+        this method replaced.
+        """
+        try:
+            os.killpg(os.getpgid(child.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        child.kill()
+        # REAPED HERE, so the group is gone before this call returns rather
+        # than whenever the interpreter next collects. A `wait` on a killed
+        # child returns at once; it is not a second wall-clock bound.
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:            # pragma: no cover - a kill
+            pass                                     # that SIGKILL did not end
+
     def _run_bounded(self, args: tuple[str, ...], env: dict[str, str],
                      timeout: float) -> subprocess.CompletedProcess[bytes]:
         """`run`, with the child's OUTPUT capped as well as its clock.
@@ -652,7 +688,13 @@ class GitRunner:
             child = subprocess.Popen(                    # noqa: S603 - fixed argv
                 argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env=env,
-                pass_fds=self._inherited())
+                pass_fds=self._inherited(),
+                # THE CHILD LEADS ITS OWN SESSION, so the bound below can be
+                # applied to the WHOLE tree and not only to `git` — see
+                # `_stop_the_whole_group`. It also detaches the push from this
+                # process's controlling terminal, which is the same contract
+                # `GIT_TERMINAL_PROMPT=0` states one layer up.
+                start_new_session=True)
         except (OSError, ValueError) as exc:
             raise GitCommandFailed(
                 args, subprocess.CompletedProcess(
@@ -681,7 +723,7 @@ class GitRunner:
                 total += len(chunk)
                 if total > MAX_REMOTE_OUTPUT_BYTES:
                     overflowed.add(name)
-                    child.kill()
+                    self._stop_the_whole_group(child)
                     break
                 chunks.append(chunk)
             captured[name] = b"".join(chunks)
@@ -695,8 +737,7 @@ class GitRunner:
         try:
             returncode = child.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait()
+            self._stop_the_whole_group(child)
             raise
         finally:
             for reader in readers:

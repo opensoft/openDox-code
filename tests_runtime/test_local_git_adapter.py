@@ -3847,3 +3847,95 @@ def test_the_walk_modes_only_what_it_made_itself(
                 lga.CREATED_DIRECTORY_MODE, made
     finally:
         os.umask(previous)
+
+
+def test_a_bounded_push_leaves_no_descendant_running_behind_its_refusal(
+        tmp_path: Path) -> None:
+    """`child.kill()` signalled `git` and left its children finishing the job.
+
+    A push's real work is in its DESCENDANTS — `ssh` for a network
+    destination, `git-receive-pack` for a local one — and they hold the pipes
+    this reader is draining. They kept running after the parent was killed, so
+    a timed-out push could go on to COMPLETE THE REMOTE WRITE after this act
+    had refused, told its caller nothing was sent and rolled the map row back
+    (Copilot review of openDox-code#26, at `ebad9d65`). For a local
+    destination that write lands in a real repository on this machine.
+
+    DRIVEN WITH A PLANTED SLOW DESCENDANT, which is the only honest way to
+    measure it: a stub `git` spawns a child that waits and then WRITES A
+    MARKER — the stand-in for the remote write — and then stalls past the
+    bound. The refusal must arrive AND the marker must never appear.
+
+    AND THE MEASUREMENT AT `555a03c8` IS WORSE THAN THE FINDING SAID: this
+    case does not merely leak a descendant there, it takes **30.0 seconds for
+    a 0.6-second bound** — the surviving group holds the pipes this method
+    drains, so the wall clock `out_bounded` exists to enforce is itself
+    defeated, and with it the promise that a stalled remote cannot hold the
+    request, the repository and the caller's database transaction. That is why
+    the assertion below is on the ELAPSED time as well as on the marker.
+    """
+    import signal
+    import time
+
+    marker = tmp_path / "the-remote-write-landed"
+    stub = tmp_path / "slow-git"
+    pid_file = tmp_path / "descendant.pid"
+    stub.write_text(
+        "#!/bin/sh\n"
+        # The descendant: it outlives its parent unless the GROUP is signalled.
+        f"( echo $$ > {pid_file}; sleep 2; echo landed > {marker} ) &\n"
+        "sleep 30\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+    runner = lga.GitRunner(root=tmp_path, executable=str(stub))
+    started = time.monotonic()
+    with pytest.raises(lga.GitCommandFailed) as refused:
+        runner.out_bounded("push", timeout=0.6)
+    assert time.monotonic() - started < 10, "the bound did not bound"
+    assert "timed out" in str(refused.value)
+
+    # THE DESCENDANT IS DEAD BEFORE THE CALL RETURNED. `kill(pid, 0)` asks
+    # whether the process exists without signalling it.
+    descendant = int(pid_file.read_text().strip())
+    try:
+        os.kill(descendant, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    except PermissionError:                  # pragma: no cover - not ours
+        alive = True
+    assert not alive, (
+        f"the descendant {descendant} outlived the refusal; it is the process "
+        "that would have finished the remote write")
+
+    # AND IT NEVER DID THE WRITE. Waited out past its own delay, because a
+    # process that is merely slow would pass an assertion made too early.
+    deadline = time.monotonic() + 3.5
+    while time.monotonic() < deadline:
+        assert not marker.exists(), (
+            "the descendant completed the remote write after this act had "
+            "refused and its caller had rolled back")
+        time.sleep(0.2)
+
+
+def test_the_bounded_runner_gives_the_child_its_own_process_group(
+        tmp_path: Path) -> None:
+    """The group is what makes the kill above reach anything, so it is pinned.
+
+    A later edit that drops `start_new_session=True` would leave the signal
+    landing on THIS process's group — or on nothing — and the case above would
+    still pass on a stub whose descendant happens to die with its parent. This
+    asserts the mechanism directly: the child's process group is its own and is
+    not this test runner's.
+    """
+    reported = tmp_path / "group"
+    stub = tmp_path / "report-git"
+    stub.write_text("#!/bin/sh\nps -o pgid= -p $$ > %s\n" % reported,
+                    encoding="utf-8")
+    stub.chmod(0o755)
+    runner = lga.GitRunner(root=tmp_path, executable=str(stub))
+    runner.out_bounded("push", timeout=10)
+    child_group = int(reported.read_text().strip())
+    assert child_group != os.getpgrp(), (
+        "the child shares this process's group, so killing the group would "
+        "signal the test runner instead of the push")
