@@ -808,8 +808,9 @@ def _store_and_settings(args: argparse.Namespace):
         from opendox.runtime.db import Database
     except ImportError as exc:  # pragma: no cover - the extra is absent
         return _emit({"verb": args.verb, "refusal": "runtime-extra-missing",
-                      "message": f"{exc}; install this package with the "
-                                 "`runtime` extra: pip install '.[runtime]'"},
+                      "message": f"{_safe_message(exc)}; install this "
+                                 "package with the `runtime` extra: "
+                                 "pip install '.[runtime]'"},
                      ok=False), None
     return settings, Database(settings.database_url)
 
