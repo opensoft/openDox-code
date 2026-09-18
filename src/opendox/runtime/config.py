@@ -245,7 +245,32 @@ SECRET_PARAMETER_KEYS = (
     "password", "passwd", "pwd", "auth", "authorization", "credential",
     "credentials", "sig", "signature", "session",
 )
-_SECRET_PARAMETER = re.compile("|".join(SECRET_PARAMETER_KEYS), re.IGNORECASE)
+#: The same list as a SET, because the question is "is this name one of
+#: these", not "does this name contain one of these". The first cut compiled
+#: the tuple into an alternation and asked `.search()`, so any name with one of
+#: them as a SUBSTRING matched: `monkey` contains `key`, `sigma` contains
+#: `sig`, `tokenizer` contains `token` and `authority` contains `auth` — and a
+#: broker URL or a git remote carrying `?monkey=1` was refused as
+#: credential-bearing, which is a false refusal at the configuration boundary
+#: (Copilot review of openDox-code#25, at `056d1597`).
+_SECRET_PARAMETER_WORDS = frozenset(SECRET_PARAMETER_KEYS)
+
+#: `access_token`, `X-Api-Key` and `sessionToken` must still match, so the name
+#: is split into WORDS first — on every non-alphanumeric run and at each
+#: camelCase boundary — and each word is compared whole.
+_WORD_SEPARATOR = re.compile(r"[^A-Za-z0-9]+")
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def names_a_secret_parameter(name: str) -> bool:
+    """True when a URL parameter's NAME is one of the credential names.
+
+    WHOLE WORDS, for the reason `_SECRET_PARAMETER_WORDS` gives above. The
+    decoded name is what is judged, because `%74oken` is `token`.
+    """
+    spaced = _CAMEL_BOUNDARY.sub(" ", name)
+    return any(word.lower() in _SECRET_PARAMETER_WORDS
+               for word in _WORD_SEPARATOR.split(spaced) if word)
 
 
 def _split_url(name: str, value: str) -> urllib.parse.SplitResult:
@@ -332,7 +357,7 @@ def _redacted_query(query: str) -> str:
             continue
         name, sep, _ = part.partition("=")
         parts.append(name + sep + "<redacted>"
-                     if sep and _SECRET_PARAMETER.search(
+                     if sep and names_a_secret_parameter(
                          urllib.parse.unquote(name))
                      else part)
     return "".join(parts)
@@ -432,7 +457,7 @@ def _a_secret_parameter_in(text: str) -> bool:
     spelled this inline and the remote-URL judgement needed the same question
     asked the same way.
     """
-    return any(_SECRET_PARAMETER.search(
+    return any(names_a_secret_parameter(
         urllib.parse.unquote(part.partition("=")[0]))
         for part in re.split(r"[&;]", text) if "=" in part)
 

@@ -1932,3 +1932,59 @@ def test_the_two_dsn_reader_answers_what_libpq_answers_for_a_REPEATED_key() -> N
                            "postgresql://m:p@h/db?options="
                            "-csearch_path%3Dbase%20-csearch_path%3Dmigrated"})
     assert "served" in str(schemas.value) and "migrated" in str(schemas.value)
+
+
+def test_a_credential_shaped_parameter_name_is_a_WORD_and_not_a_substring() -> None:
+    """`monkey` contains `key`, and the first cut refused it.
+
+    `SECRET_PARAMETER_KEYS` was compiled into an alternation and asked with
+    `.search()`, so any parameter whose name merely CONTAINED one of the words
+    matched: `monkey`, `sigma`, `tokenizer`, `authority`, `keyspace`. A broker
+    URL or a git remote carrying `?monkey=1` was then refused as
+    credential-bearing — a false refusal at the configuration boundary, where
+    the cost is an install that will not start for a reason that is not true
+    (Copilot review of openDox-code#25, at `056d1597`).
+
+    THE COMPOUND NAMES MUST STILL MATCH, which is why this is a word split and
+    not an equality test: `access_token`, `X-Api-Key` and `sessionToken` are
+    how these parameters are really spelled.
+    """
+    from opendox.runtime.config import (
+        SECRET_PARAMETER_KEYS,
+        ConfigurationError,
+        credential_in_a_remote_url,
+        load_settings,
+        names_a_secret_parameter,
+        redacted_url,
+    )
+
+    for benign in ("monkey", "sigma", "tokenizer", "authority", "keyspace",
+                   "format", "realm", "keyboard", "passage"):
+        assert not names_a_secret_parameter(benign), benign
+    for carrier in ("token", "access_token", "X-Api-Key", "sessionToken",
+                    "api_key", "apikey", "pwd", "PASSWORD", "x-credentials"):
+        assert names_a_secret_parameter(carrier), carrier
+    # EVERY DECLARED WORD IS ITSELF A MATCH, so the list cannot drift away
+    # from the predicate that reads it.
+    for word in SECRET_PARAMETER_KEYS:
+        assert names_a_secret_parameter(word), word
+
+    # AND THROUGH THE THREE CALLERS, which is where the refusal is felt.
+    assert credential_in_a_remote_url(
+        "https://github.com/o/r.git?monkey=1") is None
+    assert credential_in_a_remote_url(
+        "https://github.com/o/r.git?access_token=x") is not None
+    assert redacted_url("https://broker/certs?monkey=1"
+                        ) == "https://broker/certs?monkey=1"
+    assert redacted_url("https://broker/certs?token=x"
+                        ) == "https://broker/certs?token=<redacted>"
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox"}
+    settings = load_settings({**base,
+                              PREFIX + "OIDC_JWKS_URL":
+                                  "https://broker/certs?monkey=1&format=jwk"})
+    assert settings.oidc_jwks_url == "https://broker/certs?monkey=1&format=jwk"
+    with pytest.raises(ConfigurationError):
+        load_settings({**base, PREFIX + "OIDC_JWKS_URL":
+                       "https://broker/certs?api_key=hunter2"})

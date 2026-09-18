@@ -2127,3 +2127,24 @@ def test_the_schema_the_migration_applies_is_the_one_the_api_reads() -> None:
         "the refusal must come before the ledger is bootstrapped, or a "
         "refused run has already written to the wrong schema")
     assert guard < applied
+
+    # AND EVERY ACT THAT CHANGES OR PREVIEWS A SCHEMA ASKS IT, not just the
+    # run. It was a METHOD reached from `apply()` alone, so `migrate --plan`
+    # printed a plan the real run would refuse and `reset` — which DROPS the
+    # six tables — never asked at all (Copilot review of openDox-code#25, at
+    # `056d1597`). One module-level definition, three callers.
+    assert guard < source.index("class MigrationRunner:"), (
+        "the guard is module-level, so `cli` can ask it without a runner")
+    verbs = (ROOT / "src" / "opendox" / "runtime" / "cli.py").read_text(
+        encoding="utf-8")
+    preview = verbs.index("if args.plan:")
+    assert verbs.index("refuse_a_schema_the_api_will_not_read", preview) < \
+        verbs.index("runner.plan(conn)", preview), (
+            "`migrate --plan` must ask before it prints a plan")
+    reset = verbs.index("def cmd_reset")
+    # The DDL itself and not the paragraph that explains it: the comment
+    # block above the drops quotes the statement, and matching that would
+    # pass on a file where only the prose is in the right order.
+    assert verbs.index("refuse_a_schema_the_api_will_not_read", reset) < \
+        verbs.index('sql.SQL("drop table if exists', reset), (
+            "`reset` must ask before the first DROP, which cannot be undone")

@@ -1607,7 +1607,11 @@ def test_a_run_refuses_a_schema_the_served_application_will_not_read(
         runner.apply()
     message = str(caught.value)
     assert here in message and declared in message
-    assert "nothing has been applied" in message
+    # "CHANGED" AND NOT "APPLIED", since this guard became the module-level
+    # one that `runtime reset` and `migrate --plan` ask too: a reset that is
+    # refused has not applied anything either, and the promise an operator
+    # needs is that the database is as it was.
+    assert "nothing has been changed" in message
 
     # AND NOTHING WAS APPLIED — the refusal is before the ledger is even
     # bootstrapped, so a database that had no ledger still has none.
@@ -1624,3 +1628,86 @@ def test_a_run_refuses_a_schema_the_served_application_will_not_read(
     # error: the guard is opt-in by declaration.
     assert migrations.MigrationRunner(
         database, migrations_dir=ROOT / "migrations").apply() == []
+
+
+def test_reset_and_plan_ask_the_served_schema_declaration_the_run_asks(
+        postgres_dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A25-3's guard reached ONE of the three acts that change or read a schema.
+
+    It was a method called from `apply()`, so `runtime migrate --plan` printed
+    a plan for a run that would refuse — a preview an operator checks BEFORE
+    committing to the real thing — and `runtime reset`, the one verb that
+    cannot be undone, never asked at all: with a mispointed
+    `OPENDOX_MIGRATION_DATABASE_URL` a confirmed reset DROPPED the six
+    coordination tables of a schema while `OPENDOX_SERVED_SCHEMA` said in
+    terms that the API reads a different one (Copilot review of
+    openDox-code#25, at `056d1597`, in both places).
+
+    DRIVEN THE WAY THE DEFECT APPEARS: a real schema with a coordination table
+    in it, a DSN that selects that schema, and a declaration naming another.
+    The reset must refuse with the table still there.
+    """
+    import io
+    import json
+    import uuid
+    from contextlib import redirect_stdout
+
+    from opendox.runtime import cli
+    from opendox.runtime.config import PREFIX
+    from opendox.runtime.db import Database
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            conn.execute(f"create table {schema}.projects (id text)")
+        try:
+            separator = "&" if "?" in postgres_dsn else "?"
+            monkeypatch.setenv(
+                PREFIX + "MIGRATION_DATABASE_URL",
+                f"{postgres_dsn}{separator}"
+                f"options=-csearch_path%3D{schema}%2Cpublic")
+            monkeypatch.setenv(PREFIX + "SERVED_SCHEMA", "somewhere-else")
+
+            def _run(argv):
+                args = cli.build_parser().parse_args(argv)
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    code = args.func(args)
+                return code, json.loads(buffer.getvalue())
+
+            # -- reset REFUSES, and drops nothing --------------------------
+            code, evidence = _run(
+                ["runtime", "reset", "--confirm", cli.RESET_CONFIRMATION])
+            assert code != 0, evidence
+            assert schema in evidence["message"]
+            assert "somewhere-else" in evidence["message"]
+            with admin.connection() as conn:
+                remaining = conn.execute(
+                    "select table_name from information_schema.tables "
+                    "where table_schema = %s", (schema,)).fetchall()
+            assert [row[0] for row in remaining] == ["projects"], (
+                "a refused reset dropped something")
+
+            # -- and `migrate --plan` refuses rather than printing a plan
+            # the real run would refuse.
+            code, evidence = _run(["runtime", "migrate", "--plan"])
+            assert code != 0, evidence
+            assert schema in evidence["message"]
+            assert "somewhere-else" in evidence["message"]
+            assert "planned" not in evidence
+
+            # -- AND THE DECLARATION AGREEING IS STILL A PLAN AND A RESET.
+            # The guard is a refusal of a MISMATCH, not of the feature.
+            monkeypatch.setenv(PREFIX + "SERVED_SCHEMA", schema)
+            code, evidence = _run(["runtime", "migrate", "--plan"])
+            assert code == 0, evidence
+            assert evidence["planned"], "a fresh schema has migrations pending"
+            code, evidence = _run(
+                ["runtime", "reset", "--confirm", cli.RESET_CONFIRMATION])
+            assert code == 0, evidence
+            assert evidence["schema"] == schema
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")

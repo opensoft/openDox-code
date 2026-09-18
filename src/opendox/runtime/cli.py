@@ -429,8 +429,19 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             if args.plan:
                 # The canonical gate has already run, above, for this path and
                 # for the real one.
-                evidence = {"verb": "migrate",
-                            "planned": [m.version for m in runner.plan()],
+                #
+                # AND THE SERVED-SCHEMA GUARD RUNS HERE TOO. It lived in
+                # `apply()` alone, so `--plan` printed a plan for a run that
+                # would refuse — a preview that does not describe an
+                # executable run is worse than no preview, because it is the
+                # answer an operator checks BEFORE committing to the real one
+                # (Copilot review of openDox-code#25, at `056d1597`). One
+                # connection for the guard and the plan, so the answer and the
+                # thing it was asked of are the same session.
+                with runner_db.connection() as conn:
+                    runner.refuse_a_schema_the_api_will_not_read(conn)
+                    planned = [m.version for m in runner.plan(conn)]
+                evidence = {"verb": "migrate", "planned": planned,
                             "applied": []}
             else:
                 evidence = {"verb": "migrate", "planned": [],
@@ -716,6 +727,18 @@ def cmd_reset(args: argparse.Namespace) -> int:
                     # coordination tables under a promise that it would not
                     # (Copilot review of openDox-code#25, round 14). Measured
                     # on postgres 16.15; the refusal names both schemas.
+                    #
+                    # AND THE SERVED-SCHEMA DECLARATION IS ASKED BEFORE THE
+                    # FIRST DROP. This verb DELETES the six coordination
+                    # tables in the schema its own DSN selects, and it never
+                    # asked: a mispointed migration DSN plus a confirmed
+                    # `reset` dropped another schema's coordination state
+                    # while `OPENDOX_SERVED_SCHEMA` said in terms that the API
+                    # reads a different one — the same invariant `migrate` has
+                    # had since A25-3, on the one verb that cannot be undone
+                    # (Copilot review of openDox-code#25, at `056d1597`).
+                    migrations.refuse_a_schema_the_api_will_not_read(
+                        lock, settings.served_schema)
                     schema = migrations.selected_schema(lock)
                     with lock.transaction():
                         for table in DROP_ORDER:
