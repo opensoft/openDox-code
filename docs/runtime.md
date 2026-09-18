@@ -128,9 +128,16 @@ if it did not.
 No service publishes a host port: TLS and ingress terminate at the platform.
 Reach it over the compose network or with `docker compose exec`.
 
+**The two blocks below are fenced `bash`, and that is a prerequisite rather
+than a label.** They prompt with `read -rs -p`, and neither `-s` nor `-p` is in
+POSIX `read` — under `/bin/sh` as dash the prompt is consumed as the variable
+name and the block fails before a Secret file holds anything, so a block fenced
+`sh` could not do what it documents (Copilot review of openDox-code#25, round
+30). Everything else here is POSIX; it is the hidden prompt that needs bash.
+
 ### On Kubernetes
 
-```sh
+```bash
 # THE NAMESPACE FIRST. Every command below is `-n opendox`, and on a clean
 # cluster that namespace does not exist until the manifest is applied — which
 # is the LAST line here, so the three `create secret` calls failed with
@@ -298,7 +305,7 @@ operator's own shell — it is never an argument, so it is not in `argv`, not in
 the database is a *mistyped placeholder*, which without it would be sent as
 SQL rather than as a value. Set the four, then run the block:
 
-```sh
+```bash
 read -rs OPENDOX_RUNTIME_PG_PASSWORD && export OPENDOX_RUNTIME_PG_PASSWORD
 export OPENDOX_RUNTIME_PG_ROLE=...      # the user in opendox-db-runtime's DSN
 export OPENDOX_MIGRATION_PG_USER=...    # the user in opendox-db-migration's DSN
@@ -318,9 +325,24 @@ select format('grant connect on database %I to %I', :'database',
 \gexec
 select format('grant usage on schema public to %I', :'runtime_role')
 \gexec
--- tables that already exist, if this database has been migrated before
-select format('grant select, insert, update, delete on all tables in schema '
-              'public to %I', :'runtime_role')
+-- THE COORDINATION TABLES THAT ALREADY EXIST, and only those. A database
+-- migrated before this prerequisite ran already holds them, and a `grant … on
+-- table` for one that is absent is an error — so the list is a JOIN against
+-- the catalogue rather than seven statements, and it emits NOTHING on a fresh
+-- database. It used to read `on all tables in schema public`, which on a
+-- REUSED database handed the served role another application's data (Copilot
+-- review of openDox-code#25, round 30). The names are Q1's six plus the
+-- ledger; `tests_runtime/test_deploy_shape.py` derives them from
+-- `identity.TABLES` and `migrations.LEDGER_TABLE` so this list cannot drift.
+select format('grant select, insert, update, delete on table %I to %I',
+              c.relname, :'runtime_role')
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = 'public' and c.relkind = 'r'
+   and c.relname = any (array['drafts', 'memberships',
+                              'opendox_schema_migrations',
+                              'project_repositories', 'projects', 'sessions',
+                              'users'])
 \gexec
 -- and everything the migration owner creates from here on, so a later
 -- migration that adds a table needs no second visit

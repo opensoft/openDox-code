@@ -805,10 +805,53 @@ jobs:
       #              status is taken by `$?` ON ITS OWN LINE, because bash
       #              suppresses errexit inside an operand of `&&`/`||` and the
       #              first form of that fix ran every remaining create.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 286 there.
+      #  173 passed  at `build/3-5-runtime` `b312eeec` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — the same five modules,
+      #              after round THIRTY. The served role was granted EVERY
+      #              table in `public`, which on a reused database is another
+      #              application's data — and at first start the coordination
+      #              tables do not exist yet, so that grant could only ever
+      #              reach tables this install did not create. Two narrow
+      #              halves replace it, both measured: `alter default
+      #              privileges` for what the migration owner creates, and a
+      #              catalogue JOIN for the coordination tables that already
+      #              exist (which emitted exactly one statement beside an
+      #              unrelated table, and left that table with no grants). The
+      #              list is DERIVED from `identity.TABLES` and
+      #              `migrations.LEDGER_TABLE`. Also: the bundled script never
+      #              created an alternate `OPENDOX_MIGRATION_PG_USER` and
+      #              failed under `ON_ERROR_STOP=1` with PostgreSQL's message
+      #              rather than one naming the variable; the install blocks
+      #              are fenced `bash`, because `read -rs -p` is not POSIX and
+      #              dash consumes the prompt as the variable name; and
+      #              `/readyz` bounds its own statements with `SET LOCAL` in a
+      #              transaction — session-level was measured to SURVIVE the
+      #              checkout and leak onto the next borrower.
+      #              SUPERSEDED by the entry below, at the same count on these
+      #              five; `pytest -q tests_runtime/` was 288 there.
+      #  173 passed  at `build/3-5-runtime` `2af6f119` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — UNCHANGED here because
+      #              round THIRTY-ONE's one real change needs a database. Its
+      #              finding — that a role with USAGE but no CREATE on the
+      #              selected schema would have PostgreSQL pick a later
+      #              `search_path` entry as the creation target — is MEASURED
+      #              FALSE: the unqualified `create table` raises `permission
+      #              denied for schema <sel>` and does not fall through, the
+      #              second time this act has measured that rule against a
+      #              finding assuming otherwise. What was taken is the
+      #              message: the guard asks for CREATE before the DDL now, so
+      #              the refusal names the schema and the grant instead of
+      #              arriving from inside a `create table`. The round's other
+      #              thread claimed this workflow's required step could not
+      #              collect `test_deploy_shape.py` for a `SyntaxError` that
+      #              is not there — `py_compile` on that blob is clean and
+      #              THIS JOB was green at the commit reviewed.
       #              THE CURRENT FIGURE ON `build/3-5-runtime`, which this
       #              branch carries by merge; THAT PR's description states it
-      #              at this same commit — its head `dbc704f6` adds only the
-      #              record — and `pytest -q tests_runtime/` is 286 there.
+      #              at this same commit — its head `3517222e` adds only the
+      #              record — and `pytest -q tests_runtime/` is 289 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
