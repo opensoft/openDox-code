@@ -1927,15 +1927,28 @@ jobs:
           # FLOORS - may only RISE, and only with the reason in the commit
           # message. Set to the measured values above, which are numbers this
           # suite has actually met on CI rather than an aspiration.
-          # RAISED 2026-09-18 by the § 3.7 FLOOR PART 3 act (PR #31): eight
-          # tests join the list with `tests/test_conformance_corpus.py`, and
-          # the floors move WITH them so the margin keeps meaning something.
-          # Measured on run 35400706354, this PR's own first run, not derived
-          # by adding eight to the last pair: 1076 -> 1084 and 1073 -> 1081,
-          # skipped unchanged at 3 (the new suite skips nothing where git is
-          # present, which on this runner it is).
-          MIN_SELECTED: "1084"
-          MIN_PASSED: "1081"
+          # RAISED 2026-09-18 by the § 3.7 FLOOR PART 3 act (PR #31), TWICE,
+          # and the second time is the one that governs.
+          #
+          # First: eight tests joined the list with
+          # `tests/test_conformance_corpus.py` -- measured on run 35400706354,
+          # 1076 -> 1084 and 1073 -> 1081.
+          #
+          # Then #30 landed (merge `5c867137`, 22:12:50Z) and this branch
+          # merged it, and the number moved AGAIN -- measured on run
+          # 35400771494 over the merged head: selected 1093, passed 1090.
+          # NINE of those are #30's, added to files ALREADY in the lists
+          # (`tests_runtime/test_deploy_shape.py`,
+          # `test_local_git_adapter.py`, `test_runtime_cli.py`), and #30 left
+          # the floors where it found them -- so main carried a nine-test
+          # slack that this pin could no longer see past. Closed here because
+          # this act was re-measuring anyway; a floor with slack in it is a
+          # floor that stops catching the regression it was set to catch.
+          #
+          # NEITHER FIGURE WAS DERIVED. 1084 + 9 = 1093 is a check on the
+          # reading, not the source of it.
+          MIN_SELECTED: "1093"
+          MIN_PASSED: "1090"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
