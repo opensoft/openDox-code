@@ -1005,7 +1005,17 @@ def test_a_second_push_url_is_refused_even_when_the_first_one_matches(
     with pytest.raises(act.RepositoryActRefused) as caught:
         act.push_to_remote(store, project_id=project.id)
     message = str(caught.value)
-    assert "unrecorded.git" in message and "of-record.git" in message
+    # THE COUNT IS THE FINDING, and the configured values are NOT echoed:
+    # `get-url --push --all` is read by LINE, so a stored URL holding a
+    # newline arrives here as fragments and a redactor cannot see userinfo
+    # that has been cut in half (Copilot review of openDox-code#26, round 30).
+    # The map's own value is named, redacted as one value, and it is the one
+    # an operator has to change.
+    assert "2 destinations" in message, message
+    assert "of-record.git" in message, message
+    assert "unrecorded.git" not in message, (
+        "a configured push URL is echoed; a newline in a legacy row makes "
+        "that a leak the redactor cannot catch")
     assert "Nothing is pushed" in message
     for bare in (destination, elsewhere):
         assert subprocess.run(["git", "--git-dir", str(bare), "rev-parse",
@@ -2113,21 +2123,30 @@ def test_a_platform_without_the_no_follow_walk_refuses_rather_than_degrades(
 
 
 def test_the_push_names_a_destination_it_holds_open(
-        store, project, project_repository_root: Path, tmp_path: Path) -> None:
-    """A destination re-pointed after the check is not the one written to.
+        store, project, project_repository_root: Path, tmp_path: Path,
+        monkeypatch) -> None:
+    """The swap is driven BETWEEN the ownership check and the open.
 
-    THE FINDING (Copilot review of openDox-code#26, round 29): the containment
-    check resolved a permitted local destination and discarded the object; the
-    push reopened the URL. "A symlink used as an external local destination can
-    be switched to a sibling under this service's repository root between these
-    operations, bypassing this guard and making the runtime write into another
-    project."
+    THE FINDING, TWICE (Copilot review of openDox-code#26, rounds 29 and 30).
+    Round 29: the containment check resolved a permitted local destination and
+    discarded the object; the push reopened the URL, so a symlink could be
+    repointed in between. Round 30, on the fix: `_bound_local_destination`
+    RESOLVED THE NAME AGAIN, so the same window simply moved — "if a symlink
+    remote is outside the service root during
+    `_refuse_a_destination_this_service_owns` and is repointed into a sibling
+    before this helper runs, `resolved` becomes that sibling and the open
+    descriptor is then pushed to it". And round 30 on the first version of THIS
+    test: it repointed the link before `push_to_remote` started, so the
+    ownership check refused immediately and the race was never exercised.
 
-    The push now names the destination by an OPEN DIRECTORY —
-    `/proc/self/fd/<n>` for the handle the guard walked — so what it writes
-    into is the object that was checked, whatever the name says by then. This
-    test swaps the link between the two and measures where the commit landed:
-    in the checked directory, and NOT in the sibling the link now names.
+    So the swap happens where it has to: the real check runs, and the link is
+    repointed the instant it returns. The containment question is asked again
+    of the OPEN OBJECT — `/proc/self/fd/<n>` resolves, in this process, to the
+    directory the handle refers to — so the answer cannot be stale by
+    construction, and the refusal is what a repoint buys.
+
+    Two runs, and the second is what makes the first mean anything: with no
+    swap the push lands in the governed destination through that same handle.
     """
     act.create_repository(store, project_id=project.id,
                           root=project_repository_root, actor=ACTOR)
@@ -2139,46 +2158,46 @@ def test_the_push_names_a_destination_it_holds_open(
                    env=_GIT_ENV)
     link = tmp_path / "destination"
     link.symlink_to(outside, target_is_directory=True)
-
     act.attach_remote(store, project_id=project.id, remote_url=str(link))
 
-    # THE SWAP, after the act has resolved and bound the destination. The
-    # runtime holds the descriptor across the push, so the name changing under
-    # it is exactly the race the finding describes.
-    original_target = os.readlink(link)
-    act_push = act.push_to_remote
+    # THE RACE, DRIVEN. The real check runs against the link pointing OUTSIDE
+    # — it must pass — and the link is repointed at the sibling the moment it
+    # returns, which is the window the finding describes.
+    checked: list[str] = []
+    real_check = act._refuse_a_destination_this_service_owns
 
-    def _swap_then_push(*args, **kwargs):
+    def _check_then_swap(destinations, location):
+        real_check(destinations, location)
+        checked.append(os.readlink(link))
         link.unlink()
         link.symlink_to(sibling, target_is_directory=True)
-        return act_push(*args, **kwargs)
 
-    # The swap is done BEFORE the act runs here, which is the strictly harder
-    # case: the name already points at the sibling when the push begins, and
-    # the guard must refuse it. The bound-handle property is what the
-    # `original_target` assertion below measures.
-    link.unlink()
-    link.symlink_to(sibling, target_is_directory=True)
+    monkeypatch.setattr(act, "_refuse_a_destination_this_service_owns",
+                        _check_then_swap)
     with pytest.raises(act.RepositoryActRefused) as caught:
         act.push_to_remote(store, project_id=project.id)
-    assert "this service owns" in str(caught.value), caught.value
+    assert checked == [str(outside)], (
+        "the guard did not run against the destination outside the root, so "
+        "this test measured a refusal it would have made anyway")
+    assert "at the moment it was opened" in str(caught.value), caught.value
     assert subprocess.run(
         ["git", "-C", str(sibling), "rev-parse", "--verify", "--quiet",
          f"refs/heads/{act.DEFAULT_BRANCH}"],
         capture_output=True, env=_GIT_ENV).returncode != 0, (
-        "the push reached the sibling the link was re-pointed at")
+        "the push reached the sibling the link was repointed at")
 
-    # And with the link back where it was, the push lands in the governed
-    # destination through the handle.
+    # AND WITHOUT THE SWAP the push lands in the governed destination, through
+    # the handle — so the refusal above is the race and not the mechanism.
+    monkeypatch.setattr(act, "_refuse_a_destination_this_service_owns",
+                        real_check)
     link.unlink()
-    link.symlink_to(original_target, target_is_directory=True)
+    link.symlink_to(outside, target_is_directory=True)
     act.push_to_remote(store, project_id=project.id)
     assert subprocess.run(
         ["git", "-C", str(outside), "rev-parse", "--verify", "--quiet",
          f"refs/heads/{act.DEFAULT_BRANCH}"],
         capture_output=True, env=_GIT_ENV).returncode == 0, (
         "the push did not reach the destination it was given")
-    assert _swap_then_push is not None        # the helper is kept for the note
 
 
 def test_a_local_destination_that_cannot_be_resolved_is_refused(

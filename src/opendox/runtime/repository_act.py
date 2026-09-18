@@ -1435,10 +1435,35 @@ def _bound_local_destination(destination: str | None, location: Any):
             "this project's remote is a local path this act could not open "
             f"without following a link ({type(exc).__name__}); nothing is "
             "pushed") from exc
-    for base in ("/proc/self/fd", "/dev/fd"):
-        if os.path.isdir(base):
-            return handle, f"{base}/{handle}"
-    os.close(handle)
+    try:
+        for base in ("/proc/self/fd", "/dev/fd"):
+            if os.path.isdir(base):
+                bound = f"{base}/{handle}"
+                # AND THE CONTAINMENT IS RE-ASKED OF THE OPEN OBJECT, which is
+                # the half the first cut left open. `_refuse_a_destination_this
+                # _service_owns` approved a NAME; this function then resolved
+                # that name again, so a symlink outside the root during the
+                # check and repointed into a sibling before this open bound the
+                # SIBLING and pushed to it with the guard's blessing (Copilot
+                # review of openDox-code#26, round 30). The descriptor's own
+                # path is what is asked now — `/proc/self/fd/<n>` resolves, in
+                # this process, to the directory the handle refers to — so the
+                # object that is checked is the object that is pushed to, with
+                # nothing between them.
+                real = Path(os.path.realpath(bound))
+                owned = Path(location).parent.resolve()
+                if real == owned or owned in real.parents:
+                    raise RepositoryActRefused(
+                        "this project's remote resolved, at the moment it was "
+                        "opened, to a path inside the repository root this "
+                        "service owns — this project's own repository or "
+                        "another project's. A push moves the project into a "
+                        "GOVERNED destination; re-attach a remote that is one")
+                return handle, bound
+    except BaseException:
+        os.close(handle)
+        raise
+    os.close(handle)                      # unreachable: the capability refuses
     return None, None
 
 
@@ -1507,11 +1532,18 @@ def _push_to_remote_with(git: GitRunner, row: Any) -> str:
     if destinations is not None and len(destinations) != 1:
         raise RepositoryActRefused(
             f"the repository at {row.location} would push to "
-            f"{len(destinations)} destinations under {REMOTE_NAME!r} "
-            f"({', '.join(redact_remote_url(url) for url in destinations)}) "
-            f"while the map records one. Nothing is pushed: a destination the "
-            "map cannot record is a destination this act cannot make. "
-            "Re-attach the remote to settle it.")
+            f"{len(destinations)} destinations under {REMOTE_NAME!r} while "
+            f"the map records one ({redact_remote_url(row.remote_url)}). "
+            "Nothing is pushed: a destination the map cannot record is a "
+            "destination this act cannot make. Re-attach the remote to settle "
+            "it. THE CONFIGURED VALUES ARE NOT ECHOED: `get-url --push --all` "
+            "is read by LINE, so a stored URL holding a newline — which a "
+            "legacy row can — arrives here as fragments like "
+            "`https://user:secret` and `@host/repo`, and a redactor cannot "
+            "see userinfo that has been cut in half (Copilot review of "
+            "openDox-code#26, round 30). The count is the finding; `git -C "
+            f"{row.location} remote get-url --push --all {REMOTE_NAME}` shows "
+            "them to whoever already has the repository.")
     effective = destinations[0] if destinations else None
     for what, found in (("fetches from", configured),
                         ("would push to", effective)):

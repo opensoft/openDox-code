@@ -344,8 +344,23 @@ def _sanitized_git_environment() -> dict[str, str]:
 #: act has never run on: both `deploy/` shapes and every CI runner are Linux.
 NO_FOLLOW_WALK_IS_AVAILABLE = (
     hasattr(os, "O_DIRECTORY")
+    # `O_NOFOLLOW` IS THE GUARD ITSELF, not an optimization. The walk opened
+    # each component with `getattr(os, "O_NOFOLLOW", 0)`, so on a platform
+    # holding `O_DIRECTORY` and `dir_fd` but not `O_NOFOLLOW` the flag was
+    # silently ZERO — every component open followed links, and this constant
+    # still reported the safe walk as available (Copilot review of
+    # openDox-code#26, round 30). A guard that can be absent without anybody
+    # being told is the shape this act refuses everywhere else.
+    and hasattr(os, "O_NOFOLLOW")
     and os.mkdir in os.supports_dir_fd
-    and os.open in os.supports_dir_fd)
+    and os.open in os.supports_dir_fd
+    # AND A DESCRIPTOR MUST BE NAMEABLE, because `runner_bound_to` is what
+    # turns the verified handle into the thing git opens. Without
+    # `/proc/self/fd` or `/dev/fd` it fell back to the PATHNAME, and the
+    # adapter and both acts then re-resolved that name for the root checks and
+    # the writes — the same-object guarantee this module documents was simply
+    # false there (round 30). Refused rather than quietly weaker.
+    and any(os.path.isdir(base) for base in ("/proc/self/fd", "/dev/fd")))
 
 
 class PlatformCannotGuardPaths(OSError):
@@ -440,16 +455,25 @@ def runner_bound_to(handle: int, location: Path,
     opened, `git -C /proc/self/fd/<n>` still wrote into the real directory and
     wrote nothing through the link.
 
-    WHERE NEITHER PATH EXISTS the runner falls back to the pathname, which is
-    the behaviour this act had before — the inode comparison above still
-    refuses a path that changed, and this note is here so a reader knows which
-    guarantee holds on which platform rather than assuming the stronger one.
+    WHERE NEITHER PATH EXISTS THIS REFUSES. It used to fall back to the
+    pathname, described as "the strongest the platform offers" — but the
+    fallback closes the verified handle's only connection to git, and the
+    adapter and both acts then re-resolve that NAME for their root checks and
+    their writes, so a repository can be swapped in after the check and this
+    module's documented same-object guarantee is false (Copilot review of
+    openDox-code#26, round 30). `NO_FOLLOW_WALK_IS_AVAILABLE` carries the same
+    condition, so a platform without a descriptor path is refused at the first
+    guard rather than here; this raise is the one that would fire if the
+    directory went away between the two.
     """
     for base in ("/proc/self/fd", "/dev/fd"):
         if os.path.isdir(base):
             return GitRunner(Path(base) / str(handle), executable,
                              inherit_fd=handle)
-    return GitRunner(location, executable)
+    raise PlatformCannotGuardPaths(
+        "this platform names no open descriptor (`/proc/self/fd`, `/dev/fd`), "
+        "so the directory this act verified cannot be the directory git "
+        "opens; it refuses rather than re-resolving the path")
 
 
 @dataclass(frozen=True)

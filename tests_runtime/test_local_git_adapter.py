@@ -3448,3 +3448,52 @@ def test_no_signing_program_the_repository_names_is_ever_run(
         ["git", "-C", str(destination), "rev-parse", "--verify", "--quiet",
          "refs/heads/main"], capture_output=True,
         env=_GIT_ENV).returncode == 0, "the push did not land"
+
+
+def test_the_capability_names_every_primitive_the_walk_actually_uses(
+        monkeypatch, tmp_path: Path) -> None:
+    """A guard that can be absent without anybody being told is not a guard.
+
+    TWO FINDINGS (Copilot review of openDox-code#26, round 30), both about
+    `NO_FOLLOW_WALK_IS_AVAILABLE` claiming more than it checked:
+
+    * **`O_NOFOLLOW` was not in it.** The walk opens each component with
+      `getattr(os, "O_NOFOLLOW", 0)`, so on a platform holding `O_DIRECTORY`
+      and `dir_fd` but not `O_NOFOLLOW` the flag is silently ZERO — every
+      component open follows links — and the constant still reported the safe
+      walk as available.
+    * **A nameable descriptor was not in it.** `runner_bound_to` is what turns
+      the verified handle into the thing git opens; without `/proc/self/fd` or
+      `/dev/fd` it fell back to the PATHNAME, and the adapter and both acts
+      then re-resolve that name for their root checks and their writes. The
+      same-object guarantee this module documents was false there.
+
+    Both are in the constant now, and `runner_bound_to` raises rather than
+    falling back — the raise being the one that fires if the directory goes
+    away between the capability check and the bind.
+    """
+    assert lga.NO_FOLLOW_WALK_IS_AVAILABLE, (
+        "this platform cannot run the suite this case is written for")
+
+    # EACH PRIMITIVE, REMOVED IN TURN: the constant is recomputed from `os`, so
+    # the case measures the expression rather than restating it.
+    source = (Path(lga.__file__).read_text(encoding="utf-8")
+              .split("NO_FOLLOW_WALK_IS_AVAILABLE = ", 1)[1]
+              .split("\n\n", 1)[0])
+    for primitive in ('hasattr(os, "O_DIRECTORY")', 'hasattr(os, "O_NOFOLLOW")',
+                      "os.mkdir in os.supports_dir_fd",
+                      "os.open in os.supports_dir_fd",
+                      '"/proc/self/fd"'):
+        assert primitive in source, (
+            f"{primitive} is not part of the capability, so a platform "
+            f"without it would be told the safe walk is available")
+
+    # AND THE BIND REFUSES RATHER THAN NAMING A PATH.
+    monkeypatch.setattr(lga.os.path, "isdir", lambda _p: False)
+    handle = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(lga.PlatformCannotGuardPaths) as caught:
+            lga.runner_bound_to(handle, tmp_path, "git")
+        assert "open descriptor" in str(caught.value)
+    finally:
+        os.close(handle)
