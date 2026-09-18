@@ -849,6 +849,23 @@ jobs:
       #              (measured: EOF left the block running, status 0), while
       #              three independent `create secret` calls left a half
       #              configured install that could not be re-run.
+      #              SUPERSEDED by the entry below, at the same count on both
+      #              invocations; `pytest -q tests_runtime/` was 291 there.
+      #  174 passed  at `build/3-5-runtime` `fa67008b` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — UNCHANGED, because
+      #              round THIRTY-THREE replaces an assertion rather than
+      #              adding one. Round 29's `/`-excluding bound on the DSN
+      #              redaction leaked: a password holding BOTH a `/` and a
+      #              space fell to the plain branch, which stops at the space,
+      #              and `word@db.internal/opendox` stayed in the message. No
+      #              pattern both absorbs arbitrary userinfo and stops before
+      #              an unrelated later `@`, so the branch now runs to the
+      #              LAST `@` on the line — round 19's "redact MORE rather
+      #              than less", with the price stated in the case. And the
+      #              managed-database prerequisite accepted an EMPTY password
+      #              (`read` succeeds on an empty line) and would have
+      #              provisioned a login role with a blank credential, which
+      #              the bundled bootstrap refuses by name.
       #              THE CURRENT FIGURE; the PR description states it at this
       #              same commit, and `pytest -q tests_runtime/` is 291 here.
       - name: pytest (runtime, hermetic)
