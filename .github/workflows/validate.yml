@@ -1561,9 +1561,22 @@ jobs:
       #              the store's permissions were whatever umask the process
       #              inherited — 0777 at umask 000 — now 0700/0600 under every
       #              umask, declared and enforced.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 522 there.
+      #  337 passed  at `build/3-6-repository-act` `b736c859` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — the count rises by the fourteen
+      #              `build/3-5-runtime` brought in with its A25 batch and by
+      #              this branch's answer to what that batch's anti-leak walk
+      #              then found HERE: `GitRunner` composed an OS error's text
+      #              and trusted `GitCommandFailed` to clean it a layer later
+      #              (the A25-1 shape), `_write_back_bound` aliased a handler's
+      #              exception into a local the walk cannot follow, and the
+      #              rule itself flagged two correct shapes — a handler that
+      #              catches only this package's own exceptions, and a name
+      #              inside `redact_credentials(str(exc))`.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 522. The neutral conformance corpus
+      #              tests_runtime/` is 540. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
