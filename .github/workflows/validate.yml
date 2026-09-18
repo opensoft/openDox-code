@@ -1291,7 +1291,8 @@ jobs:
       #              reach `commit-tree` (measured) but `push.gpgSign` DID
       #              reach the push. THE CURRENT FIGURE for this branch; the
       #              PR description states it at this same commit and `pytest
-      #              -q tests_runtime/` is 492. THE NEUTRAL CONFORMANCE CORPUS
+      #              -q tests_runtime/` was 492. SUPERSEDED by the entries
+      #              below. THE NEUTRAL CONFORMANCE CORPUS
       #              WAS NOT RE-RUN at this commit — its harness is
       #              openxFactory's and was not in this session's workspace;
       #              17 of 17 at `61973332` stands, and this round changes no
@@ -1305,8 +1306,9 @@ jobs:
       #              because the figure moved, which is the only reason an
       #              entry is ever added here. THE CURRENT FIGURE for this
       #              branch; the PR description states it at this same commit
-      #              and `pytest -q tests_runtime/` is 495. The neutral
-      #              conformance corpus was not re-run; see the entry above.
+      #              and `pytest -q tests_runtime/` was 495. SUPERSEDED by the
+      #              entries below. The neutral conformance corpus was not
+      #              re-run; see the entry above.
       #              SUPERSEDED by the entry below; `pytest -q
       #              tests_runtime/` was 495 there.
       #  308 passed  at `build/3-6-repository-act` `3030d831` (2026-09-18, same
@@ -1327,12 +1329,34 @@ jobs:
       #              race and does now. And the multi-destination refusal no
       #              longer echoes `get-url --push --all` output, which is
       #              read by LINE and cuts a legacy row's userinfo in half.
-      #              THE CURRENT FIGURE for this branch; the PR description
-      #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 498. The neutral conformance corpus
+      #              SUPERSEDED by the entry below; the PR description stated
+      #              it at that same commit and `pytest -q tests_runtime/`
+      #              was 498 there. The neutral conformance corpus
       #              was not re-run; see the entry above. The 1 skipped is the
       #              live psycopg reproducer carried in from
       #              `build/3-5-runtime`; see that chain's round-26 entry.
+      #  310 passed  at `build/3-6-repository-act` `b9051b8d` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — SIX added,
+      #              answering rounds THIRTY-ONE and THIRTY-TWO. Two trailer
+      #              values were caller-controlled and unencoded, so
+      #              `A\nWrite-Path: forged` wrote a second, fabricated commit
+      #              trailer and the same newline in `actor` went into the
+      #              author and committer NAMES, which git records verbatim.
+      #              `remote.<name>.vcs` names a remote HELPER off PATH while
+      #              the URL stays ordinary — MEASURED on git 2.43.0 running a
+      #              planted `git-remote-evil`, and running it with `-c
+      #              protocol.ext.allow=never` passed too — and
+      #              `url.<prefix>.insteadOf` reaches the same helper by
+      #              rewriting the destination. The scp credential class
+      #              required no colon before the `@`, so the one form that
+      #              carries a password slipped past it; a `ValueError` from a
+      #              location holding a NUL was a traceback rather than the
+      #              act's refusal; and the push endpoint's 200 path — a
+      #              legacy row's one echo — was covered by nothing.
+      #              THE CURRENT FIGURE for this branch; the PR description
+      #              states it at this same commit and `pytest -q
+      #              tests_runtime/` is 504. The neutral conformance corpus
+      #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
