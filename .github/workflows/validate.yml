@@ -387,3 +387,48 @@ jobs:
           tests/test_wheel_paint_and_reach.py
           tests/test_binding_stylesheets.py
           --noconftest
+
+      # § 3.4 SLICE S7 RESIDUE — `tests/test_display_facet_leaves.py`, as its
+      # OWN STEP rather than a 28th entry on the list above. That is a merge
+      # decision and it is measured, not preferred: openDox-code#27 (RULED Q7's
+      # binding stylesheets) appends `tests/test_binding_stylesheets.py` at the
+      # same tail, so a second append there is a textual conflict on whichever
+      # of the two lands second — over a line whose ORDER carries no meaning.
+      # A separate step conflicts with nothing, reports its own red/green in
+      # the check's log, and is removable in one hunk if a later act folds the
+      # file back onto the list.
+      # THAT IS NOW MEASURED RATHER THAN FORECAST: #27 landed first
+      # (`5c137a90`), and merging `main` into this leg auto-merged THIS FILE
+      # with both appends intact — `tests/fixtures/web_boundary_census.yaml`'s
+      # per-class totals were the merge's only conflict.
+      #
+      # It stands on the same footing as its neighbours above: it imports no
+      # `opendox` submodule at all, reads bundle files as text, and drives the
+      # REAL `views/display.js`, `views/explorer.js` and `views/outline-model.js`
+      # under the `node` the runner already has (skipped, never failed, where
+      # node is absent). `--noconftest` safe and needs no consumer, for the same
+      # reason and by the same means as `tests/test_display_facet.py`.
+      #
+      # WHAT IT MEASURES that the eight slices above do not: seven LEAVES inside
+      # modules slice S7 already parameterized at their mounts — the two threads
+      # Copilot opened on #21 at `c7a216c7` and the five it left SUPPRESSED in
+      # review `5192900474`'s body. `tests/test_web_boundary.py` assertion 4 is
+      # green over six of the seven and always was: `captured` is in neither of
+      # its word lists, a mount that forwards no option spells nothing at all,
+      # and a fallback that keeps the previous vocabulary is a missing RESET
+      # rather than a literal. Measured at `0b4e8bbf` with this file alone
+      # dropped in: 11 of its 13 tests FAIL, each for its own defect. The two
+      # that pass there are deliberate — `applyTokens`' return contract is
+      # unchanged by the fix, and `insertSection` already honoured
+      # `options.display`, which is precisely why `runAddSection` omitting it
+      # was invisible.
+      # THE THIRTEENTH TEST is the BEHAVIOURAL half of the `docs.js` claim,
+      # added on Copilot's review of this pull request at `b4efe155`: it runs
+      # the real `docHaystack` body under node against a `vocab` double that
+      # renames one stage and reads the haystack it RETURNS, because a regex
+      # over source text can only say what a function says. The measurement
+      # that earned it is in the same review: the pattern it joins matched a
+      # body with `d.stage,` deleted from the returned array, since the
+      # `d.stage ?` guard satisfies it alone.
+      - name: pytest (S7 residue)
+        run: python -m pytest -q tests/test_display_facet_leaves.py --noconftest

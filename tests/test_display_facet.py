@@ -516,7 +516,11 @@ def test_only_the_tokens_a_host_declared_are_written_onto_root(tmp_path):
         _import_line() + """
 function apply(payload) {
   const written = {};
-  const el = { style: { setProperty: (k, v) => { written[k] = v; } } };
+  // `removeProperty` too, since the S7 residue: `applyTokens` CLEARS the
+  // closed `--st-*` family before it writes, so a double that carries only
+  // `setProperty` is not a `CSSStyleDeclaration` and would throw.
+  const el = { style: { setProperty: (k, v) => { written[k] = v; },
+                        removeProperty: (k) => { delete written[k]; } } };
   D.readDisplay(payload).applyTokens(el);
   return written;
 }
@@ -579,7 +583,11 @@ def test_the_served_payload_writes_only_the_host_declared_tokens(tmp_path):
 const payloads = {json.dumps(payloads)};
 function apply(payload) {{
   const written = {{}};
-  const el = {{ style: {{ setProperty: (k, v) => {{ written[k] = v; }} }} }};
+  // `removeProperty` too, since the S7 residue: `applyTokens` CLEARS the
+  // closed `--st-*` family before it writes, so a double that carries only
+  // `setProperty` is not a `CSSStyleDeclaration` and would throw.
+  const el = {{ style: {{ setProperty: (k, v) => {{ written[k] = v; }},
+                        removeProperty: (k) => {{ delete written[k]; }} }} }};
   D.readDisplay(payload).applyTokens(el);
   return written;
 }}
