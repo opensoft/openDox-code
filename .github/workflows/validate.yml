@@ -1574,9 +1574,31 @@ jobs:
       #              rule itself flagged two correct shapes — a handler that
       #              catches only this package's own exceptions, and a name
       #              inside `redact_credentials(str(exc))`.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 540 there.
+      #  339 passed  at `build/3-6-repository-act` `7ed5ee26` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — TWO here and two in the
+      #              DB-backed half, answering all four open threads in one
+      #              batch. A push between two EXTERNAL destinations was
+      #              unguarded, because containment cannot answer it: measured,
+      #              a link repointed the instant the ownership check returned
+      #              sent the corpus to `governed-b.git` while the row named
+      #              `governed-a.git`, so the guard now reports the `(st_dev,
+      #              st_ino)` of what it approved and the push compares it with
+      #              `os.fstat` of the descriptor it writes through.
+      #              `_writable_ref_home` walked PAST an existing ref FILE, so
+      #              a HEAD naming `refs/heads/foo/bar` beside a
+      #              `refs/heads/foo` advertised a write path for a ref git
+      #              cannot create — the blob, the tree and the commit were
+      #              made before it failed. The no-follow walk re-moded a
+      #              directory it did not create when it lost the `mkdir` race
+      #              (0o700 over another owner's 0o755, measured). And
+      #              `create_repository` swallowed the same race, adopting an
+      #              empty directory that appeared after the preflight found
+      #              the location absent.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 540. The neutral conformance corpus
+      #              tests_runtime/` is 544. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
