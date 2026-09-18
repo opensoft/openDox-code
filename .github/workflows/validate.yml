@@ -901,8 +901,26 @@ jobs:
       #              bootstrap named `public` while a DSN may select a schema,
       #              with `alter default privileges` following a migration
       #              owner that may not be this install's.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 301 there.
+      #  196 passed  at `build/3-5-runtime` `2e400a4a` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — TWELVE added, answering
+      #              an INDEPENDENT ADVERSARIAL REVIEW of `0860270f` rather
+      #              than a Copilot round: a malformed `OPENDOX_OIDC_ISSUER`
+      #              printed its own password out of `runtime status`, because
+      #              `_split_url` repeated CPython's `_checknetloc` message and
+      #              that message quotes the whole netloc; the walk that was
+      #              meant to forbid exactly that read ONE FILE and now reads
+      #              every module in the package; a `kid` naming a key of the
+      #              wrong TYPE made an anonymous request a 500, because
+      #              PyJWT's backend answers with a builtin and not a
+      #              `PyJWTError`; the two-DSN schema guard could not fire in
+      #              either shipped deployment, so the migration run is told
+      #              the served schema by name and refuses; and
+      #              `OPENDOX_OIDC_LEEWAY_SECONDS` was unbounded, which is
+      #              `exp` switched off by a number.
       #              THE CURRENT FIGURE; the PR description states it at this
-      #              same commit, and `pytest -q tests_runtime/` is 301 here.
+      #              same commit, and `pytest -q tests_runtime/` is 317 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
