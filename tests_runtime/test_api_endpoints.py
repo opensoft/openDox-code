@@ -1760,6 +1760,16 @@ def test_no_credential_ever_enters_or_leaves_the_remote_url_column(
         store = CoordinationStore(conn)
         for carrier in ("https://ci:hunter2@github.com/o/r.git",
                         "ci:hunter2@github.com:o/r.git",
+                        # A PASSWORD CONTAINING `/`, which the first cut of
+                        # the scp branch could not see: it truncated at the
+                        # first `/` — the shape of an scp authority — so
+                        # `ci:hun/ter2@…` was reduced to `ci:hun`, read as a
+                        # username with no password and called clean (Copilot
+                        # review of openDox-code#25, at `0968ff8b`). It is the
+                        # same class as round 29 on the sibling PR, where a
+                        # bound that excluded `/` was defeated by a password
+                        # holding one.
+                        "ci:hun/ter2@github.com:o/r.git",
                         "file://ci:hunter2@/srv/repos/r.git",
                         "https://github.com/o/r.git?access_token=hunter2"):
             with pytest.raises(RefusedError) as refused:
@@ -1767,6 +1777,7 @@ def test_no_credential_ever_enters_or_leaves_the_remote_url_column(
                     project_id=project["id"], adapter="local-git",
                     location="/srv/repos/r.git", remote_url=carrier)
             assert "hunter2" not in str(refused.value), carrier
+            assert "ter2" not in str(refused.value), carrier
             assert "remote_url carries" in str(refused.value)
         # AND NOTHING WAS WRITTEN — the refusal is before the statement, so a
         # refused call does not leave the map row behind without its remote.

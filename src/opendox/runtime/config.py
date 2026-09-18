@@ -400,11 +400,9 @@ def credential_in_a_remote_url(value: str | None) -> str | None:
     except ValueError:
         return "a value this runtime cannot parse"
     if split.netloc:
-        authority = split.netloc
-    else:
-        authority = value.partition("/")[0]
-    userinfo = authority.rpartition("@")[0]
-    if userinfo.partition(":")[2]:
+        if split.netloc.rpartition("@")[0].partition(":")[2]:
+            return "a password in the URL's authority"
+    elif _scp_like_userinfo(value) is not None:
         return "a password in the URL's authority"
     if _a_secret_parameter_in(split.query + "&" + split.fragment):
         return "a credential-shaped query parameter"
@@ -442,12 +440,39 @@ def redacted_remote_url(value: str | None) -> str | None:
         return "<redacted-url>"
     text = value
     if not split.netloc:
-        head, slash, rest = value.partition("/")
-        userinfo, at, host = head.rpartition("@")
-        user, _, password = userinfo.partition(":")
-        if at and password:
-            text = user + ":<redacted>" + at + host + slash + rest
+        carried = _scp_like_userinfo(value)
+        if carried is not None:
+            user, _, rest = carried
+            text = user + ":<redacted>@" + rest
     return redacted_url(text)
+
+
+def _scp_like_userinfo(value: str) -> tuple[str, str, str] | None:
+    """`(user, password, the rest)` for `[user[:password]@]host:path`, else None.
+
+    THE LAST `@` IN THE WHOLE VALUE, and not the last `@` before the first `/`.
+    The first cut truncated at the first `/` — the shape of an scp-like
+    authority — and a PASSWORD CONTAINING `/` then fell outside the window:
+    `ci:pa/ss@github.com:o/r.git` was reduced to `ci:pa`, read as a username
+    with no password, called clean, stored in the clear and returned to every
+    member of the project by `GET /api/v1/project-repositories` (Copilot review
+    of openDox-code#25, at `0968ff8b` — the same class as round 29's on the
+    sibling PR, where a bound that excluded `/` was defeated by a password
+    holding one).
+
+    OVER-DETECTING IS THE SAFE DIRECTION HERE and the trade is stated: a local
+    path that really does contain `:`…`@` before its last component — a shape
+    no git remote has — is refused with its own name. What is NOT widened is
+    whitespace: a value carrying a space is not one authority, and a candidate
+    holding one is left alone so this cannot start eating prose.
+    """
+    head, at, rest = value.rpartition("@")
+    if not at or any(character.isspace() for character in head):
+        return None
+    user, colon, password = head.partition(":")
+    if not colon or not password:
+        return None
+    return user, password, rest
 
 
 def _a_secret_parameter_in(text: str) -> bool:
