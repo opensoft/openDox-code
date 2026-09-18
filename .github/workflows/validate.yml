@@ -700,9 +700,28 @@ jobs:
       #              replacement is now a required step with a guard on the
       #              build's own output; and the runbook's four plaintext
       #              secret files survived a failed `kubectl` or a Ctrl-C,
-      #              which a trap on EXIT/INT/TERM ends. THE CURRENT FIGURE;
-      #              the PR description states it at this same commit, and
-      #              `pytest -q tests_runtime/` is 262 here.
+      #              which a trap on EXIT/INT/TERM ends. SUPERSEDED by the
+      #              entry below; `pytest -q tests_runtime/` was 262 there.
+      #  162 passed  at `build/3-5-runtime` `0ec862d3` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — the same five
+      #              modules, after the same round's two SUPPRESSED comments,
+      #              both of which were defects. A broker URL naming no host
+      #              was accepted, because `urlsplit("https:///realms/x")`
+      #              yields the scheme `https` and hostname `None` and round
+      #              25's check read only the scheme — so an issuer nothing
+      #              can be fetched from passed as a trust anchor and the
+      #              install found out when `/readyz` failed. Refused before
+      #              the scheme check now, WITHOUT echoing the value, since
+      #              `https://user:pw@/x` has no hostname either. And
+      #              `search_path` was split with `str.split(",")`, which a
+      #              legal schema name defeats: PostgreSQL quotes
+      #              `"tenant,blue", public`, the split made two entries of
+      #              one, and `selected_schema` refused a connection whose
+      #              `current_schema()` was the schema it had asked for,
+      #              naming `'"tenant'`. A scanner that splits outside
+      #              quotes, and the entries still read by `_unquoted`. THE
+      #              CURRENT FIGURE; the PR description states it at this
+      #              same commit, and `pytest -q tests_runtime/` is 272 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
