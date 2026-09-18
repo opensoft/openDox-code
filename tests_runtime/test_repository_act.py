@@ -12,6 +12,7 @@ proved hermetically in `test_local_git_adapter.py`, in the REQUIRED job.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 from pathlib import Path
@@ -2228,3 +2229,184 @@ def test_a_local_destination_that_cannot_be_resolved_is_refused(
     assert "cannot" in message and "prove" in message or "open" in message, (
         message)
     assert str(loop) not in message, "the refusal echoed the stored value"
+
+
+# -- Copilot's rounds 31 and 32 on #26 ---------------------------------------
+
+
+def test_a_remote_helper_planted_in_the_repositorys_own_config_is_refused(
+        store, project, project_repository_root: Path, tmp_path: Path,
+        monkeypatch) -> None:
+    """`remote.<name>.vcs` names a program while the URL stays ordinary.
+
+    The URL predicate looks for `::` and finds none; `-c protocol.ext.allow=
+    never` covers the `ext` transport and says nothing about a helper chosen by
+    config. MEASURED on git 2.43.0 with a `git-remote-evil` on PATH and a bare
+    destination: `git config remote.origin.vcs evil` then `git push origin` ran
+    `git-remote-evil origin <destination>` — and it ran with
+    `-c protocol.ext.allow=never` passed as well (Copilot review of
+    openDox-code#26, round 32).
+
+    `--get-all` on a fixed key cannot see a key whose middle segment the
+    repository chooses, so the scan asks `--get-regexp`.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "governed.git"
+    _git(tmp_path, "init", "--bare", "--initial-branch=main", str(destination))
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+
+    planted = tmp_path / "bin"
+    planted.mkdir()
+    marker = tmp_path / "helper-ran"
+    helper = planted / "git-remote-evil"
+    helper.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+    helper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{planted}{os.pathsep}{os.environ['PATH']}")
+
+    # THE SHAPE IT FORBIDS, RUN FIRST — in a repository this act does not own,
+    # so what is measured is git's behaviour and not this act's. Without the
+    # refusal the helper runs; that is the finding.
+    elsewhere = tmp_path / "unguarded"
+    _git(tmp_path, "init", "--initial-branch=main", str(elsewhere))
+    (elsewhere / "f").write_text("x", encoding="utf-8")
+    _git(elsewhere, "add", "f")
+    _git(elsewhere, "commit", "-m", "x")
+    _git(elsewhere, "remote", "add", "origin", str(destination))
+    _git(elsewhere, "config", "remote.origin.vcs", "evil")
+    subprocess.run(["git", "-C", str(elsewhere), "-c",
+                    "protocol.ext.allow=never", "push", "origin",
+                    "HEAD:refs/heads/main"],
+                   # `_GIT_ENV` IS A SNAPSHOT TAKEN AT IMPORT, so the
+                   # monkeypatched PATH has to be put back over it or the
+                   # planted helper is not on the one git searches.
+                   capture_output=True,
+                   env={**_GIT_ENV, "PATH": os.environ["PATH"]})
+    assert marker.exists(), (
+        "git did not run the planted helper, so this environment cannot "
+        "reproduce the finding and the refusal below would be untested")
+    marker.unlink()
+
+    _git(created.location, "config", "remote.origin.vcs", "evil")
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "remote.origin.vcs" in str(caught.value), caught.value
+    assert not marker.exists(), "the helper ran despite the refusal"
+    assert subprocess.run(
+        ["git", "-C", str(destination), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{act.DEFAULT_BRANCH}"],
+        capture_output=True, env=_GIT_ENV).returncode != 0
+
+    # AND `url.<prefix>.insteadOf` REWRITES THE DESTINATION before the
+    # transport is chosen, which reaches the same helper by another key.
+    _git(created.location, "config", "--unset", "remote.origin.vcs")
+    _git(created.location, "config", "url.evil::.insteadOf",
+         str(destination))
+    with pytest.raises(act.RepositoryActRefused) as second:
+        act.push_to_remote(store, project_id=project.id)
+    assert "insteadof" in str(second.value).lower(), second.value
+    assert not marker.exists()
+    # THE VALUE IS NOT ECHOED — an `insteadOf` prefix can be credential-shaped,
+    # which is why the scan asks for `--name-only`.
+    assert str(destination) not in str(second.value)
+
+    # AND THE ORDINARY PUSH IS UNAFFECTED once neither key is set.
+    _git(created.location, "config", "--unset-all",
+         "url.evil::.insteadOf")
+    assert act.push_to_remote(store, project_id=project.id) == str(destination)
+
+
+def test_a_credential_in_scp_userinfo_is_refused_even_with_a_colon_in_it(
+) -> None:
+    """`user:secret@host:path` is the credential shape this rule exists for.
+
+    The scp class required the pre-`@` half to hold no colon, so the one form
+    that actually carries a password slipped past it — and `git remote add`
+    persists the string in `.git/config` and in the map row every signed-in
+    caller can read (Copilot review of openDox-code#26, round 31, suppressed).
+    """
+    for refused in ("user:secret@host:path",
+                    "git:ghp_supersecrettoken@example.invalid:x.git",
+                    "user@host:path"):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.refuse_credential_bearing_remote(refused)
+        assert "secret" not in str(caught.value).lower() or "ghp_" not in str(
+            caught.value), caught.value
+
+    # AND THE WIDENED USER CLASS STILL CANNOT CLAIM A URL: `[^/@]+` cannot
+    # cross the `//` of a scheme, so an ordinary https remote is judged by the
+    # URL rule and a plain path by neither.
+    act.refuse_credential_bearing_remote("https://example.invalid/x.git")
+    act.refuse_credential_bearing_remote("/srv/projects/other.git")
+    act.refuse_credential_bearing_remote("host:path")
+
+
+def test_a_map_row_whose_location_cannot_be_opened_refuses_by_name(
+        store, project, project_repository_root: Path) -> None:
+    """A `ValueError` out of `open()` is this act's refusal, not a 500.
+
+    A legacy or hand-written row can hold a location with an embedded NUL, and
+    `open()` raises `ValueError` before any syscall — which the binding
+    handler did not name, so attach and push answered with a traceback instead
+    of the act's own named refusal (Copilot review of openDox-code#26, round
+    32, suppressed).
+    """
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    store.attach_remote(project_id=project.id,
+                        remote_url=str(project_repository_root / "d.git"))
+    row = act._local_git_row(store, project.id)
+    broken = dataclasses.replace(row, location=str(row.location) + "\0x")
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        with act._bound_to_mapped_repository(broken, "git"):
+            pass
+    assert "without following a link" in str(caught.value), caught.value
+    assert "ValueError" in str(caught.value), caught.value
+
+
+def test_a_successful_push_of_a_legacy_row_still_redacts_its_credential(
+        client_with_repositories, mint_token, database, tmp_path: Path
+) -> None:
+    """The 200 path was the one the other case could not reach.
+
+    The legacy-row case beside this one uses an UNREACHABLE remote, so it
+    exercises the 409 and leaves `push_to_remote`'s success response — the one
+    place a credential-bearing row is echoed back — covered by nothing. A
+    regression there would keep the suite green (Copilot review of
+    openDox-code#26, round 32, suppressed).
+
+    MEASURED, git 2.43.0: `file://user:token@/abs/path.git` pushes; git ignores
+    the authority for a `file://` URL. So a reachable legacy row is a real
+    shape and not a contrivance.
+    """
+    token = mint_token(subject="api-legacy-push-owner")
+    project = client_with_repositories.post(
+        "/api/v1/projects", json={"slug": "legacy-push", "title": "Legacy"},
+        headers=_auth(token)).json()
+    created = client_with_repositories.post(
+        f"/api/v1/projects/{project['id']}/repository", headers=_auth(token))
+    assert created.status_code == 201, created.text
+    location = Path(created.json()["location"])
+
+    destination = tmp_path / "reachable.git"
+    _git(tmp_path, "init", "--bare", "--initial-branch=main", str(destination))
+    legacy = f"file://someone:ghp_supersecret@{destination}"
+    with database.transaction() as conn:
+        identity.CoordinationStore(conn).attach_remote(
+            project_id=project["id"], remote_url=legacy)
+    _git(location, "remote", "add", act.REMOTE_NAME, legacy)
+
+    pushed = client_with_repositories.post(
+        f"/api/v1/projects/{project['id']}/repository/push",
+        headers=_auth(token))
+    assert pushed.status_code == 200, pushed.text
+    # THE PUSH REALLY HAPPENED — a 200 for a push that did nothing would make
+    # the redaction assertion below vacuous.
+    assert subprocess.run(
+        ["git", "-C", str(destination), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{act.DEFAULT_BRANCH}"],
+        capture_output=True, env=_GIT_ENV).returncode == 0
+    assert "ghp_supersecret" not in pushed.text
+    assert "someone" not in pushed.text
+    assert pushed.json()["pushed_to"] == "<redacted-url>"

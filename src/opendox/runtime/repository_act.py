@@ -123,7 +123,14 @@ _URL_USERINFO = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/@]*@")
 #: with a hex group or a colon, so the form cannot avoid it.
 #: `test_a_bracketed_ipv6_scp_remote_is_refused_like_any_other_userinfo` pins
 #: it, because a property held by luck is one a later edit can lose.
-_SCP_USERINFO = re.compile(r"^[^/:@]+@[^/:@]+:")
+#: THE USER PORTION ADMITS A COLON, and the host portion still does not.
+#: `user:secret@host:path` is exactly the credential-carrying shape this rule
+#: exists for, and the colon in the pre-`@` half made the old class miss it —
+#: so `git remote add` persisted the secret in `.git/config` and in the map row
+#: every signed-in caller can read (Copilot review of openDox-code#26, round
+#: 31, suppressed). Widening the USER half cannot make the pattern claim a
+#: URL: `[^/@]+` cannot cross the `//` of a `scheme://`.
+_SCP_USERINFO = re.compile(r"^[^/@]+@[^/:@]+:")
 
 #: A remote URL longer than this is refused. NOT a style rule: the credential
 #: predicate decodes each parameter name to a fixed point, which is quadratic
@@ -923,7 +930,12 @@ def _bound_to_mapped_repository(row: Any,
     location = Path(row.location)
     try:
         handle = open_no_follow_chain(location)
-    except (OSError, RuntimeError) as exc:
+    # `ValueError` IS ONE OF THE THREE. A legacy or hand-written map row can
+    # hold a location with an embedded NUL, and `open()` raises `ValueError`
+    # before any syscall — which this handler did not name, so attach and push
+    # answered with a traceback and a 500 instead of the act's own named
+    # refusal (Copilot review of openDox-code#26, round 32, suppressed).
+    except (OSError, RuntimeError, ValueError) as exc:
         raise RepositoryActRefused(
             f"{location} could not be opened without following a link "
             f"({type(exc).__name__}); this act will not run git against a "
@@ -1227,6 +1239,38 @@ _EXECUTED_LOCAL_KEYS = ("credential.helper", "core.gitProxy", "core.sshCommand",
                         "uploadpack.packObjectsHook", "core.fsmonitor",
                         "diff.external")
 
+#: The same rule's PATTERN keys — the ones with a caller-named middle segment,
+#: which `--get-all` on a fixed name cannot see. Each was MEASURED on git
+#: 2.43.0 against a planted `git-remote-evil` on PATH and a bare destination,
+#: and NONE of them is stopped by the `-c protocol.ext.allow=never` this act
+#: already passes (Copilot review of openDox-code#26, round 32):
+#:
+#:   * `remote.origin.vcs=evil` ran `git-remote-evil origin <dest>` — the
+#:     review's own case, and the URL predicate never sees a `::` because the
+#:     URL itself stays ordinary.
+#:   * `url.<prefix>.insteadOf` REWRITES the destination before the transport
+#:     is chosen, so `url."evil::".insteadOf = <dest>` ran the same helper.
+#:     The same key pointed at `ext::` is already refused by git itself
+#:     (`fatal: transport 'ext' not allowed`), which is why the REWRITE and
+#:     not `ext` is the hole here.
+#:
+#: `proxy` is the per-remote twin of `core.gitProxy`, which is already in the
+#: fixed list above; it is listed here because a list naming only the cases
+#: somebody demonstrated is a list the next transport walks past.
+#:
+#: `remote.<name>.receivepack` IS DELIBERATELY ABSENT, and that is a decision
+#: rather than an oversight. It is executed on a local push — measured, and
+#: `test_a_push_cannot_be_made_to_run_the_repository_s_own_receive_pack`
+#: measures it both ways — but round 16 closed it by PINNING `--receive-pack`
+#: on the command line, where it outranks the config value. Refusing the key
+#: as well would turn a neutralized stale setting into a failed push, and the
+#: recorded decision is that an operator's leftover is neutralized rather than
+#: fatal.
+_EXECUTED_LOCAL_KEY_PATTERNS = (
+    r"^remote\..*\.(vcs|proxy)$",
+    r"^url\..*\.insteadof$",
+)
+
 
 def _refuse_repository_local_command_config(git: GitRunner, location: Any) -> None:
     """Refuse a push from a repository whose OWN config names a program.
@@ -1250,18 +1294,36 @@ def _refuse_repository_local_command_config(git: GitRunner, location: Any) -> No
     The other keys are the same rule's other instances, checked in the same
     pass because a list with one entry is a list somebody forgets to extend.
     """
+    def _refuse_key(key: str, scope: str) -> RepositoryActRefused:
+        return RepositoryActRefused(
+            f"the repository at {location} sets {key!r} in its own "
+            f"git config ({scope.lstrip('-')} scope). git runs that "
+            "value as a program, and this service writes to this "
+            "repository, so it is refused rather than pushed with. "
+            "Remove it with `git config --unset-all " + key + "`; an "
+            "operator's own helper belongs in the global or system "
+            "config, which this runtime keeps")
+
     for key in _EXECUTED_LOCAL_KEYS:
         for scope in ("--local", "--worktree"):
             probe = git.run("config", scope, "--get-all", key)
             if probe.returncode == 0 and probe.stdout.strip():
-                raise RepositoryActRefused(
-                    f"the repository at {location} sets {key!r} in its own "
-                    f"git config ({scope.lstrip('-')} scope). git runs that "
-                    "value as a program, and this service writes to this "
-                    "repository, so it is refused rather than pushed with. "
-                    "Remove it with `git config --unset-all " + key + "`; an "
-                    "operator's own helper belongs in the global or system "
-                    "config, which this runtime keeps")
+                raise _refuse_key(key, scope)
+    # AND THE PATTERN KEYS, WHICH `--get-all` CANNOT REACH. `remote.<name>.vcs`
+    # names a remote HELPER — `git-remote-<value>`, resolved off PATH — while
+    # `remote.origin.url` stays perfectly ordinary, so the URL predicate sees
+    # no `::` and `-c protocol.ext.allow=never` says nothing about it
+    # (measured; see `_EXECUTED_LOCAL_KEY_PATTERNS`). `--get-regexp` is git's
+    # own answer for a key whose middle segment the repository chooses, and
+    # `--name-only` keeps the VALUE — which may be a credential-shaped
+    # `insteadOf` prefix — out of the refusal this act returns to a caller.
+    for pattern in _EXECUTED_LOCAL_KEY_PATTERNS:
+        for scope in ("--local", "--worktree"):
+            probe = git.run("config", scope, "--name-only", "--get-regexp",
+                            pattern)
+            if probe.returncode == 0 and probe.stdout.strip():
+                found = probe.stdout.decode("utf-8", "replace").split()
+                raise _refuse_key(found[0], scope)
 
 
 #: A DRIVE-LETTER OR UNC PATH, which git reads as a LOCAL path and not as

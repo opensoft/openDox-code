@@ -3497,3 +3497,81 @@ def test_the_capability_names_every_primitive_the_walk_actually_uses(
         assert "open descriptor" in str(caught.value)
     finally:
         os.close(handle)
+
+
+# -- a commit message is a durable record, so nothing may forge a line in it --
+
+
+def test_a_value_that_would_forge_a_commit_trailer_is_refused(
+        adapter, repository: Path) -> None:
+    """`Basis-Revision:` and `Dispatched-By:` are the write's own account of itself.
+
+    Both values are caller-controlled and were interpolated into the trailer
+    block unencoded, so `A\\nWrite-Path: forged` produced a SECOND, fabricated
+    trailer — and a reader of the durable history cannot tell it from a real
+    one. The same newline in `actor` went into the author and committer names,
+    which git records exactly as given (Copilot review of openDox-code#26,
+    round 32).
+
+    Refused rather than encoded, which is this module's rule wherever a value
+    cannot be recorded unambiguously — the NUL in a document key is refused one
+    line up in the same function. An encoded trailer would still be recorded;
+    it would just be recorded wrong, and permanently.
+    """
+    corpus = _resolve(adapter, repository)
+    document = ca.DocumentId(repository.name, "ideation/first.md")
+
+    for field, kwargs in (
+            ("basis revision",
+             {"basis_revision": "A\nWrite-Path: forged", "actor": ACTOR}),
+            ("actor",
+             {"basis_revision": corpus.revision or "",
+              "actor": "Ann\nDispatched-By: somebody-else"}),
+            ("actor (a bidirectional override, not a newline)",
+             {"basis_revision": corpus.revision or "",
+              "actor": "Ann‮Auditor"})):
+        with pytest.raises(ca.CorpusRefused) as caught:
+            adapter.write_back(corpus, document, b"# one\n", **kwargs)
+        assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE, field
+        assert "control character" in caught.value.refusal.detail, field
+        # THE VALUE IS NOT ECHOED BACK: the refusal describes the shape.
+        assert "forged" not in caught.value.refusal.detail, field
+
+    # AND NOTHING WAS WRITTEN. The refusal is before the object database is
+    # touched, so the branch is where it was.
+    assert _resolve(adapter, repository).revision == corpus.revision
+
+    # THE ORDINARY WRITE IS UNAFFECTED, including a reason holding newlines —
+    # that is prose in the message BODY, above the trailer block, and it is not
+    # what forges a trailer.
+    receipt, _ = _write(adapter, repository, "ideation/first.md", b"# one\n",
+                        reason="because\nthe reason has two lines")
+    assert receipt.correlation_id
+
+
+def test_git_identity_never_records_a_control_character_in_a_name(
+) -> None:
+    """The refusal above is the rule; this is what covers every other caller.
+
+    `git_identity` sanitized only the derived email slug and put the RAW actor
+    in `GIT_AUTHOR_NAME` / `GIT_COMMITTER_NAME`, which git writes into the
+    commit object verbatim — and `repository_act.initialize_repository` writes
+    the repository's first commit through this same function, where no protocol
+    refusal stands (Copilot review of openDox-code#26, round 32).
+    """
+    for actor in ("Ann\nDispatched-By: somebody-else",
+                  "Ann Auditor <ann\ninjected@example.invalid>",
+                  "a‮b", "  \t x \r\n y  ", "\n\n", ""):
+        identity = lga.git_identity(actor)
+        assert set(identity) == {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                                 "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
+        for field, value in identity.items():
+            assert not lga.carries_a_control_character(value), (field, actor)
+        assert identity["GIT_AUTHOR_NAME"], actor
+
+    # AND THE SHAPE IT FORBIDS IS EXERCISED: the previous spelling put the
+    # actor in unchanged, which this asserts by running that spelling.
+    assert lga.carries_a_control_character("Ann\nDispatched-By: x")
+    assert lga.on_one_line("Ann\nDispatched-By: x") == "Ann Dispatched-By: x"
+    # An ordinary name is untouched, so the sanitiser is not a rename.
+    assert lga.git_identity(ACTOR)["GIT_AUTHOR_NAME"] == ACTOR

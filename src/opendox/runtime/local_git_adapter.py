@@ -930,10 +930,13 @@ def carries_a_control_character(value: str) -> bool:
     to PRINT a legacy one that does. A plain space stays legal: a local path may
     contain one, and the credential rule's own userinfo class admits it.
     """
-    return any(character != " "
-               and (unicodedata.category(character) in {"Cc", "Cf"}
-                    or character.isspace())
-               for character in value)
+    return any(_is_a_control_character(character) for character in value)
+
+
+def _is_a_control_character(character: str) -> bool:
+    """One character's half of the rule above, so `on_one_line` shares it."""
+    return character != " " and (
+        unicodedata.category(character) in {"Cc", "Cf"} or character.isspace())
 
 
 def redact_remote_url(url: str) -> str:
@@ -987,6 +990,54 @@ class GitCommandFailed(Exception):
             f"{redact_credentials(stderr)}")
 
 
+def on_one_line(value: str) -> str:
+    """`value` with every control, format and non-space whitespace collapsed.
+
+    A single space replaces each run, and the result is stripped. This is the
+    SECOND line of defence and not the rule: `LocalGitCorpus.write_back`
+    REFUSES such a value outright (see
+    `refuse_a_value_that_would_forge_a_commit_trailer`). What this covers is
+    every other path that writes durable history through `git_identity` — the
+    repository's first commit among them — so that no caller can put a
+    newline into an author or committer name, which git records verbatim.
+    """
+    # THE PREDICATE'S OWN RULE, CHARACTER BY CHARACTER, rather than a second
+    # spelling of it as a pattern: a sanitiser and a refusal that disagreed
+    # about one character would be worse than either alone.
+    flattened = "".join(
+        " " if _is_a_control_character(character) else character
+        for character in value)
+    return " ".join(part for part in flattened.split(" ") if part).strip()
+
+
+def refuse_a_value_that_would_forge_a_commit_trailer(
+        field: str, value: str, subject: str) -> None:
+    """Refuse a value that would add or fake a line in the commit message.
+
+    `Basis-Revision:` and `Dispatched-By:` are COMMIT TRAILERS — the durable
+    record of what a write claimed, and the thing a reader of the history is
+    invited to believe. Both values arrive from the caller and were
+    interpolated into the message unencoded, so `A\nWrite-Path: forged`
+    produced a second, fabricated trailer and made the commit's own account of
+    the dispatch ambiguous — and the same newline in `actor` went into the
+    author and committer NAMES, which git records exactly as given (Copilot
+    review of openDox-code#26, round 32).
+
+    REFUSED RATHER THAN ENCODED, which is this module's rule everywhere a value
+    cannot be recorded unambiguously: the document key with a NUL is refused
+    for the same reason one line up in the same function. An encoded trailer
+    would be recorded — it would just be recorded WRONG, and permanently.
+    """
+    if carries_a_control_character(value):
+        raise _refuse(
+            WRITE_PATH_UNREACHABLE, subject,
+            f"the {field} contains a control character, and it is written "
+            "into this commit's message and identity, where a newline forges "
+            "a trailer that a reader of the durable history cannot tell from "
+            "a real one; the write is refused rather than recorded "
+            "ambiguously")
+
+
 def git_identity(actor: str) -> dict[str, str]:
     """The `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment for one actor.
 
@@ -1001,16 +1052,24 @@ def git_identity(actor: str) -> dict[str, str]:
     Module level, and public, because `opendox.runtime.repository_act` writes
     the repository's first commit with the same identity.
     """
+    # THE NAME IS PUT ON ONE LINE, and the address was already a slug. Only
+    # the derived email was sanitized, so the raw actor reached
+    # `GIT_AUTHOR_NAME` — which git writes into the commit object verbatim,
+    # where a newline is a header boundary (Copilot review of
+    # openDox-code#26, round 32). `write_back` refuses such an actor outright;
+    # this is what keeps every OTHER caller — the repository's first commit
+    # among them — from recording one.
     if "<" in actor and actor.rstrip().endswith(">"):
         name, _, address = actor.partition("<")
-        name = name.strip() or "opendox"
-        address = address.rstrip(">").strip()
+        name = on_one_line(name) or "opendox"
+        address = on_one_line(address.rstrip(">"))
         return {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": address,
                 "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": address}
     slug = _SAFE_ACTOR.sub("-", actor).strip("-") or "opendox"
     address = f"{slug}@opendox.invalid"
-    return {"GIT_AUTHOR_NAME": actor or "opendox", "GIT_AUTHOR_EMAIL": address,
-            "GIT_COMMITTER_NAME": actor or "opendox",
+    name = on_one_line(actor) or "opendox"
+    return {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": address,
+            "GIT_COMMITTER_NAME": name,
             "GIT_COMMITTER_EMAIL": address}
 
 
@@ -1642,6 +1701,17 @@ class LocalGitCorpus:
                 "the document key contains a NUL byte, which is the record "
                 "terminator git's index protocol uses; a path that cannot be "
                 "written unambiguously is not written at all")
+        # AND NEITHER TRAILER VALUE MAY FORGE A LINE. `basis_revision` and
+        # `actor` are caller-controlled and go into the commit message's
+        # trailer block and the author/committer identity unencoded, so
+        # `A\nWrite-Path: forged` wrote a second trailer that a reader of the
+        # durable history could not tell from a real one (Copilot review of
+        # openDox-code#26, round 32).
+        for field, value in (("basis revision", basis_revision),
+                             ("actor", actor), ("write path",
+                                                corpus.write_path)):
+            refuse_a_value_that_would_forge_a_commit_trailer(
+                field, value, document.key)
         # AND THE CHECK AND THE USE ARE ONE OBJECT — see `_bound`, which every
         # operation now goes through: the re-check below asked about a
         # PATHNAME, and every call after it (`hash-object`, `read-tree`,
