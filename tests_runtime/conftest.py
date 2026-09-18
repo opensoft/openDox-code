@@ -65,6 +65,35 @@ def in_ci() -> bool:
     return os.environ.get("CI", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _redacted_dsn(dsn: str) -> str:
+    """The DSN with everything but its destination removed.
+
+    Not `local_git_adapter.redact_credentials`: this file is `conftest.py` and
+    runs before the package is necessarily importable — the very failure this
+    is reporting can be an ImportError. So it is written here, small and
+    stdlib-only, and it keeps ONLY what an operator needs to know which server
+    was asked: scheme, host and port for a URI, `host=`/`port=` for the
+    keyword/value form. Everything else, including any parameter this does not
+    recognize, is dropped rather than shown.
+    """
+    import urllib.parse
+
+    try:
+        split = urllib.parse.urlsplit(dsn)
+    except ValueError:
+        return "<the configured DSN>"
+    if split.scheme and split.hostname:
+        # BRACKETS KEPT FOR AN IPv6 LITERAL, which this act has been wrong
+        # about before: `::1` unbracketed is not the host it names.
+        host = (f"[{split.hostname}]" if ":" in split.hostname
+                else split.hostname)
+        port = f":{split.port}" if split.port else ""
+        return f"{split.scheme}://{host}{port}/<redacted>"
+    kept = [part for part in dsn.split()
+            if part.split("=", 1)[0] in ("host", "port", "hostaddr")]
+    return " ".join(kept) if kept else "<the configured DSN>"
+
+
 def _skip_or_fail(reason: str) -> None:
     """A developer's skip is CI's FAILURE, and that asymmetry is the point.
 
@@ -125,10 +154,31 @@ def postgres_dsn() -> str:
         with psycopg.connect(dsn, connect_timeout=PROBE_TIMEOUT_SECONDS) as conn:
             conn.execute("select 1")
     except Exception as exc:  # noqa: BLE001
+        # THE EXCEPTION'S TYPE, NOT ITS TEXT, and the reproducer is exact.
+        # `str(exc)` was copied into a reason that pytest prints in the CI log
+        # of a job whose DSN carries a password (Copilot review of
+        # openDox-code#25, round 26). MEASURED against psycopg 3 / libpq on a
+        # DSN reading `postgresql://opendox:hunter2@[::1/opendox` — an
+        # unbracketed IPv6 host, which is the ordinary way to mis-set this
+        # variable:
+        #
+        #   ProgrammingError: end of string reached when looking for matching
+        #   "]" in IPv6 host address in URI:
+        #   "postgresql://opendox:hunter2@[::1/opendox"
+        #
+        # The password is in that line. Four other forms were measured and do
+        # not leak (a refused connection, an unknown URI parameter, an unknown
+        # keyword/value option, the keyword/value form refused): libpq quotes
+        # the whole conninfo when it cannot PARSE it, which is exactly the case
+        # an operator hits by typo. The type is what makes the skip diagnosable
+        # (`OperationalError` vs `ImportError` vs a timeout) and it carries no
+        # value; the destination is rebuilt by `_redacted_dsn` from the
+        # environment's own DSN, so an operator still learns which server did
+        # not answer.
         _skip_or_fail(
             f"{TEST_DSN_ENV} is set and the server did not answer within "
-            f"{PROBE_TIMEOUT_SECONDS}s: {type(exc).__name__}: {exc}. The "
-            "DB-backed runtime suites did not run.")
+            f"{PROBE_TIMEOUT_SECONDS}s: {type(exc).__name__} for "
+            f"{_redacted_dsn(dsn)}. The DB-backed runtime suites did not run.")
     return dsn
 
 

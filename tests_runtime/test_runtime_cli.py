@@ -916,3 +916,133 @@ def test_the_broker_url_must_be_https_because_it_is_the_trust_anchor() -> None:
             PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
             PREFIX + "OIDC_JWKS_URL": "http://broker/certs"}))
     assert PREFIX + "OIDC_JWKS_URL" in str(caught.value)
+
+
+def _conftest_module():
+    """`tests_runtime/conftest.py`, loaded BY PATH.
+
+    The `validate` job runs pytest with `--noconftest`, so this file cannot
+    reach that module as a fixture provider and must not depend on it being on
+    `sys.path` either. Loading it by path is the one form that works in both
+    jobs — and the module is definitions only, so importing it starts nothing.
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "conftest.py"
+    spec = importlib.util.spec_from_file_location("_opendox_conftest", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_probe_never_interpolates_the_exception_text(monkeypatch) -> None:
+    """THE CONTRACT ITSELF, and it does not depend on psycopg's wording.
+
+    The test below is the live reproducer and needs the driver installed; the
+    `validate` job installs `.[test]` alone and does not have it. This one
+    hands the probe a driver whose `connect` raises an exception carrying the
+    whole DSN — which is the only property of the real failure that matters —
+    and asserts the reason does not carry it. It runs in BOTH jobs, and it is
+    the assertion that would have caught the finding when it was written.
+    """
+    conftest = _conftest_module()
+    dsn = "postgresql://opendox:hunter2@db.internal:5432/opendox"
+    monkeypatch.setenv(conftest.TEST_DSN_ENV, dsn)
+
+    class _Driver:
+        @staticmethod
+        def connect(conninfo, **kwargs):
+            raise RuntimeError(f'could not parse "{conninfo}"')
+
+    monkeypatch.setattr(conftest, "_import_psycopg", lambda: _Driver)
+
+    with pytest.raises(BaseException) as caught:
+        conftest.postgres_dsn.__wrapped__()
+    reason = getattr(caught.value, "msg", None) or str(caught.value)
+
+    assert "hunter2" not in reason and "opendox:" not in reason, (
+        f"the exception's text reached the reason: {reason!r}")
+    assert "RuntimeError" in reason, (
+        f"the reason must name the exception type: {reason!r}")
+    assert "postgresql://db.internal:5432/<redacted>" in reason, (
+        f"the reason must still name the server that did not answer: {reason!r}")
+
+
+def test_an_unparsable_test_dsn_does_not_print_its_password(monkeypatch) -> None:
+    """The DB probe's skip reason carries no credential — measured, not hoped.
+
+    THE FINDING (Copilot review of openDox-code#25, round 26): the probe copied
+    `str(exc)` into the reason `_skip_or_fail` prints, "psycopg connection
+    errors can include the full `OPENDOX_TEST_DATABASE_URL`", and pytest prints
+    that reason in the CI log of a job whose DSN carries a password.
+
+    FACT, WITH ONE REPRODUCER, and this test IS the reproducer. Five DSN shapes
+    were measured against psycopg 3: a refused connection, an unknown URI
+    parameter, an unknown keyword/value option and the refused keyword/value
+    form all report without the password, because libpq's message is about the
+    connection. The fifth — a URI libpq cannot PARSE — quotes the whole string
+    back, and an unbracketed IPv6 host is the ordinary way to mis-set this
+    variable:
+
+        ProgrammingError: end of string reached when looking for matching "]"
+        in IPv6 host address in URI: "postgresql://opendox:hunter2@[::1/x"
+
+    So the case below is the leaking one, and against the previous shape
+    (`f"{type(exc).__name__}: {exc}"`) this test fails on its first assertion.
+
+    NOT A DATABASE TEST. Nothing here connects: the DSN is unparsable, which is
+    why psycopg raises before any socket exists, and that is what lets a
+    hermetic module measure the harness the DB-backed ones depend on.
+    """
+    pytest.importorskip(
+        "psycopg",
+        reason="the live reproducer needs the driver; the `validate` job "
+               "installs `.[test]` alone, and the contract itself is measured "
+               "by the hermetic test above")
+    conftest = _conftest_module()
+    password = "hunter2"                      # NOT a credential: a test string
+    monkeypatch.setenv(conftest.TEST_DSN_ENV,
+                       f"postgresql://opendox:{password}@[::1/opendox")
+
+    with pytest.raises(BaseException) as caught:   # Skipped or Failed
+        conftest.postgres_dsn.__wrapped__()
+    reason = getattr(caught.value, "msg", None) or str(caught.value)
+
+    assert password not in reason, (
+        f"the probe's reason carries the DSN password: {reason!r}")
+    assert "opendox:" not in reason, (
+        f"the probe's reason carries the DSN userinfo: {reason!r}")
+    assert "ProgrammingError" in reason, (
+        "the reason must still name the exception TYPE, which is what makes "
+        f"the skip diagnosable: {reason!r}")
+    assert "<the configured DSN>" in reason, (
+        "an unparsable DSN has no destination to name, and the reason must "
+        f"say which DSN it means rather than falling silent: {reason!r}")
+
+
+@pytest.mark.parametrize("dsn, expected", [
+    # A URI: scheme, host and port survive; userinfo, database and every
+    # parameter do not.
+    ("postgresql://opendox:hunter2@db.internal:5432/opendox?sslmode=require",
+     "postgresql://db.internal:5432/<redacted>"),
+    # NO PORT, no invented one.
+    ("postgresql://opendox:hunter2@db.internal/opendox",
+     "postgresql://db.internal/<redacted>"),
+    # AN IPv6 LITERAL KEEPS ITS BRACKETS: `::1` unbracketed is not the host it
+    # names, and this act has been wrong about that before.
+    ("postgresql://opendox:hunter2@[::1]:5432/opendox",
+     "postgresql://[::1]:5432/<redacted>"),
+    # The keyword/value form: only the three destination keywords are kept, and
+    # `password` is dropped even holding a quoted space.
+    ("host=db.internal port=5432 user=opendox password='a b' dbname=opendox",
+     "host=db.internal port=5432"),
+    # An unparsable string names no destination and is not echoed.
+    ("postgresql://opendox:hunter2@[::1/opendox", "<the configured DSN>"),
+    ("garbage", "<the configured DSN>"),
+])
+def test_the_probes_redaction_keeps_the_destination_and_nothing_else(
+        dsn: str, expected: str) -> None:
+    """Each case is a shape the harness is handed, not a shape it invents."""
+    assert _conftest_module()._redacted_dsn(dsn) == expected
+    assert "hunter2" not in _conftest_module()._redacted_dsn(dsn)

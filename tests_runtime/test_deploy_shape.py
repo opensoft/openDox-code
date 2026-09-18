@@ -1439,3 +1439,81 @@ def test_the_managed_database_path_names_the_role_the_job_narrows() -> None:
         "the managed-database instructions never mention the ConfigMap value "
         "the migration Job narrows")
     assert "opendox-db-runtime" in section
+
+
+def test_no_documented_apply_reaches_the_cluster_with_the_placeholder_image(
+) -> None:
+    """Every documented `kubectl apply` is guarded against the placeholder tag.
+
+    THE FINDING (Copilot review of openDox-code#25, round 26): the runbook
+    tells operators to apply the `dev` overlay directly, the overlay carries
+    `ghcr.io/opensoft/opendox-runtime:0.0.0`, and this repository publishes no
+    image — so "a clean Kubernetes install will therefore reach
+    `ImagePullBackOff` before the runtime or migration Job can start".
+
+    TRUE, AND MEASURED: `kustomize build deploy/kubernetes/overlays/dev`
+    against kustomize v5.4.3 emits `image: ghcr.io/opensoft/opendox-runtime:
+    0.0.0` at three container sites (the Deployment, and both of the migration
+    Job's containers). The reviewer offered two dispositions and this is the
+    second one — require the replacement before the documented apply — because
+    the first (build a local image) would make the runbook's happy path a
+    development shortcut rather than the install it documents.
+
+    So the runbook now carries the `kustomize edit set image ...@sha256:` step
+    and a guard that greps the BUILD OUTPUT for the placeholder, and this test
+    is what keeps all three in agreement: the guard's pattern, the tag the base
+    declares, and the tag each overlay sets. Anyone who bumps the placeholder
+    without touching the runbook fails here.
+
+    NOT A STYLE CHECK. The assertion is per apply command: a new documented
+    apply that goes straight to `kubectl` fails this test even if every
+    existing one is guarded.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+
+    # THE PLACEHOLDER, TAKEN FROM THE MANIFESTS and not written here twice.
+    declared = {
+        line.split("image:", 1)[1].strip()
+        for path in sorted(KUBERNETES.rglob("*.yaml"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("image:") and "opendox-runtime" in line
+    }
+    assert declared == {"ghcr.io/opensoft/opendox-runtime:0.0.0"}, (
+        f"the base declares more than one runtime image: {declared}")
+    tag = declared.pop().rsplit(":", 1)[1]
+    for overlay in sorted(p for p in (KUBERNETES / "overlays").iterdir()
+                          if p.is_dir()):
+        entry = _load_yaml(overlay / "kustomization.yaml")["images"][0]
+        assert entry.get("newTag") == tag, (
+            f"{overlay.name} sets {entry} and the base declares :{tag}; the "
+            f"runbook's guard greps for one string and would miss the other")
+
+    guard = f"grep -q 'opendox-runtime:{tag.replace('.', chr(92) + '.')}'"
+    assert guard in runbook, (
+        f"the runbook's placeholder guard does not match the declared tag; "
+        f"expected a line containing {guard!r}")
+
+    # PER APPLY, AND IN ITS OWN FENCED BLOCK: an operator pastes a block, so
+    # a guard three sections earlier is not a guard for this one.
+    seen = 0
+    block: list[str] = []
+    for line in runbook.splitlines():
+        if line.startswith("```"):
+            block = [] if line.startswith("```sh") else block
+            continue
+        if "kubectl apply" in line and "kustomize build" in line:
+            seen += 1
+            overlay = line.split("overlays/", 1)[1].split()[0]
+            body = "\n".join(block)
+            assert (guard in body
+                    and f"overlays/{overlay} | grep -q" in body), (
+                f"the documented apply of `{overlay}` is not preceded, in its "
+                f"own shell block, by the placeholder guard for that overlay: "
+                f"a clean install pasting this block reaches ImagePullBackOff")
+        block.append(line)
+    assert seen == 3, (
+        f"the runbook documents {seen} applies and this test was written "
+        f"against 3; a new one must be guarded, not counted away")
+    assert "edit set image" in runbook, (
+        "the runbook guards the apply without saying how to replace the "
+        "image, which leaves the operator stuck at the guard")
