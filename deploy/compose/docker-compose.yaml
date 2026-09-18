@@ -231,6 +231,14 @@ services:
       # role's rights on the migration ledger to SELECT. The SAME `.env` name
       # the Postgres service creates the role from — see that service.
       OPENDOX_RUNTIME_PG_ROLE: ${OPENDOX_RUNTIME_PG_ROLE:-opendox_runtime}
+      # A SCHEMA NAME, not a credential, and that is exactly why this container
+      # can be told it. The two DSNs live in two workloads and no process holds
+      # both, so the configuration-time comparison of them could never fire in
+      # a shipped deployment — the run has to be told where the API reads
+      # (independent adversarial review of openDox-code#25, A25-3). The SAME
+      # `.env` value the Postgres service grants in, so one edit moves the
+      # schema, its grants and this refusal together.
+      OPENDOX_SERVED_SCHEMA: ${OPENDOX_PG_SCHEMA:-}
     command: ["opendox-runtime", "runtime", "migrate"]
     networks:
       - internal

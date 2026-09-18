@@ -288,3 +288,61 @@ def test_ci_turns_the_db_backed_skip_into_a_failure() -> None:
     # Every exit from the probe goes through the asymmetry, not around it.
     assert "pytest.skip(_SKIP_REASON)" not in source
     assert source.count("_skip_or_fail(") >= 3
+
+
+def test_every_integer_setting_is_bounded_above_as_well_as_below() -> None:
+    """An unbounded number can switch off a security property in silence.
+
+    `OPENDOX_OIDC_LEEWAY_SECONDS` is applied by PyJWT as slack on `exp`, so
+    `999999999` is a legal configuration under which a token never expires —
+    and `_positive_int` accepted any positive integer. The same helper also
+    took Python's underscore separators, because an environment variable was
+    handed straight to `int()`: `int("3_0_0")` is 300, so the manifest said one
+    number and the runtime used another (independent adversarial review of
+    openDox-code#25, A25-5).
+    """
+    from opendox.runtime.config import (
+        MAXIMUM_BY_SETTING,
+        PREFIX,
+        ConfigurationError,
+        load_settings,
+    )
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox",
+            PREFIX + "OIDC_ISSUER": "https://broker/realms/x"}
+
+    # THE LEEWAY IS THE ONE THAT MATTERS, and the finding's own input is the
+    # first case.
+    with pytest.raises(ConfigurationError) as caught:
+        load_settings({**base, PREFIX + "OIDC_LEEWAY_SECONDS": "999999999"})
+    assert PREFIX + "OIDC_LEEWAY_SECONDS" in str(caught.value)
+    assert "at most 300" in str(caught.value)
+
+    # EVERY BOUNDED SETTING IS TESTED AT ITS OWN EDGE, from the table rather
+    # than from three numbers written out here — a bound that moves moves the
+    # case with it.
+    for name, ceiling in MAXIMUM_BY_SETTING.items():
+        assert load_settings({**base, name: str(ceiling)}), name
+        with pytest.raises(ConfigurationError) as over:
+            load_settings({**base, name: str(ceiling + 1)})
+        assert name in str(over.value) and str(ceiling) in str(over.value)
+
+    # AND THE SEPARATORS PYTHON TAKES AND AN OPERATOR DOES NOT MEAN.
+    for spelling in ("3_0_0", "+300", " 3 0 0 ", "0x12c", "300.0"):
+        with pytest.raises(ConfigurationError) as refused:
+            load_settings({**base, PREFIX + "OIDC_JWKS_TTL_SECONDS": spelling})
+        assert "written in digits" in str(refused.value), spelling
+
+    # THE ORDINARY VALUES STILL LOAD, including surrounding whitespace, which
+    # is what a YAML block scalar leaves behind.
+    assert load_settings({**base,
+                          PREFIX + "OIDC_JWKS_TTL_SECONDS": " 300 "}
+                         ).oidc_jwks_ttl_seconds == 300
+    assert load_settings(base).oidc_leeway_seconds > 0
+
+    # AND EVERY BOUNDED NAME IS A SETTING THIS RUNTIME DECLARES, so the table
+    # cannot come to name something that no longer exists.
+    from opendox.runtime.config import SETTING_NAMES
+
+    assert set(MAXIMUM_BY_SETTING) <= set(SETTING_NAMES)

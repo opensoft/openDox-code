@@ -312,9 +312,28 @@ class CachingJwks:
                 self._refresh_locked()
             return self._keyset
 
-    def select_key(self, kid: str | None) -> PyJWK:
+    def select_key(self, kid: str | None, alg: str | None = None) -> PyJWK:
+        """The broker key for this token's `kid` AND its `alg`.
+
+        `alg` IS PART OF THE SELECTION, not a detail the decoder sorts out
+        later. Selecting by `kid` alone picked a key whose TYPE could not carry
+        the header's algorithm, and PyJWT answers that with a plain
+        `TypeError("Expecting a PEM-formatted key.")` — not a `PyJWTError` — so
+        it escaped `_decode`'s seven typed clauses, escaped `verify`, and
+        escaped `app.get_principal`, which catches `OidcError`. A realm
+        publishing an RSA and an EC signing key (a Keycloak realm the moment it
+        has an ES256 provider beside the default RS256 one) let any ANONYMOUS
+        caller turn `GET /api/v1/users/me` into a 500 with a token that need
+        not verify and need not be well-formed past its header: both `kid`s are
+        public facts from the unauthenticated JWKS endpoint (independent
+        adversarial review of openDox-code#25, A25-2).
+
+        A key that cannot carry the algorithm is NOT A MATCH, which is also the
+        right answer during a rotation that changes key type: the miss path
+        refreshes once and then refuses by name.
+        """
         keyset = self.keyset()
-        key = self._match(keyset, kid)
+        key = self._match(keyset, kid, alg)
         if key is None:
             # Key rotation: refresh ONCE, and at most once per cooldown — see
             # `DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS` for the amplification
@@ -324,7 +343,7 @@ class CachingJwks:
             # of reading the key set it already had and refusing a valid token
             # (Copilot review of openDox-code#25, rounds 15 and 16). See
             # `keyset_after_miss`.
-            key = self._match(self.keyset_after_miss(), kid)
+            key = self._match(self.keyset_after_miss(), kid, alg)
         if key is None:
             raise InvalidSignatureError("no broker signing key matched the token")
         return key
@@ -382,8 +401,9 @@ class CachingJwks:
         return keyset
 
     @staticmethod
-    def _match(keyset: PyJWKSet, kid: str | None) -> PyJWK | None:
-        keys = list(keyset.keys)
+    def _match(keyset: PyJWKSet, kid: str | None,
+               alg: str | None = None) -> PyJWK | None:
+        keys = [key for key in keyset.keys if _key_can_carry(key, alg)]
         if not keys:
             return None
         if kid is None:
@@ -395,6 +415,38 @@ class CachingJwks:
             if key.key_id == kid:
                 return key
         return None
+
+
+#: The JWK key TYPE each JWS algorithm family needs, by the algorithm's own
+#: prefix. RFC 7518 § 3.1: `RS*`/`PS*` are RSA, `ES*` is an elliptic curve,
+#: `EdDSA` is an octet key pair, `HS*` is a shared secret (refused at
+#: configuration time, and listed so the mapping is total rather than silent).
+_KEY_TYPE_FOR_ALGORITHM = {"RS": "RSA", "PS": "RSA", "ES": "EC",
+                           "Ed": "OKP", "HS": "oct"}
+
+
+def _key_can_carry(key: PyJWK, alg: str | None) -> bool:
+    """Whether this published key's TYPE can carry a token signed with `alg`.
+
+    Asked at SELECTION, because the alternative is asking the cryptography
+    backend, which answers with a builtin exception rather than a typed one
+    (see `CachingJwks.select_key`). `alg` of `None` selects on `kid` alone, the
+    way it did before — a header with no `alg` is refused by the allow-list
+    check in `TokenVerifier.verify` long before a key is chosen.
+
+    A key whose own type this runtime does not recognise is NOT assumed usable:
+    an unknown `kty` cannot be shown to carry the algorithm, and a key set is
+    something a broker publishes rather than something this runtime controls.
+    """
+    if alg is None:
+        return True
+    wanted = _KEY_TYPE_FOR_ALGORITHM.get(alg[:2])
+    if wanted is None:
+        return False
+    published = getattr(key, "key_type", None)
+    if published is None:                     # PyJWT that does not expose it
+        published = (getattr(key, "_jwk_data", {}) or {}).get("kty")
+    return published == wanted
 
 
 class TokenVerifier:
@@ -453,7 +505,7 @@ class TokenVerifier:
                 f"token algorithm is not in the accepted set "
                 f"{list(self._algorithms)}")
 
-        signing_key = self._jwks.select_key(header.get("kid"))
+        signing_key = self._jwks.select_key(header.get("kid"), alg)
         claims = self._decode(token, signing_key)
 
         subject = claims.get("sub")
@@ -512,6 +564,22 @@ class TokenVerifier:
             raise InvalidSignatureError("token signature is invalid") from exc
         except jwt.PyJWTError as exc:
             raise OidcError("token could not be validated") from exc
+        except (TypeError, ValueError) as exc:
+            # NOTHING UNTYPED LEAVES THIS METHOD. PyJWT reaches for the
+            # cryptography backend with the key it is handed, and that backend
+            # raises plain builtins — `TypeError("Expecting a PEM-formatted
+            # key.")` for a key of the wrong type — which are not `PyJWTError`
+            # and so passed every clause above, out through `verify` and out
+            # through `app.get_principal` as a 500 for an anonymous request
+            # (independent adversarial review of openDox-code#25, A25-2). The
+            # selection above no longer hands over such a key; this is the
+            # second wall, so a future PyJWT or backend shape cannot reopen the
+            # same hole. The exception's own text is not repeated: it is a
+            # library's, about a key, and this method never says anything
+            # about the token either.
+            raise InvalidSignatureError(
+                "token could not be validated against the broker's key "
+                f"({type(exc).__name__})") from None
 
 
 def build_verifier(settings: Any) -> TokenVerifier:
