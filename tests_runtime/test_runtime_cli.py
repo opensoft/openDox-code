@@ -1315,3 +1315,238 @@ def test_a_uri_password_holding_a_space_is_redacted_whole() -> None:
                   ) == "reached <redacted> fine"
     assert redact("<redacted>", "first postgresql://u:p@h/db\nsecond kept"
                   ) == "first <redacted>\nsecond kept"
+
+
+def test_no_handler_in_the_cli_emits_an_exception_without_the_redactor() -> None:
+    """The redaction contract is asked of the SHAPE, not of five known lines.
+
+    Copilot's round 35 named five `except migrations.MigrationError as exc`
+    handlers that formatted `str(exc)` directly — `discover_migrations()` puts
+    the configured `OPENDOX_MIGRATIONS_DIR` in its text, so a directory path
+    holding a DSN or `password=…` was printed by `init`, `migrate --plan`,
+    `migrate` and `status` while the CLI's docstring promised redacted
+    evidence. Reading the file for the five would have left the other eight
+    this scan found, and would go stale at the next handler somebody adds.
+
+    SO THE TEST ASKS THE PARSE TREE: inside every `except … as exc`, the name
+    `exc` may be reached only by `_safe_message(exc)` or `type(exc)` — which
+    reads a class name and cannot reach the message. Any other use is a raw
+    exception on its way to an operator's terminal.
+    """
+    import ast
+
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+    body = source.splitlines()
+    unredacted: list[str] = []
+    for handler in [n for n in ast.walk(ast.parse(source))
+                    if isinstance(n, ast.ExceptHandler) and n.name]:
+        allowed = set()
+        for call in [n for n in ast.walk(handler) if isinstance(n, ast.Call)]:
+            if (isinstance(call.func, ast.Name)
+                    and call.func.id in {"_safe_message", "type"}):
+                allowed.update(id(a) for a in call.args
+                               if isinstance(a, ast.Name)
+                               and a.id == handler.name)
+        unredacted += [f"line {n.lineno}: {body[n.lineno - 1].strip()}"
+                       for n in ast.walk(handler)
+                       if isinstance(n, ast.Name) and n.id == handler.name
+                       and id(n) not in allowed]
+    assert unredacted == [], (
+        "these handlers put an exception's own text into evidence without "
+        f"`_safe_message`: {unredacted}")
+
+    # AND THE SCAN IS RUN AGAINST THE SHAPE IT FORBIDS, so a rewrite that
+    # quietly stopped finding anything is not mistaken for a clean file: the
+    # very same walk over the pre-fix spelling reports it.
+    forbidden = ast.parse(
+        "try:\n"
+        "    pass\n"
+        "except ValueError as exc:\n"
+        '    _emit({"message": str(exc)})\n')
+    found = []
+    for handler in [n for n in ast.walk(forbidden)
+                    if isinstance(n, ast.ExceptHandler) and n.name]:
+        allowed = set()
+        for call in [n for n in ast.walk(handler) if isinstance(n, ast.Call)]:
+            if (isinstance(call.func, ast.Name)
+                    and call.func.id in {"_safe_message", "type"}):
+                allowed.update(id(a) for a in call.args
+                               if isinstance(a, ast.Name)
+                               and a.id == handler.name)
+        found += [n for n in ast.walk(handler)
+                  if isinstance(n, ast.Name) and n.id == handler.name
+                  and id(n) not in allowed]
+    assert len(found) == 1
+
+
+def test_the_serve_boundary_redacts_a_traceback_uvicorn_would_log() -> None:
+    """`_safe_message` covers what this module prints; `serve` lends the process.
+
+    Uvicorn logs a failed lifespan itself, with `exc_info`, before `cmd_serve`
+    reaches its own handler, and psycopg names the whole conninfo in the text
+    of an exception raised for an unparsable DSN — so the password went to
+    stderr in a traceback while the JSON beside it was redacted (Copilot review
+    of openDox-code#25, round 34).
+
+    THE CASE IS MEASURED BOTH WAYS. The same record is formatted with the
+    boundary down and with it up: the first is the leak, the second is the
+    fix, and a boundary that stopped working could not pass both halves.
+    """
+    import logging
+
+    secret = "postgresql://opendox:hunter2@db.internal:5432/opendox"
+
+    def one_record() -> logging.LogRecord:
+        try:
+            raise RuntimeError(f"could not connect: {secret}")
+        except RuntimeError:
+            import sys
+            return logging.getLogRecordFactory()(
+                "uvicorn.error", logging.ERROR, __file__, 1,
+                "Application startup failed. Exiting.", (), sys.exc_info())
+
+    formatter = logging.Formatter("%(message)s")
+
+    leaked = formatter.format(one_record())
+    assert "hunter2" in leaked and "Traceback" in leaked
+
+    with cli.redacting_every_log_record():
+        guarded = formatter.format(one_record())
+    assert "hunter2" not in guarded
+    assert "opendox:hunter2@db.internal" not in guarded
+    assert "<redacted>" in guarded
+    # THE REST OF THE TRACEBACK SURVIVES: a redaction that dropped the
+    # exception entirely would take the operator's only clue with it.
+    assert "RuntimeError" in guarded and "could not connect" in guarded
+
+    # THE MESSAGE, ITS `%`-ARGUMENTS AND THE STACK TEXT ARE COVERED TOO —
+    # a DSN reaches a log line three ways, and a number must stay a number.
+    with cli.redacting_every_log_record():
+        # `sinfo` IS THE FACTORY'S NINTH ARGUMENT, which is how
+        # `Logger.makeRecord` passes a `stack_info=True` call's stack — setting
+        # the attribute after construction would test a shape logging never
+        # produces.
+        record = logging.getLogRecordFactory()(
+            "uvicorn.error", logging.ERROR, __file__, 1,
+            "dsn %s port %d", (secret, 5432), None, None,
+            f"  File x, in y\n    connect({secret})")
+        rendered = formatter.format(record)
+    assert "hunter2" not in rendered and "port 5432" in rendered
+    assert "hunter2" not in record.stack_info
+
+    # AND THE GLOBAL IS PUT BACK on the way out, including after an exception,
+    # because `cmd_serve` is importable and the tests call it in-process.
+    before = logging.getLogRecordFactory()
+    with pytest.raises(ZeroDivisionError):
+        with cli.redacting_every_log_record():
+            assert logging.getLogRecordFactory() is not before
+            1 / 0
+    assert logging.getLogRecordFactory() is before
+
+
+def test_the_serve_verb_installs_that_boundary_around_uvicorn() -> None:
+    """The boundary is worth nothing if `serve` does not stand inside it.
+
+    It is installed BEFORE `uvicorn.Config`, which is where uvicorn runs its
+    own `dictConfig`, and it is still up inside `run()`, which is where the
+    lifespan fails.
+    """
+    import ast
+
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+    serve = next(n for n in ast.walk(ast.parse(source))
+                 if isinstance(n, ast.FunctionDef) and n.name == "cmd_serve")
+    withs = [n for n in ast.walk(serve) if isinstance(n, ast.With)
+             and any(isinstance(i.context_expr, ast.Call)
+                     and isinstance(i.context_expr.func, ast.Name)
+                     and i.context_expr.func.id == "redacting_every_log_record"
+                     for i in n.items)]
+    assert len(withs) == 1, "serve must stand inside exactly one boundary"
+    inside = ast.dump(withs[0])
+    assert "uvicorn" in inside and "'Config'" in inside
+    assert "'run'" in inside
+
+
+def test_two_dsns_that_select_different_schemas_are_refused() -> None:
+    """Migrations must land where the API reads, or neither answer means anything.
+
+    `OPENDOX_DATABASE_URL` and `OPENDOX_MIGRATION_DATABASE_URL` are
+    independently configurable and nothing tied them together: the runner
+    derives its schema from the second and the served `Database` from the
+    first, so two DSNs at one database with different `search_path` options let
+    a run apply and VERIFY schema A while `/readyz` and the API read schema B —
+    including a pre-existing fully migrated schema, which is another install's
+    coordination data (Copilot review of openDox-code#25, round 34).
+
+    THE REFUSAL IS AT CONFIGURATION TIME, before anything connects, because
+    the alternative is discovering it from a migrated-looking database.
+    """
+    from opendox.runtime.config import (
+        ConfigurationError,
+        load_settings,
+        schema_selected_by,
+    )
+
+    # WHAT THE STRING CAN BE ASKED, in every form libpq accepts: the URI query
+    # (percent-encoded, which is the only way `-c search_path=x` survives a
+    # query string), the attached `-csearch_path=x` spelling, and the
+    # keyword/value conninfo — where the value holds a space and libpq
+    # therefore quotes it, which a `str.split()` read of the string missed.
+    assert schema_selected_by(
+        "postgresql://u:p@h/db?options=-c%20search_path%3Dtenant%2Cpublic"
+    ) == "tenant"
+    assert schema_selected_by(
+        "postgresql://u:p@h/db?options=-csearch_path%3Dtenant") == "tenant"
+    assert schema_selected_by(
+        "host=h dbname=db options='-c search_path=tenant'") == "tenant"
+    assert schema_selected_by(
+        'host=h dbname=db options="-c search_path=tenant,public"') == "tenant"
+    # THE FIRST ENTRY IS THE ANSWER, because that is where an unqualified
+    # `create table` lands — which is the question `selected_schema` asks of a
+    # live connection.
+    assert schema_selected_by(
+        "postgresql://u:p@h/db?options=-c%20search_path%3D%22a%20b%22%2Cc"
+    ) == "a b"
+    # AND A DSN THAT SELECTS NOTHING SELECTS NOTHING: the server's own default
+    # for the role is not in the string and is not guessed at here.
+    assert schema_selected_by("postgresql://u:p@h/db") is None
+    assert schema_selected_by("host=h dbname=db") is None
+    assert schema_selected_by("postgresql://u:p@h/db?options=-c%20work_mem%3D1"
+                             ) is None
+
+    base = {PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox"}
+    served = "postgresql://u:p@h/db?options=-c%20search_path%3Dserved"
+    migration = "postgresql://m:p@h/db?options=-c%20search_path%3Dmigrated"
+
+    with pytest.raises(ConfigurationError) as refused:
+        load_settings({**base, PREFIX + "DATABASE_URL": served,
+                       PREFIX + "MIGRATION_DATABASE_URL": migration})
+    message = str(refused.value)
+    assert "served" in message and "migrated" in message
+    assert PREFIX + "DATABASE_URL" in message
+    assert PREFIX + "MIGRATION_DATABASE_URL" in message
+    # THE REFUSAL NAMES THE SCHEMAS AND NOTHING ELSE — a DSN carries a
+    # password, and this is the one refusal that has two of them in hand.
+    assert "p@h" not in message and "://" not in message
+
+    # ONE SCHEMA, OR NONE NAMED IN EITHER, IS ACCEPTED.
+    same = "postgresql://m:p@h/db?options=-c%20search_path%3Dserved"
+    assert load_settings({**base, PREFIX + "DATABASE_URL": served,
+                          PREFIX + "MIGRATION_DATABASE_URL": same})
+    assert load_settings({**base,
+                          PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+                          PREFIX + "MIGRATION_DATABASE_URL":
+                              "postgresql://m:p@h/db"})
+    # AND A MIGRATION DSN THAT IS SIMPLY ABSENT is the documented single-role
+    # deployment, not a mismatch.
+    assert load_settings({**base, PREFIX + "DATABASE_URL": served})
+
+    # THE OTHER DIRECTION IS REFUSED TOO: a served DSN that names no schema
+    # beside a migration DSN that names one is the same split, and the
+    # connection default is what the message calls the unnamed side.
+    with pytest.raises(ConfigurationError) as either_way:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+                       PREFIX + "MIGRATION_DATABASE_URL": migration})
+    assert "the connection default" in str(either_way.value)

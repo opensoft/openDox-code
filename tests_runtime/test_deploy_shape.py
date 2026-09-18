@@ -1759,3 +1759,154 @@ def test_every_secret_prompt_aborts_the_block_and_every_create_is_idempotent(
         assert "--from-literal" not in rendered, (
             f"{name} puts a value on a command line, where `ps` and "
             f"/proc/<pid>/cmdline can read it")
+
+
+def test_the_healthcheck_probes_the_configured_bind_host_and_not_localhost(
+) -> None:
+    """The port finding's twin, one setting over.
+
+    `OPENDOX_BIND_HOST` is a service setting (`${OPENDOX_BIND_HOST:-0.0.0.0}`
+    in the compose `environment:`), and the probe always connected to
+    `localhost` — so a container told to bind its own address served every
+    request while this check got `connection refused`, marked it unhealthy and
+    had the orchestrator restart a working server (Copilot review of
+    openDox-code#25, round 35, suppressed).
+
+    THE SCRIPT IS RUN, not read for a substring: what matters is the URL it
+    actually dials for each configured value, and a wildcard must be MAPPED
+    rather than dialled because nothing connects to `0.0.0.0`.
+    """
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    service = compose["services"]["opendox"]
+    script = service["healthcheck"]["test"][-1]
+    assert PREFIX + "BIND_HOST" in script, (
+        "the healthcheck names a literal host; a configured bind host is "
+        "permanently unhealthy")
+    assert "${" not in script, "an operator's value is interpolated again"
+    assert service["environment"][PREFIX + "BIND_HOST"].startswith(
+        "${" + PREFIX + "BIND_HOST"), (
+        "the container is not given the host the probe reads")
+
+    def dialled(environment: dict[str, str]) -> str:
+        """The URL this exact script opens, with the environment it is given."""
+        seen: list[str] = []
+
+        class _Answer:
+            status = 200
+
+        def urlopen(url: str, timeout: float | None = None) -> _Answer:
+            seen.append(url)
+            return _Answer()
+
+        import types
+        request = types.SimpleNamespace(urlopen=urlopen)
+        namespace = {"os": types.SimpleNamespace(environ=environment),
+                     "urllib": types.SimpleNamespace(request=request),
+                     "sys": types.SimpleNamespace(exit=lambda code: None)}
+        # The script's own `import` statements are dropped so the stubs above
+        # are what it reaches; every other character is the shipped one.
+        body = script.split(";", 1)[1].lstrip()
+        assert script.split(";", 1)[0].startswith("import ")
+        exec(body, namespace)  # noqa: S102 - the subject of the test
+        return seen[0]
+
+    # A WILDCARD IS MAPPED TO THE LOOPBACK ADDRESS OF ITS OWN FAMILY, an IPv6
+    # literal is bracketed, and every other value is dialled verbatim.
+    assert dialled({}) == "http://127.0.0.1:8080/livez"
+    assert dialled({PREFIX + "BIND_HOST": "0.0.0.0"}
+                   ) == "http://127.0.0.1:8080/livez"
+    assert dialled({PREFIX + "BIND_HOST": "::", PREFIX + "BIND_PORT": "9443"}
+                   ) == "http://[::1]:9443/livez"
+    assert dialled({PREFIX + "BIND_HOST": "172.20.0.5"}
+                   ) == "http://172.20.0.5:8080/livez"
+    assert dialled({PREFIX + "BIND_HOST": "fd00::5"}
+                   ) == "http://[fd00::5]:8080/livez"
+
+    # AND THE SHAPE IT FORBIDS IS RUN: the previous spelling dialled
+    # `localhost` for every one of those, which is the defect.
+    previous = ("import os,urllib.request,sys; sys.exit(0 if "
+                "urllib.request.urlopen('http://localhost:%s/livez' % "
+                "int(os.environ.get('OPENDOX_BIND_PORT') or 8080),"
+                "timeout=3).status==200 else 1)")
+    script = previous
+    assert dialled({PREFIX + "BIND_HOST": "172.20.0.5"}
+                   ) == "http://localhost:8080/livez"
+
+
+def test_the_secret_block_stops_when_the_left_side_of_a_pipeline_fails(
+) -> None:
+    """`set -e` alone does not see a failure inside a pipeline.
+
+    Every Secret is created by `kubectl create --dry-run=client -o yaml |
+    kubectl apply -f -`, and a shell reports a pipeline's status as its RIGHT
+    side's — so a failed `create` followed by an `apply` that exits 0 left
+    `set -e` nothing to act on and the block carried on as though the Secret
+    had been made (Copilot review of openDox-code#25, round 35, suppressed).
+    """
+    import subprocess
+
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    block = runbook[runbook.index("(\n  set -e"):]
+    block = block[:block.index("\n)")]
+    assert "set -e -o pipefail" in block, (
+        "the secret subshell enables `set -e` without `pipefail`, so a failed "
+        "`kubectl create` in a pipeline does not stop it")
+    assert "--dry-run=client -o yaml | kubectl apply -f -" in block
+
+    # BOTH WAYS, MEASURED IN THE SHELL THE BLOCK IS WRITTEN FOR — a claim
+    # about `set -e` is worth nothing unread from an actual shell.
+    without = subprocess.run(
+        ["bash", "-c", "set -e; (exit 3) | cat; echo reached"],
+        capture_output=True, text=True, check=False)
+    assert without.returncode == 0 and "reached" in without.stdout, (
+        "this shell already stops on a failed left side; the finding would "
+        "not reproduce and the fix would be untested")
+    with_it = subprocess.run(
+        ["bash", "-c", "set -e -o pipefail; (exit 3) | cat; echo reached"],
+        capture_output=True, text=True, check=False)
+    assert with_it.returncode == 3 and "reached" not in with_it.stdout
+
+
+def test_the_managed_database_prerequisite_refuses_before_it_provisions(
+) -> None:
+    """psql runs the NEXT statement after a failed one unless told not to.
+
+    An unprovisioned migration owner made the `create role` fail while the
+    grants below it still ran, so the prerequisite ended looking successful
+    with the identity it exists to create never made; and the shell block above
+    it can only DECLINE TO EXPORT an empty password — it must export into the
+    operator's own shell for `\\getenv` to see anything, so it cannot be a
+    subshell and `exit 1` in it would close that shell. An operator who pasted
+    this block anyway reached `create role … password %L` with nothing (Copilot
+    review of openDox-code#25, round 35, suppressed).
+
+    NOT MEASURED AGAINST A SERVER: no `psql` binary exists in the `validate`
+    job, which installs `.[test]` and nothing else. What is asserted is the
+    ORDER — every guard before the first act — which is the property that was
+    wrong, and `deploy/*/init-runtime-role.sh` carry the same setting in the
+    spelling psql takes on its command line.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    start = runbook.index("\\getenv runtime_role OPENDOX_RUNTIME_PG_ROLE")
+    block = runbook[runbook.rindex("```sql", 0, start):]
+    block = block[:block.index("\n```")]
+
+    assert "\\set ON_ERROR_STOP on" in block, (
+        "psql reports a failed statement and runs the next one; this block "
+        "must stop on the first error the way the bundled bootstrap does")
+    assert "ON_ERROR_STOP=1" in (
+        ROOT / "deploy" / "compose" / "init-runtime-role.sh"
+    ).read_text(encoding="utf-8"), "the bundled bootstrap lost its own setting"
+
+    create = block.index("create role %I login password %L")
+    assert block.index("\\set ON_ERROR_STOP on") < create
+    # THE BLANK-PASSWORD GUARD IS BEFORE THE ROLE IS CREATED, and it raises
+    # rather than warning: with `ON_ERROR_STOP` a raised exception is what
+    # gives psql a nonzero exit.
+    assert block.index("\\if :opendox_blank_password") < create
+    assert block.index("raise exception") < create
+    assert "\\if :{?runtime_password}" in block, (
+        "an UNSET variable is not an empty one in psql; `:'runtime_password'` "
+        "would be substituted as its own literal text")
+    assert block.index("\\if :{?runtime_password}") < block.index(
+        "\\if :opendox_blank_password")

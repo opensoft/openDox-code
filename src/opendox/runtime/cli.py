@@ -60,9 +60,13 @@ ImportError it was about to explain.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import logging
 import re
 import sys
+import traceback
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -179,6 +183,85 @@ def _safe_message(exc: BaseException) -> str:
     return _DSN_SHAPED.sub("<redacted>", str(exc))
 
 
+@contextlib.contextmanager
+def redacting_every_log_record() -> Iterator[None]:
+    """Run the block with the process's log records passed through the redactor.
+
+    `_safe_message` only reaches what THIS module prints, and `serve` is the
+    one verb that hands control to somebody else's logger. Uvicorn logs a
+    failed lifespan itself — `logger.error("Application startup failed…",
+    exc_info=…)` — BEFORE `cmd_serve` ever reaches its own handler, and psycopg
+    puts the whole conninfo in the text of an exception raised for an
+    unparsable DSN, so a malformed `OPENDOX_DATABASE_URL` printed its password
+    to stderr in a traceback while the JSON beside it was scrupulously redacted
+    (Copilot review of openDox-code#25, round 34).
+
+    THE BOUNDARY IS THE RECORD FACTORY, not a filter on the handlers uvicorn
+    happens to install. A filter attached to a logger runs only for records
+    created ON that logger, a filter attached to a handler covers only that
+    handler, and uvicorn's own `dictConfig` replaces the handlers on
+    `uvicorn.error` and `uvicorn.access` when `Config` is constructed — so
+    every per-handler answer is a list of the loggers somebody remembered.
+    `logging.setLogRecordFactory` is the stdlib's one hook that every record
+    in the process goes through, whoever creates it and whatever handler later
+    emits it, including a handler installed after this point.
+
+    EACH RECORD IS REDACTED IN THREE PLACES, because a formatter can reach the
+    exception three ways: the message (and its arguments, which is where a `%s`
+    DSN would sit), the stack text, and the traceback. The traceback is
+    rendered HERE, redacted, and cached in `exc_text` — where
+    `logging.Formatter` uses it instead of formatting `exc_info` again — and
+    `exc_info` is then dropped, so a formatter that ignores `exc_text` prints
+    nothing rather than the raw exception. The exception object itself is not
+    mutated; only this record's rendering of it is.
+
+    RESIDUE, stated rather than implied: a traceback printed by something that
+    does not use `logging` is not covered here. The one such path in this verb
+    is an exception escaping `server.run()`, which the handler below turns into
+    redacted JSON, and `_safe_message` is what renders it.
+    """
+    previous = logging.getLogRecordFactory()
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = previous(*args, **kwargs)
+        record.msg = _DSN_SHAPED.sub("<redacted>", str(record.msg))
+        if isinstance(record.args, dict):
+            record.args = {key: _redacted_arg(value)
+                           for key, value in record.args.items()}
+        elif isinstance(record.args, tuple):
+            record.args = tuple(_redacted_arg(value) for value in record.args)
+        if record.stack_info:
+            record.stack_info = _DSN_SHAPED.sub("<redacted>",
+                                                record.stack_info)
+        if record.exc_info:
+            record.exc_text = _DSN_SHAPED.sub("<redacted>", "".join(
+                traceback.format_exception(*record.exc_info)))
+            record.exc_info = None
+        return record
+
+    logging.setLogRecordFactory(factory)
+    try:
+        yield
+    finally:
+        # A GLOBAL RESTORED ON EVERY PATH. `cmd_serve` is importable and is
+        # called in-process by the tests; a factory left installed would
+        # redact an unrelated caller's logs for the life of the interpreter.
+        logging.setLogRecordFactory(previous)
+
+
+def _redacted_arg(value: Any) -> Any:
+    """One `%`-argument, redacted where it is text and untouched where it is not.
+
+    A number stays a number: `"%d" % "<redacted>"` would raise inside the
+    logging machinery, which is a worse failure than the one being prevented.
+    """
+    if isinstance(value, str):
+        return _DSN_SHAPED.sub("<redacted>", value)
+    if isinstance(value, BaseException):
+        return _safe_message(value)
+    return value
+
+
 def _emit(payload: dict[str, Any], *, ok: bool) -> int:
     """Print one evidence object and return the process exit code."""
     payload = {"ok": ok, **payload}
@@ -234,7 +317,7 @@ def _settings_or_refusal(args: argparse.Namespace) -> RuntimeSettings | int:
         return load_settings()
     except ConfigurationError as exc:
         return _emit({"verb": args.verb, "refusal": "configuration",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
 
 
 # -- verbs ------------------------------------------------------------------
@@ -279,7 +362,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         digest = migrations.verify_canonical_digest(settings.migrations_dir)
     except migrations.MigrationError as exc:
         return _emit({"verb": "init", "refusal": "canonical-schema",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     pending = [m.version for m in migrations.discover_migrations(settings.migrations_dir)]
     return _emit({"verb": "init",
                   "project_repository_root": str(root),
@@ -300,7 +383,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         dsn = migration_database_url(settings)
     except ConfigurationError as exc:
         return _emit({"verb": "migrate", "refusal": "configuration",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     # THE CANONICAL GATE RUNS BEFORE THE DATABASE IS EVEN IMPORTED, for both
     # `--plan` and a real run. `apply()` runs it first "so a tree carrying the
     # wrong `0001` changes nothing at all", and `--plan` skipped it entirely —
@@ -314,13 +397,14 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         migrations.verify_canonical_digest(settings.migrations_dir)
     except migrations.MigrationError as exc:
         return _emit({"verb": "migrate", "refusal": type(exc).__name__,
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     try:
         from opendox.runtime.db import Database
     except ImportError as exc:  # pragma: no cover - the extra is absent
         return _emit({"verb": "migrate", "refusal": "runtime-extra-missing",
-                      "message": f"{exc}; install this package with the "
-                                 "`runtime` extra: pip install '.[runtime]'"},
+                      "message": f"{_safe_message(exc)}; install this "
+                                 "package with the `runtime` extra: "
+                                 "pip install '.[runtime]'"},
                      ok=False)
     runner_db = Database(dsn, application_name="opendox-runtime-migrate",
                          checkout_timeout=args.connect_timeout)
@@ -345,7 +429,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                             "applied": runner.apply()}
     except migrations.MigrationError as exc:
         return _emit({"verb": "migrate", "refusal": type(exc).__name__,
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     # EVERY OPERATIONAL FAILURE IS EVIDENCE TOO, not a traceback: a pool
     # timeout, a refused connection, a permission error and a SQL error all
     # reach an operator through the same one redacted object the lifecycle
@@ -370,8 +454,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         from opendox.runtime.app import create_app
     except ImportError as exc:  # pragma: no cover - the extra is absent
         return _emit({"verb": "serve", "refusal": "runtime-extra-missing",
-                      "message": f"{exc}; install this package with the "
-                                 "`runtime` extra: pip install '.[runtime]'"},
+                      "message": f"{_safe_message(exc)}; install this "
+                                 "package with the `runtime` extra: "
+                                 "pip install '.[runtime]'"},
                      ok=False)
     app = create_app(settings=settings)
     # AN EXPLICIT `Server`, BECAUSE `uvicorn.run` SWALLOWS A STARTUP FAILURE.
@@ -383,28 +468,33 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # (Copilot review of openDox-code#25, round 8). `Server.started` is
     # uvicorn's own answer to "did startup complete", and it is False in
     # exactly that case.
-    server = uvicorn.Server(uvicorn.Config(
-        app, host=settings.bind_host, port=settings.bind_port,
-        log_level=args.log_level))
-    # A BIND FAILURE IS EVIDENCE TOO — and it is the failure an operator meets
-    # first. `Server.run()` RAISES for an address it cannot use: `SystemExit`
-    # from uvicorn's own `sys.exit(1)` on an occupied port, `OSError` for an
-    # address that is not this host's. This call sat outside every
-    # exception-to-evidence handler, so the verb an operator runs longest
-    # answered a misconfigured port with a traceback and no JSON at all, which
-    # is the same lifecycle-contract hole round 8 closed for the SILENT startup
-    # failure beside it (Copilot review of openDox-code#25, round 10,
-    # suppressed). `SystemExit` is named explicitly because it is a
-    # `BaseException` and `except Exception` does not reach it.
-    try:
-        server.run()
-    except (Exception, SystemExit) as exc:  # noqa: BLE001
-        detail = _safe_message(exc)
-        return _emit({"verb": "serve", "refusal": "serve-failed",
-                      "bind_host": settings.bind_host,
-                      "bind_port": settings.bind_port,
-                      "message": (f"{type(exc).__name__}: {detail}" if detail
-                                  else type(exc).__name__)}, ok=False)
+    # THE BOUNDARY IS INSTALLED BEFORE `Config`, WHICH IS WHERE UVICORN
+    # CONFIGURES LOGGING, and it stays up for the whole of `run()` — the
+    # failed lifespan whose traceback carried the conninfo is logged from
+    # inside that call (Copilot review of openDox-code#25, round 34).
+    with redacting_every_log_record():
+        server = uvicorn.Server(uvicorn.Config(
+            app, host=settings.bind_host, port=settings.bind_port,
+            log_level=args.log_level))
+        # A BIND FAILURE IS EVIDENCE TOO — and it is the failure an operator meets
+        # first. `Server.run()` RAISES for an address it cannot use: `SystemExit`
+        # from uvicorn's own `sys.exit(1)` on an occupied port, `OSError` for an
+        # address that is not this host's. This call sat outside every
+        # exception-to-evidence handler, so the verb an operator runs longest
+        # answered a misconfigured port with a traceback and no JSON at all, which
+        # is the same lifecycle-contract hole round 8 closed for the SILENT startup
+        # failure beside it (Copilot review of openDox-code#25, round 10,
+        # suppressed). `SystemExit` is named explicitly because it is a
+        # `BaseException` and `except Exception` does not reach it.
+        try:
+            server.run()
+        except (Exception, SystemExit) as exc:  # noqa: BLE001
+            detail = _safe_message(exc)
+            return _emit({"verb": "serve", "refusal": "serve-failed",
+                          "bind_host": settings.bind_host,
+                          "bind_port": settings.bind_port,
+                          "message": (f"{type(exc).__name__}: {detail}" if detail
+                                      else type(exc).__name__)}, ok=False)
     if not getattr(server, "started", False):
         return _emit({"verb": "serve", "refusal": "startup-failed",
                       "bind_host": settings.bind_host,
@@ -439,7 +529,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         settings = load_settings()
     except ConfigurationError as exc:
         return _emit({"verb": "status", "refusal": "configuration",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     report["settings"] = _redacted_settings(settings)
 
     try:
@@ -447,7 +537,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             settings.migrations_dir)
         report["canonical_schema"] = "pinned"
     except migrations.MigrationError as exc:
-        report["canonical_schema"] = f"refused: {exc}"
+        report["canonical_schema"] = f"refused: {_safe_message(exc)}"
         ok = False
 
     report["coordination_tables"] = list(identity.TABLES)
@@ -455,7 +545,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     try:
         from opendox.runtime.db import Database
     except ImportError as exc:  # pragma: no cover - the extra is absent
-        report["runtime_extra"] = f"absent: {exc}"
+        report["runtime_extra"] = f"absent: {_safe_message(exc)}"
         report["database"] = "not probed"
         report["broker_keys"] = "not probed"
         return _emit(report, ok=False)
@@ -511,7 +601,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         # directory pointed the operator at the wrong dependency entirely
         # (Copilot review of openDox-code#25, round 7).
         report.setdefault("database", "reachable")
-        report["migrations"] = f"unreadable: {type(exc).__name__}: {exc}"
+        report["migrations"] = (
+            f"unreadable: {type(exc).__name__}: {_safe_message(exc)}")
         ok = False
     except Exception as exc:  # noqa: BLE001
         # THE SAME DISTINCTION THE BRANCH ABOVE MAKES, for the failures that
@@ -568,14 +659,14 @@ def cmd_reset(args: argparse.Namespace) -> int:
         dsn = migration_database_url(settings)
     except ConfigurationError as exc:
         return _emit({"verb": "reset", "refusal": "configuration",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     try:
         from psycopg import sql
 
         from opendox.runtime.db import Database
     except ImportError as exc:  # pragma: no cover - the extra is absent
         return _emit({"verb": "reset", "refusal": "runtime-extra-missing",
-                      "message": str(exc)}, ok=False)
+                      "message": _safe_message(exc)}, ok=False)
     try:
         with Database(dsn, application_name="opendox-runtime-reset",
                       checkout_timeout=args.connect_timeout) as db:

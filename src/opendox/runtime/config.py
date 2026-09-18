@@ -29,6 +29,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import shlex
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -567,6 +568,95 @@ def _by_name(name: str) -> Setting:
     raise KeyError(name)  # pragma: no cover - a typo in this module
 
 
+def schema_selected_by(dsn: str) -> str | None:
+    """The schema a DSN's own `options` selects, or `None` where it names one.
+
+    libpq takes `options=-c search_path=x` (and `-csearch_path=x`) in a URI's
+    query and in the keyword/value form, and `Database(schema=…)` sets exactly
+    that. The FIRST entry is what an unqualified `create table` lands in, which
+    is the question `migrations.selected_schema` asks of a live connection;
+    this reads the same answer out of the string, before anything connects.
+    """
+    raw: str | None = None
+    try:
+        split = urllib.parse.urlsplit(dsn)
+    except ValueError:
+        return None
+    if split.scheme and split.query:
+        for key, value in urllib.parse.parse_qsl(split.query,
+                                                 keep_blank_values=True):
+            if key == "options":
+                raw = value
+    elif not split.scheme:
+        # `shlex`, NOT `str.split`: libpq writes a value holding spaces in
+        # single quotes — `options='-c search_path=tenant'` — and splitting on
+        # whitespace made that two tokens and the setting invisible.
+        try:
+            tokens = shlex.split(dsn)
+        except ValueError:
+            return None
+        for part in tokens:
+            if part.startswith("options="):
+                raw = part.split("=", 1)[1]
+    if not raw:
+        return None
+    try:
+        words = shlex.split(raw.replace("\\ ", " "))
+    except ValueError:
+        return None
+    setting: str | None = None
+    for index, word in enumerate(words):
+        if word == "-c" and index + 1 < len(words):
+            setting = words[index + 1]
+        elif word.startswith("-c") and len(word) > 2:
+            setting = word[2:]
+        else:
+            continue
+        if setting.startswith("search_path="):
+            first = setting.split("=", 1)[1].split(",")[0].strip()
+            return first.strip('"') or None
+    return None
+
+
+def _refuse_two_dsns_that_select_different_schemas(
+        served: str, migration: str | None) -> None:
+    """Both DSNs must land in one schema, or neither answer means anything.
+
+    THE TWO ARE INDEPENDENTLY CONFIGURABLE, and nothing tied them together:
+    the migration runner derives its schema from
+    `OPENDOX_MIGRATION_DATABASE_URL` and the served `Database` uses
+    `OPENDOX_DATABASE_URL`, so two DSNs at the same database with different
+    `search_path` options let migrations apply and VERIFY schema A while
+    `/readyz` and the API read schema B — including a pre-existing fully
+    migrated schema, which is another install's coordination data (Copilot
+    review of openDox-code#25, round 34).
+
+    WHAT THIS CATCHES is the configured form: a schema named in either DSN's
+    own `options`, which is how `Database(schema=…)`, both `deploy/` shapes
+    and the runbook select one. WHAT IT DOES NOT catch is a schema that comes
+    from a ROLE's default `search_path` on the server, which no string can
+    see — `migrations.selected_schema` is the guard there, and it refuses a
+    connection whose `current_schema()` is a fallback rather than the schema
+    it asked for. The two together are the boundary; this one is the half that
+    can answer before anything connects.
+    """
+    if not migration:
+        return
+    here, there = schema_selected_by(served), schema_selected_by(migration)
+    if here == there:
+        return
+    raise ConfigurationError(
+        f"{PREFIX}DATABASE_URL selects the schema "
+        f"{here or '(the connection default)'} and "
+        f"{PREFIX}MIGRATION_DATABASE_URL selects "
+        f"{there or '(the connection default)'}. Migrations would be applied "
+        "and verified in one schema while the API and /readyz read the other, "
+        "so a run could report an applied schema that nothing serves — or "
+        "serve a schema this install never migrated. Point both at the same "
+        "schema (the values are not repeated beyond the schema names: a DSN "
+        "carries a password)")
+
+
 def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
     """Resolve :class:`RuntimeSettings` from `env` (default `os.environ`).
 
@@ -583,6 +673,13 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
     env = os.environ if env is None else env
 
     algorithms = _algorithms(env)
+    # AND THE TWO DSNs LAND IN ONE SCHEMA. See
+    # `_refuse_two_dsns_that_select_different_schemas`: this is the half of
+    # that invariant a string can answer, and it is asked here because this is
+    # the one loader that holds BOTH values.
+    _refuse_two_dsns_that_select_different_schemas(
+        _require(env, _by_name(PREFIX + "DATABASE_URL")),
+        _optional(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL")))
 
     return RuntimeSettings(
         database_url=_require(env, _by_name(PREFIX + "DATABASE_URL")),

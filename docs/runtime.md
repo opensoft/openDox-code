@@ -169,8 +169,16 @@ kubectl apply -f deploy/kubernetes/base/namespace.yaml
 # `exit` rather than re-raising for the same reason: `$$` inside a subshell is
 # still the parent's pid, so `kill -INT $$` would have signalled the operator's
 # shell. The EXIT trap fires on every one of these paths.
+# AND `pipefail`, BECAUSE EVERY CREATE BELOW IS A PIPELINE. Without it a shell
+# reports a pipeline's status as its RIGHT-hand command's, so a failed `kubectl
+# create --dry-run` followed by a `kubectl apply` that exits 0 left `set -e`
+# nothing to act on and the block carried on as if the Secret had been made
+# (Copilot review of openDox-code#25, round 35, suppressed). MEASURED, bash
+# 5.2: `set -e; (exit 3) | cat; echo reached` prints `reached` and exits 0;
+# `set -e -o pipefail` stops the block with status 3. This block is bash
+# already — `read -rs -p` is not POSIX — so it costs no portability it had.
 (
-  set -e
+  set -e -o pipefail
   umask 077
   secrets="$(mktemp -d)"
   trap 'rm -rf "$secrets"' EXIT
@@ -353,10 +361,39 @@ fi
 ```
 
 ```sql
+-- STOP ON THE FIRST ERROR, the way the bundled bootstrap does. psql's default
+-- is to report a failed statement and RUN THE NEXT ONE, so an unprovisioned
+-- migration owner made the `create role` fail and the grants below still ran —
+-- a prerequisite that ended looking successful while the identity it exists to
+-- create was never made (Copilot review of openDox-code#25, round 35,
+-- suppressed). `deploy/*/init-runtime-role.sh` spell the same setting
+-- `psql -v ON_ERROR_STOP=1` because they INVOKE psql; this block is pasted
+-- into a session, where `\set` is how the same variable is set.
+\set ON_ERROR_STOP on
 \getenv runtime_role OPENDOX_RUNTIME_PG_ROLE
 \getenv migration_owner OPENDOX_MIGRATION_PG_USER
 \getenv database OPENDOX_PG_DB
 \getenv runtime_password OPENDOX_RUNTIME_PG_PASSWORD
+-- AND THE REFUSAL ABOVE IS ENFORCED HERE, because the shell block cannot do
+-- it. That block must EXPORT into the operator's own shell for `\getenv` to
+-- see anything, so it cannot run in a subshell and `exit 1` in it would close
+-- the operator's shell (the reason the Secret block two sections up is a
+-- subshell in the first place). What it can do is decline to export — and an
+-- operator who pastes this block anyway would otherwise reach
+-- `create role … password %L` with no password at all. So the guard is where
+-- the act is (Copilot review of openDox-code#25, round 35, suppressed).
+\if :{?runtime_password}
+select :'runtime_password' = '' as opendox_blank_password
+\gset
+\else
+\set opendox_blank_password t
+\endif
+\if :opendox_blank_password
+do $refuse$ begin
+  raise exception 'OPENDOX_RUNTIME_PG_PASSWORD is unset or empty; the shell '
+                  'block above refused it, and nothing here is provisioned';
+end $refuse$;
+\endif
 select format('create role %I login password %L', :'runtime_role',
               :'runtime_password')
 \gexec
