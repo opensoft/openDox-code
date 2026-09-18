@@ -1473,3 +1473,106 @@ def test_usage_without_create_is_refused_by_the_guard_and_not_by_the_ddl(
                 conn.execute(f"revoke connect on database "
                              f"{postgres_dsn.rsplit('/', 1)[1]} from {role}")
                 conn.execute(f"drop role if exists {role}")
+
+
+def test_a_column_level_write_on_the_ledger_is_not_a_narrowed_ledger(
+        postgres_dsn: str) -> None:
+    """`has_table_privilege` does not see a column grant, and a column grant writes.
+
+    THE FINDING (Copilot review of openDox-code#25, round 32): "a role can
+    retain the ability to append or alter ledger rows through a column grant
+    while all four checks below return false, so the runner reports a protected
+    ledger that the served identity can still rewrite".
+
+    MEASURED on postgres 16.15, both halves:
+
+      * with `INSERT (version)` and `UPDATE (checksum)` held, all four
+        `has_table_privilege` answers are FALSE;
+      * a column grant made by the SAME grantor is cleared by the table-level
+        `revoke` this method already issues — but one made by a THIRD PARTY (a
+        role holding the privilege WITH GRANT OPTION) SURVIVES it, and
+        `has_table_privilege` stays false throughout.
+
+    So the second is the reachable shape and the one this test builds: a
+    grantor this run cannot revoke through. `update … set checksum = …` needs
+    nothing more than `UPDATE (checksum)`, which is the runner's own
+    tamper-evident record rewritten under a ledger the run called protected.
+
+    Against the previous head `protect_ledger` returns cleanly here.
+    """
+    import uuid as _uuid
+
+    from opendox.runtime.db import Database
+
+    tag = _uuid.uuid4().hex[:10]
+    schema, served, grantor = f"t_{tag}", f"s_{tag}", f"g_{tag}"
+    database = postgres_dsn.rsplit("/", 1)[1]
+    host = postgres_dsn.split("@", 1)[1]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            conn.execute(f"create role {served}")
+            conn.execute(f"create role {grantor} login password 'x'")
+            conn.execute(f"grant usage on schema {schema} to {served}")
+            conn.execute(f"grant usage on schema {schema} to {grantor}")
+            conn.execute(f"grant connect on database {database} to {grantor}")
+            # THE DOCUMENTED PREREQUISITE, in its narrowed form: the migration
+            # owner's default privileges, and nothing on "all tables".
+            owner = postgres_dsn.split("//", 1)[1].split(":", 1)[0]
+            conn.execute(
+                f"alter default privileges for role {owner} in schema {schema} "
+                f"grant select, insert, update, delete on tables to {served}")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir="migrations", runtime_role=served)
+                runner.apply()                       # narrows the ledger
+
+                # A THIRD PARTY grants one ledger column, the way a shared
+                # database's other owner could.
+                with admin.transaction() as conn:
+                    conn.execute(
+                        f"grant update on {schema}.{migrations.LEDGER_TABLE} "
+                        f"to {grantor} with grant option")
+                with Database(f"postgresql://{grantor}:x@{host}",
+                              schema=schema) as theirs:
+                    with theirs.transaction() as conn:
+                        conn.execute(
+                            f"grant update (checksum) on "
+                            f"{schema}.{migrations.LEDGER_TABLE} to {served}")
+
+                # THE PREMISE, so this cannot pass vacuously: the table-level
+                # question still answers false.
+                with db.connection() as conn:
+                    for privilege in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+                        held = conn.execute(
+                            "select has_table_privilege(%s, %s, %s)",
+                            (served, f"{schema}.{migrations.LEDGER_TABLE}",
+                             privilege)).fetchone()[0]
+                        assert held is False, (privilege, held)
+
+                with pytest.raises(migrations.LedgerNarrowingIneffectiveError) \
+                        as caught:
+                    runner.protect_ledger()
+                message = str(caught.value)
+                assert "COLUMN-level" in message, message
+                assert "checksum:UPDATE" in message, message
+        finally:
+            # THE GRANTS REFERENCE THE SCHEMA, so they go FIRST — dropping
+            # the schema leaves a grant naming a schema that is gone, which is
+            # the ordering this file's other role-holding case already states.
+            with admin.transaction() as conn:
+                owner = postgres_dsn.split("//", 1)[1].split(":", 1)[0]
+                conn.execute(
+                    f"alter default privileges for role {owner} in schema "
+                    f"{schema} revoke select, insert, update, delete on tables "
+                    f"from {served}")
+                conn.execute(f"revoke usage on schema {schema} from {grantor}")
+                conn.execute(f"revoke usage on schema {schema} from {served}")
+                conn.execute(f"revoke connect on database {database} "
+                             f"from {grantor}")
+                conn.execute(f"drop schema if exists {schema} cascade")
+            with admin.transaction() as conn:
+                conn.execute(f"drop role if exists {grantor}")
+                conn.execute(f"drop role if exists {served}")

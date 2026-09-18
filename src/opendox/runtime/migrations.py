@@ -974,11 +974,18 @@ class MigrationRunner:
             "default privileges FOR THE ROLE THAT RUNS IT, so a migration DSN "
             "authenticating as a different owner creates tables the served "
             "role has no rights on, and a managed database that skipped the "
-            "documented prerequisite grants nothing at all. Grant them with "
-            "`grant select, insert, update, delete on all tables in schema "
-            "… to <runtime role>` and `alter default privileges for role "
-            "<migration owner> …` (docs/runtime.md, the managed-database "
-            "note), or serve as the role the bootstrap granted.")
+            "documented prerequisite grants nothing at all. Grant them ON THE "
+            "COORDINATION TABLES BY NAME — `grant select, insert, update, "
+            f"delete on table {', '.join(self.SERVED_TABLES)} to <runtime "
+            "role>` — and set `alter default privileges for role <migration "
+            "owner> in schema <schema> grant select, insert, update, delete "
+            "on tables to <runtime role>` for the ones a later migration adds "
+            "(docs/runtime.md, the managed-database note), or serve as the "
+            "role the bootstrap granted. NOT `on all tables in schema`: this "
+            "message used to say that, and on a shared or reused schema it "
+            "hands the served role every other application's data — the same "
+            "grant the bootstrap was narrowed away from (Copilot review of "
+            "openDox-code#25, rounds 30 and 32).")
 
     def protect_ledger(self, conn: Any = None) -> None:
         """Narrow the SERVED role's rights on the ledger to SELECT.
@@ -1057,3 +1064,45 @@ class MigrationRunner:
                     "an unnarrowed served role can rewrite the runner's own "
                     "tamper-evident record. Serve as a role that is not the "
                     "owner of the coordination schema.")
+
+        # AND THE COLUMN-LEVEL ACLs, which `has_table_privilege` cannot see.
+        # PostgreSQL grants INSERT and UPDATE per COLUMN as well as per table,
+        # and a column grant is a write: `update <ledger> set checksum = …`
+        # with `UPDATE (checksum)` alone rewrites the runner's own record.
+        # MEASURED on postgres 16.15 — all four checks above returned FALSE
+        # while the role held `INSERT (version)` and `UPDATE (checksum)`
+        # (Copilot review of openDox-code#25, round 32).
+        #
+        # AND THE REVOKE DOES NOT ALWAYS CLEAR THEM, which is why this is a
+        # check and not a second revoke. Measured both ways: a column grant
+        # made by the SAME grantor is removed by the table-level `revoke`
+        # above, and one made by a THIRD PARTY (another role with grant option)
+        # SURVIVES it — `UPDATE (checksum)` still listed afterwards, with
+        # `has_table_privilege(..., 'UPDATE')` false throughout. That is the
+        # reachable shape in a shared database, and it is the one the run must
+        # refuse rather than report narrowed.
+        #
+        # `has_column_privilege` is true when the TABLE privilege is held too,
+        # so after the revoke above any true here is column-level by
+        # construction. DELETE has no column form; SELECT is kept on purpose.
+        leaked = conn.execute(
+            "select a.attname, p.privilege "
+            "  from pg_catalog.pg_attribute a "
+            "  cross join unnest(array['INSERT','UPDATE']) as p(privilege) "
+            " where a.attrelid = %s::regclass and a.attnum > 0 "
+            "   and not a.attisdropped "
+            "   and has_column_privilege(%s, a.attrelid, a.attnum, "
+            "                            p.privilege) "
+            " order by a.attname, p.privilege",
+            (LEDGER_TABLE, self._runtime_role)).fetchall()
+        if leaked:
+            named = ", ".join(f"{row[0]}:{row[1]}" for row in leaked)
+            raise LedgerNarrowingIneffectiveError(
+                f"{self._runtime_role!r} still holds COLUMN-level writes on "
+                f"{LEDGER_TABLE} after the revoke ({named}). A column grant is "
+                "a write — `update … set checksum = …` needs nothing more — "
+                "and `has_table_privilege` does not report it, so a run that "
+                "checked only the table would have called this ledger "
+                "protected. A grant made by another role survives this run's "
+                "revoke; have its grantor revoke it, or serve as a role "
+                "nobody has granted ledger columns to.")

@@ -1709,3 +1709,53 @@ def test_the_readiness_probe_bounds_its_own_statements() -> None:
         "session-level SET leaks onto the next borrower of a pooled connection")
     assert 'conn.execute("set statement_timeout' not in source, (
         "a session-level statement timeout leaks out of the checkout")
+
+
+def test_every_secret_prompt_aborts_the_block_and_every_create_is_idempotent(
+) -> None:
+    """Two ways the documented block could look successful and not be.
+
+    TWO FINDINGS (Copilot review of openDox-code#25, round 32, suppressed):
+
+    * **`set -e` does not abort on the left operand of `&&`.** MEASURED: with
+      `read -rs -p … && printf …`, an EOF on stdin left the block RUNNING with
+      the variable unset — "second command ran", status 0 — so a Secret could
+      be created from a file that was never written. Each prompt is its own
+      `if ! read …; then … exit 1; fi` now, and the same measurement on that
+      form stops at the failed read with status 1.
+    * **Three independent `create` calls are not re-runnable.** A failure in
+      the second or third leaves the earlier Secrets behind, and the re-run
+      fails with `AlreadyExists` — an install half-configured and a cleanup by
+      hand. `create --dry-run=client -o yaml | kubectl apply -f -` renders the
+      same object and applies it: created once, updated thereafter.
+
+    The value still never reaches a command line, which is round 19's rule and
+    the reason `--from-file` is there at all — so this test asserts that too,
+    since an idempotent form built from `--from-literal` would trade one defect
+    for a worse one.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    start = runbook.index("(\n  set -e")
+    block = runbook[start:runbook.index("secrets_created=$?", start)]
+
+    executable = "\n".join(line for line in block.splitlines()
+                           if not line.strip().startswith("#"))
+    assert "&& printf" not in executable, (
+        "a prompt whose failure `set -e` does not see; measured to leave the "
+        "block running with the variable unset")
+    prompts = [line for line in block.splitlines() if "read -rs -p" in line]
+    assert len(prompts) == 4, prompts
+    for line in prompts:
+        assert line.strip().startswith("if ! read"), line
+
+    creates = [line for line in block.splitlines()
+               if "create secret generic" in line]
+    assert len(creates) == 3, creates
+    for name in ("opendox-postgres", "opendox-db-runtime",
+                 "opendox-db-migration"):
+        rendered = block.split(f"generic {name}", 1)[1].split("\n\n", 1)[0]
+        assert "--dry-run=client -o yaml | kubectl -n opendox apply -f -" in \
+            rendered, (name, rendered)
+        assert "--from-literal" not in rendered, (
+            f"{name} puts a value on a command line, where `ps` and "
+            f"/proc/<pid>/cmdline can read it")

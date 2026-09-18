@@ -176,12 +176,34 @@ kubectl apply -f deploy/kubernetes/base/namespace.yaml
   trap 'rm -rf "$secrets"' EXIT
   trap 'rm -rf "$secrets"; exit 130' INT
   trap 'rm -rf "$secrets"; exit 143' TERM
-  read -rs -p 'postgres superuser password: ' pw && printf %s "$pw" > "$secrets/password"
-  read -rs -p 'served role password: '      rpw && printf %s "$rpw" > "$secrets/runtime-password"
+  # EACH PROMPT IS ITS OWN `if`, because `set -e` does NOT abort on a command
+  # that is the left operand of `&&`. MEASURED: with `read … && printf …`, an
+  # EOF on stdin left the block running with the variable unset — "second
+  # command ran", status 0 — so a Secret could be created from a file that was
+  # never written (Copilot review of openDox-code#25, round 32, suppressed).
+  # The explicit form stops at the failed read with status 1.
+  if ! read -rs -p 'postgres superuser password: ' pw; then
+      echo 'no superuser password was read; nothing is created' >&2; exit 1
+  fi
+  printf %s "$pw" > "$secrets/password"
+  if ! read -rs -p 'served role password: ' rpw; then
+      echo 'no served-role password was read; nothing is created' >&2; exit 1
+  fi
+  printf %s "$rpw" > "$secrets/runtime-password"
   unset pw rpw
+  # CREATE-OR-UPDATE, so a re-run after a partial failure is not a puzzle.
+  # These are three independent `create` calls: with `set -e`, a failure in the
+  # second or third leaves the earlier Secrets in the cluster and the re-run
+  # then fails with `AlreadyExists`, so an operator has to delete by hand
+  # before trying again (Copilot review of openDox-code#25, round 32,
+  # suppressed). `create --dry-run=client -o yaml | kubectl apply -f -` is the
+  # documented idempotent form: it renders the same object and applies it,
+  # creating it once and updating it thereafter. The value still never reaches
+  # a command line — `--from-file` is what renders it.
   kubectl -n opendox create secret generic opendox-postgres \
       --from-file=password="$secrets/password" \
-      --from-file=runtime-password="$secrets/runtime-password"
+      --from-file=runtime-password="$secrets/runtime-password" \
+      --dry-run=client -o yaml | kubectl -n opendox apply -f -
   # `opendox-db-runtime`'s DSN authenticates as the SERVED role, and that
   # role's NAME is `runtime_pg_role` in the `opendox-runtime-config` ConfigMap.
   # They must be the same role: the migration run narrows the named one's
@@ -189,13 +211,21 @@ kubectl apply -f deploy/kubernetes/base/namespace.yaml
   # served role able to rewrite it. An overlay that changes this DSN's user
   # changes that literal in the same commit.
   # A DSN CARRIES A PASSWORD, so it takes the same route.
-  read -rs -p 'served DSN: '    dsn  && printf %s "$dsn"  > "$secrets/runtime-dsn"
-  read -rs -p 'migration DSN: ' mdsn && printf %s "$mdsn" > "$secrets/migration-dsn"
+  if ! read -rs -p 'served DSN: ' dsn; then
+      echo 'no served DSN was read; nothing further is created' >&2; exit 1
+  fi
+  printf %s "$dsn" > "$secrets/runtime-dsn"
+  if ! read -rs -p 'migration DSN: ' mdsn; then
+      echo 'no migration DSN was read; nothing further is created' >&2; exit 1
+  fi
+  printf %s "$mdsn" > "$secrets/migration-dsn"
   unset dsn mdsn
   kubectl -n opendox create secret generic opendox-db-runtime \
-      --from-file=dsn="$secrets/runtime-dsn"
+      --from-file=dsn="$secrets/runtime-dsn" \
+      --dry-run=client -o yaml | kubectl -n opendox apply -f -
   kubectl -n opendox create secret generic opendox-db-migration \
-      --from-file=dsn="$secrets/migration-dsn"
+      --from-file=dsn="$secrets/migration-dsn" \
+      --dry-run=client -o yaml | kubectl -n opendox apply -f -
   rm -rf "$secrets"      # the EXIT trap does this too; this is the ordinary path
 )
 # `$?` ON ITS OWN LINE, AND NOT `) && ok=yes || ok=no`. MEASURED: bash
