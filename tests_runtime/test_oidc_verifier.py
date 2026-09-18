@@ -516,8 +516,11 @@ def test_a_thread_denied_by_the_cooldown_re_reads_before_it_refuses(
 
     real_match = oidc.CachingJwks._match          # a staticmethod
 
-    def _match_holding_the_denied_thread(keyset, kid):
-        found = real_match(keyset, kid)
+    # THE THIRD ARGUMENT IS THE ALGORITHM, which `select_key` passes since the
+    # key-type binding (A25-2): a stub with the old arity raised `TypeError`
+    # inside the thread and the event this case waits on never fired.
+    def _match_holding_the_denied_thread(keyset, kid, alg=None):
+        found = real_match(keyset, kid, alg)
         if found is None and threading.current_thread().name == "denied":
             denied_has_the_old_set.set()
             refresh_claimed.wait(5)
@@ -764,3 +767,103 @@ def test_a_jwks_file_that_is_not_utf8_is_a_typed_refusal(tmp_path) -> None:
     not_object.write_text("[1, 2]", encoding="utf-8")
     with pytest.raises(oidc.IdentityUnavailableError):
         oidc.FileJwksSource(not_object).load()
+
+
+def test_a_kid_naming_a_key_of_the_wrong_type_is_refused_and_not_a_crash(
+        rsa_key_pair, tmp_path: Path) -> None:
+    """Selecting by `kid` alone reached the cryptography backend with the wrong key.
+
+    A broker realm publishing an RSA and an EC signing key is what Keycloak
+    publishes the moment a realm has an ES256 provider beside the default RS256
+    one, and both `kid`s are public facts from the unauthenticated JWKS
+    endpoint. A token whose header is `{"alg": "RS256", "kid": "<the EC key's
+    kid>"}` passed the algorithm allow-list, selected the EC key by `kid`, and
+    PyJWT's `RSAAlgorithm.prepare_key` answered with a plain
+    `TypeError("Expecting a PEM-formatted key.")` — NOT a `PyJWTError` — which
+    escaped `_decode`'s seven typed clauses, escaped `verify`, and escaped
+    `app.get_principal`. The payload need not verify and need not be
+    well-formed past the header (independent adversarial review of
+    openDox-code#25, A25-2).
+
+    MEASURED, PyJWT 2.14.0: `RSAAlgorithm(SHA256).prepare_key(<EC public key>)`
+    raises `builtins.TypeError: Expecting a PEM-formatted key.`
+    """
+    import json
+    import time
+
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+
+    private, public = rsa_key_pair
+    ec_private = ec.generate_private_key(ec.SECP256R1())
+
+    rsa_jwk = json.loads(RSAAlgorithm.to_jwk(public))
+    rsa_jwk.update({"kid": "rsa-1", "use": "sig", "alg": "RS256"})
+    ec_jwk = json.loads(ECAlgorithm.to_jwk(ec_private.public_key()))
+    ec_jwk.update({"kid": "ec-1", "use": "sig", "alg": "ES256"})
+    path = tmp_path / "two-types.json"
+    path.write_text(json.dumps({"keys": [rsa_jwk, ec_jwk]}), encoding="utf-8")
+
+    verifier = oidc.TokenVerifier(
+        issuer=TEST_ISSUER, audience=TEST_AUDIENCE,
+        jwks=oidc.CachingJwks(oidc.FileJwksSource(str(path)), ttl_seconds=300))
+
+    now = int(time.time())
+    forged = jwt.encode(
+        {"sub": "anyone", "iss": TEST_ISSUER, "aud": TEST_AUDIENCE,
+         "iat": now, "exp": now + 300},
+        private, algorithm="RS256", headers={"kid": "ec-1"})
+
+    with pytest.raises(oidc.OidcError) as caught:
+        verifier.verify(forged)
+    # A TYPED refusal, and specifically not a `TypeError`: the point of the
+    # finding is that an untyped exception reached the ASGI layer.
+    assert isinstance(caught.value, oidc.InvalidSignatureError)
+    assert not isinstance(caught.value, TypeError)
+
+    # THE HONEST KEY STILL VERIFIES, so the type binding is a binding and not
+    # a refusal of the whole two-key key set.
+    honest = jwt.encode(
+        {"sub": "student-1", "iss": TEST_ISSUER, "aud": TEST_AUDIENCE,
+         "iat": now, "exp": now + 300},
+        private, algorithm="RS256", headers={"kid": "rsa-1"})
+    assert verifier.verify(honest).subject == "student-1"
+
+    # AND THE SELECTION ITSELF IS WHERE THE BINDING IS MADE, which is what
+    # keeps the cryptography backend from ever seeing the wrong key.
+    cache = oidc.CachingJwks(oidc.FileJwksSource(str(path)), ttl_seconds=300)
+    assert cache.select_key("ec-1", "ES256").key_id == "ec-1"
+    assert cache.select_key("rsa-1", "RS256").key_id == "rsa-1"
+    with pytest.raises(oidc.InvalidSignatureError):
+        cache.select_key("ec-1", "RS256")
+    # A `kid`-less token is now unambiguous where the ALGORITHM picks one key
+    # out of a key set holding two types — which it was not before.
+    assert cache.select_key(None, "RS256").key_id == "rsa-1"
+    # An algorithm family this runtime does not know carries no key at all,
+    # rather than being assumed to fit the first one published.
+    with pytest.raises(oidc.InvalidSignatureError):
+        cache.select_key(None, "XX256")
+
+
+def test_no_untyped_exception_can_leave_the_decoder(verifier, mint_token,
+                                                    monkeypatch) -> None:
+    """The second wall: a future PyJWT shape cannot reopen A25-2.
+
+    The selection above no longer hands over a key of the wrong type, so this
+    drives the escape directly — `jwt.decode` raising a builtin, which is what
+    the cryptography backend does — and asserts it still leaves as an
+    `OidcError`, with the library's own text not repeated.
+    """
+    import jwt
+
+    def raising(*args: object, **kwargs: object) -> dict[str, object]:
+        raise TypeError("Expecting a PEM-formatted key.")
+
+    monkeypatch.setattr(jwt, "decode", raising)
+    with pytest.raises(oidc.OidcError) as caught:
+        verifier.verify(mint_token())
+    assert isinstance(caught.value, oidc.InvalidSignatureError)
+    assert "TypeError" in str(caught.value)
+    assert "PEM" not in str(caught.value)
+    assert caught.value.__cause__ is None

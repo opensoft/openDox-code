@@ -189,6 +189,21 @@ spec:
                 configMapKeyRef:
                   name: opendox-runtime-config
                   key: runtime_pg_role
+            # AND WHERE THE SERVED APPLICATION READS. A schema NAME and never a
+            # credential, which is why a workload that must not hold the served
+            # DSN can be told it — and it has to be told, because the two DSNs
+            # live in two workloads and the configuration-time comparison of
+            # them could therefore never fire in a shipped deployment
+            # (independent adversarial review of openDox-code#25, A25-3). The
+            # run refuses rather than applying DDL to a schema the API will not
+            # read. From the SAME `pg_schema` value the first-start bootstrap
+            # grants in, so one edit moves the schema, its grants and this
+            # refusal together.
+            - name: OPENDOX_SERVED_SCHEMA
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: pg_schema
           volumeMounts:
             - name: tmp
               mountPath: /tmp

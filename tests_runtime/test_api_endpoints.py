@@ -1547,3 +1547,70 @@ def test_a_failed_pool_checkout_is_not_masked_by_the_stores_teardown() -> None:
     assert _NeverEnters.exits == 0, (
         "the teardown called __exit__ on a manager that never entered; "
         "whatever that raises would replace the database error")
+
+
+def test_an_anonymous_token_naming_a_key_of_the_wrong_type_is_401_not_500(
+        database, postgres_dsn: str, rsa_key_pair, tmp_path: Path) -> None:
+    """The end of A25-2, measured where it was reported: at the HTTP boundary.
+
+    A realm publishing an RSA and an EC signing key — Keycloak, the moment a
+    realm has an ES256 provider beside the default RS256 one — let ANY
+    anonymous caller send `Authorization: Bearer <RS256-shaped token, kid=the
+    EC key's>` and turn `GET /api/v1/users/me` into a 500: PyJWT's
+    `RSAAlgorithm.prepare_key` raises a plain `TypeError`, which is not a
+    `PyJWTError` and not an `OidcError`, so it passed `_decode`'s seven typed
+    clauses and `get_principal`'s handler alike. Both `kid`s are public facts
+    from the unauthenticated JWKS endpoint (independent adversarial review of
+    openDox-code#25, A25-2).
+
+    `raise_server_exceptions=False` so the 500 is OBSERVED as a response
+    rather than re-raised into the test — the client gets the 500 either way.
+    """
+    import json
+    import time
+
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from fastapi.testclient import TestClient
+    from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+
+    from opendox.runtime import oidc
+    from opendox.runtime.app import create_app
+    from opendox.runtime.db import Database
+
+    private, public = rsa_key_pair
+    rsa_jwk = json.loads(RSAAlgorithm.to_jwk(public))
+    rsa_jwk.update({"kid": "rsa-1", "use": "sig", "alg": "RS256"})
+    ec_jwk = json.loads(ECAlgorithm.to_jwk(
+        ec.generate_private_key(ec.SECP256R1()).public_key()))
+    ec_jwk.update({"kid": "ec-1", "use": "sig", "alg": "ES256"})
+    path = tmp_path / "two-types.json"
+    path.write_text(json.dumps({"keys": [rsa_jwk, ec_jwk]}), encoding="utf-8")
+
+    settings = load_settings({
+        PREFIX + "DATABASE_URL": postgres_dsn,
+        PREFIX + "OIDC_ISSUER": TEST_ISSUER,
+        PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
+    })
+    app = create_app(
+        settings=settings,
+        database=Database(postgres_dsn, schema=database.schema),
+        verifier=oidc.TokenVerifier(
+            issuer=TEST_ISSUER, audience=TEST_AUDIENCE,
+            jwks=oidc.CachingJwks(oidc.FileJwksSource(str(path)),
+                                  ttl_seconds=300)))
+
+    now = int(time.time())
+    forged = jwt.encode(
+        {"sub": "anyone", "iss": TEST_ISSUER, "aud": TEST_AUDIENCE,
+         "iat": now, "exp": now + 300},
+        private, algorithm="RS256", headers={"kid": "ec-1"})
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        answer = client.get("/api/v1/users/me",
+                            headers={"Authorization": f"Bearer {forged}"})
+    assert answer.status_code == 401, answer.text
+    # AND THE REFUSAL SAYS NOTHING ABOUT THE KEY SET: an anonymous caller
+    # learns that the token is not acceptable, not which key it reached.
+    assert "PEM" not in answer.text
+    assert "ec-1" not in answer.text

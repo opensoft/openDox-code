@@ -21,12 +21,42 @@ which is what makes the reference OPTIONAL rather than dangling.
 
 It deliberately does NOT prove the seam RENDERS correctly with and without
 the contribution — that needs a real ECMAScript module loader, which is
-`tests/test_intent_binding_dom.py`'s job (Node, `pytest.mark.skipif` when
-absent, mirroring `tests/test_intent_tray_dom.py`'s own precedent). That file
-is not part of this `--noconftest` list for the same reason its sibling DOM
-probes of this exact pair of views are not (RULED Q-L5 (b′)): it is a
-BEHAVIOURAL probe of a `web/` view, not a shape assertion, and un-narrowing
-that class of test is BUILD-arc work (S8), not this slice's.
+`tests/test_intent_binding_dom.py`'s job (Node, and a RUNTIME `pytest.skip`
+inside its `_run` helper when node is absent rather than a
+`pytest.mark.skipif` — the same mechanism the precedent
+`tests/test_intent_tray_dom.py` used, measured at `8efb3cf5`; a marker would
+have to answer at COLLECTION time, and what the probe actually needs to know
+is whether the interpreter it is about to invoke exists. That file was
+RETIRED at this leg on 2026-09-13, RULED `openxFactory#656` comment
+5656343213, so the precedent survives in the harness and not in a file you can
+open here).
+
+WHY THAT FILE IS NOT ON THE `--noconftest` LIST AND THIS ONE IS. Stated
+narrowly, because the wide version of the sentence — that no DOM probe of a
+`web/` view is on the list — was false (opensoft/openDox-code#24, Copilot):
+`tests/test_view_registry.py`, `tests/test_split_route_tails.py` and
+`tests/test_gate_loop_contributed.py` are all on it and all drive real `web/`
+modules under node behind a DOM stand-in of their own. The list is an
+allow-list, admitted file by file, and `.github/workflows/validate.yml` records
+the same reason for every entry: the file is the SHAPE assertion RULED Q-L5
+(b′) leaves running while the carved suite waits on the BUILD arc, or without
+it the slice's ruled contract would be only DESCRIBED (S3's "the only place
+slice S3's ruled contract is executed rather than described"; S4's and S5's
+"measures the other half"; S6's "the slice's only running proof"). THIS file is
+the first kind. S2's contract is not left undescribed without the second one:
+delete the intent reach instead of routing it through the binding and
+`test_wheel_imports_the_intent_names_from_the_binding` below goes red. It is
+that test ALONE, and the header used to claim both (Copilot review of
+openDox-code#24): `test_intent_binding_exports_every_name_the_views_need` reads
+`intent-binding.js` against a FIXED `REQUIRED_BINDING_EXPORTS` tuple, so it is
+blind to what the CONSUMERS do — measured by deleting wheel.js's static import
+of the binding, which leaves it green and reds only the consumer test. One
+running proof of S2's contract, not two, which is exactly enough and is what
+the paragraph above claims. What
+the DOM probe adds is the seam's FORWARDING, and three of its six cases have to
+write a stand-in for the never-carried `views/intent-feed.js` to measure it.
+Admitting behavioural probes as a CLASS is BUILD-arc work (S8), not this
+slice's.
 """
 
 from __future__ import annotations

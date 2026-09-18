@@ -83,7 +83,19 @@ export function stageSubline(docs, named = STAT_STAGES_NAMED, display) {
 // of the page however the host spelled its stations. `app.js` now renders it
 // after `readDisplay` and hands the vocabulary down like every other view.
 export function renderStats(root, snapshot, opts) {
-  vocab = opts?.display || vocab;
+  // RESET, NEVER CARRIED OVER (Copilot review 5192900474 on PR #21, suppressed
+  // comment 4; slice S7 residue). `|| vocab` kept the PREVIOUS render's
+  // vocabulary where this one declares none, so a render after a host facet
+  // was withdrawn — a probe, a re-read of `/capabilities` that 404s, a test
+  // that mounts the same module twice — went on speaking the withdrawn host's
+  // words instead of coming up visibly un-domained, which is the exact
+  // invisible-survival failure § 4.3 point 5's refusal rule exists to end.
+  // This was the ONE site of eleven in `views/` that did it: every other
+  // module (`board.js`:246, `canvas.js`:342, `doc-wheel.js`:108,
+  // `docs.js`:144, `funnel.js`:491, `grouping.js`:213, `wheel.js`:465,
+  // `staging-workbench.js`, `staging-workbench-model.js`, and
+  // `renderLineage` in THIS file) already resets to `neutralDisplay()`.
+  vocab = opts?.display || neutralDisplay();
   const docs = snapshot.documents || [];
   const clusters = snapshot.clusters || [];
   const possibles = snapshot.possibles || [];

@@ -1576,3 +1576,51 @@ def test_a_column_level_write_on_the_ledger_is_not_a_narrowed_ledger(
             with admin.transaction() as conn:
                 conn.execute(f"drop role if exists {grantor}")
                 conn.execute(f"drop role if exists {served}")
+
+
+def test_a_run_refuses_a_schema_the_served_application_will_not_read(
+        database) -> None:
+    """The guard rounds 34 and 36 wanted, in the place it can actually fire.
+
+    `config._refuse_two_dsns_that_select_different_schemas` compares the served
+    and migration DSNs — and NO SHIPPED WORKLOAD HOLDS BOTH. The Deployment
+    carries `OPENDOX_DATABASE_URL` and no migration DSN, the migration Job
+    carries `OPENDOX_MIGRATION_DATABASE_URL` and no served one, compose splits
+    them the same way, and `migrate` does not call `load_settings` at all;
+    `test_deploy_shape.py` PINS that split because the separation of the two
+    identities is the point. So the control existed and could not run in
+    production (independent adversarial review of openDox-code#25, A25-3).
+
+    `OPENDOX_SERVED_SCHEMA` is a schema NAME and never a credential, which is
+    why the migration container can be given it — and the run then refuses
+    rather than applying DDL somewhere the API will never look.
+    """
+    declared = "somewhere-else"
+    runner = migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations",
+        served_schema=declared)
+    with database.connection() as conn:
+        here = migrations.selected_schema(conn)
+    assert here != declared
+
+    with pytest.raises(migrations.MigrationError) as caught:
+        runner.apply()
+    message = str(caught.value)
+    assert here in message and declared in message
+    assert "nothing has been applied" in message
+
+    # AND NOTHING WAS APPLIED — the refusal is before the ledger is even
+    # bootstrapped, so a database that had no ledger still has none.
+    assert set(identity.TABLES) | {migrations.LEDGER_TABLE} == _tables_in(
+        database), "the fixture's own migrated schema must be untouched"
+
+    # THE DECLARATION AGREEING IS A RUN. Against the same database, declaring
+    # the schema the connection actually selects applies exactly as before.
+    agreeing = migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations", served_schema=here)
+    assert agreeing.apply() == [], "already applied; the guard is not a refusal"
+
+    # AND AN UNDECLARED SCHEMA IS THE BUNDLED SINGLE-SCHEMA INSTALL, not an
+    # error: the guard is opt-in by declaration.
+    assert migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations").apply() == []

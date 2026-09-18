@@ -135,6 +135,14 @@ SETTINGS: tuple[Setting, ...] = (
         "compromised API cannot rewrite the runner's own record",
     ),
     Setting(
+        PREFIX + "SERVED_SCHEMA", "", False, False,
+        "the NAME (never a credential) of the schema the SERVED application "
+        "reads, declared to the migration run so it can refuse to apply DDL "
+        "anywhere else; the two DSNs are configured in different workloads and "
+        "no process holds both, so this is how a migration container learns "
+        "what the API will read",
+    ),
+    Setting(
         PREFIX + "PUBLISH_OPENAPI", "false", False, False,
         "whether to serve the interactive schema at /docs, /redoc and "
         "/openapi.json; OFF by default, because FastAPI's defaults would "
@@ -176,6 +184,7 @@ class RuntimeSettings:
     bind_host: str
     bind_port: int
     runtime_pg_role: str | None
+    served_schema: str | None
     publish_openapi: bool
     migrations_dir: Path
     project_repository_root: Path
@@ -199,6 +208,7 @@ class RuntimeSettings:
             f"oidc_leeway_seconds={self.oidc_leeway_seconds!r}, "
             f"bind_host={self.bind_host!r}, bind_port={self.bind_port!r}, "
             f"runtime_pg_role={self.runtime_pg_role!r}, "
+            f"served_schema={self.served_schema!r}, "
             f"publish_openapi={self.publish_openapi!r}, "
             f"migrations_dir={str(self.migrations_dir)!r}, "
             f"project_repository_root={str(self.project_repository_root)!r})"
@@ -247,13 +257,37 @@ def _split_url(name: str, value: str) -> urllib.parse.SplitResult:
     NAMING it — so a malformed broker URL escaped as a raw `ValueError` and the
     CLI printed a traceback where it promises a refusal (Copilot review of
     openDox-code#25, round 24).
+
+    AND THE DRIVER'S MESSAGE IS NOT REPEATED, WHICH IS THE WHOLE OF THE SECOND
+    DEFECT. Round 24 interpolated `{exc}`, and CPython's `_checknetloc` raises
+
+        ValueError("netloc '" + netloc + "' contains invalid characters under "
+                   "NFKC normalization")
+
+    — THE WHOLE NETLOC, USERINFO AND PASSWORD INCLUDED. A hostname that is not
+    ASCII is the ordinary case for an IDN broker, and `_split_url` runs BEFORE
+    the userinfo refusal, so the guard written to keep a password out of this
+    message never got to run: `OPENDOX_OIDC_ISSUER=https://svc:hunter2@brokerâ„€evil.example/realms/x`
+    printed `hunter2` on stdout from `runtime status` and `runtime init`, in
+    the JSON the lifecycle contract calls redacted evidence. `cli._safe_message`
+    does not save it either — the leaked run is `netloc 'svc:hunter2@…'`, which
+    has no `://` and no `password=`, so `_DSN_SHAPED` passes it through
+    untouched (independent adversarial review of openDox-code#25, A25-1).
+
+    The useful half of the driver's answer is that the value is unparseable and
+    which exception said so; the value is what every other refusal in
+    `_broker_url` already declines to repeat. `from None` for the same reason
+    as the port refusal below: `__cause__` carries the same text, and a
+    traceback printed by anything at all would carry it with the exception.
     """
     try:
         return urllib.parse.urlsplit(value)
     except ValueError as exc:
         raise ConfigurationError(
-            f"{name} is not a URL this runtime can parse ({exc}); set it to "
-            "the broker endpoint, without userinfo") from exc
+            f"{name} is not a URL this runtime can parse "
+            f"({type(exc).__name__}); set it to the broker endpoint, without "
+            "userinfo — the value is not repeated here, because a URL this "
+            "runtime cannot parse can still carry one") from None
 
 
 def redacted_url(value: str | None) -> str | None:
@@ -461,18 +495,46 @@ def _optional(env: Mapping[str, str], setting: Setting) -> str | None:
     return value or setting.default
 
 
+#: The largest value each integer setting may be given, where being unbounded
+#: would make the setting meaningless rather than merely large.
+#:
+#: `OIDC_LEEWAY_SECONDS` IS THE ONE THAT MATTERS: PyJWT applies it as slack on
+#: `exp`, so `999999999` is a legal configuration under which a token never
+#: expires — a security property turned off by a number, with nothing saying
+#: so (independent adversarial review of openDox-code#25, A25-5). Five minutes
+#: is generous for clock skew between a broker and this runtime; an install
+#: that needs more has a clock problem, not a configuration one. The other two
+#: are bounded because a cache TTL of a decade and a port above 65535 are the
+#: same kind of nonsense, and because a helper that bounds only the setting
+#: somebody remembered is the shape this review was about.
+MAXIMUM_BY_SETTING: dict[str, int] = {
+    PREFIX + "OIDC_LEEWAY_SECONDS": 300,
+    PREFIX + "OIDC_JWKS_TTL_SECONDS": 86_400,
+    PREFIX + "BIND_PORT": 65_535,
+}
+
+
 def _positive_int(env: Mapping[str, str], setting: Setting) -> int:
     raw = env.get(setting.name, "").strip() or (setting.default or "")
-    try:
-        value = int(raw)
-    except ValueError as exc:
+    # `int()` TAKES PYTHON'S UNDERSCORE SEPARATORS, and an environment variable
+    # is not Python source: `int("3_0_0")` is 300, so `3_0_0` was silently a
+    # different number from the one an operator read in the manifest
+    # (independent adversarial review of openDox-code#25, A25-5). Digits only,
+    # decided before `int()` sees the string.
+    if not raw.isdigit():
         raise ConfigurationError(
-            f"{setting.name} must be a whole number, not {raw!r}: "
-            f"{setting.purpose}"
-        ) from exc
+            f"{setting.name} must be a whole number written in digits, not "
+            f"{raw!r}: {setting.purpose}")
+    value = int(raw)
     if value <= 0:
         raise ConfigurationError(
             f"{setting.name} must be greater than zero, not {value}: "
+            f"{setting.purpose}"
+        )
+    ceiling = MAXIMUM_BY_SETTING.get(setting.name)
+    if ceiling is not None and value > ceiling:
+        raise ConfigurationError(
+            f"{setting.name} must be at most {ceiling}, not {value}: "
             f"{setting.purpose}"
         )
     return value
@@ -528,6 +590,21 @@ def _algorithms(env: Mapping[str, str]) -> tuple[str, ...]:
 #: so it is validated here against a closed shape and refused otherwise, which
 #: is the only safe way to interpolate one.
 _ROLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+
+
+def _served_schema(env: Mapping[str, str]) -> str | None:
+    """`OPENDOX_SERVED_SCHEMA`, or `None`.
+
+    A schema NAME and never a credential, which is what makes it safe to give
+    a migration container: the guard this feeds needs to know WHERE the API
+    will read, and the served DSN — which carries a password — is deliberately
+    not in that container at all.
+
+    No shape rule beyond "not empty": unlike a role name this is never
+    interpolated into SQL, only COMPARED with what `selected_schema` reads
+    back from the connection.
+    """
+    return env.get(PREFIX + "SERVED_SCHEMA", "").strip() or None
 
 
 def _role_name(env: Mapping[str, str]) -> str | None:
@@ -836,6 +913,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
         bind_host=_optional(env, _by_name(PREFIX + "BIND_HOST")) or "127.0.0.1",
         bind_port=_positive_int(env, _by_name(PREFIX + "BIND_PORT")),
         runtime_pg_role=_role_name(env),
+        served_schema=_served_schema(env),
         publish_openapi=_boolean(env, _by_name(PREFIX + "PUBLISH_OPENAPI")),
         migrations_dir=Path(_optional(env, _by_name(PREFIX + "MIGRATIONS_DIR")) or "migrations"),
         project_repository_root=Path(
@@ -884,6 +962,7 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
         bind_host="127.0.0.1",
         bind_port=1,
         runtime_pg_role=_role_name(env),
+        served_schema=_served_schema(env),
         publish_openapi=False,
         migrations_dir=Path(
             _optional(env, _by_name(PREFIX + "MIGRATIONS_DIR")) or "migrations"),

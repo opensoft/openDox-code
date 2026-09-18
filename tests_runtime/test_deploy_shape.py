@@ -422,9 +422,16 @@ def test_the_migration_container_carries_no_served_identity() -> None:
     migrate = compose["services"]["migrate"]["environment"]
     assert PREFIX + "DATABASE_URL" not in migrate
     assert PREFIX + "OIDC_ISSUER" not in migrate
+    # `SERVED_SCHEMA` IS IN THE CENSUS AND IS NOT AN IDENTITY: a schema NAME,
+    # never a credential, which is why the workload that must not hold the
+    # served DSN can be told it — and has to be, because the two DSNs live in
+    # two workloads and the configuration-time comparison of them could
+    # therefore never fire in a shipped deployment (independent adversarial
+    # review of openDox-code#25, A25-3).
     assert set(migrate) == {PREFIX + "MIGRATION_DATABASE_URL",
                             PREFIX + "MIGRATIONS_DIR",
-                            PREFIX + "RUNTIME_PG_ROLE"}
+                            PREFIX + "RUNTIME_PG_ROLE",
+                            PREFIX + "SERVED_SCHEMA"}
 
     job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
     names = _env_names_of(_containers(job)[0])
@@ -432,7 +439,8 @@ def test_the_migration_container_carries_no_served_identity() -> None:
     assert PREFIX + "OIDC_ISSUER" not in names
     assert names == {PREFIX + "MIGRATION_DATABASE_URL",
                      PREFIX + "MIGRATIONS_DIR",
-                     PREFIX + "RUNTIME_PG_ROLE"}
+                     PREFIX + "RUNTIME_PG_ROLE",
+                     PREFIX + "SERVED_SCHEMA"}
 
 
 def test_the_role_the_migration_narrows_is_a_name_and_not_a_credential() -> None:
@@ -2049,3 +2057,59 @@ def test_the_default_privilege_is_refused_for_a_shared_migration_owner(
         # AND IT IS BEFORE THE GRANT IT GUARDS.
         assert text.index("having count(*) > 0") < text.index(
             "alter default privileges for role %I in schema %I")
+
+
+def test_the_schema_the_migration_applies_is_the_one_the_api_reads() -> None:
+    """The two-DSN comparison cannot fire in either shipped deployment.
+
+    `config._refuse_two_dsns_that_select_different_schemas` compares
+    `OPENDOX_DATABASE_URL` with `OPENDOX_MIGRATION_DATABASE_URL`, and NO
+    SHIPPED WORKLOAD HOLDS BOTH — this file's own cases pin that split, because
+    the separation of the privileged and the served identity is the point. So
+    the control rounds 34 and 36 built could only fire in a developer's shell
+    (independent adversarial review of openDox-code#25, A25-3).
+
+    THE STATEMENT OF SCOPE IS PART OF THE FIX: a reader must not be told a
+    protection exists that does not run. What runs in production is
+    `MigrationRunner.refuse_a_schema_the_api_will_not_read`, fed by
+    `OPENDOX_SERVED_SCHEMA` — a schema NAME, never a credential, from the SAME
+    value the first-start bootstrap grants in.
+    """
+    served = _load_yaml(KUBERNETES / "base" / "opendox-deployment.yaml")
+    job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
+    served_names = _env_names_of(_containers(served)[0])
+    job_names = _env_names_of(_containers(job)[0])
+    # The premise, asserted rather than assumed: neither workload holds both.
+    assert PREFIX + "MIGRATION_DATABASE_URL" not in served_names
+    assert PREFIX + "DATABASE_URL" not in job_names
+
+    # SO THE SCHEMA TRAVELS ON ITS OWN, from one place, to both.
+    job_entry = next(e for e in _containers(job)[0]["env"]
+                     if e["name"] == PREFIX + "SERVED_SCHEMA")
+    assert job_entry["valueFrom"]["configMapKeyRef"]["key"] == "pg_schema", (
+        "the migration Job must take the served schema from the same value "
+        "the bootstrap grants in, or the two can drift")
+    postgres = _load_yaml(KUBERNETES / "base" / "postgres-statefulset.yaml")
+    bootstrap = next(e for e in _containers(postgres)[0]["env"]
+                     if e["name"] == "OPENDOX_PG_SCHEMA")
+    assert bootstrap["valueFrom"]["configMapKeyRef"]["key"] == "pg_schema"
+
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    assert compose["services"]["migrate"]["environment"][
+        PREFIX + "SERVED_SCHEMA"] == "${OPENDOX_PG_SCHEMA:-}", (
+        "compose must derive the declaration from the same `.env` value the "
+        "bootstrap grants in")
+
+    # AND THE RUN ACTUALLY ASKS. A declaration nothing reads is the defect
+    # this case exists for, one layer along.
+    source = (ROOT / "src" / "opendox" / "runtime" / "migrations.py").read_text(
+        encoding="utf-8")
+    assert "def refuse_a_schema_the_api_will_not_read" in source
+    guard = source.index("def refuse_a_schema_the_api_will_not_read")
+    applied = source.index("def _apply_locked")
+    called = source.index("self.refuse_a_schema_the_api_will_not_read(lock)")
+    assert applied < called, "the guard must be called from the run"
+    assert called < source.index("self.bootstrap_ledger(lock)", applied), (
+        "the refusal must come before the ledger is bootstrapped, or a "
+        "refused run has already written to the wrong schema")
+    assert guard < applied

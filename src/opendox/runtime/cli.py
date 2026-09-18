@@ -343,6 +343,13 @@ def _redacted_settings(settings: RuntimeSettings) -> dict[str, Any]:
         # now drives the map from `SETTINGS` so a new setting cannot be added
         # to one and forgotten in the other.
         "OPENDOX_RUNTIME_PG_ROLE": settings.runtime_pg_role,
+        # A SCHEMA NAME AND NOT A CREDENTIAL, which is the whole reason the
+        # migration workload may be told it — and it is reported, because an
+        # operator reading `status` needs to see the declaration the run will
+        # be refused against (independent adversarial review of
+        # openDox-code#25, A25-3). The test below caught its absence from this
+        # map the moment it was declared, which is what that test is for.
+        "OPENDOX_SERVED_SCHEMA": settings.served_schema,
         "OPENDOX_PUBLISH_OPENAPI": settings.publish_openapi,
         "OPENDOX_MIGRATIONS_DIR": str(settings.migrations_dir),
         "OPENDOX_PROJECT_REPOSITORY_ROOT": str(settings.project_repository_root),
@@ -462,7 +469,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         with runner_db:
             runner = migrations.MigrationRunner(
                 runner_db, migrations_dir=settings.migrations_dir,
-                runtime_role=settings.runtime_pg_role)
+                runtime_role=settings.runtime_pg_role,
+                served_schema=settings.served_schema)
             if args.plan:
                 # The canonical gate has already run, above, for this path and
                 # for the real one.

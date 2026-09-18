@@ -363,6 +363,11 @@ def test_status_reports_every_declared_setting_and_none_as_null(
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
     monkeypatch.setenv(PREFIX + "RUNTIME_PG_ROLE", "opendox_runtime")
     monkeypatch.setenv(PREFIX + "PUBLISH_OPENAPI", "true")
+    # AND THE OTHER OPTIONAL NON-SECRET ONE: `SERVED_SCHEMA` is declared and
+    # defaults to unset, so this census sets it for the same reason it sets
+    # `RUNTIME_PG_ROLE` — the assertion below is that a DECLARED setting is
+    # reported with its value, not that every default is non-null.
+    monkeypatch.setenv(PREFIX + "SERVED_SCHEMA", "public")
     args = cli.build_parser().parse_args(
         ["runtime", "status", "--probe-timeout", "0.2"])
     buffer = io.StringIO()
@@ -1629,66 +1634,275 @@ def test_a_uri_password_holding_a_space_is_redacted_whole() -> None:
                   ) == "first <redacted>\nsecond kept"
 
 
-def test_no_handler_in_the_cli_emits_an_exception_without_the_redactor() -> None:
-    """The redaction contract is asked of the SHAPE, not of five known lines.
+#: Attributes of an exception that are a DATUM rather than the driver's own
+#: message, and may therefore be formatted into evidence. Each is a fact about
+#: WHERE or WHAT KIND, and none of them is the text a library composed out of
+#: the caller's value: `reason`/`start` (`UnicodeDecodeError`), `code` (this
+#: package's own machine code), `sqlstate` (psycopg), `errno`/`filename`/
+#: `lineno`. `args`, `msg`, `message`, `strerror`, `detail`, `stderr` and
+#: `stdout` are deliberately NOT here — they are the message.
+BENIGN_EXCEPTION_ATTRIBUTES = frozenset({
+    "reason", "start", "end", "code", "sqlstate", "errno", "filename",
+    "lineno", "returncode", "__class__", "__name__",
+})
 
-    Copilot's round 35 named five `except migrations.MigrationError as exc`
-    handlers that formatted `str(exc)` directly — `discover_migrations()` puts
-    the configured `OPENDOX_MIGRATIONS_DIR` in its text, so a directory path
-    holding a DSN or `password=…` was printed by `init`, `migrate --plan`,
-    `migrate` and `status` while the CLI's docstring promised redacted
-    evidence. Reading the file for the five would have left the other eight
-    this scan found, and would go stale at the next handler somebody adds.
+#: Calls that turn an exception into TEXT. Every other call may be handed the
+#: exception itself — `store.close(exc)` passes an object, `getattr(exc,
+#: "sqlstate", None)` reads a datum, and neither composes a message.
+STRINGIFIERS = frozenset({"str", "repr", "format", "ascii"})
 
-    SO THE TEST ASKS THE PARSE TREE: inside every `except … as exc`, the name
-    `exc` may be reached only by `_safe_message(exc)` or `type(exc)` — which
-    reads a class name and cannot reach the message. Any other use is a raw
-    exception on its way to an operator's terminal.
+
+def _exception_classes_this_package_defines() -> frozenset[str]:
+    """Every exception class name declared under `src/opendox/`.
+
+    An exception THIS PACKAGE raises carries text this package wrote, so
+    formatting it into evidence is safe by construction — that is what makes
+    `str(exc)` legitimate in `app._found` (an `identity.NotFoundError`) and a
+    leak in `config._split_url` (a `ValueError` from CPython, whose
+    `_checknetloc` message quotes the whole netloc, password included).
     """
     import ast
 
-    source = Path(cli.__file__).read_text(encoding="utf-8")
-    body = source.splitlines()
-    unredacted: list[str] = []
-    for handler in [n for n in ast.walk(ast.parse(source))
-                    if isinstance(n, ast.ExceptHandler) and n.name]:
-        allowed = set()
-        for call in [n for n in ast.walk(handler) if isinstance(n, ast.Call)]:
-            if (isinstance(call.func, ast.Name)
-                    and call.func.id in {"_safe_message", "type"}):
-                allowed.update(id(a) for a in call.args
-                               if isinstance(a, ast.Name)
-                               and a.id == handler.name)
-        unredacted += [f"line {n.lineno}: {body[n.lineno - 1].strip()}"
-                       for n in ast.walk(handler)
-                       if isinstance(n, ast.Name) and n.id == handler.name
-                       and id(n) not in allowed]
-    assert unredacted == [], (
-        "these handlers put an exception's own text into evidence without "
-        f"`_safe_message`: {unredacted}")
+    owned: set[str] = set()
+    for module in sorted((Path(cli.__file__).parents[1]).rglob("*.py")):
+        for node in ast.walk(ast.parse(module.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ClassDef) and any(
+                    "Error" in ast.unparse(base) or "Refused" in ast.unparse(base)
+                    or "Exception" in ast.unparse(base)
+                    for base in node.bases):
+                owned.add(node.name)
+    return frozenset(owned)
 
-    # AND THE SCAN IS RUN AGAINST THE SHAPE IT FORBIDS, so a rewrite that
-    # quietly stopped finding anything is not mistaken for a clean file: the
-    # very same walk over the pre-fix spelling reports it.
-    forbidden = ast.parse(
-        "try:\n"
-        "    pass\n"
-        "except ValueError as exc:\n"
-        '    _emit({"message": str(exc)})\n')
-    found = []
-    for handler in [n for n in ast.walk(forbidden)
+
+def _unredacted_exception_uses(source: str) -> list[str]:
+    """Every use of a bound exception that could put a library's text in evidence.
+
+    THE RULE, and it is the one A25-1 escaped by living in another file: inside
+    `except … as exc`, the name may be reached by `type(exc)`, by
+    `_safe_message(exc)`, as the `from` of a `raise`, by one of the benign
+    attributes above, or as an argument to a call that is not a stringifier.
+    Formatting it as TEXT — `str(exc)`, or an f-string — is allowed only where
+    every type the handler catches is one this package defines, because then
+    the text is this package's own.
+    """
+    import ast
+
+    owned = _exception_classes_this_package_defines()
+    tree = ast.parse(source)
+    body = source.splitlines()
+    findings: list[str] = []
+
+    def caught_is_all_ours(handler: ast.ExceptHandler) -> bool:
+        if handler.type is None:
+            return False
+        node = handler.type
+        parts = node.elts if isinstance(node, ast.Tuple) else [node]
+        return all(ast.unparse(part).rsplit(".", 1)[-1] in owned
+                   for part in parts)
+
+    for handler in [n for n in ast.walk(tree)
                     if isinstance(n, ast.ExceptHandler) and n.name]:
-        allowed = set()
-        for call in [n for n in ast.walk(handler) if isinstance(n, ast.Call)]:
-            if (isinstance(call.func, ast.Name)
-                    and call.func.id in {"_safe_message", "type"}):
-                allowed.update(id(a) for a in call.args
-                               if isinstance(a, ast.Name)
-                               and a.id == handler.name)
-        found += [n for n in ast.walk(handler)
-                  if isinstance(n, ast.Name) and n.id == handler.name
-                  and id(n) not in allowed]
-    assert len(found) == 1
+        ours = caught_is_all_ours(handler)
+        allowed: set[int] = set()
+        formatted: set[int] = set()
+        for node in ast.walk(handler):
+            if isinstance(node, ast.Call):
+                # The called NAME, whether it is `str(...)` or `x.format(...)`
+                # — a stringifier reached through an attribute composes text
+                # exactly as the builtin does.
+                called = (node.func.id if isinstance(node.func, ast.Name)
+                          else getattr(node.func, "attr", ""))
+                arguments = [a for a in node.args
+                             if isinstance(a, ast.Name)
+                             and a.id == handler.name]
+                if called in {"_safe_message", "type"}:
+                    allowed.update(id(a) for a in arguments)
+                elif called in STRINGIFIERS:
+                    formatted.update(id(a) for a in arguments)
+                else:                        # an object passed, not composed
+                    allowed.update(id(a) for a in arguments)
+            if isinstance(node, ast.Raise) and isinstance(node.cause, ast.Name):
+                if node.cause.id == handler.name:
+                    allowed.add(id(node.cause))
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == handler.name
+                    and node.attr in BENIGN_EXCEPTION_ATTRIBUTES):
+                allowed.add(id(node.value))
+            if isinstance(node, ast.FormattedValue):
+                for inner in ast.walk(node.value):
+                    if (isinstance(inner, ast.Name)
+                            and inner.id == handler.name):
+                        formatted.add(id(inner))
+        for node in ast.walk(handler):
+            if not (isinstance(node, ast.Name) and node.id == handler.name):
+                continue
+            if id(node) in allowed:
+                continue
+            if id(node) in formatted and ours:
+                continue
+            findings.append(
+                f"line {node.lineno}: {body[node.lineno - 1].strip()}")
+        # AND THE TWO SHAPES THAT REACH THE TEXT WITHOUT NAMING IT.
+        for node in ast.walk(handler):
+            if isinstance(node, ast.Call):
+                called = ast.unparse(node.func)
+                if called in {"traceback.format_exc", "sys.exc_info",
+                              "traceback.print_exc"}:
+                    findings.append(
+                        f"line {node.lineno}: {body[node.lineno - 1].strip()}")
+    return sorted(set(findings))
+
+
+@pytest.mark.parametrize("module", sorted(
+    path.name for path in Path(cli.__file__).parent.glob("*.py")))
+def test_no_handler_in_this_package_emits_an_exception_without_the_redactor(
+        module: str) -> None:
+    """The redaction contract is asked of the SHAPE — and of EVERY module.
+
+    Round 35 named five handlers in `cli.py` that formatted `str(exc)`; the
+    answer was an AST walk, and the walk was scoped to `Path(cli.__file__)`
+    alone. `config.py`, `oidc.py`, `migrations.py`, `identity.py`, `app.py` and
+    `db.py` all compose messages an operator reads, and A25-1 — a malformed
+    `OPENDOX_OIDC_ISSUER` printing its own password out of `runtime status` —
+    lived in exactly that gap for thirty-six review rounds (independent
+    adversarial review of openDox-code#25, A25-1 and A25-4).
+
+    So the scan runs over every module in the package, and the rule is stated
+    rather than allow-listed by line: a library's exception text may not be
+    formatted into evidence, and this package's own may, because this package
+    wrote it.
+
+    NOT FLAGGED, AND ON PURPOSE: a bare `raise` inside a handler. It re-raises
+    the SAME exception to a caller that must still handle it — `_LazyStore`
+    and `CachingJwks._refresh_locked` both need that — and every escape route
+    out of this package converts it. What IS flagged is reaching for the text
+    without naming the exception at all: `traceback.format_exc()`,
+    `traceback.print_exc()` and `sys.exc_info()` inside a handler.
+    """
+    source = (Path(cli.__file__).parent / module).read_text(encoding="utf-8")
+    assert _unredacted_exception_uses(source) == [], (
+        f"{module} puts a library's exception text into evidence without "
+        "`_safe_message`")
+
+
+def test_that_scan_is_run_against_every_shape_it_forbids() -> None:
+    """A scan that quietly stopped finding anything is not a clean tree.
+
+    Each case below is a real defect this package has actually shipped: the
+    round-35 `str(exc)` in a `MigrationError` handler, A25-1's `{exc}` for a
+    `ValueError` from CPython, and a handler reaching for the traceback.
+    """
+    forbidden = (
+        'try:\n    pass\nexcept ValueError as exc:\n'
+        '    _emit({"message": str(exc)})\n',
+        'try:\n    pass\nexcept ValueError as exc:\n'
+        '    raise ConfigurationError(f"not a URL ({exc})") from exc\n',
+        'import traceback\ntry:\n    pass\nexcept ValueError as exc:\n'
+        '    print(exc.args)\n',
+        'import traceback\ntry:\n    pass\nexcept ValueError as exc:\n'
+        '    print(traceback.format_exc())\n',
+    )
+    for source in forbidden:
+        assert _unredacted_exception_uses(source), source
+
+    # AND THE THREE SHAPES IT MUST NOT FLAG, or it would forbid the package's
+    # own correct code: the redactor, the class name, a benign attribute, a
+    # chained cause, an object passed on, and this package's own message.
+    allowed = (
+        'try:\n    pass\nexcept ValueError as exc:\n'
+        '    _emit({"message": _safe_message(exc)})\n',
+        'try:\n    pass\nexcept ValueError as exc:\n'
+        '    _emit({"refusal": type(exc).__name__})\n',
+        'try:\n    pass\nexcept UnicodeDecodeError as exc:\n'
+        '    raise MigrationError(f"at byte {exc.start}: {exc.reason}")\n',
+        'try:\n    pass\nexcept OSError as exc:\n'
+        '    raise RuntimeError("could not read") from exc\n',
+        'try:\n    pass\nexcept OSError as exc:\n    store.close(exc)\n',
+        'class ConfigurationError(Exception):\n    pass\n'
+        'try:\n    pass\nexcept ConfigurationError as exc:\n'
+        '    _emit({"message": str(exc)})\n',
+    )
+    for source in allowed:
+        assert _unredacted_exception_uses(source) == [], source
+
+
+def test_a_malformed_broker_url_never_prints_its_own_password() -> None:
+    """The defect the widened scan exists to have caught.
+
+    `_split_url` interpolated the driver's message, and CPython's
+    `_checknetloc` raises `ValueError("netloc '<the whole netloc>' contains
+    invalid characters under NFKC normalization")` — userinfo and password
+    included. A hostname that is not ASCII is the ordinary case for an IDN
+    broker, and `_split_url` runs BEFORE the userinfo refusal, so the guard
+    written to keep a password out of this very message never ran. `runtime
+    status` and `runtime init` printed `hunter2` on stdout, in the JSON the
+    lifecycle contract calls redacted evidence, and `_safe_message` did not
+    catch it either: the leaked run is `netloc 'svc:hunter2@…'`, which has no
+    `://` and no `password=` (independent adversarial review of
+    openDox-code#25, A25-1).
+
+    U+2100 (ACCOUNT OF) is one of the characters that NFKC-expand to one of
+    `/?#@:`; any of them reaches the same branch.
+    """
+    import io
+    import json
+    from contextlib import redirect_stdout
+
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    issuer = "https://svc:hunter2@broker\u2100evil.example/realms/x"
+    env = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+           PREFIX + "OIDC_AUDIENCE": "opendox",
+           PREFIX + "OIDC_ISSUER": issuer}
+
+    with pytest.raises(ConfigurationError) as caught:
+        load_settings(env)
+    message = str(caught.value)
+    assert "hunter2" not in message, message
+    assert "svc:" not in message
+    # THE SETTING IS STILL NAMED, and the reader is still told what is wrong.
+    assert PREFIX + "OIDC_ISSUER" in message
+    assert "ValueError" in message
+
+    # AND THE EXCEPTION CHAIN IS CLEAN TOO, because a traceback printed by
+    # anything at all would carry the cause with it.
+    import traceback
+    chain = "".join(traceback.format_exception(
+        type(caught.value), caught.value, caught.value.__traceback__))
+    assert "hunter2" not in chain
+    assert caught.value.__cause__ is None
+    assert "hunter2" not in cli._safe_message(caught.value)
+
+    # AND THROUGH THE SHIPPED VERB, on stdout, which is where it was printed.
+    printed = io.StringIO()
+    with redirect_stdout(printed):
+        code = cli.main(["runtime", "status"], env=env) if _status_takes_env() \
+            else _status_with(env)
+    assert code != 0
+    evidence = json.loads(printed.getvalue())
+    assert evidence["ok"] is False
+    assert "hunter2" not in printed.getvalue()
+    assert "hunter2" not in json.dumps(evidence)
+
+
+def _status_takes_env() -> bool:
+    import inspect
+    return "env" in inspect.signature(cli.main).parameters
+
+
+def _status_with(env: dict[str, str]) -> int:
+    """`runtime status` with exactly this environment and nothing inherited."""
+    import os
+
+    previous = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        return cli.main(["runtime", "status"])
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
 
 
 def test_the_serve_boundary_redacts_a_traceback_uvicorn_would_log() -> None:

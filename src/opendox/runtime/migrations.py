@@ -542,10 +542,12 @@ class MigrationRunner:
 
     def __init__(self, db: Any, *,
                  migrations_dir: str | Path = DEFAULT_MIGRATIONS_DIR,
-                 runtime_role: str | None = None) -> None:
+                 runtime_role: str | None = None,
+                 served_schema: str | None = None) -> None:
         self._db = db
         self._migrations_dir = Path(migrations_dir)
         self._runtime_role = runtime_role
+        self._served_schema = served_schema
 
     # -- introspection ----------------------------------------------------
 
@@ -759,6 +761,49 @@ class MigrationRunner:
             f"no canonical migration ({CANONICAL_MIGRATION_VERSION}) found in "
             f"{self._migrations_dir}")
 
+    def refuse_a_schema_the_api_will_not_read(self, conn: Any) -> None:
+        """Refuse a run whose schema is not the one the served application reads.
+
+        WHY THIS EXISTS RATHER THAN THE CONFIGURATION CHECK BESIDE IT.
+        `config._refuse_two_dsns_that_select_different_schemas` compares the
+        served and migration DSNs — and NO SHIPPED WORKLOAD HOLDS BOTH.
+        `deploy/kubernetes/base/opendox-deployment.yaml` carries
+        `OPENDOX_DATABASE_URL` and no migration DSN; `migration-job.yaml`
+        carries `OPENDOX_MIGRATION_DATABASE_URL` and no served one; compose
+        splits them the same way; and `migrate` and `reset` do not call
+        `load_settings` at all. `test_deploy_shape.py` PINS that split, because
+        the separation of the two identities is the point. So the guard rounds
+        34 and 36 built could only ever fire in a developer's shell that
+        happened to export both, and the failure it was written for — a run
+        that applies and VERIFIES schema A while `/readyz` and the API read
+        schema B — was unguarded in production (independent adversarial review
+        of openDox-code#25, A25-3).
+
+        THE MIGRATION CONTAINER CAN BE TOLD WHERE THE API READS, and safely:
+        `OPENDOX_SERVED_SCHEMA` is a schema NAME, never a credential, which is
+        exactly why it can be given to a workload that must not hold the served
+        DSN. `deploy/*` take it from the same `pg_schema` value the first-start
+        bootstrap grants in, so one edit moves the schema, the grants and this
+        refusal together.
+
+        Declared and unset is not an error: the single-schema install that
+        names nothing is the bundled shape, and `selected_schema` is still the
+        guard that the connection resolved the schema it asked for.
+        """
+        if not self._served_schema:
+            return
+        here = selected_schema(conn)
+        if here == self._served_schema:
+            return
+        raise MigrationError(
+            f"this run would apply the schema {here!r}, and "
+            f"OPENDOX_SERVED_SCHEMA declares the served application reads "
+            f"{self._served_schema!r}. A run that migrates one schema while "
+            "the API reads another reports an applied schema nothing serves — "
+            "or serves a schema this install never migrated. Point the "
+            "migration DSN's `options=-c search_path=...` at the declared "
+            "schema, or correct the declaration; nothing has been applied")
+
     def _apply_locked(self, lock: Any) -> list[str]:
         """`apply`'s body, ON THE CONNECTION THAT OWNS THE RUN'S LOCK.
 
@@ -767,6 +812,7 @@ class MigrationRunner:
         pool connection the advisory lock does not cover — see `_session`.
         """
         run = self.snapshot_run()
+        self.refuse_a_schema_the_api_will_not_read(lock)
         self.bootstrap_ledger(lock)
         lock.commit()
 
