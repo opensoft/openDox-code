@@ -1867,8 +1867,15 @@ jobs:
           # FLOORS - may only RISE, and only with the reason in the commit
           # message. Set to the measured values above, which are numbers this
           # suite has actually met on CI rather than an aspiration.
-          MIN_SELECTED: "1076"
-          MIN_PASSED: "1073"
+          # RAISED 2026-09-18 by the § 3.7 FLOOR PART 3 act (PR #31): eight
+          # tests join the list with `tests/test_conformance_corpus.py`, and
+          # the floors move WITH them so the margin keeps meaning something.
+          # Measured on run 35400706354, this PR's own first run, not derived
+          # by adding eight to the last pair: 1076 -> 1084 and 1073 -> 1081,
+          # skipped unchanged at 3 (the new suite skips nothing where git is
+          # present, which on this runner it is).
+          MIN_SELECTED: "1084"
+          MIN_PASSED: "1081"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
