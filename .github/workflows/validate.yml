@@ -1829,21 +1829,37 @@ jobs:
       # and resolve in a developer worktree, so a locally measured SKIPPED is
       # knowably the wrong number.
       #
-      # THE `collect_ignore` CAVEAT, WRITTEN DOWN SO IT IS NOT REDISCOVERED.
-      # This repository's root `conftest.py` ignores SEVEN files - six that
-      # import `openxdox.*` and await the openXdox-code leg, and
-      # `tests/test_session_harness.py`, which execs an openxFactory-only
-      # script and awaits the BUILD arc. An IGNORED file is not collected at
-      # all, so it never reaches these reports: it is invisible to all three
-      # numbers rather than counted as a skip. That makes the floors and the
-      # exact SKIPPED honest TODAY and tells you what happens when the
-      # ignores lift - SELECTED and PASSED RISE, which floors permit, and
-      # SKIPPED may MOVE, which is a pin edit WITH THE REASON in the commit
-      # message and never a relaxation of the comparison. That is the
-      # referent's own rule (`pytest-suite.yml`: "EXPECT_SKIPPED stays
-      # exactly as it was, doing the job it was for"), and it is why SKIPPED
-      # is the load-bearing number: a directory that silently turns into
-      # skips is exactly what an exact pin exists to catch.
+      # WHAT MOVES THESE NUMBERS — MEASURED, because the first version of this
+      # comment got it wrong and Copilot caught it on PR #29.
+      #
+      # THE ROOT `conftest.py` AND ITS `collect_ignore` LIST ARE IRRELEVANT
+      # HERE, on two independent grounds, either of which is sufficient:
+      #   1. All THREE report-producing commands pass `--noconftest`, so the
+      #      root conftest is never loaded and its `collect_ignore` never
+      #      evaluated.
+      #   2. Every command names its files EXPLICITLY — 28 + 1 + 6 = 35 files
+      #      — and NOT ONE of the seven `collect_ignore` entries is among
+      #      them. Measured: the overlap is EMPTY.
+      # So the openXdox leg landing, or the BUILD arc lifting an ignore,
+      # CANNOT move SELECTED, PASSED or SKIPPED in this job. A comment that
+      # said otherwise would send the next reader to the wrong file.
+      #
+      # WHAT DOES MOVE THEM: editing one of the three explicit lists in this
+      # file. 35 files are named; 61 `test_*.py` files exist under `tests/`
+      # and `tests_runtime/`, so 26 are collected by NO command here. Adding
+      # one raises SELECTED and PASSED — floors permit a rise, and the commit
+      # that adds it should raise them WITH the reason so the margin stays
+      # meaningful. Removing one LOWERS them, and the floor will refuse: find
+      # the tests, do not lower the floor.
+      #
+      # AND SKIPPED IS THE LOAD-BEARING NUMBER, pinned EXACTLY. The three
+      # skips are real skips inside the named files, not ignored files: an
+      # ignored file is not collected at all and never reaches these reports,
+      # while a skip is a test that was collected and then declined to run. A
+      # named file that quietly turns into skips is precisely what an exact
+      # pin catches and a floor cannot, which is why this one is `==` and the
+      # other two are `>=`. If a change makes it move, move the pin WITH the
+      # reason in the commit message — never relax the comparison.
       - name: Pin the triple
         shell: bash
         env:
