@@ -719,8 +719,8 @@ jobs:
       #              one, and `selected_schema` refused a connection whose
       #              `current_schema()` was the schema it had asked for,
       #              naming `'"tenant'`. A scanner that splits outside
-      #              quotes, and the entries still read by `_unquoted`. THE
-      #              CURRENT FIGURE; the PR description states it at this
+      #              quotes, and the entries still read by `_unquoted`.
+      #              THE CURRENT FIGURE; the PR description states it at this
       #              same commit, and `pytest -q tests_runtime/` is 272 here.
       - name: pytest (runtime, hermetic)
         run: >-
