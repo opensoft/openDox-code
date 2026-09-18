@@ -1405,3 +1405,71 @@ def test_a_later_migration_that_is_not_utf8_applies_nothing_at_all(
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")
+
+
+def test_usage_without_create_is_refused_by_the_guard_and_not_by_the_ddl(
+        postgres_dsn: str) -> None:
+    """The case the reviewer asked to cover, and the answer it actually gives.
+
+    THE FINDING (Copilot review of openDox-code#25, round 31): `selected_schema`
+    proves USAGE, the ledger DDL CREATEs, and PostgreSQL would therefore choose
+    "a later `search_path` entry where the migration role has CREATE (for
+    example `public`) as the object-creation target" — bootstrapping the ledger
+    in the wrong schema.
+
+    MEASURED FALSE on postgres 16.15: it does not fall through. With USAGE and
+    no CREATE on the first entry and CREATE on `public`, `current_schema()` is
+    still the selected schema and the unqualified `create table` raises
+    `InsufficientPrivilege: permission denied for schema …`. The creation
+    target is the entry `current_schema()` names, and the run fails closed.
+
+    WHAT WAS WORTH TAKING is the message: that refusal came from inside a
+    `create table`, after the guard that exists to answer this question had
+    passed, and it named no remedy. The guard asks now, and this test pins BOTH
+    halves — the refusal is `MigrationError` and not `InsufficientPrivilege`,
+    it names the schema and the grant, and NOTHING was created in either
+    schema. Against the previous head it raises `InsufficientPrivilege`.
+    """
+    import uuid as _uuid
+
+    from opendox.runtime.db import Database
+
+    tag = _uuid.uuid4().hex[:10]
+    schema, role = f"t_{tag}", f"r_{tag}"
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+            conn.execute(f"create role {role} login password 'x' nosuperuser")
+            conn.execute(f"grant usage on schema {schema} to {role}")
+            conn.execute(f"revoke create on schema {schema} from {role}")
+            conn.execute(f"grant usage, create on schema public to {role}")
+            conn.execute(f"grant connect on database "
+                         f"{postgres_dsn.rsplit('/', 1)[1]} to {role}")
+        try:
+            host = postgres_dsn.split("@", 1)[1]
+            with Database(f"postgresql://{role}:x@{host}", schema=schema) as db:
+                runner = migrations.MigrationRunner(db,
+                                                    migrations_dir="migrations")
+                with pytest.raises(migrations.MigrationError) as caught:
+                    runner.apply()
+                message = str(caught.value)
+                assert schema in message, message
+                assert "may USE it but not CREATE in it" in message, message
+                assert "Nothing has been applied" in message, message
+
+            with admin.connection() as conn:
+                created = conn.execute(
+                    "select n.nspname, c.relname from pg_class c "
+                    "join pg_namespace n on n.oid = c.relnamespace "
+                    "where n.nspname in (%s, 'public') and c.relname = %s",
+                    (schema, migrations.LEDGER_TABLE)).fetchall()
+                assert created == [], (
+                    f"the refusal still created a ledger: {created}")
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+                conn.execute(f"revoke all on schema public from {role}")
+                conn.execute(f"revoke connect on database "
+                             f"{postgres_dsn.rsplit('/', 1)[1]} from {role}")
+                conn.execute(f"drop role if exists {role}")

@@ -385,6 +385,50 @@ def _path_entries(path: str) -> list[str]:
     return entries
 
 
+def _refuse_a_schema_this_role_cannot_create_in(conn: Any) -> str:
+    """`selected_schema`, and then the privilege the DDL below actually needs.
+
+    `selected_schema` proves USAGE, which is the privilege that decides WHICH
+    schema an unqualified name resolves to. The ledger DDL then CREATES, and
+    USAGE does not carry CREATE.
+
+    WHAT THIS IS NOT (Copilot review of openDox-code#25, round 31): the finding
+    is that PostgreSQL would choose "a later `search_path` entry where the
+    migration role has CREATE (for example `public`) as the object-creation
+    target", so the ledger would land in the wrong schema. MEASURED on postgres
+    16.15, as a `nosuperuser` role with USAGE and no CREATE on the first entry
+    and CREATE on `public`:
+
+        set search_path = sel, public;
+        select current_schema();                         -- sel
+        has_schema_privilege('sel','usage' / 'create')    -- t / f
+        create table if not exists opendox_schema_migrations (…);
+        -- ERROR: permission denied for schema sel
+
+    It does not fall through. The creation target is the same entry
+    `current_schema()` names, and the run fails closed.
+
+    WHAT IT IS is the message. That refusal is PostgreSQL's, it arrives from
+    inside a `create table` rather than from the guard that exists to answer
+    this question before anything is written, and it names no remedy. Asked
+    here, the run refuses in this act's own words and says which grant is
+    missing — the same shape `selected_schema` already uses for the schema
+    that does not exist and the schema this connection may not USE.
+    """
+    schema = selected_schema(conn)
+    row = conn.execute(
+        "select has_schema_privilege(current_user, %s, 'create'), current_user",
+        (schema,)).fetchone()
+    if row and not row[0]:
+        raise MigrationError(
+            f"this connection selects {schema!r}, and {row[1]!r} may USE it "
+            f"but not CREATE in it: the ledger and every migration's tables "
+            f"are created there. Grant create on schema {schema!r} to that "
+            f"role, or point the DSN at a schema it owns. Nothing has been "
+            f"applied")
+    return schema
+
+
 def _unquoted(entry: str) -> str:
     """One `search_path` entry, with PostgreSQL's quoting removed."""
     entry = entry.strip()
@@ -652,12 +696,12 @@ class MigrationRunner:
         before the DDL, so a run that will refuse refuses before it writes.
         """
         if conn is not None:
-            selected_schema(conn)
+            _refuse_a_schema_this_role_cannot_create_in(conn)
             with conn.transaction():
                 conn.execute(LEDGER_DDL)
             return
         with self._db.transaction() as owned:
-            selected_schema(owned)
+            _refuse_a_schema_this_role_cannot_create_in(owned)
             owned.execute(LEDGER_DDL)
 
     def apply(self) -> list[str]:
