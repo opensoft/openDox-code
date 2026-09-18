@@ -3874,7 +3874,6 @@ def test_a_bounded_push_leaves_no_descendant_running_behind_its_refusal(
     request, the repository and the caller's database transaction. That is why
     the assertion below is on the ELAPSED time as well as on the marker.
     """
-    import signal
     import time
 
     marker = tmp_path / "the-remote-write-landed"
@@ -4095,7 +4094,6 @@ def test_the_group_is_signalled_from_the_id_saved_at_popen_not_looked_up_later(
     dies proves the saved id was used, because the lookup is impossible by
     then and this case asserts that too.
     """
-    import signal
     import subprocess
     import time
 
