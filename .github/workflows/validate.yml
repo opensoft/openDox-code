@@ -387,6 +387,7 @@ jobs:
           tests/test_smoke_signals.py
           tests/test_wheel_paint_and_reach.py
           tests/test_binding_stylesheets.py
+          tests/test_conformance_corpus.py
           --noconftest
 
       # § 3.4 SLICE S7 RESIDUE — `tests/test_display_facet_leaves.py`, as its
