@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: opendox-runtime
+  namespace: opendox
+spec:
+  selector:
+    app.kubernetes.io/name: opendox-runtime
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

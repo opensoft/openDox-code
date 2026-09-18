@@ -432,3 +432,777 @@ jobs:
       # `d.stage ?` guard satisfies it alone.
       - name: pytest (S7 residue)
         run: python -m pytest -q tests/test_display_facet_leaves.py --noconftest
+
+      # ---------------------------------------------------------------------
+      # THE RUNTIME'S HERMETIC HALF — `split-opendox-two-layer-product` § 3.5
+      # (RULED Q2, openxFactory#656 comment 5542792997) and § 3.6 (RULED C3,
+      # comment 5544381563).
+      #
+      # APPENDED, AND NOTHING ABOVE IS TOUCHED. The pytest step above keeps its
+      # file list and its comment block exactly as slice S8 left them: this act
+      # adds new files at new paths and adds this step after them, so it can
+      # neither change what the required check already runs nor collide with
+      # `chore/retire-intent-feed-suites` (#24), whose only hunk in this file
+      # is inside that comment block.
+      #
+      # WHY THE RUNTIME TESTS ARE SPLIT IN TWO. The five modules named here are
+      # HERMETIC: they import the standard library, `PyYAML` (this package's
+      # own base dependency) and the stdlib-only half of `opendox.runtime`, and
+      # they read files. They therefore run under THIS job's existing
+      # `pip install -e ".[test]"` with nothing added — no FastAPI, no psycopg,
+      # no PyJWT — which is what keeps the required check's green light out of
+      # the hands of a web framework's release, and is the same property
+      # `opendox/runtime/__init__.py` declares and
+      # `tests_runtime/test_runtime_surface.py` measures. Everything that needs
+      # a database, a token or a web framework runs in the separate `runtime`
+      # job below, which is NOT a required check.
+      #
+      # `--noconftest` FOR THE SAME REASON THE STEP ABOVE CARRIES IT: the root
+      # conftest's `collect_ignore` and `tests/conftest.py`'s autouse fixtures
+      # are written for a tree that can import `opendox.serve`, and until the
+      # BUILD arc repairs that, a file named in this job has to stand on its
+      # own. Each of the five does; `tests_runtime/conftest.py` is read only by
+      # the `runtime` job.
+      #
+      # MEASURED, file by file, under this exact invocation before each was
+      # named. THE FIGURE MOVES WITH THE TREE, so it is stated with the head
+      # that produced it — the same rule the § 3.4 slice S8 block above states
+      # for the same reason ("a figure that moves with the base is stated with
+      # the base that produced it"), and Copilot's review of openDox-code#26
+      # was right that a bare number here and a different one in a PR
+      # description cannot both be the evidence.
+      #
+      #   87 passed  at `build/3-5-runtime` `8648c119` (2026-09-16,
+      #              python 3.12.3 / pytest 8.4.2) — the five modules § 3.5
+      #              names; `tests_runtime/test_local_git_adapter.py` is not in
+      #              that branch's list because the file arrives with § 3.6.
+      #   97 passed  at `build/3-5-runtime` `a9c6f0d6` (same day, same python
+      #              and pytest) — the same five modules. The round that
+      #              answered Copilot's fourth review added ten assertions to
+      #              them: the StatefulSet's parsed `defaultMode`, the
+      #              migration Job's readiness wait, `init`'s refusal of a
+      #              root that is not a directory, and `serve`'s evidence on
+      #              an ordinary shutdown.
+      #  101 passed  at `build/3-5-runtime` `981b1d47` (same day, same python
+      #              and pytest) — the same five modules. Copilot's FIFTH
+      #              review moved four: the schema viewers' switch reaching
+      #              both deployments, the migration Job's overlay-configurable
+      #              readiness address, the narrowed role arriving from the
+      #              ConfigMap, the runbook's namespace before its Secrets, the
+      #              Dockerfile comment that claimed a layer cache it does not
+      #              have, and CI's refusal to let the DB-backed suites skip
+      #              (asserted on `conftest.py`'s source, because this list is
+      #              the hermetic one and that file is not read here). The
+      #              commit above this one is where they landed; this block
+      #              changes no test, so the figure holds at this head too.
+      #  102 passed  at `build/3-5-runtime` `7f2cdec1` (same day, same python
+      #              and pytest) — the same five modules. Copilot's SIXTH
+      #              review moved one of them: `.env.example` now declares the
+      #              served role's name ONCE, and `test_deploy_shape.py` holds
+      #              both the Postgres service's role creation and the migrate
+      #              container's narrowing to that one declaration. Its other
+      #              three findings are measured in the DB-backed job.
+      #
+      #              A NOTE ON READING THIS LIST (Copilot's round-6 suppressed
+      #              comment): each entry states the head it was MEASURED at,
+      #              and the last entry is the current one. An earlier entry is
+      #              history, not a competing claim, and the PR description
+      #              states the same current figure at the same head.
+      #  106 passed  at `build/3-5-runtime` `76457876` (same day, same python
+      #              and pytest) — the same five modules, after the eight
+      #              suppressed comments of that round: the compose probe and
+      #              mount following their settings, the Kubernetes root held
+      #              equal to its mountPath, the readiness probe's timeout, and
+      #              a discovery regex that is the filename contract.
+      #  108 passed  at `build/3-5-runtime` `b7e05744` (same day, same python
+      #              and pytest) — the same five modules, after round SEVEN:
+      #              duplicate migration versions refused at discovery, and the
+      #              Kubernetes bootstrap creating the role the Job narrows.
+      #  109 passed  at `build/3-5-runtime` `3f20a122` (same day, same python
+      #              and pytest) — the same five modules, after that round's
+      #              suppressed comments: the migrate PREVIEW running the
+      #              canonical gate, and the filename assertion that is now the
+      #              runner's own regex rather than a looser restatement.
+      #
+      #              READING THIS LIST: the LAST entry is the current figure
+      #              and the PR description states that one at that same
+      #              commit. An earlier entry is the measurement that was
+      #              current when it was written, not a competing claim, and
+      #              SAYS SO in its own words — a reader who lands on one
+      #              entry should not have to reach this note to learn it is
+      #              history (Copilot's round-18 review of the sibling PR
+      #              #26 read a superseded entry as that branch's claim
+      #              about its own head). The commit that records a figure
+      #              changes no test, so each figure also holds at the head
+      #              that carries its record.
+      #  111 passed  at `build/3-5-runtime` `2161a23a` (same day, same python
+      #              and pytest) — the same five modules, after round
+      #              EIGHT: `serve` telling a startup failure from a
+      #              shutdown, and a version below the canonical one
+      #              refused at discovery.
+      #
+      #              AND MEASURED WITH THE `runtime` EXTRA MADE
+      #              UNIMPORTABLE (`psycopg`, `psycopg_pool`, `fastapi`,
+      #              `uvicorn`, `jwt` stubbed to raise ImportError), which
+      #              is this job's own install. A figure measured with the
+      #              extras present is not this job's figure: round 7
+      #              added a test that passed that way and went RED here,
+      #              because the gate it asserted sat behind the deferred
+      #              driver import.
+      #  118 passed  at `build/3-5-runtime` `f9c72341` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round TEN: `serve` reporting a bind
+      #              failure as evidence rather than a traceback, `status`
+      #              keeping the connectivity answer `select 1` already gave
+      #              it, the migration runner's documented connection contract
+      #              driven by a double that implements exactly it, the
+      #              readiness probe's timeout held STRICTLY over the
+      #              endpoint's own budgets (both read from the modules that
+      #              declare them), and the managed-database role provisioning
+      #              made a prerequisite the runbook states and this suite
+      #              derives from the bundled bootstrap. ROUND TEN'S OTHER SIX
+      #              FIXES ARE IN THE DB-BACKED JOB (three write races, an
+      #              existence oracle, the key-set source Protocol): 211
+      #              passed there at the same commit.
+      #  122 passed  at `build/3-5-runtime` `4bf054ec` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round ELEVEN: the canonical migration
+      #              re-checked against the exact bytes about to run, the role
+      #              bootstrap keeping its password out of `psql`'s argv, the
+      #              documented `compose run` carrying `--build` (it does not
+      #              build by policy), and the migration Job's retry budget
+      #              covering a database that is still recovering when the TCP
+      #              wait returns. Round eleven's other fix — the streamed
+      #              body cap answering 413 rather than FastAPI's 400 — is in
+      #              the DB-backed job: 216 passed there at this commit.
+      #  126 passed  at `build/3-5-runtime` `2052e1e6` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round TWELVE: the first-start role
+      #              bootstrap aiming `alter default privileges` at the
+      #              MIGRATION OWNER rather than at whoever runs the script
+      #              (with the name wired through compose, the ConfigMap and
+      #              the StatefulSet), the managed-database prerequisite
+      #              reading the password through `\getenv`/`%L` instead of a
+      #              single-quoted SQL literal, the runbook's claim that the
+      #              run checks that prerequisite, and the canonical gate
+      #              covering the WHOLE run's bytes before the ledger is
+      #              bootstrapped. SUPERSEDED by a later entry below; the PR
+      #              description stated it at this same commit while it was
+      #              current. ROUND TWELVE'S OTHER TWO
+      #              FIXES ARE IN THE DB-BACKED JOB (a run whose served role
+      #              was never granted now fails instead of serving, and the
+      #              drafts listing bounded in bytes as well as in rows): 223
+      #              passed there at this commit.
+      #  126 passed  at `build/3-5-runtime` `95b34ad9` — UNCHANGED, and that
+      #              is the entry: round THIRTEEN's one THREAD is a write
+      #              ordering, so its case is DB-backed and the hermetic
+      #              figure did not move there. `pytest -q tests_runtime/` is
+      #              224 at that commit (was 223).
+      #  128 passed  at `build/3-5-runtime` `d9a6dd3a` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round thirteen's five SUPPRESSED comments:
+      #              the compose package's repository root held absolute (it
+      #              is a container mount target, and the application's own
+      #              default is relative), and the managed-database
+      #              prerequisite made to substitute nothing by hand — every
+      #              name through psql's `\getenv`, quoted by `%I`. Round
+      #              thirteen's other three are a docstring that promised a
+      #              snapshot READ COMMITTED does not give, a docstring that
+      #              promised a refresh `coalesce` does not do, and the
+      #              workflow/description figures, answered by measurement.
+      #              `pytest -q tests_runtime/` is 227 here.
+      #  130 passed  at `build/3-5-runtime` `c1327207` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round fourteen's single defect, reported
+      #              in two places: `current_schema()` IS the search-path
+      #              fallback this module's qualification was defending
+      #              against. It answers the first EXISTING schema on the
+      #              path, never the first CONFIGURED one — measured on
+      #              postgres 16.15 — so a DSN selecting a dropped or absent
+      #              schema had `applied()` read `public`'s ledger and
+      #              `runtime reset` drop `public`'s coordination tables
+      #              under a promise that it would not. `selected_schema`
+      #              asks both questions together and refuses when they
+      #              disagree; `"$user"` is not compared, because it is not
+      #              a name. `pytest -q tests_runtime/` is 230 here.
+      #  132 passed  at `build/3-5-runtime` `a69ba82f` (same day, same python
+      #              and pytest, extras blocked the same way) — the same five
+      #              modules, after round fourteen's five SUPPRESSED
+      #              comments, which are two defects: the command this
+      #              service PRINTS was not a command (every verb lives
+      #              under the `runtime` group, so the shortened spelling
+      #              exits 2 — it was `init`'s `next`, `/readyz`'s advice to
+      #              an operator, the runbook's transcript, and a case that
+      #              PINNED it), and the managed-database prerequisite
+      #              accepted a served role this runtime then refuses (the
+      #              ledger narrowing interpolates a role name as SYNTAX,
+      #              so it must be a plain identifier; the runbook says so
+      #              now and a case pins the statement to both refusals).
+      #              `pytest -q tests_runtime/` is 232 here.
+      #  132 passed  at `build/3-5-runtime` `c9009634` — UNCHANGED, and the
+      #              same five modules: round FIFTEEN's one finding is in
+      #              the DB-backed job, where the case that measures it
+      #              lives. `bootstrap_ledger` runs before `applied()` and
+      #              its `create table` is unqualified, so on a connection
+      #              whose selected schema is gone the ledger was created in
+      #              `public` and COMMITTED before round fourteen's guard
+      #              refused one call later — a fail-closed run that had
+      #              already mutated another schema. The guard is asked
+      #              before the DDL now. `pytest -q tests_runtime/` is 232
+      #              here.
+      #  132 passed  at `build/3-5-runtime` `541b0329` — UNCHANGED again,
+      #              and for the same reason: round fifteen's four
+      #              SUPPRESSED comments are all measured in the DB-backed
+      #              job. A concurrent rotation refused a valid token (the
+      #              miss cooldown bounds FETCHES and was bounding ANSWERS);
+      #              the access preflight asked about every table in the
+      #              schema and not about the schema's own `usage`; and the
+      #              page budget bounded what the application received
+      #              rather than what Postgres read. `pytest -q
+      #              tests_runtime/` is 235 here.
+      #  132 passed  at `build/3-5-runtime` `c663874e` — UNCHANGED once more:
+      #              round SIXTEEN's two findings are both refinements of
+      #              round fifteen's own fixes and both are measured in the
+      #              DB-backed job. The whole configured `search_path` is
+      #              walked now, not only its head (`"$user", tenant,
+      #              public` with neither present stopped at the exempt
+      #              entry and accepted `public`), and the cooldown claim
+      #              and the refresh are ONE lock acquisition (re-reading
+      #              after a denial narrowed that window; it did not close
+      #              it). `pytest -q tests_runtime/` is 236 here.
+      #  132 passed  at `build/3-5-runtime` `5d86d8b8` — UNCHANGED, and the
+      #              same five modules: round sixteen's SUPPRESSED comments
+      #              are a gap this round itself opened (restricting the
+      #              access preflight to the coordination tables made a
+      #              DROPPED one invisible, since the query is driven by
+      #              `pg_class` — the set is compared now), a setting that
+      #              promised an OIDC discovery this runtime does not make,
+      #              and a migration comment naming a test that does not
+      #              exist. SUPERSEDED by the entry below; the PR
+      #              description stated it at this same commit, and `pytest
+      #              -q tests_runtime/` was 236 there.
+      #  135 passed  at `build/3-5-runtime` `01b9876c`
+      #              (2026-09-17, same python and pytest; extras
+      #              unimportable) — the same five modules, after round
+      #              NINETEEN, whose three findings were all measured and
+      #              all real. A libpq password holding a SPACE is quoted,
+      #              and `password\s*=\s*\S+` ends at whitespace, so the
+      #              valid conninfo `password='secret value'` was redacted
+      #              as `<redacted> value'` — half the password beside the
+      #              marker that says it was removed. `search_path`
+      #              resolution asks whether THIS ROLE may use a schema and
+      #              not whether it exists, so an existing `tenant` with no
+      #              `usage` grant passed the round-16 existence probe and
+      #              the run went to `public`; MEASURED on postgres 16.15,
+      #              `pg_namespace` has it, `has_schema_privilege` is false
+      #              and `current_schema()` answers `public`. And the
+      #              compose build context is the whole repository, so a
+      #              filled-in `deploy/compose/.env` — git-ignored, which is
+      #              not a build-context rule — was uploaded to the docker
+      #              daemon on every `--build`; MEASURED with docker server
+      #              29.6.2 by copying the context into a `busybox` image,
+      #              both before (`.env` present) and after (the context is
+      #              the four paths the Dockerfile COPYs), and the real
+      #              image still builds and runs. SUPERSEDED by the entry
+      #              below; `pytest -q tests_runtime/` was 240 there.
+      #  138 passed  at `build/3-5-runtime` `b9408bf5` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round nineteen's SUPPRESSED comments:
+      #              four real, two false and measured so. `/readyz` made
+      #              THREE pool checkouts under a `timeoutSeconds` this file
+      #              derives from ONE (measured: "this probe checked out 3
+      #              pooled connections"); the migration Job's wait counted
+      #              120 attempts and called it 240s while each attempt can
+      #              cost 4s (measured: three attempts claiming 6s took
+      #              12.1s), and is a `time.monotonic()` deadline now; the
+      #              install block put a password in `kubectl`'s own argv
+      #              where `/proc/<pid>/cmdline` shows it; and the
+      #              managed-database path ships the overlay that removes
+      #              the bundled Postgres (measured with kustomize v5.4.3).
+      #              FALSE: `STDLIB_ONLY_MODULES` is reported to omit
+      #              `identity`, which is line 43 of it. FALSE, and reported
+      #              twice: `octet_length(body)` is held to detoast every
+      #              candidate body — `textoctetlen` reads the varlena
+      #              header, so over 200 rows of 1 MiB it costs 0.3 ms
+      #              against `count(*)`'s 0.3 ms and `max(md5(body))`'s
+      #              381.9 ms. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 245 there.
+      #  139 passed  at `build/3-5-runtime` `39db0b0f` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY's one finding: `"$user"` is
+      #              exempt for being ABSENT, not for being unreachable.
+      #              Round 19 made every NAMED entry prove it is usable and
+      #              left `"$user"` skipped unconditionally, and PostgreSQL
+      #              skips an existing schema the role may not USE exactly as
+      #              it skips an absent one — so a schema named for the role,
+      #              present and denied, still fell through to `public`. It
+      #              goes through the same probe now and is forgiven only for
+      #              not existing. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 246 there.
+      #  141 passed  at `build/3-5-runtime` `8fe2f3fd` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-TWO's two findings, which
+      #              are one defect in two places and one in a third. The
+      #              broker's URLs were UNCHECKED and PRINTED: `oidc_issuer`
+      #              and an explicit `oidc_jwks_url` are PUBLIC endpoints and
+      #              `load_settings` took any string, so MEASURED against the
+      #              previous head `https://svc:pw@broker/realms/x` was
+      #              accepted and then printed by `repr(settings)`, by
+      #              `status`'s derived JWKS URL and by its discovery URL —
+      #              three credentials from a value that had never been a
+      #              DSN. Refused at the door (the verifier FETCHES that URL)
+      #              and redacted at both printing boundaries anyway, host
+      #              kept. And round 19's managed-database overlay supplied
+      #              no broker values while the runbook told an operator to
+      #              build it, so it rendered a Deployment that fails
+      #              `load_settings`; the guard derives the rule from the
+      #              base. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 248 there.
+      #  142 passed  at `build/3-5-runtime` `8779a776` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-THREE: compose interpolates
+      #              `${VAR}` BEFORE the container sees the string, so
+      #              `CMD-SHELL` made an operator's `.env` value SHELL source
+      #              (a value with a space already became two arguments) and
+      #              the application probe made it PYTHON source, evaluated
+      #              before `load_settings` looked at the port. Exec form for
+      #              the first; the second reads the value from `os.environ`
+      #              and holds no interpolation — MEASURED with an injected
+      #              value: exit 1, `ValueError`, no marker. SUPERSEDED by
+      #              the entry below; `pytest -q tests_runtime/` was 249
+      #              there.
+      #  144 passed  at `build/3-5-runtime` `65376475` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-FOUR, which is round 22's
+      #              own guard in three places. A broker URL carries a
+      #              credential in its QUERY as surely as in its userinfo and
+      #              that guard read only the authority; `urlsplit` RAISES
+      #              `ValueError` for a malformed URL from inside the
+      #              function that owes a `ConfigurationError` naming the
+      #              variable (MEASURED on python 3.12 with an unmatched IPv6
+      #              bracket); and `runtime_pg_role` is an edit the
+      #              managed-database overlay cannot make, so the Job would
+      #              narrow the bundled role while the real served role keeps
+      #              the ledger. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 251 there.
+      #  145 passed  at `build/3-5-runtime` `a4d0eddf` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-FIVE's one finding: the
+      #              broker URL is a TRUST ANCHOR and its scheme was
+      #              unchecked. `HttpJwksSource` fetches it and the keys it
+      #              returns verify every token, so over `http://` anyone on
+      #              the path replaces the key set and mints tokens whose
+      #              `iss` and `aud` still pass. `https` or a LOOPBACK host,
+      #              judged by `ipaddress` so the exception cannot be spoofed
+      #              by a name. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 252 there.
+      #  153 passed  at `build/3-5-runtime` `c21b8b97` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-SIX. THE SKIP IS NEW AND
+      #              DELIBERATE: the live psycopg reproducer for the DB
+      #              probe's credential leak needs a driver this job does not
+      #              install (`.[test]` alone), and the contract it proves —
+      #              that the probe never interpolates the exception's text —
+      #              is measured beside it against a stub driver, which does
+      #              run here. The round's other two fixes: the documented
+      #              `kubectl apply` reached a clean cluster with the
+      #              PLACEHOLDER image tag at three container sites, which is
+      #              `ImagePullBackOff` before anything starts, so the digest
+      #              replacement is now a required step with a guard on the
+      #              build's own output; and the runbook's four plaintext
+      #              secret files survived a failed `kubectl` or a Ctrl-C,
+      #              which a trap on EXIT/INT/TERM ends. SUPERSEDED by the
+      #              entry below; `pytest -q tests_runtime/` was 262 there.
+      #  162 passed  at `build/3-5-runtime` `0ec862d3` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — the same five
+      #              modules, after the same round's two SUPPRESSED comments,
+      #              both of which were defects. A broker URL naming no host
+      #              was accepted, because `urlsplit("https:///realms/x")`
+      #              yields the scheme `https` and hostname `None` and round
+      #              25's check read only the scheme — so an issuer nothing
+      #              can be fetched from passed as a trust anchor and the
+      #              install found out when `/readyz` failed. Refused before
+      #              the scheme check now, WITHOUT echoing the value, since
+      #              `https://user:pw@/x` has no hostname either. And
+      #              `search_path` was split with `str.split(",")`, which a
+      #              legal schema name defeats: PostgreSQL quotes
+      #              `"tenant,blue", public`, the split made two entries of
+      #              one, and `selected_schema` refused a connection whose
+      #              `current_schema()` was the schema it had asked for,
+      #              naming `'"tenant'`. A scanner that splits outside
+      #              quotes, and the entries still read by `_unquoted`.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 272 there.
+      #  167 passed  at `build/3-5-runtime` `81c01c1f` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-SEVEN, two of whose three
+      #              findings are defects in the code that answered round 26.
+      #              `urlsplit` SUCCEEDS for a port that is not a number and
+      #              defers the error to `.port`, a property that parses on
+      #              read: the probe's redaction raised from inside the
+      #              handler it was reporting from, and a crash is what makes
+      #              pytest print the chained psycopg error — which quotes
+      #              the conninfo, password and all. Every access inside the
+      #              boundary now, and the reason raised OUTSIDE the handler
+      #              so there is no context to print. The same property at
+      #              the configuration boundary: `https://broker:not-a-port/`
+      #              passed it. And the managed-database apply stood above
+      #              the `runtime_pg_role` edit and the role-provisioning
+      #              block, so an operator working top to bottom narrowed the
+      #              BUNDLED role.
+      #              SUPERSEDED by the entry below, which is the same five
+      #              modules at the same count: `pytest -q tests_runtime/`
+      #              was 277 there.
+      #  167 passed  at `build/3-5-runtime` `948cf056` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — UNCHANGED on
+      #              the hermetic five, because round 27's third finding is
+      #              in `oidc.py`, which needs the runtime extra and is
+      #              measured in the OTHER job. A failed JWKS load left the
+      #              cache untouched, so every request re-entered the refresh
+      #              branch and fetched again, each holding the cache lock
+      #              for the source's whole timeout — one outbound fetch per
+      #              inbound request for as long as the broker is down. A
+      #              failure is remembered for a cooldown now, and the
+      #              cooldown never serves a key set: every call inside it
+      #              still raises, so verification stays fail-closed and only
+      #              the traffic is bounded.
+      #              SUPERSEDED by the entry below, again at the same count:
+      #              `pytest -q tests_runtime/` was 279 there.
+      #  167 passed  at `build/3-5-runtime` `744753c0` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — UNCHANGED again, and
+      #              for the same reason: round 28's one finding needs a
+      #              database to measure. `snapshot_run()` gated every file's
+      #              BYTES before the first commit and left `decode("utf-8")`
+      #              in the per-migration loop, so a later file holding
+      #              invalid UTF-8 aborted the run — with an untyped
+      #              `UnicodeDecodeError` — after the ledger and earlier
+      #              migrations had COMMITTED. One read of every file, and
+      #              now one decode of every file, before the first commit.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 280 there.
+      #  171 passed  at `build/3-5-runtime` `50565d63` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — the same five modules,
+      #              after round TWENTY-NINE's two bodies: six defects and one
+      #              measurement. An issuer carrying a QUERY derived
+      #              `…/realms/x?tenant=a/protocol/openid-connect/certs`,
+      #              because the derived paths are appended and a query comes
+      #              after a path; the loopback exception, written as "not
+      #              https AND not loopback", accepted `ftp://localhost/…` and
+      #              `file://127.0.0.1/…`, which `httpx` cannot fetch; a
+      #              non-UTF-8 JWKS file raised `UnicodeDecodeError` past the
+      #              handler that makes this path's failures typed
+      #              (`UnicodeDecodeError` is a `ValueError`, not a
+      #              `JSONDecodeError`); a failed pool checkout left `_exit`
+      #              set, so the teardown called `__exit__` on a manager that
+      #              never entered and masked the database error; the URI
+      #              redaction stopped at the first space, printing the tail
+      #              of a password; and the secret block ran on after a failed
+      #              `kubectl` — fixed with `set -e` in a subshell whose
+      #              status is taken by `$?` ON ITS OWN LINE, because bash
+      #              suppresses errexit inside an operand of `&&`/`||` and the
+      #              first form of that fix ran every remaining create.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 286 there.
+      #  173 passed  at `build/3-5-runtime` `b312eeec` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — the same five modules,
+      #              after round THIRTY. The served role was granted EVERY
+      #              table in `public`, which on a reused database is another
+      #              application's data — and at first start the coordination
+      #              tables do not exist yet, so that grant could only ever
+      #              reach tables this install did not create. Two narrow
+      #              halves replace it, both measured: `alter default
+      #              privileges` for what the migration owner creates, and a
+      #              catalogue JOIN for the coordination tables that already
+      #              exist (which emitted exactly one statement beside an
+      #              unrelated table, and left that table with no grants). The
+      #              list is DERIVED from `identity.TABLES` and
+      #              `migrations.LEDGER_TABLE`. Also: the bundled script never
+      #              created an alternate `OPENDOX_MIGRATION_PG_USER` and
+      #              failed under `ON_ERROR_STOP=1` with PostgreSQL's message
+      #              rather than one naming the variable; the install blocks
+      #              are fenced `bash`, because `read -rs -p` is not POSIX and
+      #              dash consumes the prompt as the variable name; and
+      #              `/readyz` bounds its own statements with `SET LOCAL` in a
+      #              transaction — session-level was measured to SURVIVE the
+      #              checkout and leak onto the next borrower.
+      #              SUPERSEDED by the entry below, at the same count on these
+      #              five; `pytest -q tests_runtime/` was 288 there.
+      #  173 passed  at `build/3-5-runtime` `2af6f119` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — UNCHANGED here because
+      #              round THIRTY-ONE's one real change needs a database. Its
+      #              finding — that a role with USAGE but no CREATE on the
+      #              selected schema would have PostgreSQL pick a later
+      #              `search_path` entry as the creation target — is MEASURED
+      #              FALSE: the unqualified `create table` raises `permission
+      #              denied for schema <sel>` and does not fall through, the
+      #              second time this act has measured that rule against a
+      #              finding assuming otherwise. What was taken is the
+      #              message: the guard asks for CREATE before the DDL now, so
+      #              the refusal names the schema and the grant instead of
+      #              arriving from inside a `create table`. The round's other
+      #              thread claimed this workflow's required step could not
+      #              collect `test_deploy_shape.py` for a `SyntaxError` that
+      #              is not there — `py_compile` on that blob is clean and
+      #              THIS JOB was green at the commit reviewed.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 289 there.
+      #  174 passed  at `build/3-5-runtime` `05e13af9` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — the same five modules,
+      #              after round THIRTY-TWO's four defects. A refusal was
+      #              still telling operators to run the `on all tables in
+      #              schema` grant round 30 removed. A COLUMN-level grant is a
+      #              write and `has_table_privilege` does not see it: measured
+      #              false on all four while the role held `UPDATE (checksum)`
+      #              — and a column grant from a THIRD PARTY survives this
+      #              run's revoke, so the ledger was reported narrowed while
+      #              the served role could still rewrite it. And the runbook's
+      #              `read … && printf …` prompts are not seen by `set -e`
+      #              (measured: EOF left the block running, status 0), while
+      #              three independent `create secret` calls left a half
+      #              configured install that could not be re-run.
+      #              SUPERSEDED by the entry below, at the same count on both
+      #              invocations; `pytest -q tests_runtime/` was 291 there.
+      #  174 passed  at `build/3-5-runtime` `fa67008b` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — UNCHANGED, because
+      #              round THIRTY-THREE replaces an assertion rather than
+      #              adding one. Round 29's `/`-excluding bound on the DSN
+      #              redaction leaked: a password holding BOTH a `/` and a
+      #              space fell to the plain branch, which stops at the space,
+      #              and `word@db.internal/opendox` stayed in the message. No
+      #              pattern both absorbs arbitrary userinfo and stops before
+      #              an unrelated later `@`, so the branch now runs to the
+      #              LAST `@` on the line — round 19's "redact MORE rather
+      #              than less", with the price stated in the case. And the
+      #              managed-database prerequisite accepted an EMPTY password
+      #              (`read` succeeds on an empty line) and would have
+      #              provisioned a login role with a blank credential, which
+      #              the bundled bootstrap refuses by name. SUPERSEDED by the
+      #              entry below; `pytest -q tests_runtime/` was 291 there.
+      #  181 passed  at `build/3-5-runtime` `bb84c6c6` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — SEVEN added, answering
+      #              rounds THIRTY-FOUR and THIRTY-FIVE. Four in the CLI: the
+      #              served and migration DSNs could select different schemas,
+      #              so a run applied and verified schema A while /readyz and
+      #              the API read schema B; uvicorn logged a failed lifespan
+      #              with the whole conninfo in the traceback while the JSON
+      #              beside it was redacted; and thirteen handlers — Copilot
+      #              named five — put an exception's own text into evidence
+      #              without `_safe_message`, which an AST walk now forbids as
+      #              a shape. Three in the deployment: the compose healthcheck
+      #              dialled `localhost` while the bind host is a setting, the
+      #              Secret subshell's `set -e` did not see a failed left side
+      #              of a pipeline, and the managed-database prerequisite ran
+      #              on after its first SQL error and would provision a role
+      #              with no password.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 298 there.
+      #  184 passed  at `build/3-5-runtime` `ad077e2f` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — THREE added, answering
+      #              round THIRTY-SIX, and one of its findings was round 34's
+      #              own: the preflight split `search_path` with
+      #              `.split(",")[0]` while the runner it feeds has had a
+      #              quote-aware parser since round 26, so `"tenant,blue"` and
+      #              `"tenant,red"` compared equal — and `shlex` had already
+      #              removed the quotes that make a comma part of a name,
+      #              because libpq's `options` has no quote processing at all.
+      #              The schema comparison also meant nothing across two
+      #              DATABASES. The readiness bound was per-statement for a
+      #              probe that runs four statements, so it is a deadline now
+      #              and `timeoutSeconds` is 25. And every grant in the
+      #              bootstrap named `public` while a DSN may select a schema,
+      #              with `alter default privileges` following a migration
+      #              owner that may not be this install's.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 301 there.
+      #  196 passed  at `build/3-5-runtime` `2e400a4a` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — TWELVE added, answering
+      #              an INDEPENDENT ADVERSARIAL REVIEW of `0860270f` rather
+      #              than a Copilot round: a malformed `OPENDOX_OIDC_ISSUER`
+      #              printed its own password out of `runtime status`, because
+      #              `_split_url` repeated CPython's `_checknetloc` message and
+      #              that message quotes the whole netloc; the walk that was
+      #              meant to forbid exactly that read ONE FILE and now reads
+      #              every module in the package; a `kid` naming a key of the
+      #              wrong TYPE made an anonymous request a 500, because
+      #              PyJWT's backend answers with a builtin and not a
+      #              `PyJWTError`; the two-DSN schema guard could not fire in
+      #              either shipped deployment, so the migration run is told
+      #              the served schema by name and refuses; and
+      #              `OPENDOX_OIDC_LEEWAY_SECONDS` was unbounded, which is
+      #              `exp` switched off by a number.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 317 there.
+      #  197 passed  at `build/3-5-runtime` `2c3e9bae` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — ONE added here and two
+      #              more in the DB-backed half, answering the FIVE open
+      #              threads in one batch. `schema_selected_by` took the FIRST
+      #              `-c search_path=` where libpq takes the LAST (measured:
+      #              `-csearch_path=old -csearch_path=new` then `show
+      #              search_path` prints `new`), so a DSN assembled by
+      #              appending an override was read as saying what it
+      #              overrode. `database_named_by` read the URI path alone, so
+      #              two URIs naming two databases in the QUERY both answered
+      #              `None` and passed the preflight — measured against
+      #              `PQconninfoParse` itself, where the query beats the path
+      #              and a repeated key takes the last. `/readyz` bounded each
+      #              PHASE and not the total: the real `plan()`/`drift()`
+      #              issue SEVEN statements under three bounds, 7 x 1.5s
+      #              against a declared 3.0s budget, all inside the probe's own
+      #              25s `timeoutSeconds` — so it is one deadline re-applied
+      #              before every statement now, and the probe refuses partway
+      #              rather than answering late. And
+      #              `project_repositories.remote_url` was free text nothing
+      #              judged, so a URL carrying a password was a legal row,
+      #              returned verbatim to every member of the project: refused
+      #              at the store and redacted at the JSON boundary and in the
+      #              object's `repr`, with an ordinary `ssh://git@host/…` left
+      #              exactly as stored.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 320 there.
+      #  198 passed  at `build/3-5-runtime` `61ab8576` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — ONE added here and one
+      #              in the DB-backed half, answering the review submitted at
+      #              this branch's own head. A25-3's served-schema guard was a
+      #              METHOD reached from `apply()` alone, so the two verbs
+      #              beside it never asked: measured at `056d1597`, `migrate
+      #              --plan` printed a plan for a run that would refuse, and a
+      #              confirmed `reset` — the verb that cannot be undone —
+      #              DROPPED the coordination table of a schema the
+      #              declaration says the API does not read. It is
+      #              module-level now, one definition and three callers. And
+      #              the credential-parameter test was a SUBSTRING search, so
+      #              `monkey` matched `key` and `sigma` matched `sig`: a valid
+      #              broker URL or git remote carrying `?monkey=1` was refused
+      #              as credential-bearing. Whole words now, with the compound
+      #              spellings (`access_token`, `X-Api-Key`, `sessionToken`)
+      #              still matching and the declared list unchanged.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 322 there.
+      #  200 passed  at `build/3-5-runtime` `3d587ae8` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — TWO added, the third
+      #              mini-batch RULED on openxFactory#656: the two-DSN guard
+      #              resolved only what the STRING says. Two DSNs that both
+      #              omit `dbname` both answered `None` and were read as
+      #              agreeing, while libpq defaults the database to the
+      #              CONNECTION USER — and this deployment's two identities
+      #              are different users by design (measured:
+      #              `postgresql://opendox:…@host:5432/` connects to
+      #              `opendox`). And `"$user"` is a search-path TOKEN compared
+      #              as a literal, so two roles' `"$user",public` agreed on
+      #              the string while PostgreSQL resolved two different
+      #              schemas (measured three ways, including that a schema
+      #              LITERALLY named `$user` is skipped too). Both now resolve
+      #              what the DSN leaves unsaid, and what cannot be resolved
+      #              before connecting is refused rather than assumed equal.
+      #              THE CURRENT FIGURE; the PR description states it at this
+      #              same commit, and `pytest -q tests_runtime/` is 324 here.
+      - name: pytest (runtime, hermetic)
+        run: >-
+          python -m pytest -q
+          tests_runtime/test_migration_shape.py
+          tests_runtime/test_schema_shape.py
+          tests_runtime/test_runtime_surface.py
+          tests_runtime/test_runtime_cli.py
+          tests_runtime/test_deploy_shape.py
+          --noconftest
+
+  # -------------------------------------------------------------------------
+  # THE DB-BACKED HALF, IN ITS OWN JOB — `split-opendox-two-layer-product`
+  # § 3.5/§ 3.6.
+  #
+  # A NEW JOB AND NOT MORE STEPS ABOVE, deliberately. `validate` is this
+  # repository's one REQUIRED status check (openDox-code#2, "Enforce validate
+  # as a required status check"), and a required check that needs a database
+  # service and a web framework to install is a required check that goes red
+  # for an outage. So the required job stays hermetic and this one carries the
+  # dependencies: a `postgres:16` service on the Hermes install's own CI shape
+  # (`xFactory-Hermes-Install/.github/workflows/ci.yml`), and
+  # `pip install -e ".[runtime,test]"`.
+  #
+  # IT IS NOT A REQUIRED CHECK AND THIS BLOCK IS WHERE THAT IS RECORDED.
+  # Making it one is a repository SETTING (`docs/branch-protection.md`), not a
+  # file, and it is a separate act with a separate owner — named here so the
+  # gap is visible rather than assumed.
+  #
+  # AND THAT IS RULED, not deferred by this act's own judgment:
+  # RULED openxFactory#656 comment 5701772032 (Brett Heap, 2026-09-16, by interactive multi-choice)
+  # answers Q-R3 — this job is ADVISORY now and becomes required in a separate
+  # DECLARED act. So the gap above is a scheduled act with an owner, and the
+  # required check stays hermetic in the meantime.
+  #
+  # WITHOUT `--noconftest`, because this is the job `tests_runtime/conftest.py`
+  # exists for: the per-test schema, the in-fixture RSA key pair and the token
+  # minter. Where `OPENDOX_TEST_DATABASE_URL` is unreachable a DEVELOPER's tree
+  # skips with the reason printed, and HERE IT FAILS: `CI` is set, and pytest
+  # exits 0 when every collected case is skipped, so a run whose `postgres:16`
+  # service failed to start would otherwise report green having made no
+  # database-backed assertion at all (`conftest._skip_or_fail`; Copilot review
+  # of openDox-code#25, round 5). This job supplies the service, so its absence
+  # here is this job's own defect and is reported as one.
+  runtime:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: opendox
+          # A throwaway CI credential for a service container reachable only
+          # from this job's own network namespace, torn down with the job. No
+          # real secret is ever written into a workflow file — the runtime's
+          # own DSNs are Secret references everywhere they appear
+          # (`deploy/kubernetes/base/`), and `tests_runtime/test_deploy_shape.py`
+          # refuses a committed credential value. Marked at the end of the line
+          # below on the estate's own precedent:
+          # `xFactory-Hermes-Install/.github/workflows/ci.yml` marks its
+          # identical Postgres password the same way.
+          POSTGRES_PASSWORD: opendox # NOSONAR # NOSONAR
+          POSTGRES_DB: opendox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # `--only-binary :all:` — SonarCloud `githubactions:S8541`, and it is a
+      # real hardening rather than a suppression: without it pip is allowed to
+      # build a dependency from an sdist, which runs that project's `setup.py`
+      # inside this job. Every package in the `runtime` extra publishes wheels
+      # for cpython 3.12 on linux (`psycopg[binary]` is asked for by name
+      # precisely so libpq never has to be built), so the flag costs nothing —
+      # measured in a clean venv on 2026-09-16: `pip install --only-binary :all:
+      # -e ".[runtime,test]"` resolves and installs, and `import fastapi,
+      # psycopg, jwt, httpx, uvicorn, opendox.runtime` succeeds. The local
+      # editable project itself is exempt from the flag, which is why `-e .`
+      # still works.
+      # A FOLDED SCALAR (`>-`) AND NOT A PLAIN ONE, and it is not a style
+      # choice: `--only-binary :all: -e` contains `: `, and in a plain YAML
+      # scalar a colon followed by a space is a mapping indicator. Written
+      # plainly the file does not parse — `yaml.scanner.ScannerError: mapping
+      # values are not allowed here` — and GitHub Actions then runs NO job from
+      # it at all, which is exactly what the previous head of this branch did:
+      # only SonarCloud reported, and `validate` and `runtime` never started.
+      # The step above uses the same form for the same reason.
+      - name: install the package with the runtime and test extras
+        run: >-
+          python -m pip install --only-binary :all: -e ".[runtime,test]"
+
+      - name: pytest (runtime, database-backed)
+        env:
+          # The same throwaway credential as the service block above, spelled
+          # as a DSN, and marked the same way and on the same precedent:
+          # `xFactory-Hermes-Install/.github/workflows/ci.yml` marks BOTH
+          # halves, its Postgres password and its DSN. Marking only the first
+          # leaves the secret scanner pointing at the second, which is what
+          # this act's first pass did. (The marker is written only at the end
+          # of the line below; a prose comment that spells it is itself read as
+          # a malformed suppression.)
+          OPENDOX_TEST_DATABASE_URL: postgresql://opendox:opendox@127.0.0.1:5432/opendox # NOSONAR
+        run: python -m pytest -q tests_runtime/

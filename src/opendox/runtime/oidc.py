@@ -1,0 +1,613 @@
+"""Bearer-token verification against the Keycloak broker, and the first-login
+row it writes.
+
+RULING Q2 (opensoft/openxFactory#656 comment 5542792997): "OIDC through the
+Keycloak broker being adopted in QA". So this runtime is a VERIFIER and never
+an issuer: it fetches the broker's published key set, checks the signature, the
+pinned issuer, the pinned audience and the expiry, and mints nothing. It never
+stores a raw token — `migrations/0001_…sql` has no column one could be stored
+in, which is the honest place to enforce that.
+
+DESIGN § D5's INVERSION IS REALIZED IN `principal_for`. "an account is a
+durable row, authentication delegates to the Keycloak broker, and authorization
+stops being a property of the request's origin. This is the largest conceptual
+change in the rulings and the easiest to under-read." A verified token
+therefore RESOLVES TO A ROW — upserted on first login — and every later
+authorization question is asked about that row, never about where the request
+came from. A loopback caller with no token is not privileged here.
+
+THE SHAPE IS `xFactory-Hermes-Install`'s `authz/oidc.py` (RULING Q2), with the
+three properties that file records and openDox needs unchanged:
+
+  * **An asymmetric ALGORITHM ALLOW-LIST**, checked against the token header
+    before verification, which is what defeats the classic `alg: none`
+    downgrade. openDox refuses a symmetric algorithm one step EARLIER as well,
+    at configuration time (`config.load_settings`), because a runtime
+    configured to accept `HS256` would verify tokens signed with the public key
+    anybody can fetch, and discovering that at the first request means it is
+    already serving.
+  * **A key-set cache on a MONOTONIC clock** with a refresh on `kid` miss, for
+    key rotation. Monotonic and not wall time because this host's clock can
+    step backwards, and a cache whose freshness depended on it would serve a
+    stale key set for as long as the step.
+  * **Typed, non-disclosing errors.** Every failure carries a stable machine
+    `code` and never the token.
+
+WHAT openDox DOES NOT TAKE from that file: its layer-scope claim and its scope
+vocabulary. Hermes is a three-layer product and its tokens carry a layer;
+openDox is single-layer, so a `layer` claim here would be a shape copied
+without a meaning. Authorization in this runtime is `memberships.role` — a row,
+per D5 — and the token's only job is to say WHO.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
+
+import httpx
+import jwt
+from jwt import PyJWK, PyJWKSet
+
+DEFAULT_JWKS_TIMEOUT_SECONDS = 5.0
+
+#: How long a `kid` MISS is remembered before another outbound refresh is
+#: allowed. Copilot's review of openDox-code#25 named the hole this closes,
+#: critical and correct: without it every token carrying an unknown `kid`
+#: forced an immediate fetch that bypassed the TTL, WHILE THE CACHE LOCK WAS
+#: HELD — so a caller sending random `kid` headers turned one request into one
+#: outbound broker request and serialized every other verification behind it.
+#:
+#: A miss still refreshes ONCE, which is what key rotation needs; what the
+#: cooldown removes is the second, third and thousandth refresh in the same
+#: few seconds. Short, because a rotation should be picked up in seconds, not
+#: minutes — the cost of being wrong here is one extra fetch, and the cost of
+#: having no cooldown is the broker taking the traffic.
+DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS = 10.0
+
+#: How long a FAILED key-set load is remembered before another one is
+#: attempted.
+#:
+#: A failed load leaves the cache exactly as it was — no key set, or a stale
+#: one, and the TTL stamp untouched — so the next request re-enters the refresh
+#: branch and fetches again. Under a broker outage that is one outbound fetch
+#: PER REQUEST, each waiting the full `DEFAULT_JWKS_TIMEOUT_SECONDS` while
+#: holding the cache lock, so every other verification queues behind it and the
+#: worker pool is spent waiting on a broker that is already down (Copilot
+#: review of openDox-code#25, round 27). It is the same amplification the miss
+#: cooldown removes, reached by a failure instead of by an unknown `kid`.
+#:
+#: THE COOLDOWN NEVER SERVES A KEY SET. It replaces a fetch with the failure
+#: that fetch already produced, so verification stays fail-closed and only the
+#: outbound traffic is bounded. Ten seconds, for the miss cooldown's reason: a
+#: broker that comes back is picked up in seconds, and the cost of being wrong
+#: is one extra fetch.
+DEFAULT_FAILED_REFRESH_COOLDOWN_SECONDS = 10.0
+
+
+class OidcError(Exception):
+    """Base class for token-validation failures. Carries no secret material."""
+
+    code = "auth.invalid_token"
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or self.code)
+
+
+class MalformedTokenError(OidcError):
+    code = "auth.malformed_token"
+
+
+class UnsupportedAlgorithmError(OidcError):
+    code = "auth.unsupported_algorithm"
+
+
+class InvalidSignatureError(OidcError):
+    code = "auth.invalid_signature"
+
+
+class InvalidIssuerError(OidcError):
+    code = "auth.invalid_issuer"
+
+
+class InvalidAudienceError(OidcError):
+    code = "auth.invalid_audience"
+
+
+class TokenExpiredError(OidcError):
+    code = "auth.token_expired"
+
+
+class MissingClaimError(OidcError):
+    code = "auth.missing_claim"
+
+
+class IdentityUnavailableError(OidcError):
+    """The broker's signing keys could not be resolved."""
+
+    code = "auth.identity_unavailable"
+
+
+@dataclass(frozen=True)
+class Claims:
+    """The validated, non-secret claims of one access token.
+
+    `raw` deliberately carries the subject and nothing else: a claims object
+    reaches a log line the first time somebody debugs an authorization
+    refusal, and a copy of the whole token payload is the wrong thing to have
+    put there.
+    """
+
+    subject: str
+    issuer: str
+    audience: str
+    email: str | None = None
+    display_name: str | None = None
+    expires_at: int | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@runtime_checkable
+class JwksSource(Protocol):
+    """Where a key set comes from: ONE method, and this is the whole contract.
+
+    THE ANNOTATION WAS A UNION OF THE TWO IMPLEMENTATIONS THIS MODULE SHIPS,
+    and neither `CachingJwks` nor the suites ever asked for more than `load()`:
+    the tests already pass counting and rotating sources of their own, and a
+    deployment that fetched its key set from a secret store would be a third.
+    A union of concrete classes said a false thing about the surface and made
+    every legitimate third source a type error (Copilot review of
+    openDox-code#25, round 10). `runtime_checkable` so `isinstance` can be
+    asked the same question the annotation states.
+
+    `load()` returns the RAW JWKS document (`{"keys": [...]}`) and raises
+    `IdentityUnavailableError` when it cannot be read — the cache turns the
+    document into a `PyJWKSet` and owns the freshness rules.
+    """
+
+    def load(self) -> dict[str, Any]:
+        ...                                            # pragma: no cover
+
+
+class FileJwksSource:
+    """Load a key set from a local file — tests and air-gapped installs."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+
+    def load(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        # `ValueError` AND NOT `json.JSONDecodeError`: a file that is not UTF-8
+        # raises `UnicodeDecodeError` out of `read_text`, which is a
+        # `ValueError` and NOT a `JSONDecodeError` — so it escaped this handler
+        # and surfaced as a 500 from the air-gapped path that this class exists
+        # to make a typed refusal (Copilot review of openDox-code#25, round 29,
+        # suppressed). `JSONDecodeError` is itself a `ValueError`, so naming
+        # the base covers both and is the same rule `HttpJwksSource` already
+        # states one class below.
+        except (OSError, ValueError) as exc:
+            raise IdentityUnavailableError(
+                f"JWKS file could not be read at {self._path}") from exc
+        if not isinstance(data, dict):
+            raise IdentityUnavailableError("JWKS file did not parse to an object")
+        return data
+
+
+class HttpJwksSource:
+    """Fetch the key set from the broker's published JWKS URL."""
+
+    def __init__(self, url: str, *,
+                 timeout: float = DEFAULT_JWKS_TIMEOUT_SECONDS) -> None:
+        self._url = url
+        self._timeout = timeout
+
+    def load(self) -> dict[str, Any]:
+        try:
+            response = httpx.get(self._url, timeout=self._timeout)
+            response.raise_for_status()
+            data = response.json()
+        # `ValueError` ALONE covers the JSON case: `json.JSONDecodeError` is a
+        # subclass of it (measured), so naming both is redundant and reads as
+        # if they were two different failures.
+        except (httpx.HTTPError, ValueError) as exc:
+            raise IdentityUnavailableError(
+                "the broker's JWKS endpoint could not be fetched") from exc
+        if not isinstance(data, dict):
+            raise IdentityUnavailableError(
+                "the broker's JWKS endpoint did not return an object")
+        return data
+
+
+class CachingJwks:
+    """A key-set cache that refreshes on a MONOTONIC TTL and on a `kid` miss."""
+
+    def __init__(self, source: JwksSource, *,
+                 ttl_seconds: float,
+                 miss_cooldown_seconds: float =
+                 DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS,
+                 failed_refresh_cooldown_seconds: float =
+                 DEFAULT_FAILED_REFRESH_COOLDOWN_SECONDS) -> None:
+        self._source = source
+        self._ttl = ttl_seconds
+        self._miss_cooldown = miss_cooldown_seconds
+        self._failure_cooldown = failed_refresh_cooldown_seconds
+        self._lock = threading.Lock()
+        self._keyset: PyJWKSet | None = None
+        self._loaded_monotonic = 0.0
+        self._last_miss_refresh = float("-inf")
+        self._failed_monotonic = float("-inf")
+        self._failure: str | None = None
+
+    def _load_keyset(self) -> PyJWKSet:
+        raw = self._source.load()
+        try:
+            return PyJWKSet.from_dict(raw)
+        except (jwt.PyJWKError, jwt.PyJWKSetError, jwt.InvalidKeyError,
+                KeyError, TypeError, AttributeError) as exc:
+            # `PyJWKSetError` is NOT a subclass of `PyJWKError` and has to be
+            # named separately — measured, not assumed: a broker serving
+            # `{"keys": []}` (a realm mid-rotation, a misconfigured proxy)
+            # raises it, and without this clause it would escape as an
+            # untyped exception past the 401 mapping in `app.get_principal`
+            # and surface as a 500.
+            raise IdentityUnavailableError(
+                "the broker's JWKS document could not be parsed") from exc
+
+    def _refresh_locked(self) -> PyJWKSet:
+        """Load the key set, WITH THE LOCK HELD, remembering a failure.
+
+        A failed load used to leave the cache untouched — no key set, or a
+        stale one, and `_loaded_monotonic` unchanged — so the next request
+        re-entered the refresh branch and fetched again. Under a broker outage
+        that is one outbound fetch per request, each waiting the source's whole
+        timeout with this lock held, so every other verification queues behind
+        it (Copilot review of openDox-code#25, round 27). See
+        `DEFAULT_FAILED_REFRESH_COOLDOWN_SECONDS`.
+
+        WHAT THE COOLDOWN DOES NOT DO is serve anything: inside it the caller
+        gets the failure the last fetch produced, so a stale key set is never
+        used past its TTL and verification stays fail-closed. The remembered
+        failure is re-raised as a NEW exception carrying the same message —
+        re-raising the object would accumulate the tracebacks of every request
+        the cooldown answered.
+        """
+        now = time.monotonic()
+        if (self._failure is not None
+                and (now - self._failed_monotonic) < self._failure_cooldown):
+            raise IdentityUnavailableError(self._failure) from None
+        try:
+            keyset = self._load_keyset()
+        except IdentityUnavailableError as exc:
+            self._failed_monotonic = time.monotonic()
+            self._failure = str(exc)
+            raise
+        self._failure = None
+        self._keyset = keyset
+        self._loaded_monotonic = time.monotonic()
+        return keyset
+
+    def keyset(self, *, force_refresh: bool = False) -> PyJWKSet:
+        """The cached key set, refreshed at most once per TTL boundary.
+
+        THE CLOCK IS READ INSIDE THE LOCK, and the stamp is taken AFTER the
+        fetch. Reading `time.monotonic()` before acquiring it meant every
+        caller that crossed a TTL boundary together carried its own pre-lock
+        `now` through the wait and re-evaluated `stale` against it — so each
+        one in turn fetched the JWKS, serially, and the single refresh the
+        cache exists to make became one refresh PER WAITER at exactly the
+        moment the broker is busiest (Copilot review of openDox-code#25). The
+        first waiter now refreshes and the rest see a fresh stamp and take the
+        cached set; stamping after the fetch also means a slow broker does not
+        have its own latency counted against the next TTL.
+        """
+        with self._lock:
+            now = time.monotonic()
+            stale = (now - self._loaded_monotonic) >= self._ttl
+            if force_refresh or self._keyset is None or stale:
+                self._refresh_locked()
+            return self._keyset
+
+    def select_key(self, kid: str | None, alg: str | None = None) -> PyJWK:
+        """The broker key for this token's `kid` AND its `alg`.
+
+        `alg` IS PART OF THE SELECTION, not a detail the decoder sorts out
+        later. Selecting by `kid` alone picked a key whose TYPE could not carry
+        the header's algorithm, and PyJWT answers that with a plain
+        `TypeError("Expecting a PEM-formatted key.")` — not a `PyJWTError` — so
+        it escaped `_decode`'s seven typed clauses, escaped `verify`, and
+        escaped `app.get_principal`, which catches `OidcError`. A realm
+        publishing an RSA and an EC signing key (a Keycloak realm the moment it
+        has an ES256 provider beside the default RS256 one) let any ANONYMOUS
+        caller turn `GET /api/v1/users/me` into a 500 with a token that need
+        not verify and need not be well-formed past its header: both `kid`s are
+        public facts from the unauthenticated JWKS endpoint (independent
+        adversarial review of openDox-code#25, A25-2).
+
+        A key that cannot carry the algorithm is NOT A MATCH, which is also the
+        right answer during a rotation that changes key type: the miss path
+        refreshes once and then refuses by name.
+        """
+        keyset = self.keyset()
+        key = self._match(keyset, kid, alg)
+        if key is None:
+            # Key rotation: refresh ONCE, and at most once per cooldown — see
+            # `DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS` for the amplification
+            # that bound removes — and ANSWER from whatever that one refresh
+            # produced. The claim and the fetch are one lock acquisition, so a
+            # thread the cooldown denies waits for the fetch in flight instead
+            # of reading the key set it already had and refusing a valid token
+            # (Copilot review of openDox-code#25, rounds 15 and 16). See
+            # `keyset_after_miss`.
+            key = self._match(self.keyset_after_miss(), kid, alg)
+        if key is None:
+            raise InvalidSignatureError("no broker signing key matched the token")
+        return key
+
+    def _may_refresh_on_miss(self) -> bool:
+        """True at most once per cooldown, measured on the MONOTONIC clock.
+
+        Under the same lock the cache uses, so two threads missing at once
+        produce one refresh rather than two.
+
+        AND THE CLOCK IS READ INSIDE THE LOCK — the same correction `keyset`
+        took, in the method beside it. A thread that waited on the lock longer
+        than the cooldown carried its pre-lock `now` through the wait and was
+        refused a refresh the cooldown had in fact already allowed: the
+        decision is serialized, so the reading it is made against has to be
+        the serialized one (Copilot review of openDox-code#25, round 9).
+        """
+        with self._lock:
+            return self._claim_refresh_locked()
+
+    def _claim_refresh_locked(self) -> bool:
+        """`_may_refresh_on_miss`'s decision, WITH THE LOCK ALREADY HELD."""
+        now = time.monotonic()
+        if (now - self._last_miss_refresh) < self._miss_cooldown:
+            return False
+        self._last_miss_refresh = now
+        return True
+
+    def keyset_after_miss(self) -> PyJWKSet:
+        """The key set to answer a `kid` MISS with — claim and fetch under ONE lock.
+
+        The claim and the refresh used to be two acquisitions: a thread could
+        be denied by the cooldown, leave the lock, and read the cache BEFORE
+        the claiming thread had taken the lock to fetch — so it saw the OLD key
+        set and rejected a valid token carrying a newly rotated `kid`. Re-reading
+        after the denial narrowed that window; it did not close it, because the
+        denial and the re-read were themselves two acquisitions (Copilot review
+        of openDox-code#25, rounds 15 and 16).
+
+        Holding the lock across the claim AND the fetch closes it: a denied
+        thread cannot get the lock until the claiming thread's fetch has
+        finished, so what it reads is the fetch's result. The cooldown still
+        bounds FETCHES — exactly one per cooldown — which is the property it
+        exists for; what it no longer bounds is ANSWERS.
+
+        `keyset()` already holds the lock across `_load_keyset()`, so this adds
+        no new property: the same lock is held across the same call.
+        """
+        with self._lock:
+            if self._claim_refresh_locked():
+                self._refresh_locked()
+            keyset = self._keyset
+        if keyset is None:                       # never primed; prime it now
+            return self.keyset()
+        return keyset
+
+    @staticmethod
+    def _match(keyset: PyJWKSet, kid: str | None,
+               alg: str | None = None) -> PyJWK | None:
+        keys = [key for key in keyset.keys if _key_can_carry(key, alg)]
+        if not keys:
+            return None
+        if kid is None:
+            # A token with no `kid` is only unambiguous where the broker
+            # publishes exactly one key; guessing among several is how a
+            # rotation becomes an outage nobody can explain.
+            return keys[0] if len(keys) == 1 else None
+        for key in keys:
+            if key.key_id == kid:
+                return key
+        return None
+
+
+#: The JWK key TYPE each JWS algorithm family needs, by the algorithm's own
+#: prefix. RFC 7518 § 3.1: `RS*`/`PS*` are RSA, `ES*` is an elliptic curve,
+#: `EdDSA` is an octet key pair, `HS*` is a shared secret (refused at
+#: configuration time, and listed so the mapping is total rather than silent).
+_KEY_TYPE_FOR_ALGORITHM = {"RS": "RSA", "PS": "RSA", "ES": "EC",
+                           "Ed": "OKP", "HS": "oct"}
+
+
+def _key_can_carry(key: PyJWK, alg: str | None) -> bool:
+    """Whether this published key's TYPE can carry a token signed with `alg`.
+
+    Asked at SELECTION, because the alternative is asking the cryptography
+    backend, which answers with a builtin exception rather than a typed one
+    (see `CachingJwks.select_key`). `alg` of `None` selects on `kid` alone, the
+    way it did before — a header with no `alg` is refused by the allow-list
+    check in `TokenVerifier.verify` long before a key is chosen.
+
+    A key whose own type this runtime does not recognise is NOT assumed usable:
+    an unknown `kty` cannot be shown to carry the algorithm, and a key set is
+    something a broker publishes rather than something this runtime controls.
+    """
+    if alg is None:
+        return True
+    wanted = _KEY_TYPE_FOR_ALGORITHM.get(alg[:2])
+    if wanted is None:
+        return False
+    published = getattr(key, "key_type", None)
+    if published is None:                     # PyJWT that does not expose it
+        published = (getattr(key, "_jwk_data", {}) or {}).get("kty")
+    return published == wanted
+
+
+class TokenVerifier:
+    """Validate a bearer token against the pinned issuer, audience and keys."""
+
+    def __init__(self, *, issuer: str, audience: str, jwks: CachingJwks,
+                 algorithms: tuple[str, ...] = ("RS256",),
+                 leeway_seconds: int = 60,
+                 email_claim: str = "email",
+                 name_claim: str = "name") -> None:
+        self._issuer = issuer
+        self._audience = audience
+        self._jwks = jwks
+        self._algorithms = tuple(algorithms)
+        self._leeway = leeway_seconds
+        self._email_claim = email_claim
+        self._name_claim = name_claim
+
+    @property
+    def issuer(self) -> str:
+        return self._issuer
+
+    @property
+    def audience(self) -> str:
+        return self._audience
+
+    def probe_keys(self) -> None:
+        """Load the key set — the readiness probe; raises on unavailability."""
+        self._jwks.keyset()
+
+    def verify(self, token: str) -> Claims:
+        """Return validated :class:`Claims`, or raise an :class:`OidcError`."""
+        if not token or token.count(".") != 2:
+            raise MalformedTokenError(
+                "token is not a well-formed JWS compact serialization")
+
+        # READING THE HEADER BEFORE VERIFYING IS NOT A MISSING CHECK, it is the
+        # only possible order: the header carries the `kid` that selects the
+        # signing key and the `alg` the allow-list is applied to, and neither
+        # can be known until it is read. NOTHING from this header is trusted —
+        # `alg` is checked against the allow-list below, and the signature is
+        # verified against the broker's own key in `_decode`, which runs with
+        # `verify_signature: True` and a required-claim list. The marker on the
+        # call below suppresses `python:S5659` on that measurement — and it is
+        # written only THERE, because a prose comment that spells the marker is
+        # itself read as a malformed suppression (`python:S7632`, which is what
+        # this act's first pass earned).
+        try:
+            header = jwt.get_unverified_header(token)  # NOSONAR
+        except jwt.PyJWTError as exc:
+            raise MalformedTokenError("token header could not be parsed") from exc
+
+        alg = header.get("alg")
+        if alg not in self._algorithms:
+            raise UnsupportedAlgorithmError(
+                f"token algorithm is not in the accepted set "
+                f"{list(self._algorithms)}")
+
+        signing_key = self._jwks.select_key(header.get("kid"), alg)
+        claims = self._decode(token, signing_key)
+
+        subject = claims.get("sub")
+        if not isinstance(subject, str) or not subject:
+            raise MissingClaimError("token has no usable subject claim")
+
+        email = claims.get(self._email_claim)
+        name = claims.get(self._name_claim)
+        return Claims(
+            subject=subject,
+            issuer=str(claims.get("iss") or self._issuer),
+            audience=self._audience,
+            email=email if isinstance(email, str) and email else None,
+            display_name=name if isinstance(name, str) and name else None,
+            expires_at=claims.get("exp"),
+            raw={"sub": subject},
+        )
+
+    def _decode(self, token: str, signing_key: PyJWK) -> dict[str, Any]:
+        """`jwt.decode` with this runtime's pins, and its errors made ours.
+
+        A METHOD OF ITS OWN because the mapping is seven clauses and `verify`
+        is the readable part: with both in one body `verify`'s cognitive
+        complexity was 17 (SonarCloud `python:S3776`, limit 15). The seven
+        clauses are also exactly what a reader wants to read on its own — each
+        turns a PyJWT exception into an `OidcError` subclass carrying a stable
+        machine `code` and never the token.
+        """
+        try:
+            return jwt.decode(
+                token,
+                key=signing_key.key,
+                algorithms=list(self._algorithms),
+                audience=self._audience,
+                issuer=self._issuer,
+                leeway=self._leeway,
+                options={
+                    "require": ["exp", "iss", "aud", "sub"],
+                    "verify_signature": True,
+                    "verify_exp": True,
+                    "verify_iss": True,
+                    "verify_aud": True,
+                },
+            )
+        except jwt.ExpiredSignatureError as exc:
+            raise TokenExpiredError("token has expired") from exc
+        except jwt.InvalidIssuerError as exc:
+            raise InvalidIssuerError(
+                "token issuer is not the pinned broker") from exc
+        except jwt.InvalidAudienceError as exc:
+            raise InvalidAudienceError(
+                "token audience is not this runtime") from exc
+        except jwt.MissingRequiredClaimError as exc:
+            raise MissingClaimError("token is missing a required claim") from exc
+        except (jwt.InvalidSignatureError, jwt.InvalidAlgorithmError) as exc:
+            raise InvalidSignatureError("token signature is invalid") from exc
+        except jwt.PyJWTError as exc:
+            raise OidcError("token could not be validated") from exc
+        except (TypeError, ValueError) as exc:
+            # NOTHING UNTYPED LEAVES THIS METHOD. PyJWT reaches for the
+            # cryptography backend with the key it is handed, and that backend
+            # raises plain builtins — `TypeError("Expecting a PEM-formatted
+            # key.")` for a key of the wrong type — which are not `PyJWTError`
+            # and so passed every clause above, out through `verify` and out
+            # through `app.get_principal` as a 500 for an anonymous request
+            # (independent adversarial review of openDox-code#25, A25-2). The
+            # selection above no longer hands over such a key; this is the
+            # second wall, so a future PyJWT or backend shape cannot reopen the
+            # same hole. The exception's own text is not repeated: it is a
+            # library's, about a key, and this method never says anything
+            # about the token either.
+            raise InvalidSignatureError(
+                "token could not be validated against the broker's key "
+                f"({type(exc).__name__})") from None
+
+
+def build_verifier(settings: Any) -> TokenVerifier:
+    """The verifier one runtime process serves with, from its settings.
+
+    Takes `config.RuntimeSettings` (typed loosely so this module never imports
+    the config module and the two can be read in either order).
+    """
+    jwks = CachingJwks(HttpJwksSource(settings.jwks_url()),
+                       ttl_seconds=settings.oidc_jwks_ttl_seconds)
+    return TokenVerifier(issuer=settings.oidc_issuer,
+                         audience=settings.oidc_audience,
+                         jwks=jwks,
+                         algorithms=tuple(settings.oidc_algorithms),
+                         leeway_seconds=settings.oidc_leeway_seconds)
+
+
+def principal_for(store: Any, claims: Claims) -> Any:
+    """The DURABLE ROW a verified token resolves to (design § D5's inversion).
+
+    Upserts on every login: the first one creates the account, later ones
+    refresh what the broker last said about it and stamp `last_seen_at`. The
+    returned `identity.User` — not the token, not the request's origin — is the
+    subject of every authorization question this runtime asks.
+
+    `store` is an `identity.CoordinationStore`; typed loosely for the same
+    reason `build_verifier`'s argument is.
+    """
+    return store.upsert_user(issuer=claims.issuer, subject=claims.subject,
+                             email=claims.email,
+                             display_name=claims.display_name)

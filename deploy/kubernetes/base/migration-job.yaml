@@ -1,0 +1,213 @@
+# The PRIVILEGED one-shot migration executor — the Kubernetes counterpart of
+# the compose package's `migrate` profile, and the only workload in this
+# namespace that receives `OPENDOX_MIGRATION_DATABASE_URL`.
+#
+# A Job and not an initContainer of the Deployment: an initContainer would run
+# on every pod restart with the privileged DSN mounted into the same pod spec
+# as the served application, which is the separation this file exists to keep.
+#
+# IT HAS A FIXED NAME, AND RE-RUNNING IT IS A DELIBERATE ACT. A Job's pod
+# template is immutable, so a second `kubectl apply` of this manifest after the
+# first run does NOT start a new migration — it fails to patch the template and
+# the later migrations are silently not applied (Copilot review of
+# openDox-code#25). That is a property of Jobs, not of this file, and the
+# answer is to say so rather than to pretend an apply loop covers it. The
+# runbook (`docs/runtime.md` § 6) states the re-run:
+#
+#     kubectl -n opendox delete job opendox-migrate --ignore-not-found
+#     kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
+#
+# `ttlSecondsAfterFinished` below lets the cluster reap a finished run on its
+# own, so the delete is usually a no-op; it is in the runbook because "usually"
+# is not a migration guarantee.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: opendox-migrate
+  namespace: opendox
+spec:
+  # SIX ATTEMPTS, NOT TWO, AND THE REASON IS THE WAIT BELOW. The initContainer
+  # can only prove that something is LISTENING on 5432 — it carries no
+  # credential, deliberately, so it cannot open a session — and Postgres
+  # accepts the socket while still answering "the database system is starting
+  # up" during crash recovery or a slow restart. So the wait is not a
+  # readiness proof in that case, the migration container meets a server that
+  # refuses sessions, and two attempts could exhaust the Job while the database
+  # came up seconds later — leaving the runtime unready until an operator
+  # deleted and reapplied it (Copilot review of openDox-code#25, round 11).
+  # Kubernetes backs a failed Job's pods off exponentially (10s, 20s, 40s …),
+  # so six attempts is about ten minutes of patience for a database that is
+  # recovering, and no wait at all for one that is up.
+  backoffLimit: 6
+  # Reaped an hour after it finishes, so the next `kubectl apply` meets no
+  # immutable template. See the note above for why the runbook still names the
+  # explicit delete.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opendox-migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # THE JOB WAITS FOR POSTGRES, because Kubernetes does not order the
+      # resources a single `kubectl apply` creates. On a clean install this Job
+      # and the Postgres StatefulSet are admitted together, so the first
+      # migration attempt could run against a server still initializing its
+      # data directory; with `backoffLimit: 2` the whole Job could then be
+      # marked Failed while the database came up seconds later, leaving the
+      # runtime unready until an operator deleted and reapplied it (Copilot
+      # review of openDox-code#25). The wait is an initContainer and not a
+      # larger `backoffLimit` because a retry budget is a guess and a readiness
+      # gate is an answer.
+      #
+      # It uses the SAME image as the migration container and only that
+      # image's PYTHON — `deploy/compose/Dockerfile` adds `git` and nothing
+      # else, so there is no `pg_isready` here, and pulling a second image in
+      # would put an unpinned dependency in the install path. The probe is a
+      # TCP CONNECT and carries no credential: the official `postgres` image
+      # serves its first-start `initdb` over a unix socket only and does not
+      # listen on 5432 until it is ready for clients, so an open port is
+      # exactly the fact this wait needs, and asking for it needs no DSN in a
+      # container that should not have one.
+      #
+      # AND IT IS NOT A READINESS PROOF FOR A RESTART, which is why
+      # `backoffLimit` above is six. A server recovering from an unclean stop
+      # LISTENS while it replays, and answers sessions with "the database
+      # system is starting up"; a TCP connect cannot tell that from ready, and
+      # the only things that can — `pg_isready`, a real connection — need
+      # either a second image in the install path or a credential in a
+      # container this file keeps credential-free. The migration container is
+      # the honest probe for that case: it opens a real session, fails if the
+      # server will not take one, and the Job's retry budget is what makes that
+      # a wait rather than a failure (Copilot review of openDox-code#25,
+      # round 11).
+      initContainers:
+        - name: wait-for-postgres
+          image: ghcr.io/opensoft/opendox-runtime:0.0.0
+          env:
+            # THE ADDRESS IS OVERLAY-CONFIGURABLE, and an EMPTY HOST means
+            # "there is nothing here to wait for". The base ships Postgres and
+            # the default names its Service, but the base also supports
+            # replacing it with a MANAGED database — in which case that
+            # Service does not exist, and a hard-coded wait spent its whole
+            # budget and failed the Job before the configured DSN was ever
+            # used (Copilot review of openDox-code#25).
+            - name: OPENDOX_MIGRATION_WAIT_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: migration_wait_host
+            - name: OPENDOX_MIGRATION_WAIT_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: migration_wait_port
+          command:
+            - python3
+            - -c
+            - |
+              import os, socket, sys, time
+              host = os.environ.get("OPENDOX_MIGRATION_WAIT_HOST", "").strip()
+              if not host:
+                  # A managed database: nothing in this cluster to wait for.
+                  sys.exit(0)
+              port = int(os.environ.get("OPENDOX_MIGRATION_WAIT_PORT") or 5432)
+              # FOUR MINUTES ON THE CLOCK, not 120 attempts that each cost an
+              # unknown amount of it. `create_connection(..., timeout=2)` can
+              # spend its whole 2s before the `sleep(2)`, so the counted loop
+              # ran for up to 480s while the message it ends with said 240s —
+              # and a Job whose retry budget is stated in the runbook then took
+              # twice what the runbook said (Copilot review of openDox-code#25,
+              # round 19, suppressed). A deadline is the same four minutes
+              # whatever each attempt costs: longer than a first-start initdb,
+              # shorter than a human's patience.
+              deadline = time.monotonic() + 240
+              while True:
+                  try:
+                      with socket.create_connection((host, port), timeout=2):
+                          sys.exit(0)
+                  except OSError:
+                      pass
+                  if time.monotonic() >= deadline:
+                      break
+                  time.sleep(min(2, max(0, deadline - time.monotonic())))
+              sys.stderr.write(
+                  f"{host}:{port} did not accept connections in 240s\n")
+              sys.exit(1)
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      containers:
+        - name: migrate
+          image: ghcr.io/opensoft/opendox-runtime:0.0.0
+          # `command:`, for the reason the Deployment states: the image has a
+          # `CMD` and no `ENTRYPOINT`, so `args:` alone leaves Kubernetes with
+          # no executable.
+          command: ["opendox-runtime", "runtime", "migrate"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            # THE PRIVILEGED DSN AND NOTHING ELSE. `opendox-runtime runtime migrate`
+            # reads `load_migration_settings`, which requires this variable
+            # alone, so this pod carries no served identity and no broker
+            # binding. It used to also receive `OPENDOX_DATABASE_URL` from the
+            # same Secret purely to satisfy the served loader — which made any
+            # path reading `settings.database_url` in this pod
+            # schema-privileged and defeated the boundary this Job exists to
+            # keep (Copilot review of openDox-code#25).
+            - name: OPENDOX_MIGRATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: opendox-db-migration
+                  key: dsn
+            - name: OPENDOX_MIGRATIONS_DIR
+              value: "migrations"
+            # A ROLE NAME, not a credential; see the compose file's note.
+            # FROM THE ConfigMap, because it must MATCH the user in the
+            # `opendox-db-runtime` Secret's DSN — and that DSN is created out
+            # of band, so an overlay that serves as another role and a Job
+            # that narrows `opendox_runtime` would leave the real served role
+            # able to rewrite the migration ledger (Copilot review of
+            # openDox-code#25). One value, one place, named in the runbook
+            # beside the Secret.
+            - name: OPENDOX_RUNTIME_PG_ROLE
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: runtime_pg_role
+            # AND WHERE THE SERVED APPLICATION READS. A schema NAME and never a
+            # credential, which is why a workload that must not hold the served
+            # DSN can be told it — and it has to be told, because the two DSNs
+            # live in two workloads and the configuration-time comparison of
+            # them could therefore never fire in a shipped deployment
+            # (independent adversarial review of openDox-code#25, A25-3). The
+            # run refuses rather than applying DDL to a schema the API will not
+            # read. From the SAME `pg_schema` value the first-start bootstrap
+            # grants in, so one edit moves the schema, its grants and this
+            # refusal together.
+            - name: OPENDOX_SERVED_SCHEMA
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: pg_schema
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

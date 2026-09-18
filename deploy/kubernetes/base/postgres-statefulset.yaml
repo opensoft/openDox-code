@@ -1,0 +1,147 @@
+# The single-node Postgres this base ships, on the Hermes install's shape.
+# An environment with a managed Postgres drops this resource in its overlay and
+# points `OPENDOX_DATABASE_URL` elsewhere; nothing else in the base changes,
+# which is the point of the DSN being a Secret reference rather than a host
+# name assembled from parts.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: opendox-postgres
+  namespace: opendox
+spec:
+  serviceName: opendox-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opendox-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opendox-postgres
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: opendox
+            - name: POSTGRES_USER
+              value: opendox
+            # BY REFERENCE, never a literal. The Secret is created out of band
+            # (or by the platform's secret store); this repository commits its
+            # NAME and its key and no value.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: opendox-postgres
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # THE LEAST-PRIVILEGED ROLE THE DEPLOYMENT CONNECTS AS. The base
+            # used to start this Postgres with the `opendox` role alone while
+            # the Deployment's `opendox-db-runtime` Secret named another one,
+            # so a fresh base install either could not authenticate at all or
+            # had to point the served runtime at the schema-owning role —
+            # which is the separation the whole layout exists to keep (Copilot
+            # review of openDox-code#25). The init script below creates it on
+            # the volume's FIRST start, exactly as the compose package does.
+            #
+            # FROM THE SAME ConfigMap KEY THE MIGRATION JOB NARROWS. This was
+            # a literal while the Job read `runtime_pg_role`, so an overlay
+            # that changed the documented served role created one role and
+            # narrowed another — a startup failure, or the real served role
+            # left able to write the ledger (Copilot review of
+            # openDox-code#25). Creation, narrowing and the served DSN's user
+            # are one name; two of them are these two references.
+            - name: OPENDOX_RUNTIME_PG_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: runtime_pg_role
+            - name: OPENDOX_RUNTIME_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: opendox-postgres
+                  key: runtime-password
+            # AND THE MIGRATION OWNER THE BOOTSTRAP AIMS DEFAULT PRIVILEGES AT.
+            # From the same ConfigMap an overlay edits when it repoints
+            # `opendox-db-migration` at another owner; empty is the bundled
+            # shape and the script then uses `POSTGRES_USER` (Copilot review of
+            # openDox-code#25, round 12).
+            - name: OPENDOX_MIGRATION_PG_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: migration_pg_user
+            # AND THE SCHEMA EVERY ONE OF THOSE GRANTS IS MADE IN. A runtime
+            # DSN may select one with `options=-c search_path=<schema>`, which
+            # the migration runner supports and validates, and the bootstrap
+            # named `public` everywhere — so that configuration put the DDL in
+            # one schema and the served role's rights in another (Copilot
+            # review of openDox-code#25, round 36, suppressed). Empty is
+            # `public`, the bundled shape.
+            - name: OPENDOX_PG_SCHEMA
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: pg_schema
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "opendox", "-d", "opendox"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: pg-data
+              mountPath: /var/lib/postgresql/data
+            # `/docker-entrypoint-initdb.d/` runs ONCE per data volume, so this
+            # is a first-start bootstrap and never touches an existing
+            # database. The script is the SAME FILE the compose package mounts
+            # (`deploy/compose/init-runtime-role.sh`), carried here by the
+            # kustomization's `configMapGenerator` so there is one script and
+            # not two that drift.
+            - name: init-runtime-role
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: init-runtime-role
+          configMap:
+            name: opendox-postgres-init
+            # 0555 — the YAML 1.1 octal spelling, NOT Python's `0o555`.
+            # `defaultMode` is an integer field and a Kubernetes manifest is
+            # parsed as YAML 1.1, in which `0o555` is a STRING: the API server
+            # rejects the StatefulSet before Postgres ever starts (Copilot
+            # review of openDox-code#25). `tests_runtime/test_deploy_shape.py`
+            # now asserts the parsed value is the integer 0o555 = 365.
+            defaultMode: 0555
+  volumeClaimTemplates:
+    - metadata:
+        name: pg-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi

@@ -1,0 +1,23 @@
+# THE BUILD CONTEXT IS THIS WHOLE REPOSITORY, and it is uploaded to the docker
+# daemon or to a remote builder BEFORE any instruction runs. `deploy/compose/
+# docker-compose.yaml` builds with `context: ../..` because the Dockerfile
+# installs this package from source, so a FILLED-IN `deploy/compose/.env` —
+# which is git-ignored and therefore invisible to every other guard here —
+# travelled with every `docker compose … --build`, carrying its DSN and its
+# password to whatever daemon ran the build, even though the Dockerfile never
+# copies it into the image (Copilot review of openDox-code#25, round 19).
+# `.gitignore` is not a build-context rule; this file is the one docker reads.
+#
+# AN ALLOWLIST, NOT A DENYLIST, so the property is structural rather than a
+# list somebody has to remember to extend: everything is excluded and the four
+# paths `deploy/compose/Dockerfile` actually COPYs are named back in. A secret
+# that arrives in a file nobody anticipated is excluded by the first line
+# rather than by an entry nobody wrote, and adding a COPY without adding its
+# source here fails the build loudly instead of shipping quietly.
+# `tests_runtime/test_deploy_shape.py` derives the list below from the
+# Dockerfile's own COPY lines, so the two cannot drift.
+*
+!pyproject.toml
+!README.md
+!src
+!migrations

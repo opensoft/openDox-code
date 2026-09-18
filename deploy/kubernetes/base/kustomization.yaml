@@ -1,0 +1,119 @@
+# Neutral kustomize base for the openDox runtime. NO environment literal lives
+# here: the issuer, the audience and the image digest arrive through an
+# overlay, and the two DSNs arrive as Secrets created out of band.
+#
+# WHAT THIS BASE COMMITS AND WHAT IT REFUSES TO. It commits every Secret's NAME
+# and key (`opendox-db-runtime/dsn`, `opendox-db-migration/dsn`,
+# `opendox-postgres/password` and `opendox-postgres/runtime-password`) and no
+# Secret's value. `tests_runtime/
+# test_deploy_shape.py` reads every manifest here and refuses any `kind:
+# Secret` and any `stringData:`/`data:` credential block, so a value cannot be
+# added later without the test that forbids it going red.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opendox
+
+commonLabels:
+  app.kubernetes.io/part-of: opendox
+
+resources:
+  - namespace.yaml
+  - project-repositories-pvc.yaml
+  - postgres-service.yaml
+  - postgres-statefulset.yaml
+  - opendox-service.yaml
+  - opendox-deployment.yaml
+  - migration-job.yaml
+
+images:
+  - name: ghcr.io/opensoft/opendox-runtime
+    newTag: "0.0.0"
+
+# Non-secret runtime config the Deployment and the migration Job consume via
+# `configMapKeyRef`. The neutral base leaves the environment-specific values
+# EMPTY on purpose — an empty issuer is a refusal at startup
+# (`config.load_settings` names the variable), which is the honest failure; a
+# plausible-looking placeholder would be a runtime trusting an issuer nobody
+# chose. `disableNameSuffixHash` keeps the name stable for the references.
+configMapGenerator:
+  # The bundled Postgres's first-start role bootstrap.
+  #
+  # A COPY INSIDE THIS BASE, and the copy is not a lapse — it is what
+  # kustomize's default load restrictor requires. `LoadRestrictionsRootOnly`
+  # refuses a generator source outside the kustomization root, so
+  # `../../compose/init-runtime-role.sh` made the documented
+  # `kustomize build deploy/kubernetes/overlays/dev` FAIL rather than render
+  # (Copilot review of openDox-code#25). The alternative — telling every
+  # operator to pass `--load-restrictor LoadRestrictionsNone` — buys one file
+  # at the cost of weakening every build.
+  #
+  # ONE SOURCE OF TRUTH IS KEPT BY A TEST INSTEAD OF BY A PATH:
+  # `tests_runtime/test_deploy_shape.py::
+  # test_the_two_copies_of_the_role_bootstrap_are_byte_identical` compares this
+  # file with `deploy/compose/init-runtime-role.sh` and fails on any
+  # difference, so the duplication cannot drift even though it exists.
+  - name: opendox-postgres-init
+    behavior: create
+    options:
+      disableNameSuffixHash: true
+    files:
+      - 010-runtime-role.sh=init-runtime-role.sh
+  - name: opendox-oidc
+    behavior: create
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - oidc_issuer=
+      - oidc_audience=
+      - oidc_jwks_url=
+      - oidc_algorithms=RS256
+      - oidc_jwks_ttl_seconds=300
+      - oidc_leeway_seconds=60
+  # Non-secret RUNTIME config an overlay changes without patching a workload.
+  #
+  # `publish_openapi` is here and not an inline `value:` because it is a
+  # DECISION an environment makes — a staging cluster may publish the schema
+  # viewers and a production one may not — and the Deployment had no reference
+  # to it at all, so the setting `.env.example` and the runbook both document
+  # could not be turned on in Kubernetes by any means (Copilot review of
+  # openDox-code#25).
+  #
+  # `migration_wait_host` / `migration_wait_port` are the address the migration
+  # Job's readiness gate probes. The base ships Postgres and the default names
+  # its Service; an overlay that points the DSN at a MANAGED database sets the
+  # host to that endpoint — or to the EMPTY STRING, which the wait reads as
+  # "nothing to wait for" and exits immediately. Hard-coding the bundled
+  # Service made the Job burn its 240-second budget and fail in exactly the
+  # deployment shape this base says it supports (same review).
+  - name: opendox-runtime-config
+    behavior: create
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - publish_openapi=false
+      - migration_wait_host=opendox-postgres
+      - migration_wait_port=5432
+      # The SERVED role `MigrationRunner.protect_ledger` narrows. It must be
+      # the role the `opendox-db-runtime` Secret's DSN authenticates as: the
+      # narrowing is what keeps the served identity out of the migration
+      # ledger, and narrowing a role nobody serves as would leave the real one
+      # able to rewrite it (Copilot review of openDox-code#25). An overlay that
+      # changes the DSN's user changes this in the same commit; the runbook
+      # says so beside the Secret it names.
+      - runtime_pg_role=opendox_runtime
+      # The role the migration Job's DSN authenticates as, for the first-start
+      # bootstrap's `alter default privileges FOR ROLE`. EMPTY is the bundled
+      # shape (the migration connects as the StatefulSet's `POSTGRES_USER`);
+      # an overlay pointing `opendox-db-migration` at another owner sets this
+      # to that owner in the same commit, or the served role is granted nothing
+      # on the tables the run creates (Copilot review of openDox-code#25,
+      # round 12).
+      - migration_pg_user=
+      # The schema the bootstrap creates, grants in, and aims the migration
+      # owner's default privileges at. EMPTY is `public`, the bundled shape;
+      # an overlay whose DSNs carry `options=-c search_path=<schema>` sets this
+      # to the SAME schema in the same commit, or the DDL lands in one schema
+      # and the served role's rights in another (Copilot review of
+      # openDox-code#25, round 36, suppressed).
+      - pg_schema=

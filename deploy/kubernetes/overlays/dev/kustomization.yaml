@@ -1,0 +1,42 @@
+# A worked example of what an environment supplies, and the shape a real one
+# (a QA cluster, a tenant install) takes. It carries NO credential: the two
+# Secrets named by the base are created out of band, by the platform's secret
+# store or by `kubectl create secret generic`, and never by a file in this
+# repository.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: opendox
+
+resources:
+  - ../../base
+
+# The overlay supplies the concrete broker. These are public facts about the
+# realm, not credentials.
+configMapGenerator:
+  - name: opendox-oidc
+    behavior: merge
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - oidc_issuer=https://keycloak.dev.example/realms/opendox
+      - oidc_audience=opendox-runtime
+
+# AN EXPLICIT NON-PRODUCTION PLACEHOLDER, and it says so rather than claiming
+# otherwise. `newTag:` is a MUTABLE reference — kustomize will not enforce the
+# bytes that were reviewed — so this overlay pins nothing, and the comment that
+# used to say "by digest" was describing a line that did not do it (Copilot
+# review of openDox-code#25).
+#
+# A real environment replaces `newTag:` with `digest:` and the reviewed
+# digest, which is the one form kustomize resolves to immutable bytes:
+#
+#   images:
+#     - name: ghcr.io/opensoft/opendox-runtime
+#       digest: sha256:<the reviewed digest>
+#
+# This repository ships no digest because it publishes no image yet; inventing
+# one here would be a pin to bytes that do not exist.
+images:
+  - name: ghcr.io/opensoft/opendox-runtime
+    newTag: "0.0.0"

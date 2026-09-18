@@ -1,0 +1,258 @@
+# Single-node Compose package for the openDox runtime
+# (`split-opendox-two-layer-product` § 3.5, RULED Q2: "deployed the way
+# `xFactory-Hermes-Install` is"). Its `deploy/compose/docker-compose.yaml` is
+# the shape this file takes, with the three-layer install's backup job and
+# worker-readiness surface deliberately left out — openDox is a single-layer
+# product and neither has a meaning here yet.
+#
+# Internal-only: no published ports. TLS and ingress terminate at the platform;
+# reach the service over the compose network or `docker compose exec`.
+#
+# SECRETS ENTER BY ENVIRONMENT REFERENCE ONLY. No credential value is committed
+# in this file — every `${...}` comes from `deploy/compose/.env`, which is
+# gitignored and made from `.env.example`.
+#
+# THE MIGRATION IDENTITY AND THE SERVED IDENTITY ARE SEPARATE, and that is the
+# single most load-bearing thing in this file. The `migrate` service is a
+# one-shot, profile-gated executor holding `OPENDOX_MIGRATION_DATABASE_URL`;
+# the long-running `opendox` service holds `OPENDOX_DATABASE_URL` and never
+# sees the other. `opendox.runtime.config.migration_database_url` refuses to
+# fall back from one to the other, so the separation is enforced in code as
+# well as declared here.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${OPENDOX_PG_DB:-opendox}
+      POSTGRES_USER: ${OPENDOX_PG_USER:-opendox}
+      # Supplied at run time by the platform or the local `.env`.
+      POSTGRES_PASSWORD: ${OPENDOX_PG_PASSWORD}
+      # THE ROLE `init-runtime-role.sh` CREATES, from the ONE name `.env`
+      # declares — `OPENDOX_RUNTIME_PG_ROLE`, which is also the runtime setting
+      # the migration narrows and the user in `OPENDOX_DATABASE_URL`. This used
+      # to read a second `.env` variable of its own, so an operator who set the
+      # documented setting created one role and narrowed another and the real
+      # served role kept its write on the ledger (Copilot review of
+      # openDox-code#25). The container-side name stays what the init script
+      # reads.
+      OPENDOX_RUNTIME_PG_USER: ${OPENDOX_RUNTIME_PG_ROLE:-opendox_runtime}
+      OPENDOX_RUNTIME_PG_PASSWORD: ${OPENDOX_RUNTIME_PG_PASSWORD}
+      # THE ROLE THE MIGRATION RUNS AS — the user inside
+      # `OPENDOX_MIGRATION_DATABASE_URL`. `alter default privileges` belongs to
+      # the role that creates the object, so the bootstrap has to name this one
+      # or a migration owner that is not `POSTGRES_USER` creates tables the
+      # served role has no rights on (Copilot review of openDox-code#25, round
+      # 12). EMPTY means "the same role as POSTGRES_USER", which is the bundled
+      # shape; the init script applies that default.
+      OPENDOX_MIGRATION_PG_USER: ${OPENDOX_MIGRATION_PG_USER:-}
+      # AND THE SCHEMA THOSE GRANTS ARE MADE IN. A runtime DSN may select one
+      # with `options=-c search_path=<schema>` — a form the migration runner
+      # supports and validates — and every grant in the bootstrap named
+      # `public`, so in that configuration the DDL landed in the selected
+      # schema and the served role had no rights there at all (Copilot review
+      # of openDox-code#25, round 36, suppressed). It must be the SAME schema
+      # both DSNs select; `verify_runtime_access` is what makes a mismatch a
+      # failed migration rather than a failed first request.
+      OPENDOX_PG_SCHEMA: ${OPENDOX_PG_SCHEMA:-public}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init-runtime-role.sh:/docker-entrypoint-initdb.d/010-runtime-role.sh:ro
+    networks:
+      - internal
+    restart: unless-stopped
+    healthcheck:
+      # EXEC FORM, so an operator's `.env` value is an ARGUMENT and not shell
+      # source. `CMD-SHELL` receives the string AFTER compose interpolation, so
+      # `OPENDOX_PG_USER=x; touch /tmp/pwned` ran in this container on every
+      # health probe — and a value with a space silently became two arguments
+      # long before that (Copilot review of openDox-code#25, round 23). `CMD`
+      # passes the list to `exec` with no shell between, so the value can be
+      # anything and is still one argument.
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - ${OPENDOX_PG_USER:-opendox}
+        - -d
+        - ${OPENDOX_PG_DB:-opendox}
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  opendox:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+      args:
+        SOURCE_REVISION: ${OPENDOX_SOURCE_REVISION:-unknown}
+    image: ${OPENDOX_IMAGE:-opendox-runtime:local}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      OPENDOX_DATABASE_URL: ${OPENDOX_DATABASE_URL}
+      OPENDOX_OIDC_ISSUER: ${OPENDOX_OIDC_ISSUER}
+      OPENDOX_OIDC_AUDIENCE: ${OPENDOX_OIDC_AUDIENCE}
+      OPENDOX_OIDC_JWKS_URL: ${OPENDOX_OIDC_JWKS_URL:-}
+      OPENDOX_OIDC_ALGORITHMS: ${OPENDOX_OIDC_ALGORITHMS:-RS256}
+      OPENDOX_OIDC_JWKS_TTL_SECONDS: ${OPENDOX_OIDC_JWKS_TTL_SECONDS:-300}
+      OPENDOX_OIDC_LEEWAY_SECONDS: ${OPENDOX_OIDC_LEEWAY_SECONDS:-60}
+      OPENDOX_BIND_HOST: ${OPENDOX_BIND_HOST:-0.0.0.0}
+      OPENDOX_BIND_PORT: ${OPENDOX_BIND_PORT:-8080}
+      OPENDOX_MIGRATIONS_DIR: ${OPENDOX_MIGRATIONS_DIR:-migrations}
+      OPENDOX_PROJECT_REPOSITORY_ROOT: ${OPENDOX_PROJECT_REPOSITORY_ROOT:-/var/lib/opendox/projects}
+      # THE SCHEMA VIEWERS' SWITCH REACHES THE CONTAINER. `.env.example`
+      # documents `OPENDOX_PUBLISH_OPENAPI` and the application reads it, and
+      # this service did not pass it — so setting it in the documented `.env`
+      # changed nothing and `/docs` stayed 404 with no way to tell why
+      # (Copilot review of openDox-code#25). The default is the application's
+      # own: OFF.
+      OPENDOX_PUBLISH_OPENAPI: ${OPENDOX_PUBLISH_OPENAPI:-false}
+    volumes:
+      # RULING C3's per-project plain local git repositories. A NAMED VOLUME
+      # and not a bind mount: these are repositories the runtime creates and
+      # owns, and losing them is losing documents — the one thing RULING Q1's
+      # "the database is disposable" does NOT say about this stack.
+      #
+      # AND THE TARGET IS THE CONFIGURED ROOT. `OPENDOX_PROJECT_REPOSITORY_ROOT`
+      # is interpolated above and was NOT interpolated here, so an operator who
+      # set the documented root wrote repositories outside the volume — onto a
+      # read-only filesystem, or into a layer that dies with the container
+      # (Copilot review of openDox-code#25). One expression, both places.
+      #
+      # AND IN THIS PACKAGE IT MUST BE ABSOLUTE. The application's own default
+      # is the RELATIVE `var/projects` — right for a developer running
+      # `opendox-runtime` directly — and a container mount target cannot be
+      # relative, so an operator who copies that default into `.env` gets an
+      # invalid mount rather than a running stack (Copilot review of
+      # openDox-code#25, round 13, suppressed). MEASURED on Docker Compose
+      # v5.5.1: `docker compose config` ACCEPTS the relative target and the
+      # daemon refuses at container creation —
+      #   invalid mount path: 'var/projects' mount path must be absolute
+      # — so the failure is loud, names the path and happens before anything
+      # runs, which is why this stays one expression rather than becoming a
+      # fixed literal that would make the documented setting mean nothing here
+      # again. `.env.example` says it beside the value, and
+      # `tests_runtime/test_deploy_shape.py` holds the documented default
+      # absolute and both places to the same expression.
+      - project_repositories:${OPENDOX_PROJECT_REPOSITORY_ROOT:-/var/lib/opendox/projects}
+    networks:
+      - internal
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        # THE CONFIGURED PORT, not a literal 8080. The service accepts
+        # `OPENDOX_BIND_PORT`, and a healthcheck that always probed 8080 made
+        # any other configured port a permanently unhealthy container — the
+        # server listening and the orchestrator restarting it (Copilot review
+        # of openDox-code#25).
+        #
+        # AND THE SCRIPT IS FIXED, WITH THE VALUE READ FROM THE ENVIRONMENT.
+        # Compose interpolates `${VAR}` into this string before python sees it,
+        # so the value was python SOURCE: `OPENDOX_BIND_PORT=8080'),None) or
+        # __import__('os').system('…` executed in the application container on
+        # every probe, before `config.load_settings` ever looked at the port
+        # (Copilot review of openDox-code#25, round 23). The container already
+        # HAS the variable — the `environment:` block above sets it from the
+        # same `.env` — so python reads it itself and the script holds no
+        # interpolated text at all.
+        #
+        # AND THE CONFIGURED HOST, for the same reason and read the same way.
+        # `OPENDOX_BIND_HOST` is a service setting here (`${OPENDOX_BIND_HOST
+        # :-0.0.0.0}` above) and the probe always connected to `localhost`, so
+        # a container told to bind its own address served every request while
+        # this check got `connection refused`, marked it unhealthy and had the
+        # orchestrator restart a working server — the exact defect the port
+        # line above fixed, one setting over (Copilot review of
+        # openDox-code#25, round 35, suppressed). A WILDCARD IS MAPPED, not
+        # dialled: nothing connects TO `0.0.0.0`, so the two wildcards become
+        # the loopback address of their own family and every other value is
+        # used verbatim, bracketed when it is an IPv6 literal. MEASURED:
+        # `0.0.0.0` and unset both give `http://127.0.0.1:8080/livez`, `::`
+        # gives `http://[::1]:9443/livez` at port 9443, and `172.20.0.5` gives
+        # `http://172.20.0.5:8080/livez`.
+        - "import os,urllib.request,sys; h=os.environ.get('OPENDOX_BIND_HOST') or '127.0.0.1'; h={'0.0.0.0':'127.0.0.1','::':'::1'}.get(h,h); h='['+h+']' if ':' in h else h; sys.exit(0 if urllib.request.urlopen('http://%s:%s/livez' % (h,int(os.environ.get('OPENDOX_BIND_PORT') or 8080)),timeout=3).status==200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Privileged one-shot migration executor. Never the long-running application
+  # container, and it receives no runtime DSN.
+  #   docker compose --profile migration run --rm --build migrate
+  #
+  # `--build`, because `run` DOES NOT BUILD BY POLICY: it is the only one of
+  # `run`, `up` and `create` with no `--no-build` flag, since it has nothing to
+  # suppress. The `build:` stanza below says HOW to build this service, not
+  # WHEN, so on a clean checkout with the default local image tag the
+  # documented first command tried to pull an image that has never existed
+  # (Copilot review of openDox-code#25, round 11). `up` needs no flag: by then
+  # the image is there, and it would build one if it were not.
+  migrate:
+    # THE SAME BUILD AS THE SERVED SERVICE. Without it a fresh checkout running
+    # the runbook's order — migrate, then up — tries to PULL
+    # `opendox-runtime:local`, an image that has never been built and is in no
+    # registry, and the documented first command fails (Copilot review of
+    # openDox-code#25). Compose reuses the built image for both services.
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+      args:
+        SOURCE_REVISION: ${OPENDOX_SOURCE_REVISION:-unknown}
+    image: ${OPENDOX_IMAGE:-opendox-runtime:local}
+    profiles:
+      - migration
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # THE PRIVILEGED DSN AND NOTHING ELSE. `opendox-runtime runtime migrate` reads
+      # `load_migration_settings`, which requires this variable alone — so this
+      # container carries no served identity, no broker and no second
+      # credential. It used to also receive `OPENDOX_DATABASE_URL` set to this
+      # same value, purely to satisfy the served loader; that made any path
+      # reading `settings.database_url` here schema-privileged and defeated the
+      # separation this service exists to keep (Copilot review of
+      # openDox-code#25).
+      OPENDOX_MIGRATION_DATABASE_URL: ${OPENDOX_MIGRATION_DATABASE_URL}
+      OPENDOX_MIGRATIONS_DIR: ${OPENDOX_MIGRATIONS_DIR:-migrations}
+      # A ROLE NAME, not a credential: after applying, the runner narrows this
+      # role's rights on the migration ledger to SELECT. The SAME `.env` name
+      # the Postgres service creates the role from — see that service.
+      OPENDOX_RUNTIME_PG_ROLE: ${OPENDOX_RUNTIME_PG_ROLE:-opendox_runtime}
+      # A SCHEMA NAME, not a credential, and that is exactly why this container
+      # can be told it. The two DSNs live in two workloads and no process holds
+      # both, so the configuration-time comparison of them could never fire in
+      # a shipped deployment — the run has to be told where the API reads
+      # (independent adversarial review of openDox-code#25, A25-3). The SAME
+      # `.env` value the Postgres service grants in, so one edit moves the
+      # schema, its grants and this refusal together.
+      OPENDOX_SERVED_SCHEMA: ${OPENDOX_PG_SCHEMA:-}
+    command: ["opendox-runtime", "runtime", "migrate"]
+    networks:
+      - internal
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  pg_data:
+  project_repositories:
