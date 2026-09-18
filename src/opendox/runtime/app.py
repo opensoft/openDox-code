@@ -82,7 +82,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from opendox.runtime import API_V1, identity, migrations, oidc
-from opendox.runtime.config import RuntimeSettings, load_settings
+from opendox.runtime.config import (
+    RuntimeSettings,
+    load_settings,
+    redacted_remote_url,
+)
 
 # ---------------------------------------------------------------------------
 # request bodies — every write verb takes a declared shape
@@ -282,6 +286,61 @@ READINESS_STATEMENT_TIMEOUT_SECONDS = 1.5
 #: case is this budget plus one ceiling — 4.5 seconds — and that is the term
 #: `tests_runtime/test_deploy_shape.py` adds to the checkout and JWKS budgets.
 READINESS_DATABASE_BUDGET_SECONDS = 3.0
+
+
+class WithinTheDeadline:
+    """A connection whose EVERY statement is bounded by what is left of one budget.
+
+    `SET LOCAL statement_timeout` IS PER STATEMENT, which is the whole of the
+    defect this class exists for. The first cut set it once before each PHASE —
+    `select 1`, then `plan()`, then `drift()` — and called that a total; but
+    `plan()` and `drift()` each call `applied()`, which issues `selected_schema`,
+    a ledger-existence probe and the ledger read. MEASURED by driving the real
+    runner against a recording connection: three statements per phase, SEVEN
+    for the probe, under three bounds — a worst case of 7 x 1.5s = 10.5s
+    against a declared 3.0s budget, all of it inside the probe's own 25s
+    `timeoutSeconds`, so nothing downstream would have reported it and probes
+    would simply have overlapped (Copilot review of openDox-code#25, at
+    `48de5833`). A budget enforced at a granularity coarser than the thing it
+    bounds is not a budget.
+
+    So the bound is re-applied HERE, before every statement, from one deadline:
+    nothing is STARTED after it, and what does start is capped at the smaller
+    of the per-statement ceiling and what remains. The worst case is therefore
+    the budget plus one ceiling, which is exactly the term
+    `tests_runtime/test_deploy_shape.py` adds to the checkout and JWKS budgets —
+    and it is now TRUE rather than asserted.
+
+    A WRAPPER RATHER THAN A CHANGE TO THE RUNNER, because the statements that
+    needed bounding are `MigrationRunner`'s own and this is the only caller
+    that has a deadline. `__getattr__` forwards everything else — `transaction`,
+    `commit`, `rollback` — so the runner sees the four-part connection contract
+    its module docstring states and nothing about this.
+    """
+
+    def __init__(self, conn: Any, deadline: float) -> None:
+        self._conn = conn
+        self._deadline = deadline
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                "the readiness probe's database budget "
+                f"({READINESS_DATABASE_BUDGET_SECONDS}s) was spent before "
+                "this statement; the answer is not ready rather than late")
+        milliseconds = max(1, int(min(READINESS_STATEMENT_TIMEOUT_SECONDS,
+                                      remaining) * 1000))
+        # THE VALUE IS INTERPOLATED, because `SET` takes no bind parameter:
+        # `set local statement_timeout = %s` is a `SyntaxError` from
+        # PostgreSQL, measured. It is an `int()` of two float constants
+        # declared in this module and a clock reading, and can be nothing else.
+        self._conn.execute(
+            f"set local statement_timeout = {milliseconds}")
+        return self._conn.execute(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
 
 
 def _context(request: Request) -> AppContext:
@@ -880,8 +939,21 @@ def _project_json(p: identity.Project) -> dict[str, Any]:
 
 
 def _repository_json(r: identity.ProjectRepository) -> dict[str, Any]:
+    """The map row as JSON, with `remote_url` REDACTED at the boundary.
+
+    `identity.refuse_a_remote_url_that_carries_a_credential` refuses one on the
+    way in, so this is the second layer: a row written by an earlier build, by
+    a restore or by `psql` is still served here, and these two GETs hand it to
+    every member of the project. Redaction rather than refusal on the way OUT,
+    because a row that already exists is a fact an operator has to be able to
+    see — `config.redacted_remote_url` changes nothing it does not have to, so
+    an ordinary `ssh://git@host/…` comes back exactly as stored (Copilot review
+    of openDox-code#25, on `migrations/0001_identity_and_coordination.sql`'s
+    `remote_url` column).
+    """
     return {"id": r.id, "project_id": r.project_id, "adapter": r.adapter,
-            "location": r.location, "remote_url": r.remote_url,
+            "location": r.location,
+            "remote_url": redacted_remote_url(r.remote_url),
             "created_at": _iso(r.created_at)}
 
 
@@ -1057,32 +1129,23 @@ def create_app(*, settings: RuntimeSettings | None = None,
                 # else.
                 #
                 # AND THE BOUND IS A TOTAL, not a per-statement one. This
-                # probe runs FOUR statements — `select 1`, then `plan()` and
-                # `drift()`, each asking the ledger — so a per-statement
-                # ceiling alone bounded the probe at four times that ceiling,
-                # which with the checkout wait and the JWKS timeout beside it
-                # exceeded the probe's own `timeoutSeconds` (Copilot review of
-                # openDox-code#25, round 36, suppressed). `_bound_by` re-reads
-                # the deadline before each phase: nothing is STARTED after it,
-                # and what does start is capped at the smaller of the ceiling
-                # and what is left.
+                # probe runs `select 1`, then `plan()` and `drift()`, each of
+                # which calls `applied()` — `selected_schema`, a ledger probe
+                # and the ledger read — so a per-statement ceiling alone
+                # bounded it at many times that ceiling, and with the checkout
+                # wait and the JWKS timeout beside it the probe could pass its
+                # own `timeoutSeconds` and leave the next one overlapping
+                # (Copilot review of openDox-code#25, round 36 suppressed and
+                # again at `48de5833`). Setting the bound once per PHASE was
+                # the first answer and was not enough, for the same reason:
+                # `SET LOCAL statement_timeout` is per statement, and a phase
+                # is several. `WithinTheDeadline` re-applies it before EVERY
+                # statement, from one deadline.
                 deadline = time.monotonic() + READINESS_DATABASE_BUDGET_SECONDS
-
-                def _bound_by(deadline: float) -> bool:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return False
-                    conn.execute(
-                        "set local statement_timeout = "
-                        f"{max(1, int(min(READINESS_STATEMENT_TIMEOUT_SECONDS, remaining) * 1000))}")
-                    return True
+                bounded = WithinTheDeadline(conn, deadline)
 
                 with conn.transaction():
-                    if not _bound_by(deadline):  # pragma: no cover - a clock
-                        raise TimeoutError(
-                            "the readiness probe's database budget was spent "
-                            "before its first statement")
-                    conn.execute("select 1")
+                    bounded.execute("select 1")
                     checks["database"] = "ok"
                     try:
                         # THE PINNED CANONICAL FILE IS VERIFIED BEFORE THE PLAN IS
@@ -1103,16 +1166,8 @@ def create_app(*, settings: RuntimeSettings | None = None,
                             app.state.context.database,
                             migrations_dir=(
                                 app.state.context.settings.migrations_dir))
-                        if not _bound_by(deadline):
-                            raise TimeoutError(
-                                "the readiness probe's database budget was "
-                                "spent before the schema could be read")
-                        pending = [m.version for m in runner.plan(conn)]
-                        if not _bound_by(deadline):
-                            raise TimeoutError(
-                                "the readiness probe's database budget was "
-                                "spent before drift could be read")
-                        drifted = runner.drift(conn)
+                        pending = [m.version for m in runner.plan(bounded)]
+                        drifted = runner.drift(bounded)
                         if pending:
                             checks["schema"] = (
                                 "pending: " + ",".join(pending)

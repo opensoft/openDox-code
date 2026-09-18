@@ -1854,3 +1854,81 @@ def test_two_dsns_naming_different_databases_are_refused_too() -> None:
                               "postgresql://u:p@pooler:6432/one",
                           PREFIX + "MIGRATION_DATABASE_URL":
                               "postgresql://m:p@db.internal:5432/one"})
+
+
+def test_the_two_dsn_reader_answers_what_libpq_answers_for_a_REPEATED_key() -> None:
+    """A KEY GIVEN TWICE — and both readers took the FIRST, which libpq does not.
+
+    The preflight compares two DSNs by the database each names and the schema
+    each selects. Both readers stopped at the first match, so a DSN that says
+    a thing twice was read as saying the FIRST thing, and the two ways of
+    saying it twice are exactly the two ways an operator ends up with one:
+    an `options` string assembled by appending (`-csearch_path=old
+    -csearch_path=new`, from a base DSN plus an override) and a URI that names
+    the database in the path AND in the query (`postgresql://h/frompath?
+    dbname=fromquery`, from a template plus a parameter). The preflight then
+    passes on a comparison of values the server will never use, which is worse
+    than not comparing: it reports agreement that is not there.
+
+    BOTH ANSWERS ARE MEASURED AGAINST THE REAL THING, not reasoned out. On
+    postgres 16, `psql "…?options=-csearch_path%3Dold -csearch_path%3Dnew"`
+    followed by `show search_path` prints `new`; and
+    `psycopg.conninfo.conninfo_to_dict`, which is `PQconninfoParse`, resolves
+    `postgresql://h/frompath?dbname=fromquery` to `dbname=fromquery` and
+    `…?dbname=one&dbname=two` to `dbname=two`. Last assignment wins in both,
+    and the query beats the path.
+    """
+    from opendox.runtime.config import database_named_by, schema_selected_by
+
+    # (1) THE LAST `-c search_path=` IS THE ONE THE BACKEND GETS.
+    assert schema_selected_by(
+        "postgresql://u:p@h/db?options=-csearch_path%3Dold%20-csearch_path%3Dnew"
+    ) == "new"
+    assert schema_selected_by(
+        "postgresql://u:p@h/db?options="
+        "-c%20search_path%3Done%20-c%20search_path%3Dtwo") == "two"
+    assert schema_selected_by(
+        "host=h dbname=db options='-c search_path=one -c search_path=two'"
+    ) == "two"
+    # AND THE FIRST ENTRY OF THE LAST ASSIGNMENT, since both reductions apply.
+    assert schema_selected_by(
+        "host=h dbname=db options='-c search_path=a,b -c search_path=c,d'"
+    ) == "c"
+    # A LATER `-c` FOR A DIFFERENT SETTING IS NOT AN OVERRIDE, which is the
+    # error the fix could have made in the other direction.
+    assert schema_selected_by(
+        "host=h dbname=db options='-c search_path=kept -c work_mem=1'"
+    ) == "kept"
+
+    # (2) THE QUERY NAMES THE DATABASE TOO, and beats the path when both do.
+    assert database_named_by("postgresql://h/frompath") == "frompath"
+    assert database_named_by("postgresql://h/?dbname=fromquery") == "fromquery"
+    assert database_named_by(
+        "postgresql://h/frompath?dbname=fromquery") == "fromquery"
+    assert database_named_by("postgresql://h/?dbname=one&dbname=two") == "two"
+    assert database_named_by("host=h dbname=one dbname=two") == "two"
+
+    # AND THE PREFLIGHT THEREFORE REFUSES THE PAIR IT USED TO PASS: two URIs
+    # that agree in the path and disagree in the query are two databases.
+    base = {PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox"}
+    from opendox.runtime.config import ConfigurationError, load_settings
+    with pytest.raises(ConfigurationError) as refused:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL":
+                           "postgresql://u:p@h/same?dbname=served",
+                       PREFIX + "MIGRATION_DATABASE_URL":
+                           "postgresql://m:p@h/same?dbname=migrated"})
+    message = str(refused.value)
+    assert "served" in message and "migrated" in message
+    assert "u:p@" not in message and "m:p@" not in message
+    # AND THE APPENDED-OPTIONS PAIR, which is the `search_path` half of it.
+    with pytest.raises(ConfigurationError) as schemas:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL":
+                           "postgresql://u:p@h/db?options="
+                           "-csearch_path%3Dbase%20-csearch_path%3Dserved",
+                       PREFIX + "MIGRATION_DATABASE_URL":
+                           "postgresql://m:p@h/db?options="
+                           "-csearch_path%3Dbase%20-csearch_path%3Dmigrated"})
+    assert "served" in str(schemas.value) and "migrated" in str(schemas.value)

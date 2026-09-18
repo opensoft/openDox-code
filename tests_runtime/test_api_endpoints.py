@@ -1583,3 +1583,242 @@ def test_an_anonymous_token_naming_a_key_of_the_wrong_type_is_401_not_500(
     # learns that the token is not acceptable, not which key it reached.
     assert "PEM" not in answer.text
     assert "ec-1" not in answer.text
+
+
+def test_the_readiness_budget_bounds_the_total_and_not_each_statement(
+        monkeypatch) -> None:
+    """`SET LOCAL statement_timeout` is PER STATEMENT, and a phase is several.
+
+    The first answer set the bound once before each phase — `select 1`, then
+    `plan()`, then `drift()` — and called that a total. It is not, and the
+    multiplier is MEASURED off the runner rather than argued: driving the real
+    `MigrationRunner.plan(conn)` and `.drift(conn)` against a recording
+    connection issues THREE statements each (`selected_schema`, the
+    `to_regclass` ledger probe, the ledger read), so the probe issues seven in
+    all under three bounds — a worst case of 7 x 1.5s = 10.5s against a
+    declared 3.0s database budget, every one of them inside the probe's own
+    25s `timeoutSeconds`, so nothing downstream would have reported it
+    (Copilot review of openDox-code#25, at `48de5833`).
+
+    THE WORST CASE IS DRIVEN, not argued: the clock advances by exactly the
+    timeout each statement was granted, which is the slowest a statement can be
+    without being cut off. The total then cannot exceed the budget plus one
+    ceiling — the term `test_deploy_shape.py` adds to the checkout and JWKS
+    budgets — however many statements the runner issues.
+    """
+    import contextlib
+
+    from opendox.runtime import app as app_module
+
+    ROOT = Path(__file__).resolve().parents[1]
+    now = {"t": 1000.0}
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: now["t"])
+
+    issued: list[str] = []
+
+    class _Conn:
+        def execute(self, sql, *args, **kwargs):
+            issued.append(sql)
+            if sql.startswith("set local statement_timeout = "):
+                # The statement this bound is for runs for exactly as long as
+                # it is allowed to: the worst case that is not a timeout.
+                granted = int(sql.rsplit("= ", 1)[1]) / 1000
+                now["t"] += granted
+            return self
+
+    budget = app_module.READINESS_DATABASE_BUDGET_SECONDS
+    ceiling = app_module.READINESS_STATEMENT_TIMEOUT_SECONDS
+    started = now["t"]
+    bounded = app_module.WithinTheDeadline(_Conn(), started + budget)
+
+    statements = 0
+    with pytest.raises(TimeoutError) as spent:
+        for _ in range(100):               # far more than the probe issues
+            bounded.execute("select 1")
+            statements += 1
+    assert "budget" in str(spent.value)
+    assert statements >= 2, "the budget must admit more than one statement"
+
+    elapsed = now["t"] - started
+    assert elapsed <= budget + ceiling + 1e-3, (
+        f"{statements} statements consumed {elapsed}s against a {budget}s "
+        f"budget and a {ceiling}s per-statement ceiling")
+
+    # EVERY statement was preceded by its own bound, which is the granularity
+    # the finding was about.
+    bounds = [s for s in issued if s.startswith("set local statement_timeout")]
+    others = [s for s in issued if not s.startswith("set local")]
+    assert len(bounds) == len(others) == statements
+    # AND EACH BOUND IS THE SMALLER OF THE CEILING AND WHAT REMAINED, so the
+    # last statement cannot be granted the whole ceiling out of a spent budget.
+    granted = [int(s.rsplit("= ", 1)[1]) / 1000 for s in bounds]
+    assert granted[0] == ceiling
+    assert granted[-1] <= ceiling
+    assert sum(granted) <= budget + 1e-3
+
+    # AND THE REAL PHASES, NOT ONLY THE SYNTHETIC LOOP: the same worst-case
+    # clock driving the ACTUAL `plan()` and `drift()` through the wrapper —
+    # the seven statements measured above — spends the budget and is REFUSED
+    # partway, which is the whole difference. At HEAD's one-bound-per-phase
+    # shape the same seven ran to 10.5s and `/readyz` answered late instead of
+    # answering "not ready".
+    from opendox.runtime import migrations as migrations_module
+
+    class _Row(list):
+        def fetchone(self): return self
+        def fetchall(self): return []
+
+    class _Recording:
+        def __init__(self, cost: float) -> None:
+            self._cost = cost
+
+        def execute(self, sql, params=None):
+            issued.append(sql)
+            if sql.startswith("set local statement_timeout = "):
+                granted = int(sql.rsplit("= ", 1)[1]) / 1000
+                now["t"] += self._cost if self._cost is not None else granted
+                return _Row([])
+            if "to_regclass" in sql:
+                return _Row([True])
+            return _Row(["public", "public", "public"])
+
+        @contextlib.contextmanager
+        def transaction(self):
+            yield self
+
+    def _drive(cost):
+        issued.clear()
+        now["t"] = start = 2000.0
+        runner = migrations_module.MigrationRunner(
+            None, migrations_dir=str(ROOT / "migrations"))
+        probe = app_module.WithinTheDeadline(_Recording(cost), start + budget)
+        probe.execute("select 1")
+        runner.plan(probe)
+        runner.drift(probe)
+        return now["t"] - start
+
+    with pytest.raises(TimeoutError):
+        _drive(None)                       # every statement takes all it may
+    spent = now["t"] - 2000.0
+    assert spent <= budget + 1e-3, (
+        f"the real probe consumed {spent}s of a {budget}s budget")
+
+    # AND AN ORDINARY DATABASE STILL ANSWERS: at 10ms a statement all seven
+    # run, which is the half of this a per-statement bound must not break.
+    elapsed = _drive(0.010)
+    real = [s for s in issued if not s.startswith("set local")]
+    assert len(real) == 7, real            # the measurement, pinned
+    assert elapsed < budget
+
+    # AND THE WRAPPER IS TRANSPARENT for everything else the runner uses, so
+    # `plan()` and `drift()` see the connection contract they are written for.
+    class _Rich:
+        schema = "public"
+
+        def execute(self, sql, *args, **kwargs):
+            return self
+
+        def transaction(self):
+            return self
+    rich = app_module.WithinTheDeadline(_Rich(), now["t"] + 10)
+    assert rich.schema == "public"
+    assert rich.transaction() is not None
+
+
+def test_no_credential_ever_enters_or_leaves_the_remote_url_column(
+        client, database, mint_token) -> None:
+    """`project_repositories.remote_url` was free text with nothing judging it.
+
+    `migrations/0001_identity_and_coordination.sql` declares the column and
+    argues only its NULLABILITY — "a remote can be attached later" — and no
+    layer between a caller and that column looked at the value, so
+    `https://ci:hunter2@github.com/o/r.git` was a legal row: stored in the
+    clear in a database RULING Q1 gives identity and coordination and NOT
+    secrets, returned verbatim by `GET /api/v1/project-repositories` to every
+    member of the project, present in every backup, and handed to `git` by
+    § 3.6 (Copilot review of openDox-code#25, on that column's line).
+
+    BOTH LAYERS ARE EXERCISED HERE, because either alone is a half-measure:
+    the store REFUSES the value on the way in, and the JSON boundary REDACTS a
+    row that got in some other way — an earlier build, a restore, `psql`.
+    The row below is written with raw SQL for exactly that reason: it is the
+    only way to produce the state the second layer exists for.
+    """
+    from opendox.runtime.identity import (
+        CoordinationStore,
+        ProjectRepository,
+        RefusedError,
+    )
+
+    owner = mint_token(subject="remote-url-owner")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "remote-url", "title": "Remote"},
+                          headers=_auth(owner)).json()
+
+    # -- layer one: the store refuses, at BOTH writers, without echoing ------
+    with database.transaction() as conn:
+        store = CoordinationStore(conn)
+        for carrier in ("https://ci:hunter2@github.com/o/r.git",
+                        "ci:hunter2@github.com:o/r.git",
+                        "file://ci:hunter2@/srv/repos/r.git",
+                        "https://github.com/o/r.git?access_token=hunter2"):
+            with pytest.raises(RefusedError) as refused:
+                store.create_project_repository(
+                    project_id=project["id"], adapter="local-git",
+                    location="/srv/repos/r.git", remote_url=carrier)
+            assert "hunter2" not in str(refused.value), carrier
+            assert "remote_url carries" in str(refused.value)
+        # AND NOTHING WAS WRITTEN — the refusal is before the statement, so a
+        # refused call does not leave the map row behind without its remote.
+        assert conn.execute(
+            "select count(*) from project_repositories where project_id = %s",
+            (project["id"],)).fetchone()[0] == 0
+
+        # The ORDINARY remotes are not refused: an ssh URL's userinfo is a
+        # username, and that is the form every real remote takes.
+        made = store.create_project_repository(
+            project_id=project["id"], adapter="local-git",
+            location="/srv/repos/r.git",
+            remote_url="ssh://git@github.com/o/r.git")
+        assert made.remote_url == "ssh://git@github.com/o/r.git"
+        assert store.attach_remote(
+            project_id=project["id"],
+            remote_url="git@github.com:o/r.git").remote_url == \
+            "git@github.com:o/r.git"
+        with pytest.raises(RefusedError) as attached:
+            store.attach_remote(project_id=project["id"],
+                                remote_url="https://ci:hunter2@h/o/r.git")
+        assert "hunter2" not in str(attached.value)
+
+    # -- layer two: a row written around the store is redacted on the way out
+    with database.transaction() as conn:
+        conn.execute(
+            "update project_repositories set remote_url = %s "
+            "where project_id = %s",
+            ("https://ci:hunter2@github.com/o/r.git", project["id"]))
+
+    listed = client.get("/api/v1/project-repositories",
+                        headers=_auth(owner)).json()
+    assert len(listed) == 1
+    assert "hunter2" not in listed[0]["remote_url"]
+    assert listed[0]["remote_url"] == "https://<redacted>@github.com/o/r.git"
+    one = client.get(f"/api/v1/project-repositories/{project['id']}",
+                     headers=_auth(owner))
+    assert "hunter2" not in one.text
+    # THE WHOLE RESPONSE, not just the field: a credential in any other key
+    # would be this test passing for the wrong reason.
+    assert "hunter2" not in client.get("/api/v1/project-repositories",
+                                       headers=_auth(owner)).text
+
+    # -- and the object's own `repr`, which is what a log line or a failing
+    # assertion prints. The store refuses these, so a row carrying one came
+    # from outside — and that is exactly the object nothing else protects.
+    carried = ProjectRepository(
+        id="r1", project_id=project["id"], adapter="local-git",
+        location="/srv/repos/r.git",
+        remote_url="https://ci:hunter2@github.com/o/r.git",
+        created_at=made.created_at)
+    assert "hunter2" not in repr(carried)
+    assert "<redacted>" in repr(carried)
+    # AND AN ORDINARY ROW PRINTS UNCHANGED, so the redaction is not noise.
+    assert "ssh://git@github.com/o/r.git" in repr(made)
