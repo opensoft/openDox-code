@@ -1388,9 +1388,20 @@ jobs:
       #              location holding a NUL was a traceback rather than the
       #              act's refusal; and the push endpoint's 200 path — a
       #              legacy row's one echo — was covered by nothing.
-      #              THE CURRENT FIGURE for this branch; the PR description
-      #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 504. The neutral conformance corpus
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 504 there.
+      #  320 passed  at `build/3-6-repository-act` `affee88f` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — the six modules, after merging
+      #              `build/3-5-runtime`'s rounds 34-36 in. TEN of the added
+      #              cases are that branch's; the eleventh is this one's own
+      #              defect, found by the walk those rounds brought with them:
+      #              round 35 made the no-credential contract a SHAPE — no use
+      #              of a bound exception outside `_safe_message(exc)` /
+      #              `type(exc)` anywhere in `cli.py` — and § 3.6's
+      #              `_settings_and_database` had added a handler that emitted
+      #              `str(exc)`. THE CURRENT FIGURE for this branch; the PR
+      #              description states it at this same commit and `pytest -q
+      #              tests_runtime/` is 514. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
