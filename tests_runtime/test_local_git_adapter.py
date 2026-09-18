@@ -3952,19 +3952,49 @@ def test_the_two_readings_of_the_one_list_never_disagree_about_hiding() -> None:
     covered `sslpassword=` and the whole libpq keyword/value form (Copilot
     review of openDox-code#26, at `555a03c8`).
 
-    ONE DECLARATION AND TWO READINGS NOW, and the readings differ ON PURPOSE:
-    this module asks the tuple as a plain alternation (so `monkey` matches
-    `key`), and `config` asks it whole-word with a substring rule for the
-    needles too long to collide. The difference is only ever in ONE direction,
-    and that is what this case holds: whatever `config` hides, this module
-    hides. The reverse — something `config` calls a secret that this module
-    prints — is the defect above, and no corpus entry may show it.
+    THE SHARED LIST WAS NOT ENOUGH. Two implementations reading one list still
+    disagreed about three shapes — `?%2574oken=` (`config` decoded a parameter
+    name once, this module to a fixed point), a newline inside an scp-form
+    userinfo (`config` declines to judge a value holding whitespace), and
+    `;token=` — a delimiter to `config` and NOT to this module, which is the
+    one of the three that ran in THIS module's leaking direction: it printed
+    the shape `config` hid, and `carries_a_credential` (this redactor asked as
+    a predicate) answered False with it, so `repository_act.attach_remote`
+    accepted a value `identity.CoordinationStore` then refused with an error
+    the route does not catch — a 500 rather than a 409. This very case asserted
+    that the two never disagreed AND PASSED, because its corpus held none of
+    the three: a property test that under-samples its property is the weaker
+    half of the pair it guards (Copilot review of openDox-code#26, at
+    `fe421882`; all three measured against a full checkout of that head).
+
+    SO THERE IS ONE REDACTOR NOW: `config.redacted_remote_url` is a call into
+    `redact_remote_url`, agreement is true by construction, and this case is
+    the regression guard that it STAYS a call. The three shapes join the corpus
+    anyway — they are what the next narrowing would break.
+
+    THE TWO READINGS THAT REMAIN are the store's REFUSAL and the redaction.
+    `config.credential_in_a_remote_url` asks the tuple whole-word with a
+    substring rule for the needles too long to collide; the redactor asks it as
+    a plain alternation (so `monkey` matches `key`). The difference is legal in
+    exactly ONE direction, and that is the property below: whatever the refusal
+    names as a credential, the redactor hides. The reverse — a value the store
+    will not store and the API prints — is the leak.
     """
+
     from opendox.runtime import config
 
     # ONE DECLARATION, asserted structurally rather than by eye.
     assert lga.SECRET_PARAMETER_KEYS == "|".join(config.SECRET_PARAMETER_KEYS)
     assert lga._LIBPQ_PASSWORD is config.LIBPQ_PASSWORD
+    # AND ONE REDACTOR. This case used to assert that two implementations
+    # agreed, and it passed while they disagreed about three shapes its corpus
+    # did not hold — a property test that names a property and under-samples it
+    # is the weaker half of the pair it is guarding (Copilot review of
+    # openDox-code#26, at `fe421882`). `config.redacted_remote_url` is a call
+    # into `redact_remote_url` now, so the agreement is true by construction
+    # and this case is the guard that it STAYS a call.
+    assert config.redacted_remote_url("https://host/x?token=t") == \
+        lga.redact_remote_url("https://host/x?token=t")
 
     secret = "hunter2"
     carriers = [
@@ -3983,6 +4013,12 @@ def test_the_two_readings_of_the_one_list_never_disagree_about_hiding() -> None:
         f"https://github.com/o/r.git?X-Api-Key={secret}",
         f"https://github.com/o/r.git?sessionToken={secret}",
         f"host=db password='{secret} two' dbname=x",
+        # THE THREE THE TWO IMPLEMENTATIONS DISAGREED ABOUT, each measured
+        # leaking through the map endpoints or through a push refusal before
+        # the redactors became one.
+        f"https://github.com/o/r.git?%2574oken={secret}",     # double-encoded
+        f"user:{secret[:3]}\n{secret[3:]}@github.com:o/r.git",  # newline
+        f"https://github.com/o/r.git?mode=1;{'token'}={secret}",  # `;`
     ]
     innocent = [
         "ssh://git@github.com/o/r.git",
@@ -3997,14 +4033,34 @@ def test_the_two_readings_of_the_one_list_never_disagree_about_hiding() -> None:
         assert secret not in config.redacted_remote_url(value), value
         assert secret not in lga.redact_credentials(value), value
 
-    # THE PROPERTY, over both halves of the corpus: anything `config` hides,
-    # the adapter hides. Stated as an implication and not as equality, because
-    # the adapter deliberately hides more.
+    # THE PROPERTY, over both halves of the corpus: whatever the STORE'S
+    # REFUSAL names as a credential, the redactor hides. Stated as an
+    # implication and not as equality, because the redactor deliberately hides
+    # more — an scp-form USERNAME among them, which the store rightly stores.
     for value in carriers + innocent:
-        if config.redacted_remote_url(value) != value:
+        named = config.credential_in_a_remote_url(value)
+        if named is not None:
             assert lga.redact_credentials(value) != value, (
-                f"{value!r} is a secret to config and plain text to the "
-                "adapter, which is the direction that leaks")
+                f"{value!r} is {named} to the store and plain text to the "
+                "redactor, which is the direction that leaks")
+            assert secret not in lga.redact_remote_url(value), value
+
+    # AND THE OTHER DIRECTION IS MEASURED RATHER THAN ASSUMED, because it is
+    # where the remaining hole is: the redactor hides two shapes the refusal
+    # does not name — `?%2574oken=` (defensible: a server decodes a parameter
+    # name ONCE, so the single-encoded `?%74oken=` is the one that arrives as
+    # `token`, and THAT the refusal does name) and a whitespace-bearing
+    # scp-form userinfo, which `_scp_like_userinfo` declines to judge. The
+    # second is a REFUSAL GAP IN LANDED § 3.5 CODE, registered on
+    # openDox-code#26 rather than taken here: the store accepts such a row,
+    # and only this redactor keeps it off the API. The case below in
+    # `tests_runtime/test_api_endpoints.py` holds that second layer.
+    hidden_but_not_refused = [
+        value for value in carriers
+        if config.credential_in_a_remote_url(value) is None]
+    assert len(hidden_but_not_refused) == 2, hidden_but_not_refused
+    for value in hidden_but_not_refused:
+        assert secret not in lga.redact_remote_url(value), value
 
     # AND THE INNOCENT ONES ARE UNTOUCHED BY THE NARROW READING, so the fix
     # did not buy its safety by refusing everything. (The adapter is allowed
@@ -4018,3 +4074,70 @@ def test_the_two_readings_of_the_one_list_never_disagree_about_hiding() -> None:
         url = f"https://github.com/o/r.git?{key}={secret}"
         assert secret not in config.redacted_remote_url(url), key
         assert secret not in lga.redact_credentials(url), key
+
+
+def test_the_group_is_signalled_from_the_id_saved_at_popen_not_looked_up_later(
+        tmp_path: Path) -> None:
+    """The lookup happened at KILL time, and by then the child can be reaped.
+
+    `_stop_the_whole_group` asked `os.getpgid(child.pid)` itself. On the output
+    overflow path a reader thread reaches it while the main thread may already
+    have returned from `child.wait`, and MEASURED on CPython 3.12
+    `os.getpgid` on a reaped pid raises `ProcessLookupError` — which that
+    method swallowed, so the group was never signalled and a descendant
+    survived the refusal. That is the whole defect the group kill exists to
+    close, reintroduced inside its own repair (Copilot review of
+    openDox-code#26, at `fe421882`). The reaped pid is also RECYCLABLE, so the
+    late lookup could have named an unrelated process's group.
+
+    THE RACE IS NOT RACED — it is arranged: the child is reaped FIRST, and the
+    group is then signalled from the id captured at `Popen`. A descendant that
+    dies proves the saved id was used, because the lookup is impossible by
+    then and this case asserts that too.
+    """
+    import signal
+    import subprocess
+    import time
+
+    marker = tmp_path / "the-remote-write-landed"
+    pid_file = tmp_path / "descendant.pid"
+    stub = tmp_path / "exits-leaving-a-child"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"( echo $$ > {pid_file}; sleep 2; echo landed > {marker} ) &\n"
+        # THE PARENT EXITS AT ONCE, so it can be reaped while its descendant
+        # is still working — which is the shape of the race.
+        "exit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+    child = subprocess.Popen([str(stub)], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+    pgid = lga.GitRunner._process_group_of(child)
+    assert pgid is not None and pgid != os.getpgrp()
+    child.wait()                          # REAPED FIRST, on purpose
+    while not pid_file.exists():          # the descendant has announced itself
+        time.sleep(0.05)
+
+    # THE PREMISE: the id can no longer be looked up, so a method that asks for
+    # it here has nothing to signal.
+    with pytest.raises(ProcessLookupError):
+        os.getpgid(child.pid)
+
+    lga.GitRunner._stop_the_whole_group(child, pgid)
+
+    descendant = int(pid_file.read_text().strip())
+    try:
+        os.kill(descendant, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    assert not alive, (
+        f"the descendant {descendant} survived a kill of the saved group")
+
+    # AND IT NEVER DID THE WRITE, waited out past its own delay.
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        assert not marker.exists(), "the descendant finished its work anyway"
+        time.sleep(0.2)

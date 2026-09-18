@@ -640,8 +640,35 @@ class GitRunner:
                 )) from exc
 
     @staticmethod
-    def _stop_the_whole_group(child: subprocess.Popen[bytes]) -> None:
-        """SIGKILL the child's process GROUP, then reap the child.
+    def _process_group_of(child: subprocess.Popen[bytes]) -> int | None:
+        """The child's process group, read WHILE IT IS ALIVE.
+
+        `start_new_session=True` makes the child a session and group leader, so
+        this is its own pid — but it is READ rather than assumed, because the
+        assumption is exactly the kind that survives a later edit that drops
+        the flag.
+
+        THE READ HAS TO HAPPEN HERE, at `Popen`, and that is the finding:
+        `_stop_the_whole_group` used to ask `os.getpgid(child.pid)` at kill
+        time, and on the overflow path a reader thread can reach it AFTER the
+        main thread's `wait` has reaped the child. MEASURED on CPython 3.12:
+        `os.getpgid` on a reaped pid raises `ProcessLookupError`, which that
+        method swallowed — so the group was never signalled and a descendant
+        survived the refusal, which is the whole defect the group kill exists
+        to close (Copilot review of openDox-code#26, at `fe421882`). The pid is
+        also RECYCLABLE once reaped, so the late read could have named an
+        unrelated process's group; CPython's own `Popen.send_signal` polls
+        first for that reason (bpo-40550).
+        """
+        try:
+            return os.getpgid(child.pid)
+        except OSError:                  # pragma: no cover - the child is alive
+            return None
+
+    @staticmethod
+    def _stop_the_whole_group(child: subprocess.Popen[bytes],
+                              pgid: int | None) -> None:
+        """SIGKILL the process GROUP captured at `Popen`, then reap the child.
 
         `child.kill()` signals the top-level `git` and nothing else, and a
         push's real work is in its DESCENDANTS: `ssh` for a network
@@ -661,10 +688,15 @@ class GitRunner:
         case the single-process `kill()` still runs, which is strictly what
         this method replaced.
         """
-        try:
-            os.killpg(os.getpgid(child.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        # BEST-EFFORT AND AFTER THE GROUP, never instead of it. `Popen.kill`
+        # on a child this process has already reaped is a NO-OP on CPython
+        # (`send_signal` polls and returns; bpo-40550), so it neither raises
+        # nor rescues — the group signal above is what does the work.
         child.kill()
         # REAPED HERE, so the group is gone before this call returns rather
         # than whenever the interpreter next collects. A `wait` on a killed
@@ -711,6 +743,8 @@ class GitRunner:
                     stderr=(f"{self.executable}: "
                             f"{redact_credentials(str(exc))}").encode(),
                 )) from exc
+        # CAPTURED WHILE THE CHILD IS ALIVE — see `_process_group_of`.
+        pgid = self._process_group_of(child)
         captured: dict[str, bytes] = {}
         overflowed: set[str] = set()
 
@@ -724,7 +758,7 @@ class GitRunner:
                 total += len(chunk)
                 if total > MAX_REMOTE_OUTPUT_BYTES:
                     overflowed.add(name)
-                    self._stop_the_whole_group(child)
+                    self._stop_the_whole_group(child, pgid)
                     break
                 chunks.append(chunk)
             captured[name] = b"".join(chunks)
@@ -738,7 +772,7 @@ class GitRunner:
         try:
             returncode = child.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            self._stop_the_whole_group(child)
+            self._stop_the_whole_group(child, pgid)
             raise
         finally:
             for reader in readers:
@@ -929,10 +963,20 @@ _SECRET_KEY = re.compile(SECRET_PARAMETER_KEYS, re.IGNORECASE)
 #: newline is the one boundary kept: `redact_credentials` runs over git's own
 #: multi-line stderr, and a credential on one line must not take the diagnostic
 #: on the next with it.
+#: AND `;` IS A DELIMITER TOO, which cost a disagreement to learn. libpq and
+#: a great many CGI-era readers accept `;` between query parameters, and
+#: `config._a_secret_parameter_in` has split on `[&;]` since it was written —
+#: so `https://host/x?mode=1;token=secret` was a secret to the CONFIGURATION
+#: boundary and plain text to this one. Two costs, both measured: this
+#: redactor left the token in a push refusal and in the CLI's evidence, and an
+#: `attach_remote` of that shape passed `repository_act`'s pre-check (which
+#: asks THIS module) and was then refused by the store (which asks `config`),
+#: so the API answered 500 where it promises a named refusal (Copilot review
+#: of openDox-code#26, at `fe421882`). One delimiter class, both readings.
 _ANY_PARAMETER = re.compile(
-    r"(?P<lead>[?&#][ \t]*(?P<name>[^=&#\s]*)[ \t]*=)(?P<value>[^&#\n]*)")
+    r"(?P<lead>[?&#;][ \t]*(?P<name>[^=&#;\s]*)[ \t]*=)(?P<value>[^&#;\n]*)")
 _ANY_PARAMETER_ANCHORED = re.compile(
-    r"(?:^|[?&#])[ \t]*(?P<name>[^=&#\s]*)[ \t]*=")
+    r"(?:^|[?&#;])[ \t]*(?P<name>[^=&#;\s]*)[ \t]*=")
 def _decoded_parameter_name(name: str) -> str:
     """A parameter name with its percent-encoding removed, decoded to a fixed
     point under a bound the NAME'S OWN LENGTH gives.
@@ -1000,7 +1044,28 @@ def names_a_secret_parameter(text: str) -> bool:
 _LIBPQ_PASSWORD = config.LIBPQ_PASSWORD
 
 
-def redact_credentials(text: str) -> str:
+def _authority_holds_a_password(matched: str) -> bool:
+    """Whether a `_CREDENTIAL_SHAPED` match's userinfo carries a PASSWORD.
+
+    `ssh://git@github.com/o/r.git` and `git@github.com:o/r.git` are the
+    ordinary forms of an ssh remote and their userinfo is a USERNAME — a name
+    that is in every server log and in the map row's own `location` beside it.
+    A password is what `:` before the final `@` announces.
+
+    THE LAST `@`, and the whole run before it, for the reason the scp rule on
+    the sibling branch learned the hard way: a password may contain `/` and the
+    naive read of an scp authority stops at the first one, so
+    `ci:pa/ss@github.com:o/r.git` was read as the username `ci:pa` and called
+    clean (Copilot review of openDox-code#25, at `0968ff8b`).
+    """
+    userinfo = matched.rpartition("@")[0]
+    if "//" in userinfo:                 # `scheme://user[:password]`
+        userinfo = userinfo.split("//", 1)[1]
+    return bool(userinfo.partition(":")[2])
+
+
+def redact_credentials(text: str, *,
+                       a_bare_username_is_not_a_secret: bool = False) -> str:
     """Replace anything shaped like a credential-bearing URL with a marker.
 
     WHY AN ERROR MESSAGE NEEDS THIS. `GitCommandFailed` used to format its
@@ -1035,8 +1100,14 @@ def redact_credentials(text: str) -> str:
             return match.group("lead") + "<redacted>"
         return match.group(0)
 
+    def _redact_authority(match: re.Match[str]) -> str:
+        if a_bare_username_is_not_a_secret and not _authority_holds_a_password(
+                match.group(0)):
+            return match.group(0)
+        return "<redacted-url>"
+
     return _LIBPQ_PASSWORD.sub("<redacted>", _ANY_PARAMETER.sub(
-        _redact_value, _CREDENTIAL_SHAPED.sub("<redacted-url>", text)))
+        _redact_value, _CREDENTIAL_SHAPED.sub(_redact_authority, text)))
 
 
 def carries_a_credential(text: str) -> bool:
@@ -1114,10 +1185,48 @@ def redact_remote_url(url: str) -> str:
     `refuse_command_executing_remote` refuses one. A value that carries one is
     therefore legacy and cannot be shown in part, so it is replaced WHOLE,
     which is what the userinfo form already gets from `redact_credentials`.
+
+    AND A BARE USERNAME SURVIVES HERE AND ONLY HERE. `redact_credentials`
+    replaces a whole `scheme://…@…` run, which is right for git's stderr — a
+    diagnostic gives no way to tell a username from a password, and
+    over-redacting there costs a word. This entry point is handed ONE STORED
+    REMOTE and is what `app._repository_json` returns to a project's members,
+    where replacing `ssh://git@github.com/o/r.git` with `<redacted-url>` hides
+    a name that is not a secret and makes every ordinary row look tampered
+    with. So the flag is passed, the two forms share one implementation, and
+    the difference between them is one argument rather than a second redactor
+    (Copilot review of openDox-code#26, at `fe421882`, which found the two
+    disagreeing about `?%2574oken=`, a newline in the userinfo, and `;`).
+
+    A SPACE IS THE SAME CASE AS A CONTROL CHARACTER HERE, for the same reason
+    and by the same caller's-knowledge argument. `_CREDENTIAL_SHAPED`'s
+    userinfo class excludes whitespace so the stderr reading cannot join
+    `Fetching from origin: git@github.com` into one authority and destroy the
+    line; the cost is that a legacy `user:pa ss@host:path` — an scp-form
+    authority holding a space — is invisible to BOTH readings, which is how
+    MEASURED it reached the map endpoints in the clear. A stored remote cannot
+    legitimately take that shape (`repository_act.refuse_credential_bearing_
+    remote` refuses it at every writer, measured), a local path with a space in
+    it has no `user:…@` head, and this entry point holds ONE value — so a
+    whitespace-bearing authority is a legacy row that cannot be shown in part.
+    `redact_credentials` is untouched, so the diagnostic reading keeps its
+    lines.
     """
-    if carries_a_control_character(url):
+    if carries_a_control_character(url) or _whitespace_inside_an_authority(url):
         return "<redacted-url>"
-    return redact_credentials(url)
+    return redact_credentials(url, a_bare_username_is_not_a_secret=True)
+
+
+def _whitespace_inside_an_authority(url: str) -> bool:
+    """`user:pa ss@host:path` — an authority-shaped head holding whitespace.
+
+    The head is taken at the LAST `@` for the reason `config._scp_like_userinfo`
+    takes it there: a password may contain `@`, and stopping at the first one
+    reads the remainder as a host. A head without `:` is a bare username, which
+    is not a secret in any form; a value without `@` has no authority at all.
+    """
+    head = url.rpartition("@")[0]
+    return bool(head) and ":" in head and any(c.isspace() for c in head)
 
 
 class GitCommandFailed(Exception):

@@ -1845,7 +1845,13 @@ def test_no_credential_ever_enters_or_leaves_the_remote_url_column(
                         headers=_auth(owner)).json()
     assert len(listed) == 1
     assert "hunter2" not in listed[0]["remote_url"]
-    assert listed[0]["remote_url"] == "https://<redacted>@github.com/o/r.git"
+    # THE WHOLE VALUE, not the userinfo alone. This asserted
+    # `https://<redacted>@github.com/o/r.git` while the boundary called a
+    # SECOND redactor living in `config`; that second implementation is gone
+    # (it disagreed with this module's about three shapes), so a password in
+    # the authority takes the adapter's answer — over-redaction, which is the
+    # safe direction for a row that was never supposed to exist.
+    assert listed[0]["remote_url"] == "<redacted-url>"
     one = client.get(f"/api/v1/project-repositories/{project['id']}",
                      headers=_auth(owner))
     assert "hunter2" not in one.text
@@ -1863,29 +1869,41 @@ def test_no_credential_ever_enters_or_leaves_the_remote_url_column(
         remote_url="https://ci:hunter2@github.com/o/r.git",
         created_at=made.created_at)
     assert "hunter2" not in repr(carried)
-    assert "<redacted>" in repr(carried)
+    assert "<redacted-url>" in repr(carried)
     # AND AN ORDINARY ROW PRINTS UNCHANGED, so the redaction is not noise.
     assert "ssh://git@github.com/o/r.git" in repr(made)
 
 
 def test_the_map_endpoints_redact_every_shape_a_legacy_row_can_carry(
         client, database, mint_token) -> None:
-    """The merge of § 3.5 moved this boundary and narrowed what it can see.
+    """The merge of § 3.5 pointed this boundary at a SECOND redactor.
 
-    `_repository_json` used to call `local_git_adapter.redact_remote_url` and
-    now calls `config.redacted_remote_url`, for a real reason — the general
+    `_repository_json` called `local_git_adapter.redact_remote_url` and began
+    calling `config.redacted_remote_url`, for a real reason — the general
     redactor replaces the userinfo of an ordinary `git@github.com:o/r.git`,
-    which is a username and not a secret. But `config`'s redactor was written
-    for BROKER URLs, and a `remote_url` is free text: it knew neither the
-    libpq keyword/value form nor the parameter name `pass`, so
+    which is a username and not a secret. But `config`'s was written for BROKER
+    URLs and a `remote_url` is free text: it knew neither the libpq
+    keyword/value form nor the parameter name `pass`, so
     `host=db password=hunter2 dbname=x` and `https://host/r.git?pass=hunter2`
     were returned VERBATIM by both map endpoints to every member of the
     project — a credential exposure introduced by this branch's own merge
     (Copilot review of openDox-code#26, at `555a03c8`).
 
-    THE FOUR SHAPES ARE DRIVEN THROUGH THE REAL ENDPOINTS, not through the
-    redactor: the defect was in which redactor the boundary called, and a case
-    that asked the redactor directly would have passed throughout.
+    THE SHARED KEY LIST THAT CLOSED THOSE FOUR DID NOT CLOSE THE NEXT THREE.
+    Two implementations reading one list still disagreed three times at
+    `fe421882`, and TWICE IN THIS DIRECTION: `?%2574oken=…` (decoded once by
+    `config`, to a fixed point by the adapter) and a newline inside an scp-form
+    userinfo (`config` declines to judge a value holding whitespace) were both
+    MEASURED coming back from these endpoints in the clear. The third, `;`, ran
+    the other way — `config` hid it and the adapter did not, which cost a 500
+    at the attach route rather than a leak here. So there is ONE redactor now: `config.redacted_remote_url` is a
+    CALL into `local_git_adapter.redact_remote_url`, carrying the single
+    nuance this boundary needs as an argument, and the seven shapes below are
+    one function's answers rather than an agreement between two.
+
+    THEY ARE DRIVEN THROUGH THE REAL ENDPOINTS, not through a redactor: the
+    defect was in WHICH redactor the boundary called, and a case that asked a
+    redactor directly would have passed throughout both rounds.
     """
     from opendox.runtime import app as app_module
 
@@ -1899,11 +1917,34 @@ def test_the_map_endpoints_redact_every_shape_a_legacy_row_can_carry(
             project_id=project["id"], adapter="local-git",
             location="/srv/repos/legacy-shapes.git")
 
-    shapes = ("host=db password=hunter2 dbname=x",
-              "https://github.com/o/r.git?pass=hunter2",
-              "https://github.com/o/r.git?sslpassword=hunter2",
-              "host=db sslpassword=hunter2")
-    for legacy in shapes:
+    keeps_its_host, redacted_whole = "host survives", "whole value"
+    shapes = (
+        ("host=db password=hunter2 dbname=x", keeps_its_host),
+        ("https://github.com/o/r.git?pass=hunter2", keeps_its_host),
+        ("https://github.com/o/r.git?sslpassword=hunter2", keeps_its_host),
+        ("host=db sslpassword=hunter2", keeps_its_host),
+        # -- and the three a second implementation printed in the clear ------
+        # A DOUBLE-ENCODED PARAMETER NAME. The decode runs to a fixed point
+        # here, so `%2574oken` reads as `token`; `config` decoded once and
+        # handed the value back.
+        ("https://github.com/o/r.git?%2574oken=hunter2", keeps_its_host),
+        # `;` AS A PARAMETER DELIMITER — the disagreement that ran the OTHER
+        # way, which is why it is here as a guard and not as a repair: at
+        # `fe421882` `config` hid this shape at these very endpoints and the
+        # ADAPTER printed it (git's stderr, the push refusals, the CLI's
+        # `pushed_to`). Its `carries_a_credential` answered False with it, so
+        # `repository_act.attach_remote` accepted a value the store then
+        # refused with an `identity.RefusedError` the route does not catch —
+        # a 500, measured, asserted a 409 at the end of this case.
+        ("https://github.com/o/r.git?mode=1;token=hunter2", keeps_its_host),
+        # A NEWLINE INSIDE AN scp-FORM AUTHORITY takes the WHOLE value, on
+        # purpose: a value this runtime cannot read as one line is not one it
+        # should print a PART of — half of it on a log line is how a redacted
+        # field becomes two forged ones. `config` declined to judge it at all,
+        # so it came back entire.
+        ("user:hun\nter2@github.com:o/r.git", redacted_whole),
+    )
+    for legacy, survival in shapes:
         # AROUND THE STORE, which is what a legacy row is: § 3.5 refuses these
         # at `identity.CoordinationStore` itself, and the row this boundary
         # exists for is the one written before any such rule.
@@ -1919,30 +1960,79 @@ def test_the_map_endpoints_redact_every_shape_a_legacy_row_can_carry(
         for response in (listed, one):
             assert response.status_code == 200, response.text
             assert "hunter2" not in response.text, legacy
-        assert "<redacted>" in one.json()["remote_url"], legacy
-        # AND THE HOST SURVIVES, so the row stays readable for what it is for.
-        assert ("github.com" in one.json()["remote_url"]
-                or "host=db" in one.json()["remote_url"]), legacy
+        redacted = one.json()["remote_url"]
+        if survival is keeps_its_host:
+            assert "<redacted>" in redacted, legacy
+            # AND THE HOST SURVIVES, so the row stays readable for what it is
+            # for: an operator has to be able to see WHICH endpoint it names.
+            assert ("github.com" in redacted or "host=db" in redacted), legacy
+        else:
+            assert redacted == "<redacted-url>", legacy
 
     # THE ORDINARY REMOTE IS STILL RETURNED EXACTLY AS STORED, which is the
-    # reason this boundary uses the narrow redactor at all.
-    with database.transaction() as conn:
-        conn.execute(
-            "update project_repositories set remote_url = %s "
-            "where project_id = %s",
-            ("ssh://git@github.com/o/r.git", project["id"]))
-    unchanged = client.get(f"/api/v1/project-repositories/{project['id']}",
-                           headers=_auth(owner)).json()
-    assert unchanged["remote_url"] == "ssh://git@github.com/o/r.git"
+    # reason this boundary passes the redactor its flag at all.
+    for ordinary in ("ssh://git@github.com/o/r.git", "git@github.com:o/r.git"):
+        with database.transaction() as conn:
+            conn.execute(
+                "update project_repositories set remote_url = %s "
+                "where project_id = %s", (ordinary, project["id"]))
+        unchanged = client.get(
+            f"/api/v1/project-repositories/{project['id']}",
+            headers=_auth(owner)).json()
+        assert unchanged["remote_url"] == ordinary
 
-    # AND THE BOUNDARY IS THE FUNCTION, asked directly for the four shapes so
-    # a future edit that stops calling it is not hidden by the route.
+    # AND THE BOUNDARY IS THE FUNCTION, asked directly for every shape so a
+    # future edit that stops calling it is not hidden by the route.
     from datetime import datetime
 
     from opendox.runtime import identity as identity_module
-    for legacy in shapes:
+    for legacy, _ in shapes:
         row = identity_module.ProjectRepository(
             id="r", project_id=project["id"], adapter="local-git",
             location="/srv/repos/legacy-shapes.git", remote_url=legacy,
             created_at=datetime(2026, 9, 18))
         assert "hunter2" not in app_module._repository_json(row)["remote_url"]
+
+    # -- the `;` shape ARRIVING, which used to be a 500 ----------------------
+    # `attach_remote` of `…?mode=1;token=…` raised out of the boundary rather
+    # than refusing, because the two readings of `;` disagreed about whether
+    # there was a parameter there at all. It is one refusal now: 409, the
+    # SHAPE named, the value absent — and a 500 would be the regression.
+    attached = client.put(
+        f"/api/v1/projects/{project['id']}/repository/remote",
+        json={"remote_url": "https://github.com/o/r.git?mode=1;token=hunter2"},
+        headers=_auth(owner))
+    assert attached.status_code == 409, attached.text
+    assert "hunter2" not in attached.text
+    assert "credential-shaped query or fragment parameter" in attached.text
+
+    # -- and the shape NEITHER READING SAW: whitespace in the authority ------
+    # `user:pa ss@host:path`. Both classes exclude whitespace on purpose — the
+    # refusal so it cannot start judging prose, the redactor so an unrelated
+    # `user@host` three lines down git's stderr is not joined to the URL above
+    # it — and between them sat an scp-form authority holding a SPACE, which
+    # went through this boundary in the clear. MEASURED, then closed at the
+    # one-URL entry point, where the caller knows it holds one value.
+    with database.transaction() as conn:
+        conn.execute(
+            "update project_repositories set remote_url = %s "
+            "where project_id = %s",
+            ("user:hun ter2@github.com:o/r.git", project["id"]))
+    spaced = client.get(f"/api/v1/project-repositories/{project['id']}",
+                        headers=_auth(owner))
+    assert spaced.status_code == 200, spaced.text
+    assert "hun ter2" not in spaced.text
+    assert spaced.json()["remote_url"] == "<redacted-url>"
+
+    # AND NO WRITER CAN MAKE THAT ROW: the act refuses the shape, so the value
+    # above is legacy by construction. (`identity.CoordinationStore`'s own
+    # guard does NOT name it — `config._scp_like_userinfo` declines a
+    # whitespace-bearing head — so a raw-SQL writer still can. That is a § 3.5
+    # gap, landed, and it is registered on openDox-code#26 as a follow-up
+    # rather than widened from here; this layer is what holds meanwhile.)
+    refused = client.put(
+        f"/api/v1/projects/{project['id']}/repository/remote",
+        json={"remote_url": "user:hun ter2@github.com:o/r.git"},
+        headers=_auth(owner))
+    assert refused.status_code == 409, refused.text
+    assert "hun ter2" not in refused.text

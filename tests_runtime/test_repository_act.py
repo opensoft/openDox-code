@@ -909,15 +909,18 @@ def test_the_api_never_hands_back_a_legacy_row_s_credential(
         f"/api/v1/project-repositories/{project['id']}", headers=_auth(token))
     assert mapped.status_code == 200, mapped.text
     assert "ghp_supersecret" not in mapped.text
-    # THE SHAPE CHANGED WITH THE MERGE OF § 3.5, deliberately. This boundary
-    # used to call `local_git_adapter.redact_remote_url`, which replaces the
-    # WHOLE value with `<redacted-url>` — the right trade for git's stderr,
-    # where over-redacting is safe. § 3.5 pairs a refusal at the store with
-    # `config.redacted_remote_url`, which removes the secret and nothing else,
-    # so an operator can still see WHICH endpoint the row names and an ordinary
-    # `ssh://git@host/…` comes back exactly as stored. The secret is gone
-    # either way, which is the assertion above.
-    assert mapped.json()["remote_url"] == "https://<redacted>@example.invalid/x.git"
+    # THE SHAPE MOVED TWICE AND IS BACK. § 3.5's merge pointed this boundary at
+    # a SECOND redactor in `config`, which removed the secret and nothing else
+    # — so a password in the authority came back as
+    # `https://<redacted>@example.invalid/x.git`. That second implementation
+    # disagreed with this module's about three shapes it was never asked
+    # (`?%2574oken=`, a newline in the userinfo, `;token=`) and printed them in
+    # the clear, so there is ONE redactor again and `config.redacted_remote_url`
+    # is a call into it. A password in the authority therefore takes the whole
+    # value once more; the one nuance the boundary needs — an ordinary
+    # `ssh://git@host/…` keeps its USERNAME, which is not a secret — is an
+    # argument to that one function, not a second one.
+    assert mapped.json()["remote_url"] == "<redacted-url>"
 
     pushed = client_with_repositories.post(
         f"/api/v1/projects/{project['id']}/repository/push",

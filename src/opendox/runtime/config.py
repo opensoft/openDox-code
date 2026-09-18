@@ -469,44 +469,41 @@ def credential_in_a_remote_url(value: str | None) -> str | None:
 
 
 def redacted_remote_url(value: str | None) -> str | None:
-    """The same two shapes with the secret replaced, for a row already written.
+    """A stored git remote with its secret replaced — ONE redactor, called here.
 
-    The store refuses one of these on the way in
-    (`identity.CoordinationStore.create_project_repository` and
-    `attach_remote`), so this is the second layer and not the first: a row
-    written by an earlier build, by a restore or by `psql` is still handed to
-    `GET /api/v1/project-repositories`, and a redactor at the read boundary is
-    what makes "this API never returns a credential" a property of the
-    boundary rather than of everything that can reach the table.
+    THIS USED TO BE A SECOND IMPLEMENTATION and the two disagreed three times
+    in one review: `config` decoded a parameter name ONCE, so
+    `?%2574oken=hunter2` was returned verbatim while the adapter's fixed-point
+    decoder read it as `token`; `config` refused to judge any value holding
+    whitespace, so a legacy `user:sec\nret@host:path` came back whole; and `;`
+    was a parameter delimiter to `config` and NOT to the adapter — the other
+    direction, and the expensive one. `local_git_adapter.carries_a_credential`
+    is the adapter's redactor asked as a predicate, so it answered False for
+    `…?mode=1;token=…`, `repository_act.attach_remote` accepted the value, and
+    `identity.CoordinationStore` then refused it with a `RefusedError` the
+    route does not catch, because it catches `RepositoryActRefused`: a 500
+    where a 409 belonged (all three MEASURED at `fe421882`; Copilot review of
+    openDox-code#26, at `555a03c8` and `fe421882`). A property test said the
+    two never disagreed and passed, because its corpus had none of the three.
 
-    The URL form is `redacted_url`'s job — including the query, which it
-    redacts whether or not there is a netloc. Only the scp-like authority is
-    handled here, because that is the one `urlsplit` cannot see.
+    SO THERE IS ONE REDACTOR NOW AND THIS IS A CALL INTO IT. The agreement is
+    true by construction rather than by assertion, and the case that stated the
+    property stays as a regression guard over the alias. The nuance the API
+    boundary needs — that an ordinary `ssh://git@host/…` keeps its USERNAME,
+    which is not a secret — moved into `redact_remote_url` as an argument, so
+    it is one implementation with one flag and not two implementations with one
+    agreement.
 
-    IT CHANGES NOTHING THE PREDICATE CALLS CLEAN, and that is the contract
-    between the two: `redacted_url` on its own would rewrite
-    `ssh://git@github.com/o/r.git` to `ssh://<redacted>@github.com/o/r.git`,
-    which is right for a broker endpoint and wrong here — it hides the username
-    an operator needs to read and makes every ordinary ssh row look tampered
-    with. Asking the predicate first makes "redacted exactly when a credential
-    is carried" a property a test can assert over every shape at once.
+    THE IMPORT IS INSIDE THE FUNCTION because the dependency runs the other
+    way: `local_git_adapter` imports this module for the declared key list and
+    the libpq pattern. Both are stdlib-only, so nothing here changes the
+    package's import weight — see `src/opendox/runtime/__init__.py`.
     """
-    if not value or credential_in_a_remote_url(value) is None:
+    if not value:
         return value
-    try:
-        split = urllib.parse.urlsplit(value)
-    except ValueError:
-        return "<redacted-url>"
-    text = value
-    if not split.netloc:
-        carried = _scp_like_userinfo(value)
-        if carried is not None:
-            user, _, rest = carried
-            text = user + ":<redacted>@" + rest
-    # ONLY THE PASSWORD FIELD GOES; `host=db` stays, for the same reason the
-    # query form keeps its host — an operator has to be able to see WHICH
-    # endpoint the row names.
-    return LIBPQ_PASSWORD.sub("<redacted>", redacted_url(text))
+    from opendox.runtime.local_git_adapter import redact_remote_url
+
+    return redact_remote_url(value)
 
 
 def _scp_like_userinfo(value: str) -> tuple[str, str, str] | None:
