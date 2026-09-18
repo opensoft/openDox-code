@@ -1642,9 +1642,24 @@ jobs:
       #              `create_repository` swallowed the same race, adopting an
       #              empty directory that appeared after the preflight found
       #              the location absent.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 544 there.
+      #  341 passed  at `build/3-6-repository-act` `bb450614` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — NO CHANGE OF THIS BRANCH'S OWN
+      #              BEYOND THE MERGE: `build/3-5-runtime`'s five-thread batch
+      #              and its answer to the review at `056d1597` come in, with
+      #              two conflicts resolved by keeping both. `_repository_json`
+      #              redacts on both branches and the merged boundary keeps
+      #              `config.redacted_remote_url`, which removes the secret and
+      #              nothing else, rather than the general redactor written for
+      #              git's stderr. And six cases that wrote a legacy
+      #              credential-bearing row THROUGH the store now write it with
+      #              an UPDATE, because § 3.5 shut that door — which is § 3.5's
+      #              own case, and these are about the row that got in before
+      #              any such rule existed.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 544. The neutral conformance corpus
+      #              tests_runtime/` is 549. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
