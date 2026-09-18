@@ -1307,8 +1307,32 @@ jobs:
       #              branch; the PR description states it at this same commit
       #              and `pytest -q tests_runtime/` is 495. The neutral
       #              conformance corpus was not re-run; see the entry above.
-      #              The 1 skipped is the live psycopg reproducer carried in
-      #              from `build/3-5-runtime`; see that chain's round-26 entry.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 495 there.
+      #  308 passed  at `build/3-6-repository-act` `3030d831` (2026-09-18, same
+      #  1 skipped   python, pytest and git; extras unimportable, no ambient
+      #              git config) — after round THIRTY, two of whose five
+      #              threads are about round 29's own answers.
+      #              `NO_FOLLOW_WALK_IS_AVAILABLE` did not require
+      #              `O_NOFOLLOW`, which the walk applies with `getattr(…, 0)`
+      #              — so a platform without it followed every link while the
+      #              constant said the walk was safe — and did not require a
+      #              nameable descriptor, without which `runner_bound_to` fell
+      #              back to the pathname and the same-object guarantee was
+      #              false. Both are in it; the bind raises. THE RACE HAD
+      #              MOVED: the bind re-resolved the NAME, so a symlink
+      #              repointed between the ownership check and the open bound
+      #              the sibling — containment is asked of the OPEN OBJECT
+      #              now. The case that was meant to prove it never drove the
+      #              race and does now. And the multi-destination refusal no
+      #              longer echoes `get-url --push --all` output, which is
+      #              read by LINE and cuts a legacy row's userinfo in half.
+      #              THE CURRENT FIGURE for this branch; the PR description
+      #              states it at this same commit and `pytest -q
+      #              tests_runtime/` is 498. The neutral conformance corpus
+      #              was not re-run; see the entry above. The 1 skipped is the
+      #              live psycopg reproducer carried in from
+      #              `build/3-5-runtime`; see that chain's round-26 entry.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
