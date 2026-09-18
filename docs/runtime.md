@@ -357,6 +357,7 @@ export OPENDOX_RUNTIME_PG_PASSWORD
 export OPENDOX_RUNTIME_PG_ROLE=...      # the user in opendox-db-runtime's DSN
 export OPENDOX_MIGRATION_PG_USER=...    # the user in opendox-db-migration's DSN
 export OPENDOX_PG_DB=...                # the database both DSNs name
+export OPENDOX_PG_SCHEMA=public         # the schema BOTH DSNs select
 fi
 ```
 
@@ -373,7 +374,20 @@ fi
 \getenv runtime_role OPENDOX_RUNTIME_PG_ROLE
 \getenv migration_owner OPENDOX_MIGRATION_PG_USER
 \getenv database OPENDOX_PG_DB
+\getenv schema OPENDOX_PG_SCHEMA
 \getenv runtime_password OPENDOX_RUNTIME_PG_PASSWORD
+-- THE SCHEMA THE DSNs SELECT, and not a hard-coded `public`. A DSN may carry
+-- `options=-c search_path=<schema>`, a form the migration runner supports and
+-- validates and `load_settings` refuses two DSNs from disagreeing about — and
+-- every grant below named `public`, so the DDL landed in the selected schema
+-- while the served role got no USAGE, no table grants and no default
+-- privilege there: `verify_runtime_access` then failed the migration and the
+-- install could not start (Copilot review of openDox-code#25, round 36,
+-- suppressed). Unset means `public`.
+\if :{?schema}
+\else
+\set schema public
+\endif
 -- AND THE REFUSAL ABOVE IS ENFORCED HERE, because the shell block cannot do
 -- it. That block must EXPORT into the operator's own shell for `\getenv` to
 -- see anything, so it cannot run in a subshell and `exit 1` in it would close
@@ -400,7 +414,11 @@ select format('create role %I login password %L', :'runtime_role',
 select format('grant connect on database %I to %I', :'database',
               :'runtime_role')
 \gexec
-select format('grant usage on schema public to %I', :'runtime_role')
+select format('create schema if not exists %I authorization %I',
+              :'schema', :'migration_owner')
+ where :'schema' <> 'public'
+\gexec
+select format('grant usage on schema %I to %I', :'schema', :'runtime_role')
 \gexec
 -- THE COORDINATION TABLES THAT ALREADY EXIST, and only those. A database
 -- migrated before this prerequisite ran already holds them, and a `grant … on
@@ -415,17 +433,47 @@ select format('grant select, insert, update, delete on table %I to %I',
               c.relname, :'runtime_role')
   from pg_class c
   join pg_namespace n on n.oid = c.relnamespace
- where n.nspname = 'public' and c.relkind = 'r'
+ where n.nspname = :'schema' and c.relkind = 'r'
    and c.relname = any (array['drafts', 'memberships',
                               'opendox_schema_migrations',
                               'project_repositories', 'projects', 'sessions',
                               'users'])
 \gexec
--- and everything the migration owner creates from here on, so a later
--- migration that adds a table needs no second visit
-select format('alter default privileges for role %I in schema public grant '
+-- AND EVERYTHING THE MIGRATION OWNER CREATES FROM HERE ON, so a later
+-- migration that adds a table needs no second visit — WHICH IS ONLY THE
+-- NARROW SET IT SOUNDS LIKE WHEN THAT OWNER IS THIS INSTALL'S. `alter default
+-- privileges` follows the ROLE, not a table list, so on a shared or reused
+-- database a reused owner would hand the served role select/insert/update/
+-- delete on every table it creates afterwards — another application's data,
+-- which is the boundary replacing `grant … on all tables` was meant to draw
+-- (Copilot review of openDox-code#25, round 36). The managed path is exactly
+-- where a reused owner is plausible, so the grant is refused when the owner
+-- already owns a table this runtime did not create. MEASURED on postgres
+-- 16.15: the query returns no row for a schema with no tables and for one
+-- holding only the seven, and exactly one for an owner that also owns
+-- `invoices` — and `\gexec` runs nothing when there is no row, so the
+-- `having` is the whole conditional.
+select format('do $refuse$ begin raise exception %L; end $refuse$',
+              format('the migration owner %s already owns tables this runtime '
+                     'did not create (%s). `alter default privileges` follows '
+                     'the OWNER, so every future table it creates would become '
+                     'readable and writable by the served role. Use a '
+                     'migration owner dedicated to this install.',
+                     :'migration_owner', string_agg(c.relname, ', ')))
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  join pg_roles r on r.oid = c.relowner
+ where n.nspname = :'schema' and c.relkind = 'r'
+   and r.rolname = :'migration_owner'
+   and c.relname <> all (array['drafts', 'memberships',
+                               'opendox_schema_migrations',
+                               'project_repositories', 'projects', 'sessions',
+                               'users'])
+having count(*) > 0
+\gexec
+select format('alter default privileges for role %I in schema %I grant '
               'select, insert, update, delete on tables to %I',
-              :'migration_owner', :'runtime_role')
+              :'migration_owner', :'schema', :'runtime_role')
 \gexec
 ```
 

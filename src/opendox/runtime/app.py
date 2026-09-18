@@ -64,6 +64,7 @@ database rather than migrating it.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -262,7 +263,25 @@ class AppContext:
 #: in three seconds is one whose answer is "not ready", and
 #: `tests_runtime/test_deploy_shape.py` derives the deployment's
 #: `timeoutSeconds` from this and the other two.
-READINESS_STATEMENT_TIMEOUT_SECONDS = 3.0
+READINESS_STATEMENT_TIMEOUT_SECONDS = 1.5
+
+#: How long ALL of this probe's database work may take, together.
+#:
+#: The per-statement bound above is not a total, and this probe runs FOUR
+#: statements: `select 1`, then `plan()` and `drift()`, each of which asks the
+#: ledger. Four times three seconds is twelve, and with one checkout wait and
+#: the JWKS timeout beside it a slow-but-healthy request could pass the probe's
+#: own twenty-second `timeoutSeconds` — so kubelet would cut it off and the
+#: next probe would overlap it, which is precisely the failure rounds 19 and 30
+#: closed one term at a time (Copilot review of openDox-code#25, round 36,
+#: suppressed).
+#:
+#: THE BOUND IS A DEADLINE, and the honest statement of it is this: no
+#: statement is STARTED after the deadline, and each one that starts is capped
+#: at the smaller of the per-statement ceiling and what is left. So the worst
+#: case is this budget plus one ceiling — 4.5 seconds — and that is the term
+#: `tests_runtime/test_deploy_shape.py` adds to the checkout and JWKS budgets.
+READINESS_DATABASE_BUDGET_SECONDS = 3.0
 
 
 def _context(request: Request) -> AppContext:
@@ -1036,9 +1055,33 @@ def create_app(*, settings: RuntimeSettings | None = None,
                 # `SyntaxError` from PostgreSQL, measured. It is an `int()` of
                 # a float constant declared in this module and can be nothing
                 # else.
+                #
+                # AND THE BOUND IS A TOTAL, not a per-statement one. This
+                # probe runs FOUR statements — `select 1`, then `plan()` and
+                # `drift()`, each asking the ledger — so a per-statement
+                # ceiling alone bounded the probe at four times that ceiling,
+                # which with the checkout wait and the JWKS timeout beside it
+                # exceeded the probe's own `timeoutSeconds` (Copilot review of
+                # openDox-code#25, round 36, suppressed). `_bound_by` re-reads
+                # the deadline before each phase: nothing is STARTED after it,
+                # and what does start is capped at the smaller of the ceiling
+                # and what is left.
+                deadline = time.monotonic() + READINESS_DATABASE_BUDGET_SECONDS
+
+                def _bound_by(deadline: float) -> bool:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    conn.execute(
+                        "set local statement_timeout = "
+                        f"{max(1, int(min(READINESS_STATEMENT_TIMEOUT_SECONDS, remaining) * 1000))}")
+                    return True
+
                 with conn.transaction():
-                    conn.execute("set local statement_timeout = "
-                                 f"{int(READINESS_STATEMENT_TIMEOUT_SECONDS * 1000)}")
+                    if not _bound_by(deadline):  # pragma: no cover - a clock
+                        raise TimeoutError(
+                            "the readiness probe's database budget was spent "
+                            "before its first statement")
                     conn.execute("select 1")
                     checks["database"] = "ok"
                     try:
@@ -1060,7 +1103,15 @@ def create_app(*, settings: RuntimeSettings | None = None,
                             app.state.context.database,
                             migrations_dir=(
                                 app.state.context.settings.migrations_dir))
+                        if not _bound_by(deadline):
+                            raise TimeoutError(
+                                "the readiness probe's database budget was "
+                                "spent before the schema could be read")
                         pending = [m.version for m in runner.plan(conn)]
+                        if not _bound_by(deadline):
+                            raise TimeoutError(
+                                "the readiness probe's database budget was "
+                                "spent before drift could be read")
                         drifted = runner.drift(conn)
                         if pending:
                             checks["schema"] = (

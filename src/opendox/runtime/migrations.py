@@ -66,6 +66,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from opendox.runtime.config import (
+    search_path_entries,
+    unquoted_identifier,
+)
 from opendox.runtime.identity import TABLES as COORDINATION_TABLES
 
 #: Repository-root-relative default location of the ordered SQL migrations.
@@ -350,39 +354,16 @@ def verify_canonical_digest(
     return actual
 
 
-def _path_entries(path: str) -> list[str]:
-    """`search_path`'s entries, split where PostgreSQL's quoting allows it.
-
-    NOT `path.split(",")`. A schema whose NAME contains a comma is legal,
-    PostgreSQL quotes it in `current_setting('search_path')`, and splitting the
-    text on every comma turned `"tenant,blue", public` into `"tenant` and
-    `blue"` — so this guard REFUSED a connection whose `current_schema()` was
-    exactly the schema it had asked for, and named `'"tenant'` as the thing
-    that did not exist (Copilot review of openDox-code#25, round 26,
-    suppressed). MEASURED on postgres 16.15 against a schema created as
-    `"tenant,blue"`: `current_schema()` is `tenant,blue`, the path reads
-    `"tenant,blue", public`, and the refusal was raised on a valid install.
-
-    Returns the entries RAW — quotes and surrounding space included — because
-    `_unquoted` is what knows how to read one, and a quoted name's leading and
-    trailing spaces are part of it.
-    """
-    entries: list[str] = []
-    start = index = 0
-    quoted = False
-    while index < len(path):
-        char = path[index]
-        if char == '"':
-            if quoted and index + 1 < len(path) and path[index + 1] == '"':
-                index += 2                      # an escaped quote, still inside
-                continue
-            quoted = not quoted
-        elif char == "," and not quoted:
-            entries.append(path[start:index])
-            start = index + 1
-        index += 1
-    entries.append(path[start:])
-    return entries
+#: `search_path`'s entries and one entry's unquoting, DEFINED IN
+#: `config` and aliased here. They are facts about PostgreSQL's own
+#: identifier quoting rather than about migrations, and `config` needs
+#: the same two to compare what the SERVED and MIGRATION DSNs select —
+#: where a second, simpler spelling (`path.split(",")[0]`) reduced
+#: `"tenant,blue"` and `"tenant,red"` to one name and let two DSNs
+#: selecting DIFFERENT schemas pass the comparison (Copilot review of
+#: openDox-code#25, round 36). One definition, so the two cannot drift.
+_path_entries = search_path_entries
+_unquoted = unquoted_identifier
 
 
 def _refuse_a_schema_this_role_cannot_create_in(conn: Any) -> str:
@@ -427,14 +408,6 @@ def _refuse_a_schema_this_role_cannot_create_in(conn: Any) -> str:
             f"role, or point the DSN at a schema it owns. Nothing has been "
             f"applied")
     return schema
-
-
-def _unquoted(entry: str) -> str:
-    """One `search_path` entry, with PostgreSQL's quoting removed."""
-    entry = entry.strip()
-    if len(entry) >= 2 and entry.startswith('"') and entry.endswith('"'):
-        return entry[1:-1].replace('""', '"')
-    return entry
 
 
 def selected_schema(conn: Any) -> str:

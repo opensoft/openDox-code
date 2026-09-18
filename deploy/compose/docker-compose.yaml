@@ -46,6 +46,15 @@ services:
       # 12). EMPTY means "the same role as POSTGRES_USER", which is the bundled
       # shape; the init script applies that default.
       OPENDOX_MIGRATION_PG_USER: ${OPENDOX_MIGRATION_PG_USER:-}
+      # AND THE SCHEMA THOSE GRANTS ARE MADE IN. A runtime DSN may select one
+      # with `options=-c search_path=<schema>` — a form the migration runner
+      # supports and validates — and every grant in the bootstrap named
+      # `public`, so in that configuration the DDL landed in the selected
+      # schema and the served role had no rights there at all (Copilot review
+      # of openDox-code#25, round 36, suppressed). It must be the SAME schema
+      # both DSNs select; `verify_runtime_access` is what makes a mismatch a
+      # failed migration rather than a failed first request.
+      OPENDOX_PG_SCHEMA: ${OPENDOX_PG_SCHEMA:-public}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - pg_data:/var/lib/postgresql/data

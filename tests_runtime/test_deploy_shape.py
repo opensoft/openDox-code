@@ -40,6 +40,11 @@ COMPOSE_ONLY = frozenset({
     # aimed at the owner that will create the tables (Copilot review of
     # openDox-code#25, round 12).
     "OPENDOX_MIGRATION_PG_USER",
+    # And the schema those grants are made in: a runtime DSN selects one with
+    # `options=-c search_path=…`, and the bootstrap cannot read a DSN — it is
+    # the DATABASE container's environment and a DSN carries a password
+    # (Copilot review of openDox-code#25, round 36, suppressed).
+    "OPENDOX_PG_SCHEMA",
     "OPENDOX_IMAGE", "OPENDOX_SOURCE_REVISION",
 })
 
@@ -773,8 +778,16 @@ def test_the_readiness_probe_allows_the_endpoints_own_budgets() -> None:
     # outlast the whole probe (Copilot review of openDox-code#25, round 30,
     # suppressed). `/readyz` sets `statement_timeout` for its own transaction,
     # so the third term is real and is read from the module that declares it.
+    # THE DATABASE TERM IS A TOTAL PLUS ONE STATEMENT, and that is the exact
+    # bound `/readyz` holds: no statement is STARTED after the budget's
+    # deadline, and one that starts is capped at the per-statement ceiling. The
+    # third term used to be the CEILING ALONE, while the probe runs four
+    # statements — so the derived budget was under a quarter of the real worst
+    # case (Copilot review of openDox-code#25, round 36, suppressed).
     budget = (_declared_seconds("db.py", "DEFAULT_CHECKOUT_TIMEOUT_SECONDS")
               + _declared_seconds("oidc.py", "DEFAULT_JWKS_TIMEOUT_SECONDS")
+              + _declared_seconds("app.py",
+                                  "READINESS_DATABASE_BUDGET_SECONDS")
               + _declared_seconds("app.py",
                                   "READINESS_STATEMENT_TIMEOUT_SECONDS"))
     assert probe["timeoutSeconds"] > budget, (
@@ -809,7 +822,7 @@ def test_the_runbook_makes_the_managed_database_role_an_explicit_prerequisite(
     section = managed[1].split("\n## ", 1)[0]
 
     for statement in ("create role", "grant connect on database",
-                      "grant usage on schema public",
+                      "grant usage on schema %i",
                       "grant select, insert, update, delete on table %i",
                       "alter default privileges"):
         assert statement in script.lower(), (
@@ -1694,21 +1707,46 @@ def test_the_readiness_probe_bounds_its_own_statements() -> None:
     interpolated because `SET` takes no bind parameter: `set local
     statement_timeout = %s` is a `SyntaxError` from PostgreSQL, measured.
     """
+    import ast
+
     source = (ROOT / "src" / "opendox" / "runtime" / "app.py").read_text(
         encoding="utf-8")
-    executed = 'conn.execute("set local statement_timeout = "'
-    assert executed in source, (
+    assert '"set local statement_timeout = "' in source, (
         "the readiness path no longer bounds its own statements")
     assert "READINESS_STATEMENT_TIMEOUT_SECONDS" in source
-    # THE EXECUTED FORM, not the comment that quotes it: this file's own rule
-    # about measuring the thing rather than the sentence about it.
-    local_at = source.index(executed)
-    opened = source.rindex("with conn.transaction():", 0, local_at)
-    assert local_at - opened < 400, (
-        "`SET LOCAL` outside a transaction is a no-op with a warning, and a "
-        "session-level SET leaks onto the next borrower of a pooled connection")
+    assert "READINESS_DATABASE_BUDGET_SECONDS" in source, (
+        "the per-statement ceiling is not a total, and this probe runs four "
+        "statements")
     assert 'conn.execute("set statement_timeout' not in source, (
         "a session-level statement timeout leaks out of the checkout")
+
+    # ASKED OF THE PARSE TREE, because the bound is now set by a closure the
+    # transaction calls rather than by a literal beside it — and proximity in
+    # the source proves nothing about a function. What must hold is that every
+    # call that sets the bound, and every statement it guards, happens INSIDE
+    # `with conn.transaction():`: `SET LOCAL` outside a transaction is a no-op
+    # with a warning, and a session-level SET leaks onto the next borrower of
+    # a pooled connection.
+    readyz = next(n for n in ast.walk(ast.parse(source))
+                  if isinstance(n, ast.FunctionDef) and n.name == "readyz")
+    setter = next(n for n in ast.walk(readyz)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_bound_by")
+    assert any(isinstance(node, ast.Constant) and isinstance(node.value, str)
+               and node.value.startswith("set local statement_timeout")
+               for node in ast.walk(setter)), (
+        "`_bound_by` no longer sets the bound it is named for")
+
+    transactions = [n for n in ast.walk(readyz) if isinstance(n, ast.With)
+                    and "transaction" in ast.dump(n.items[0].context_expr)]
+    assert len(transactions) == 1
+    inside = {id(n) for n in ast.walk(transactions[0])}
+    calls = [n for n in ast.walk(readyz) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "_bound_by"]
+    assert len(calls) == 3, (
+        "the probe runs `select 1`, `plan()` and `drift()`; each phase must "
+        "re-read the deadline or the budget is not a total")
+    assert all(id(call) in inside for call in calls), (
+        "a `SET LOCAL` outside the transaction is a no-op with a warning")
 
 
 def test_every_secret_prompt_aborts_the_block_and_every_create_is_idempotent(
@@ -1910,3 +1948,104 @@ def test_the_managed_database_prerequisite_refuses_before_it_provisions(
         "would be substituted as its own literal text")
     assert block.index("\\if :{?runtime_password}") < block.index(
         "\\if :opendox_blank_password")
+
+
+def test_the_bootstrap_grants_in_the_schema_the_dsns_select(
+) -> None:
+    """A supported DSN shape the bootstrap could not serve.
+
+    A runtime DSN may carry `options=-c search_path=<schema>` — a form
+    `migrations.selected_schema` supports and validates, and `load_settings`
+    refuses two DSNs from disagreeing about — while every grant in the
+    first-start bootstrap named `public`. In that configuration the DDL lands
+    in the selected schema and the served role gets no USAGE there, no table
+    grants there and no default privilege there, so `verify_runtime_access`
+    fails the migration and the install cannot start (Copilot review of
+    openDox-code#25, round 36, suppressed).
+
+    The bootstrap cannot read a DSN — it is the DATABASE container's
+    environment and a DSN carries a password — so the schema arrives as its
+    own variable and the runbook says it must be the same one.
+    """
+    scripts = [(COMPOSE / "init-runtime-role.sh"),
+               (KUBERNETES / "base" / "init-runtime-role.sh")]
+    for path in scripts:
+        text = path.read_text(encoding="utf-8")
+        assert 'schema="${OPENDOX_PG_SCHEMA:-public}"' in text, (
+            f"{path.name} has no schema variable; every grant in it is "
+            "hard-coded to `public`")
+        assert '-v schema="$schema"' in text, (
+            f"{path.name} does not pass the schema to psql")
+        assert "grant usage on schema %I" in text
+        assert "in schema %I grant " in text
+        assert "n.nspname = :'schema'" in text
+        assert "n.nspname = 'public'" not in text, (
+            f"{path.name} still pins a grant to `public`")
+        # THE SCHEMA IS CREATED BEFORE IT IS GRANTED ON, and only when it is
+        # not `public`, which every database already has.
+        assert "create schema if not exists %I authorization %I" in text
+        assert "where :'schema' <> 'public'" in text
+
+    # THE VARIABLE IS SUPPLIED BY BOTH DEPLOYMENTS, or the script reads a
+    # default nothing configured.
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    assert compose["services"]["postgres"]["environment"][
+        "OPENDOX_PG_SCHEMA"].startswith("${OPENDOX_PG_SCHEMA")
+    assert "OPENDOX_PG_SCHEMA" in ENV_EXAMPLE.read_text(encoding="utf-8")
+    statefulset = _load_yaml(KUBERNETES / "base" / "postgres-statefulset.yaml")
+    named = {v["name"]: v for v in _containers(statefulset)[0]["env"]}
+    assert named["OPENDOX_PG_SCHEMA"]["valueFrom"]["configMapKeyRef"][
+        "key"] == "pg_schema"
+    assert "pg_schema=" in (
+        KUBERNETES / "base" / "kustomization.yaml").read_text(encoding="utf-8")
+
+    # AND THE RUNBOOK'S MANAGED PATH TAKES THE SAME VARIABLE, since it is the
+    # hand-run copy of this script.
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    assert "\\getenv schema OPENDOX_PG_SCHEMA" in runbook
+    assert "export OPENDOX_PG_SCHEMA=public" in runbook
+
+
+def test_the_default_privilege_is_refused_for_a_shared_migration_owner(
+) -> None:
+    """`alter default privileges` follows the ROLE, not a table list.
+
+    So every table that owner creates from here on becomes readable and
+    writable by the served role — and on a shared or reused database, which
+    the managed path explicitly tolerates, that is another application's data:
+    the same boundary replacing `grant … on all tables in schema public` was
+    meant to draw (Copilot review of openDox-code#25, round 36).
+
+    The grant is refused when the owner already owns a table this runtime did
+    not create. MEASURED on postgres 16.15 against the shipped statement with
+    `:'owner'` and `:'schema'` bound: no row for a schema with no tables, no
+    row for one holding only the seven coordination tables, exactly one row
+    for an owner that also owns `invoices` — and that row's `do` block raises
+    with the message naming the owner and the foreign table. `\\gexec` runs
+    nothing when there is no row, so the `having` is the whole conditional.
+    """
+    from opendox.runtime import identity, migrations
+
+    expected = sorted(set(identity.TABLES) | {migrations.LEDGER_TABLE})
+    for text in [(COMPOSE / "init-runtime-role.sh").read_text(encoding="utf-8"),
+                 (KUBERNETES / "base" / "init-runtime-role.sh").read_text(
+                     encoding="utf-8"),
+                 (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")]:
+        guard = text[text.index("do $refuse$ begin raise exception %L"):]
+        guard = guard[:guard.index("\\gexec")]
+        assert "r.rolname = :'migration_owner'" in guard, (
+            "the guard does not ask about the migration owner's own tables")
+        assert "having count(*) > 0" in guard, (
+            "without the `having`, `\\gexec` is handed a row on every install "
+            "and the bootstrap always refuses")
+        assert "c.relname <> all (array[" in guard
+        # THE EXEMPT LIST IS THIS RUNTIME'S OWN TABLES, derived rather than
+        # typed, so a migration that adds one cannot make the guard refuse a
+        # correct install.
+        named = sorted(re.findall(r"'([a-z_]+)'",
+                                  guard.split("array[", 1)[1].split("]", 1)[0]))
+        assert named == expected, (
+            f"the guard exempts {named}; this runtime's tables are {expected}")
+        # AND IT IS BEFORE THE GRANT IT GUARDS.
+        assert text.index("having count(*) > 0") < text.index(
+            "alter default privileges for role %I in schema %I")

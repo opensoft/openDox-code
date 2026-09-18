@@ -568,6 +568,90 @@ def _by_name(name: str) -> Setting:
     raise KeyError(name)  # pragma: no cover - a typo in this module
 
 
+def search_path_entries(path: str) -> list[str]:
+    """`search_path`'s entries, split where PostgreSQL's quoting allows it.
+
+    NOT `path.split(",")`. A schema whose NAME contains a comma is legal,
+    PostgreSQL quotes it in `current_setting('search_path')`, and splitting the
+    text on every comma turned `"tenant,blue", public` into `"tenant` and
+    `blue"` — so this guard REFUSED a connection whose `current_schema()` was
+    exactly the schema it had asked for, and named `'"tenant'` as the thing
+    that did not exist (Copilot review of openDox-code#25, round 26,
+    suppressed). MEASURED on postgres 16.15 against a schema created as
+    `"tenant,blue"`: `current_schema()` is `tenant,blue`, the path reads
+    `"tenant,blue", public`, and the refusal was raised on a valid install.
+
+    Returns the entries RAW — quotes and surrounding space included — because
+    `_unquoted` is what knows how to read one, and a quoted name's leading and
+    trailing spaces are part of it.
+    """
+    entries: list[str] = []
+    start = index = 0
+    quoted = False
+    while index < len(path):
+        char = path[index]
+        if char == '"':
+            if quoted and index + 1 < len(path) and path[index + 1] == '"':
+                index += 2                      # an escaped quote, still inside
+                continue
+            quoted = not quoted
+        elif char == "," and not quoted:
+            entries.append(path[start:index])
+            start = index + 1
+        index += 1
+    entries.append(path[start:])
+    return entries
+
+
+def unquoted_identifier(entry: str) -> str:
+    """One `search_path` entry, with PostgreSQL's quoting removed."""
+    entry = entry.strip()
+    if len(entry) >= 2 and entry.startswith('"') and entry.endswith('"'):
+        return entry[1:-1].replace('""', '"')
+    return entry
+
+
+def _libpq_option_words(raw: str) -> list[str]:
+    """One `options` value, split the way libpq splits it — not the way a shell does.
+
+    `shlex` WAS WRONG HERE, and wrong in the direction that matters: POSIX
+    `shlex` REMOVES double quotes, so `-c search_path="tenant,blue",public`
+    became `search_path=tenant,blue,public` and the comma inside a legal schema
+    name was indistinguishable from the separator between two entries — which
+    is the same defect `migrations._path_entries` exists to prevent, arriving
+    one layer earlier (Copilot review of openDox-code#25, round 36).
+
+    libpq's `options` has NO quote processing at all: arguments are separated
+    by whitespace, and a backslash escapes the next character. The double
+    quotes in a `search_path` value belong to PostgreSQL's identifier syntax,
+    which `search_path_entries` reads, and they must survive this step
+    untouched.
+
+    The conninfo layer ABOVE this one is different, and `shlex` is still right
+    there: libpq's keyword/value form DOES take single quotes, which is how
+    `options='-c search_path=x'` carries a space — and POSIX `shlex` leaves
+    the inner double quotes alone while removing that outer quoting.
+    """
+    words: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for character in raw:
+        if escaped:
+            current.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character.isspace():
+            if current:
+                words.append("".join(current))
+                current = []
+        else:
+            current.append(character)
+    if current:
+        words.append("".join(current))
+    return words
+
+
 def schema_selected_by(dsn: str) -> str | None:
     """The schema a DSN's own `options` selects, or `None` where it names one.
 
@@ -600,10 +684,7 @@ def schema_selected_by(dsn: str) -> str | None:
                 raw = part.split("=", 1)[1]
     if not raw:
         return None
-    try:
-        words = shlex.split(raw.replace("\\ ", " "))
-    except ValueError:
-        return None
+    words = _libpq_option_words(raw)
     setting: str | None = None
     for index, word in enumerate(words):
         if word == "-c" and index + 1 < len(words):
@@ -613,8 +694,45 @@ def schema_selected_by(dsn: str) -> str | None:
         else:
             continue
         if setting.startswith("search_path="):
-            first = setting.split("=", 1)[1].split(",")[0].strip()
-            return first.strip('"') or None
+            # THE QUOTE-AWARE SPLIT, NOT `.split(",")[0]`. A schema whose name
+            # contains a comma is legal and PostgreSQL quotes it, so the simple
+            # spelling reduced BOTH `"tenant,blue"` and `"tenant,red"` to
+            # `tenant` — and two DSNs selecting genuinely different schemas
+            # passed the comparison this function exists to feed (Copilot
+            # review of openDox-code#25, round 36). It is the same parser
+            # `migrations.selected_schema` reads a live connection with.
+            entries = search_path_entries(setting.split("=", 1)[1])
+            return unquoted_identifier(entries[0]) or None
+    return None
+
+
+def database_named_by(dsn: str) -> str | None:
+    """The DATABASE a DSN names, or `None` where it leaves it to the default.
+
+    The schema comparison one function down is only half the invariant: two
+    DSNs can select the same schema NAME in two different databases, and then
+    migrations apply and verify `public.migration_ledger` in one database
+    while `/readyz` and the API read a different one (Copilot review of
+    openDox-code#25, round 36).
+
+    NO CREDENTIAL IS READ and none can be returned: the URI branch takes
+    `urlsplit().path` and nothing else, and the keyword/value branch takes the
+    `dbname=` token. `user`, `password` and the userinfo are never touched.
+    """
+    try:
+        split = urllib.parse.urlsplit(dsn)
+    except ValueError:
+        return None
+    if split.scheme:
+        name = urllib.parse.unquote(split.path).lstrip("/")
+        return name or None
+    try:
+        tokens = shlex.split(dsn)
+    except ValueError:
+        return None
+    for token in tokens:
+        if token.startswith("dbname="):
+            return token.split("=", 1)[1] or None
     return None
 
 
@@ -642,6 +760,29 @@ def _refuse_two_dsns_that_select_different_schemas(
     """
     if not migration:
         return
+    # THE DATABASE FIRST, because the schema comparison means nothing across
+    # two of them: `public` in one database and `public` in another are two
+    # different sets of tables, and the run would apply and VERIFY one while
+    # the API reads the other (Copilot review of openDox-code#25, round 36).
+    mine, yours = database_named_by(served), database_named_by(migration)
+    if mine != yours:
+        raise ConfigurationError(
+            f"{PREFIX}DATABASE_URL names the database "
+            f"{mine or '(the connection default)'} and "
+            f"{PREFIX}MIGRATION_DATABASE_URL names "
+            f"{yours or '(the connection default)'}. Migrations would be "
+            "applied and verified in one database while the API and /readyz "
+            "read the other, so a run could report an applied schema that "
+            "nothing serves. Point both at the same database (the values are "
+            "not repeated beyond the database names: a DSN carries a "
+            "password)")
+    # THE HOST AND PORT ARE DELIBERATELY NOT COMPARED, and that is a judgement
+    # rather than an omission. A served DSN through a connection pooler and a
+    # migration DSN direct to the server is the ordinary secure shape, and it
+    # is the SAME database reached two ways — nothing in either string tells a
+    # pooler from a second server. What catches a genuinely different server
+    # is the ledger: its schema is not the one this install migrated, so
+    # `/readyz` and `status` report it as not applied rather than ready.
     here, there = schema_selected_by(served), schema_selected_by(migration)
     if here == there:
         return

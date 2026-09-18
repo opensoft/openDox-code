@@ -1504,8 +1504,13 @@ def test_two_dsns_that_select_different_schemas_are_refused() -> None:
     # THE FIRST ENTRY IS THE ANSWER, because that is where an unqualified
     # `create table` lands — which is the question `selected_schema` asks of a
     # live connection.
+    # A SPACE IN A SCHEMA NAME IS BACKSLASH-ESCAPED, because that is what
+    # libpq's `options` takes: whitespace separates arguments there and there
+    # is no quote processing, so `search_path="a b"` reaches the backend as
+    # two arguments and not as one quoted name. This reports what the backend
+    # would select, which is the whole point of reading the string.
     assert schema_selected_by(
-        "postgresql://u:p@h/db?options=-c%20search_path%3D%22a%20b%22%2Cc"
+        "postgresql://u:p@h/db?options=-c%20search_path%3D%22a%5C%20b%22%2Cc"
     ) == "a b"
     # AND A DSN THAT SELECTS NOTHING SELECTS NOTHING: the server's own default
     # for the role is not in the string and is not guessed at here.
@@ -1550,3 +1555,88 @@ def test_two_dsns_that_select_different_schemas_are_refused() -> None:
                        PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
                        PREFIX + "MIGRATION_DATABASE_URL": migration})
     assert "the connection default" in str(either_way.value)
+
+
+def test_two_dsns_naming_different_databases_are_refused_too() -> None:
+    """The schema comparison means nothing across two databases.
+
+    `public` in one database and `public` in another are two different sets of
+    tables, so two DSNs that agree about the schema and disagree about the
+    database passed the round-34 check — and migrations applied and VERIFIED
+    one while `/readyz` and the API read the other (Copilot review of
+    openDox-code#25, round 36).
+
+    AND THE COMMA-QUOTING BUG IN THE SAME PREFLIGHT: it reduced `search_path`
+    with `.split(",")[0]`, so the legal, distinct schema names `"tenant,blue"`
+    and `"tenant,red"` both became `tenant` and two DSNs selecting genuinely
+    different schemas compared equal — which is exactly the defect
+    `migrations._path_entries` exists to prevent, one layer earlier.
+    """
+    from opendox.runtime import migrations
+    from opendox.runtime.config import (
+        ConfigurationError,
+        database_named_by,
+        load_settings,
+        schema_selected_by,
+        search_path_entries,
+        unquoted_identifier,
+    )
+
+    # ONE PARSER, NOT TWO SPELLINGS OF IT. The migration runner reads a live
+    # connection's path with the same two functions; a second, simpler
+    # spelling is how the two came to disagree in the first place.
+    assert migrations._path_entries is search_path_entries
+    assert migrations._unquoted is unquoted_identifier
+
+    quoted = ("postgresql://u:p@h/db?options="
+              "-c%20search_path%3D%22tenant%2Cblue%22%2Cpublic")
+    other = ("postgresql://u:p@h/db?options="
+             "-c%20search_path%3D%22tenant%2Cred%22")
+    assert schema_selected_by(quoted) == "tenant,blue"
+    assert schema_selected_by(other) == "tenant,red"
+    # libpq's `options` has NO quote processing — whitespace separates and a
+    # backslash escapes — so the double quotes belong to PostgreSQL's
+    # identifier syntax and must survive the split that finds `-c`.
+    assert schema_selected_by(
+        r"postgresql://u:p@h/db?options=-c%20search_path%3D%22a%5C%20b%22"
+    ) == "a b"
+    # AND AN UNESCAPED SPACE IS NOT ONE ARGUMENT TO LIBPQ EITHER, so reading
+    # it as one would be a different answer from the one the server gets:
+    # `options=-c search_path="a b"` reaches the backend as `-c` and
+    # `search_path="a`, and this reports what the backend would select.
+    assert schema_selected_by(
+        "host=h dbname=db options='-c search_path=\"a b\",public'") == '"a'
+
+    base = {PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox"}
+    with pytest.raises(ConfigurationError) as split_schema:
+        load_settings({**base, PREFIX + "DATABASE_URL": quoted,
+                       PREFIX + "MIGRATION_DATABASE_URL": other})
+    assert "tenant,blue" in str(split_schema.value)
+    assert "tenant,red" in str(split_schema.value)
+
+    # THE DATABASE IS COMPARED FIRST, in both DSN forms, and no credential is
+    # read to do it.
+    assert database_named_by("postgresql://u:p@h:5432/opendox?x=1") == "opendox"
+    assert database_named_by("host=h dbname=coord user=u") == "coord"
+    assert database_named_by("postgresql://u:p@h/") is None
+    assert database_named_by("host=h") is None
+
+    with pytest.raises(ConfigurationError) as split_database:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL": "postgresql://u:p@h/one",
+                       PREFIX + "MIGRATION_DATABASE_URL":
+                           "postgresql://m:p@h/two"})
+    message = str(split_database.value)
+    assert "one" in message and "two" in message
+    assert "://" not in message and "p@h" not in message
+
+    # AND A POOLER IS NOT A SECOND SERVER. A served DSN through a connection
+    # pooler beside a migration DSN direct to the database is the ordinary
+    # secure shape, and nothing in either string tells the two apart — so the
+    # host and port are deliberately not compared, and this pins that.
+    assert load_settings({**base,
+                          PREFIX + "DATABASE_URL":
+                              "postgresql://u:p@pooler:6432/one",
+                          PREFIX + "MIGRATION_DATABASE_URL":
+                              "postgresql://m:p@db.internal:5432/one"})
