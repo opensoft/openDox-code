@@ -325,6 +325,49 @@ def _sanitized_git_environment() -> dict[str, str]:
             and not name.startswith("GIT_CONFIG_VALUE_")}
 
 
+#: Whether this platform offers the primitives every path guard here needs.
+#:
+#: `O_DIRECTORY` and a `dir_fd`-capable `mkdir`/`open` are what make the
+#: component-by-component walk a walk and not a pathname resolution. Windows
+#: has neither: `os.O_DIRECTORY` is not defined there at all, and
+#: `os.supports_dir_fd` excludes both calls — so `open_no_follow_chain` raised
+#: `AttributeError` before any caller's refusal translation, and every read,
+#: write, attach and push failed with a traceback rather than an answer
+#: (Copilot review of openDox-code#26, round 29).
+#:
+#: THE ACT REFUSES THERE RATHER THAN DEGRADING. The alternative that was in the
+#: tree — create the parents by pathname, then check the leaf — is not a weaker
+#: race window, it is no guard at all: an EXISTING `<root>/link` pointing
+#: elsewhere is followed on every platform taking that branch, every time, and
+#: the act would have written a repository outside the root it owns while
+#: reporting success. A named refusal is the honest answer for a platform this
+#: act has never run on: both `deploy/` shapes and every CI runner are Linux.
+NO_FOLLOW_WALK_IS_AVAILABLE = (
+    hasattr(os, "O_DIRECTORY")
+    and os.mkdir in os.supports_dir_fd
+    and os.open in os.supports_dir_fd)
+
+
+class PlatformCannotGuardPaths(OSError):
+    """This platform cannot open a directory chain without following links."""
+
+
+def refuse_without_the_no_follow_walk() -> None:
+    """Raise unless this platform offers the walk every path guard needs.
+
+    An `OSError` subclass on purpose: every caller in this package already
+    translates `OSError` into its own named refusal, so a platform without the
+    primitives produces the act's answer and not a traceback.
+    """
+    if not NO_FOLLOW_WALK_IS_AVAILABLE:
+        raise PlatformCannotGuardPaths(
+            "this platform offers no O_DIRECTORY or no dir_fd-capable "
+            "mkdir/open, so a repository path cannot be opened without "
+            "following links; this act refuses rather than writing through "
+            "one. Run the runtime on a platform that has them (every "
+            "deploy/ shape and every CI runner is Linux)")
+
+
 def open_no_follow_chain(directory: Path, *, create: bool = False) -> int:
     """A descriptor for `directory`, opened COMPONENT BY COMPONENT, no-follow.
 
@@ -356,6 +399,7 @@ def open_no_follow_chain(directory: Path, *, create: bool = False) -> int:
     lookup the caller then makes with `dir_fd=` happens in the object this walk
     verified.
     """
+    refuse_without_the_no_follow_walk()
     walked = Path(os.path.abspath(directory))
     handle = os.open(walked.anchor or os.sep, os.O_RDONLY | os.O_DIRECTORY)
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
@@ -436,6 +480,17 @@ class GitRunner:
     #: what makes `/proc/self/fd/<n>` mean anything in the child. `None` — every
     #: other caller — behaves exactly as before.
     inherit_fd: int | None = None
+    #: A SECOND DESCRIPTOR THE CHILD INHERITS, for the push that names its
+    #: DESTINATION by open handle as well as its source (`repository_act.
+    #: _push_to_remote_with`). Same rule as `inherit_fd`: `subprocess` closes
+    #: inherited descriptors, so passing it is what makes `/proc/self/fd/<n>`
+    #: mean anything in the child.
+    extra_fd: int | None = None
+
+    def _inherited(self) -> tuple[int, ...]:
+        """The descriptors this runner's children keep, in a stable order."""
+        return tuple(fd for fd in (self.inherit_fd, self.extra_fd)
+                     if fd is not None)
 
     def _argv(self, args: tuple[str, ...]) -> list[str]:
         """The command line, with this package's two policy options on it.
@@ -467,6 +522,24 @@ class GitRunner:
                  else ["-c", f"alias.{subcommand}="])
         return [self.executable, "-C", str(self.root),
                 "-c", "core.hooksPath=" + os.devnull, *alias,
+                # AND NO SIGNING, which names a PROGRAM the repository chooses.
+                # `gpg.program` is run by whatever signs, and a repository can
+                # turn signing on in its own config. MEASURED on git 2.43.0
+                # with `gpg.program` pointing at a script: `commit.gpgSign`
+                # does NOT reach `commit-tree`, which is the only commit this
+                # act makes (`git commit` DOES run it — the control) — but
+                # `push.gpgSign=true` DID reach the push, which this act
+                # performs, and failed it with `the receiving end does not
+                # support --signed push` before any receiver had agreed to
+                # anything. Against a receiver that does support it, that is
+                # the repository choosing which program this process runs
+                # (Copilot review of openDox-code#26, round 29, which reported
+                # the `commit-tree` half). All three switches are pinned off
+                # here rather than the one that is reachable today: they cost
+                # one option each and the reachable set is git's to change.
+                "-c", "commit.gpgSign=false",
+                "-c", "tag.gpgSign=false",
+                "-c", "push.gpgSign=false",
                 "--literal-pathspecs", *args]
 
     def run(self, *args: str, stdin: bytes | None = None,
@@ -477,8 +550,7 @@ class GitRunner:
         try:
             return subprocess.run(argv, input=stdin, capture_output=True,
                                   check=False, env=merged, timeout=timeout,
-                                  pass_fds=() if self.inherit_fd is None
-                                  else (self.inherit_fd,))
+                                  pass_fds=self._inherited())
         except (OSError, ValueError) as exc:
             # `ValueError` TOO, and for a caller-controlled reason: a
             # `DocumentId.key`, an `actor` or a `reason` carrying an embedded
@@ -517,7 +589,7 @@ class GitRunner:
             child = subprocess.Popen(                    # noqa: S603 - fixed argv
                 argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env=env,
-                pass_fds=() if self.inherit_fd is None else (self.inherit_fd,))
+                pass_fds=self._inherited())
         except (OSError, ValueError) as exc:
             raise GitCommandFailed(
                 args, subprocess.CompletedProcess(
@@ -1826,13 +1898,33 @@ class LocalGitCorpus:
         call, which makes the answer conservative (a filtered file reads as
         changed) rather than executable.
         """
-        listed = self._probe(git, "config", "--local", "--name-only",
-                             "--get-regexp", r"^filter\..*\.(clean|smudge|process)$",
-                             kind=CORPUS_UNREADABLE, subject=subject)
-        if listed.returncode != 0:
-            return ()                     # exit 1 is "none set", which is usual
+        # BOTH SCOPES, because `--local` is not all of a repository's own
+        # config. With `extensions.worktreeConfig` set, a LINKED WORKTREE keeps
+        # its own `config.worktree`, and a `filter.<name>.clean` defined there
+        # is invisible to `--local` and is still run. MEASURED on git 2.43.0:
+        #
+        #   git config extensions.worktreeConfig true
+        #   git config --worktree filter.evil.clean 'sh -c "echo PWNED >&2; cat"'
+        #   git config --local --get-regexp '^filter\.'   -- exit 1, nothing
+        #   git config --worktree --get-regexp '^filter\.' -- filter.evil.clean …
+        #   git diff --name-only                          -- PWNED
+        #
+        # The override itself already worked (`-c filter.evil.clean=` silenced
+        # it); what did not was FINDING the name to override (Copilot review of
+        # openDox-code#26, round 29). `--worktree` is an error where the
+        # extension is off, which is the usual case, so its failure is as
+        # ordinary as `--local` returning nothing.
+        keys: list[str] = []
+        for scope in ("--local", "--worktree"):
+            listed = self._probe(git, "config", scope, "--name-only",
+                                 "--get-regexp",
+                                 r"^filter\..*\.(clean|smudge|process)$",
+                                 kind=CORPUS_UNREADABLE, subject=subject)
+            if listed.returncode != 0:
+                continue                  # "none set", or no worktree config
+            keys += listed.stdout.decode("utf-8", "replace").split()
         options: list[str] = []
-        for key in listed.stdout.decode("utf-8", "replace").split():
+        for key in dict.fromkeys(keys):   # DEDUPLICATED, order kept
             if key.startswith("filter.") and key.count(".") >= 2:
                 options += ["-c", key + "="]
         return tuple(options)

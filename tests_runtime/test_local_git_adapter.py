@@ -3316,3 +3316,135 @@ def test_check_does_not_run_a_filter_the_corpus_names(
     assert marker.exists(), (
         "this git does not run a clean filter for `diff --name-only`, so the "
         "case above proves nothing on this platform")
+
+
+def test_a_worktree_scoped_clean_filter_is_emptied_like_a_local_one(
+        adapter: lga.LocalGitCorpus, tmp_path: Path) -> None:
+    """`--local` is not all of a repository's own config.
+
+    THE FINDING (Copilot review of openDox-code#26, round 29): with
+    `extensions.worktreeConfig` set, a LINKED WORKTREE keeps its own
+    `config.worktree`, and a `filter.<name>.clean` defined there is invisible
+    to `git config --local` and is still run by `git diff --name-only` — so
+    `check` executed repository-controlled code despite round 23's overrides.
+
+    MEASURED on git 2.43.0, which is what makes this a defect and not a
+    hypothesis:
+
+        git config extensions.worktreeConfig true
+        git config --worktree filter.evil.clean 'sh -c "echo PWNED >&2; cat"'
+        git config --local --get-regexp '^filter\\.'    -- exit 1, nothing
+        git config --worktree --get-regexp '^filter\\.'  -- filter.evil.clean …
+        git diff --name-only                           -- PWNED
+
+    The override already worked (`-c filter.evil.clean=` silenced it); what did
+    not was FINDING the name to override. Both scopes are read now.
+    """
+    location = tmp_path / "worktree-config"
+    location.mkdir()
+    _git(location, "init", "--initial-branch=main", ".")
+    marker = tmp_path / "WORKTREE_CLEAN_RAN"
+    (location / "a.md").write_text("hello\n", encoding="utf-8")
+    (location / ".gitattributes").write_text("*.md filter=evil\n",
+                                             encoding="utf-8")
+    _git(location, "add", "-A")
+    _git(location, "commit", "-m", "with an attribute")
+    # THE WORKTREE SCOPE, which `--local` does not report.
+    _git(location, "config", "extensions.worktreeConfig", "true")
+    _git(location, "config", "--worktree", "filter.evil.clean",
+         f"sh -c 'touch {marker}; cat'")
+    (location / "a.md").write_text("changed\n", encoding="utf-8")
+
+    listed = subprocess.run(
+        ["git", "-C", str(location), "config", "--local", "--name-only",
+         "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"],
+        capture_output=True, env=_GIT_ENV)
+    assert listed.returncode != 0 and not listed.stdout.strip(), (
+        "`--local` reports the worktree-scoped driver on this git, so this "
+        "case measures nothing")
+
+    corpus = _resolve(adapter, location)
+    findings = adapter.check(corpus)
+    assert not marker.exists(), (
+        "`check` ran a clean filter defined in the worktree scope")
+    assert any(finding.subject == "a.md" for finding in findings), findings
+
+    # THE PREMISE, measured rather than assumed: that driver really does run
+    # under the plain invocation.
+    subprocess.run(["git", "-C", str(location), "diff", "--no-ext-diff",
+                    "--no-textconv", "--name-only"],
+                   capture_output=True, env=_GIT_ENV)
+    assert marker.exists(), (
+        "this git does not run a worktree-scoped clean filter for `diff "
+        "--name-only`, so the case above proves nothing on this platform")
+
+
+def test_no_signing_program_the_repository_names_is_ever_run(
+        tmp_path: Path) -> None:
+    """`gpg.program` is a program, and signing is what invites it.
+
+    THE FINDING (Copilot review of openDox-code#26, round 29): a repository can
+    set `commit.gpgSign=true` and `gpg.program` to an executable, "so both
+    `initialize_repository` and `write_back` can run repository-controlled code
+    through `commit-tree`".
+
+    MEASURED FALSE FOR `commit-tree`, and TRUE for the push, which is the more
+    interesting half. With `gpg.program` pointing at a script on git 2.43.0:
+
+      * `git commit-tree` produced a commit and did NOT run it — `commit.gpgSign`
+        is `git commit`'s, and `commit-tree` signs only for `-S`;
+      * `git commit` DID run it, the control: `PWNED ran with: --status-fd=2
+        -bsau …`. This act makes no `git commit`, only `commit-tree`;
+      * `push.gpgSign=true` DID reach the push, which this act performs, and
+        failed it with `the receiving end does not support --signed push`
+        before any receiver had agreed to anything. Against a receiver that
+        does support it, that is the repository choosing which program this
+        process runs.
+
+    All three switches are pinned off in the common argv rather than the one
+    that is reachable today: they cost one option each, and which of them is
+    reachable is git's to change. This case asserts the argv AND drives the
+    reachable one end to end.
+    """
+    runner = lga.GitRunner(root=tmp_path)
+    argv = runner._argv(("status",))
+    for key in ("commit.gpgSign=false", "tag.gpgSign=false",
+                "push.gpgSign=false"):
+        assert key in argv, (key, argv)
+        assert argv.index("-c") < argv.index(key), "an option after the verb"
+
+    # AND THE REACHABLE ONE, end to end. A repository that turns on signed
+    # pushes and names a program cannot make this runner do either.
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init", "--initial-branch=main", ".")
+    (source / "a.md").write_text("hello\n", encoding="utf-8")
+    _git(source, "add", "-A")
+    _git(source, "commit", "-m", "one")
+    destination = tmp_path / "governed.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(destination)],
+                   check=True, capture_output=True, env=_GIT_ENV)
+    marker = tmp_path / "GPG_RAN"
+    program = tmp_path / "gpg.sh"
+    program.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+    program.chmod(0o755)
+    _git(source, "config", "push.gpgSign", "true")
+    _git(source, "config", "gpg.program", str(program))
+    _git(source, "remote", "add", "origin", str(destination))
+
+    # THE PREMISE: plain git fails this push because the repository asked for a
+    # signed one.
+    plain = subprocess.run(
+        ["git", "-C", str(source), "push", "origin", "main:main"],
+        capture_output=True, env=_GIT_ENV)
+    assert plain.returncode != 0, (
+        "this git does not honour `push.gpgSign` from the repository's own "
+        "config, so the case below proves nothing on this platform")
+
+    lga.GitRunner(root=source).out_bounded(
+        "push", "origin", "main:main", timeout=30)
+    assert not marker.exists(), "a program the repository named was run"
+    assert subprocess.run(
+        ["git", "-C", str(destination), "rev-parse", "--verify", "--quiet",
+         "refs/heads/main"], capture_output=True,
+        env=_GIT_ENV).returncode == 0, "the push did not land"

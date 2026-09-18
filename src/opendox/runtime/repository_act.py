@@ -62,6 +62,7 @@ below for the line.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import urllib.parse
@@ -84,6 +85,7 @@ from opendox.runtime.local_git_adapter import (
     git_available,
     git_identity,
     names_a_secret_parameter,
+    PlatformCannotGuardPaths,
     open_no_follow_chain,
     redact_remote_url,
     runner_bound_to,
@@ -386,9 +388,17 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
               else "holds a '/'" if "/" in project_id
               else "holds a NUL" if "\0" in project_id
               else "is '.' or '..'" if project_id in {".", ".."}
+              # `windows.root` IS IN THIS PREDICATE, and it is not redundant
+              # with `is_absolute()`: MEASURED on python 3.12,
+              # `PureWindowsPath(r"\\outside")` has `drive=''`, `root='\\'`
+              # and `is_absolute() == False` — a ROOT-RELATIVE path, which is
+              # not absolute because it names no drive, and which discards the
+              # configured parent all the same:
+              # `PureWindowsPath("C:/srv/projects") / r"\\outside"` is
+              # `C:\\outside` (Copilot review of openDox-code#26, round 29).
               else "is not a single path component"
               if (windows is not None
-                  and (windows.drive or windows.is_absolute()
+                  and (windows.drive or windows.root or windows.is_absolute()
                        or len(windows.parts) != 1))
               # A CONTROL CHARACTER, because git terminates a pathname with a
               # newline and `rev-parse` has no `-z`: a location whose name
@@ -686,24 +696,25 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
             finally:
                 os.close(parent)
         else:
-            # A PLATFORM WITHOUT `dir_fd`, and the weaker guarantee is stated
-            # rather than assumed. `os.supports_dir_fd` excludes `mkdir` and
-            # `open` on Windows, where they raise `NotImplementedError`; every
-            # place this runtime is deployed (both `deploy/` shapes) and every
-            # runner its CI uses is Linux, where both are supported. Where they
-            # are not, this is the shape the act had before: an exclusive
-            # create and a no-follow open BY NAME, which still refuses a
-            # symlink and (with the inode comparison below) a re-pointed path,
-            # and leaves only the window between the two calls. Same policy as
-            # `_runner_bound_to`'s `/proc/self/fd` → `/dev/fd` → pathname
-            # ladder: take the strongest the platform offers, and say which.
-            location.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                location.mkdir()
-            except FileExistsError:
-                pass
-            owned = os.open(location, os.O_RDONLY | os.O_DIRECTORY
-                            | getattr(os, "O_NOFOLLOW", 0))
+            # A PLATFORM WITHOUT `dir_fd` REFUSES, and that is a change of
+            # policy this comment owes an explanation for. The branch here used
+            # to create the parents with `location.parent.mkdir(parents=True)`
+            # and then open the leaf no-follow by name, described as "the
+            # strongest the platform offers". It is not weaker — it is not a
+            # guard at all: `mkdir(parents=True)` resolves the chain BY
+            # PATHNAME, so an EXISTING `<root>/link` pointing elsewhere is
+            # followed every time on every platform taking this branch, and the
+            # act would have created a repository outside the root it owns and
+            # reported success (Copilot review of openDox-code#26, round 29 —
+            # "this is not just the documented race window"). Refusing is the
+            # honest answer for a platform this act has never run on: both
+            # `deploy/` shapes and every CI runner are Linux. The refusal is an
+            # `OSError`, which this function's caller already translates.
+            raise PlatformCannotGuardPaths(
+                "creating a repository needs a dir_fd-capable `mkdir` and "
+                "this platform has none, so the parents could only be made by "
+                "pathname — which follows any link already in the chain. "
+                "Nothing has been created")
     except RepositoryActRefused:
         raise
     except (OSError, ValueError) as exc:
@@ -1262,7 +1273,9 @@ _WINDOWS_LOCAL_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
 
 
 def _destination_as_a_local_path(destination: str,
-                                 location: Any) -> Path | None:
+                                 location: Any,
+                                 *, windows: bool = os.name == "nt"
+                                 ) -> Path | None:
     """The filesystem path a destination names, or `None` if it names a host.
 
     git's own rule, narrowed to what this act has to decide — and each of the
@@ -1287,8 +1300,28 @@ def _destination_as_a_local_path(destination: str,
     if destination.startswith("file://"):
         return Path(urllib.parse.unquote(
             urllib.parse.urlsplit(destination).path or "/"))
-    if _WINDOWS_LOCAL_PATH.match(destination):
+    # THE DRIVE/UNC BRANCH RUNS ONLY WHERE GIT READS IT AS A PATHNAME. It ran
+    # on every host, so a POSIX runtime classified `C:/repo.git` as a local
+    # path — and MEASURED on git 2.43.0 on Linux, git reads that colon form as
+    # scp/SSH syntax: `git ls-remote C:/repo.git` gives `ssh: Could not resolve
+    # hostname c`. So this act would have sent the LOCAL hook-disabling
+    # `--receive-pack` to a remote host, and compared ownership against a
+    # filesystem path nothing was ever going to touch (Copilot review of
+    # openDox-code#26, round 29). `windows` is a parameter so the case can
+    # measure both platforms from either.
+    if windows and _WINDOWS_LOCAL_PATH.match(destination):
         return Path(destination)
+    # AND `://` STILL WINS OVER AN ABSOLUTE PATH, which round 29 also asked
+    # about — `/srv/projects/other://repo.git` returning `None` was reported as
+    # a bypass, "even though Git treats an absolute path as a local
+    # repository". It does not treat THAT one as a path. MEASURED:
+    #
+    #   git push /tmp/cls/src/../other://repo.git HEAD:refs/heads/main
+    #   fatal: protocol '/tmp/cls/src/../other' is not supported
+    #
+    # git splits on `://` first too, so the destination is unusable rather than
+    # unchecked: the push fails loudly at git and nothing is bypassed. This
+    # classifier agreeing with git is the property that matters, and it does.
     if "://" in destination:
         return None
     head = destination.split("/", 1)[0]
@@ -1343,14 +1376,70 @@ def _refuse_a_destination_this_service_owns(destinations: tuple[str, ...],
             resolved = path.expanduser().resolve()
             root = owned.resolve()
             here = Path(location).resolve()
-        except (OSError, RuntimeError, ValueError):
-            continue                      # unreadable: other guards answer
+        except (OSError, RuntimeError, ValueError) as exc:
+            # FAIL CLOSED. This `continue` said "unreadable: other guards
+            # answer", and no other guard answers THIS question: a local
+            # destination whose path could not be resolved — a permission
+            # error, a symlink loop, an embedded NUL — went on to `git push`
+            # without anything having proved it lies outside the root this
+            # service owns (Copilot review of openDox-code#26, round 29). A
+            # containment check that cannot be made is a refusal, not a pass.
+            raise RepositoryActRefused(
+                "this project's remote is a local path whose location this "
+                f"act cannot establish ({type(exc).__name__}), so it cannot "
+                "prove the push stays out of the repository root this service "
+                "owns; re-attach a remote that resolves") from exc
         if resolved == here or resolved == root or root in resolved.parents:
             raise RepositoryActRefused(
                 "this project's remote names a path inside the repository "
                 "root this service owns, which is this project's own "
                 "repository or another project's. A push moves the project "
                 "into a GOVERNED destination; re-attach a remote that is one")
+
+
+def _bound_local_destination(destination: str | None, location: Any):
+    """A LOCAL push destination named by an OPEN DIRECTORY, where the OS allows.
+
+    THE WINDOW THIS CLOSES (Copilot review of openDox-code#26, round 29): the
+    containment check resolved the destination, refused it if it lay inside the
+    root this service owns, and then THREW THE RESOLVED OBJECT AWAY — the push
+    re-opened the same URL by pathname. A symlink used as an external local
+    destination could be re-pointed at a sibling under this service's root
+    between the two, and the push would write into another project with the
+    guard's blessing. The act registered this as residue twice; it is closed
+    here rather than registered a third time.
+
+    The handle is opened with the same component-by-component no-follow walk
+    every other path in this module uses, and `git push /proc/self/fd/<n>`
+    writes into THAT object whatever the name now points at — measured on this
+    container (Linux 6.18, git 2.43.0): `rc 0`, `* [new branch] HEAD -> main`
+    in the directory the descriptor held.
+
+    Returns `(handle, argument)`: the descriptor to keep open across the push
+    and the destination to name on the command line, or `(None, None)` when the
+    destination is not local. WHERE NEITHER `/proc/self/fd` NOR `/dev/fd`
+    EXISTS the handle is released and the pathname is used, which is the ladder
+    `runner_bound_to` already documents — unlike the creation path, the guard
+    here is real on every platform and only its NAMING degrades.
+    """
+    if destination is None:
+        return None, None
+    path = _destination_as_a_local_path(destination, location)
+    if path is None:
+        return None, None
+    try:
+        resolved = path.expanduser().resolve()
+        handle = open_no_follow_chain(resolved)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RepositoryActRefused(
+            "this project's remote is a local path this act could not open "
+            f"without following a link ({type(exc).__name__}); nothing is "
+            "pushed") from exc
+    for base in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(base):
+            return handle, f"{base}/{handle}"
+    os.close(handle)
+    return None, None
 
 
 def _receive_pack_for(destination: str | None, location: Any) -> str:
@@ -1490,11 +1579,27 @@ def _push_to_remote_with(git: GitRunner, row: Any) -> str:
         # openDox-code#26, round 21). The value is still one THIS act chooses
         # rather than one the repository names, which is the property round 16
         # pinned.
-        git.out_bounded("-c", "protocol.ext.allow=never",
-                        "push", _receive_pack_for(effective, row.location),
-                        REMOTE_NAME,
-                        f"refs/heads/{branch}:refs/heads/{branch}",
-                        timeout=PUSH_TIMEOUT_SECONDS)
+        # AND A LOCAL DESTINATION IS NAMED BY THE OBJECT THE GUARD CHECKED.
+        # `REMOTE_NAME` made git re-read `remote.origin.url` and re-walk that
+        # pathname, so the destination the containment check resolved and the
+        # destination git opened were two lookups with a window between them —
+        # see `_bound_local_destination`. The remote's two URLs and the map row
+        # have already been proved equal above, so naming the handle loses
+        # nothing and closes that window. A network destination still pushes to
+        # `REMOTE_NAME`, which is the value all three agree on.
+        handle, bound = _bound_local_destination(effective, row.location)
+        try:
+            runner = (dataclasses.replace(git, extra_fd=handle)
+                      if handle is not None else git)
+            runner.out_bounded("-c", "protocol.ext.allow=never",
+                               "push",
+                               _receive_pack_for(effective, row.location),
+                               bound or REMOTE_NAME,
+                               f"refs/heads/{branch}:refs/heads/{branch}",
+                               timeout=PUSH_TIMEOUT_SECONDS)
+        finally:
+            if handle is not None:
+                os.close(handle)
     except GitCommandFailed as failed:
         # THE STORED URL IS REDACTED IN THE REFUSAL. A row written before
         # `refuse_credential_bearing_remote` existed can still carry a

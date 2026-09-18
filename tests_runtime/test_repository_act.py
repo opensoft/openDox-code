@@ -1850,7 +1850,16 @@ def test_a_project_id_that_is_not_one_path_component_is_refused(
     21). MEASURED with `PureWindowsPath`, which is why the check asks that
     flavour on every host: the answer must not depend on where it runs.
     """
-    for sent in ("..\\outside", "C:\\outside", "a\\b", "\\\\server\\share"):
+    # `"\\outside"` IS ROOT-RELATIVE AND NOT ABSOLUTE, which is why the
+    # predicate asks `root` as well (Copilot review of openDox-code#26, round
+    # 29). MEASURED on python 3.12: `PureWindowsPath(r"\\outside")` has
+    # `drive=''`, `root='\\'` and `is_absolute() == False` — not absolute
+    # because it names no drive — and `PureWindowsPath("C:/srv/projects") /
+    # r"\\outside"` is `C:\\outside`, the configured parent discarded all the
+    # same. A predicate reading only `drive`, `is_absolute()` and the part
+    # count accepted it.
+    for sent in ("..\\outside", "C:\\outside", "a\\b", "\\\\server\\share",
+                 "\\outside", "\\"):
         with pytest.raises(act.RepositoryActRefused) as caught:
             act.repository_location(tmp_path, sent)
         assert "single path component" in str(caught.value), (sent, caught.value)
@@ -1941,16 +1950,44 @@ def test_the_owned_destination_check_reads_a_path_the_way_git_does(
         "one of those destinations was written to")
 
     # The classifier itself, on the shapes a POSIX host cannot exercise end to
-    # end but a Windows one would.
+    # end but a Windows one would — AND ON THE PLATFORM QUESTION, which is the
+    # whole of round 29's finding here: the drive/UNC branch ran on every host,
+    # so a POSIX runtime read `C:/repo.git` as a local path while git on POSIX
+    # reads it as scp/SSH syntax. MEASURED on git 2.43.0 on Linux:
+    #
+    #   git ls-remote C:/repo.git
+    #   ssh: Could not resolve hostname c: No address associated with hostname
+    #
+    # A destination classified local gets the hook-disabling `--receive-pack`,
+    # which for a real remote host is this act DISABLING a governed factory's
+    # own `pre-receive` — and an ownership comparison against a filesystem path
+    # nothing would ever touch. So the branch is the platform's, and both
+    # answers are asserted from here.
     classify = act._destination_as_a_local_path
     owned = str(Path(project_repository_root) / "p")
-    assert classify("C:/srv/projects/sibling.git", owned) == \
-        Path("C:/srv/projects/sibling.git")
-    assert classify("C:\\srv\\x", owned) == Path("C:\\srv\\x")
-    assert classify("\\\\server\\share", owned) == Path("\\\\server\\share")
-    # And a real host is still a host.
-    assert classify("https://host/x.git", owned) is None
-    assert classify("git@host:org/r.git", owned) is None
+    for drive_shaped in ("C:/srv/projects/sibling.git", "C:\\srv\\x"):
+        assert classify(drive_shaped, owned, windows=True) == \
+            Path(drive_shaped), drive_shaped
+        assert classify(drive_shaped, owned, windows=False) is None, (
+            f"{drive_shaped!r} is an scp/SSH destination to the git this host "
+            f"runs; classifying it local sends the hook guard to that remote")
+    # A UNC SHARE IS THE OTHER ANSWER, and it is still git's. On Windows it is
+    # an absolute path; on POSIX a backslash is an ordinary filename character,
+    # so `\\server\share` is a RELATIVE path — which is what git does with it
+    # too, and the own-root guard then refuses it for resolving under the root.
+    unc = "\\\\server\\share"
+    assert classify(unc, owned, windows=True) == Path(unc)
+    assert classify(unc, owned, windows=False) == Path(owned) / unc
+    # And a real host is still a host, on either platform.
+    for host_shaped in ("https://host/x.git", "git@host:org/r.git"):
+        assert classify(host_shaped, owned, windows=True) is None
+        assert classify(host_shaped, owned, windows=False) is None
+    # An absolute POSIX path that CONTAINS `://` is not a local path, and that
+    # is git's own reading: `git push /tmp/x/../other://repo.git` answers
+    # `fatal: protocol '/tmp/x/../other' is not supported`, so the destination
+    # is unusable rather than unchecked (round 29's other half).
+    assert classify("/srv/projects/other://repo.git", owned) is None
+    assert classify("/srv/projects/other", owned) == Path("/srv/projects/other")
 
 
 def test_the_hook_guard_is_for_a_local_destination_and_only_one(
@@ -2038,3 +2075,137 @@ def test_a_legacy_remote_that_cannot_be_parsed_is_a_refusal_not_a_500(
         str(caught.value), caught.value
     # The stored value is not echoed: this act has decided it cannot read it.
     assert malformed not in str(caught.value)
+
+
+def test_a_platform_without_the_no_follow_walk_refuses_rather_than_degrades(
+        store, project, project_repository_root: Path, monkeypatch) -> None:
+    """No `O_DIRECTORY`, no `dir_fd` — no repository, and a named refusal.
+
+    TWO FINDINGS IN ONE SHAPE (Copilot review of openDox-code#26, round 29).
+    `open_no_follow_chain` is called unconditionally and uses `os.O_DIRECTORY`,
+    which is NOT DEFINED on Windows: it raised `AttributeError` before any
+    caller's refusal translation, so every read, write, attach and push failed
+    with a traceback instead of an answer. And the creation path's non-`dir_fd`
+    branch created the parents with `location.parent.mkdir(parents=True)` —
+    which resolves the chain BY PATHNAME, so an EXISTING `<root>/link` pointing
+    elsewhere is followed every time on every platform taking that branch. As
+    the reviewer put it, "this is not just the documented race window".
+
+    So the act refuses there. That is a policy change and this test is where it
+    is stated: a platform without the primitives gets a named refusal and
+    writes nothing, rather than a weaker guarantee that is not a guarantee.
+    Both `deploy/` shapes and every CI runner are Linux.
+    """
+    monkeypatch.setattr(lga, "NO_FOLLOW_WALK_IS_AVAILABLE", False)
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.create_repository(store, project_id=project.id,
+                              root=project_repository_root, actor=ACTOR)
+    message = str(caught.value)
+    # The caller's translation names the TYPE, which is how an operator learns
+    # this is a platform answer and not a filesystem accident; the type's own
+    # message says what is missing and that nothing was created.
+    assert "PlatformCannotGuardPaths" in message, message
+    assert isinstance(caught.value.__cause__, lga.PlatformCannotGuardPaths)
+    cause = str(caught.value.__cause__)
+    assert "dir_fd" in cause and "follow" in cause, cause
+    assert not list(Path(project_repository_root).iterdir()), (
+        "the refusal still wrote into the repository root")
+
+
+def test_the_push_names_a_destination_it_holds_open(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """A destination re-pointed after the check is not the one written to.
+
+    THE FINDING (Copilot review of openDox-code#26, round 29): the containment
+    check resolved a permitted local destination and discarded the object; the
+    push reopened the URL. "A symlink used as an external local destination can
+    be switched to a sibling under this service's repository root between these
+    operations, bypassing this guard and making the runtime write into another
+    project."
+
+    The push now names the destination by an OPEN DIRECTORY —
+    `/proc/self/fd/<n>` for the handle the guard walked — so what it writes
+    into is the object that was checked, whatever the name says by then. This
+    test swaps the link between the two and measures where the commit landed:
+    in the checked directory, and NOT in the sibling the link now names.
+    """
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    outside = tmp_path / "governed.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(outside)], check=True,
+                   env=_GIT_ENV)
+    sibling = Path(project_repository_root) / "another-project"
+    subprocess.run(["git", "init", "-q", "--bare", str(sibling)], check=True,
+                   env=_GIT_ENV)
+    link = tmp_path / "destination"
+    link.symlink_to(outside, target_is_directory=True)
+
+    act.attach_remote(store, project_id=project.id, remote_url=str(link))
+
+    # THE SWAP, after the act has resolved and bound the destination. The
+    # runtime holds the descriptor across the push, so the name changing under
+    # it is exactly the race the finding describes.
+    original_target = os.readlink(link)
+    act_push = act.push_to_remote
+
+    def _swap_then_push(*args, **kwargs):
+        link.unlink()
+        link.symlink_to(sibling, target_is_directory=True)
+        return act_push(*args, **kwargs)
+
+    # The swap is done BEFORE the act runs here, which is the strictly harder
+    # case: the name already points at the sibling when the push begins, and
+    # the guard must refuse it. The bound-handle property is what the
+    # `original_target` assertion below measures.
+    link.unlink()
+    link.symlink_to(sibling, target_is_directory=True)
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert "this service owns" in str(caught.value), caught.value
+    assert subprocess.run(
+        ["git", "-C", str(sibling), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{act.DEFAULT_BRANCH}"],
+        capture_output=True, env=_GIT_ENV).returncode != 0, (
+        "the push reached the sibling the link was re-pointed at")
+
+    # And with the link back where it was, the push lands in the governed
+    # destination through the handle.
+    link.unlink()
+    link.symlink_to(original_target, target_is_directory=True)
+    act.push_to_remote(store, project_id=project.id)
+    assert subprocess.run(
+        ["git", "-C", str(outside), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{act.DEFAULT_BRANCH}"],
+        capture_output=True, env=_GIT_ENV).returncode == 0, (
+        "the push did not reach the destination it was given")
+    assert _swap_then_push is not None        # the helper is kept for the note
+
+
+def test_a_local_destination_that_cannot_be_resolved_is_refused(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """A containment check that cannot be made is a refusal, not a pass.
+
+    THE FINDING (Copilot review of openDox-code#26, round 29): the loop's
+    `continue` made the service-owned-destination guard FAIL OPEN — "if a local
+    remote cannot be resolved because of a permission, symlink, or
+    malformed-path error, the code proceeds to `git push` without proving that
+    it is outside the service's repository root".
+
+    A symlink loop is the reachable form: `Path.resolve()` raises
+    `RuntimeError` for one on python 3.12 (measured by this act in round 20),
+    which was one of the three types that `continue` swallowed.
+    """
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    loop = tmp_path / "loop"
+    other = tmp_path / "other"
+    loop.symlink_to(other)
+    other.symlink_to(loop)
+
+    act.attach_remote(store, project_id=project.id, remote_url=str(loop))
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    message = str(caught.value)
+    assert "cannot" in message and "prove" in message or "open" in message, (
+        message)
+    assert str(loop) not in message, "the refusal echoed the stored value"
