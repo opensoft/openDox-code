@@ -76,6 +76,17 @@ configMapGenerator:
       # does:
       #
       #   - runtime_pg_role=<the user in opendox-db-runtime's DSN>
+      #
+      # AND `pg_database` IS THE SECOND EDIT OF EXACTLY THAT KIND. The base
+      # declares `opendox`, which is the database the BUNDLED StatefulSet
+      # creates — and this overlay deletes that StatefulSet. The migration Job
+      # compares the declaration with `current_database()` and REFUSES when
+      # they differ, which is the safe direction and a loud one: a managed
+      # database named anything else stops the run until this literal names it.
+      # Uncomment and set it to the database in `opendox-db-migration`'s DSN,
+      # in the same commit that points those DSNs:
+      #
+      #   - pg_database=<the database in opendox-db-migration's DSN>
   - name: opendox-oidc
     behavior: merge
     options:

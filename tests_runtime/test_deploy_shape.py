@@ -2181,6 +2181,78 @@ def test_the_schema_the_migration_applies_is_the_one_the_api_reads() -> None:
 # -- the registered follow-ups, from #26's rounds -----------------------------
 
 
+def test_the_shipped_shapes_declare_the_database_they_actually_create(
+) -> None:
+    """A declaration that defaults to empty is a guard that never fires.
+
+    `OPENDOX_SERVED_DATABASE` lets the migration workload refuse to apply DDL —
+    or to DROP the six coordination tables — in a database the API does not
+    read. It shipped, in its first cut, defaulting to EMPTY in both deployments
+    while each of them CREATES a named database: compose's `postgres` service
+    is `POSTGRES_DB: ${OPENDOX_PG_DB:-opendox}` and the bundled StatefulSet
+    hardcodes `opendox`. So an operator who set nothing — the first run
+    everybody makes — got a server holding `opendox` and a migration container
+    told nothing, and `_served_database()` turned that into `None`: the guard
+    was a no-op in exactly the shapes it was added for (Copilot review of
+    openDox-code#30, measured across the compose file, the base and both
+    overlays).
+
+    THE SCHEMA STAYS EMPTY, AND THE DIFFERENCE IS THE POINT: `public` is
+    PostgreSQL's default rather than a name this repository chose, while the
+    database is a name these manifests write down and create.
+    """
+    compose = _load_yaml(COMPOSE / "docker-compose.yaml")
+    migrate = compose["services"]["migrate"]["environment"]
+    postgres = compose["services"]["postgres"]["environment"]
+    assert migrate[PREFIX + "SERVED_DATABASE"] == postgres["POSTGRES_DB"], (
+        "the migration container's declaration and the server's database come "
+        "from one expression, defaults included, or the guard is off for the "
+        "operator who sets neither")
+
+    kustomization = _load_yaml(KUBERNETES / "base" / "kustomization.yaml")
+    generator = next(item for item in kustomization["configMapGenerator"]
+                     if item["name"] == "opendox-runtime-config")
+    literals = dict(item.split("=", 1) for item in generator["literals"])
+    assert literals["pg_database"] == "opendox", (
+        "the base declares the database its own StatefulSet creates; empty "
+        "leaves the guard off for every shipped Kubernetes shape")
+    statefulset = _load_yaml(KUBERNETES / "base" / "postgres-statefulset.yaml")
+    env = {item["name"]: item.get("value")
+           for item in _containers(statefulset)[0]["env"]}
+    assert env["POSTGRES_DB"] == literals["pg_database"], (
+        "one name, two places; they cannot drift")
+
+    # AND THE OVERLAY THAT DELETES THAT STATEFULSET SAYS SO, in the same place
+    # it says the same thing about `runtime_pg_role` — a numbered edit rather
+    # than a silent inheritance.
+    managed = (KUBERNETES / "overlays" / "managed-database"
+               / "kustomization.yaml").read_text(encoding="utf-8")
+    assert "pg_database=<the database in opendox-db-migration's DSN>" in managed
+
+
+def test_the_image_creates_the_repository_root_private(
+) -> None:
+    """`runtime init` narrows the root it CREATES, and here it creates nothing.
+
+    The image makes `/var/lib/opendox/projects` in its own layer, so by the
+    time `runtime init` runs the root is already there — and this runtime does
+    not re-mode a directory it did not make. `mkdir -p` takes
+    `0o777 & ~umask`, which is 0755 for a `RUN` layer, so the directory holding
+    every project's bare repository shipped world-readable and traversable
+    while each repository under it is 0700 (Copilot review of openDox-code#30).
+    `install -d -m 0700` sets the mode itself, so no umask applies.
+    """
+    dockerfile = (COMPOSE / "Dockerfile").read_text(encoding="utf-8")
+    assert "mkdir -p /var/lib/opendox" not in dockerfile, (
+        "`mkdir` takes the build's umask; the repository root has to be made "
+        "with its mode stated")
+    for path in ("/var/lib/opendox", "/var/lib/opendox/projects"):
+        assert f"install -d -m 0700 {path}" in dockerfile, path
+    # ONE NUMBER WITH THE ACT THAT FILLS THE DIRECTORY.
+    from opendox.runtime import repository_act
+    assert f"{repository_act.REPOSITORY_DIRECTORY_MODE:04o}" == "0700"
+
+
 def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
     """An unlocked install is a supply chain that changes without a commit.
 

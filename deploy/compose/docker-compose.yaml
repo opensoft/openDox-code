@@ -244,7 +244,17 @@ services:
       # wider of the two declarations: a DSN may omit `dbname` altogether, and
       # libpq then defaults it to the connection USER — two DSNs that look
       # alike selecting two databases with neither one saying so.
-      OPENDOX_SERVED_DATABASE: ${OPENDOX_PG_DB:-}
+      # THE SAME DEFAULT THE SERVER ABOVE TAKES, and that is the whole point:
+      # this shipped as `${OPENDOX_PG_DB:-}` beside a `postgres` service
+      # declared `POSTGRES_DB: ${OPENDOX_PG_DB:-opendox}`, so an operator who
+      # sets nothing — the first run everybody makes — got a server holding
+      # `opendox` and a migration container told NOTHING, which turns this
+      # guard into a no-op in exactly the shape it was added for (Copilot
+      # review of openDox-code#30, measured in this file). The schema line
+      # above may stay empty because `public` is a DEFAULT and not a fact; the
+      # bundled server CREATES a named database, so this one is a fact and is
+      # declared.
+      OPENDOX_SERVED_DATABASE: ${OPENDOX_PG_DB:-opendox}
     command: ["opendox-runtime", "runtime", "migrate"]
     networks:
       - internal

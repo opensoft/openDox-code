@@ -57,8 +57,19 @@ RUN python -m pip install --no-cache-dir --only-binary :all: \
 COPY migrations ./migrations
 
 # A non-root user, and the per-project repository root it owns.
+#
+# `install -d -m 0700` AND NOT `mkdir -p`, on the same argument as
+# `runtime init`'s: this directory holds every project's bare repository, each
+# of which is created 0700, and `mkdir` takes `0o777 & ~umask` — 0755 for a
+# `RUN` layer — so the root above them shipped world-readable and traversable.
+# `runtime init` narrows the root it CREATES, and in this image the root is
+# already here by the time it runs, so `init` reports the mode and leaves it
+# alone (it does not re-mode a directory it did not make). The one place that
+# owns this directory is therefore the layer that makes it (Copilot review of
+# openDox-code#30). `install` sets the mode itself, so no umask applies.
 RUN useradd --system --create-home --uid 10001 opendox \
- && mkdir -p /var/lib/opendox/projects \
+ && install -d -m 0700 /var/lib/opendox \
+ && install -d -m 0700 /var/lib/opendox/projects \
  && chown -R opendox:opendox /var/lib/opendox
 USER opendox
 

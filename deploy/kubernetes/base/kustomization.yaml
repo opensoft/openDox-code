@@ -118,11 +118,23 @@ configMapGenerator:
       # openDox-code#25, round 36, suppressed).
       - pg_schema=
       # The DATABASE the served application reads, declared to the migration
-      # Job so it can refuse to apply DDL anywhere else. EMPTY declares
-      # nothing, which is the bundled shape; an overlay whose DSNs name a
-      # database sets this to the SAME name in the same commit. A NAME and
-      # never a credential — the property that lets a workload which must not
-      # hold the served DSN be told where the API reads (A25-3 established it
-      # for the schema; this is the half it left, openDox-code#26's registered
-      # item 4).
-      - pg_database=
+      # Job so it can refuse to apply DDL anywhere else. A NAME and never a
+      # credential — the property that lets a workload which must not hold the
+      # served DSN be told where the API reads (A25-3 established it for the
+      # schema; this is the half it left, openDox-code#26's registered item 4).
+      #
+      # `opendox`, AND NOT EMPTY, because the bundled `postgres-statefulset`
+      # hardcodes `POSTGRES_DB: opendox`: this base knows the name it creates,
+      # so an empty literal here would have left the guard OFF in every shipped
+      # Kubernetes shape — neither overlay sets it — which is the one shape it
+      # was added for (Copilot review of openDox-code#30, measured across the
+      # base and both overlays). `pg_schema` above stays empty for the opposite
+      # reason: `public` is PostgreSQL's default, not a name this repository
+      # chose.
+      #
+      # AN OVERLAY POINTING AT A MANAGED DATABASE MUST SET ITS OWN, in the same
+      # commit that points the DSNs — see `overlays/managed-database`, which
+      # says so where it says the same thing about `runtime_pg_role`. Leaving
+      # this one wrong is a REFUSAL and not a silent wrong-database migration,
+      # which is the direction this declaration exists to choose.
+      - pg_database=opendox

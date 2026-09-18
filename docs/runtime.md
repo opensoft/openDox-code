@@ -675,6 +675,7 @@ Check out the old head whole and run there instead, so the interpreter, the
 test file and the code under test come from one place:
 
 ```sh
+mkdir -p /tmp/oldhead                  # `tar -C` does not create it
 git archive <old-sha> | tar -x -C /tmp/oldhead
 cp tests_runtime/test_x.py /tmp/oldhead/tests_runtime/
 cd /tmp/oldhead && python -m pytest -q tests_runtime/test_x.py -k the_case
