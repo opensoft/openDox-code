@@ -739,8 +739,24 @@ jobs:
       #              the `runtime_pg_role` edit and the role-provisioning
       #              block, so an operator working top to bottom narrowed the
       #              BUNDLED role.
+      #              SUPERSEDED by the entry below, which is the same five
+      #              modules at the same count: `pytest -q tests_runtime/`
+      #              was 277 there.
+      #  167 passed  at `build/3-5-runtime` `948cf056` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — UNCHANGED on
+      #              the hermetic five, because round 27's third finding is
+      #              in `oidc.py`, which needs the runtime extra and is
+      #              measured in the OTHER job. A failed JWKS load left the
+      #              cache untouched, so every request re-entered the refresh
+      #              branch and fetched again, each holding the cache lock
+      #              for the source's whole timeout — one outbound fetch per
+      #              inbound request for as long as the broker is down. A
+      #              failure is remembered for a cooldown now, and the
+      #              cooldown never serves a key set: every call inside it
+      #              still raises, so verification stays fail-closed and only
+      #              the traffic is bounded.
       #              THE CURRENT FIGURE; the PR description states it at this
-      #              same commit, and `pytest -q tests_runtime/` is 277 here.
+      #              same commit, and `pytest -q tests_runtime/` is 279 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
