@@ -2410,3 +2410,77 @@ def test_a_successful_push_of_a_legacy_row_still_redacts_its_credential(
     assert "ghp_supersecret" not in pushed.text
     assert "someone" not in pushed.text
     assert pushed.json()["pushed_to"] == "<redacted-url>"
+
+
+def test_the_first_commit_cannot_be_forged_by_a_project_id_or_a_display_name(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`initialize_repository` is public and does not go through the map's validation.
+
+    The project id and the actor are both interpolated into the repository's
+    FIRST and permanent commit message, and the API hands `actor` an
+    authenticated DISPLAY NAME — so a newline in either wrote extra lines into
+    a record a reader cannot tell from the act's own (Copilot review of
+    openDox-code#26, round 33: one thread and one "previously missed").
+    """
+    for project_id, actor in (("p1\nCreated-By: somebody-else", ACTOR),
+                              ("p1", "Ann\nAdapter: forged")):
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.initialize_repository(tmp_path / "forged.git",
+                                      project_id=project_id, actor=actor)
+        assert "control character" in str(caught.value), caught.value
+        assert "nothing is created" in str(caught.value)
+    assert not (tmp_path / "forged.git" / "HEAD").exists()
+
+    # AND AN ORDINARY CREATE IS UNAFFECTED, and its message carries the two
+    # values it is supposed to.
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    message = _git(created.location, "log", "-1", "--format=%B")
+    assert f"Created-By: {ACTOR}" in message
+    assert str(project.id) in message
+
+
+def test_the_ownership_recheck_answers_inside_the_refusal_boundary(
+        store, project, project_repository_root: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check that cannot complete is a check that did not pass.
+
+    The bind re-asks containment of the OPEN object, and that question calls
+    `Path(location).parent.resolve()` — which raises `OSError` or
+    `RuntimeError` for a parent renamed, replaced by a symlink loop or made
+    unreachable after the bind. `push_to_remote` translates only
+    `GitCommandFailed`, so the API answered 500 instead of the act's named
+    refusal (Copilot review of openDox-code#26, round 33, suppressed).
+
+    `_bound_local_destination` IS ENTERED DIRECTLY, because the destination
+    check one function up asks the same question and already translates it —
+    driving this through `push_to_remote` would measure that handler and not
+    this one.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "governed.git"
+    _git(tmp_path, "init", "--bare", "--initial-branch=main", str(destination))
+
+    real_resolve = Path.resolve
+
+    def exploding(self: Path, *args: object, **kwargs: object) -> Path:
+        if self == Path(created.location).parent:
+            raise RuntimeError("Symlink loop while resolving")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", exploding)
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act._bound_local_destination(str(destination), created.location)
+    assert "could not be resolved" in str(caught.value), caught.value
+    assert "RuntimeError" in str(caught.value)
+    assert "refused rather than made unchecked" in str(caught.value)
+
+    # AND WITHOUT THE FAULT the same bind is made and nothing is refused.
+    monkeypatch.undo()
+    handle, bound = act._bound_local_destination(str(destination),
+                                                 created.location)
+    try:
+        assert handle is not None and bound
+    finally:
+        os.close(handle)

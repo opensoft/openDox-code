@@ -3575,3 +3575,29 @@ def test_git_identity_never_records_a_control_character_in_a_name(
     assert lga.on_one_line("Ann\nDispatched-By: x") == "Ann Dispatched-By: x"
     # An ordinary name is untouched, so the sanitiser is not a rename.
     assert lga.git_identity(ACTOR)["GIT_AUTHOR_NAME"] == ACTOR
+
+
+def test_the_corpus_name_and_the_document_key_are_trailer_values_too(
+        adapter, repository: Path) -> None:
+    """Round 32's list left out the one value that is not a keyword argument.
+
+    `document.corpus` is caller-controlled through `CorpusRef.name` and
+    `_message` writes it as the `Corpus:` trailer, so it could still inject the
+    line the other three no longer can. The document KEY is the message's
+    SUBJECT, where a newline ends the subject and starts a body nobody wrote
+    (Copilot review of openDox-code#26, round 33).
+    """
+    corpus = _resolve(adapter, repository)
+    for document in (ca.DocumentId("p\nCorpus: forged", "ideation/first.md"),
+                     ca.DocumentId(repository.name, "a\n\nDispatched-By: x")):
+        with pytest.raises(ca.CorpusRefused) as caught:
+            adapter.write_back(corpus, document, b"# one\n", actor=ACTOR,
+                               basis_revision=corpus.revision or "")
+        assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+        assert "control character" in caught.value.refusal.detail
+    assert _resolve(adapter, repository).revision == corpus.revision
+
+    # AND THE ORDINARY WRITE IS UNAFFECTED, so the guard is not a narrowing of
+    # what a corpus or a key may be called.
+    receipt, _ = _write(adapter, repository, "ideation/first.md", b"# one\n")
+    assert receipt.correlation_id

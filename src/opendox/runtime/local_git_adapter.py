@@ -1707,9 +1707,19 @@ class LocalGitCorpus:
         # `A\nWrite-Path: forged` wrote a second trailer that a reader of the
         # durable history could not tell from a real one (Copilot review of
         # openDox-code#26, round 32).
+        # AND THE CORPUS NAME IS ONE OF THEM. `document.corpus` is
+        # caller-controlled through `CorpusRef.name` and `_message` writes it
+        # as the `Corpus:` trailer, and round 32's list left it out — so the
+        # one trailer value that was still unchecked could inject the line the
+        # other three can no longer (Copilot review of openDox-code#26, round
+        # 33). The document KEY is checked too: it is the message's SUBJECT
+        # line, where a newline ends the subject and starts a body nobody
+        # wrote.
         for field, value in (("basis revision", basis_revision),
-                             ("actor", actor), ("write path",
-                                                corpus.write_path)):
+                             ("actor", actor),
+                             ("corpus name", document.corpus),
+                             ("document key", document.key),
+                             ("write path", corpus.write_path)):
             refuse_a_value_that_would_forge_a_commit_trailer(
                 field, value, document.key)
         # AND THE CHECK AND THE USE ARE ONE OBJECT — see `_bound`, which every

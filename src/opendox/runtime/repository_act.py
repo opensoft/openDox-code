@@ -639,6 +639,23 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
     # directory and mix the two (Copilot review of openDox-code#26). The checks
     # are cheap and idempotent, so making them twice costs nothing and makes
     # the guarantee a property of the function rather than of one caller.
+    # NEITHER VALUE MAY FORGE A LINE IN THE FIRST COMMIT, and the check is here
+    # — BEFORE `git init` — because "nothing is created" has to be true.
+    # `initialize_repository` is public and does not go through
+    # `repository_location`'s validation, and the API hands `actor` an
+    # authenticated DISPLAY NAME, so a newline in either wrote extra lines into
+    # the repository's first and permanent commit, where a reader cannot tell
+    # them from the act's own (Copilot review of openDox-code#26, round 33: one
+    # thread and one "previously missed"). The adapter refuses the same shapes
+    # at the write path; this is that rule at the create path, raised as this
+    # module's own refusal because that is what its callers catch.
+    for field, value in (("project id", str(project_id)), ("actor", actor)):
+        if carries_a_control_character(value):
+            raise RepositoryActRefused(
+                f"the {field} contains a control character, and it is written "
+                "into this repository's first commit message and identity, "
+                "where a newline forges a line a reader of the durable history "
+                "cannot tell from the act's own; nothing is created")
     refuse_unusable_location(location)
     try:
         # INSIDE the `try`: a permission error or a non-directory parent from
@@ -1513,7 +1530,24 @@ def _bound_local_destination(destination: str | None, location: Any):
                 # object that is checked is the object that is pushed to, with
                 # nothing between them.
                 real = Path(os.path.realpath(bound))
-                owned = Path(location).parent.resolve()
+                # `resolve()` CAN RAISE, and this one sat outside the
+                # translation the destination path above gets: a mapped
+                # repository whose parent is renamed, replaced by a symlink
+                # loop or made unreachable after the bind raises `OSError` or
+                # `RuntimeError` here, and `push_to_remote` translates only
+                # `GitCommandFailed` — so the API answered 500 instead of the
+                # act's named refusal (Copilot review of openDox-code#26,
+                # round 33, suppressed). The check that cannot complete is a
+                # check that did not pass.
+                try:
+                    owned = Path(location).parent.resolve()
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise RepositoryActRefused(
+                        "the repository root this service owns could not be "
+                        f"resolved ({type(exc).__name__}), so this push's "
+                        "destination cannot be proved to be outside it; the "
+                        "push is refused rather than made unchecked"
+                    ) from exc
                 if real == owned or owned in real.parents:
                     raise RepositoryActRefused(
                         "this project's remote resolved, at the moment it was "
