@@ -1692,9 +1692,31 @@ jobs:
       #              deliberately does not. The second case pins the mechanism,
       #              so dropping `start_new_session=True` cannot pass the
       #              first on a stub whose descendant dies with its parent.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 553 there.
+      #  346 passed  at `build/3-6-repository-act` `2714f6b1` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — ONE added here and one in the
+      #              DB-backed half, closing a CREDENTIAL EXPOSURE this
+      #              branch's own merge introduced. `bb450614` pointed
+      #              `app._repository_json` at `config.redacted_remote_url`,
+      #              which was written for BROKER URLs and knew neither the
+      #              libpq keyword/value form nor the parameter name `pass` —
+      #              so `host=db password=…`, `?pass=…`, `?sslpassword=…` and
+      #              `host=db sslpassword=…` were all returned VERBATIM to
+      #              every member of the project (measured through the real
+      #              endpoints at `555a03c8`). There is ONE declared list now:
+      #              `config.SECRET_PARAMETER_KEYS`, which `pass` joins and
+      #              from which this module's alternation is BUILT, and one
+      #              `config.LIBPQ_PASSWORD` the adapter holds by identity.
+      #              The two readings differ only in the safe direction, and a
+      #              case states that as a property over a corpus.
+      #              Also in this entry: main merged (§ 3.5 landed SQUASHED,
+      #              so ten add/add conflicts, each resolved to this branch's
+      #              version and each checked for anything main had that this
+      #              branch lacked — nothing).
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 553. The neutral conformance corpus
+      #              tests_runtime/` is 555. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
