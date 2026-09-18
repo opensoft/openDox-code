@@ -69,6 +69,25 @@ DEFAULT_JWKS_TIMEOUT_SECONDS = 5.0
 #: having no cooldown is the broker taking the traffic.
 DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS = 10.0
 
+#: How long a FAILED key-set load is remembered before another one is
+#: attempted.
+#:
+#: A failed load leaves the cache exactly as it was — no key set, or a stale
+#: one, and the TTL stamp untouched — so the next request re-enters the refresh
+#: branch and fetches again. Under a broker outage that is one outbound fetch
+#: PER REQUEST, each waiting the full `DEFAULT_JWKS_TIMEOUT_SECONDS` while
+#: holding the cache lock, so every other verification queues behind it and the
+#: worker pool is spent waiting on a broker that is already down (Copilot
+#: review of openDox-code#25, round 27). It is the same amplification the miss
+#: cooldown removes, reached by a failure instead of by an unknown `kid`.
+#:
+#: THE COOLDOWN NEVER SERVES A KEY SET. It replaces a fetch with the failure
+#: that fetch already produced, so verification stays fail-closed and only the
+#: outbound traffic is bounded. Ten seconds, for the miss cooldown's reason: a
+#: broker that comes back is picked up in seconds, and the cost of being wrong
+#: is one extra fetch.
+DEFAULT_FAILED_REFRESH_COOLDOWN_SECONDS = 10.0
+
 
 class OidcError(Exception):
     """Base class for token-validation failures. Carries no secret material."""
@@ -163,7 +182,15 @@ class FileJwksSource:
     def load(self) -> dict[str, Any]:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        # `ValueError` AND NOT `json.JSONDecodeError`: a file that is not UTF-8
+        # raises `UnicodeDecodeError` out of `read_text`, which is a
+        # `ValueError` and NOT a `JSONDecodeError` — so it escaped this handler
+        # and surfaced as a 500 from the air-gapped path that this class exists
+        # to make a typed refusal (Copilot review of openDox-code#25, round 29,
+        # suppressed). `JSONDecodeError` is itself a `ValueError`, so naming
+        # the base covers both and is the same rule `HttpJwksSource` already
+        # states one class below.
+        except (OSError, ValueError) as exc:
             raise IdentityUnavailableError(
                 f"JWKS file could not be read at {self._path}") from exc
         if not isinstance(data, dict):
@@ -202,14 +229,19 @@ class CachingJwks:
     def __init__(self, source: JwksSource, *,
                  ttl_seconds: float,
                  miss_cooldown_seconds: float =
-                 DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS) -> None:
+                 DEFAULT_MISS_REFRESH_COOLDOWN_SECONDS,
+                 failed_refresh_cooldown_seconds: float =
+                 DEFAULT_FAILED_REFRESH_COOLDOWN_SECONDS) -> None:
         self._source = source
         self._ttl = ttl_seconds
         self._miss_cooldown = miss_cooldown_seconds
+        self._failure_cooldown = failed_refresh_cooldown_seconds
         self._lock = threading.Lock()
         self._keyset: PyJWKSet | None = None
         self._loaded_monotonic = 0.0
         self._last_miss_refresh = float("-inf")
+        self._failed_monotonic = float("-inf")
+        self._failure: str | None = None
 
     def _load_keyset(self) -> PyJWKSet:
         raw = self._source.load()
@@ -225,6 +257,39 @@ class CachingJwks:
             # and surface as a 500.
             raise IdentityUnavailableError(
                 "the broker's JWKS document could not be parsed") from exc
+
+    def _refresh_locked(self) -> PyJWKSet:
+        """Load the key set, WITH THE LOCK HELD, remembering a failure.
+
+        A failed load used to leave the cache untouched — no key set, or a
+        stale one, and `_loaded_monotonic` unchanged — so the next request
+        re-entered the refresh branch and fetched again. Under a broker outage
+        that is one outbound fetch per request, each waiting the source's whole
+        timeout with this lock held, so every other verification queues behind
+        it (Copilot review of openDox-code#25, round 27). See
+        `DEFAULT_FAILED_REFRESH_COOLDOWN_SECONDS`.
+
+        WHAT THE COOLDOWN DOES NOT DO is serve anything: inside it the caller
+        gets the failure the last fetch produced, so a stale key set is never
+        used past its TTL and verification stays fail-closed. The remembered
+        failure is re-raised as a NEW exception carrying the same message —
+        re-raising the object would accumulate the tracebacks of every request
+        the cooldown answered.
+        """
+        now = time.monotonic()
+        if (self._failure is not None
+                and (now - self._failed_monotonic) < self._failure_cooldown):
+            raise IdentityUnavailableError(self._failure) from None
+        try:
+            keyset = self._load_keyset()
+        except IdentityUnavailableError as exc:
+            self._failed_monotonic = time.monotonic()
+            self._failure = str(exc)
+            raise
+        self._failure = None
+        self._keyset = keyset
+        self._loaded_monotonic = time.monotonic()
+        return keyset
 
     def keyset(self, *, force_refresh: bool = False) -> PyJWKSet:
         """The cached key set, refreshed at most once per TTL boundary.
@@ -244,8 +309,7 @@ class CachingJwks:
             now = time.monotonic()
             stale = (now - self._loaded_monotonic) >= self._ttl
             if force_refresh or self._keyset is None or stale:
-                self._keyset = self._load_keyset()
-                self._loaded_monotonic = time.monotonic()
+                self._refresh_locked()
             return self._keyset
 
     def select_key(self, kid: str | None) -> PyJWK:
@@ -311,8 +375,7 @@ class CachingJwks:
         """
         with self._lock:
             if self._claim_refresh_locked():
-                self._keyset = self._load_keyset()
-                self._loaded_monotonic = time.monotonic()
+                self._refresh_locked()
             keyset = self._keyset
         if keyset is None:                       # never primed; prime it now
             return self.keyset()

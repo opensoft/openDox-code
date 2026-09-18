@@ -123,8 +123,23 @@ DROP_ORDER: tuple[str, ...] = (
 #: the lifecycle contract's "redacted" forbids (Copilot review of
 #: openDox-code#25).
 _DSN_SHAPED = re.compile(
-    r"(?i)\b(?:postgres(?:ql)?|postgresql\+\w+)://\S*"
-    r"|[A-Za-z][A-Za-z0-9+.\-]*://[^\s/@]*@\S*"
+    # USERINFO ENDS AT THE FIRST `@` AND CANNOT CONTAIN `/`, which is what lets
+    # these two branches absorb a SPACE inside it. `\S*` stopped at the first
+    # whitespace, so a driver quoting back a URI whose password was never
+    # percent-encoded — `postgresql://opendox:hunter 2@db.internal/opendox`,
+    # which is exactly the conninfo an operator mistypes — was redacted to
+    # `<redacted> 2@db.internal/opendox`: the tail of the password and the
+    # whole host, printed beside the marker that says the credential was
+    # removed (Copilot review of openDox-code#25, round 29, suppressed). It is
+    # the URI form of round 19's `password='secret value'`.
+    #
+    # AND IT DOES NOT RUN AWAY DOWN THE LINE, because `/` is excluded: on
+    # `postgresql://host/db for user a@b` the `@` branch cannot cross `/`, so
+    # it fails and the plain branch matches the URI alone. A later, unrelated
+    # `@` in the same message is not swallowed.
+    r"(?i)\b(?:postgres(?:ql)?|postgresql\+\w+)://[^/@\n]*@\S*"
+    r"|\b(?:postgres(?:ql)?|postgresql\+\w+)://\S*"
+    r"|[A-Za-z][A-Za-z0-9+.\-]*://[^/@\n]*@\S*"
     # A LIBPQ KEYWORD/VALUE PASSWORD, IN THE FORMS LIBPQ ITSELF ACCEPTS. The
     # first cut was `password\s*=\s*\S+`, which ends at whitespace — and libpq
     # documents that a value CONTAINING SPACES is written in single quotes,

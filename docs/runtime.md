@@ -152,38 +152,90 @@ kubectl apply -f deploy/kubernetes/base/namespace.yaml
 # review of openDox-code#25, round 19, suppressed). `--from-file` takes the
 # value from a file whose name is the KEY, so the password is never an
 # argument.
-umask 077 && secrets="$(mktemp -d)"
-read -rs -p 'postgres superuser password: ' pw && printf %s "$pw" > "$secrets/password"
-read -rs -p 'served role password: '      rpw && printf %s "$rpw" > "$secrets/runtime-password"
-unset pw rpw
-kubectl -n opendox create secret generic opendox-postgres \
-    --from-file=password="$secrets/password" \
-    --from-file=runtime-password="$secrets/runtime-password"
-# `opendox-db-runtime`'s DSN authenticates as the SERVED role, and that role's
-# NAME is `runtime_pg_role` in the `opendox-runtime-config` ConfigMap. They
-# must be the same role: the migration run narrows the named one's rights on
-# the ledger, so narrowing a role nobody serves as leaves the real served role
-# able to rewrite it. An overlay that changes this DSN's user changes that
-# literal in the same commit.
-# A DSN CARRIES A PASSWORD, so it takes the same route.
-read -rs -p 'served DSN: '    dsn  && printf %s "$dsn"  > "$secrets/runtime-dsn"
-read -rs -p 'migration DSN: ' mdsn && printf %s "$mdsn" > "$secrets/migration-dsn"
-unset dsn mdsn
-kubectl -n opendox create secret generic opendox-db-runtime \
-    --from-file=dsn="$secrets/runtime-dsn"
-kubectl -n opendox create secret generic opendox-db-migration \
-    --from-file=dsn="$secrets/migration-dsn"
-rm -rf "$secrets"
-kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
+# A SUBSHELL WITH `set -e`, AND A TRAP IMMEDIATELY INSIDE IT. These files hold
+# plaintext passwords and DSNs. The trap alone (round 26) removed them, but the
+# block RAN ON after a failed `kubectl create secret`: the remaining creates
+# went ahead, the final `rm` succeeded, and a block that had not created the
+# credentials it exists to create looked like one that had (Copilot review of
+# openDox-code#25, round 29, suppressed). `set -e` is what stops that, and it
+# is inside a subshell because `set -e` pasted into an interactive shell closes
+# THAT shell on the first failure — including the operator's. The signal traps
+# `exit` rather than re-raising for the same reason: `$$` inside a subshell is
+# still the parent's pid, so `kill -INT $$` would have signalled the operator's
+# shell. The EXIT trap fires on every one of these paths.
+(
+  set -e
+  umask 077
+  secrets="$(mktemp -d)"
+  trap 'rm -rf "$secrets"' EXIT
+  trap 'rm -rf "$secrets"; exit 130' INT
+  trap 'rm -rf "$secrets"; exit 143' TERM
+  read -rs -p 'postgres superuser password: ' pw && printf %s "$pw" > "$secrets/password"
+  read -rs -p 'served role password: '      rpw && printf %s "$rpw" > "$secrets/runtime-password"
+  unset pw rpw
+  kubectl -n opendox create secret generic opendox-postgres \
+      --from-file=password="$secrets/password" \
+      --from-file=runtime-password="$secrets/runtime-password"
+  # `opendox-db-runtime`'s DSN authenticates as the SERVED role, and that
+  # role's NAME is `runtime_pg_role` in the `opendox-runtime-config` ConfigMap.
+  # They must be the same role: the migration run narrows the named one's
+  # rights on the ledger, so narrowing a role nobody serves as leaves the real
+  # served role able to rewrite it. An overlay that changes this DSN's user
+  # changes that literal in the same commit.
+  # A DSN CARRIES A PASSWORD, so it takes the same route.
+  read -rs -p 'served DSN: '    dsn  && printf %s "$dsn"  > "$secrets/runtime-dsn"
+  read -rs -p 'migration DSN: ' mdsn && printf %s "$mdsn" > "$secrets/migration-dsn"
+  unset dsn mdsn
+  kubectl -n opendox create secret generic opendox-db-runtime \
+      --from-file=dsn="$secrets/runtime-dsn"
+  kubectl -n opendox create secret generic opendox-db-migration \
+      --from-file=dsn="$secrets/migration-dsn"
+  rm -rf "$secrets"      # the EXIT trap does this too; this is the ordinary path
+)
+# `$?` ON ITS OWN LINE, AND NOT `) && ok=yes || ok=no`. MEASURED: bash
+# SUPPRESSES `set -e` inside a compound command that is an operand of `&&` or
+# `||`, and the suppression is inherited by the subshell — so the first form of
+# this block ran every remaining `kubectl` after one had failed and reported
+# success. Driven with a `kubectl` stub that refuses the first create: with the
+# `&&` form all three creates ran and the status was 0; with this form the
+# block stops at the first failure, the EXIT trap removes the files, and the
+# status is the failure's.
+secrets_created=$?
+
+# THE IMAGE, AND THIS REPOSITORY PUBLISHES NONE. Every overlay carries the
+# placeholder tag `0.0.0`, which `kustomize build` emits at all THREE runtime
+# container sites (the Deployment and the migration Job's two containers), so
+# an apply that skips this step reaches `ImagePullBackOff` before the migration
+# or the runtime can start — measured against kustomize v5.4.3 (Copilot review
+# of openDox-code#25, round 26). Replace it with the digest you reviewed;
+# `edit set image` writes `digest:`, which is the one form kustomize resolves
+# to immutable bytes:
+(cd deploy/kubernetes/overlays/dev && kustomize edit set image \
+   ghcr.io/opensoft/opendox-runtime=<your registry>/opendox-runtime@sha256:<the reviewed digest>)
+
+# AND THE BUILD SAYS WHETHER YOU DID. The pattern is the placeholder the base
+# declares; `tests_runtime/test_deploy_shape.py` keeps the two the same, and
+# refuses a documented apply that does not carry this guard.
+if [ "${secrets_created:-1}" -ne 0 ]; then
+    echo 'a Secret was not created, so nothing is applied; fix it and re-run' >&2
+elif kustomize build deploy/kubernetes/overlays/dev | grep -q 'opendox-runtime:0\.0\.0'; then
+    echo 'the image is still the placeholder 0.0.0; this apply would ImagePullBackOff' >&2
+else
+    kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
+fi
 ```
 
 **A managed database instead of the bundled Postgres.** Build the
 `managed-database` overlay instead of `dev`, and create only the two DSN
 Secrets — not `opendox-postgres`:
 
-```sh
-kustomize build deploy/kubernetes/overlays/managed-database | kubectl apply -f -
-```
+**Nothing is applied yet, and that ordering is the point.** Applying this
+overlay before the role exists and before `runtime_pg_role` names it makes the
+migration Job narrow `opendox_runtime` — the bundled database's role — or fail
+because that role does not exist, while the role actually serving keeps the
+right to rewrite the ledger (Copilot review of openDox-code#25, round 27). The
+apply command for this path is at the end of the prerequisite below.
+
 
 **Set `runtime_pg_role` in that overlay to the role you provisioned** — the
 user in `opendox-db-runtime`'s DSN. The base's value, `opendox_runtime`, is the
@@ -236,10 +288,15 @@ space — which is a prerequisite an operator could complete and still not start
 NOTHING BELOW IS SUBSTITUTED BY HAND. Every name and the password come from
 the environment, through psql's own `\getenv`, and every one of them is quoted
 by `format` — `%I` for an identifier, `%L` for a literal — so a name or a
-password holding a quote is a name or a password rather than a syntax error,
-and neither the password nor a mistyped placeholder can reach the database
-(Copilot review of openDox-code#25, rounds 12 and 13). Set the four, then run
-the block:
+password holding a quote is a name or a password rather than a syntax error
+(Copilot review of openDox-code#25, rounds 12 and 13). **The password of course
+reaches the database**: `create role … password %L` is the statement that sets
+it, and an earlier wording here said otherwise, which could mislead an operator
+about what this block does (round 29). What it keeps the password out of is the
+operator's own shell — it is never an argument, so it is not in `argv`, not in
+`/proc/<pid>/cmdline` and not in the history file — and what `%L` keeps out of
+the database is a *mistyped placeholder*, which without it would be sent as
+SQL rather than as a value. Set the four, then run the block:
 
 ```sh
 read -rs OPENDOX_RUNTIME_PG_PASSWORD && export OPENDOX_RUNTIME_PG_PASSWORD
@@ -273,6 +330,33 @@ select format('alter default privileges for role %I in schema public grant '
 \gexec
 ```
 
+**NOW apply the overlay.** The served role exists, `runtime_pg_role` names it,
+and both DSNs point at the managed database, so the migration Job narrows the
+role this install will actually serve as:
+
+```sh
+# THE IMAGE, AND THIS REPOSITORY PUBLISHES NONE. Every overlay carries the
+# placeholder tag `0.0.0`, which `kustomize build` emits at all THREE runtime
+# container sites (the Deployment and the migration Job's two containers), so
+# an apply that skips this step reaches `ImagePullBackOff` before the migration
+# or the runtime can start — measured against kustomize v5.4.3 (Copilot review
+# of openDox-code#25, round 26). Replace it with the digest you reviewed;
+# `edit set image` writes `digest:`, which is the one form kustomize resolves
+# to immutable bytes:
+(cd deploy/kubernetes/overlays/managed-database && kustomize edit set image \
+   ghcr.io/opensoft/opendox-runtime=<your registry>/opendox-runtime@sha256:<the reviewed digest>)
+
+# AND THE BUILD SAYS WHETHER YOU DID. The pattern is the placeholder the base
+# declares; `tests_runtime/test_deploy_shape.py` keeps the two the same, and
+# refuses a documented apply that does not carry this guard.
+if kustomize build deploy/kubernetes/overlays/managed-database | grep -q 'opendox-runtime:0\.0\.0'; then
+    echo 'the image is still the placeholder 0.0.0; this apply would ImagePullBackOff' >&2
+else
+    kustomize build deploy/kubernetes/overlays/managed-database | kubectl apply -f -
+fi
+```
+
+
 The migration run then NARROWS that role on the ledger alone
 (`MigrationRunner.protect_ledger`, which is why the role has to exist before
 the Job runs and why the Job fails loudly if it does not): the served identity
@@ -303,7 +387,12 @@ for one:
 
 ```sh
 kubectl -n opendox delete job opendox-migrate --ignore-not-found
-kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
+# The same guard: a re-run from a fresh clone has the placeholder again.
+if kustomize build deploy/kubernetes/overlays/dev | grep -q 'opendox-runtime:0\.0\.0'; then
+    echo 'the image is still the placeholder 0.0.0; this apply would ImagePullBackOff' >&2
+else
+    kustomize build deploy/kubernetes/overlays/dev | kubectl apply -f -
+fi
 ```
 
 The Job carries `ttlSecondsAfterFinished: 3600`, so the delete is usually a

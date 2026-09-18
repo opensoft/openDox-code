@@ -698,11 +698,117 @@ jobs:
       #              the path replaces the key set and mints tokens whose
       #              `iss` and `aud` still pass. `https` or a LOOPBACK host,
       #              judged by `ipaddress` so the exception cannot be spoofed
-      #              by a name. THE CURRENT FIGURE ON `build/3-5-runtime`,
-      #              which this branch carries by merge; THAT PR's
-      #              description states it at this same commit — its head
-      #              `99c21185` adds only the record — and `pytest -q
-      #              tests_runtime/` is 252 there.
+      #              by a name. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 252 there.
+      #  153 passed  at `build/3-5-runtime` `c21b8b97` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-SIX. THE SKIP IS NEW AND
+      #              DELIBERATE: the live psycopg reproducer for the DB
+      #              probe's credential leak needs a driver this job does not
+      #              install (`.[test]` alone), and the contract it proves —
+      #              that the probe never interpolates the exception's text —
+      #              is measured beside it against a stub driver, which does
+      #              run here. The round's other two fixes: the documented
+      #              `kubectl apply` reached a clean cluster with the
+      #              PLACEHOLDER image tag at three container sites, which is
+      #              `ImagePullBackOff` before anything starts, so the digest
+      #              replacement is now a required step with a guard on the
+      #              build's own output; and the runbook's four plaintext
+      #              secret files survived a failed `kubectl` or a Ctrl-C,
+      #              which a trap on EXIT/INT/TERM ends. SUPERSEDED by the
+      #              entry below; `pytest -q tests_runtime/` was 262 there.
+      #  162 passed  at `build/3-5-runtime` `0ec862d3` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — the same five
+      #              modules, after the same round's two SUPPRESSED comments,
+      #              both of which were defects. A broker URL naming no host
+      #              was accepted, because `urlsplit("https:///realms/x")`
+      #              yields the scheme `https` and hostname `None` and round
+      #              25's check read only the scheme — so an issuer nothing
+      #              can be fetched from passed as a trust anchor and the
+      #              install found out when `/readyz` failed. Refused before
+      #              the scheme check now, WITHOUT echoing the value, since
+      #              `https://user:pw@/x` has no hostname either. And
+      #              `search_path` was split with `str.split(",")`, which a
+      #              legal schema name defeats: PostgreSQL quotes
+      #              `"tenant,blue", public`, the split made two entries of
+      #              one, and `selected_schema` refused a connection whose
+      #              `current_schema()` was the schema it had asked for,
+      #              naming `'"tenant'`. A scanner that splits outside
+      #              quotes, and the entries still read by `_unquoted`.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 272 there.
+      #  167 passed  at `build/3-5-runtime` `81c01c1f` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-SEVEN, two of whose three
+      #              findings are defects in the code that answered round 26.
+      #              `urlsplit` SUCCEEDS for a port that is not a number and
+      #              defers the error to `.port`, a property that parses on
+      #              read: the probe's redaction raised from inside the
+      #              handler it was reporting from, and a crash is what makes
+      #              pytest print the chained psycopg error — which quotes
+      #              the conninfo, password and all. Every access inside the
+      #              boundary now, and the reason raised OUTSIDE the handler
+      #              so there is no context to print. The same property at
+      #              the configuration boundary: `https://broker:not-a-port/`
+      #              passed it. And the managed-database apply stood above
+      #              the `runtime_pg_role` edit and the role-provisioning
+      #              block, so an operator working top to bottom narrowed the
+      #              BUNDLED role.
+      #              SUPERSEDED by the entry below, which is the same five
+      #              modules at the same count: `pytest -q tests_runtime/`
+      #              was 277 there.
+      #  167 passed  at `build/3-5-runtime` `948cf056` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — UNCHANGED on
+      #              the hermetic five, because round 27's third finding is
+      #              in `oidc.py`, which needs the runtime extra and is
+      #              measured in the OTHER job. A failed JWKS load left the
+      #              cache untouched, so every request re-entered the refresh
+      #              branch and fetched again, each holding the cache lock
+      #              for the source's whole timeout — one outbound fetch per
+      #              inbound request for as long as the broker is down. A
+      #              failure is remembered for a cooldown now, and the
+      #              cooldown never serves a key set: every call inside it
+      #              still raises, so verification stays fail-closed and only
+      #              the traffic is bounded.
+      #              SUPERSEDED by the entry below, again at the same count:
+      #              `pytest -q tests_runtime/` was 279 there.
+      #  167 passed  at `build/3-5-runtime` `744753c0` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — UNCHANGED again, and
+      #              for the same reason: round 28's one finding needs a
+      #              database to measure. `snapshot_run()` gated every file's
+      #              BYTES before the first commit and left `decode("utf-8")`
+      #              in the per-migration loop, so a later file holding
+      #              invalid UTF-8 aborted the run — with an untyped
+      #              `UnicodeDecodeError` — after the ledger and earlier
+      #              migrations had COMMITTED. One read of every file, and
+      #              now one decode of every file, before the first commit.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 280 there.
+      #  171 passed  at `build/3-5-runtime` `50565d63` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — the same five modules,
+      #              after round TWENTY-NINE's two bodies: six defects and one
+      #              measurement. An issuer carrying a QUERY derived
+      #              `…/realms/x?tenant=a/protocol/openid-connect/certs`,
+      #              because the derived paths are appended and a query comes
+      #              after a path; the loopback exception, written as "not
+      #              https AND not loopback", accepted `ftp://localhost/…` and
+      #              `file://127.0.0.1/…`, which `httpx` cannot fetch; a
+      #              non-UTF-8 JWKS file raised `UnicodeDecodeError` past the
+      #              handler that makes this path's failures typed
+      #              (`UnicodeDecodeError` is a `ValueError`, not a
+      #              `JSONDecodeError`); a failed pool checkout left `_exit`
+      #              set, so the teardown called `__exit__` on a manager that
+      #              never entered and masked the database error; the URI
+      #              redaction stopped at the first space, printing the tail
+      #              of a password; and the secret block ran on after a failed
+      #              `kubectl` — fixed with `set -e` in a subshell whose
+      #              status is taken by `$?` ON ITS OWN LINE, because bash
+      #              suppresses errexit inside an operand of `&&`/`||` and the
+      #              first form of that fix ran every remaining create.
+      #              THE CURRENT FIGURE ON `build/3-5-runtime`, which this
+      #              branch carries by merge; THAT PR's description states it
+      #              at this same commit — its head `dbc704f6` adds only the
+      #              record — and `pytest -q tests_runtime/` is 286 there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this

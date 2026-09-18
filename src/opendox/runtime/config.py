@@ -321,7 +321,7 @@ def _is_loopback(host: str | None) -> bool:
 
 
 def _broker_url(env: Mapping[str, str], setting: Setting, *,
-                required: bool) -> str | None:
+                required: bool, is_a_base_url: bool = False) -> str | None:
     """A broker endpoint, REFUSED when it carries URL userinfo.
 
     `oidc_issuer` and an explicit `oidc_jwks_url` are PUBLIC endpoints: the
@@ -368,13 +368,73 @@ def _broker_url(env: Mapping[str, str], setting: Setting, *,
     # `https` or a LOOPBACK host, and only those: a developer running a broker
     # on `127.0.0.1` has no network for anyone to be on, and every other
     # `http://` is refused rather than warned about.
-    if split.scheme != "https" and not _is_loopback(split.hostname):
+    # AND IT MUST NAME A HOST AT ALL, which the scheme check below does not
+    # ask: `urlsplit("https:///realms/x")` gives scheme `https` and hostname
+    # `None`, so a URL nothing can be fetched from passed as a trust anchor and
+    # the install found out when `/readyz` failed on the key-set fetch —
+    # configuration discovered at serve time, which is the boundary this
+    # function exists to hold (Copilot review of openDox-code#25, round 26,
+    # suppressed). THE VALUE IS NOT ECHOED: `https://user:pw@/realms/x` also
+    # has no hostname, and its netloc carries the password.
+    if not split.hostname:
+        raise ConfigurationError(
+            f"{setting.name} is a {split.scheme or '(no scheme)'} URL that "
+            "names no HOST, so no key set can be fetched from it and no "
+            "issuer can be compared against a token's `iss`. Set it to the "
+            "broker's full URL, e.g. "
+            "https://broker.example/realms/opendox (the value is not repeated "
+            "here: a URL with no host can still carry userinfo)")
+    # AND THE PORT IS PARSED HERE, not at the first fetch. `urlsplit` SUCCEEDS
+    # for `https://broker:not-a-port/realms/x` and defers the error to `.port`,
+    # a property that parses on read — so an unusable broker URL passed this
+    # boundary and raised `ValueError` inside `httpx` when the key set was
+    # fetched, which is neither a `ConfigurationError` nor a named setting
+    # (Copilot review of openDox-code#25, round 27). The value is not echoed,
+    # for the reason above.
+    try:
+        split.port
+    except ValueError:
+        raise ConfigurationError(
+            f"{setting.name} names a PORT that is not a number in 0-65535, so "
+            "no key set can be fetched from it. Set it to the broker's full "
+            "URL (the value is not repeated here: a URL this runtime cannot "
+            "parse can still carry userinfo)") from None
+    # `https`, OR `http` ON A LOOPBACK HOST — and those two only. The
+    # exception used to be written as "not https AND not loopback", which
+    # accepted EVERY other scheme on a loopback host: `ftp://localhost/realms/x`
+    # and `file://127.0.0.1/realms/x` both passed configuration, and
+    # `HttpJwksSource` fetches with `httpx.get`, which cannot use either — so
+    # the process started with an unusable trust anchor and failed at readiness
+    # (Copilot review of openDox-code#25, round 29, suppressed). The exception
+    # exists for a developer running a broker over plain HTTP on the loopback,
+    # and that is the whole of what it now allows.
+    if split.scheme != "https" and not (
+            split.scheme == "http" and _is_loopback(split.hostname)):
         raise ConfigurationError(
             f"{setting.name} is {split.scheme or '(no scheme)'}://, and this "
             "is a TRUST ANCHOR: the key set fetched from it is what every "
             "token is verified against, so anyone on the path between this "
             "runtime and that host could replace it. Use https, or a loopback "
             "host for local development")
+    # AND A BASE URL IS A BASE URL: `jwks_url()` and `discovery_url()` APPEND
+    # their paths to the issuer, and a URL's query and fragment come after its
+    # path — so `https://broker/realms/x?tenant=a` derived
+    # `https://broker/realms/x?tenant=a/protocol/openid-connect/certs`, which
+    # is a key-set URL nothing serves, and the verifier found out at the fetch
+    # (Copilot review of openDox-code#25, round 29). Measured, both components.
+    # The rule is the ISSUER's alone: an explicit `OPENDOX_OIDC_JWKS_URL` is
+    # fetched as given and a broker behind a rewriting proxy may well need a
+    # query on it.
+    if is_a_base_url and (split.query or split.fragment):
+        component = "query" if split.query else "fragment"
+        raise ConfigurationError(
+            f"{setting.name} carries a {component} component, and it is a BASE "
+            "URL: the key-set and discovery URLs are derived by appending a "
+            "path to it, which would land after that component and address "
+            "nothing. Set the issuer alone, and set "
+            f"{PREFIX}OIDC_JWKS_URL explicitly if the key set is somewhere a "
+            "derived path does not reach (the value is not repeated here: a "
+            "query can carry a credential)")
     if carried:
         raise ConfigurationError(
             f"{setting.name} carries a credential in its URL ({carried}). It "
@@ -528,7 +588,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
         database_url=_require(env, _by_name(PREFIX + "DATABASE_URL")),
         migration_database_url=_optional(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL")),
         oidc_issuer=_broker_url(env, _by_name(PREFIX + "OIDC_ISSUER"),
-                                required=True) or "",
+                                required=True, is_a_base_url=True) or "",
         oidc_audience=_require(env, _by_name(PREFIX + "OIDC_AUDIENCE")),
         oidc_jwks_url=_broker_url(env, _by_name(PREFIX + "OIDC_JWKS_URL"),
                                   required=False),

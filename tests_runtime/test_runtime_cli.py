@@ -1216,10 +1216,14 @@ def test_the_broker_url_must_be_https_because_it_is_the_trust_anchor() -> None:
 
     for issuer in ("http://broker/realms/x",
                    "http://127.0.0.1.evil.test/realms/x",
-                   "ftp://broker/x", "broker/realms/x"):
+                   "ftp://broker/x"):
         with pytest.raises(ConfigurationError) as caught:
             load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
         assert "TRUST ANCHOR" in str(caught.value), (issuer, caught.value)
+
+    # `broker/realms/x` USED TO BE ASSERTED HERE, and it is refused by the
+    # rule below instead: it has no scheme AND no host, and "names no HOST" is
+    # the more accurate of the two diagnoses for a value that is not a URL.
 
     # The explicit key-set URL is judged by the same rule, since it is the one
     # actually fetched.
@@ -1228,3 +1232,383 @@ def test_the_broker_url_must_be_https_because_it_is_the_trust_anchor() -> None:
             PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
             PREFIX + "OIDC_JWKS_URL": "http://broker/certs"}))
     assert PREFIX + "OIDC_JWKS_URL" in str(caught.value)
+
+
+def _conftest_module():
+    """`tests_runtime/conftest.py`, loaded BY PATH.
+
+    The `validate` job runs pytest with `--noconftest`, so this file cannot
+    reach that module as a fixture provider and must not depend on it being on
+    `sys.path` either. Loading it by path is the one form that works in both
+    jobs — and the module is definitions only, so importing it starts nothing.
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "conftest.py"
+    spec = importlib.util.spec_from_file_location("_opendox_conftest", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_probe_never_interpolates_the_exception_text(monkeypatch) -> None:
+    """THE CONTRACT ITSELF, and it does not depend on psycopg's wording.
+
+    The test below is the live reproducer and needs the driver installed; the
+    `validate` job installs `.[test]` alone and does not have it. This one
+    hands the probe a driver whose `connect` raises an exception carrying the
+    whole DSN — which is the only property of the real failure that matters —
+    and asserts the reason does not carry it. It runs in BOTH jobs, and it is
+    the assertion that would have caught the finding when it was written.
+    """
+    conftest = _conftest_module()
+    dsn = "postgresql://opendox:hunter2@db.internal:5432/opendox"
+    monkeypatch.setenv(conftest.TEST_DSN_ENV, dsn)
+
+    class _Driver:
+        @staticmethod
+        def connect(conninfo, **kwargs):
+            raise RuntimeError(f'could not parse "{conninfo}"')
+
+    monkeypatch.setattr(conftest, "_import_psycopg", lambda: _Driver)
+
+    with pytest.raises(BaseException) as caught:
+        conftest.postgres_dsn.__wrapped__()
+    reason = getattr(caught.value, "msg", None) or str(caught.value)
+
+    assert "hunter2" not in reason and "opendox:" not in reason, (
+        f"the exception's text reached the reason: {reason!r}")
+    assert "RuntimeError" in reason, (
+        f"the reason must name the exception type: {reason!r}")
+    assert "postgresql://db.internal:5432/<redacted>" in reason, (
+        f"the reason must still name the server that did not answer: {reason!r}")
+
+
+def test_an_unparsable_test_dsn_does_not_print_its_password(monkeypatch) -> None:
+    """The DB probe's skip reason carries no credential — measured, not hoped.
+
+    THE FINDING (Copilot review of openDox-code#25, round 26): the probe copied
+    `str(exc)` into the reason `_skip_or_fail` prints, "psycopg connection
+    errors can include the full `OPENDOX_TEST_DATABASE_URL`", and pytest prints
+    that reason in the CI log of a job whose DSN carries a password.
+
+    FACT, WITH ONE REPRODUCER, and this test IS the reproducer. Five DSN shapes
+    were measured against psycopg 3: a refused connection, an unknown URI
+    parameter, an unknown keyword/value option and the refused keyword/value
+    form all report without the password, because libpq's message is about the
+    connection. The fifth — a URI libpq cannot PARSE — quotes the whole string
+    back, and an unbracketed IPv6 host is the ordinary way to mis-set this
+    variable:
+
+        ProgrammingError: end of string reached when looking for matching "]"
+        in IPv6 host address in URI: "postgresql://opendox:hunter2@[::1/x"
+
+    So the case below is the leaking one, and against the previous shape
+    (`f"{type(exc).__name__}: {exc}"`) this test fails on its first assertion.
+
+    NOT A DATABASE TEST. Nothing here connects: the DSN is unparsable, which is
+    why psycopg raises before any socket exists, and that is what lets a
+    hermetic module measure the harness the DB-backed ones depend on.
+    """
+    pytest.importorskip(
+        "psycopg",
+        reason="the live reproducer needs the driver; the `validate` job "
+               "installs `.[test]` alone, and the contract itself is measured "
+               "by the hermetic test above")
+    conftest = _conftest_module()
+    password = "hunter2"                      # NOT a credential: a test string
+    monkeypatch.setenv(conftest.TEST_DSN_ENV,
+                       f"postgresql://opendox:{password}@[::1/opendox")
+
+    with pytest.raises(BaseException) as caught:   # Skipped or Failed
+        conftest.postgres_dsn.__wrapped__()
+    reason = getattr(caught.value, "msg", None) or str(caught.value)
+
+    assert password not in reason, (
+        f"the probe's reason carries the DSN password: {reason!r}")
+    assert "opendox:" not in reason, (
+        f"the probe's reason carries the DSN userinfo: {reason!r}")
+    assert "ProgrammingError" in reason, (
+        "the reason must still name the exception TYPE, which is what makes "
+        f"the skip diagnosable: {reason!r}")
+    assert "<the configured DSN>" in reason, (
+        "an unparsable DSN has no destination to name, and the reason must "
+        f"say which DSN it means rather than falling silent: {reason!r}")
+
+
+@pytest.mark.parametrize("dsn, expected", [
+    # A URI: scheme, host and port survive; userinfo, database and every
+    # parameter do not.
+    ("postgresql://opendox:hunter2@db.internal:5432/opendox?sslmode=require",
+     "postgresql://db.internal:5432/<redacted>"),
+    # NO PORT, no invented one.
+    ("postgresql://opendox:hunter2@db.internal/opendox",
+     "postgresql://db.internal/<redacted>"),
+    # AN IPv6 LITERAL KEEPS ITS BRACKETS: `::1` unbracketed is not the host it
+    # names, and this act has been wrong about that before.
+    ("postgresql://opendox:hunter2@[::1]:5432/opendox",
+     "postgresql://[::1]:5432/<redacted>"),
+    # The keyword/value form: only the three destination keywords are kept, and
+    # `password` is dropped even holding a quoted space.
+    ("host=db.internal port=5432 user=opendox password='a b' dbname=opendox",
+     "host=db.internal port=5432"),
+    # An unparsable string names no destination and is not echoed.
+    ("postgresql://opendox:hunter2@[::1/opendox", "<the configured DSN>"),
+    ("garbage", "<the configured DSN>"),
+    # A PORT THAT IS NOT A NUMBER: `urlsplit` succeeds and `.port` raises on
+    # read, so the redaction itself used to crash (round 27).
+    ("postgresql://opendox:hunter2@host:not-a-port/db", "<the configured DSN>"),
+    ("postgresql://opendox:hunter2@host:99999/db", "<the configured DSN>"),
+])
+def test_the_probes_redaction_keeps_the_destination_and_nothing_else(
+        dsn: str, expected: str) -> None:
+    """Each case is a shape the harness is handed, not a shape it invents."""
+    assert _conftest_module()._redacted_dsn(dsn) == expected
+    assert "hunter2" not in _conftest_module()._redacted_dsn(dsn)
+
+
+def test_a_broker_url_that_names_no_host_is_refused_at_the_door() -> None:
+    """A trust anchor nothing can be fetched from must not reach serve time.
+
+    THE FINDING (Copilot review of openDox-code#25, round 26, suppressed):
+    `urlsplit("https:///realms/x")` yields the scheme `https` and NO hostname,
+    so the scheme check above accepted it, `load_settings` succeeded, and the
+    install discovered the bad configuration when the JWKS fetch made
+    `/readyz` and `status` fail. Measured before the fix: `load_settings` with
+    `OPENDOX_OIDC_ISSUER=https:///realms/x` returned settings carrying that
+    issuer.
+
+    AND THE REFUSAL DOES NOT ECHO THE VALUE, which is not fastidiousness:
+    `urlsplit("https://user:hunter2@/realms/x").hostname` is `None` too, so the
+    hostless shape and the credential-carrying shape overlap exactly, and a
+    message that quoted the value would print the password this function
+    exists to keep out of `status` and the logs.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for issuer in ("https:///realms/x", "https://", "https:///",
+                   "broker/realms/x", "https://user:hunter2@/realms/x"):
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+        message = str(caught.value)
+        assert "names no HOST" in message, (issuer, message)
+        assert PREFIX + "OIDC_ISSUER" in message, (issuer, message)
+        assert "hunter2" not in message, (
+            f"the refusal echoed a credential from a hostless URL: {message}")
+
+    # The same rule on the URL that is actually fetched, and a host that IS
+    # named still passes.
+    with pytest.raises(ConfigurationError) as caught:
+        load_settings(dict(base, **{
+            PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_JWKS_URL": "https:///certs"}))
+    assert "names no HOST" in str(caught.value)
+    assert PREFIX + "OIDC_JWKS_URL" in str(caught.value)
+    assert load_settings(dict(base, **{
+        PREFIX + "OIDC_ISSUER": "https://broker.example/realms/opendox"}))
+
+
+def test_a_probe_failure_leaves_no_traceback_that_could_carry_the_dsn(
+        monkeypatch) -> None:
+    """The redaction is TOTAL, and the reason is raised outside the handler.
+
+    TWO FINDINGS IN ONE SHAPE (Copilot review of openDox-code#25, round 27).
+    `urlsplit("postgresql://u:pw@host:not-a-port/db")` SUCCEEDS and defers the
+    error to `.port`, which is a property that parses on read — so
+    `_redacted_dsn` raised `ValueError` from inside the handler that was
+    reporting a connection failure, and pytest printed a chained traceback
+    instead of the redacted reason the module promises. Measured before the
+    fix: `ValueError: Port could not be cast to integer value as 'not-a-port'`,
+    raised at `port = f":{split.port}"`.
+
+    And the chain is the second half: `pytest.skip` raised inside `except`
+    carries the psycopg error as `__context__`, and libpq quotes a conninfo it
+    cannot parse — so a traceback pytest chose to print would have carried the
+    password even though the reason did not. Measured before the fix, on
+    `postgresql://opendox:hunter2@[::1:not-a-port/db`: the password was in the
+    formatted traceback and not in the reason. The probe now raises OUTSIDE the
+    handler, so there is no context to print.
+    """
+    conftest = _conftest_module()
+    for dsn in ("postgresql://opendox:hunter2@host:not-a-port/db",
+                "postgresql://opendox:hunter2@[::1:not-a-port/db",
+                "postgresql://opendox:hunter2@host:99999/db"):
+        monkeypatch.setenv(conftest.TEST_DSN_ENV, dsn)
+
+        class _Driver:
+            @staticmethod
+            def connect(conninfo, **kwargs):
+                raise RuntimeError(f'could not parse "{conninfo}"')
+
+        monkeypatch.setattr(conftest, "_import_psycopg", lambda: _Driver)
+        with pytest.raises(BaseException) as caught:
+            conftest.postgres_dsn.__wrapped__()
+
+        import traceback as _tb
+        rendered = "".join(_tb.format_exception(caught.value))
+        reason = getattr(caught.value, "msg", None) or str(caught.value)
+        assert "<the configured DSN>" in reason, (dsn, reason)
+        assert "hunter2" not in reason, (dsn, reason)
+        assert caught.value.__context__ is None, (
+            f"the outcome is chained to the connection failure, so a printed "
+            f"traceback would carry what libpq quoted back: {dsn}")
+        assert "hunter2" not in rendered, (
+            f"the rendered traceback carries the password: {rendered}")
+
+
+def test_a_broker_url_whose_port_is_not_a_number_is_refused_at_the_door(
+) -> None:
+    """`urlsplit` succeeds for it; `.port` is where it fails, and that is late.
+
+    THE FINDING (Copilot review of openDox-code#25, round 27, suppressed):
+    `https://broker:not-a-port/realm` passed this boundary, because the checks
+    read the scheme and the hostname and never evaluated the port — so `serve`
+    started and the `ValueError` surfaced inside the JWKS fetch, which is
+    neither a `ConfigurationError` nor a named setting. Measured: `.port`
+    raises `ValueError` for a non-numeric port and for one out of 0-65535.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for issuer in ("https://broker:not-a-port/realm",
+                   "https://broker:99999/realm",
+                   "https://user:hunter2@broker:not-a-port/realm"):
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+        message = str(caught.value)
+        assert "PORT that is not a number" in message, (issuer, message)
+        assert PREFIX + "OIDC_ISSUER" in message, (issuer, message)
+        assert "hunter2" not in message, (issuer, message)
+
+    # A real port still passes, and the key-set URL is judged by the same rule.
+    assert load_settings(dict(base, **{
+        PREFIX + "OIDC_ISSUER": "https://broker:8443/realm"}))
+    with pytest.raises(ConfigurationError) as caught:
+        load_settings(dict(base, **{
+            PREFIX + "OIDC_ISSUER": "https://broker/realm",
+            PREFIX + "OIDC_JWKS_URL": "https://broker:not-a-port/certs"}))
+    assert PREFIX + "OIDC_JWKS_URL" in str(caught.value)
+
+
+def test_the_issuer_carries_no_query_or_fragment_because_paths_are_appended(
+) -> None:
+    """A base URL's derived paths land after its query, addressing nothing.
+
+    THE FINDING (Copilot review of openDox-code#25, round 29, previously
+    missed): `jwks_url()` and `discovery_url()` APPEND a path to the issuer,
+    and a URL's query and fragment come after its path. Measured before the
+    fix, both components accepted:
+
+        OPENDOX_OIDC_ISSUER=https://broker/realms/x?tenant=a
+        jwks_url()      -> https://broker/realms/x?tenant=a/protocol/openid-connect/certs
+        discovery_url() -> https://broker/realms/x?tenant=a/.well-known/openid-configuration
+
+    Nothing serves either, so readiness failed at the fetch — configuration
+    discovered at serve time, which is the boundary `load_settings` holds.
+
+    THE RULE IS THE ISSUER'S ALONE, and the second half of this test is why
+    that matters: an explicit `OPENDOX_OIDC_JWKS_URL` is fetched exactly as
+    given, and a broker behind a rewriting proxy may need a query on it. That
+    is the whole reason the variable exists.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for issuer, component in (("https://broker/realms/x?tenant=a", "query"),
+                              ("https://broker/realms/x#frag", "fragment"),
+                              ("https://broker/realms/x?a=1#b", "query")):
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+        message = str(caught.value)
+        assert f"carries a {component} component" in message, (issuer, message)
+        assert PREFIX + "OIDC_ISSUER" in message, (issuer, message)
+
+    # THE DERIVATION IS WHAT THIS PROTECTS, so measure it on the value that
+    # passes: a trailing slash and no query, and the derived URLs are the two
+    # Keycloak publishes.
+    settings = load_settings(dict(base, **{
+        PREFIX + "OIDC_ISSUER": "https://broker/realms/x/"}))
+    assert settings.jwks_url() == \
+        "https://broker/realms/x/protocol/openid-connect/certs"
+    assert settings.discovery_url() == \
+        "https://broker/realms/x/.well-known/openid-configuration"
+
+    # AND AN EXPLICIT KEY-SET URL KEEPS ITS QUERY, fetched as given.
+    settings = load_settings(dict(base, **{
+        PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+        PREFIX + "OIDC_JWKS_URL": "https://proxy/certs?realm=x"}))
+    assert settings.jwks_url() == "https://proxy/certs?realm=x"
+
+
+def test_the_loopback_exception_is_for_http_and_not_for_every_other_scheme(
+) -> None:
+    """`ftp://localhost/…` is not a broker URL, and it used to be accepted.
+
+    THE FINDING (Copilot review of openDox-code#25, round 29, suppressed): the
+    exception was written as "not https AND not loopback", which accepts EVERY
+    non-https scheme on a loopback host. `HttpJwksSource` fetches with
+    `httpx.get`, which cannot use `ftp://` or `file://`, so the process started
+    with an unusable trust anchor and failed at readiness. Measured before the
+    fix: `ftp://localhost/realms/x` and `file://127.0.0.1/realms/x` both
+    ACCEPTED.
+
+    The exception exists for a developer running a broker over plain HTTP on
+    the loopback, and that is the whole of what it allows now.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for issuer in ("ftp://localhost/realms/x", "file://127.0.0.1/realms/x",
+                   "ws://localhost:8080/realms/x", "ftp://[::1]/realms/x"):
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+        assert "TRUST ANCHOR" in str(caught.value), (issuer, caught.value)
+
+    # The two that must still pass: https anywhere, http on the loopback.
+    for issuer in ("https://broker/realms/x", "http://localhost:8080/realms/x",
+                   "http://127.0.0.1:8080/realms/x", "http://[::1]:8080/x"):
+        assert load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+
+
+def test_a_uri_password_holding_a_space_is_redacted_whole() -> None:
+    """Round 19's finding in its URI form: `\\S*` stops at the space.
+
+    THE FINDING (Copilot review of openDox-code#25, round 29, suppressed): a
+    driver quoting back a URI whose password was never percent-encoded — which
+    is exactly the conninfo an operator mistypes — was redacted only to the
+    first whitespace. Measured before the fix:
+
+        'invalid dsn: postgresql://opendox:hunter 2@db.internal:5432/opendox'
+        -> 'invalid dsn: <redacted> 2@db.internal:5432/opendox'
+
+    The tail of the password and the whole host, printed beside the marker that
+    says the credential was removed.
+
+    USERINFO ENDS AT THE FIRST `@` AND CANNOT CONTAIN `/`, which is what lets
+    the pattern absorb the space without running away down the line — the last
+    two cases are that bound, and they are why this is not simply "redact to
+    end of line".
+    """
+    redact = cli._DSN_SHAPED.sub
+
+    assert redact("<redacted>",
+                  "invalid dsn: postgresql://opendox:hunter 2@db.internal/x"
+                  ) == "invalid dsn: <redacted>"
+    assert redact("<redacted>",
+                  'invalid dsn: "postgresql://opendox:my pass word@host/db"'
+                  ) == 'invalid dsn: "<redacted>'
+    assert redact("<redacted>", "amqps://svc:my pass@broker/vhost failed"
+                  ) == "<redacted> failed"
+
+    # THE BOUND: a later, unrelated `@` in the same message is not swallowed,
+    # because the `@` branch cannot cross the URI's `/`.
+    assert redact("<redacted>", "postgresql://host/db for user a@b"
+                  ) == "<redacted> for user a@b"
+    assert redact("<redacted>", "reached postgresql://host:5432/db fine"
+                  ) == "reached <redacted> fine"

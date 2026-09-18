@@ -641,3 +641,64 @@ def test_a_user_named_schema_this_role_may_not_use_is_not_exempt() -> None:
                         present=("tenant", "public"), denied=("tenant",),
                         user="svc"))
     assert "tenant" in str(caught.value)
+
+
+@pytest.mark.parametrize("path, entries", [
+    # The ordinary paths, unchanged by the scanner.
+    ("tenant, public", ["tenant", "public"]),
+    ('"$user", public', ["$user", "public"]),
+    # A COMMA IN THE NAME, which is legal and which PostgreSQL quotes.
+    ('"tenant,blue", public', ["tenant,blue", "public"]),
+    ('public, "tenant,blue"', ["public", "tenant,blue"]),
+    # A quote in the name, doubled the way PostgreSQL writes it.
+    ('"a""b", public', ['a"b', "public"]),
+    # A quoted name whose own spaces are part of it.
+    ('" pad ", public', [" pad ", "public"]),
+    # One entry, no comma at all.
+    ("public", ["public"]),
+])
+def test_the_search_path_is_split_the_way_postgresql_quotes_it(
+        path: str, entries: list[str]) -> None:
+    """`path.split(",")` is not a parser, and a legal name proved it.
+
+    THE FINDING (Copilot review of openDox-code#25, round 26, suppressed): a
+    schema whose name contains a comma is quoted in `search_path`, so
+    `"tenant,blue", public` split on every comma becomes `"tenant` and
+    `blue"` — and `selected_schema` then refused a connection whose
+    `current_schema()` was exactly the schema it had asked for.
+
+    MEASURED on postgres 16.15 before the fix, against a schema created as
+    `"tenant,blue"`:
+
+        current_schema()                -- tenant,blue
+        current_setting('search_path')  -- "tenant,blue", public
+        selected_schema(conn)           -- MigrationError: this connection
+                                        -- selects '"tenant', which does not
+                                        -- exist …
+
+    A refusal naming `'"tenant'` is not a diagnosis anyone can act on, and the
+    install it refused was valid. The entries below are what PostgreSQL itself
+    prints for each of these names.
+    """
+    split = [migrations._unquoted(entry)
+             for entry in migrations._path_entries(path)]
+    assert split == entries
+
+
+def test_a_comma_in_a_schema_name_does_not_refuse_a_valid_connection() -> None:
+    """The finding's own case, through `selected_schema` and not the scanner.
+
+    The double answers what postgres 16.15 answered: `current_schema()` is the
+    unquoted name, the path carries it quoted. Against the previous head this
+    raises `MigrationError` naming `'"tenant'`.
+    """
+    assert migrations.selected_schema(
+        _SearchPath("tenant,blue", '"tenant,blue", public',
+                    present=("tenant,blue", "public"))) == "tenant,blue"
+
+    # And the guard still REFUSES when such a name really is skipped: the
+    # fix widens the parser, not the rule.
+    with pytest.raises(migrations.MigrationError) as caught:
+        migrations.selected_schema(
+            _SearchPath("public", '"tenant,blue", public', present=("public",)))
+    assert "tenant,blue" in str(caught.value)

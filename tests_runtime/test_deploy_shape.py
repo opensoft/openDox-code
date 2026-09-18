@@ -1439,3 +1439,173 @@ def test_the_managed_database_path_names_the_role_the_job_narrows() -> None:
         "the managed-database instructions never mention the ConfigMap value "
         "the migration Job narrows")
     assert "opendox-db-runtime" in section
+
+
+def test_no_documented_apply_reaches_the_cluster_with_the_placeholder_image(
+) -> None:
+    """Every documented `kubectl apply` is guarded against the placeholder tag.
+
+    THE FINDING (Copilot review of openDox-code#25, round 26): the runbook
+    tells operators to apply the `dev` overlay directly, the overlay carries
+    `ghcr.io/opensoft/opendox-runtime:0.0.0`, and this repository publishes no
+    image — so "a clean Kubernetes install will therefore reach
+    `ImagePullBackOff` before the runtime or migration Job can start".
+
+    TRUE, AND MEASURED: `kustomize build deploy/kubernetes/overlays/dev`
+    against kustomize v5.4.3 emits `image: ghcr.io/opensoft/opendox-runtime:
+    0.0.0` at three container sites (the Deployment, and both of the migration
+    Job's containers). The reviewer offered two dispositions and this is the
+    second one — require the replacement before the documented apply — because
+    the first (build a local image) would make the runbook's happy path a
+    development shortcut rather than the install it documents.
+
+    So the runbook now carries the `kustomize edit set image ...@sha256:` step
+    and a guard that greps the BUILD OUTPUT for the placeholder, and this test
+    is what keeps all three in agreement: the guard's pattern, the tag the base
+    declares, and the tag each overlay sets. Anyone who bumps the placeholder
+    without touching the runbook fails here.
+
+    NOT A STYLE CHECK. The assertion is per apply command: a new documented
+    apply that goes straight to `kubectl` fails this test even if every
+    existing one is guarded.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+
+    # THE PLACEHOLDER, TAKEN FROM THE MANIFESTS and not written here twice.
+    declared = {
+        line.split("image:", 1)[1].strip()
+        for path in sorted(KUBERNETES.rglob("*.yaml"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("image:") and "opendox-runtime" in line
+    }
+    assert declared == {"ghcr.io/opensoft/opendox-runtime:0.0.0"}, (
+        f"the base declares more than one runtime image: {declared}")
+    tag = declared.pop().rsplit(":", 1)[1]
+    for overlay in sorted(p for p in (KUBERNETES / "overlays").iterdir()
+                          if p.is_dir()):
+        entry = _load_yaml(overlay / "kustomization.yaml")["images"][0]
+        assert entry.get("newTag") == tag, (
+            f"{overlay.name} sets {entry} and the base declares :{tag}; the "
+            f"runbook's guard greps for one string and would miss the other")
+
+    guard = f"grep -q 'opendox-runtime:{tag.replace('.', chr(92) + '.')}'"
+    assert guard in runbook, (
+        f"the runbook's placeholder guard does not match the declared tag; "
+        f"expected a line containing {guard!r}")
+
+    # PER APPLY, AND IN ITS OWN FENCED BLOCK: an operator pastes a block, so
+    # a guard three sections earlier is not a guard for this one.
+    seen = 0
+    block: list[str] = []
+    for line in runbook.splitlines():
+        if line.startswith("```"):
+            block = [] if line.startswith("```sh") else block
+            continue
+        if "kubectl apply" in line and "kustomize build" in line:
+            seen += 1
+            overlay = line.split("overlays/", 1)[1].split()[0]
+            body = "\n".join(block)
+            assert (guard in body
+                    and f"overlays/{overlay} | grep -q" in body), (
+                f"the documented apply of `{overlay}` is not preceded, in its "
+                f"own shell block, by the placeholder guard for that overlay: "
+                f"a clean install pasting this block reaches ImagePullBackOff")
+        block.append(line)
+    assert seen == 3, (
+        f"the runbook documents {seen} applies and this test was written "
+        f"against 3; a new one must be guarded, not counted away")
+    assert "edit set image" in runbook, (
+        "the runbook guards the apply without saying how to replace the "
+        "image, which leaves the operator stuck at the guard")
+
+
+def test_the_managed_database_overlay_is_applied_after_its_prerequisites(
+) -> None:
+    """The managed path applies only once the role it narrows exists and is named.
+
+    THE FINDING (Copilot review of openDox-code#25, round 27): the apply block
+    stood above both the `runtime_pg_role` instruction and the role-provisioning
+    prerequisite, so an operator working top to bottom applied the overlay
+    carrying the base's inherited `opendox_runtime` — the BUNDLED database's
+    role. The migration Job then narrows a role nobody serves as (or fails
+    because it does not exist on a managed database, which runs no init
+    script), while the role actually serving keeps the right to rewrite the
+    ledger. That is round 24's defect reached by ordering rather than by a
+    missing edit, which is why it needs its own assertion and not a sentence.
+
+    ORDERING IS THE WHOLE CLAIM, so this measures positions in the document.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    apply_at = runbook.index(
+        "kustomize build deploy/kubernetes/overlays/managed-database "
+        "| kubectl apply")
+    for earlier in (
+            "**Set `runtime_pg_role` in that overlay",   # names the role
+            "\\getenv runtime_role OPENDOX_RUNTIME_PG_ROLE",  # creates it
+            "\\gexec",                                   # runs that block
+    ):
+        assert runbook.index(earlier) < apply_at, (
+            f"the managed-database apply comes BEFORE {earlier!r}; an operator "
+            f"working top to bottom would narrow the bundled role")
+
+    # And the dev path's apply still comes after the Secrets it needs, which is
+    # the same rule for the other overlay.
+    dev_at = runbook.index(
+        "kustomize build deploy/kubernetes/overlays/dev | kubectl apply")
+    assert runbook.index("create secret generic opendox-db-runtime") < dev_at
+
+
+def test_the_secret_block_is_fail_fast_and_its_set_e_is_not_defeated() -> None:
+    """A failed `create secret` stops the block, and `set -e` actually runs.
+
+    THE FINDING (Copilot review of openDox-code#25, rounds 27 and 29,
+    suppressed twice): the block had no fail-fast, so a failed `kubectl create
+    secret` was followed by the remaining creates and by the cleanup, and a run
+    that had not created the credentials looked like one that had.
+
+    THREE PROPERTIES, and each is here because the obvious fix breaks one:
+
+      * `set -e` is INSIDE A SUBSHELL. Pasted into an interactive shell it
+        would close the operator's own shell on the first failure.
+      * the subshell's status is taken by `$?` ON ITS OWN LINE. MEASURED with
+        a `kubectl` stub that refuses the first create: written as `) && ok=yes
+        || ok=no`, bash SUPPRESSES `set -e` inside a compound command that is
+        an operand of `&&`/`||` — the suppression is inherited — and all three
+        creates ran and the status was 0. With `secrets_created=$?` the block
+        stopped at the first failure, the EXIT trap removed the files, and the
+        status was 1.
+      * the signal traps `exit` rather than re-raising. `$$` inside a subshell
+        is still the PARENT's pid, so the round-26 `kill -INT $$` would have
+        signalled the operator's shell from inside the subshell.
+
+    The apply is guarded on that status, so a half-created install applies
+    nothing.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    start = runbook.index("(\n  set -e")
+    block = runbook[start:runbook.index("secrets_created=$?", start)]
+
+    assert "set -e" in block
+    assert block.count("kubectl -n opendox create secret") == 3, (
+        "this test is written against the three creates the base needs")
+    assert "kill -INT $$" not in block and "kill -TERM $$" not in block, (
+        "`$$` in a subshell is the operator's shell, not this one")
+    for signal, status in (("EXIT", None), ("INT", "130"), ("TERM", "143")):
+        line = [l for l in block.splitlines() if f"' {signal}" in l]
+        assert line, f"no trap for {signal}"
+        assert 'rm -rf "$secrets"' in line[0], line
+        if status:
+            assert f"exit {status}" in line[0], line
+
+    assert ") && secrets_created" not in runbook, (
+        "an `&&` after the subshell suppresses the `set -e` inside it; "
+        "measured, and it ran every remaining kubectl")
+    assert "\n)\n" in runbook[start:start + len(block) + 200] or \
+        "\n)\n" in runbook[start:], "the subshell is never closed"
+
+    # AND THE APPLY IS GUARDED ON IT.
+    assert '[ "${secrets_created:-1}" -ne 0 ]' in runbook, (
+        "the documented apply does not check whether the Secrets were created")
+    apply_at = runbook.index(
+        "kustomize build deploy/kubernetes/overlays/dev | kubectl apply")
+    assert runbook.index('[ "${secrets_created:-1}" -ne 0 ]') < apply_at

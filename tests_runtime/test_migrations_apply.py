@@ -1199,3 +1199,209 @@ def test_the_draft_page_budget_does_not_read_the_bodies_it_sizes(
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")
+
+
+def test_a_public_ledger_does_not_capture_a_tenant_schema_run(
+        postgres_dsn: str) -> None:
+    """An existing `public` ledger does not divert a tenant's bootstrap.
+
+    THE FINDING, IN ITS OWN TERMS (Copilot review of openDox-code#25, round
+    26): `LEDGER_DDL` is unqualified, so a selected schema with no ledger
+    "can reuse a later `public.opendox_schema_migrations`: `CREATE TABLE IF
+    NOT EXISTS` sees the public relation and skips creation in the selected
+    schema", after which the unqualified insert records this tenant's run in
+    `public` while `applied()` reads the selected schema and reports the
+    migration as still pending.
+
+    MEASURED FALSE, on postgres 16.15, and this test is the measurement kept
+    executable. `IF NOT EXISTS` is tested against the relation the statement
+    WOULD CREATE — the first schema in `search_path` the role can create in —
+    and not against what the name resolves to for a read. A `public` ledger
+    is therefore visible to the lookup and irrelevant to the creation.
+
+    Which makes the test's own shape the point: it is a regression test only
+    because the decoy in `public` is created FIRST and holds a row this run
+    must not touch. Against the shape the finding describes — a bootstrap
+    that skipped creation and wrote through the search path — `public` would
+    hold two rows, the tenant schema would hold no ledger at all, and
+    `applied()` would come back empty. All three are asserted.
+    """
+    import uuid as _uuid
+
+    from opendox.runtime.db import Database
+
+    schema = "t_" + _uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    decoy_was_ours = False
+    with admin:
+        with admin.transaction() as conn:
+            existing = conn.execute(
+                "select to_regclass('public.opendox_schema_migrations')"
+            ).fetchone()[0]
+            if existing is None:
+                # THE DECOY, BUILT FROM THE RUNNER'S OWN DDL so it cannot
+                # drift into a shape the run would reject for some reason
+                # other than the one under test: under the finding, the
+                # tenant's rows land in THIS table, and they can only do that
+                # if its columns are the ledger's columns. Created only when
+                # `public` is genuinely clean, and dropped below only in that
+                # case, so this test never removes a ledger a real install
+                # keeps in `public`.
+                conn.execute(migrations.LEDGER_DDL.replace(
+                    "if not exists ", "if not exists public.", 1))
+                conn.execute(
+                    "insert into public.opendox_schema_migrations "
+                    "(version, name, checksum) values ('0000', 'decoy', 'x')")
+                decoy_was_ours = True
+            conn.execute(f"create schema {schema}")
+        try:
+            if not decoy_was_ours:
+                pytest.skip("public already holds a ledger; the decoy this "
+                            "test needs would not be ours to create or drop")
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(db,
+                                                    migrations_dir="migrations")
+                applied = runner.apply()
+                assert applied, "the run applied nothing; the rest is vacuous"
+
+                with db.connection() as conn:
+                    # WHERE THE LEDGER LANDED, by oid and not by name: an
+                    # unqualified `to_regclass` would answer through the same
+                    # search path the finding says was followed.
+                    landed = conn.execute(
+                        "select n.nspname from pg_class c "
+                        "join pg_namespace n on n.oid = c.relnamespace "
+                        "where c.relname = %s and n.nspname in (%s, 'public') "
+                        "order by n.nspname",
+                        (migrations.LEDGER_TABLE, schema)).fetchall()
+                    assert {row[0] for row in landed} == {schema, "public"}, (
+                        f"the ledger is not in both {schema} and public: "
+                        f"{landed}; under the finding's shape the tenant "
+                        f"schema would have none")
+
+                    rows = conn.execute(
+                        f"select version from {schema}.opendox_schema_migrations"
+                        " order by version").fetchall()
+                    assert [row[0] for row in rows] == sorted(applied), (
+                        "the tenant ledger does not record this run")
+
+                    decoy = conn.execute(
+                        "select version from public.opendox_schema_migrations "
+                        "order by version").fetchall()
+                    assert [row[0] for row in decoy] == ["0000"], (
+                        f"the run wrote into the public ledger: {decoy}")
+
+                # AND THE READ AGREES WITH THE WRITE: `applied()` resolves
+                # through `selected_schema()`, which is the half of the finding
+                # that would have reported a pending migration forever.
+                assert [row.version for row in runner.applied()] == sorted(applied)
+                assert runner.plan() == []
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
+                if decoy_was_ours:
+                    conn.execute(
+                        "drop table if exists public.opendox_schema_migrations")
+
+
+def test_a_comma_in_the_schema_name_is_a_real_connection_and_not_a_refusal(
+        postgres_dsn: str) -> None:
+    """The finding's case against a real server, not a double.
+
+    `"tenant,blue"` is a legal schema name and PostgreSQL quotes it in
+    `search_path`, so the old `path.split(",")` turned one entry into two and
+    `selected_schema` refused a connection whose `current_schema()` was
+    exactly the schema it had asked for — naming `'"tenant'` as the thing that
+    did not exist (Copilot review of openDox-code#25, round 26, suppressed).
+
+    The path is set ON THE CONNECTION here rather than through
+    `Database(schema=…)`, which interpolates the name into a libpq `options`
+    string and is documented as taking an install-generated identifier. That
+    is the operator's route to a path this guard reads, and it is the one the
+    finding is about.
+
+    Against the previous head this fails at the first assertion.
+    """
+    from opendox.runtime.db import Database
+
+    name = 'tenant,blue'
+    quoted = '"' + name.replace('"', '""') + '"'
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"drop schema if exists {quoted} cascade")
+            conn.execute(f"create schema {quoted}")
+        try:
+            with Database(postgres_dsn) as db:
+                runner = migrations.MigrationRunner(db,
+                                                    migrations_dir="migrations")
+                with db.connection() as conn:
+                    conn.execute(f"set search_path = {quoted}, public")
+                    assert conn.execute(
+                        "select current_schema()").fetchone()[0] == name
+                    assert migrations.selected_schema(conn) == name
+
+                    runner.bootstrap_ledger(conn)
+                    landed = conn.execute(
+                        "select n.nspname from pg_class c "
+                        "join pg_namespace n on n.oid = c.relnamespace "
+                        "where c.relname = %s and n.nspname = %s",
+                        (migrations.LEDGER_TABLE, name)).fetchall()
+                    assert [row[0] for row in landed] == [name], (
+                        f"the ledger did not land in {name!r}: {landed}")
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {quoted} cascade")
+
+
+def test_a_later_migration_that_is_not_utf8_applies_nothing_at_all(
+        postgres_dsn: str, tmp_path: Path) -> None:
+    """The whole-run promise covers the DECODE, not only the digest.
+
+    THE FINDING (Copilot review of openDox-code#25, round 28):
+    `snapshot_run()` takes every file's bytes before the first commit, but
+    `raw.decode("utf-8")` sat inside the per-migration loop — AFTER the ledger
+    was bootstrapped, protected and written to. A later file holding invalid
+    UTF-8 therefore aborted the run with an untyped `UnicodeDecodeError` once
+    `0001` had COMMITTED: exactly the partial run "a tree carrying the wrong
+    `0001` changes nothing at all" exists to make impossible.
+
+    The decode now happens in `snapshot_run()`, beside the canonical gate and
+    before the first mutation, and raises `MigrationError` naming the file and
+    the byte. Against the previous head this run leaves the six tables and the
+    ledger behind and raises `UnicodeDecodeError` instead.
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    for name in ("0001_identity_and_coordination.sql",
+                 "0002_migration_state.sql"):
+        shutil.copyfile(ROOT / "migrations" / name, tmp_path / name)
+    # A LATER file, so the run has real work to commit before it reaches it.
+    (tmp_path / "0003_not_utf8.sql").write_bytes(
+        b"create table late_arrival (note text);  -- \xff\xfe\n")
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(db, migrations_dir=tmp_path)
+                with pytest.raises(migrations.MigrationError) as caught:
+                    runner.apply()
+                message = str(caught.value)
+                assert "0003_not_utf8.sql" in message, message
+                assert "not UTF-8" in message, message
+                assert "nothing has been applied" in message, message
+                assert not isinstance(caught.value, UnicodeDecodeError)
+
+                # NOTHING AT ALL, and the ledger is the strictest form of it:
+                # a bootstrap alone would leave that one table behind.
+                assert _tables_in(db, schema) == set(), (
+                    "the run mutated the schema before refusing")
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")
