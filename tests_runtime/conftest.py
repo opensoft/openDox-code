@@ -79,16 +79,22 @@ def _redacted_dsn(dsn: str) -> str:
     import urllib.parse
 
     try:
+        # EVERY ACCESS INSIDE THE BOUNDARY, not just the parse. `urlsplit`
+        # SUCCEEDS for `postgresql://u:p@host:not-a-port/db` and defers the
+        # error to `.port`, which is a property that parses on read — so this
+        # function raised from inside the handler that was reporting a
+        # connection failure, and pytest printed the chained traceback instead
+        # of the redacted reason it promises (Copilot review of
+        # openDox-code#25, round 27).
         split = urllib.parse.urlsplit(dsn)
+        scheme, hostname, port = split.scheme, split.hostname, split.port
     except ValueError:
         return "<the configured DSN>"
-    if split.scheme and split.hostname:
+    if scheme and hostname:
         # BRACKETS KEPT FOR AN IPv6 LITERAL, which this act has been wrong
         # about before: `::1` unbracketed is not the host it names.
-        host = (f"[{split.hostname}]" if ":" in split.hostname
-                else split.hostname)
-        port = f":{split.port}" if split.port else ""
-        return f"{split.scheme}://{host}{port}/<redacted>"
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        return f"{scheme}://{host}{f':{port}' if port else ''}/<redacted>"
     kept = [part for part in dsn.split()
             if part.split("=", 1)[0] in ("host", "port", "hostaddr")]
     return " ".join(kept) if kept else "<the configured DSN>"
@@ -154,6 +160,10 @@ def postgres_dsn() -> str:
         with psycopg.connect(dsn, connect_timeout=PROBE_TIMEOUT_SECONDS) as conn:
             conn.execute("select 1")
     except Exception as exc:  # noqa: BLE001
+        failed_as = type(exc).__name__
+    else:
+        failed_as = None
+    if failed_as is not None:
         # THE EXCEPTION'S TYPE, NOT ITS TEXT, and the reproducer is exact.
         # `str(exc)` was copied into a reason that pytest prints in the CI log
         # of a job whose DSN carries a password (Copilot review of
@@ -175,9 +185,14 @@ def postgres_dsn() -> str:
         # value; the destination is rebuilt by `_redacted_dsn` from the
         # environment's own DSN, so an operator still learns which server did
         # not answer.
+        # RAISED OUTSIDE THE HANDLER, deliberately. `pytest.skip` raised from
+        # inside `except` chains the psycopg error onto it, and libpq quotes a
+        # conninfo it cannot parse — so any traceback pytest chose to print
+        # would carry the password even though the reason does not. Outside
+        # the handler there is no `__context__` to print.
         _skip_or_fail(
             f"{TEST_DSN_ENV} is set and the server did not answer within "
-            f"{PROBE_TIMEOUT_SECONDS}s: {type(exc).__name__} for "
+            f"{PROBE_TIMEOUT_SECONDS}s: {failed_as} for "
             f"{_redacted_dsn(dsn)}. The DB-backed runtime suites did not run.")
     return dsn
 

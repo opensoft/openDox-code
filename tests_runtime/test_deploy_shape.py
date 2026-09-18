@@ -1517,3 +1517,39 @@ def test_no_documented_apply_reaches_the_cluster_with_the_placeholder_image(
     assert "edit set image" in runbook, (
         "the runbook guards the apply without saying how to replace the "
         "image, which leaves the operator stuck at the guard")
+
+
+def test_the_managed_database_overlay_is_applied_after_its_prerequisites(
+) -> None:
+    """The managed path applies only once the role it narrows exists and is named.
+
+    THE FINDING (Copilot review of openDox-code#25, round 27): the apply block
+    stood above both the `runtime_pg_role` instruction and the role-provisioning
+    prerequisite, so an operator working top to bottom applied the overlay
+    carrying the base's inherited `opendox_runtime` — the BUNDLED database's
+    role. The migration Job then narrows a role nobody serves as (or fails
+    because it does not exist on a managed database, which runs no init
+    script), while the role actually serving keeps the right to rewrite the
+    ledger. That is round 24's defect reached by ordering rather than by a
+    missing edit, which is why it needs its own assertion and not a sentence.
+
+    ORDERING IS THE WHOLE CLAIM, so this measures positions in the document.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    apply_at = runbook.index(
+        "kustomize build deploy/kubernetes/overlays/managed-database "
+        "| kubectl apply")
+    for earlier in (
+            "**Set `runtime_pg_role` in that overlay",   # names the role
+            "\\getenv runtime_role OPENDOX_RUNTIME_PG_ROLE",  # creates it
+            "\\gexec",                                   # runs that block
+    ):
+        assert runbook.index(earlier) < apply_at, (
+            f"the managed-database apply comes BEFORE {earlier!r}; an operator "
+            f"working top to bottom would narrow the bundled role")
+
+    # And the dev path's apply still comes after the Secrets it needs, which is
+    # the same rule for the other overlay.
+    dev_at = runbook.index(
+        "kustomize build deploy/kubernetes/overlays/dev | kubectl apply")
+    assert runbook.index("create secret generic opendox-db-runtime") < dev_at

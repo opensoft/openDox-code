@@ -384,6 +384,21 @@ def _broker_url(env: Mapping[str, str], setting: Setting, *,
             "broker's full URL, e.g. "
             "https://broker.example/realms/opendox (the value is not repeated "
             "here: a URL with no host can still carry userinfo)")
+    # AND THE PORT IS PARSED HERE, not at the first fetch. `urlsplit` SUCCEEDS
+    # for `https://broker:not-a-port/realms/x` and defers the error to `.port`,
+    # a property that parses on read — so an unusable broker URL passed this
+    # boundary and raised `ValueError` inside `httpx` when the key set was
+    # fetched, which is neither a `ConfigurationError` nor a named setting
+    # (Copilot review of openDox-code#25, round 27). The value is not echoed,
+    # for the reason above.
+    try:
+        split.port
+    except ValueError:
+        raise ConfigurationError(
+            f"{setting.name} names a PORT that is not a number in 0-65535, so "
+            "no key set can be fetched from it. Set it to the broker's full "
+            "URL (the value is not repeated here: a URL this runtime cannot "
+            "parse can still carry userinfo)") from None
     if split.scheme != "https" and not _is_loopback(split.hostname):
         raise ConfigurationError(
             f"{setting.name} is {split.scheme or '(no scheme)'}://, and this "

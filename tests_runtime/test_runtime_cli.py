@@ -1044,6 +1044,10 @@ def test_an_unparsable_test_dsn_does_not_print_its_password(monkeypatch) -> None
     # An unparsable string names no destination and is not echoed.
     ("postgresql://opendox:hunter2@[::1/opendox", "<the configured DSN>"),
     ("garbage", "<the configured DSN>"),
+    # A PORT THAT IS NOT A NUMBER: `urlsplit` succeeds and `.port` raises on
+    # read, so the redaction itself used to crash (round 27).
+    ("postgresql://opendox:hunter2@host:not-a-port/db", "<the configured DSN>"),
+    ("postgresql://opendox:hunter2@host:99999/db", "<the configured DSN>"),
 ])
 def test_the_probes_redaction_keeps_the_destination_and_nothing_else(
         dsn: str, expected: str) -> None:
@@ -1093,3 +1097,86 @@ def test_a_broker_url_that_names_no_host_is_refused_at_the_door() -> None:
     assert PREFIX + "OIDC_JWKS_URL" in str(caught.value)
     assert load_settings(dict(base, **{
         PREFIX + "OIDC_ISSUER": "https://broker.example/realms/opendox"}))
+
+
+def test_a_probe_failure_leaves_no_traceback_that_could_carry_the_dsn(
+        monkeypatch) -> None:
+    """The redaction is TOTAL, and the reason is raised outside the handler.
+
+    TWO FINDINGS IN ONE SHAPE (Copilot review of openDox-code#25, round 27).
+    `urlsplit("postgresql://u:pw@host:not-a-port/db")` SUCCEEDS and defers the
+    error to `.port`, which is a property that parses on read — so
+    `_redacted_dsn` raised `ValueError` from inside the handler that was
+    reporting a connection failure, and pytest printed a chained traceback
+    instead of the redacted reason the module promises. Measured before the
+    fix: `ValueError: Port could not be cast to integer value as 'not-a-port'`,
+    raised at `port = f":{split.port}"`.
+
+    And the chain is the second half: `pytest.skip` raised inside `except`
+    carries the psycopg error as `__context__`, and libpq quotes a conninfo it
+    cannot parse — so a traceback pytest chose to print would have carried the
+    password even though the reason did not. Measured before the fix, on
+    `postgresql://opendox:hunter2@[::1:not-a-port/db`: the password was in the
+    formatted traceback and not in the reason. The probe now raises OUTSIDE the
+    handler, so there is no context to print.
+    """
+    conftest = _conftest_module()
+    for dsn in ("postgresql://opendox:hunter2@host:not-a-port/db",
+                "postgresql://opendox:hunter2@[::1:not-a-port/db",
+                "postgresql://opendox:hunter2@host:99999/db"):
+        monkeypatch.setenv(conftest.TEST_DSN_ENV, dsn)
+
+        class _Driver:
+            @staticmethod
+            def connect(conninfo, **kwargs):
+                raise RuntimeError(f'could not parse "{conninfo}"')
+
+        monkeypatch.setattr(conftest, "_import_psycopg", lambda: _Driver)
+        with pytest.raises(BaseException) as caught:
+            conftest.postgres_dsn.__wrapped__()
+
+        import traceback as _tb
+        rendered = "".join(_tb.format_exception(caught.value))
+        reason = getattr(caught.value, "msg", None) or str(caught.value)
+        assert "<the configured DSN>" in reason, (dsn, reason)
+        assert "hunter2" not in reason, (dsn, reason)
+        assert caught.value.__context__ is None, (
+            f"the outcome is chained to the connection failure, so a printed "
+            f"traceback would carry what libpq quoted back: {dsn}")
+        assert "hunter2" not in rendered, (
+            f"the rendered traceback carries the password: {rendered}")
+
+
+def test_a_broker_url_whose_port_is_not_a_number_is_refused_at_the_door(
+) -> None:
+    """`urlsplit` succeeds for it; `.port` is where it fails, and that is late.
+
+    THE FINDING (Copilot review of openDox-code#25, round 27, suppressed):
+    `https://broker:not-a-port/realm` passed this boundary, because the checks
+    read the scheme and the hostname and never evaluated the port — so `serve`
+    started and the `ValueError` surfaced inside the JWKS fetch, which is
+    neither a `ConfigurationError` nor a named setting. Measured: `.port`
+    raises `ValueError` for a non-numeric port and for one out of 0-65535.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for issuer in ("https://broker:not-a-port/realm",
+                   "https://broker:99999/realm",
+                   "https://user:hunter2@broker:not-a-port/realm"):
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+        message = str(caught.value)
+        assert "PORT that is not a number" in message, (issuer, message)
+        assert PREFIX + "OIDC_ISSUER" in message, (issuer, message)
+        assert "hunter2" not in message, (issuer, message)
+
+    # A real port still passes, and the key-set URL is judged by the same rule.
+    assert load_settings(dict(base, **{
+        PREFIX + "OIDC_ISSUER": "https://broker:8443/realm"}))
+    with pytest.raises(ConfigurationError) as caught:
+        load_settings(dict(base, **{
+            PREFIX + "OIDC_ISSUER": "https://broker/realm",
+            PREFIX + "OIDC_JWKS_URL": "https://broker:not-a-port/certs"}))
+    assert PREFIX + "OIDC_JWKS_URL" in str(caught.value)

@@ -209,27 +209,13 @@ fi
 `managed-database` overlay instead of `dev`, and create only the two DSN
 Secrets — not `opendox-postgres`:
 
-```sh
-# THE IMAGE, AND THIS REPOSITORY PUBLISHES NONE. Every overlay carries the
-# placeholder tag `0.0.0`, which `kustomize build` emits at all THREE runtime
-# container sites (the Deployment and the migration Job's two containers), so
-# an apply that skips this step reaches `ImagePullBackOff` before the migration
-# or the runtime can start — measured against kustomize v5.4.3 (Copilot review
-# of openDox-code#25, round 26). Replace it with the digest you reviewed;
-# `edit set image` writes `digest:`, which is the one form kustomize resolves
-# to immutable bytes:
-(cd deploy/kubernetes/overlays/managed-database && kustomize edit set image \
-   ghcr.io/opensoft/opendox-runtime=<your registry>/opendox-runtime@sha256:<the reviewed digest>)
+**Nothing is applied yet, and that ordering is the point.** Applying this
+overlay before the role exists and before `runtime_pg_role` names it makes the
+migration Job narrow `opendox_runtime` — the bundled database's role — or fail
+because that role does not exist, while the role actually serving keeps the
+right to rewrite the ledger (Copilot review of openDox-code#25, round 27). The
+apply command for this path is at the end of the prerequisite below.
 
-# AND THE BUILD SAYS WHETHER YOU DID. The pattern is the placeholder the base
-# declares; `tests_runtime/test_deploy_shape.py` keeps the two the same, and
-# refuses a documented apply that does not carry this guard.
-if kustomize build deploy/kubernetes/overlays/managed-database | grep -q 'opendox-runtime:0\.0\.0'; then
-    echo 'the image is still the placeholder 0.0.0; this apply would ImagePullBackOff' >&2
-else
-    kustomize build deploy/kubernetes/overlays/managed-database | kubectl apply -f -
-fi
-```
 
 **Set `runtime_pg_role` in that overlay to the role you provisioned** — the
 user in `opendox-db-runtime`'s DSN. The base's value, `opendox_runtime`, is the
@@ -318,6 +304,33 @@ select format('alter default privileges for role %I in schema public grant '
               :'migration_owner', :'runtime_role')
 \gexec
 ```
+
+**NOW apply the overlay.** The served role exists, `runtime_pg_role` names it,
+and both DSNs point at the managed database, so the migration Job narrows the
+role this install will actually serve as:
+
+```sh
+# THE IMAGE, AND THIS REPOSITORY PUBLISHES NONE. Every overlay carries the
+# placeholder tag `0.0.0`, which `kustomize build` emits at all THREE runtime
+# container sites (the Deployment and the migration Job's two containers), so
+# an apply that skips this step reaches `ImagePullBackOff` before the migration
+# or the runtime can start — measured against kustomize v5.4.3 (Copilot review
+# of openDox-code#25, round 26). Replace it with the digest you reviewed;
+# `edit set image` writes `digest:`, which is the one form kustomize resolves
+# to immutable bytes:
+(cd deploy/kubernetes/overlays/managed-database && kustomize edit set image \
+   ghcr.io/opensoft/opendox-runtime=<your registry>/opendox-runtime@sha256:<the reviewed digest>)
+
+# AND THE BUILD SAYS WHETHER YOU DID. The pattern is the placeholder the base
+# declares; `tests_runtime/test_deploy_shape.py` keeps the two the same, and
+# refuses a documented apply that does not carry this guard.
+if kustomize build deploy/kubernetes/overlays/managed-database | grep -q 'opendox-runtime:0\.0\.0'; then
+    echo 'the image is still the placeholder 0.0.0; this apply would ImagePullBackOff' >&2
+else
+    kustomize build deploy/kubernetes/overlays/managed-database | kubectl apply -f -
+fi
+```
+
 
 The migration run then NARROWS that role on the ledger alone
 (`MigrationRunner.protect_ledger`, which is why the role has to exist before
