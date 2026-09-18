@@ -358,6 +358,7 @@ jobs:
       - name: pytest
         run: >-
           python -m pytest -q
+          --junitxml=pytest-report-main.xml
           tests/test_leg_shape.py
           tests/test_consumer_reach.py
           tests/test_profile_registration.py
@@ -431,7 +432,11 @@ jobs:
       # body with `d.stage,` deleted from the returned array, since the
       # `d.stage ?` guard satisfies it alone.
       - name: pytest (S7 residue)
-        run: python -m pytest -q tests/test_display_facet_leaves.py --noconftest
+        run: >-
+          python -m pytest -q
+          --junitxml=pytest-report-s7.xml
+          tests/test_display_facet_leaves.py
+          --noconftest
 
       # ---------------------------------------------------------------------
       # THE RUNTIME'S HERMETIC HALF — `split-opendox-two-layer-product` § 3.5
@@ -1777,6 +1782,7 @@ jobs:
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
+          --junitxml=pytest-report-runtime.xml
           tests_runtime/test_migration_shape.py
           tests_runtime/test_schema_shape.py
           tests_runtime/test_runtime_surface.py
@@ -1784,6 +1790,126 @@ jobs:
           tests_runtime/test_deploy_shape.py
           tests_runtime/test_local_git_adapter.py
           --noconftest
+
+      # -----------------------------------------------------------------------
+      # THE PINNED TRIPLE — `split-opendox-two-layer-product` § 5.4 FLOOR
+      # PART 2, clause (d), THIS LEG'S HALF.
+      #
+      # The clause, verbatim (openxFactory `openspec/changes/
+      # split-opendox-two-layer-product/tasks.md:2768-2775`):
+      #
+      #   "(d) PINNED BY TEST at each destination and in `openxFactory` ...
+      #    the way `pytest-suite.yml` already pins this repository's
+      #    collection triple - SKIPPED exactly, SELECTED and PASSED as
+      #    FLOORS, failures and errors zero. Per destination, never as one
+      #    cross-repository equality: an equality pin on a sum goes RED on
+      #    merge refs that add tests for reasons the candidate cannot fix,
+      #    which is the deadlock class `pytest-suite.yml` already refuses by
+      #    name."
+      #
+      # So this pin is openDox-code's OWN triple and never a sum across the
+      # three repositories. The openXdox leg is its own pin in its own file,
+      # owed after openXdox-code#23 (§ 4.5a).
+      #
+      # THREE REPORTS, SUMMED. The required job runs pytest three times and a
+      # single `--junitxml` path would have each run overwrite the last, so
+      # each step writes its own and this step adds them up. SELECTED is the
+      # JUnit `tests` attribute; PASSED is selected minus skipped, failures
+      # and errors - the same arithmetic the reference implementation uses,
+      # over the XML rather than the `-q` summary line, because that summary
+      # is a human line whose format has changed before.
+      #
+      # THE NUMBERS ARE CI'S OWN, NOT A DEVELOPER MACHINE'S. Measured on run
+      # 35397867526 (job 105770720097, PR #29, 2026-09-18), the first commit
+      # of that pull request having printed them before this step pinned
+      # them: main 714 / s7 13 / runtime 349 = selected 1076, passed 1073,
+      # skipped 3, failures 0, errors 0. The reference implementation gives
+      # the reason to prefer CI ("THE PIN IS TAKEN FROM CI'S OWN RUN, NOT
+      # FROM A DEVELOPER MACHINE"): self-skip guards stand down on a runner
+      # and resolve in a developer worktree, so a locally measured SKIPPED is
+      # knowably the wrong number.
+      #
+      # WHAT MOVES THESE NUMBERS — MEASURED, because the first version of this
+      # comment got it wrong and Copilot caught it on PR #29.
+      #
+      # THE ROOT `conftest.py` AND ITS `collect_ignore` LIST ARE IRRELEVANT
+      # HERE, on two independent grounds, either of which is sufficient:
+      #   1. All THREE report-producing commands pass `--noconftest`, so the
+      #      root conftest is never loaded and its `collect_ignore` never
+      #      evaluated.
+      #   2. Every command names its files EXPLICITLY — 28 + 1 + 6 = 35 files
+      #      — and NOT ONE of the seven `collect_ignore` entries is among
+      #      them. Measured: the overlap is EMPTY.
+      # So the openXdox leg landing, or the BUILD arc lifting an ignore,
+      # CANNOT move SELECTED, PASSED or SKIPPED in this job. A comment that
+      # said otherwise would send the next reader to the wrong file.
+      #
+      # WHAT DOES MOVE THEM: editing one of the three explicit lists in this
+      # file. 35 files are named; 61 `test_*.py` files exist under `tests/`
+      # and `tests_runtime/`, so 26 are collected by NO command here. Adding
+      # one raises SELECTED and PASSED — floors permit a rise, and the commit
+      # that adds it should raise them WITH the reason so the margin stays
+      # meaningful. Removing one LOWERS them, and the floor will refuse: find
+      # the tests, do not lower the floor.
+      #
+      # AND SKIPPED IS THE LOAD-BEARING NUMBER, pinned EXACTLY. The three
+      # skips are real skips inside the named files, not ignored files: an
+      # ignored file is not collected at all and never reaches these reports,
+      # while a skip is a test that was collected and then declined to run. A
+      # named file that quietly turns into skips is precisely what an exact
+      # pin catches and a floor cannot, which is why this one is `==` and the
+      # other two are `>=`. If a change makes it move, move the pin WITH the
+      # reason in the commit message — never relax the comparison.
+      - name: Pin the triple
+        shell: bash
+        env:
+          # FLOORS - may only RISE, and only with the reason in the commit
+          # message. Set to the measured values above, which are numbers this
+          # suite has actually met on CI rather than an aspiration.
+          MIN_SELECTED: "1076"
+          MIN_PASSED: "1073"
+          # EXACT - the load-bearing number. Moves only with its reason.
+          EXPECT_SKIPPED: "3"
+        run: |
+          python3 - <<'PY' > triple.env
+          import xml.etree.ElementTree as ET, pathlib, sys
+          REPORTS = ("pytest-report-main.xml", "pytest-report-s7.xml",
+                     "pytest-report-runtime.xml")
+          tot = {"tests": 0, "skipped": 0, "failures": 0, "errors": 0}
+          missing = []
+          for name in REPORTS:
+              f = pathlib.Path(name)
+              if not f.exists():
+                  missing.append(name)
+                  continue
+              root = ET.parse(f).getroot()
+              suites = root.iter("testsuite") if root.tag == "testsuites" else [root]
+              for ts in suites:
+                  for k in tot:
+                      tot[k] += int(ts.get(k, 0))
+          if missing:
+              # A REPORT THAT DID NOT APPEAR IS A REFUSAL, NOT A SMALLER SUM.
+              # Silently summing the two that exist would present a missing
+              # third of the suite as a pass, which is the failure mode this
+              # pin exists to catch.
+              print("MISSING=" + ",".join(missing))
+          print(f"SELECTED={tot['tests']}")
+          print(f"SKIPPED={tot['skipped']}")
+          print(f"FAILURES={tot['failures']}")
+          print(f"ERRORS={tot['errors']}")
+          print(f"PASSED={tot['tests'] - tot['skipped'] - tot['failures'] - tot['errors']}")
+          PY
+          . ./triple.env
+          echo "triple: selected=$SELECTED passed=$PASSED skipped=$SKIPPED failures=$FAILURES errors=$ERRORS"
+          echo "pins:   selected>=$MIN_SELECTED (margin $((SELECTED - MIN_SELECTED))) passed>=$MIN_PASSED (margin $((PASSED - MIN_PASSED))) skipped==$EXPECT_SKIPPED"
+          rc=0
+          [ -z "${MISSING:-}" ] || { echo "::error::JUnit report(s) missing: $MISSING — a report that did not appear is a refusal, not a smaller sum. A step that failed to write one has taken its tests out of every number below"; rc=1; }
+          [ "$SELECTED" -ge "$MIN_SELECTED" ] || { echo "::error::selected $SELECTED is BELOW the floor $MIN_SELECTED — tests stopped being collected. Find them; do not lower the floor"; rc=1; }
+          [ "$PASSED" -ge "$MIN_PASSED" ] || { echo "::error::passed $PASSED is BELOW the floor $MIN_PASSED — find the tests that stopped passing or stopped being collected; do not lower the floor"; rc=1; }
+          [ "$SKIPPED" = "$EXPECT_SKIPPED" ] || { echo "::error::skipped $SKIPPED, pinned exactly $EXPECT_SKIPPED — a file or directory that silently turned into skips is exactly what this pin exists to catch. If the change is intended (the root conftest's collect_ignore lifting as the openXdox leg or the BUILD arc lands is the expected cause), move the pin WITH the reason"; rc=1; }
+          [ "$FAILURES" = "0" ] || { echo "::error::failures $FAILURES, clause (d) requires zero"; rc=1; }
+          [ "$ERRORS" = "0" ] || { echo "::error::errors $ERRORS, clause (d) requires zero"; rc=1; }
+          exit $rc
 
   # -------------------------------------------------------------------------
   # THE DB-BACKED HALF, IN ITS OWN JOB — `split-opendox-two-layer-product`
