@@ -720,8 +720,27 @@ jobs:
       #              `current_schema()` was the schema it had asked for,
       #              naming `'"tenant'`. A scanner that splits outside
       #              quotes, and the entries still read by `_unquoted`.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 272 there.
+      #  167 passed  at `build/3-5-runtime` `81c01c1f` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-SEVEN, two of whose three
+      #              findings are defects in the code that answered round 26.
+      #              `urlsplit` SUCCEEDS for a port that is not a number and
+      #              defers the error to `.port`, a property that parses on
+      #              read: the probe's redaction raised from inside the
+      #              handler it was reporting from, and a crash is what makes
+      #              pytest print the chained psycopg error — which quotes
+      #              the conninfo, password and all. Every access inside the
+      #              boundary now, and the reason raised OUTSIDE the handler
+      #              so there is no context to print. The same property at
+      #              the configuration boundary: `https://broker:not-a-port/`
+      #              passed it. And the managed-database apply stood above
+      #              the `runtime_pg_role` edit and the role-provisioning
+      #              block, so an operator working top to bottom narrowed the
+      #              BUNDLED role.
       #              THE CURRENT FIGURE; the PR description states it at this
-      #              same commit, and `pytest -q tests_runtime/` is 272 here.
+      #              same commit, and `pytest -q tests_runtime/` is 277 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
