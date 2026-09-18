@@ -1262,9 +1262,20 @@ jobs:
       #              WAS NOT RE-RUN at this commit — its harness is
       #              openxFactory's and was not in this session's workspace;
       #              17 of 17 at `61973332` stands, and this round changes no
-      #              member of the adapter interface.
-      #  1 skipped   is the live psycopg reproducer carried in from
-      #              `build/3-5-runtime`; see that chain's round-26 entry.
+      #              member of the adapter interface. SUPERSEDED by the entry
+      #              below, which is the same six modules after a merge.
+      #  306 passed  at `build/3-6-repository-act` `67dcbf60` (2026-09-18,
+      #  1 skipped   same python, pytest and git; extras unimportable, no
+      #              ambient git config) — NO CHANGE OF THIS BRANCH'S OWN: the
+      #              merge brings #25's rounds 30 and 31, whose cases are two
+      #              more hermetic and three more in the full suite. Recorded
+      #              because the figure moved, which is the only reason an
+      #              entry is ever added here. THE CURRENT FIGURE for this
+      #              branch; the PR description states it at this same commit
+      #              and `pytest -q tests_runtime/` is 495. The neutral
+      #              conformance corpus was not re-run; see the entry above.
+      #              The 1 skipped is the live psycopg reproducer carried in
+      #              from `build/3-5-runtime`; see that chain's round-26 entry.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
