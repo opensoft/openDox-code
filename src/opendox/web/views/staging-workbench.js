@@ -886,6 +886,7 @@ function renderDocsPanel(pane, scope, onOpen, create, verbs, abstractSeam) {
   // instead, and why this callback records which subject that control would act
   // on rather than acting.
   const wheel = renderDocWheel(selector, entries, {
+    display: vocab, // or this pane renders in two vocabularies (S7 residue)
     onSelect: (entry) => {
       // The abstract above, and NOTHING else: a selection is not a binding route
       // under Phase B (see the note above this function), and not a generation
@@ -1290,8 +1291,19 @@ async function runAddSection(seam, path, note, title, after, required) {
       + ") — nothing was written";
     return null;
   }
+  // THE INTERACTIVE ADD TAKES THE HOST'S SECTION ORDER (Copilot review
+  // 5192900474 on PR #21, suppressed comment 5; slice S7 residue).
+  // `insertSection` reads its canonical heading order through
+  // `templateOrder(options.display)` and falls back to openDox's own shipped
+  // `SECTION_ORDER` when the caller supplies none — so this, the ONLY
+  // interactive route a human has for adding a section, placed and
+  // duplicate-checked every section against the NEUTRAL order while the
+  // outline it was editing was rendered in the host's. The gap-row route
+  // (`required: true`) is the same call, so both are fixed by the one
+  // argument. It is the same `vocab` this module installed at mount.
   const patch = insertSection(live.text, {
     title, after, required, addedBy: seam.actor, date: provenanceDate(),
+    display: vocab,
   });
   if (!patch.ok) {
     // The MODEL's reasons are this tab's own sentences (it is our pure module,

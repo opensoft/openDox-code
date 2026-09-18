@@ -112,7 +112,19 @@ function colHead(color, label, count) {
 function brainstormCard(d, indexes) {
   const card = el("div", "card stage-brainstorm");
   card.appendChild(el("div", "title", d.summary || basename(d.path)));
-  const captured = d.dates?.captured ? "captured " + d.dates.captured : null;
+  // THE DATE'S OWN WORD IS THE COLUMN'S WORD (Copilot review 5192900474 on
+  // PR #21, suppressed comment 1; slice S7 residue). The heading above this
+  // card resolves the SOURCE column through `columnLabel(SOURCE)` ->
+  // `vocab.status(VOCABULARY.DOCUMENT, STATUS_ROLE.CAPTURED)`, while the
+  // metadata line beneath it spelled openDox's own `captured` as a literal —
+  // one card in two vocabularies, and invisible to the census sweep because
+  // `captured` is not one of assertion 4's twenty governance words
+  // (`tests/test_web_boundary.py::_STATUS_WORDS` / `_STAGE_WORDS`). The SCHEMA
+  // key `d.dates.captured` is untouched: it is the snapshot's own field name
+  // under § 2.2 rule 3, not a rendered word.
+  const captured = d.dates?.captured
+    ? vocab.status(VOCABULARY.DOCUMENT, STATUS_ROLE.CAPTURED) + " " + d.dates.captured
+    : null;
   const topics = (d.topics || []).length ? "topics: " + d.topics.join(", ") : null;
   card.appendChild(el("div", "meta", [d.kind, captured, topics].filter(Boolean).join(" · ")));
   const badge = possiblesForDoc(d.id, indexes);

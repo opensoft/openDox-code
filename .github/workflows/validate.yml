@@ -91,13 +91,78 @@ jobs:
       # probe of a `web/` view, and un-narrowing that class of test was
       # slice S8's job, not S2's. **S8 has since done that job for this one
       # file** — `tests/test_intent_binding_dom.py` is named in the list below
-      # — and the two siblings are still deliberately omitted, MEASURED and not
-      # assumed: neither is among the six suites this slice repairs, and each
-      # run alone under this exact invocation at this head is RED for a defect
-      # this slice does not own (`test_intent_tray_dom.py` 23 failed,
-      # `test_wheel_verbs_dom.py` 8 failed), so naming either would put the
-      # required check red for another act's work. This paragraph therefore
-      # records S2's state and the list below records today's.
+      # — and the two siblings are NOT on it because THEY NO LONGER EXIST
+      # HERE. RULED `openxFactory#656` comment 5656343213 (Brett Heap,
+      # 2026-09-13, citing RULED OQ-F) RETIRED both at this leg.
+      #
+      # NEITHER CAN RUN HERE, AND THE TWO DO NOT FAIL FOR QUITE THE SAME
+      # REASON -- measured in the two files themselves before they were
+      # deleted, because an earlier draft of this paragraph said both DROVE
+      # `views/intent-feed.js` and only one did (Copilot review of
+      # openDox-code#24). The TRAY suite drove it: its own header reads "DOM
+      # behaviour of the HOSTED dispose tray and the intent-feed overlay", it
+      # imports `emitIntent` from that module, and it passes `intent:`
+      # payloads throughout. The WHEEL suite did NOT, and said so in its own
+      # words -- "`intent-feed.js` rides along because dispose.js imports it
+      # ... This probe drives the LOCAL path only -- no `opts.intent` is ever
+      # passed" -- so it copied the feed to make a static import resolve and
+      # nothing more. Saying both drove it OVERSTATED the coverage this
+      # retirement gives up, which is the one thing a retirement's record
+      # must not do.
+      #
+      # WHAT THEY SHARE IS THE COPY LOOP AND WHAT IT CANNOT FIND HERE.
+      # `views/intent-feed.js` is RULED OQ-F `not_moved`: it STAYED at
+      # openxFactory and arrived at NEITHER leg. And `views/dispose.js`,
+      # which BOTH suites mount, moved to openXdox-code at § 3.4 slice S5 and
+      # is not at this leg either (`find . -name dispose.js` is empty here and
+      # finds `src/openxdox/web/views/dispose.js` there). So openxFactory's
+      # carve manifest carries the `retired:` block and this commit carries
+      # the deletion. S8's own reason for
+      # omitting them was right for the question S8 could ask — measured at
+      # its head, `test_intent_tray_dom.py` 23 failed and
+      # `test_wheel_verbs_dom.py` 8 failed, so naming either would have put the
+      # required check red for another act's defect — and the ruling answers a
+      # DIFFERENT question: not "should the list name them" but "should they be
+      # here at all". THERE IS NO NARROWED SIBLING LEFT TO UN-NARROW HERE.
+      # This paragraph records S2's state, then S8's, then the ruling's; the
+      # list below records today's.
+      #
+      # TWO SENTENCES ELSEWHERE IN THE TREE STILL NAME THE RETIRED SUITES, AND
+      # THEY STAY — recorded here so the residue is DECLARED rather than found.
+      # `tests/test_account_menu_dom.py`:4 sends a reader to
+      # `test_wheel_verbs_dom.py` for the DOM shim, and
+      # `tests/test_doxbench_tile_verbs.py`:19 names it as an instrument in
+      # use. Both files are `moved_with_declared_edit` carve rows whose ONLY
+      # declared edit is `path constants`, at carve line 30 and carve line 34
+      # respectively, and at a leg every line on which an arrived file differs
+      # from its carve blob has to fall in one of RULING OQ-1's three CLOSED
+      # classes — `import rewrites`, `path constants`, `adapter calls`. A
+      # comment naming a retired sibling is none of the three. The repair was
+      # made and then WITHDRAWN on that ground (`ebf1425`, restored at
+      # `d9b7f0f4`), and the withdrawal is not a guess about the verifier:
+      # `scripts/verify-carve-arrival.py --phase B`, run against a destination
+      # carrying only that one edit, refuses it by name —
+      # "arrival-undeclared-edit — tests/test_account_menu_dom.py was edited at
+      # carve-commit line(s) [4] which the row … does not declare; it declares
+      # [30] under class(es) path constants" — and the same for line [19] of
+      # the other. Filing either under a class it does not belong to would put
+      # a false description in the floor's own record to make a comment read
+      # better (openxFactory `docs/opendox-cutover-runbook.md` § 5.8 step 4:
+      # "AND THE REPAIR STOPS AT A CARVED FILE"). So the repair covers only
+      # the prose THIS LEG OWNS — this workflow, and the files the leg created
+      # under a declared admission. What would move those two sentences: a
+      # ruling widening OQ-1's class vocabulary, or some other act amending
+      # those rows for a reason the vocabulary already covers.
+      #
+      # `tests/test_account_menu_dom.py` is now ON the list below, so the
+      # required check RUNS the file whose line 4 still names a retired
+      # sibling. That changes nothing: the sentence is a comment, and the
+      # reason it is unrepaired is unchanged — the file is a
+      # `moved_with_declared_edit` carve row whose only declared edit is
+      # `path constants` at carve line 30, and a comment naming a retired
+      # sibling is none of RULING OQ-1's three CLOSED classes. Its companion
+      # `tests/test_doxbench_tile_verbs.py` is NOT on the list, so that
+      # sentence is not executed by anything either way.
       #
       # § 3.4 SLICE S3 adds `tests/test_view_registry.py`, on exactly the same
       # footing as its three neighbours and for the same reason: it asserts a
@@ -320,7 +385,53 @@ jobs:
           tests/test_lens_labels_at_scale.py
           tests/test_smoke_signals.py
           tests/test_wheel_paint_and_reach.py
+          tests/test_binding_stylesheets.py
           --noconftest
+
+      # § 3.4 SLICE S7 RESIDUE — `tests/test_display_facet_leaves.py`, as its
+      # OWN STEP rather than a 28th entry on the list above. That is a merge
+      # decision and it is measured, not preferred: openDox-code#27 (RULED Q7's
+      # binding stylesheets) appends `tests/test_binding_stylesheets.py` at the
+      # same tail, so a second append there is a textual conflict on whichever
+      # of the two lands second — over a line whose ORDER carries no meaning.
+      # A separate step conflicts with nothing, reports its own red/green in
+      # the check's log, and is removable in one hunk if a later act folds the
+      # file back onto the list.
+      # THAT IS NOW MEASURED RATHER THAN FORECAST: #27 landed first
+      # (`5c137a90`), and merging `main` into this leg auto-merged THIS FILE
+      # with both appends intact — `tests/fixtures/web_boundary_census.yaml`'s
+      # per-class totals were the merge's only conflict.
+      #
+      # It stands on the same footing as its neighbours above: it imports no
+      # `opendox` submodule at all, reads bundle files as text, and drives the
+      # REAL `views/display.js`, `views/explorer.js` and `views/outline-model.js`
+      # under the `node` the runner already has (skipped, never failed, where
+      # node is absent). `--noconftest` safe and needs no consumer, for the same
+      # reason and by the same means as `tests/test_display_facet.py`.
+      #
+      # WHAT IT MEASURES that the eight slices above do not: seven LEAVES inside
+      # modules slice S7 already parameterized at their mounts — the two threads
+      # Copilot opened on #21 at `c7a216c7` and the five it left SUPPRESSED in
+      # review `5192900474`'s body. `tests/test_web_boundary.py` assertion 4 is
+      # green over six of the seven and always was: `captured` is in neither of
+      # its word lists, a mount that forwards no option spells nothing at all,
+      # and a fallback that keeps the previous vocabulary is a missing RESET
+      # rather than a literal. Measured at `0b4e8bbf` with this file alone
+      # dropped in: 11 of its 13 tests FAIL, each for its own defect. The two
+      # that pass there are deliberate — `applyTokens`' return contract is
+      # unchanged by the fix, and `insertSection` already honoured
+      # `options.display`, which is precisely why `runAddSection` omitting it
+      # was invisible.
+      # THE THIRTEENTH TEST is the BEHAVIOURAL half of the `docs.js` claim,
+      # added on Copilot's review of this pull request at `b4efe155`: it runs
+      # the real `docHaystack` body under node against a `vocab` double that
+      # renames one stage and reads the haystack it RETURNS, because a regex
+      # over source text can only say what a function says. The measurement
+      # that earned it is in the same review: the pattern it joins matched a
+      # body with `d.stage,` deleted from the returned array, since the
+      # `d.stage ?` guard satisfies it alone.
+      - name: pytest (S7 residue)
+        run: python -m pytest -q tests/test_display_facet_leaves.py --noconftest
 
       # ---------------------------------------------------------------------
       # THE RUNTIME'S HERMETIC HALF — `split-opendox-two-layer-product` § 3.5

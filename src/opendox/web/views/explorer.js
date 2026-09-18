@@ -102,6 +102,23 @@ function fileEntry(snapshot, path, owner) {
 // Returns null when the tile does not resolve against the snapshot (a stale
 // click after regeneration, or a caller passing an unrecognized kind).
 // DOM-free and pure — unit-tested via node exactly like model.js.
+// THE STALE-TILE FALLBACK SPEAKS THE HOST'S WORDS TOO (Copilot review
+// 5192900474 on PR #21, suppressed comment 3; slice S7 residue). Every
+// RESOLVED tile takes its title from `resolveExplorerTarget`, which reads the
+// facet — but the one branch that resolves nothing (a tile whose snapshot row
+// has gone, the only place a human sees the tile KIND rather than its id)
+// rendered the raw `DRILL_KINDS` value: a host whose submissions are
+// "requests" still read `proposal · REQ-14` in the dialog heading. The kind is
+// a SEAM KEY, not a word (§ 2.2 rule 3), so it is mapped back to its own stage
+// role and the role is rendered; a value no role carries — nothing calls this
+// with one today — renders verbatim rather than being refused, because a
+// heading is the wrong surface on which to fail a lookup.
+export function drillKindWord(kind, display) {
+  const role = Object.keys(DRILL_KINDS).find((r) => DRILL_KINDS[r] === kind);
+  if (!role) return String(kind == null ? "" : kind);
+  return (display || neutralDisplay()).one(role);
+}
+
 export function resolveExplorerTarget(kind, id, snapshot, display) {
   const d = display || neutralDisplay();
   const s = snapshot || {};
@@ -268,7 +285,7 @@ export function mountExplorer(container, snapshot, { onOpenFile, signal, display
     list.innerHTML = "";
     viewer.innerHTML = "";
     if (!target) {
-      title.textContent = kind + " · " + id;
+      title.textContent = drillKindWord(kind, display) + " · " + id;
       subtitle.textContent = "";
       list.appendChild(el("div", "empty", "nothing to show for this tile in the snapshot"));
     } else {
