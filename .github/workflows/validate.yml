@@ -1714,9 +1714,39 @@ jobs:
       #              so ten add/add conflicts, each resolved to this branch's
       #              version and each checked for anything main had that this
       #              branch lacked — nothing).
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 555 there.
+      #  347 passed  at `build/3-6-repository-act` `7977d91e` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — ONE added here, and the one
+      #              declared list of the entry above became ONE REDACTOR.
+      #              Two implementations reading that list still disagreed
+      #              three times, and the case asserting they never disagreed
+      #              PASSED because its corpus held none of the three:
+      #              `?%2574oken=` (decoded once by `config`, to a fixed point
+      #              by the adapter) and a newline in an scp-form userinfo
+      #              (`config` declines a value holding whitespace) came back
+      #              from the map endpoints IN THE CLEAR, and `;` — a
+      #              delimiter to `config` and not to the adapter — made
+      #              `carries_a_credential` answer False, so the act accepted
+      #              an attach the store refused with an error the route does
+      #              not catch: a 500 where a 409 belonged. All three measured
+      #              against a full checkout of `fe421882`.
+      #              `config.redacted_remote_url` is a CALL into
+      #              `redact_remote_url` now, with the API boundary's one
+      #              nuance as an argument; a fourth shape neither reading saw
+      #              — whitespace INSIDE an authority, `user:pa ss@host:path`,
+      #              also measured leaking — is replaced WHOLE at that
+      #              one-URL entry point, where the caller knows it holds one
+      #              value. `redact_credentials` is untouched, so git's stderr
+      #              keeps its lines.
+      #              The added case is the other half: `_stop_the_whole_group`
+      #              looked the pgid up at KILL time, and on a reaped child
+      #              `os.getpgid` raises `ProcessLookupError` (measured,
+      #              CPython 3.12) — so the group survived the refusal. The
+      #              id is captured at `Popen` now, and the case reaps first.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 555. The neutral conformance corpus
+      #              tests_runtime/` is 556. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
