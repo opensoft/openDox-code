@@ -335,10 +335,21 @@ the database is a *mistyped placeholder*, which without it would be sent as
 SQL rather than as a value. Set the four, then run the block:
 
 ```bash
-read -rs OPENDOX_RUNTIME_PG_PASSWORD && export OPENDOX_RUNTIME_PG_PASSWORD
+# AND AN EMPTY ONE IS REFUSED HERE TOO. `read` SUCCEEDS on an empty line, and
+# the `create role … password %L` below would then provision the served
+# identity with `PASSWORD ''` — a login role with a blank credential, where the
+# bundled bootstrap refuses exactly that case by name (Copilot review of
+# openDox-code#25, round 33). One path's refusal is not the other's.
+if ! read -rs OPENDOX_RUNTIME_PG_PASSWORD || \
+   [ -z "$OPENDOX_RUNTIME_PG_PASSWORD" ]; then
+    echo 'no served-role password was read; refusing to provision a role with' \
+         'no password' >&2
+else
+export OPENDOX_RUNTIME_PG_PASSWORD
 export OPENDOX_RUNTIME_PG_ROLE=...      # the user in opendox-db-runtime's DSN
 export OPENDOX_MIGRATION_PG_USER=...    # the user in opendox-db-migration's DSN
 export OPENDOX_PG_DB=...                # the database both DSNs name
+fi
 ```
 
 ```sql

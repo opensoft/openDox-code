@@ -1294,9 +1294,24 @@ def test_a_uri_password_holding_a_space_is_redacted_whole() -> None:
     assert redact("<redacted>", "amqps://svc:my pass@broker/vhost failed"
                   ) == "<redacted> failed"
 
-    # THE BOUND: a later, unrelated `@` in the same message is not swallowed,
-    # because the `@` branch cannot cross the URI's `/`.
+    # A PASSWORD HOLDING BOTH `/` AND A SPACE, which is round 33's case and
+    # what retired round 29's `/`-excluding bound: that form fell through to
+    # the plain branch, which stops at the space, and left
+    # `word@db.internal/opendox` visible.
+    assert redact("<redacted>",
+                  "invalid dsn: postgresql://opendox:pa/ss word@db.internal/x"
+                  ) == "invalid dsn: <redacted>"
+
+    # THE PRICE, stated rather than hidden: the DSN branch now runs to the LAST
+    # `@` ON THE LINE, so a line holding a DSN and a later unrelated `@` loses
+    # the text between them. There is no pattern that both absorbs arbitrary
+    # userinfo and stops before that `@`, and this act's own rule is that a
+    # truncated message redacts MORE rather than less.
     assert redact("<redacted>", "postgresql://host/db for user a@b"
-                  ) == "<redacted> for user a@b"
+                  ) == "<redacted>"
+    # A line with no `@` at all is untouched past the URI, and a newline is
+    # never crossed.
     assert redact("<redacted>", "reached postgresql://host:5432/db fine"
                   ) == "reached <redacted> fine"
+    assert redact("<redacted>", "first postgresql://u:p@h/db\nsecond kept"
+                  ) == "first <redacted>\nsecond kept"

@@ -128,11 +128,21 @@ _DSN_SHAPED = re.compile(
     # removed (Copilot review of openDox-code#25, round 29, suppressed). It is
     # the URI form of round 19's `password='secret value'`.
     #
-    # AND IT DOES NOT RUN AWAY DOWN THE LINE, because `/` is excluded: on
-    # `postgresql://host/db for user a@b` the `@` branch cannot cross `/`, so
-    # it fails and the plain branch matches the URI alone. A later, unrelated
-    # `@` in the same message is not swallowed.
-    r"(?i)\b(?:postgres(?:ql)?|postgresql\+\w+)://[^/@\n]*@\S*"
+    # AND THE DSN BRANCH RUNS TO THE LAST `@` ON THE LINE, which is a
+    # deliberate trade and not an oversight. Round 29 excluded `/` from the
+    # userinfo to bound the match, and round 33 showed what that bound leaks:
+    # a password holding BOTH a `/` and a space —
+    # `postgresql://opendox:pa/ss word@db.internal/opendox` — fell to the
+    # plain branch, which stops at the space, and the message kept
+    # `word@db.internal/opendox`: the tail of the password and the whole
+    # destination. Two spaces did the same to the round-29 form
+    # (`my pass word@host`). There is no pattern that both absorbs arbitrary
+    # userinfo and stops before an unrelated later `@`, so this takes the
+    # act's own stated rule — "a truncated message must redact MORE rather
+    # than less" — and over-redacts: a line holding a DSN and a later `@`
+    # loses the text between them. `[^\n]*` never crosses a newline, so a
+    # multi-line error keeps every other line.
+    r"(?i)\b(?:postgres(?:ql)?|postgresql\+\w+)://[^\n]*@\S*"
     r"|\b(?:postgres(?:ql)?|postgresql\+\w+)://\S*"
     r"|[A-Za-z][A-Za-z0-9+.\-]*://[^/@\n]*@\S*"
     # A LIBPQ KEYWORD/VALUE PASSWORD, IN THE FORMS LIBPQ ITSELF ACCEPTS. The
