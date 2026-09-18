@@ -400,11 +400,9 @@ def credential_in_a_remote_url(value: str | None) -> str | None:
     except ValueError:
         return "a value this runtime cannot parse"
     if split.netloc:
-        authority = split.netloc
-    else:
-        authority = value.partition("/")[0]
-    userinfo = authority.rpartition("@")[0]
-    if userinfo.partition(":")[2]:
+        if split.netloc.rpartition("@")[0].partition(":")[2]:
+            return "a password in the URL's authority"
+    elif _scp_like_userinfo(value) is not None:
         return "a password in the URL's authority"
     if _a_secret_parameter_in(split.query + "&" + split.fragment):
         return "a credential-shaped query parameter"
@@ -442,12 +440,39 @@ def redacted_remote_url(value: str | None) -> str | None:
         return "<redacted-url>"
     text = value
     if not split.netloc:
-        head, slash, rest = value.partition("/")
-        userinfo, at, host = head.rpartition("@")
-        user, _, password = userinfo.partition(":")
-        if at and password:
-            text = user + ":<redacted>" + at + host + slash + rest
+        carried = _scp_like_userinfo(value)
+        if carried is not None:
+            user, _, rest = carried
+            text = user + ":<redacted>@" + rest
     return redacted_url(text)
+
+
+def _scp_like_userinfo(value: str) -> tuple[str, str, str] | None:
+    """`(user, password, the rest)` for `[user[:password]@]host:path`, else None.
+
+    THE LAST `@` IN THE WHOLE VALUE, and not the last `@` before the first `/`.
+    The first cut truncated at the first `/` — the shape of an scp-like
+    authority — and a PASSWORD CONTAINING `/` then fell outside the window:
+    `ci:pa/ss@github.com:o/r.git` was reduced to `ci:pa`, read as a username
+    with no password, called clean, stored in the clear and returned to every
+    member of the project by `GET /api/v1/project-repositories` (Copilot review
+    of openDox-code#25, at `0968ff8b` — the same class as round 29's on the
+    sibling PR, where a bound that excluded `/` was defeated by a password
+    holding one).
+
+    OVER-DETECTING IS THE SAFE DIRECTION HERE and the trade is stated: a local
+    path that really does contain `:`…`@` before its last component — a shape
+    no git remote has — is refused with its own name. What is NOT widened is
+    whitespace: a value carrying a space is not one authority, and a candidate
+    holding one is left alone so this cannot start eating prose.
+    """
+    head, at, rest = value.rpartition("@")
+    if not at or any(character.isspace() for character in head):
+        return None
+    user, colon, password = head.partition(":")
+    if not colon or not password:
+        return None
+    return user, password, rest
 
 
 def _a_secret_parameter_in(text: str) -> bool:
@@ -976,6 +1001,117 @@ def database_named_by(dsn: str) -> str | None:
     return named or None
 
 
+def user_named_by(dsn: str) -> str | None:
+    """The CONNECTION USER a DSN names, or `None` where it leaves it to libpq.
+
+    NOT A CREDENTIAL, and the distinction is the whole reason this is allowed
+    to exist in a module that refuses to repeat a DSN: the user NAME is in
+    every server log line and in `pg_stat_activity`, and `deploy/` commits it
+    by name in a ConfigMap. The PASSWORD is the secret, and nothing here
+    touches it — `urlsplit().username` and the `user=` keyword only.
+
+    WHY THE COMPARISON NEEDS IT: libpq defaults BOTH the database name and
+    PostgreSQL's `"$user"` search-path token to this name, so a DSN that omits
+    `dbname` still names a database and a `search_path` of `"$user",public`
+    still selects a schema — just not one written in the string.
+
+    MEASURED through libpq itself (`PQconninfoParse` by way of
+    `psycopg.conninfo.conninfo_to_dict`), because the precedence is not
+    obvious:
+
+      postgresql://my%20user@h/db            -> 'my user'   (percent-decoded)
+      postgresql://userinfo@h/db?user=fromquery -> 'fromquery' (query wins)
+      postgresql://h/db?user=one&user=two    -> 'two'       (last wins)
+      host=h user=one user=two dbname=x      -> 'two'       (last wins)
+    """
+    try:
+        split = urllib.parse.urlsplit(dsn)
+    except ValueError:
+        return None
+    if split.scheme:
+        named: str | None = None
+        for key, value in urllib.parse.parse_qsl(split.query,
+                                                 keep_blank_values=True):
+            if key == "user":
+                named = value
+        if named is not None:
+            return named or None
+        # `urlsplit` does NOT percent-decode the userinfo and libpq does, so
+        # `my%20user` is one name and not a literal `%20` (measured above).
+        return (urllib.parse.unquote(split.username)
+                if split.username else None)
+    try:
+        tokens = shlex.split(dsn)
+    except ValueError:
+        return None
+    named = None
+    for token in tokens:
+        if token.startswith("user="):
+            named = token.split("=", 1)[1]
+    return named or None
+
+
+def effective_database(dsn: str) -> str | None:
+    """WHICH DATABASE this DSN reaches, including libpq's own default.
+
+    `database_named_by` reports what the STRING says and answers `None` for a
+    DSN that names no database — and the comparison below then read two
+    `None`s as agreement. They are not: libpq defaults `dbname` to the
+    CONNECTION USER, and this deployment's two DSNs carry deliberately
+    DIFFERENT users (the privileged migration identity and the least-privileged
+    served one), so two DSNs that both omit the database name reach two
+    different databases (Copilot review of openDox-code#25, at `0968ff8b`).
+
+    MEASURED on postgres 16 rather than argued: `postgresql://opendox:…@host/`
+    — no database in the path, no `dbname` anywhere —  connects, and
+    `select current_database()` answers `opendox`, which is the user's name.
+    `PQconninfoParse` does not fill the default in, so it is not visible in the
+    parse; it is applied at connect.
+
+    `None` means UNRESOLVED and never "the same default": with neither a
+    database nor a user in the string, libpq falls back to the OPERATING
+    SYSTEM user of the process that connects — and the two DSNs are used by two
+    different containers. A comparison that cannot be made is a refusal, which
+    is the rule this module already applies to a destination it cannot resolve.
+    """
+    return database_named_by(dsn) or user_named_by(dsn)
+
+
+def effective_schema(dsn: str) -> str | None:
+    """`schema_selected_by`, with PostgreSQL's `"$user"` token substituted.
+
+    `"$user"` is a TOKEN and not a schema name, and the comparison compared it
+    as a literal — so two DSNs for different roles, both selecting
+    `"$user",public`, agreed on the string `$user` while PostgreSQL resolved
+    them to two different schemas (Copilot review of openDox-code#25, at
+    `0968ff8b`).
+
+    MEASURED on postgres 16, and the second measurement is the one that
+    settles how to treat it:
+
+      set search_path = "$user", public   (no schema named for the user)
+          -> current_schema() = public
+      … with a schema LITERALLY NAMED `$user` created
+          -> current_schema() = public       (the literal is STILL skipped)
+      … with a schema named `opendox` (the session user) created
+          -> current_schema() = opendox      (the token IS substituted)
+
+    So PostgreSQL never reads `"$user"` as the name of a schema, even when such
+    a schema exists — which is why substituting it here matches the server, and
+    why the quoted/unquoted distinction Copilot raised one module over does not
+    change the answer. (`set search_path = $user` unquoted is a syntax error;
+    the token is always written quoted.)
+
+    `None` from this function keeps `schema_selected_by`'s meaning — the DSN
+    names no schema — and the caller separates that from UNRESOLVED, which is
+    the token with no user in the string to substitute.
+    """
+    selected = schema_selected_by(dsn)
+    if selected != "$user":
+        return selected
+    return user_named_by(dsn)
+
+
 def _refuse_two_dsns_that_select_different_schemas(
         served: str, migration: str | None) -> None:
     """Both DSNs must land in one schema, or neither answer means anything.
@@ -1004,18 +1140,39 @@ def _refuse_two_dsns_that_select_different_schemas(
     # two of them: `public` in one database and `public` in another are two
     # different sets of tables, and the run would apply and VERIFY one while
     # the API reads the other (Copilot review of openDox-code#25, round 36).
-    mine, yours = database_named_by(served), database_named_by(migration)
+    # AND THE DEFAULT COUNTS AS A NAME. `database_named_by` reports what the
+    # STRING says, and two DSNs that both leave the database out both answered
+    # `None` — read here as agreement. It is not: libpq defaults `dbname` to
+    # the CONNECTION USER, and this deployment's two DSNs carry deliberately
+    # different users, so "neither names a database" is two different
+    # databases (Copilot review of openDox-code#25, at `0968ff8b`). See
+    # `effective_database` for the measurement.
+    mine, yours = effective_database(served), effective_database(migration)
+    if mine is None or yours is None:
+        unnamed = [name for name, value in (
+            (PREFIX + "DATABASE_URL", mine),
+            (PREFIX + "MIGRATION_DATABASE_URL", yours)) if value is None]
+        raise ConfigurationError(
+            f"{' and '.join(unnamed)} "
+            f"{'name' if len(unnamed) > 1 else 'names'} neither a database "
+            "nor a user, so which database "
+            f"{'they reach' if len(unnamed) > 1 else 'it reaches'} cannot be "
+            "established before connecting: "
+            "libpq falls back to the OPERATING SYSTEM user of whichever "
+            "process connects, and these two DSNs are used by two different "
+            "containers. Name the database in both (the values are not "
+            "repeated: a DSN carries a password)")
     if mine != yours:
         raise ConfigurationError(
-            f"{PREFIX}DATABASE_URL names the database "
-            f"{mine or '(the connection default)'} and "
-            f"{PREFIX}MIGRATION_DATABASE_URL names "
-            f"{yours or '(the connection default)'}. Migrations would be "
-            "applied and verified in one database while the API and /readyz "
-            "read the other, so a run could report an applied schema that "
-            "nothing serves. Point both at the same database (the values are "
-            "not repeated beyond the database names: a DSN carries a "
-            "password)")
+            f"{PREFIX}DATABASE_URL reaches the database {mine} and "
+            f"{PREFIX}MIGRATION_DATABASE_URL reaches {yours}. Migrations "
+            "would be applied and verified in one database while the API and "
+            "/readyz read the other, so a run could report an applied schema "
+            "that nothing serves. Point both at the same database — and note "
+            "that a DSN which names no database reaches the one named after "
+            "its USER, which is how two DSNs with no `dbname` at all end up "
+            "in two places (the values are not repeated beyond the database "
+            "names: a DSN carries a password)")
     # THE HOST AND PORT ARE DELIBERATELY NOT COMPARED, and that is a judgement
     # rather than an omission. A served DSN through a connection pooler and a
     # migration DSN direct to the server is the ordinary secure shape, and it
@@ -1023,7 +1180,24 @@ def _refuse_two_dsns_that_select_different_schemas(
     # pooler from a second server. What catches a genuinely different server
     # is the ledger: its schema is not the one this install migrated, so
     # `/readyz` and `status` report it as not applied rather than ready.
-    here, there = schema_selected_by(served), schema_selected_by(migration)
+    # `"$user"` IS A TOKEN AND NOT A NAME, and comparing it as a literal made
+    # two DSNs for different roles agree on the string `$user` while
+    # PostgreSQL resolved them to two different schemas (Copilot review of
+    # openDox-code#25, at `0968ff8b`). `effective_schema` substitutes it the
+    # way the server does — see there for the measurement, including the one
+    # that shows a schema LITERALLY named `$user` is skipped too.
+    here, there = effective_schema(served), effective_schema(migration)
+    for setting, dsn, resolved in (
+            (PREFIX + "DATABASE_URL", served, here),
+            (PREFIX + "MIGRATION_DATABASE_URL", migration, there)):
+        if schema_selected_by(dsn) == "$user" and resolved is None:
+            raise ConfigurationError(
+                f"{setting} selects the schema `\"$user\"`, which PostgreSQL "
+                "replaces with the session user's name — and that DSN names "
+                "no user, so which schema it selects cannot be established "
+                "before connecting. Name the user in the DSN, or select the "
+                "schema by name (the value is not repeated: a DSN carries a "
+                "password)")
     if here == there:
         return
     raise ConfigurationError(

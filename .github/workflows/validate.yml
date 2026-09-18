@@ -1091,9 +1091,27 @@ jobs:
       #              as credential-bearing. Whole words now, with the compound
       #              spellings (`access_token`, `X-Api-Key`, `sessionToken`)
       #              still matching and the declared list unchanged.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 322 there.
+      #  200 passed  at `build/3-5-runtime` `3d587ae8` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — TWO added, the third
+      #              mini-batch RULED on openxFactory#656: the two-DSN guard
+      #              resolved only what the STRING says. Two DSNs that both
+      #              omit `dbname` both answered `None` and were read as
+      #              agreeing, while libpq defaults the database to the
+      #              CONNECTION USER — and this deployment's two identities
+      #              are different users by design (measured:
+      #              `postgresql://opendox:…@host:5432/` connects to
+      #              `opendox`). And `"$user"` is a search-path TOKEN compared
+      #              as a literal, so two roles' `"$user",public` agreed on
+      #              the string while PostgreSQL resolved two different
+      #              schemas (measured three ways, including that a schema
+      #              LITERALLY named `$user` is skipped too). Both now resolve
+      #              what the DSN leaves unsaid, and what cannot be resolved
+      #              before connecting is refused rather than assumed equal.
       #              THE CURRENT FIGURE ON `build/3-5-runtime`, which this
       #              branch carries by merge; THAT PR's description states it
-      #              at this same commit and `pytest -q tests_runtime/` is 322
+      #              at this same commit and `pytest -q tests_runtime/` is 324
       #              there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
