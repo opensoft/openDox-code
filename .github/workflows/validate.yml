@@ -1057,8 +1057,27 @@ jobs:
       #              at the store and redacted at the JSON boundary and in the
       #              object's `repr`, with an ordinary `ssh://git@host/…` left
       #              exactly as stored.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 320 there.
+      #  198 passed  at `build/3-5-runtime` `61ab8576` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — ONE added here and one
+      #              in the DB-backed half, answering the review submitted at
+      #              this branch's own head. A25-3's served-schema guard was a
+      #              METHOD reached from `apply()` alone, so the two verbs
+      #              beside it never asked: measured at `056d1597`, `migrate
+      #              --plan` printed a plan for a run that would refuse, and a
+      #              confirmed `reset` — the verb that cannot be undone —
+      #              DROPPED the coordination table of a schema the
+      #              declaration says the API does not read. It is
+      #              module-level now, one definition and three callers. And
+      #              the credential-parameter test was a SUBSTRING search, so
+      #              `monkey` matched `key` and `sigma` matched `sig`: a valid
+      #              broker URL or git remote carrying `?monkey=1` was refused
+      #              as credential-bearing. Whole words now, with the compound
+      #              spellings (`access_token`, `X-Api-Key`, `sessionToken`)
+      #              still matching and the declared list unchanged.
       #              THE CURRENT FIGURE; the PR description states it at this
-      #              same commit, and `pytest -q tests_runtime/` is 320 here.
+      #              same commit, and `pytest -q tests_runtime/` is 322 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
