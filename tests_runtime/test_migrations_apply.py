@@ -1302,3 +1302,53 @@ def test_a_public_ledger_does_not_capture_a_tenant_schema_run(
                 if decoy_was_ours:
                     conn.execute(
                         "drop table if exists public.opendox_schema_migrations")
+
+
+def test_a_comma_in_the_schema_name_is_a_real_connection_and_not_a_refusal(
+        postgres_dsn: str) -> None:
+    """The finding's case against a real server, not a double.
+
+    `"tenant,blue"` is a legal schema name and PostgreSQL quotes it in
+    `search_path`, so the old `path.split(",")` turned one entry into two and
+    `selected_schema` refused a connection whose `current_schema()` was
+    exactly the schema it had asked for — naming `'"tenant'` as the thing that
+    did not exist (Copilot review of openDox-code#25, round 26, suppressed).
+
+    The path is set ON THE CONNECTION here rather than through
+    `Database(schema=…)`, which interpolates the name into a libpq `options`
+    string and is documented as taking an install-generated identifier. That
+    is the operator's route to a path this guard reads, and it is the one the
+    finding is about.
+
+    Against the previous head this fails at the first assertion.
+    """
+    from opendox.runtime.db import Database
+
+    name = 'tenant,blue'
+    quoted = '"' + name.replace('"', '""') + '"'
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"drop schema if exists {quoted} cascade")
+            conn.execute(f"create schema {quoted}")
+        try:
+            with Database(postgres_dsn) as db:
+                runner = migrations.MigrationRunner(db,
+                                                    migrations_dir="migrations")
+                with db.connection() as conn:
+                    conn.execute(f"set search_path = {quoted}, public")
+                    assert conn.execute(
+                        "select current_schema()").fetchone()[0] == name
+                    assert migrations.selected_schema(conn) == name
+
+                    runner.bootstrap_ledger(conn)
+                    landed = conn.execute(
+                        "select n.nspname from pg_class c "
+                        "join pg_namespace n on n.oid = c.relnamespace "
+                        "where c.relname = %s and n.nspname = %s",
+                        (migrations.LEDGER_TABLE, name)).fetchall()
+                    assert [row[0] for row in landed] == [name], (
+                        f"the ledger did not land in {name!r}: {landed}")
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {quoted} cascade")

@@ -368,6 +368,22 @@ def _broker_url(env: Mapping[str, str], setting: Setting, *,
     # `https` or a LOOPBACK host, and only those: a developer running a broker
     # on `127.0.0.1` has no network for anyone to be on, and every other
     # `http://` is refused rather than warned about.
+    # AND IT MUST NAME A HOST AT ALL, which the scheme check below does not
+    # ask: `urlsplit("https:///realms/x")` gives scheme `https` and hostname
+    # `None`, so a URL nothing can be fetched from passed as a trust anchor and
+    # the install found out when `/readyz` failed on the key-set fetch —
+    # configuration discovered at serve time, which is the boundary this
+    # function exists to hold (Copilot review of openDox-code#25, round 26,
+    # suppressed). THE VALUE IS NOT ECHOED: `https://user:pw@/realms/x` also
+    # has no hostname, and its netloc carries the password.
+    if not split.hostname:
+        raise ConfigurationError(
+            f"{setting.name} is a {split.scheme or '(no scheme)'} URL that "
+            "names no HOST, so no key set can be fetched from it and no "
+            "issuer can be compared against a token's `iss`. Set it to the "
+            "broker's full URL, e.g. "
+            "https://broker.example/realms/opendox (the value is not repeated "
+            "here: a URL with no host can still carry userinfo)")
     if split.scheme != "https" and not _is_loopback(split.hostname):
         raise ConfigurationError(
             f"{setting.name} is {split.scheme or '(no scheme)'}://, and this "

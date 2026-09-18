@@ -350,6 +350,41 @@ def verify_canonical_digest(
     return actual
 
 
+def _path_entries(path: str) -> list[str]:
+    """`search_path`'s entries, split where PostgreSQL's quoting allows it.
+
+    NOT `path.split(",")`. A schema whose NAME contains a comma is legal,
+    PostgreSQL quotes it in `current_setting('search_path')`, and splitting the
+    text on every comma turned `"tenant,blue", public` into `"tenant` and
+    `blue"` — so this guard REFUSED a connection whose `current_schema()` was
+    exactly the schema it had asked for, and named `'"tenant'` as the thing
+    that did not exist (Copilot review of openDox-code#25, round 26,
+    suppressed). MEASURED on postgres 16.15 against a schema created as
+    `"tenant,blue"`: `current_schema()` is `tenant,blue`, the path reads
+    `"tenant,blue", public`, and the refusal was raised on a valid install.
+
+    Returns the entries RAW — quotes and surrounding space included — because
+    `_unquoted` is what knows how to read one, and a quoted name's leading and
+    trailing spaces are part of it.
+    """
+    entries: list[str] = []
+    start = index = 0
+    quoted = False
+    while index < len(path):
+        char = path[index]
+        if char == '"':
+            if quoted and index + 1 < len(path) and path[index + 1] == '"':
+                index += 2                      # an escaped quote, still inside
+                continue
+            quoted = not quoted
+        elif char == "," and not quoted:
+            entries.append(path[start:index])
+            start = index + 1
+        index += 1
+    entries.append(path[start:])
+    return entries
+
+
 def _unquoted(entry: str) -> str:
     """One `search_path` entry, with PostgreSQL's quoting removed."""
     entry = entry.strip()
@@ -425,7 +460,7 @@ def selected_schema(conn: Any) -> str:
     path = (row[1] if len(row) > 1 else "") or ""
     user = row[2] if len(row) > 2 else None
     configured = [entry for entry in
-                  (_unquoted(entry) for entry in path.split(",")) if entry]
+                  (_unquoted(entry) for entry in _path_entries(path)) if entry]
     skipped: list[str] = []
     user_entry: int | None = None        # `"$user"`'s position in `skipped`
     for entry in configured:

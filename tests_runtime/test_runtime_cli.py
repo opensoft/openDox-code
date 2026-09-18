@@ -904,10 +904,14 @@ def test_the_broker_url_must_be_https_because_it_is_the_trust_anchor() -> None:
 
     for issuer in ("http://broker/realms/x",
                    "http://127.0.0.1.evil.test/realms/x",
-                   "ftp://broker/x", "broker/realms/x"):
+                   "ftp://broker/x"):
         with pytest.raises(ConfigurationError) as caught:
             load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
         assert "TRUST ANCHOR" in str(caught.value), (issuer, caught.value)
+
+    # `broker/realms/x` USED TO BE ASSERTED HERE, and it is refused by the
+    # rule below instead: it has no scheme AND no host, and "names no HOST" is
+    # the more accurate of the two diagnoses for a value that is not a URL.
 
     # The explicit key-set URL is judged by the same rule, since it is the one
     # actually fetched.
@@ -1046,3 +1050,46 @@ def test_the_probes_redaction_keeps_the_destination_and_nothing_else(
     """Each case is a shape the harness is handed, not a shape it invents."""
     assert _conftest_module()._redacted_dsn(dsn) == expected
     assert "hunter2" not in _conftest_module()._redacted_dsn(dsn)
+
+
+def test_a_broker_url_that_names_no_host_is_refused_at_the_door() -> None:
+    """A trust anchor nothing can be fetched from must not reach serve time.
+
+    THE FINDING (Copilot review of openDox-code#25, round 26, suppressed):
+    `urlsplit("https:///realms/x")` yields the scheme `https` and NO hostname,
+    so the scheme check above accepted it, `load_settings` succeeded, and the
+    install discovered the bad configuration when the JWKS fetch made
+    `/readyz` and `status` fail. Measured before the fix: `load_settings` with
+    `OPENDOX_OIDC_ISSUER=https:///realms/x` returned settings carrying that
+    issuer.
+
+    AND THE REFUSAL DOES NOT ECHO THE VALUE, which is not fastidiousness:
+    `urlsplit("https://user:hunter2@/realms/x").hostname` is `None` too, so the
+    hostless shape and the credential-carrying shape overlap exactly, and a
+    message that quoted the value would print the password this function
+    exists to keep out of `status` and the logs.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for issuer in ("https:///realms/x", "https://", "https:///",
+                   "broker/realms/x", "https://user:hunter2@/realms/x"):
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+        message = str(caught.value)
+        assert "names no HOST" in message, (issuer, message)
+        assert PREFIX + "OIDC_ISSUER" in message, (issuer, message)
+        assert "hunter2" not in message, (
+            f"the refusal echoed a credential from a hostless URL: {message}")
+
+    # The same rule on the URL that is actually fetched, and a host that IS
+    # named still passes.
+    with pytest.raises(ConfigurationError) as caught:
+        load_settings(dict(base, **{
+            PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_JWKS_URL": "https:///certs"}))
+    assert "names no HOST" in str(caught.value)
+    assert PREFIX + "OIDC_JWKS_URL" in str(caught.value)
+    assert load_settings(dict(base, **{
+        PREFIX + "OIDC_ISSUER": "https://broker.example/realms/opendox"}))
