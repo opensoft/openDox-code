@@ -2484,3 +2484,178 @@ def test_the_ownership_recheck_answers_inside_the_refusal_boundary(
         assert handle is not None and bound
     finally:
         os.close(handle)
+
+
+# -- the independent adversarial review: A26-1, A26-3, A26-5 -----------------
+
+
+def test_an_include_path_cannot_hide_an_executed_key_from_the_push_guard(
+        store, project, project_repository_root: Path, tmp_path: Path) -> None:
+    """`git config --local` does not follow `include.path`; git's reader does.
+
+    `--includes` DEFAULTS TO OFF when a config FILE is named — `--local`,
+    `--worktree`, `--global`, `--file` — and ON only when git searches all of
+    them, while the config READER always follows an include. So a repository
+    whose `.git/config` holds nothing but `[include] path = extra.cfg` hid
+    every key this guard exists to refuse, and git still ran them during the
+    push (independent adversarial review of openDox-code#26, A26-1).
+
+    MEASURED, git 2.43.0, the probe's exact argv:
+
+        $ git config --local --get-all credential.helper
+        (exit 1, no output)                  <- what the guard saw
+        $ git config --local --includes --get-all credential.helper
+        !f() { … }; f                        <- what git runs
+
+    This guard is the WHOLE attack surface by design: `GitRunner` deliberately
+    keeps the operator's global and system config, so the repository-local file
+    is the only one this act judges — and an include was a hole straight
+    through it.
+    """
+    created = act.create_repository(store, project_id=project.id,
+                                    root=project_repository_root, actor=ACTOR)
+    destination = tmp_path / "governed.git"
+    _git(tmp_path, "init", "--bare", "--initial-branch=main", str(destination))
+    act.attach_remote(store, project_id=project.id,
+                      remote_url=str(destination))
+
+    config = Path(created.location) / "config"
+    included = Path(created.location) / "extra.cfg"
+    original = config.read_text(encoding="utf-8")
+
+    # EVERY FIXED KEY, one at a time, through the include.
+    for key in act._EXECUTED_LOCAL_KEYS:
+        section, _, name = key.partition(".")
+        included.write_text(f'[{section}]\n\t{name} = "!f() {{ :; }}; f"\n',
+                            encoding="utf-8")
+        config.write_text(original + "[include]\n\tpath = extra.cfg\n",
+                          encoding="utf-8")
+        # THE PREMISE: the probe without `--includes` finds nothing, which is
+        # what made this invisible. Asserted, so an environment where git
+        # behaves differently cannot make the case vacuous.
+        assert subprocess.run(
+            ["git", "-C", str(created.location), "config", "--local",
+             "--get-all", key], capture_output=True, env=_GIT_ENV
+        ).returncode != 0, f"{key} is visible without --includes here"
+        assert subprocess.run(
+            ["git", "-C", str(created.location), "config", "--local",
+             "--includes", "--get-all", key], capture_output=True,
+            env=_GIT_ENV).returncode == 0
+
+        with pytest.raises(act.RepositoryActRefused) as caught:
+            act.push_to_remote(store, project_id=project.id)
+        assert key in str(caught.value), (key, str(caught.value))
+
+    # AND A PATTERN KEY THROUGH THE SAME DOOR, since the second probe is a
+    # separate call with its own flags.
+    included.write_text("[remote \"origin\"]\n\tvcs = evil\n", encoding="utf-8")
+    with pytest.raises(act.RepositoryActRefused) as pattern:
+        act.push_to_remote(store, project_id=project.id)
+    assert "remote.origin.vcs" in str(pattern.value)
+
+    # AND THE ORDINARY PUSH IS UNAFFECTED once the include is gone.
+    included.unlink()
+    config.write_text(original, encoding="utf-8")
+    assert act.push_to_remote(store, project_id=project.id) == str(destination)
+
+
+def test_what_this_act_refuses_to_store_is_what_it_refuses_to_print() -> None:
+    """The two halves of the credential rule asked two different questions.
+
+    `names_a_secret_parameter`'s docstring called itself "THE ONE PLACE THE
+    QUESTION IS ASKED, by both halves of the rule" — and the redactor applies
+    THREE patterns while the refusal consulted one of them, the positionally
+    anchored `_ANY_PARAMETER_ANCHORED`. So `host=db password=hunter2 dbname=x`
+    was ACCEPTED and written verbatim into `project_repositories.remote_url` —
+    the column whose own refusal text says it is stored durably with nothing to
+    rotate it — while every read-back of it was dutifully redacted (independent
+    adversarial review of openDox-code#26, A26-3).
+
+    THE INVARIANT IS THE TEST: this act refuses to STORE exactly what it
+    refuses to PRINT. A corpus, not a key list — the key list was already
+    shared and could not see this.
+    """
+    carries = (
+        "password=hunter2",
+        "host=db password=hunter2 dbname=x",
+        "/srv/projects/x.git password=hunter2",
+        "host=db sslpassword=hunter2",
+        "https://host/r.git?token=ghp_supersecret",
+        "https://host/r.git#api_key=abc",
+        "https://user:pw@host/r.git",
+        "user:pw@host:path/r.git",
+        "https://host/r.git?%74oken=ghp_supersecret",
+    )
+    clean = (
+        "https://example.invalid/x.git",
+        "/srv/projects/other.git",
+        "host:path",
+        "git@github.com:opensoft/x.git".replace("git@", ""),
+        "https://host/r.git?a+b=1",
+        "https://host/r.git?ref=main",
+        "../sibling.git",
+    )
+    for value in carries:
+        assert lga.redact_credentials(value) != value, value
+        with pytest.raises(act.RepositoryActRefused):
+            act.refuse_credential_bearing_remote(value)
+    for value in clean:
+        assert lga.redact_credentials(value) == value, value
+        act.refuse_credential_bearing_remote(value)
+
+    # AND THE BICONDITIONAL ITSELF, over both lists at once, because that is
+    # the sentence the docstring made and could not keep.
+    for value in carries + clean:
+        changed = lga.redact_credentials(value) != value
+        try:
+            act.refuse_credential_bearing_remote(value)
+            refused = False
+        except act.RepositoryActRefused:
+            refused = True
+        assert refused == changed, (value, refused, changed)
+
+
+def test_the_repository_tree_is_not_readable_by_whatever_the_umask_allows(
+        tmp_path: Path) -> None:
+    """`os.mkdir`'s default mode is the ambient umask, and nothing declared one.
+
+    So the mode of the configured root, of the project's repository and of
+    everything `git init` makes under it was a property of whatever umask the
+    process inherited: MEASURED `0755` at umask 022, `0775` at 002, and `0777`
+    with `config` at `0666` at umask 000. The shipped Kubernetes shape is safe
+    today because the pod runs as a single uid with a private volume — which
+    makes the answer accidental rather than decided, in a store whose own
+    compose comment says losing it is losing documents (independent
+    adversarial review of openDox-code#26, A26-5).
+
+    RUN AT `umask 0`, which is the shape the finding forbids: an explicit
+    `mode=` is still masked by the umask, so the `fchmod` through the held
+    descriptor is what makes the answer the same everywhere, and `--shared` is
+    what makes it the same for the files `git init` creates.
+    """
+    import stat
+
+    previous = os.umask(0o000)
+    try:
+        location = tmp_path / "root" / "proj-1"
+        act.initialize_repository(location, project_id="proj-1", actor=ACTOR)
+    finally:
+        os.umask(previous)
+
+    def mode(path: Path) -> int:
+        return stat.S_IMODE(path.stat().st_mode)
+
+    directories = [location.parent, location, location / "objects",
+                   location / "refs", location / "hooks"]
+    for path in directories:
+        assert mode(path) & 0o077 == 0, (
+            f"{path.name} is {oct(mode(path))} at umask 000; the store is "
+            "readable and writable by anything sharing the uid's group")
+        assert mode(path) == act.REPOSITORY_DIRECTORY_MODE or path != location
+    for path in (location / "config", location / "HEAD"):
+        assert mode(path) & 0o077 == 0, (path, oct(mode(path)))
+
+    # AND THE REPOSITORY STILL WORKS, which an over-tight mode would break:
+    # the act's own first commit is there and readable by this process.
+    assert _git(location, "log", "-1", "--format=%s").startswith(
+        "Create the repository for project")

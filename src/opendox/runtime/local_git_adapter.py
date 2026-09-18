@@ -363,6 +363,12 @@ NO_FOLLOW_WALK_IS_AVAILABLE = (
     and any(os.path.isdir(base) for base in ("/proc/self/fd", "/dev/fd")))
 
 
+#: The mode `open_no_follow_chain(create=True)` creates a directory with.
+#: One number with `repository_act.REPOSITORY_DIRECTORY_MODE`, stated in both
+#: places because this module may not import that one (see A26-5).
+CREATED_DIRECTORY_MODE = 0o700
+
+
 class PlatformCannotGuardPaths(OSError):
     """This platform cannot open a directory chain without following links."""
 
@@ -426,13 +432,26 @@ def open_no_follow_chain(directory: Path, *, create: bool = False) -> int:
                 if not create:
                     raise
                 try:
-                    os.mkdir(component, dir_fd=handle)
+                    # THE MODE IS DECLARED HERE TOO — this is the walk that
+                    # makes the configured ROOT and any missing ancestor of it,
+                    # and `os.mkdir`'s default is the ambient umask (see
+                    # `repository_act.REPOSITORY_DIRECTORY_MODE`, independent
+                    # adversarial review of openDox-code#26, A26-5). The
+                    # `fchmod` is through the descriptor this walk opens next,
+                    # so the mode is settled on the object it verified rather
+                    # than on a name.
+                    os.mkdir(component, CREATED_DIRECTORY_MODE, dir_fd=handle)
                 except FileExistsError:
                     # Another process got there first. The open below is the
                     # check that what it made is a real directory and not a
                     # link, so the race needs no second decision here.
                     pass
                 nxt = os.open(component, flags, dir_fd=handle)
+                # ONLY WHAT THIS WALK JUST MADE. A component that already
+                # existed belongs to whoever made it — an operator's own
+                # mount point among them — and re-chmoding somebody else's
+                # directory would be a different act from creating one.
+                os.fchmod(nxt, CREATED_DIRECTORY_MODE)
             os.close(handle)
             handle = nxt
     except BaseException:
@@ -754,11 +773,29 @@ class GitRunner:
 #: space into `[^\s/:@]+` would let the match START at an earlier word and a
 #: sentence such as "please tell bob a@b:c" would be redacted whole. It also
 #: cannot carry a password: scp form is `user@host:path` with no password
-#: field, and the class excludes `:` for exactly that reason. The scheme branch
+#: field — git splits at the FIRST `:`, so in `user:secret@host:path` git reads
+#: the host as `user` and the path as `secret@host:path`, a remote that cannot
+#: authenticate with `secret` at all. That is why Copilot's report of a
+#: PASSWORD echo on this line is rejected on the landed text and A26-4 is a
+#: username disclosure instead. The scheme branch
 #: is anchored by `scheme://` and the class still excludes `/` and a newline,
 #: so widening it cannot reach past the authority it is already inside.
+#:
+#: AND THE USER PORTION RUNS TO THE LAST `@` OF ITS OWN TOKEN. The class used
+#: to exclude `:` and `/` as well, so the match began at the LAST run that fit
+#: and everything before it survived — `user:secret@host:path/r.git` redacted
+#: to `user:<redacted-url>`, and a value with a `/` or a second `@` in it left
+#: a longer prefix (`user:sec/`, `user:sec@`). That is the username and a
+#: prefix of whatever precedes the final `@`, disclosed in map responses, push
+#: failures and CLI evidence for a legacy row (independent adversarial review
+#: of openDox-code#26, A26-4). `[^\s]+` cannot cross whitespace, so the
+#: protective cases the narrow class existed for are unchanged and are
+#: asserted: "please tell bob a@b:c" still redacts only `a@b:c`, a bracketed
+#: IPv6 scp remote still redacts whole and still stops at the following text,
+#: and a newline is still never crossed. This is round 19's rule on #25 in
+#: another file: a truncated redaction must redact MORE rather than less.
 _CREDENTIAL_SHAPED = re.compile(
-    r"[A-Za-z][A-Za-z0-9+.\-]*://[^/@\n]*@[^\s]*|(?<![\w.])[^\s/:@]+@[^\s/:@]+:[^\s]*")
+    r"[A-Za-z][A-Za-z0-9+.\-]*://[^/@\n]*@[^\s]*|(?<![\w.])[^\s]+@[^\s/:@]+:[^\s]*")
 
 #: A CREDENTIAL-SHAPED QUERY OR FRAGMENT PARAMETER, whose VALUE is replaced.
 #: Userinfo is not the only place a secret rides: `https://host/r.git?token=…`
@@ -852,11 +889,14 @@ def _decoded_parameter_name(name: str) -> str:
 def names_a_secret_parameter(text: str) -> bool:
     """Whether `text` carries a credential-shaped query or fragment parameter.
 
-    THE ONE PLACE THE QUESTION IS ASKED, by both halves of the rule: what may
-    not be STORED (`repository_act.refuse_credential_bearing_remote`) and what
-    must not be PRINTED (`redact_credentials`). They drifted apart once over
-    the key list and once over percent-encoding; sharing the predicate is what
-    stops a third drift.
+    ONE OF THE THREE PATTERNS the rule is made of, and named here because the
+    redactor reads it. It is NOT the whole question, and saying that it was is
+    what let the two halves drift a third time: this one is positionally
+    anchored, so a credential parameter after a space is invisible to it while
+    `_LIBPQ_PASSWORD` — which only the redactor consulted — catches it
+    (independent adversarial review of openDox-code#26, A26-3).
+    `carries_a_credential` is the shared question now, and it is the redactor
+    itself.
     """
     return any(_SECRET_KEY.search(_decoded_parameter_name(match.group("name")))
                for match in _ANY_PARAMETER_ANCHORED.finditer(text))
@@ -917,6 +957,36 @@ def redact_credentials(text: str) -> str:
 
     return _LIBPQ_PASSWORD.sub("<redacted>", _ANY_PARAMETER.sub(
         _redact_value, _CREDENTIAL_SHAPED.sub("<redacted-url>", text)))
+
+
+def carries_a_credential(text: str) -> bool:
+    """True exactly when `redact_credentials` would change `text`.
+
+    THE INVARIANT AS THE IMPLEMENTATION, because stating it any other way is
+    how the two halves came apart. `names_a_secret_parameter`'s docstring
+    claimed to be "THE ONE PLACE THE QUESTION IS ASKED, by both halves of the
+    rule" — and it was not: the redactor applies THREE patterns and the refusal
+    consulted one of them, the positionally anchored
+    `_ANY_PARAMETER_ANCHORED`. So the two disagreed about the same bytes
+    (independent adversarial review of openDox-code#26, A26-3):
+
+        password=hunter2                      refused, and redacted
+        host=db password=hunter2 dbname=x     ACCEPTED, and redacted
+        /srv/projects/x.git password=hunter2  ACCEPTED, and redacted
+
+    An accepted value is written verbatim into `project_repositories.
+    remote_url` — the column whose own refusal text says it is "stored durably
+    with nothing to rotate it" — and into the repository's `.git/config`. The
+    read-backs were redacted, so it was a STORED credential rather than an
+    echoed one; a stored one is the worse half.
+
+    Asking the redactor itself is what makes a fourth pattern impossible to
+    add to one half only: a key, an encoding or a whole new shape reaches this
+    predicate the moment `redact_credentials` learns it. The work is bounded
+    where the value enters — `refuse_credential_bearing_remote` caps a remote
+    at `MAX_REMOTE_URL_CHARS` before asking.
+    """
+    return redact_credentials(text) != text
 
 
 def carries_a_control_character(value: str) -> bool:
@@ -2018,10 +2088,24 @@ class LocalGitCorpus:
         # openDox-code#26, round 29). `--worktree` is an error where the
         # extension is off, which is the usual case, so its failure is as
         # ordinary as `--local` returning nothing.
+        #
+        # AND `--includes`, WHICH IS THE THIRD PLACE THE NAME CAN HIDE. git
+        # turns includes OFF when a config FILE is named — `--local`,
+        # `--worktree`, `--global`, `--file` — and ON only when it searches all
+        # of them, while git's own config READER always follows `include.path`.
+        # MEASURED on git 2.43.0 against a repository whose `.git/config` holds
+        # only `[include] path = extra.cfg` and whose `extra.cfg` defines
+        # `filter.evil.clean`: the probe below exited 1 with no output, this
+        # method returned `()`, and `git diff --name-only` then RAN the driver
+        # (`trace: run_command: 'sh -c echo PWNED-CLEAN >&2; cat'`) — an
+        # owner-chosen program executed in this process by the one method whose
+        # whole job is to make `check` conservative rather than executable
+        # (independent adversarial review of openDox-code#26, A26-2). It is the
+        # same git default as A26-1 and therefore the same word.
         keys: list[str] = []
         for scope in ("--local", "--worktree"):
-            listed = self._probe(git, "config", scope, "--name-only",
-                                 "--get-regexp",
+            listed = self._probe(git, "config", scope, "--includes",
+                                 "--name-only", "--get-regexp",
                                  r"^filter\..*\.(clean|smudge|process)$",
                                  kind=CORPUS_UNREADABLE, subject=subject)
             if listed.returncode != 0:

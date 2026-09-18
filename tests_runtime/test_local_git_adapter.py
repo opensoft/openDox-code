@@ -664,10 +664,19 @@ def test_the_two_halves_of_the_credential_rule_share_one_key_list() -> None:
     # ONE PREDICATE NOW, not only one key list: the halves drifted a second
     # time over PERCENT-ENCODING — the refusal read raw text and the redactor
     # read raw text, each with its own regex, so `?%74oken=…` walked past both
-    # (Copilot review of openDox-code#26, round 5). `names_a_secret_parameter`
-    # is the question, and this asserts the importing half asks that one.
-    assert (repository_act.names_a_secret_parameter
-            is lga.names_a_secret_parameter)
+    # (Copilot review of openDox-code#26, round 5).
+    #
+    # AND THE PREDICATE THIS ASSERTED WAS THE WRONG ONE, which is why the
+    # halves drifted a THIRD time while this case stayed green.
+    # `names_a_secret_parameter` is ONE of the redactor's three patterns and it
+    # is positionally anchored, so `host=db password=hunter2 dbname=x` was
+    # stored verbatim and redacted on every read-back (independent adversarial
+    # review of openDox-code#26, A26-3). The importing half now asks the
+    # REDACTOR, and `test_what_this_act_refuses_to_store_is_what_it_refuses_to_
+    # print` states that as the biconditional over a corpus — which is the
+    # assertion this one could not make.
+    assert (repository_act.carries_a_credential
+            is lga.carries_a_credential)
     for key in lga.SECRET_PARAMETER_KEYS.split("|"):
         for spelling in (key, key[0].upper() + key[1:],
                          # the same name with its first character
@@ -3601,3 +3610,133 @@ def test_the_corpus_name_and_the_document_key_are_trailer_values_too(
     # what a corpus or a key may be called.
     receipt, _ = _write(adapter, repository, "ideation/first.md", b"# one\n")
     assert receipt.correlation_id
+
+
+# -- the independent adversarial review: A26-2 and A26-4 ---------------------
+
+
+def test_a_filter_behind_an_include_path_is_found_and_emptied(
+        adapter: lga.LocalGitCorpus, tmp_path: Path) -> None:
+    """`git config --local` does not follow `include.path`; git's reader does.
+
+    `--includes` DEFAULTS TO OFF when a config FILE is named and ON only when
+    git searches all of them — the same default as A26-1, in the one method
+    whose whole job is to make `check` conservative rather than EXECUTABLE. So
+    a `filter.evil.clean` defined in an included file was invisible to
+    `_emptied_filters`, which returned `()`, and `git diff --name-only` then
+    ran the driver in this process (independent adversarial review of
+    openDox-code#26, A26-2).
+
+    MEASURED, git 2.43.0:
+
+        git config --local --name-only --get-regexp '^filter\\..*\\.(clean|…)$'
+          -- exit 1, nothing
+        git config --local --includes --name-only --get-regexp '^filter\\.…'
+          -- filter.evil.clean
+        GIT_TRACE=1 git diff --name-only
+          -- trace: run_command: 'sh -c echo PWNED-CLEAN >&2; cat'
+
+    Round 29 widened this probe from `--local` to `--local` + `--worktree` for
+    exactly this reason; an include is the third place the name can hide, and
+    the fix is the same word.
+    """
+    location = tmp_path / "corpus"
+    location.mkdir()
+    _git(location, "init", "--initial-branch=main", ".")
+    marker = tmp_path / "CLEAN_RAN"
+    (location / "a.md").write_text("hello\n", encoding="utf-8")
+    (location / ".gitattributes").write_text("*.md filter=evil\n",
+                                             encoding="utf-8")
+    _git(location, "add", "-A")
+    _git(location, "commit", "-m", "with an attribute")
+    # THE DRIVER IS IN AN INCLUDED FILE AND NOWHERE ELSE.
+    included = location / ".git" / "extra.cfg"
+    # DOUBLE-QUOTED IN THE FILE, because git's config parser ends a value at
+    # an unquoted `;` — the driver would be truncated and fail rather than
+    # run, which would make this case pass for the wrong reason.
+    included.write_text(
+        f'[filter "evil"]\n\tclean = "sh -c \'touch {marker}; cat\'"\n'
+        "\tsmudge = cat\n", encoding="utf-8")
+    config = location / ".git" / "config"
+    config.write_text(config.read_text(encoding="utf-8")
+                      + "[include]\n\tpath = extra.cfg\n", encoding="utf-8")
+    (location / "a.md").write_text("changed\n", encoding="utf-8")
+
+    # THE PREMISE, measured rather than assumed, in both halves: the probe
+    # without `--includes` finds nothing, and the one with it finds the name.
+    plain = subprocess.run(
+        ["git", "-C", str(location), "config", "--local", "--name-only",
+         "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"],
+        capture_output=True, text=True, env=_GIT_ENV)
+    assert plain.returncode != 0 and not plain.stdout.strip(), (
+        "this git follows an include without being asked, so the case below "
+        "proves nothing on this platform")
+    with_includes = subprocess.run(
+        ["git", "-C", str(location), "config", "--local", "--includes",
+         "--name-only", "--get-regexp",
+         r"^filter\..*\.(clean|smudge|process)$"],
+        capture_output=True, text=True, env=_GIT_ENV)
+    assert "filter.evil.clean" in with_includes.stdout
+
+    # THE DRIVER REALLY DOES RUN under the plain invocation — measured FIRST,
+    # because `git diff` refreshes the index's stat cache and a second diff
+    # over an unchanged file runs no filter at all. That ordering is the
+    # difference between a premise and an artefact.
+    subprocess.run(["git", "-C", str(location), "diff", "--no-ext-diff",
+                    "--no-textconv", "--name-only"],
+                   capture_output=True, env=_GIT_ENV)
+    assert marker.exists(), (
+        "this git does not run a clean filter hidden behind `include.path` "
+        "for `diff --name-only`, so the case below proves nothing here")
+    marker.unlink()
+    (location / "a.md").write_text("changed again\n", encoding="utf-8")
+
+    corpus = _resolve(adapter, location)
+    findings = adapter.check(corpus)
+    assert not marker.exists(), (
+        "a filter hidden behind `include.path` ran in this process during "
+        "`check`")
+    # AND THE ANSWER IS STILL AN ANSWER.
+    assert any(finding.subject == "a.md" for finding in findings), findings
+
+
+def test_the_scp_redaction_keeps_no_prefix_of_the_userinfo() -> None:
+    """The match began at the LAST run that fitted, and the rest survived.
+
+    The scp userinfo class excluded `:` and `/`, so
+    `user:secret@host:path/r.git` redacted to `user:<redacted-url>` and a value
+    holding a `/` or a second `@` left a longer prefix (`user:sec/`,
+    `user:sec@`) — the username, and a prefix of whatever precedes the final
+    `@`, in map responses, push failures and CLI evidence for a legacy row
+    (independent adversarial review of openDox-code#26, A26-4).
+
+    AND COPILOT'S REPORT ON THIS LINE IS REJECTED ON THE LANDED TEXT. It read
+    the same line as echoing a PASSWORD; it does not, and did not before this
+    change: the scp branch matched from `secret@host:` onward, so the password
+    was already redacted and the username was not. git's scp grammar is
+    `[user@]host:path` with no password field at all — git splits at the FIRST
+    `:`, so in `user:secret@host:path` git reads the host as `user` and the
+    path as `secret@host:path`, a remote that cannot authenticate with
+    `secret`. The residue was disclosure of a username, which is this case.
+    """
+    redact = lga.redact_credentials
+
+    # WHAT WAS DISCLOSED, and is not any more.
+    assert redact("user:secret@host:path/r.git") == "<redacted-url>"
+    assert redact("user:sec/ret@host:path/r.git") == "<redacted-url>"
+    assert redact("user:sec@ret@host:path/r.git") == "<redacted-url>"
+
+    # AND THE CASES THE NARROW CLASS EXISTED FOR, unchanged — `[^\\s]+` cannot
+    # cross whitespace, so an ordinary sentence keeps everything but the one
+    # token that really is a remote.
+    assert redact("please tell bob a@b:c") == "please tell bob <redacted-url>"
+    assert redact("user@[::1]:repo.git") == "<redacted-url>"
+    assert redact("reached user@[::1]:repo but not later text"
+                  ) == "reached <redacted-url> but not later text"
+    assert redact("a@b:c and d@e:f") == "<redacted-url> and <redacted-url>"
+    # A newline is still never crossed: a credential on one line must not take
+    # the diagnostic on the next with it.
+    assert redact("line one u@h:p\nline two kept"
+                  ) == "line one <redacted-url>\nline two kept"
+    # And a value that is not a remote at all is untouched.
+    assert redact("no credential here /srv/x.git") == "no credential here /srv/x.git"

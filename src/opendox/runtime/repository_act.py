@@ -84,7 +84,7 @@ from opendox.runtime.local_git_adapter import (
     decoded_ref_name,
     git_available,
     git_identity,
-    names_a_secret_parameter,
+    carries_a_credential,
     PlatformCannotGuardPaths,
     open_no_follow_chain,
     redact_remote_url,
@@ -192,10 +192,13 @@ _COMMAND_TRANSPORT = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9+.\-]*)?::")
 #: `token`, was accepted, and was stored verbatim in a column the repository
 #: endpoints read back to every project member (Copilot review of
 #: openDox-code#26, round 5). The question is asked by
-#: `local_git_adapter.names_a_secret_parameter` — ONE predicate for both
-#: halves, so the storing rule and the printing rule cannot answer it
-#: differently, which is the same defect the shared key list was introduced to
-#: close.
+#: `local_git_adapter.carries_a_credential` — which is the REDACTOR ITSELF, so
+#: the storing rule and the printing rule cannot answer it differently. Naming
+#: one of the redactor's three patterns instead (`names_a_secret_parameter`)
+#: is how they came apart a third time: that one is positionally anchored, so
+#: `host=db password=hunter2 dbname=x` was stored verbatim in this column and
+#: redacted in every read-back of it (independent adversarial review of
+#: openDox-code#26, A26-3).
 
 
 def refuse_credential_bearing_remote(remote_url: str) -> None:
@@ -274,13 +277,23 @@ def refuse_credential_bearing_remote(remote_url: str) -> None:
             "with nothing to rotate it, so a credential must not be part of "
             "it. Use a credential helper, an ssh key or a .netrc, and give "
             "this act the URL alone.")
-    if names_a_secret_parameter(remote_url):
+    # THE SAME QUESTION THE REDACTOR ASKS, and asked by asking IT. This branch
+    # consulted one of the redactor's three patterns, and that one is
+    # positionally anchored — so `host=db password=hunter2 dbname=x` was
+    # ACCEPTED and stored verbatim in the column whose refusal text two
+    # paragraphs up says it is "stored durably with nothing to rotate it",
+    # while every read-back of it was dutifully redacted (independent
+    # adversarial review of openDox-code#26, A26-3). A value this act would
+    # refuse to PRINT is a value it must refuse to STORE, and the two cannot
+    # drift again because there is now one predicate and it is the printer.
+    if carries_a_credential(remote_url):
         raise RepositoryActRefused(
-            "the remote URL carries a credential-shaped query or fragment "
-            "parameter. Userinfo is not the only place a secret hides, and "
-            "this column is read back to every authenticated caller; give "
-            "this act the URL alone and let git's own credential machinery "
-            "supply the rest.")
+            "the remote URL carries a credential — a credential-shaped query "
+            "or fragment parameter, or a keyword/value password. Userinfo is "
+            "not the only place a secret hides, and this column is read back "
+            "to every authenticated caller and stored with nothing to rotate "
+            "it; give this act the URL alone and let git's own credential "
+            "machinery supply the rest.")
 
 
 def refuse_command_executing_remote(remote_url: str) -> None:
@@ -459,6 +472,21 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
             f"the configured repository root could not be resolved "
             f"({type(exc).__name__}); set OPENDOX_PROJECT_REPOSITORY_ROOT to a "
             "directory this process can read") from exc
+
+
+#: The mode this act creates a repository directory with, and then ENFORCES.
+#:
+#: `os.mkdir`'s default is `0o777 & ~umask`, so without this the mode of the
+#: configured root, of each project's repository and of everything `git init`
+#: makes under it was a property of whatever umask the process inherited —
+#: MEASURED: `0755` at umask 022, `0775` at 002, and `0777` at 000, with
+#: `config` at `0666`. The shipped Kubernetes shape is safe today because the
+#: pod runs as a single uid with a private volume, which makes the answer
+#: accidental rather than decided (independent adversarial review of
+#: openDox-code#26, A26-5). `0o700`: this act's process owns the store, and a
+#: second container sharing the `fsGroup`, a different base image or an
+#: operator's `umask 0` in a `runtime init` shell no longer change the answer.
+REPOSITORY_DIRECTORY_MODE = 0o700
 
 
 def refuse_unusable_location(location: Path) -> None:
@@ -712,11 +740,25 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
             try:
                 leaf = location.name
                 try:
-                    os.mkdir(leaf, dir_fd=parent)
+                    # THE MODE IS DECLARED AND THEN ENFORCED, because neither
+                    # half is enough on its own. `os.mkdir`'s default is
+                    # `0o777 & ~umask`, so the mode of this repository, its
+                    # `objects/`, `refs/`, `hooks/` and `config` was whatever
+                    # umask the process happened to inherit — at `umask 000` a
+                    # world-writable document store, and the shipped shape is
+                    # safe only by a default nobody declared (independent
+                    # adversarial review of openDox-code#26, A26-5). `mode=` is
+                    # still MASKED by the umask, so it cannot widen and cannot
+                    # be relied on to narrow; the `fchmod` through the held
+                    # descriptor is what makes the answer the same under every
+                    # umask, and doing it through the descriptor rather than
+                    # the name is what makes it race-free.
+                    os.mkdir(leaf, REPOSITORY_DIRECTORY_MODE, dir_fd=parent)
                 except FileExistsError:
                     pass
                 owned = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY
                                 | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+                os.fchmod(owned, REPOSITORY_DIRECTORY_MODE)
             finally:
                 os.close(parent)
         else:
@@ -900,7 +942,19 @@ def _initialize_with(git: GitRunner, location: Path, *, project_id: str,
         # AND IT IS RULED, not this act's preference:
         # RULED openxFactory#656 comment 5701772032 (Brett Heap, 2026-09-16, by interactive multi-choice)
         # answers Q-R1 — the repository this act creates STAYS BARE.
-        git.out("init", "--bare", f"--initial-branch={branch}", ".")
+        # `--shared=0600` PINS WHAT GIT MAKES UNDER IT. The directory this act
+        # creates is `0o700` by the `fchmod` above, and `git init` then creates
+        # `objects/`, `refs/`, `hooks/` and `config` by its own rule — which is
+        # the umask again unless it is told otherwise (independent adversarial
+        # review of openDox-code#26, A26-5). `--shared` is `init`'s own option
+        # for this and it takes an octal; `-c core.sharedRepository=…` is NOT
+        # the spelling, because `GitRunner` puts its `-c` options before the
+        # subcommand and `git init -c …` is `unknown switch \`c'` (measured on
+        # git 2.43.0). The compose and Kubernetes shapes run as a single uid
+        # with a private volume; this is that intent written down rather than
+        # inherited from a shell.
+        git.out("init", "--bare", "--shared=0600",
+                f"--initial-branch={branch}", ".")
         # The first commit, through plumbing and over the EMPTY TREE: no file
         # is written, so the repository's whole content is what its owner puts
         # there through the adapter's write path.
@@ -1321,9 +1375,21 @@ def _refuse_repository_local_command_config(git: GitRunner, location: Any) -> No
             "operator's own helper belongs in the global or system "
             "config, which this runtime keeps")
 
+    # `--includes` ON EVERY SCOPED PROBE, because git turns it OFF when a config
+    # FILE is named and ON only when it searches all of them — while git's own
+    # config READER always follows `include.path`. So a repository whose
+    # `.git/config` holds nothing but `[include] path = extra.cfg` hid every one
+    # of these keys from this guard and still had git run them during the push,
+    # which is the execution round 21 added this guard to stop. MEASURED on git
+    # 2.43.0: `git config --local --get-all credential.helper` exits 1 with no
+    # output while `git config --local --includes --get-all credential.helper`
+    # prints `!f() { … }; f` (independent adversarial review of
+    # openDox-code#26, A26-1). This guard is the whole attack surface by
+    # design — `GitRunner` deliberately keeps the operator's global and system
+    # config — so a hole in it is a hole straight through.
     for key in _EXECUTED_LOCAL_KEYS:
         for scope in ("--local", "--worktree"):
-            probe = git.run("config", scope, "--get-all", key)
+            probe = git.run("config", scope, "--includes", "--get-all", key)
             if probe.returncode == 0 and probe.stdout.strip():
                 raise _refuse_key(key, scope)
     # AND THE PATTERN KEYS, WHICH `--get-all` CANNOT REACH. `remote.<name>.vcs`
@@ -1336,8 +1402,8 @@ def _refuse_repository_local_command_config(git: GitRunner, location: Any) -> No
     # `insteadOf` prefix — out of the refusal this act returns to a caller.
     for pattern in _EXECUTED_LOCAL_KEY_PATTERNS:
         for scope in ("--local", "--worktree"):
-            probe = git.run("config", scope, "--name-only", "--get-regexp",
-                            pattern)
+            probe = git.run("config", scope, "--includes", "--name-only",
+                            "--get-regexp", pattern)
             if probe.returncode == 0 and probe.stdout.strip():
                 found = probe.stdout.decode("utf-8", "replace").split()
                 raise _refuse_key(found[0], scope)
