@@ -615,7 +615,17 @@ class GitRunner:
             raise GitCommandFailed(
                 args, subprocess.CompletedProcess(
                     argv, returncode=127, stdout=b"",
-                    stderr=(f"{self.executable}: {exc}").encode())) from exc
+                    # REDACTED AT THE SOURCE, not only at the sink.
+                    # `GitCommandFailed` redacts the stderr it is handed, and
+                    # that is one layer away from the interpolation — which is
+                    # exactly the shape `build/3-5-runtime`'s A25-1 was: a
+                    # message composed here and trusted to be cleaned
+                    # elsewhere. An OS error's text can carry the argv's
+                    # filename, so it is cleaned where it is composed and the
+                    # anti-leak walk can see that it is.
+                    stderr=(f"{self.executable}: "
+                            f"{redact_credentials(str(exc))}").encode(),
+                )) from exc
 
     def _run_bounded(self, args: tuple[str, ...], env: dict[str, str],
                      timeout: float) -> subprocess.CompletedProcess[bytes]:
@@ -637,7 +647,17 @@ class GitRunner:
             raise GitCommandFailed(
                 args, subprocess.CompletedProcess(
                     argv, returncode=127, stdout=b"",
-                    stderr=(f"{self.executable}: {exc}").encode())) from exc
+                    # REDACTED AT THE SOURCE, not only at the sink.
+                    # `GitCommandFailed` redacts the stderr it is handed, and
+                    # that is one layer away from the interpolation — which is
+                    # exactly the shape `build/3-5-runtime`'s A25-1 was: a
+                    # message composed here and trusted to be cleaned
+                    # elsewhere. An OS error's text can carry the argv's
+                    # filename, so it is cleaned where it is composed and the
+                    # anti-leak walk can see that it is.
+                    stderr=(f"{self.executable}: "
+                            f"{redact_credentials(str(exc))}").encode(),
+                )) from exc
         captured: dict[str, bytes] = {}
         overflowed: set[str] = set()
 
@@ -1879,7 +1899,7 @@ class LocalGitCorpus:
             # REF and not the index (Copilot review of openDox-code#26).
             index = git_dir / f"opendox-index-{os.getpid()}-{uuid.uuid4().hex}"
             index_env = {"GIT_INDEX_FILE": str(index)}
-            uncleaned: OSError | None = None
+            uncleaned: str | None = None
             try:
                 if corpus.revision is not None:
                     git.out("read-tree", corpus.revision, env=index_env)
@@ -1922,14 +1942,21 @@ class LocalGitCorpus:
                 try:
                     index.unlink(missing_ok=True)
                 except OSError as exc:
-                    uncleaned = exc
+                    # THE CLASS NAME, NOT THE EXCEPTION. Stashing the object
+                    # aliased it past the anti-leak walk `build/3-5-runtime`'s
+                    # A25-4 answer made total over this package: the walk reads
+                    # one handler at a time and cannot follow a name out of it,
+                    # so an alias is a blind spot whether or not this
+                    # particular one leaked. It did not — only the class name
+                    # was ever formatted — and the code now says that in a
+                    # shape the walk can see.
+                    uncleaned = type(exc).__name__
             if uncleaned is not None:
                 raise _refuse(
                     WRITE_PATH_UNREACHABLE, corpus.write_path,
                     f"the temporary index {index.name} could not be removed "
-                    f"({uncleaned.__class__.__name__}); this write path has "
-                    "become unreachable and the document remains unsaved"
-                ) from uncleaned
+                    f"({uncleaned}); this write path has become unreachable "
+                    "and the document remains unsaved")
 
             message = self._message(document, actor, basis_revision, reason,
                                     corpus.write_path)

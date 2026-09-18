@@ -1575,6 +1575,8 @@ def test_an_anonymous_token_naming_a_key_of_the_wrong_type_is_401_not_500(
     from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 
     from opendox.runtime import oidc
+    from opendox.runtime.config import PREFIX, load_settings
+    from tests_runtime.conftest import TEST_AUDIENCE
     from opendox.runtime.app import create_app
     from opendox.runtime.db import Database
 

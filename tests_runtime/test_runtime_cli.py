@@ -1651,6 +1651,12 @@ BENIGN_EXCEPTION_ATTRIBUTES = frozenset({
 #: "sqlstate", None)` reads a datum, and neither composes a message.
 STRINGIFIERS = frozenset({"str", "repr", "format", "ascii"})
 
+#: This package's own redactors. A value that has been through one of them is
+#: evidence, whatever it was before — `cli._safe_message` for the CLI,
+#: `local_git_adapter.redact_credentials` / `redact_remote_url` for the act.
+REDACTORS = frozenset({"_safe_message", "redact_credentials",
+                       "redact_remote_url"})
+
 
 def _exception_classes_this_package_defines() -> frozenset[str]:
     """Every exception class name declared under `src/opendox/`.
@@ -1703,6 +1709,15 @@ def _unredacted_exception_uses(source: str) -> list[str]:
     for handler in [n for n in ast.walk(tree)
                     if isinstance(n, ast.ExceptHandler) and n.name]:
         ours = caught_is_all_ours(handler)
+        # A HANDLER THAT CATCHES ONLY THIS PACKAGE'S OWN EXCEPTIONS IS FREE OF
+        # THE RULE ENTIRELY, not merely free to format it. `CorpusRefused`
+        # carries a `Refusal` whose `kind` and `detail` this package wrote, and
+        # `_bound` reads both to re-raise in the operation's own vocabulary —
+        # a structured datum, not a library's message, and the rule is about a
+        # LIBRARY's text reaching evidence. Anything narrower turns the benign
+        # attribute list into a list of the attributes somebody remembered.
+        if ours:
+            continue
         allowed: set[int] = set()
         formatted: set[int] = set()
         for node in ast.walk(handler):
@@ -1715,7 +1730,18 @@ def _unredacted_exception_uses(source: str) -> list[str]:
                 arguments = [a for a in node.args
                              if isinstance(a, ast.Name)
                              and a.id == handler.name]
-                if called in {"_safe_message", "type"}:
+                if called in REDACTORS:
+                    # ANYWHERE INSIDE THE REDACTOR'S ARGUMENTS, not only as a
+                    # direct one: `redact_credentials(str(exc))` composes the
+                    # text and then cleans it, which is the contract — and a
+                    # rule that read only the outermost call would flag the
+                    # inner `str` and push authors away from the redactor.
+                    allowed.update(
+                        id(inner) for argument in node.args
+                        for inner in ast.walk(argument)
+                        if isinstance(inner, ast.Name)
+                        and inner.id == handler.name)
+                elif called == "type":
                     allowed.update(id(a) for a in arguments)
                 elif called in STRINGIFIERS:
                     formatted.update(id(a) for a in arguments)
