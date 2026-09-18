@@ -1988,3 +1988,164 @@ def test_a_credential_shaped_parameter_name_is_a_WORD_and_not_a_substring() -> N
     with pytest.raises(ConfigurationError):
         load_settings({**base, PREFIX + "OIDC_JWKS_URL":
                        "https://broker/certs?api_key=hunter2"})
+
+
+def test_a_dsn_that_names_no_database_still_reaches_one() -> None:
+    """Two `None`s were read as agreement, and they are two DIFFERENT defaults.
+
+    `database_named_by` reports what the STRING says, so two DSNs that both
+    leave the database out both answered `None` and the preflight passed the
+    pair. libpq then defaults `dbname` to the CONNECTION USER — and this
+    deployment's two DSNs carry deliberately different users, the privileged
+    migration identity and the least-privileged served one, which is the whole
+    point of the split. So the guard passed exactly the configuration it
+    exists to refuse (Copilot review of openDox-code#25, at `0968ff8b`).
+
+    MEASURED on postgres 16 rather than argued:
+    `postgresql://opendox:…@host:5432/` — no database in the path and no
+    `dbname` anywhere — connects, and `select current_database()` answers
+    `opendox`, the user's name. `PQconninfoParse` does not fill that default
+    in, so it is invisible in the parse and applied at connect.
+
+    AND NEITHER-NOR IS UNRESOLVED, not a shared default: with no database and
+    no user in the string libpq falls back to the OPERATING SYSTEM user of
+    whichever process connects, and the two DSNs are used by two different
+    containers. A comparison that cannot be made is a refusal — the rule this
+    module already applies to a broker URL it cannot parse.
+    """
+    from opendox.runtime.config import (
+        ConfigurationError,
+        database_named_by,
+        effective_database,
+        load_settings,
+        user_named_by,
+    )
+
+    # THE USER IS READ THE WAY LIBPQ READS IT, measured through
+    # `PQconninfoParse` (`psycopg.conninfo.conninfo_to_dict`): the query beats
+    # the userinfo, the last repeat wins, and the userinfo is percent-decoded.
+    assert user_named_by("postgresql://my%20user@h/db") == "my user"
+    assert user_named_by("postgresql://userinfo@h/db?user=fromquery") == "fromquery"
+    assert user_named_by("postgresql://h/db?user=one&user=two") == "two"
+    assert user_named_by("host=h user=one user=two dbname=x") == "two"
+    assert user_named_by("postgresql://h/db") is None
+    assert user_named_by("host=h dbname=x") is None
+
+    # THE DEFAULT IS A NAME. The string says nothing; the connection does.
+    assert database_named_by("postgresql://served:p@h:5432/") is None
+    assert effective_database("postgresql://served:p@h:5432/") == "served"
+    assert effective_database("host=h user=served") == "served"
+    # An explicit database still wins over the user, which is libpq's order.
+    assert effective_database("postgresql://served:p@h/opendox") == "opendox"
+    # And with neither, nothing here can say.
+    assert effective_database("postgresql://h:5432/") is None
+
+    base = {PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox"}
+
+    def _load(served: str, migration: str):
+        return load_settings({**base, PREFIX + "DATABASE_URL": served,
+                              PREFIX + "MIGRATION_DATABASE_URL": migration})
+
+    # THE PAIR THE GUARD USED TO PASS: two users, no database in either.
+    with pytest.raises(ConfigurationError) as split:
+        _load("postgresql://served:p@h/", "postgresql://migrator:p@h/")
+    message = str(split.value)
+    assert "served" in message and "migrator" in message
+    assert "named after" in message, (
+        "the refusal must say WHERE the database name came from, because it "
+        "is nowhere in the operator's own DSN")
+    assert ":p@" not in message, "the refusal repeated a password"
+
+    # AND THE PAIR NOTHING CAN ANSWER FOR.
+    with pytest.raises(ConfigurationError) as unresolved:
+        _load("postgresql://h/", "postgresql://h/")
+    assert "neither a database nor a user" in str(unresolved.value)
+    assert "operating system user" in str(unresolved.value).lower()
+
+    # ONE SIDE RESOLVED AND ONE NOT IS STILL UNRESOLVED, and the refusal names
+    # the side that cannot answer rather than both.
+    with pytest.raises(ConfigurationError) as lopsided:
+        _load("postgresql://h/", "postgresql://migrator:p@h/opendox")
+    assert PREFIX + "DATABASE_URL" in str(lopsided.value)
+    assert PREFIX + "MIGRATION_DATABASE_URL" not in str(lopsided.value)
+
+    # AND THE ORDINARY SHAPE IS UNTOUCHED: two identities, one database, named.
+    assert _load("postgresql://served:p@h/opendox",
+                 "postgresql://migrator:p@h/opendox")
+    # Including two users whose DSNs omit the database but agree on it, which
+    # is a single-role install and not a split.
+    assert _load("postgresql://opendox:p@h/", "postgresql://opendox:p2@h/")
+
+
+def test_the_dollar_user_search_path_token_is_expanded_before_it_is_compared() -> None:
+    """`"$user"` is a TOKEN, and two roles' `"$user"` are two schemas.
+
+    The preflight compared the string, so two DSNs for different roles both
+    selecting `"$user",public` agreed on `$user` while PostgreSQL resolved
+    them to different schemas — the split this guard exists to refuse, wearing
+    the agreement it was looking for (Copilot review of openDox-code#25, at
+    `0968ff8b`).
+
+    MEASURED on postgres 16, and the middle measurement is the one that
+    settles how to treat it:
+
+      set search_path = "$user", public      -> current_schema() = public
+      … with a schema LITERALLY NAMED `$user` -> current_schema() = public
+      … with a schema named for the session user -> current_schema() = <user>
+
+    PostgreSQL never reads `"$user"` as the name of a schema, even when such a
+    schema exists, so substituting it here matches the server — and the
+    quoted-versus-literal distinction does not change the answer. (`set
+    search_path = $user` unquoted is a syntax error: the token is always
+    written quoted.)
+    """
+    import urllib.parse
+
+    from opendox.runtime.config import (
+        ConfigurationError,
+        effective_schema,
+        load_settings,
+        schema_selected_by,
+    )
+
+    def _dsn(user: str | None, path: str) -> str:
+        authority = f"{user}:p@" if user else ""
+        return (f"postgresql://{authority}h/db?options=-csearch_path%3D"
+                + urllib.parse.quote(path, safe=""))
+
+    # THE STRING STILL REPORTS THE TOKEN — that is what the DSN says — and the
+    # resolved answer is the user's name.
+    assert schema_selected_by(_dsn("alice", '"$user",public')) == "$user"
+    assert effective_schema(_dsn("alice", '"$user",public')) == "alice"
+    assert effective_schema(_dsn("bob", '"$user",public')) == "bob"
+    # A schema named by hand is untouched by the substitution.
+    assert effective_schema(_dsn("alice", "tenant,public")) == "tenant"
+    # And with no user in the string there is nothing to substitute.
+    assert effective_schema(_dsn(None, '"$user",public')) is None
+
+    base = {PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox"}
+
+    def _load(served: str, migration: str):
+        return load_settings({**base, PREFIX + "DATABASE_URL": served,
+                              PREFIX + "MIGRATION_DATABASE_URL": migration})
+
+    # THE PAIR THE GUARD USED TO PASS.
+    with pytest.raises(ConfigurationError) as split:
+        _load(_dsn("alice", '"$user",public'), _dsn("bob", '"$user",public'))
+    message = str(split.value)
+    assert "alice" in message and "bob" in message
+    assert ":p@" not in message, "the refusal repeated a password"
+
+    # THE SAME ROLE IS THE SAME SCHEMA, so this refuses a mismatch and not the
+    # `"$user"` idiom itself.
+    assert _load(_dsn("alice", '"$user",public'), _dsn("alice", '"$user"'))
+
+    # AND THE TOKEN WITH NO USER TO SUBSTITUTE IS UNRESOLVED, not "no schema":
+    # reading it as "names none" would have compared equal to a DSN that
+    # really names none, which is the same false agreement one step along.
+    with pytest.raises(ConfigurationError) as unresolved:
+        _load(_dsn(None, '"$user",public'), "postgresql://m:p@h/db")
+    assert '"$user"' in str(unresolved.value)
+    assert "names no user" in str(unresolved.value)
