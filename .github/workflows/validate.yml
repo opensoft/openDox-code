@@ -1744,9 +1744,35 @@ jobs:
       #              `os.getpgid` raises `ProcessLookupError` (measured,
       #              CPython 3.12) — so the group survived the refusal. The
       #              id is captured at `Popen` now, and the case reaps first.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 556 there.
+      #  348 passed  at `build/3-6-repository-act` `727b4769` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — ONE added here, closing this
+      #              batch's OWN regression. `_decoded_parameter_name` decodes
+      #              a parameter name to a fixed point, which is quadratic in
+      #              that name, and its docstring named `repository_act`'s
+      #              length refusal as the bound — true while every path came
+      #              through that refusal. The entry above pointed
+      #              `config.redacted_remote_url` at `redact_remote_url`, and
+      #              a LEGACY `remote_url` row passes no refusal at all, so
+      #              every map read did the work: MEASURED against a full
+      #              checkout of `4156f233`, with the decoder instrumented, a
+      #              9 KB `%2525…` chain cost 0.08 s, 60 KB cost 2.65 s and
+      #              180 KB cost 21.31 s of CPU — per read, per row.
+      #              `MAX_REMOTE_URL_CHARS` moves to `config`, the module both
+      #              readers import (the key list and the libpq pattern are
+      #              there for the same reason), and `repository_act` keeps
+      #              the name by alias. The act refuses a NEW remote longer
+      #              than it; `redact_remote_url` replaces a STORED one longer
+      #              than it WHOLE, so a remote the act accepts is never
+      #              over-redacted and the two numbers cannot drift. The case
+      #              asserts it BY SUBSTITUTION — the decoder is made to raise,
+      #              so reaching it fails — and then drives a value AT the cap
+      #              through the real decoder, because over-refusing is the
+      #              other way to get this wrong.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 556. The neutral conformance corpus
+      #              tests_runtime/` is 557. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
