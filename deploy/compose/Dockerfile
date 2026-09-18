@@ -36,12 +36,19 @@ WORKDIR /app
 # cost is a developer's minutes and it is recorded here rather than traded for
 # an invented pin.
 COPY pyproject.toml README.md ./
+# The lock travels with the sources it pins, and BEFORE the install that reads
+# it: an image built from an unlocked resolve is a supply chain that can change
+# without a commit (SonarCloud `docker:S8544`, "using dependencies without
+# locking resolved versions is security-sensitive" — advisory on this
+# repository, registered on openDox-code#26 and built in the follow-up).
+COPY constraints-cpython312-linux.txt ./
 COPY src ./src
 # `--only-binary :all:` so pip never builds a dependency from an sdist —
 # which would run that project's `setup.py` inside the image build. Every
 # package in the `runtime` extra publishes wheels for cpython 3.12 on
 # linux, `psycopg[binary]` by name, so the flag costs nothing.
-RUN python -m pip install --no-cache-dir --only-binary :all: ".[runtime]"
+RUN python -m pip install --no-cache-dir --only-binary :all: \
+      -c constraints-cpython312-linux.txt ".[runtime]"
 
 # The ordered SQL travels with the image: `opendox-runtime runtime migrate` reads
 # `migrations/` relative to the working directory, and an image whose migration
@@ -50,8 +57,19 @@ RUN python -m pip install --no-cache-dir --only-binary :all: ".[runtime]"
 COPY migrations ./migrations
 
 # A non-root user, and the per-project repository root it owns.
+#
+# `install -d -m 0700` AND NOT `mkdir -p`, on the same argument as
+# `runtime init`'s: this directory holds every project's bare repository, each
+# of which is created 0700, and `mkdir` takes `0o777 & ~umask` — 0755 for a
+# `RUN` layer — so the root above them shipped world-readable and traversable.
+# `runtime init` narrows the root it CREATES, and in this image the root is
+# already here by the time it runs, so `init` reports the mode and leaves it
+# alone (it does not re-mode a directory it did not make). The one place that
+# owns this directory is therefore the layer that makes it (Copilot review of
+# openDox-code#30). `install` sets the mode itself, so no umask applies.
 RUN useradd --system --create-home --uid 10001 opendox \
- && mkdir -p /var/lib/opendox/projects \
+ && install -d -m 0700 /var/lib/opendox \
+ && install -d -m 0700 /var/lib/opendox/projects \
  && chown -R opendox:opendox /var/lib/opendox
 USER opendox
 

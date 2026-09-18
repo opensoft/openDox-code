@@ -529,6 +529,60 @@ def selected_schema(conn: Any) -> str:
     return str(schema)
 
 
+def selected_database(conn: Any) -> str:
+    """`current_database()` — the database this connection is actually in.
+
+    There is no fallback to unmask here, which is what makes this the short
+    twin of `selected_schema`: libpq resolves the database at CONNECT time, and
+    a connection that reached a database at all is in exactly the one it named.
+    What can be wrong is the NAME the DSN gave — `dbname` omitted defaults to
+    the connection USER, measured on postgres 16 — and that is the case this
+    answer is compared against.
+    """
+    return str(conn.execute("select current_database()").fetchone()[0])
+
+
+def refuse_a_database_the_api_will_not_read(conn: Any,
+                                            served_database: str | None
+                                            ) -> None:
+    """Refuse an act whose DATABASE is not the one the served application reads.
+
+    THE HALF A25-3 LEFT OPEN. That review's finding was that
+    `config._refuse_two_dsns_that_select_different_schemas` can never fire in a
+    shipped deployment, because the Deployment holds the served DSN and the
+    migration Job holds the migration DSN and no workload holds both — so the
+    migration container has to be TOLD where the API reads. It was told the
+    SCHEMA. It was not told the DATABASE, and a DSN naming the wrong one is the
+    easier mistake to make: `dbname` may be omitted entirely, in which case
+    libpq defaults it to the connection USER (measured on postgres 16), so two
+    DSNs that look alike can select two databases without either one saying so.
+
+    THE CONSEQUENCE IS THE SAME AS THE SCHEMA'S, ONE LEVEL UP: `migrate`
+    applies DDL and writes a ledger into a database nothing serves, `/readyz`
+    calls the served database unmigrated or — worse — `runtime reset` DROPS the
+    six coordination tables in a database that was never this install's. That
+    verb cannot be undone.
+
+    A NAME AND NEVER A CREDENTIAL, which is why the workload that must not hold
+    the served DSN can be given it. Declared and unset is not an error: the
+    single-database install that declares nothing is the bundled shape, and
+    nothing is queried in that case.
+    """
+    if not served_database:
+        return
+    here = selected_database(conn)
+    if here == served_database:
+        return
+    raise MigrationError(
+        f"this act would change the database {here!r}, and "
+        f"OPENDOX_SERVED_DATABASE declares the served application reads "
+        f"{served_database!r}. An act that migrates or drops one database "
+        "while the API reads another reports an applied database nothing "
+        "serves — or serves a database this install never migrated. Point "
+        "the migration DSN's `dbname` at the declared database, or correct "
+        "the declaration; nothing has been changed")
+
+
 def refuse_a_schema_the_api_will_not_read(conn: Any,
                                          served_schema: str | None) -> None:
     """Refuse an act whose schema is not the one the served application reads.
@@ -596,11 +650,13 @@ class MigrationRunner:
     def __init__(self, db: Any, *,
                  migrations_dir: str | Path = DEFAULT_MIGRATIONS_DIR,
                  runtime_role: str | None = None,
-                 served_schema: str | None = None) -> None:
+                 served_schema: str | None = None,
+                 served_database: str | None = None) -> None:
         self._db = db
         self._migrations_dir = Path(migrations_dir)
         self._runtime_role = runtime_role
         self._served_schema = served_schema
+        self._served_database = served_database
 
     # -- introspection ----------------------------------------------------
 
@@ -814,6 +870,16 @@ class MigrationRunner:
             f"no canonical migration ({CANONICAL_MIGRATION_VERSION}) found in "
             f"{self._migrations_dir}")
 
+    def refuse_a_database_the_api_will_not_read(self, conn: Any) -> None:
+        """This runner's DATABASE declaration, through the module-level guard.
+
+        Beside the schema's, and for the same reason it has a method at all:
+        three callers ask it — `apply()` here, `runtime migrate --plan` and
+        `runtime reset` — and a second spelling of a refusal is how two of the
+        three came to be missing the schema one.
+        """
+        refuse_a_database_the_api_will_not_read(conn, self._served_database)
+
     def refuse_a_schema_the_api_will_not_read(self, conn: Any) -> None:
         """This runner's declaration, asked through the module-level guard.
 
@@ -831,6 +897,11 @@ class MigrationRunner:
         pool connection the advisory lock does not cover — see `_session`.
         """
         run = self.snapshot_run()
+        # THE DATABASE BEFORE THE SCHEMA, because it is the wider question: a
+        # schema comparison in the wrong DATABASE compares two names that
+        # happen to agree. Both are before `bootstrap_ledger`, so a refused run
+        # has written nothing at all — not even the ledger table.
+        self.refuse_a_database_the_api_will_not_read(lock)
         self.refuse_a_schema_the_api_will_not_read(lock)
         self.bootstrap_ledger(lock)
         lock.commit()

@@ -64,6 +64,7 @@ import contextlib
 import json
 import logging
 import re
+import stat
 import sys
 import traceback
 from collections.abc import Iterator
@@ -350,6 +351,12 @@ def _redacted_settings(settings: RuntimeSettings) -> dict[str, Any]:
         # openDox-code#25, A25-3). The test below caught its absence from this
         # map the moment it was declared, which is what that test is for.
         "OPENDOX_SERVED_SCHEMA": settings.served_schema,
+        # AND THE DATABASE, for the same reason and reported for the same
+        # reason: an operator reading `status` needs to see BOTH declarations
+        # the run will be refused against. A25-3 gave the migration workload
+        # the served schema and not the served database, which is the wider of
+        # the two (openDox-code#26's registered item 4).
+        "OPENDOX_SERVED_DATABASE": settings.served_database,
         "OPENDOX_PUBLISH_OPENAPI": settings.publish_openapi,
         "OPENDOX_MIGRATIONS_DIR": str(settings.migrations_dir),
         "OPENDOX_PROJECT_REPOSITORY_ROOT": str(settings.project_repository_root),
@@ -383,6 +390,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     of local state the runtime cannot create later without a race: the
     directory RULING C3's per-project repositories are created under.
     """
+    from opendox.runtime import repository_act
+
     settings = _settings_or_refusal(args)
     if isinstance(settings, int):
         return settings
@@ -404,7 +413,24 @@ def cmd_init(args: argparse.Namespace) -> int:
                                  "created under (RULING C3)"}, ok=False)
     if not root.exists():
         try:
-            root.mkdir(parents=True, exist_ok=True)
+            # 0700, NOT THE AMBIENT UMASK. This directory holds every project's
+            # bare repository, and each of those is created
+            # `REPOSITORY_DIRECTORY_MODE` — but the ROOT above them took
+            # `mkdir`'s default, which is `0o777 & ~umask`: MEASURED under the
+            # container's own umask (0o022) `runtime init` left it **0755**, so
+            # every project name under it was listable, and traversable, by any
+            # local account (Copilot review of openDox-code#26 registered this
+            # as `local_git_adapter.py:465`; the holder ruled "measure first,
+            # fix only if a reachable path leaves it wider than 0700", and this
+            # is that path). A mode of 0o700 is umask-SAFE, because a umask can
+            # only remove bits.
+            #
+            # THE LEAF ONLY, WHICH IS WHAT `Path.mkdir` DOES: parents are
+            # created by a recursive call that does not carry `mode`, and they
+            # are the operator's own path components — `/srv`, `/var/lib` —
+            # not this runtime's directory to narrow.
+            root.mkdir(parents=True, exist_ok=True,
+                       mode=repository_act.REPOSITORY_DIRECTORY_MODE)
         except OSError as exc:
             return _emit({"verb": "init", "refusal": "root-uncreatable",
                           "project_repository_root": str(root),
@@ -416,8 +442,19 @@ def cmd_init(args: argparse.Namespace) -> int:
         return _emit({"verb": "init", "refusal": "canonical-schema",
                       "message": _safe_message(exc)}, ok=False)
     pending = [m.version for m in migrations.discover_migrations(settings.migrations_dir)]
+    # AND AN EXISTING ROOT IS REPORTED, NOT RE-MODED. `runtime init` is
+    # idempotent and a root that is already there belongs to whoever made it —
+    # an operator's own mount point among them — so this act says what it found
+    # rather than changing it, on `_directory_by_name`'s rule that a walk
+    # narrows only what it made itself. An operator upgrading from a build that
+    # created the root 0755 sees the number here and decides.
+    try:
+        mode = f"{stat.S_IMODE(root.stat().st_mode):04o}"
+    except OSError:                      # pragma: no cover - raced away
+        mode = None
     return _emit({"verb": "init",
                   "project_repository_root": str(root),
+                  "project_repository_root_mode": mode,
                   "directories_created": created,
                   "canonical_sha256": digest,
                   "migrations_on_disk": pending,
@@ -470,7 +507,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             runner = migrations.MigrationRunner(
                 runner_db, migrations_dir=settings.migrations_dir,
                 runtime_role=settings.runtime_pg_role,
-                served_schema=settings.served_schema)
+                served_schema=settings.served_schema,
+                served_database=settings.served_database)
             if args.plan:
                 # The canonical gate has already run, above, for this path and
                 # for the real one.
@@ -484,6 +522,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                 # connection for the guard and the plan, so the answer and the
                 # thing it was asked of are the same session.
                 with runner_db.connection() as conn:
+                    runner.refuse_a_database_the_api_will_not_read(conn)
                     runner.refuse_a_schema_the_api_will_not_read(conn)
                     planned = [m.version for m in runner.plan(conn)]
                 evidence = {"verb": "migrate", "planned": planned,
@@ -782,6 +821,12 @@ def cmd_reset(args: argparse.Namespace) -> int:
                     # reads a different one — the same invariant `migrate` has
                     # had since A25-3, on the one verb that cannot be undone
                     # (Copilot review of openDox-code#25, at `056d1597`).
+                    # AND THE DATABASE DECLARATION BEFORE THE SCHEMA'S, on
+                    # the verb that cannot be undone: a schema comparison made
+                    # in the wrong DATABASE compares two names that happen to
+                    # agree, and this is the act that DROPS six tables.
+                    migrations.refuse_a_database_the_api_will_not_read(
+                        lock, settings.served_database)
                     migrations.refuse_a_schema_the_api_will_not_read(
                         lock, settings.served_schema)
                     schema = migrations.selected_schema(lock)

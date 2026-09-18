@@ -204,6 +204,16 @@ spec:
                 configMapKeyRef:
                   name: opendox-runtime-config
                   key: pg_schema
+            # AND WHICH DATABASE. The same argument one level up, and the
+            # wider one: a migration DSN that names the wrong database — or
+            # omits `dbname` and takes libpq's default, the connection USER —
+            # applies DDL, and `runtime reset` DROPS six tables, in a database
+            # the API does not read. A NAME and never a credential.
+            - name: OPENDOX_SERVED_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: pg_database
           volumeMounts:
             - name: tmp
               mountPath: /tmp

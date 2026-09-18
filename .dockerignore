@@ -21,3 +21,12 @@
 !README.md
 !src
 !migrations
+# The dependency lock the image's `pip install` reads with `-c`. Named back in
+# for the same reason the four above are: the Dockerfile COPYs it, and an
+# allowlist that does not carry a COPY source is a build that fails at the
+# daemon (SonarCloud `docker:S8544`, built in openDox-code#26's follow-up).
+# AT THE REPOSITORY ROOT, and that is deliberate: `deploy/` holds the
+# git-ignored `.env` this whole file exists to keep out of the build context,
+# so a lock living there would have meant a `!deploy…` rule — and the guard
+# that no such rule exists is the one that keeps the filled-in `.env` at home.
+!constraints-cpython312-linux.txt
