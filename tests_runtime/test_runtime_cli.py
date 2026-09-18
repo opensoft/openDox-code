@@ -1180,3 +1180,123 @@ def test_a_broker_url_whose_port_is_not_a_number_is_refused_at_the_door(
             PREFIX + "OIDC_ISSUER": "https://broker/realm",
             PREFIX + "OIDC_JWKS_URL": "https://broker:not-a-port/certs"}))
     assert PREFIX + "OIDC_JWKS_URL" in str(caught.value)
+
+
+def test_the_issuer_carries_no_query_or_fragment_because_paths_are_appended(
+) -> None:
+    """A base URL's derived paths land after its query, addressing nothing.
+
+    THE FINDING (Copilot review of openDox-code#25, round 29, previously
+    missed): `jwks_url()` and `discovery_url()` APPEND a path to the issuer,
+    and a URL's query and fragment come after its path. Measured before the
+    fix, both components accepted:
+
+        OPENDOX_OIDC_ISSUER=https://broker/realms/x?tenant=a
+        jwks_url()      -> https://broker/realms/x?tenant=a/protocol/openid-connect/certs
+        discovery_url() -> https://broker/realms/x?tenant=a/.well-known/openid-configuration
+
+    Nothing serves either, so readiness failed at the fetch — configuration
+    discovered at serve time, which is the boundary `load_settings` holds.
+
+    THE RULE IS THE ISSUER'S ALONE, and the second half of this test is why
+    that matters: an explicit `OPENDOX_OIDC_JWKS_URL` is fetched exactly as
+    given, and a broker behind a rewriting proxy may need a query on it. That
+    is the whole reason the variable exists.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for issuer, component in (("https://broker/realms/x?tenant=a", "query"),
+                              ("https://broker/realms/x#frag", "fragment"),
+                              ("https://broker/realms/x?a=1#b", "query")):
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+        message = str(caught.value)
+        assert f"carries a {component} component" in message, (issuer, message)
+        assert PREFIX + "OIDC_ISSUER" in message, (issuer, message)
+
+    # THE DERIVATION IS WHAT THIS PROTECTS, so measure it on the value that
+    # passes: a trailing slash and no query, and the derived URLs are the two
+    # Keycloak publishes.
+    settings = load_settings(dict(base, **{
+        PREFIX + "OIDC_ISSUER": "https://broker/realms/x/"}))
+    assert settings.jwks_url() == \
+        "https://broker/realms/x/protocol/openid-connect/certs"
+    assert settings.discovery_url() == \
+        "https://broker/realms/x/.well-known/openid-configuration"
+
+    # AND AN EXPLICIT KEY-SET URL KEEPS ITS QUERY, fetched as given.
+    settings = load_settings(dict(base, **{
+        PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+        PREFIX + "OIDC_JWKS_URL": "https://proxy/certs?realm=x"}))
+    assert settings.jwks_url() == "https://proxy/certs?realm=x"
+
+
+def test_the_loopback_exception_is_for_http_and_not_for_every_other_scheme(
+) -> None:
+    """`ftp://localhost/…` is not a broker URL, and it used to be accepted.
+
+    THE FINDING (Copilot review of openDox-code#25, round 29, suppressed): the
+    exception was written as "not https AND not loopback", which accepts EVERY
+    non-https scheme on a loopback host. `HttpJwksSource` fetches with
+    `httpx.get`, which cannot use `ftp://` or `file://`, so the process started
+    with an unusable trust anchor and failed at readiness. Measured before the
+    fix: `ftp://localhost/realms/x` and `file://127.0.0.1/realms/x` both
+    ACCEPTED.
+
+    The exception exists for a developer running a broker over plain HTTP on
+    the loopback, and that is the whole of what it allows now.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
+    for issuer in ("ftp://localhost/realms/x", "file://127.0.0.1/realms/x",
+                   "ws://localhost:8080/realms/x", "ftp://[::1]/realms/x"):
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+        assert "TRUST ANCHOR" in str(caught.value), (issuer, caught.value)
+
+    # The two that must still pass: https anywhere, http on the loopback.
+    for issuer in ("https://broker/realms/x", "http://localhost:8080/realms/x",
+                   "http://127.0.0.1:8080/realms/x", "http://[::1]:8080/x"):
+        assert load_settings(dict(base, **{PREFIX + "OIDC_ISSUER": issuer}))
+
+
+def test_a_uri_password_holding_a_space_is_redacted_whole() -> None:
+    """Round 19's finding in its URI form: `\\S*` stops at the space.
+
+    THE FINDING (Copilot review of openDox-code#25, round 29, suppressed): a
+    driver quoting back a URI whose password was never percent-encoded — which
+    is exactly the conninfo an operator mistypes — was redacted only to the
+    first whitespace. Measured before the fix:
+
+        'invalid dsn: postgresql://opendox:hunter 2@db.internal:5432/opendox'
+        -> 'invalid dsn: <redacted> 2@db.internal:5432/opendox'
+
+    The tail of the password and the whole host, printed beside the marker that
+    says the credential was removed.
+
+    USERINFO ENDS AT THE FIRST `@` AND CANNOT CONTAIN `/`, which is what lets
+    the pattern absorb the space without running away down the line — the last
+    two cases are that bound, and they are why this is not simply "redact to
+    end of line".
+    """
+    redact = cli._DSN_SHAPED.sub
+
+    assert redact("<redacted>",
+                  "invalid dsn: postgresql://opendox:hunter 2@db.internal/x"
+                  ) == "invalid dsn: <redacted>"
+    assert redact("<redacted>",
+                  'invalid dsn: "postgresql://opendox:my pass word@host/db"'
+                  ) == 'invalid dsn: "<redacted>'
+    assert redact("<redacted>", "amqps://svc:my pass@broker/vhost failed"
+                  ) == "<redacted> failed"
+
+    # THE BOUND: a later, unrelated `@` in the same message is not swallowed,
+    # because the `@` branch cannot cross the URI's `/`.
+    assert redact("<redacted>", "postgresql://host/db for user a@b"
+                  ) == "<redacted> for user a@b"
+    assert redact("<redacted>", "reached postgresql://host:5432/db fine"
+                  ) == "reached <redacted> fine"

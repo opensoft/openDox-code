@@ -1553,3 +1553,59 @@ def test_the_managed_database_overlay_is_applied_after_its_prerequisites(
     dev_at = runbook.index(
         "kustomize build deploy/kubernetes/overlays/dev | kubectl apply")
     assert runbook.index("create secret generic opendox-db-runtime") < dev_at
+
+
+def test_the_secret_block_is_fail_fast_and_its_set_e_is_not_defeated() -> None:
+    """A failed `create secret` stops the block, and `set -e` actually runs.
+
+    THE FINDING (Copilot review of openDox-code#25, rounds 27 and 29,
+    suppressed twice): the block had no fail-fast, so a failed `kubectl create
+    secret` was followed by the remaining creates and by the cleanup, and a run
+    that had not created the credentials looked like one that had.
+
+    THREE PROPERTIES, and each is here because the obvious fix breaks one:
+
+      * `set -e` is INSIDE A SUBSHELL. Pasted into an interactive shell it
+        would close the operator's own shell on the first failure.
+      * the subshell's status is taken by `$?` ON ITS OWN LINE. MEASURED with
+        a `kubectl` stub that refuses the first create: written as `) && ok=yes
+        || ok=no`, bash SUPPRESSES `set -e` inside a compound command that is
+        an operand of `&&`/`||` — the suppression is inherited — and all three
+        creates ran and the status was 0. With `secrets_created=$?` the block
+        stopped at the first failure, the EXIT trap removed the files, and the
+        status was 1.
+      * the signal traps `exit` rather than re-raising. `$$` inside a subshell
+        is still the PARENT's pid, so the round-26 `kill -INT $$` would have
+        signalled the operator's shell from inside the subshell.
+
+    The apply is guarded on that status, so a half-created install applies
+    nothing.
+    """
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    start = runbook.index("(\n  set -e")
+    block = runbook[start:runbook.index("secrets_created=$?", start)]
+
+    assert "set -e" in block
+    assert block.count("kubectl -n opendox create secret") == 3, (
+        "this test is written against the three creates the base needs")
+    assert "kill -INT $$" not in block and "kill -TERM $$" not in block, (
+        "`$$` in a subshell is the operator's shell, not this one")
+    for signal, status in (("EXIT", None), ("INT", "130"), ("TERM", "143")):
+        line = [l for l in block.splitlines() if f"' {signal}" in l]
+        assert line, f"no trap for {signal}"
+        assert 'rm -rf "$secrets"' in line[0], line
+        if status:
+            assert f"exit {status}" in line[0], line
+
+    assert ") && secrets_created" not in runbook, (
+        "an `&&` after the subshell suppresses the `set -e` inside it; "
+        "measured, and it ran every remaining kubectl")
+    assert "\n)\n" in runbook[start:start + len(block) + 200] or \
+        "\n)\n" in runbook[start:], "the subshell is never closed"
+
+    # AND THE APPLY IS GUARDED ON IT.
+    assert '[ "${secrets_created:-1}" -ne 0 ]' in runbook, (
+        "the documented apply does not check whether the Secrets were created")
+    apply_at = runbook.index(
+        "kustomize build deploy/kubernetes/overlays/dev | kubectl apply")
+    assert runbook.index('[ "${secrets_created:-1}" -ne 0 ]') < apply_at

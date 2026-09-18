@@ -1472,3 +1472,47 @@ def test_a_readiness_probe_makes_one_pool_checkout(
     assert len(checkouts) == 1, (
         f"this probe checked out {len(checkouts)} pooled connections; the "
         "budget the manifests assert covers one")
+
+
+def test_a_failed_pool_checkout_is_not_masked_by_the_stores_teardown() -> None:
+    """`close()` must not call `__exit__` on a manager that never entered.
+
+    THE FINDING (Copilot review of openDox-code#25, round 29, suppressed):
+    `_open()` assigned `self._exit` and THEN called `__enter__()`, so a pool
+    checkout or `BEGIN` that raised left `_exit` non-None — and `get_store`'s
+    cleanup calls `store.close(exc)` on the way out, which calls `__exit__` on
+    a context manager whose `__enter__` never completed. Whatever that raises
+    replaces the database error that is the real answer.
+
+    The manager is held in a local until `__enter__` returns. This test drives
+    the failure directly rather than through a route, because the property is
+    the proxy's and not any endpoint's: `close()` after a failed open must be
+    a no-op, and the original exception must be what the caller sees.
+    """
+    from opendox.runtime import app as app_module
+
+    class _NeverEnters:
+        exits = 0
+
+        def __enter__(self):
+            raise RuntimeError("the pool is exhausted")
+
+        def __exit__(self, *exc_info):
+            _NeverEnters.exits += 1
+            raise AssertionError(
+                "__exit__ ran on a manager whose __enter__ never completed")
+
+    class _Database:
+        @staticmethod
+        def transaction():
+            return _NeverEnters()
+
+    store = app_module._LazyStore(_Database())
+    with pytest.raises(RuntimeError, match="the pool is exhausted") as caught:
+        store.projects()                       # any attribute opens the store
+
+    # THE TEARDOWN THAT `get_store` PERFORMS, on the object it is holding.
+    store.close(caught.value)
+    assert _NeverEnters.exits == 0, (
+        "the teardown called __exit__ on a manager that never entered; "
+        "whatever that raises would replace the database error")

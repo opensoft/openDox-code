@@ -182,7 +182,15 @@ class FileJwksSource:
     def load(self) -> dict[str, Any]:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        # `ValueError` AND NOT `json.JSONDecodeError`: a file that is not UTF-8
+        # raises `UnicodeDecodeError` out of `read_text`, which is a
+        # `ValueError` and NOT a `JSONDecodeError` — so it escaped this handler
+        # and surfaced as a 500 from the air-gapped path that this class exists
+        # to make a typed refusal (Copilot review of openDox-code#25, round 29,
+        # suppressed). `JSONDecodeError` is itself a `ValueError`, so naming
+        # the base covers both and is the same rule `HttpJwksSource` already
+        # states one class below.
+        except (OSError, ValueError) as exc:
             raise IdentityUnavailableError(
                 f"JWKS file could not be read at {self._path}") from exc
         if not isinstance(data, dict):

@@ -290,8 +290,18 @@ class _LazyStore:
 
     def _open(self) -> identity.CoordinationStore:
         if self._store is None:
-            self._exit = self._database.transaction()
-            self._store = identity.CoordinationStore(self._exit.__enter__())
+            # THE MANAGER IS HELD LOCALLY UNTIL `__enter__` HAS RETURNED.
+            # `self._exit` used to be assigned first, so a pool checkout that
+            # raised left a non-None `_exit` whose `__enter__` had never
+            # completed — and `get_store`'s cleanup then called `close()`,
+            # which calls `__exit__` on it. Calling `__exit__` without a
+            # completed `__enter__` raises out of the exception handler and
+            # MASKS the database error that is the real answer (Copilot review
+            # of openDox-code#25, round 29, suppressed).
+            manager = self._database.transaction()
+            connection = manager.__enter__()
+            self._exit = manager
+            self._store = identity.CoordinationStore(connection)
         return self._store
 
     def __getattr__(self, name: str) -> Any:

@@ -728,3 +728,39 @@ def test_a_recovered_broker_is_used_at_once_and_not_after_the_cooldown(
     clock[0] += 3600.0
     assert cache.keyset().keys
     assert _Flaky.calls == 3
+
+
+def test_a_jwks_file_that_is_not_utf8_is_a_typed_refusal(tmp_path) -> None:
+    """The air-gapped path's failure is `IdentityUnavailableError`, not a 500.
+
+    THE FINDING (Copilot review of openDox-code#25, round 29, previously
+    missed): `read_text(encoding="utf-8")` raises `UnicodeDecodeError`, which
+    is a `ValueError` and NOT a `json.JSONDecodeError` — so it escaped the
+    handler that exists to make this class's failures typed, and a malformed
+    key set surfaced as a 500 instead of the readiness or authentication
+    refusal the callers map. Measured before the fix: `UnicodeDecodeError:
+    'utf-8' codec can't decode byte 0xff in position 10`.
+
+    `ValueError` is the base of both, which is the same rule `HttpJwksSource`
+    already states one class below for its own JSON case.
+    """
+    bad = tmp_path / "jwks.json"
+    bad.write_bytes(b'{"keys": [\xff\xfe]}')
+    with pytest.raises(oidc.IdentityUnavailableError) as caught:
+        oidc.FileJwksSource(bad).load()
+    assert not isinstance(caught.value, UnicodeDecodeError)
+    assert str(bad) in str(caught.value), (
+        "the refusal must name the file an operator has to fix")
+
+    # The neighbouring failures this handler already covered, still typed.
+    missing = tmp_path / "absent.json"
+    with pytest.raises(oidc.IdentityUnavailableError):
+        oidc.FileJwksSource(missing).load()
+    not_json = tmp_path / "not.json"
+    not_json.write_text("{oops", encoding="utf-8")
+    with pytest.raises(oidc.IdentityUnavailableError):
+        oidc.FileJwksSource(not_json).load()
+    not_object = tmp_path / "list.json"
+    not_object.write_text("[1, 2]", encoding="utf-8")
+    with pytest.raises(oidc.IdentityUnavailableError):
+        oidc.FileJwksSource(not_object).load()
