@@ -1188,10 +1188,40 @@ jobs:
       #              containment check and answered 500. `basis_revision` is
       #              RULED, not fixed: openxFactory#656 comment 5701772032
       #              makes it a commit TRAILER and the compare-and-swap the
-      #              adjudicator. THE CURRENT FIGURE for this branch; the PR
-      #              description states it at this same commit, `pytest -q
-      #              tests_runtime/` is 453 and the neutral conformance
-      #              corpus is 17 of 17.
+      #              adjudicator. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 453 there and the neutral conformance
+      #              corpus 17 of 17.
+      #  304 passed  at `build/3-6-repository-act` `f85ebaf8` (2026-09-18,
+      #  1 skipped   same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the SIX modules this branch names,
+      #              after round TWENTY-NINE's nine threads: seven defects.
+      #              `os.O_DIRECTORY` is undefined on Windows, so the
+      #              no-follow walk raised `AttributeError` before any
+      #              refusal translation — and the creation path's
+      #              non-`dir_fd` branch made the parents BY PATHNAME, which
+      #              follows an existing `<root>/link` every time. Both now
+      #              REFUSE, by name, on a platform without the primitives. A
+      #              worktree-scoped `filter.<name>.clean` is invisible to
+      #              `--local` and still runs (measured), so both scopes are
+      #              read. The push names its LOCAL destination by the open
+      #              directory the guard walked, closing the re-point window
+      #              this act had registered as residue twice. The
+      #              containment check fails closed. `PureWindowsPath(r"\
+      #              outside")` is root-relative, not absolute, and still
+      #              discards the parent — `root` joins the predicate. The
+      #              drive/UNC branch runs only where git reads it as a
+      #              pathname (on POSIX git reads `C:/repo.git` as scp/SSH).
+      #              And signing is pinned off: `commit.gpgSign` does NOT
+      #              reach `commit-tree` (measured) but `push.gpgSign` DID
+      #              reach the push. THE CURRENT FIGURE for this branch; the
+      #              PR description states it at this same commit and `pytest
+      #              -q tests_runtime/` is 492. THE NEUTRAL CONFORMANCE CORPUS
+      #              WAS NOT RE-RUN at this commit — its harness is
+      #              openxFactory's and was not in this session's workspace;
+      #              17 of 17 at `61973332` stands, and this round changes no
+      #              member of the adapter interface.
+      #  1 skipped   is the live psycopg reproducer carried in from
+      #              `build/3-5-runtime`; see that chain's round-26 entry.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
