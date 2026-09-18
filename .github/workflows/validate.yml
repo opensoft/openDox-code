@@ -1399,9 +1399,24 @@ jobs:
       #              of a bound exception outside `_safe_message(exc)` /
       #              `type(exc)` anywhere in `cli.py` — and § 3.6's
       #              `_settings_and_database` had added a handler that emitted
-      #              `str(exc)`. THE CURRENT FIGURE for this branch; the PR
+      #              `str(exc)`. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 514 there.
+      #  321 passed  at `build/3-6-repository-act` `52d00a37` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — THREE added, answering round
+      #              THIRTY-THREE, and all three are round 32's own rule in
+      #              places it was not applied: `document.corpus` is the
+      #              `Corpus:` trailer and was left out of that list, the
+      #              document KEY is the message's subject line, and
+      #              `initialize_repository` — public, and reached by the API
+      #              with an authenticated DISPLAY NAME — interpolated the
+      #              project id and the actor into the repository's first and
+      #              permanent commit. The guard is before `git init`, because
+      #              "nothing is created" has to be true. And the bind's
+      #              containment re-ask sat outside the refusal boundary, so a
+      #              parent renamed after the bind answered 500 instead of a
+      #              named refusal. THE CURRENT FIGURE for this branch; the PR
       #              description states it at this same commit and `pytest -q
-      #              tests_runtime/` is 514. The neutral conformance corpus
+      #              tests_runtime/` is 517. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
