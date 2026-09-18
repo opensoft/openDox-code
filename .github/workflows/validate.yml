@@ -865,9 +865,26 @@ jobs:
       #              managed-database prerequisite accepted an EMPTY password
       #              (`read` succeeds on an empty line) and would have
       #              provisioned a login role with a blank credential, which
-      #              the bundled bootstrap refuses by name.
+      #              the bundled bootstrap refuses by name. SUPERSEDED by the
+      #              entry below; `pytest -q tests_runtime/` was 291 there.
+      #  181 passed  at `build/3-5-runtime` `bb84c6c6` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — SEVEN added, answering
+      #              rounds THIRTY-FOUR and THIRTY-FIVE. Four in the CLI: the
+      #              served and migration DSNs could select different schemas,
+      #              so a run applied and verified schema A while /readyz and
+      #              the API read schema B; uvicorn logged a failed lifespan
+      #              with the whole conninfo in the traceback while the JSON
+      #              beside it was redacted; and thirteen handlers — Copilot
+      #              named five — put an exception's own text into evidence
+      #              without `_safe_message`, which an AST walk now forbids as
+      #              a shape. Three in the deployment: the compose healthcheck
+      #              dialled `localhost` while the bind host is a setting, the
+      #              Secret subshell's `set -e` did not see a failed left side
+      #              of a pipeline, and the managed-database prerequisite ran
+      #              on after its first SQL error and would provision a role
+      #              with no password.
       #              THE CURRENT FIGURE; the PR description states it at this
-      #              same commit, and `pytest -q tests_runtime/` is 291 here.
+      #              same commit, and `pytest -q tests_runtime/` is 298 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
