@@ -1782,9 +1782,33 @@ jobs:
       #              so reaching it fails — and then drives a value AT the cap
       #              through the real decoder, because over-refusing is the
       #              other way to get this wrong.
+      #              SUPERSEDED by the entry below, which is on a NEW branch
+      #              cut from main after § 3.6 landed; `pytest -q
+      #              tests_runtime/` was 557 there.
+      #  355 passed  at `build/3-7-registered-follow-ups` `6d2b0861` (2026-09-18,
+      #  1 skipped   same python, pytest and git) — SEVEN added here and two in
+      #              the DB-backed half: the follow-ups openDox-code#26
+      #              registered rather than took, each measured against a full
+      #              checkout of `4f8ae01e`. The served DATABASE gets the
+      #              non-secret declaration A25-3 gave the served schema (and
+      #              it is the wider question: `dbname` omitted defaults to the
+      #              connection USER); every install of this package reads one
+      #              measured dependency lock with `-c` (S8544); `_found` wraps
+      #              the ACT and not only the pre-check, so a row deleted in
+      #              the window is a 404 and not the uncaught `NotFoundError`
+      #              measured there; a parameter name is judged by its WORDS
+      #              plus one declared compound, so `passwordless` and
+      #              `secretary` are no longer refused; `GIT_INDEX_FILE` is
+      #              built from `--git-dir` joined onto the held descriptor,
+      #              because the absolute form wrote the index into a DECOY
+      #              when the name was re-pointed after the probe (measured);
+      #              the store names a whitespace-bearing scp authority instead
+      #              of accepting it; and `runtime init` creates the repository
+      #              root 0700, where `Path.mkdir`'s default left it 0755 under
+      #              the container's umask and 0777 under umask 0 (measured).
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 557. The neutral conformance corpus
+      #              tests_runtime/` is 566. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
