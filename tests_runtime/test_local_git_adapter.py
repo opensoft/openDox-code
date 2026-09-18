@@ -3740,3 +3740,110 @@ def test_the_scp_redaction_keeps_no_prefix_of_the_userinfo() -> None:
                   ) == "line one <redacted-url>\nline two kept"
     # And a value that is not a remote at all is untouched.
     assert redact("no credential here /srv/x.git") == "no credential here /srv/x.git"
+
+
+def test_a_ref_whose_parent_is_a_FILE_has_no_write_path(
+        adapter: lga.LocalGitCorpus, repository: Path) -> None:
+    """`refs/heads/foo` is a valid ref, and `refs/heads/foo/bar` cannot exist.
+
+    `_writable_ref_home` walked up "to the nearest ancestor that exists",
+    testing `is_dir()` — so an existing ref FILE at `refs/heads/foo` was walked
+    STRAIGHT PAST to `refs/heads`, which is a directory and is writable, and
+    resolution advertised `write_path_available=True` for a ref git cannot
+    create at all: `update-ref refs/heads/foo/bar` fails because a file is in
+    the way, and it fails only AFTER `write_back` has hashed the blob, written
+    the tree and created the commit — unreachable objects for a refusal the
+    corpus could have made at resolution (Copilot review of openDox-code#26,
+    at `cec91c08`). It is the round-12 finding's own shape, one level down.
+
+    THE PREMISE IS MEASURED FIRST: git really does refuse the nested ref while
+    the file is there, so this is a corpus that cannot be written and not one
+    this adapter is merely pessimistic about.
+    """
+    head = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "update-ref", "refs/heads/foo", head)
+    assert (repository / "refs" / "heads" / "foo").is_file(), (
+        "the ref was packed rather than written loose; the premise is gone")
+    refused = subprocess.run(
+        ["git", "-C", str(repository), "update-ref", "refs/heads/foo/bar",
+         head], capture_output=True, env=_GIT_ENV)
+    assert refused.returncode != 0, (
+        "git created a ref beneath an existing ref file; the premise of this "
+        "case is gone and the walk would be right to pass it")
+
+    (repository / "HEAD").write_text("ref: refs/heads/foo/bar\n",
+                                     encoding="utf-8")
+    corpus = adapter.resolve(
+        ca.CorpusRef(name="blocked", location=str(repository)))
+    assert corpus.write_path_available is False, (
+        "resolution advertised a write path for a ref whose parent is a file")
+
+    # AND THE WRITE IS REFUSED BEFORE ANY OBJECT IS MADE, which is what the
+    # advertisement is for. The object count is the evidence.
+    before = _git(repository, "count-objects", "-v")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.write_back(corpus,
+                           ca.DocumentId(corpus="blocked", key="notes.md"),
+                           b"# later\n", actor=ACTOR, basis_revision=None)
+    assert caught.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+    assert _git(repository, "count-objects", "-v") == before, (
+        "objects were written for a ref that can never be created")
+
+    # AND THE SAME NESTING WITH NO FILE IN THE WAY IS STILL WRITABLE, so what
+    # this refuses is the wall and not the nesting.
+    (repository / "HEAD").write_text("ref: refs/heads/topic/bar\n",
+                                     encoding="utf-8")
+    assert adapter.resolve(
+        ca.CorpusRef(name="free", location=str(repository))
+    ).write_path_available is True
+
+
+def test_the_walk_modes_only_what_it_made_itself(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The comment said "ONLY WHAT THIS WALK JUST MADE" and the code did not.
+
+    A26-5 gave the created components an explicit `0o700`, because `os.mkdir`'s
+    default is the ambient umask and at `umask 000` the repository root and
+    everything under it was world-writable. The `fchmod` that settles the mode
+    sat AFTER the `except FileExistsError: pass` — the branch for "another
+    process got there first" — so a directory this walk did NOT create was
+    re-moded to `0o700` anyway: a concurrent owner's directory (an operator's
+    own mount point among them) silently narrowed by a service that only meant
+    to make its own (Copilot review of openDox-code#26, at `cec91c08`).
+
+    DRIVEN AND NOT ARGUED: `os.mkdir` is replaced by one that really creates
+    the directory — as the concurrent process would — with a mode of its own,
+    and then raises `FileExistsError` exactly as the kernel would for the loser
+    of that race. The window is otherwise unreachable from a test.
+    """
+    import errno
+    import stat
+
+    made_by_somebody_else = 0o755
+    real_mkdir = os.mkdir
+
+    def _lost_the_race(path, mode=0o777, *, dir_fd=None):
+        real_mkdir(path, made_by_somebody_else, dir_fd=dir_fd)
+        raise FileExistsError(errno.EEXIST, "File exists", str(path))
+
+    previous = os.umask(0)                # so the mode asked for is the mode set
+    try:
+        target = tmp_path / "theirs" / "deeper"
+        monkeypatch.setattr(os, "mkdir", _lost_the_race)
+        handle = lga.open_no_follow_chain(target, create=True)
+        os.close(handle)
+        for made in (tmp_path / "theirs", target):
+            assert stat.S_IMODE(os.stat(made).st_mode) == made_by_somebody_else, (
+                f"{made} was re-moded by a walk that did not create it")
+
+        # AND THE HALF A26-5 ADDED IS UNCHANGED: what this walk really does
+        # create is still 0o700, whatever the umask is.
+        monkeypatch.undo()
+        ours = tmp_path / "ours" / "deeper"
+        handle = lga.open_no_follow_chain(ours, create=True)
+        os.close(handle)
+        for made in (tmp_path / "ours", ours):
+            assert stat.S_IMODE(os.stat(made).st_mode) == \
+                lga.CREATED_DIRECTORY_MODE, made
+    finally:
+        os.umask(previous)

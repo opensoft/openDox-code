@@ -431,6 +431,7 @@ def open_no_follow_chain(directory: Path, *, create: bool = False) -> int:
             except FileNotFoundError:
                 if not create:
                     raise
+                made = True
                 try:
                     # THE MODE IS DECLARED HERE TOO — this is the walk that
                     # makes the configured ROOT and any missing ancestor of it,
@@ -444,14 +445,23 @@ def open_no_follow_chain(directory: Path, *, create: bool = False) -> int:
                 except FileExistsError:
                     # Another process got there first. The open below is the
                     # check that what it made is a real directory and not a
-                    # link, so the race needs no second decision here.
-                    pass
+                    # link, so the race needs no second decision here — but it
+                    # is NOT this walk's directory, and that is what `made`
+                    # records.
+                    made = False
                 nxt = os.open(component, flags, dir_fd=handle)
                 # ONLY WHAT THIS WALK JUST MADE. A component that already
                 # existed belongs to whoever made it — an operator's own
                 # mount point among them — and re-chmoding somebody else's
-                # directory would be a different act from creating one.
-                os.fchmod(nxt, CREATED_DIRECTORY_MODE)
+                # directory would be a different act from creating one. The
+                # sentence was true of the component that was already there
+                # when the walk looked, and FALSE of the one that appeared
+                # between the failed `os.open` and the `os.mkdir`: that path
+                # reached the `fchmod` anyway and re-moded a concurrent
+                # owner's directory to 0o700 (Copilot review of
+                # openDox-code#26, at `cec91c08`).
+                if made:
+                    os.fchmod(nxt, CREATED_DIRECTORY_MODE)
             os.close(handle)
             handle = nxt
     except BaseException:
@@ -2169,6 +2179,26 @@ class LocalGitCorpus:
         ref = self._served_ref(git, subject)
         home = common_dir / Path(ref).parent
         while not home.is_dir() and home != common_dir:
+            # AN EXISTING NON-DIRECTORY IS A WALL AND NOT A MISSING ANCESTOR.
+            # `refs/heads/foo` is a perfectly valid ref FILE, and a HEAD naming
+            # `refs/heads/foo/bar` then walked straight past it to `refs/heads`
+            # — which is a directory, and writable — so this advertised an
+            # available write path for a ref `update-ref` cannot create at all
+            # (git refuses a directory where a ref file is). `write_back` then
+            # hashed the blob, wrote the tree and created the commit before
+            # failing, which is the same forbidden discovery order the round-12
+            # finding was about, one shape along (Copilot review of
+            # openDox-code#26, at `cec91c08`).
+            #
+            # `os.path.lexists` and not `.exists()`: a DANGLING symlink is a
+            # name git will not write through either, and `.exists()` follows
+            # the link and answers False for it.
+            if os.path.lexists(home):
+                raise _refuse(
+                    CORPUS_UNREADABLE, subject,
+                    f"the served ref {ref!r} cannot be written: "
+                    f"{home.name!r} already exists and is not a directory, so "
+                    "git can create nothing beneath it")
             home = home.parent
         return home
 

@@ -2168,10 +2168,15 @@ def test_the_push_names_a_destination_it_holds_open(
     real_check = act._refuse_a_destination_this_service_owns
 
     def _check_then_swap(destinations, location):
-        real_check(destinations, location)
+        # THE REAL CHECK'S ANSWER IS RETURNED, because it is one: the guard
+        # reports the IDENTITY of each destination it approved, and the push
+        # carries that to the open. A harness that dropped it would be testing
+        # a push with the identity guard disabled.
+        answer = real_check(destinations, location)
         checked.append(os.readlink(link))
         link.unlink()
         link.symlink_to(sibling, target_is_directory=True)
+        return answer
 
     monkeypatch.setattr(act, "_refuse_a_destination_this_service_owns",
                         _check_then_swap)
@@ -2180,7 +2185,11 @@ def test_the_push_names_a_destination_it_holds_open(
     assert checked == [str(outside)], (
         "the guard did not run against the destination outside the root, so "
         "this test measured a refusal it would have made anyway")
-    assert "at the moment it was opened" in str(caught.value), caught.value
+    # THE IDENTITY GUARD ANSWERS FIRST, and says the more precise thing: the
+    # object opened is not the object checked. The containment re-check on the
+    # open object stays as the backstop for a caller that does not carry the
+    # identity, and the case below drives it directly.
+    assert "another when it was opened" in str(caught.value), caught.value
     assert subprocess.run(
         ["git", "-C", str(sibling), "rev-parse", "--verify", "--quiet",
          f"refs/heads/{act.DEFAULT_BRANCH}"],
@@ -2659,3 +2668,161 @@ def test_the_repository_tree_is_not_readable_by_whatever_the_umask_allows(
     # the act's own first commit is there and readable by this process.
     assert _git(location, "log", "-1", "--format=%s").startswith(
         "Create the repository for project")
+
+
+def test_the_push_refuses_a_swap_between_two_places_it_does_not_own(
+        store, project, project_repository_root: Path, tmp_path: Path,
+        monkeypatch) -> None:
+    """A→B, with BOTH outside the root — the case containment cannot answer.
+
+    Round 30's fix re-asks the containment question of the OPEN object, which
+    closes the swap into a path this service owns. It cannot close a swap
+    between two places it does NOT own: external repository A and external
+    repository B are both outside the root, so the check passes at the name
+    and passes again at the descriptor, and the push lands in B while the map
+    row and the API response both name A — a corpus delivered to a destination
+    of nobody's choosing, reported as success (Copilot review of
+    openDox-code#26, at `cec91c08`).
+
+    The answer is IDENTITY and not containment: the guard reports `(st_dev,
+    st_ino)` for what it approved, and `os.fstat` on the descriptor the push
+    will actually write through reports what was opened. A descriptor cannot
+    be raced — it refers to an object, not to a name.
+    """
+    act.create_repository(store, project_id=project.id,
+                          root=project_repository_root, actor=ACTOR)
+    first = tmp_path / "governed-a.git"
+    second = tmp_path / "governed-b.git"
+    for where in (first, second):
+        subprocess.run(["git", "init", "-q", "--bare", str(where)], check=True,
+                       env=_GIT_ENV)
+    link = tmp_path / "destination"
+    link.symlink_to(first, target_is_directory=True)
+    act.attach_remote(store, project_id=project.id, remote_url=str(link))
+
+    # BOTH DESTINATIONS ARE OUTSIDE THE ROOT, which is the premise: measured,
+    # not assumed, because a test whose premise is false measures nothing.
+    root = Path(project_repository_root).resolve()
+    for where in (first, second):
+        assert root not in where.resolve().parents
+
+    seen: list[str] = []
+    real_check = act._refuse_a_destination_this_service_owns
+
+    def _check_then_swap(destinations, location):
+        answer = real_check(destinations, location)
+        seen.append(os.readlink(link))
+        link.unlink()
+        link.symlink_to(second, target_is_directory=True)
+        return answer
+
+    monkeypatch.setattr(act, "_refuse_a_destination_this_service_owns",
+                        _check_then_swap)
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.push_to_remote(store, project_id=project.id)
+    assert seen == [str(first)], (
+        "the guard did not run against the first destination, so the swap "
+        "was not the thing this test measured")
+    assert "another when it was opened" in str(caught.value), caught.value
+    # AND THE REFUSAL NAMES NEITHER PLACE, because a value that changed under
+    # the act is not one a refusal can honestly quote.
+    assert str(second) not in str(caught.value)
+
+    # NOTHING REACHED EITHER REPOSITORY. `second` is the one the link pointed
+    # at when the push would have run; `first` is the one of record.
+    for where in (first, second):
+        assert subprocess.run(
+            ["git", "-C", str(where), "rev-parse", "--verify", "--quiet",
+             f"refs/heads/{act.DEFAULT_BRANCH}"],
+            capture_output=True, env=_GIT_ENV).returncode != 0, where
+
+    # AND THE ROW IS AS IT WAS — the refusal is before the push and before any
+    # write, so the map still records the destination it recorded.
+    assert store.repository_for_project(project.id).remote_url == str(link)
+
+    # WITHOUT THE SWAP the same link, the same guard and the same handle push
+    # into the destination of record, so the refusal above is the race and not
+    # the mechanism.
+    monkeypatch.setattr(act, "_refuse_a_destination_this_service_owns",
+                        real_check)
+    link.unlink()
+    link.symlink_to(first, target_is_directory=True)
+    act.push_to_remote(store, project_id=project.id)
+    assert subprocess.run(
+        ["git", "-C", str(first), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{act.DEFAULT_BRANCH}"],
+        capture_output=True, env=_GIT_ENV).returncode == 0
+    assert subprocess.run(
+        ["git", "-C", str(second), "rev-parse", "--verify", "--quiet",
+         f"refs/heads/{act.DEFAULT_BRANCH}"],
+        capture_output=True, env=_GIT_ENV).returncode != 0
+
+
+def test_a_directory_that_appears_after_the_preflight_is_not_adopted(
+        store, project, project_repository_root: Path,
+        monkeypatch) -> None:
+    """The exclusive `mkdir` DETECTED the race and the code then ignored it.
+
+    `refuse_unusable_location` allows two states — an empty directory this act
+    may adopt, and nothing at all — and `FileExistsError` from the exclusive
+    `mkdir` means something different in each. The branch treated both as the
+    first, so for a location the preflight found ABSENT another process could
+    create an ordinary empty directory in the window, and this act opened it,
+    passed the emptiness check and initialized a repository in a directory it
+    did not create: the documented exclusive-create guarantee quietly not kept
+    (Copilot review of openDox-code#26, at `cec91c08`).
+
+    THE WINDOW IS DRIVEN: `os.mkdir` is replaced by one that really creates the
+    directory — as the other process would — and then raises the error the
+    kernel gives the loser. Nothing else can reach that window from a test.
+    """
+    import errno
+
+    location = Path(project_repository_root) / project.id
+    assert not location.exists(), "the preflight must find this absent"
+
+    real_mkdir = os.mkdir
+
+    def _somebody_else_creates_it(path, mode=0o777, *, dir_fd=None):
+        if path == location.name and dir_fd is not None:
+            real_mkdir(path, 0o755, dir_fd=dir_fd)
+            raise FileExistsError(errno.EEXIST, "File exists", str(path))
+        return real_mkdir(path, mode, dir_fd=dir_fd)
+
+    # `os.supports_dir_fd` is a membership test on the FUNCTION OBJECT, and
+    # the act refuses a platform whose `mkdir` is not in it — so the double
+    # has to be declared capable, or this case would measure the
+    # platform refusal instead of the race.
+    monkeypatch.setattr(os, "supports_dir_fd",
+                        set(os.supports_dir_fd) | {_somebody_else_creates_it})
+    monkeypatch.setattr(os, "mkdir", _somebody_else_creates_it)
+    with pytest.raises(act.RepositoryActRefused) as caught:
+        act.create_repository(store, project_id=project.id,
+                              root=project_repository_root, actor=ACTOR)
+    assert "created it while this repository was being made" in str(caught.value)
+
+    # NOTHING WAS INITIALIZED IN IT — the intruder's directory is still an
+    # ordinary empty directory and not a repository.
+    assert location.is_dir()
+    assert list(location.iterdir()) == [], location
+    # The map row goes back with the CALLER'S transaction, which is this act's
+    # documented contract and is what the refusal says in terms.
+    assert "rolled back with the caller's transaction" in str(caught.value), (
+        "the refusal must say what becomes of the row, like every other "
+        "refusal this act makes after the row is written")
+
+    # AND THE DOCUMENTED CASE IS UNTOUCHED: a directory that was ALREADY there
+    # and empty when the preflight looked is still adopted, `FileExistsError`
+    # and all. A second project, because the row above is only rolled back by
+    # a caller this test is standing in for.
+    monkeypatch.undo()
+    other = store.create_project(slug="second", title="Second",
+                                 created_by=project.created_by)
+    store.create_membership(user_id=project.created_by, project_id=other.id,
+                            role="owner")
+    waiting = Path(project_repository_root) / other.id
+    waiting.mkdir(parents=True)
+    row = act.create_repository(store, project_id=other.id,
+                                root=project_repository_root, actor=ACTOR)
+    assert Path(row.location) == waiting
+    assert (waiting / "HEAD").is_file(), "the repository was not initialized"

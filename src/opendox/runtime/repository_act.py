@@ -489,8 +489,15 @@ def repository_location(root: str | os.PathLike[str], project_id: str) -> Path:
 REPOSITORY_DIRECTORY_MODE = 0o700
 
 
-def refuse_unusable_location(location: Path) -> None:
+def refuse_unusable_location(location: Path) -> bool:
     """Refuse a path that is not an empty (or absent) directory, BY NAME.
+
+    Returns whether the location was THERE when it was asked — an empty
+    directory this act may adopt (`True`) or nothing at all (`False`). The
+    caller needs that answer to tell one `FileExistsError` from another: see
+    `initialize_repository`, where "it was absent a moment ago and exists now"
+    is a race and "it was an empty directory and still is" is the documented
+    case.
 
     Two different refusals with one rule: a path collision (`location` is a
     regular file, which made `iterdir()` raise `NotADirectoryError` and reach
@@ -560,6 +567,7 @@ def refuse_unusable_location(location: Path) -> None:
                 "something else. Remove it, or map the project to it "
                 "deliberately — this act will not adopt a directory nobody "
                 "can account for.")
+    return present
 
 
 def corpus_ref_for(row: Any, *, name: str | None = None) -> CorpusRef:
@@ -684,7 +692,7 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
                 "into this repository's first commit message and identity, "
                 "where a newline forges a line a reader of the durable history "
                 "cannot tell from the act's own; nothing is created")
-    refuse_unusable_location(location)
+    was_there = refuse_unusable_location(location)
     try:
         # INSIDE the `try`: a permission error or a non-directory parent from
         # `mkdir` used to escape as `PermissionError`/`NotADirectoryError` and
@@ -755,7 +763,26 @@ def initialize_repository(location: str | os.PathLike[str], *, project_id: str,
                     # the name is what makes it race-free.
                     os.mkdir(leaf, REPOSITORY_DIRECTORY_MODE, dir_fd=parent)
                 except FileExistsError:
-                    pass
+                    # AND "IT EXISTS" IS TWO DIFFERENT ANSWERS. The preflight
+                    # allows an EMPTY DIRECTORY this act may adopt, and for
+                    # that one this exception is expected and means nothing.
+                    # For a location the preflight found ABSENT it is the race
+                    # the exclusive `mkdir` exists to detect: another process
+                    # created an ordinary empty directory in the window, this
+                    # branch swallowed the error, the emptiness check below
+                    # passed, and the act initialized a repository in a
+                    # directory it did not create — the documented exclusive
+                    # guarantee quietly not kept (Copilot review of
+                    # openDox-code#26, at `cec91c08`).
+                    if not was_there:
+                        raise RepositoryActRefused(
+                            f"{location} did not exist when this act checked "
+                            "it and existed a moment later, so something else "
+                            "created it while this repository was being made. "
+                            "Nothing has been initialized: this act creates "
+                            "the directory it uses, and will not adopt one "
+                            "that appeared under it; the map row is rolled "
+                            "back with the caller's transaction.") from None
                 owned = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY
                                 | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
                 os.fchmod(owned, REPOSITORY_DIRECTORY_MODE)
@@ -1476,8 +1503,9 @@ def _destination_as_a_local_path(destination: str,
     return named if named.is_absolute() else Path(location) / named
 
 
-def _refuse_a_destination_this_service_owns(destinations: tuple[str, ...],
-                                            location: Any) -> None:
+def _refuse_a_destination_this_service_owns(
+        destinations: tuple[str, ...],
+        location: Any) -> dict[str, tuple[int, int] | None]:
     """Refuse a push aimed INSIDE this service's own repository root.
 
     The act accepts a local destination by design — a governed factory is a
@@ -1499,7 +1527,19 @@ def _refuse_a_destination_this_service_owns(destinations: tuple[str, ...],
     registry — that this act does not have. What is closed is the one
     destination this service can reach WITHOUT any credential of the operator's
     at all: its own.
+
+    AND IT RETURNS THE IDENTITY OF WHAT IT CHECKED — `(st_dev, st_ino)` per
+    local destination, or `None` where nothing was there — so the push can
+    prove it opened THE SAME OBJECT. This function judges a NAME, and a name
+    is not a thing: an allowed EXTERNAL symlink repointed from repository A to
+    repository B between this check and the open passes the containment test
+    both times, because B is outside the root as surely as A was, and the push
+    lands in B while the row and the response name A (Copilot review of
+    openDox-code#26, at `cec91c08`). The service-owned case was closed by
+    re-asking containment of the OPEN object; this closes the external case,
+    which containment cannot answer.
     """
+    checked: dict[str, tuple[int, int] | None] = {}
     owned = Path(location).parent
     for destination in destinations:
         try:
@@ -1521,6 +1561,7 @@ def _refuse_a_destination_this_service_owns(destinations: tuple[str, ...],
             resolved = path.expanduser().resolve()
             root = owned.resolve()
             here = Path(location).resolve()
+            checked[destination] = _identity_of(resolved)
         except (OSError, RuntimeError, ValueError) as exc:
             # FAIL CLOSED. This `continue` said "unreadable: other guards
             # answer", and no other guard answers THIS question: a local
@@ -1540,9 +1581,38 @@ def _refuse_a_destination_this_service_owns(destinations: tuple[str, ...],
                 "root this service owns, which is this project's own "
                 "repository or another project's. A push moves the project "
                 "into a GOVERNED destination; re-attach a remote that is one")
+    return checked
 
 
-def _bound_local_destination(destination: str | None, location: Any):
+def _identity_of(resolved: Path) -> tuple[int, int] | None:
+    """`(st_dev, st_ino)` — WHICH OBJECT this is, not what it is called.
+
+    `None` where nothing is there: a destination that does not exist yet is
+    not an error here (the open that follows is what refuses it), and "there
+    was nothing, and now there is something" is itself a mismatch the caller
+    must see rather than a missing answer.
+
+    `os.stat` and not `os.lstat`, because `resolved` has already been through
+    `Path.resolve()`: the link chain is gone and the last component IS the
+    object. Every other `OSError` propagates deliberately — the caller has this
+    inside the translation that makes an unresolvable destination a named
+    refusal, and a containment check that cannot be made is a refusal.
+    """
+    try:
+        st = os.stat(resolved)
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+#: `_bound_local_destination`'s "nobody told me what was checked". Distinct
+#: from `None`, which is a real answer: the destination WAS checked and there
+#: was nothing there.
+_NOT_CHECKED = object()
+
+
+def _bound_local_destination(destination: str | None, location: Any, *,
+                             checked: Any = _NOT_CHECKED):
     """A LOCAL push destination named by an OPEN DIRECTORY, where the OS allows.
 
     THE WINDOW THIS CLOSES (Copilot review of openDox-code#26, round 29): the
@@ -1581,6 +1651,25 @@ def _bound_local_destination(destination: str | None, location: Any):
             f"without following a link ({type(exc).__name__}); nothing is "
             "pushed") from exc
     try:
+        # AND IT IS THE OBJECT THE GUARD CHECKED, asked of the OPEN
+        # DESCRIPTOR. Containment answers "is this inside the root this
+        # service owns", and for two EXTERNAL destinations the answer is `no`
+        # both times — so a symlink repointed from external repository A to
+        # external repository B between the check and this open passed every
+        # test and the push landed in B while the row and the response named A
+        # (Copilot review of openDox-code#26, at `cec91c08`). `os.fstat` on
+        # the handle cannot be raced: it reports the object this descriptor
+        # refers to, and that is the object `--receive-pack` will write into.
+        if checked is not _NOT_CHECKED:
+            seen = os.fstat(handle)
+            if (seen.st_dev, seen.st_ino) != checked:
+                raise RepositoryActRefused(
+                    "this project's remote named one place when it was "
+                    "checked and another when it was opened, so the "
+                    "destination of record and the destination this push "
+                    "would reach are not the same object. Nothing is pushed; "
+                    "the remote is not echoed, because a value that changed "
+                    "under the act is not one this refusal can name")
         for base in ("/proc/self/fd", "/dev/fd"):
             if os.path.isdir(base):
                 bound = f"{base}/{handle}"
@@ -1720,7 +1809,7 @@ def _push_to_remote_with(git: GitRunner, row: Any) -> str:
 
     # AND IT IS NOT A PLACE THIS SERVICE OWNS. Checked after the two agree, so
     # the value judged is the one git would use and the one the map records.
-    _refuse_a_destination_this_service_owns(
+    checked = _refuse_a_destination_this_service_owns(
         tuple(url for url in (configured, effective, row.remote_url) if url),
         row.location)
 
@@ -1781,7 +1870,12 @@ def _push_to_remote_with(git: GitRunner, row: Any) -> str:
         # have already been proved equal above, so naming the handle loses
         # nothing and closes that window. A network destination still pushes to
         # `REMOTE_NAME`, which is the value all three agree on.
-        handle, bound = _bound_local_destination(effective, row.location)
+        # AND THE IDENTITY THE GUARD ABOVE CHECKED TRAVELS WITH IT, so the
+        # object that was judged is the object that is written to. Without it
+        # the window is real for an EXTERNAL destination, which containment
+        # cannot close: both A and B are outside the root.
+        handle, bound = _bound_local_destination(
+            effective, row.location, checked=checked.get(effective))
         try:
             runner = (dataclasses.replace(git, extra_fd=handle)
                       if handle is not None else git)
