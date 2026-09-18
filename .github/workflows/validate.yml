@@ -1264,7 +1264,7 @@ jobs:
       #              before it opens the path, a Windows drive or UNC share
       #              is a PATH and was read as scp syntax, and a relative
       #              destination is the REPOSITORY's rather than this
-      #              process's. THE CURRENT FIGURE for this branch; the PR
+      #              process's. SUPERSEDED (see below); the PR
       #              description states it at this same commit, `pytest -q
       #              tests_runtime/` was 446 and the neutral conformance
       #              corpus 17 of 17. SUPERSEDED by the entry below.
@@ -1279,8 +1279,8 @@ jobs:
       #              value in a 403 body, ahead of every redaction the acts
       #              apply. Both messages there name the RULE now, and the
       #              session mismatch one message over still names the STORED
-      #              project and not the requested one. THE CURRENT FIGURE
-      #              for this branch; the PR description states it at this
+      #              project and not the requested one. SUPERSEDED (see
+      #              below); the PR description stated it at this
       #              same commit, `pytest -q tests_runtime/` was 449 and the
       #              neutral conformance corpus 17 of 17. SUPERSEDED below.
       #  276 passed  at `build/3-6-repository-act` `61973332` (2026-09-17,
@@ -1414,9 +1414,27 @@ jobs:
       #              "nothing is created" has to be true. And the bind's
       #              containment re-ask sat outside the refusal boundary, so a
       #              parent renamed after the bind answered 500 instead of a
-      #              named refusal. THE CURRENT FIGURE for this branch; the PR
-      #              description states it at this same commit and `pytest -q
-      #              tests_runtime/` is 517. The neutral conformance corpus
+      #              named refusal. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 517 there.
+      #  323 passed  at `build/3-6-repository-act` `50142b0c` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — FIVE added, answering an
+      #              INDEPENDENT ADVERSARIAL REVIEW of `cec91c08` rather than a
+      #              Copilot round. `git config --includes` defaults OFF when a
+      #              config FILE is named, so `[include] path = extra.cfg` hid
+      #              every executed key from the push guard and every driver
+      #              from `_emptied_filters` while git ran them anyway — two
+      #              BLOCKING findings and one word. The refusal half of the
+      #              credential rule consulted one of the redactor's three
+      #              patterns, and that one is positionally anchored, so
+      #              `host=db password=hunter2 dbname=x` was stored verbatim
+      #              and redacted on read-back; it asks the redactor itself
+      #              now. The scp redaction kept a prefix of the userinfo. And
+      #              the store's permissions were whatever umask the process
+      #              inherited — 0777 at umask 000 — now 0700/0600 under every
+      #              umask, declared and enforced.
+      #              THE CURRENT FIGURE for this branch; the PR description
+      #              states it at this same commit and `pytest -q
+      #              tests_runtime/` is 522. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
