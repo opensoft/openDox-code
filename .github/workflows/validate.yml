@@ -1030,8 +1030,35 @@ jobs:
       #              the served schema by name and refuses; and
       #              `OPENDOX_OIDC_LEEWAY_SECONDS` was unbounded, which is
       #              `exp` switched off by a number.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 317 there.
+      #  197 passed  at `build/3-5-runtime` `2c3e9bae` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — ONE added here and two
+      #              more in the DB-backed half, answering the FIVE open
+      #              threads in one batch. `schema_selected_by` took the FIRST
+      #              `-c search_path=` where libpq takes the LAST (measured:
+      #              `-csearch_path=old -csearch_path=new` then `show
+      #              search_path` prints `new`), so a DSN assembled by
+      #              appending an override was read as saying what it
+      #              overrode. `database_named_by` read the URI path alone, so
+      #              two URIs naming two databases in the QUERY both answered
+      #              `None` and passed the preflight — measured against
+      #              `PQconninfoParse` itself, where the query beats the path
+      #              and a repeated key takes the last. `/readyz` bounded each
+      #              PHASE and not the total: the real `plan()`/`drift()`
+      #              issue SEVEN statements under three bounds, 7 x 1.5s
+      #              against a declared 3.0s budget, all inside the probe's own
+      #              25s `timeoutSeconds` — so it is one deadline re-applied
+      #              before every statement now, and the probe refuses partway
+      #              rather than answering late. And
+      #              `project_repositories.remote_url` was free text nothing
+      #              judged, so a URL carrying a password was a legal row,
+      #              returned verbatim to every member of the project: refused
+      #              at the store and redacted at the JSON boundary and in the
+      #              object's `repr`, with an ordinary `ssh://git@host/…` left
+      #              exactly as stored.
       #              THE CURRENT FIGURE; the PR description states it at this
-      #              same commit, and `pytest -q tests_runtime/` is 317 here.
+      #              same commit, and `pytest -q tests_runtime/` is 320 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
