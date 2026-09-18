@@ -1675,9 +1675,26 @@ jobs:
       #              an UPDATE, because § 3.5 shut that door — which is § 3.5's
       #              own case, and these are about the row that got in before
       #              any such rule existed.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 549 there.
+      #  345 passed  at `build/3-6-repository-act` `a86dc3a2` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — TWO added here plus the two
+      #              `build/3-5-runtime` brings in by merge. THE BOUND BOUNDED
+      #              ONLY `git`: `child.kill()` left a push's descendants —
+      #              `ssh`, `git-receive-pack` — holding the pipes and
+      #              finishing the remote write behind a refusal whose caller
+      #              had already rolled back. Measured at `555a03c8` with a
+      #              planted slow descendant and it is worse than the finding
+      #              said: 30.0 SECONDS FOR A 0.6-SECOND BOUND, because the
+      #              surviving group holds the streams this reader drains. The
+      #              child leads its own session now and both refusal paths
+      #              SIGKILL and reap the whole group; the clean path
+      #              deliberately does not. The second case pins the mechanism,
+      #              so dropping `start_new_session=True` cannot pass the
+      #              first on a stub whose descendant dies with its parent.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 549. The neutral conformance corpus
+      #              tests_runtime/` is 553. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
