@@ -821,8 +821,18 @@ def attach_project_remote(project_id: str, body: RemoteAttach, store: StoreDep,
         # The credential check happens in the act, so the CLI gets it too; this
         # route only has to let the refusal through as a 409 with a message
         # that never echoes the URL.
-        row = repository_act.attach_remote(store, project_id=project_id,
-                                           remote_url=body.remote_url)
+        #
+        # AND `_found` WRAPS THE ACT, NOT ONLY THE PRE-CHECK ABOVE. The read
+        # above and the act are two statements, and `_local_git_row` takes the
+        # row FOR UPDATE inside the act — so a map row deleted in that window
+        # raised `identity.NotFoundError` past a handler that catches only
+        # `RepositoryActRefused`, and the ordinary disappeared-row race
+        # answered 500 where this API documents 404 (Copilot review of
+        # openDox-code#26, at `db5197d0`, suppressed). The same class as
+        # openDox-code#25 round 10 on the draft-discard path, and the same
+        # repair: the translation belongs on the call that can raise it.
+        row = _found(lambda: repository_act.attach_remote(
+            store, project_id=project_id, remote_url=body.remote_url))
     except repository_act.RepositoryActRefused as exc:
         raise HTTPException(status_code=409,
                             detail={"code": "repository.refused",
@@ -840,7 +850,13 @@ def push_project_repository(project_id: str, store: StoreDep,
                   allowed=("owner",))
     _found(lambda: store.repository_for_project(project_id))
     try:
-        remote_url = repository_act.push_to_remote(store, project_id=project_id)
+        # `_found` AROUND THE ACT, for the reason the attach route states: the
+        # pre-check above and `push_to_remote`'s own locking read are two
+        # statements, and a row deleted between them made `NotFoundError`
+        # escape as a 500 rather than the documented 404 (Copilot review of
+        # openDox-code#26, at `db5197d0`, suppressed).
+        remote_url = _found(lambda: repository_act.push_to_remote(
+            store, project_id=project_id))
     except repository_act.RepositoryActRefused as exc:
         raise HTTPException(status_code=409,
                             detail={"code": "repository.refused",

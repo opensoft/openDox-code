@@ -26,7 +26,19 @@ jobs:
       # unchanged — is declared once, in the `test` extra, and read from here
       # rather than copied here.
       - name: install the package and its test extra
-        run: python -m pip install -e ".[test]"
+        # `-c` LOCKS THE RESOLVED VERSIONS. Without it this required check
+        # installs whatever the index resolves to on the day it runs, so the
+        # same commit tested twice is two different programs and a dependency
+        # can change under a green light (SonarCloud `githubactions:S8544`,
+        # advisory here, registered on openDox-code#26 and built in the
+        # follow-up). The file pins and installs nothing, so this step still
+        # installs `.[test]` ALONE — the FastAPI and psycopg entries in it
+        # simply do not apply — and the hermetic property this job exists for
+        # is unchanged.
+        run: >-
+          python -m pip install
+          -c constraints-cpython312-linux.txt
+          -e ".[test]"
 
       # RULED Q-L5 (b′), opensoft/openxFactory#656, 2026-09-10: until the
       # BUILD arc (split-opendox § 3.5/3.6) inverts the openDox → openXdox
@@ -1776,9 +1788,57 @@ jobs:
       #              so reaching it fails — and then drives a value AT the cap
       #              through the real decoder, because over-refusing is the
       #              other way to get this wrong.
+      #              SUPERSEDED by the entry below, which is on a NEW branch
+      #              cut from main after § 3.6 landed; `pytest -q
+      #              tests_runtime/` was 557 there.
+      #  355 passed  at `build/3-7-registered-follow-ups` `6d2b0861` (2026-09-18,
+      #  1 skipped   same python, pytest and git) — SEVEN added here and two in
+      #              the DB-backed half: the follow-ups openDox-code#26
+      #              registered rather than took, each measured against a full
+      #              checkout of `4f8ae01e`. The served DATABASE gets the
+      #              non-secret declaration A25-3 gave the served schema (and
+      #              it is the wider question: `dbname` omitted defaults to the
+      #              connection USER); every install of this package reads one
+      #              measured dependency lock with `-c` (S8544); `_found` wraps
+      #              the ACT and not only the pre-check, so a row deleted in
+      #              the window is a 404 and not the uncaught `NotFoundError`
+      #              measured there; a parameter name is judged by its WORDS
+      #              plus one declared compound, so `passwordless` and
+      #              `secretary` are no longer refused; `GIT_INDEX_FILE` is
+      #              built from `--git-dir` joined onto the held descriptor,
+      #              because the absolute form wrote the index into a DECOY
+      #              when the name was re-pointed after the probe (measured);
+      #              the store names a whitespace-bearing scp authority instead
+      #              of accepting it; and `runtime init` creates the repository
+      #              root 0700, where `Path.mkdir`'s default left it 0755 under
+      #              the container's umask and 0777 under umask 0 (measured).
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 566 there.
+      #  357 passed  at `build/3-7-registered-follow-ups` `4767ceb7` (2026-09-18,
+      #  1 skipped   same python, pytest and git) — TWO added, after the review
+      #              at `4df3701c` found the same defect in both deployments:
+      #              a served-DATABASE declaration defaulting to EMPTY beside a
+      #              server that CREATES a named one. Compose declared
+      #              `${OPENDOX_PG_DB:-}` next to `POSTGRES_DB:
+      #              ${OPENDOX_PG_DB:-opendox}`, and the Kubernetes base left
+      #              `pg_database=` empty with NEITHER overlay setting it, so
+      #              the guard the entry above added was a no-op in every shape
+      #              that ships. One expression for compose's two services; the
+      #              base declares what its own StatefulSet hardcodes; the
+      #              managed-database overlay carries the commented edit beside
+      #              its `runtime_pg_role` one. Also: the image made
+      #              `/var/lib/opendox/projects` with `mkdir -p` — 0755 under a
+      #              `RUN` layer's umask — and `runtime init` does not re-mode a
+      #              root it did not create, so `install -d -m 0700` moves that
+      #              to the layer that owns it; and `docs/runtime.md`'s
+      #              old-head procedure now creates its own extraction
+      #              directory. The comment at `local_git_adapter.py:2104` is
+      #              corrected and nothing there behaves differently: an
+      #              absolute `--git-dir` DOES arise, for a linked worktree,
+      #              measured — that repair is a ruled separate act.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 557. The neutral conformance corpus
+      #              tests_runtime/` is 568. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
@@ -2005,7 +2065,9 @@ jobs:
       # The step above uses the same form for the same reason.
       - name: install the package with the runtime and test extras
         run: >-
-          python -m pip install --only-binary :all: -e ".[runtime,test]"
+          python -m pip install --only-binary :all:
+          -c constraints-cpython312-linux.txt
+          -e ".[runtime,test]"
 
       - name: pytest (runtime, database-backed)
         env:

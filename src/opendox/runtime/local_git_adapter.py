@@ -2078,8 +2078,50 @@ class LocalGitCorpus:
             # `<location>/.git` for a checkout and `<location>` itself for the
             # BARE repository the act creates — so it is asked for rather than
             # assumed.
-            git_dir = Path(decoded_path(
-                git.out("rev-parse", "--absolute-git-dir")))
+            #
+            # ASKED AS A RELATIVE NAME AND JOINED ONTO THE HELD DIRECTORY,
+            # because `--absolute-git-dir` is a PATHNAME and this method's
+            # whole guarantee is that the check and the use are one object.
+            # Every other call here goes through `-C /proc/self/fd/<n>`; the
+            # index did not, so a rename or replacement of the location
+            # between this probe and the index operations put the index — and
+            # its `unlink` — somewhere else (Copilot review of
+            # openDox-code#26, at `4156f233`). MEASURED on git 2.43.0 with the
+            # directory renamed away and a symlink to a second repository put
+            # in its place after the handle was opened: the absolute form
+            # wrote `opendox-index-…` into the DECOY and the descriptor-
+            # relative form wrote it into the real repository.
+            #
+            # `--git-dir` ASKED THROUGH `-C` IS RELATIVE for the two shapes
+            # this act creates and serves most — measured on the same git: `.`
+            # for a bare repository and `.git` for a checkout — so joining it
+            # onto `git.root` keeps the whole path inside the descriptor.
+            #
+            # AND FOR A LINKED WORKTREE IT IS NOT, WHICH THIS COMMENT USED TO
+            # DENY. It said an absolute answer "cannot arise for a repository
+            # this act writes to". That is FALSE, and measured false on git
+            # 2.43.0: `git -C <worktree> rev-parse --git-dir` answers the
+            # absolute `<main>/.git/worktrees/<name>`, and
+            # `test_a_linked_worktree_can_reach_its_write_path` — landed with
+            # § 3.6 — serves exactly that shape WRITABLE and drives
+            # `write_back` through it (Copilot review of openDox-code#30). So
+            # the branch below is live for a supported corpus, and for it the
+            # index is still bound to a PATHNAME: the race this act closes for
+            # the other two shapes remains open there.
+            #
+            # IT IS NOT CLOSED HERE, DELIBERATELY. A linked worktree has TWO
+            # directories — its own gitdir, which holds the index, and the
+            # common directory `--git-common-dir` names, which holds `objects/`
+            # and `refs/` — so binding it means holding two more descriptors
+            # and threading them through this method; and the other answer,
+            # serving linked worktrees read-only, reverses a decision § 3.6
+            # landed with its own case. RULED a separate act (the holder, on
+            # openDox-code#30): bind by descriptor, keep them writable. This
+            # comment is the truth in the meantime, which is the one thing a
+            # comment owes.
+            named_git_dir = Path(decoded_path(git.out("rev-parse", "--git-dir")))
+            git_dir = (named_git_dir if named_git_dir.is_absolute()
+                       else git.root / named_git_dir)
             # A UNIQUE NAME PER CALL. Keyed on the process id alone, two
             # concurrent writes to the same repository in ONE process shared
             # `GIT_INDEX_FILE`: their `read-tree`/`update-index`/`write-tree`
