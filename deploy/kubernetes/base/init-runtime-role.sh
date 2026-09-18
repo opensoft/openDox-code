@@ -51,6 +51,25 @@ fi
 runtime_user="${OPENDOX_RUNTIME_PG_USER:-opendox_runtime}"
 migration_owner="${OPENDOX_MIGRATION_PG_USER:-$POSTGRES_USER}"
 
+# AND THE MIGRATION OWNER HAS TO EXIST, because `alter default privileges for
+# role %I` names it and this script creates only the SERVED role. Documented as
+# an alternate owner, `OPENDOX_MIGRATION_PG_USER` set to a role nobody had
+# provisioned made that statement fail under `ON_ERROR_STOP=1` on a fresh
+# volume — the stack could not initialize, and the message was PostgreSQL's
+# rather than one naming the variable (Copilot review of openDox-code#25,
+# round 30). The bundled path does not create it: an alternate owner is
+# externally provisioned, with its own credential, which is what this refusal
+# says.
+if ! psql -tAqX --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+      -v owner="$migration_owner" \
+      -c "select 1 from pg_roles where rolname = :'owner'" | grep -q '^1$'; then
+  echo "init-runtime-role: OPENDOX_MIGRATION_PG_USER names '$migration_owner'," \
+       "which this database does not have. The bundled first start creates the" \
+       "SERVED role only; an alternate migration owner is provisioned" \
+       "externally, with its own credential, before this container starts." >&2
+  exit 1
+fi
+
 # THE PASSWORD IS NEVER AN ARGUMENT. `-v runtime_password=…` puts it in
 # `psql`'s argv, where `ps`, `/proc/<pid>/cmdline` and any host tooling that
 # reads process tables can see it — for the whole life of the command, on a
@@ -73,9 +92,41 @@ select format('grant connect on database %I to %I', current_database(),
 \gexec
 select format('grant usage on schema public to %I', :'runtime_user')
 \gexec
-select format('grant select, insert, update, delete on all tables in schema '
-              'public to %I', :'runtime_user')
+-- THE COORDINATION TABLES THAT ALREADY EXIST, and only those. A database
+-- migrated before this prerequisite ran already holds them, and a `grant … on
+-- table` for one that is absent is an error — so the list is a JOIN against
+-- the catalogue rather than seven statements, and it emits NOTHING on a fresh
+-- database. It used to read `on all tables in schema public`, which on a
+-- REUSED database handed the served role another application's data (Copilot
+-- review of openDox-code#25, round 30). The names are Q1's six plus the
+-- ledger; `tests_runtime/test_deploy_shape.py` derives them from
+-- `identity.TABLES` and `migrations.LEDGER_TABLE` so this list cannot drift.
+select format('grant select, insert, update, delete on table %I to %I',
+              c.relname, :'runtime_user')
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = 'public' and c.relkind = 'r'
+   and c.relname = any (array['drafts', 'memberships',
+                              'opendox_schema_migrations',
+                              'project_repositories', 'projects', 'sessions',
+                              'users'])
 \gexec
+
+-- NO `GRANT … ON ALL TABLES IN SCHEMA public`, deliberately. It used to be
+-- here, and on a REUSED or managed database it handed the served role
+-- select/insert/update/delete on every table that schema already held —
+-- another application's data, which the migration preflight explicitly
+-- tolerates being there (Copilot review of openDox-code#25, round 30). It was
+-- not even doing the job it looked like it was doing: at first start the six
+-- coordination tables DO NOT EXIST YET, so that grant could only ever reach
+-- tables this install did not create.
+--
+-- The `alter default privileges` below is the whole grant, and it is exactly
+-- the narrow one: every table the MIGRATION OWNER creates from here on, which
+-- is the six and the ledger and nothing else. MEASURED on postgres 16.15 —
+-- with the broad grant removed, a table created afterwards by the owner
+-- carries `DELETE, INSERT, SELECT, UPDATE` for the served role, and a table
+-- created by anybody else carries none.
 select format('alter default privileges for role %I in schema public grant '
               'select, insert, update, delete on tables to %I',
               :'migration_owner', :'runtime_user')

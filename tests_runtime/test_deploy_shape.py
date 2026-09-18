@@ -767,8 +767,16 @@ def test_the_readiness_probe_allows_the_endpoints_own_budgets() -> None:
     """
     deployment = _load_yaml(KUBERNETES / "base" / "opendox-deployment.yaml")
     probe = _containers(deployment)[0]["readinessProbe"]
+    # THE STATEMENT BOUND IS PART OF THE BUDGET NOW. The first two cover
+    # waiting to GET a connection and fetching the key set; neither says how
+    # long a statement may then take, and `select 1` behind a lock could
+    # outlast the whole probe (Copilot review of openDox-code#25, round 30,
+    # suppressed). `/readyz` sets `statement_timeout` for its own transaction,
+    # so the third term is real and is read from the module that declares it.
     budget = (_declared_seconds("db.py", "DEFAULT_CHECKOUT_TIMEOUT_SECONDS")
-              + _declared_seconds("oidc.py", "DEFAULT_JWKS_TIMEOUT_SECONDS"))
+              + _declared_seconds("oidc.py", "DEFAULT_JWKS_TIMEOUT_SECONDS")
+              + _declared_seconds("app.py",
+                                  "READINESS_STATEMENT_TIMEOUT_SECONDS"))
     assert probe["timeoutSeconds"] > budget, (
         f"the readiness probe's timeout ({probe['timeoutSeconds']}s) leaves "
         f"nothing over the endpoint's own dependency budgets ({budget}s); a "
@@ -802,7 +810,7 @@ def test_the_runbook_makes_the_managed_database_role_an_explicit_prerequisite(
 
     for statement in ("create role", "grant connect on database",
                       "grant usage on schema public",
-                      "grant select, insert, update, delete on all tables",
+                      "grant select, insert, update, delete on table %i",
                       "alter default privileges"):
         assert statement in script.lower(), (
             f"{statement!r} is no longer what the bundled bootstrap does; the "
@@ -1499,7 +1507,11 @@ def test_no_documented_apply_reaches_the_cluster_with_the_placeholder_image(
     block: list[str] = []
     for line in runbook.splitlines():
         if line.startswith("```"):
-            block = [] if line.startswith("```sh") else block
+            # `sh` OR `bash`: the install blocks are fenced `bash` because
+            # `read -rs -p` is not POSIX (round 30), and a scanner that knew
+            # only `sh` would have stopped seeing them the moment that was
+            # corrected — reading the guard from a stale block.
+            block = [] if line.startswith(("```sh", "```bash")) else block
             continue
         if "kubectl apply" in line and "kustomize build" in line:
             seen += 1
@@ -1609,3 +1621,91 @@ def test_the_secret_block_is_fail_fast_and_its_set_e_is_not_defeated() -> None:
     apply_at = runbook.index(
         "kustomize build deploy/kubernetes/overlays/dev | kubectl apply")
     assert runbook.index('[ "${secrets_created:-1}" -ne 0 ]') < apply_at
+
+
+def test_the_bootstrap_grants_the_coordination_tables_and_no_others() -> None:
+    """Least privilege, and the table list is DERIVED rather than restated.
+
+    THE FINDING (Copilot review of openDox-code#25, round 30, on both copies of
+    the script and on the runbook): `grant … on all tables in schema public`
+    hands the served role select/insert/update/delete on every table that
+    schema already holds — another application's data on a reused or managed
+    database, which the migration preflight explicitly tolerates being there.
+    It was not even doing the job it looked like it was doing: at first start
+    the coordination tables do not exist yet, so that grant could only ever
+    reach tables this install did not create.
+
+    THE REPLACEMENT IS TWO NARROW HALVES, and both are measured on postgres
+    16.15 rather than reasoned about:
+
+      * `alter default privileges for role <owner>` covers every table the
+        MIGRATION OWNER creates from then on — measured: a table the owner
+        creates afterwards carries `DELETE, INSERT, SELECT, UPDATE` for the
+        served role, and a table created by anybody else carries none;
+      * a JOIN against the catalogue grants the coordination tables that
+        ALREADY exist, for a database migrated before the prerequisite ran —
+        measured: with `projects` and `unrelated_app` both present it emitted
+        exactly `grant … on table projects …`, and the unrelated table ended
+        with zero grants for the served role.
+
+    THE LIST IS DERIVED HERE, from `identity.TABLES` and
+    `migrations.LEDGER_TABLE`, so a seventh coordination table cannot be added
+    to the schema and left out of the grant — which is the failure the broad
+    grant was hiding.
+    """
+    from opendox.runtime import identity, migrations
+
+    expected = sorted(set(identity.TABLES) | {migrations.LEDGER_TABLE})
+    runbook = (ROOT / "docs" / "runtime.md").read_text(encoding="utf-8")
+    script = (COMPOSE / "init-runtime-role.sh").read_text(encoding="utf-8")
+
+    for name, text in (("init-runtime-role.sh", script),
+                       ("docs/runtime.md", runbook)):
+        assert "on all tables in schema " not in text.replace(
+            "`on all tables in schema public`", ""), (
+            f"{name} still grants the served role every table in the schema")
+        listed = re.search(r"c\.relname = any \(array\[(.*?)\]\)", text,
+                           re.S)
+        assert listed, f"{name} has no derived coordination-table list"
+        names = sorted(re.findall(r"'([a-z_]+)'", listed.group(1)))
+        assert names == expected, (
+            f"{name} grants {names}; the coordination tables are {expected}")
+        assert "alter default privileges" in text, (
+            f"{name} drops the grant that covers the tables the migration "
+            f"owner has yet to create")
+
+
+def test_the_readiness_probe_bounds_its_own_statements() -> None:
+    """The probe's budget covers waiting for a connection AND using it.
+
+    THE FINDING (Copilot review of openDox-code#25, round 30, suppressed): the
+    budget bounded the pool checkout and the JWKS fetch, and `Database.
+    connection(timeout=…)` sets no statement or socket timeout — so once a
+    connection was in hand, a lock or a stalled server could hold `select 1`
+    past `timeoutSeconds`, kubelet would cut the probe off, and the next probe
+    would overlap it. The comment above the endpoint claimed the full budget
+    was covered.
+
+    `SET LOCAL` IN AN EXPLICIT TRANSACTION, and that shape is measured rather
+    than idiomatic: a session-level `set statement_timeout` on a POOLED
+    connection survived the checkout it was made in — a later checkout of the
+    same connection still read `1234ms` — so the bound would have leaked onto
+    whatever request borrowed that connection next. And the value is
+    interpolated because `SET` takes no bind parameter: `set local
+    statement_timeout = %s` is a `SyntaxError` from PostgreSQL, measured.
+    """
+    source = (ROOT / "src" / "opendox" / "runtime" / "app.py").read_text(
+        encoding="utf-8")
+    executed = 'conn.execute("set local statement_timeout = "'
+    assert executed in source, (
+        "the readiness path no longer bounds its own statements")
+    assert "READINESS_STATEMENT_TIMEOUT_SECONDS" in source
+    # THE EXECUTED FORM, not the comment that quotes it: this file's own rule
+    # about measuring the thing rather than the sentence about it.
+    local_at = source.index(executed)
+    opened = source.rindex("with conn.transaction():", 0, local_at)
+    assert local_at - opened < 400, (
+        "`SET LOCAL` outside a transaction is a no-op with a warning, and a "
+        "session-level SET leaks onto the next borrower of a pooled connection")
+    assert 'conn.execute("set statement_timeout' not in source, (
+        "a session-level statement timeout leaks out of the checkout")

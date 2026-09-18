@@ -251,6 +251,20 @@ class AppContext:
         self.verifier = verifier
 
 
+#: How long ANY ONE statement the readiness probe runs may take.
+#:
+#: The probe's `timeoutSeconds` is derived from one pool-checkout wait plus the
+#: JWKS timeout — which bounds how long it waits to GET a connection, and said
+#: nothing about how long a statement could then take. A lock or a stalled
+#: server made `select 1` outlast the whole budget, kubelet cut the probe off,
+#: and the next one overlapped it (Copilot review of openDox-code#25, round 30,
+#: suppressed). Three seconds: a readiness question this runtime cannot answer
+#: in three seconds is one whose answer is "not ready", and
+#: `tests_runtime/test_deploy_shape.py` derives the deployment's
+#: `timeoutSeconds` from this and the other two.
+READINESS_STATEMENT_TIMEOUT_SECONDS = 3.0
+
+
 def _context(request: Request) -> AppContext:
     # ANNOTATED `Request` AND NOT `Any`, and it is load-bearing: FastAPI reads
     # a dependency's annotations to decide where each argument comes from, and
@@ -1002,49 +1016,72 @@ def create_app(*, settings: RuntimeSettings | None = None,
         # `plan()` and `drift()` pass one through to it now.
         try:
             with app.state.context.database.connection() as conn:
-                conn.execute("select 1")
-                checks["database"] = "ok"
-                try:
-                    # THE PINNED CANONICAL FILE IS VERIFIED BEFORE THE PLAN IS
-                    # CALCULATED. `plan()` and `drift()` compare the ledger
-                    # with what `discover()` FINDS, and `discover()` returns
-                    # `[]` for a migrations directory that exists and is empty
-                    # — so an image that lost `0001`, or a wrong
-                    # `OPENDOX_MIGRATIONS_DIR`, made both answers empty on a
-                    # FRESH database and readiness reported `schema: applied`
-                    # and admitted traffic to an install with no coordination
-                    # schema at all (Copilot review of openDox-code#25).
-                    # `verify_canonical_digest` is the same gate `apply()` runs
-                    # first and `status` reports, and it refuses an absent
-                    # `0001` as loudly as a changed one.
-                    migrations.verify_canonical_digest(
-                        app.state.context.settings.migrations_dir)
-                    runner = migrations.MigrationRunner(
-                        app.state.context.database,
-                        migrations_dir=(
-                            app.state.context.settings.migrations_dir))
-                    pending = [m.version for m in runner.plan(conn)]
-                    drifted = runner.drift(conn)
-                    if pending:
-                        checks["schema"] = (
-                            "pending: " + ",".join(pending)
-                            + " — run `opendox-runtime runtime migrate`")
+                # AND THE STATEMENTS ARE BOUNDED TOO, not only the checkout.
+                # The probe's `timeoutSeconds` was derived from ONE checkout
+                # wait plus the JWKS timeout, which bounds how long it waits to
+                # GET a connection and says nothing about how long a statement
+                # may then take: a lock, or a stalled server, and `select 1`
+                # alone could outlast the whole budget, so kubelet cut the
+                # probe off and started an overlapping one (Copilot review of
+                # openDox-code#25, round 30, suppressed).
+                #
+                # `SET LOCAL` IN AN EXPLICIT TRANSACTION, and that is measured
+                # rather than idiomatic: a session-level `set statement_timeout`
+                # on a POOLED connection survived the checkout it was made in
+                # — a later checkout of the same connection still read `1234ms`
+                # — so the bound would have leaked onto whatever request
+                # borrowed it next. `SET LOCAL` ends with the transaction.
+                # THE VALUE IS INTERPOLATED, because `SET` takes no bind
+                # parameter: `set local statement_timeout = %s` is a
+                # `SyntaxError` from PostgreSQL, measured. It is an `int()` of
+                # a float constant declared in this module and can be nothing
+                # else.
+                with conn.transaction():
+                    conn.execute("set local statement_timeout = "
+                                 f"{int(READINESS_STATEMENT_TIMEOUT_SECONDS * 1000)}")
+                    conn.execute("select 1")
+                    checks["database"] = "ok"
+                    try:
+                        # THE PINNED CANONICAL FILE IS VERIFIED BEFORE THE PLAN IS
+                        # CALCULATED. `plan()` and `drift()` compare the ledger
+                        # with what `discover()` FINDS, and `discover()` returns
+                        # `[]` for a migrations directory that exists and is empty
+                        # — so an image that lost `0001`, or a wrong
+                        # `OPENDOX_MIGRATIONS_DIR`, made both answers empty on a
+                        # FRESH database and readiness reported `schema: applied`
+                        # and admitted traffic to an install with no coordination
+                        # schema at all (Copilot review of openDox-code#25).
+                        # `verify_canonical_digest` is the same gate `apply()` runs
+                        # first and `status` reports, and it refuses an absent
+                        # `0001` as loudly as a changed one.
+                        migrations.verify_canonical_digest(
+                            app.state.context.settings.migrations_dir)
+                        runner = migrations.MigrationRunner(
+                            app.state.context.database,
+                            migrations_dir=(
+                                app.state.context.settings.migrations_dir))
+                        pending = [m.version for m in runner.plan(conn)]
+                        drifted = runner.drift(conn)
+                        if pending:
+                            checks["schema"] = (
+                                "pending: " + ",".join(pending)
+                                + " — run `opendox-runtime runtime migrate`")
+                            ok = False
+                        elif drifted:
+                            # NOTHING PENDING IS NOT THE SAME AS MATCHING THIS
+                            # TREE: a migration whose file changed, or vanished, is
+                            # invisible to `plan()` and is REFUSED by `apply()`.
+                            # Readiness that ignored it called an image the runner
+                            # would not migrate healthy (Copilot review of
+                            # openDox-code#25).
+                            checks["schema"] = "drifted: " + ",".join(drifted)
+                            ok = False
+                        else:
+                            checks["schema"] = "applied"
+                    # reported, never raised at a probe
+                    except Exception as exc:  # noqa: BLE001
+                        checks["schema"] = f"unreadable: {type(exc).__name__}"
                         ok = False
-                    elif drifted:
-                        # NOTHING PENDING IS NOT THE SAME AS MATCHING THIS
-                        # TREE: a migration whose file changed, or vanished, is
-                        # invisible to `plan()` and is REFUSED by `apply()`.
-                        # Readiness that ignored it called an image the runner
-                        # would not migrate healthy (Copilot review of
-                        # openDox-code#25).
-                        checks["schema"] = "drifted: " + ",".join(drifted)
-                        ok = False
-                    else:
-                        checks["schema"] = "applied"
-                # reported, never raised at a probe
-                except Exception as exc:  # noqa: BLE001
-                    checks["schema"] = f"unreadable: {type(exc).__name__}"
-                    ok = False
         # reported, never raised at a probe
         except Exception as exc:  # noqa: BLE001
             checks["database"] = f"unavailable: {type(exc).__name__}"
