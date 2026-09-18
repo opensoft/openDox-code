@@ -82,9 +82,14 @@ from opendox.runtime.config import (
     migration_database_url,
 )
 
-#: The verb set, closed and in lifecycle order. Read by
+#: The `runtime` verb set, closed and in lifecycle order. Read by
 #: `tests_runtime/test_runtime_cli.py` against the parser the module builds.
 VERBS: tuple[str, ...] = ("init", "migrate", "serve", "status", "reset")
+
+#: The `project` verb set — `split-opendox-two-layer-product` § 3.6's
+#: first-class act and the two verbs RULING C3 puts after it. Closed for the
+#: same reason and read by the same test.
+PROJECT_VERBS: tuple[str, ...] = ("create-repository", "attach-remote", "push")
 
 #: What `reset` will not do without being told twice.
 RESET_CONFIRMATION = "yes-drop-the-coordination-database"
@@ -174,13 +179,53 @@ _DSN_SHAPED = re.compile(
     r"""(?:'(?:[^'\\\n]|\\.)*'?|"(?:[^"\\\n]|\\.)*"?|\S+)""")
 
 
-def _safe_message(exc: BaseException) -> str:
+def _safe_message(exc: BaseException, *caller_values: str | None) -> str:
     """An exception's text with every DSN- or credential-shaped run removed.
 
     Applied to EVERY operational message this CLI emits, rather than to the
     ones somebody remembered: the contract is that evidence is redacted.
+
+    THREE PASSES SINCE ROUND 21, and the first is not a pattern at all: a
+    value this CALL was given is removed by identity before any rule is asked,
+    because an identifier is not a shape a rule can recognise.
+
+    TWO PASSES, BECAUSE A CREDENTIAL IS NOT ONLY A DSN. `_DSN_SHAPED` covers a
+    connection string and a `scheme://user:secret@host` run; it says nothing
+    about `?token=…`, which is the other half of the rule
+    `local_git_adapter.redact_credentials` holds — and the repository verbs
+    route caller-controlled text (a project id, a remote URL from a legacy row)
+    through this one helper, so a token in that shape reached the evidence
+    object despite the contract above (Copilot review of openDox-code#26,
+    round 12). One boundary, both halves; `local_git_adapter` is stdlib-only,
+    so this costs the CLI no import weight, and it is imported here rather than
+    at module scope so `opendox.runtime.cli`'s own import graph is what
+    `tests_runtime/test_runtime_surface.py` already measures.
     """
-    return _DSN_SHAPED.sub("<redacted>", str(exc))
+    from opendox.runtime.local_git_adapter import redact_credentials
+
+    # THE FULL REDACTION RUNS FIRST, AND THE DSN PATTERN IS THE FALLBACK.
+    # `_DSN_SHAPED` ends its match at whitespace, so with it applied first a
+    # credential holding a space — `postgresql://u:secret value@host`, the very
+    # shape round 12 widened the userinfo class to catch — was CUT at the
+    # space: `<redacted> value@host`, with half the password printed beside the
+    # marker (Copilot review of openDox-code#26, round 15). The general rule
+    # matches the whole authority, so it goes first and this only has to cover
+    # what it leaves: a DSN with no userinfo at all.
+    text = str(exc)
+    # AND ANY VALUE THIS CALL WAS GIVEN IS REMOVED BEFORE THE PATTERNS RUN.
+    # The patterns recognise URLs and libpq conninfo; a caller-controlled
+    # IDENTIFIER is neither, and the repository verbs hand one to a store whose
+    # `NotFoundError` echoes it — `project attach-remote --project-id
+    # 'user:secret@host/path'` printed `secret` through the generic handler,
+    # because that shape matches no rule here (Copilot review of
+    # openDox-code#26, round 21). This is the same technique the push refusal
+    # already uses for the destination it KNOWS: a value does not have to be
+    # recognised when it is known.
+    for value in caller_values:
+        if value and len(value) >= 2:
+            text = text.replace(repr(value), "<caller value>")
+            text = text.replace(value, "<caller value>")
+    return _DSN_SHAPED.sub("<redacted>", redact_credentials(text))
 
 
 @contextlib.contextmanager
@@ -762,6 +807,134 @@ def cmd_reset(args: argparse.Namespace) -> int:
                  ok=True)
 
 
+# -- § 3.6, the repository-creation act, as CLI verbs ------------------------
+#
+# EVERY `except Exception` BELOW REPORTS THROUGH `_safe_message`. These three
+# verbs catch their own failures so the evidence object can name the verb, and
+# catching before `main()`'s boundary means `main()`'s redaction never runs —
+# so a `str(exc)` here put whatever the driver said straight into the JSON, and
+# a psycopg connection failure says the DSN, password included (Copilot review
+# of openDox-code#26, three times: one thread and two suppressed comments for
+# the same shape in three handlers).
+#
+# AND `RepositoryActRefused` GOES THROUGH IT TOO, which it did not. That
+# message is this act's own and was called secret-free by construction — but it
+# is not: `repository_location` refuses a project id it cannot use as a
+# directory name and ECHOES it, before any database is touched, so
+# `opendox-runtime project create-repository --project-id
+# 'postgresql://u:p@host/x'` printed the password back in the evidence object
+# and into whatever collects it (Copilot review of openDox-code#26, round 10).
+# A message built from caller-supplied text is redacted like any other.
+
+
+def _store_and_settings(args: argparse.Namespace):
+    """The settings, a `Database`, and the transaction the act runs in.
+
+    Returns `(settings, Database)` or an exit code already emitted.
+    """
+    settings = _settings_or_refusal(args)
+    if isinstance(settings, int):
+        return settings, None
+    try:
+        from opendox.runtime.db import Database
+    except ImportError as exc:  # pragma: no cover - the extra is absent
+        return _emit({"verb": args.verb, "refusal": "runtime-extra-missing",
+                      "message": f"{_safe_message(exc)}; install this "
+                                 "package with the `runtime` extra: "
+                                 "pip install '.[runtime]'"},
+                     ok=False), None
+    return settings, Database(settings.database_url)
+
+
+def cmd_create_repository(args: argparse.Namespace) -> int:
+    """Create this project's plain local git repository (RULING C3)."""
+    from opendox.runtime import repository_act
+    from opendox.runtime.identity import CoordinationStore
+
+    settings, database = _store_and_settings(args)
+    if database is None:
+        return int(settings)
+    try:
+        with database, database.transaction() as conn:
+            created = repository_act.create_repository(
+                CoordinationStore(conn), project_id=args.project_id,
+                root=settings.project_repository_root, actor=args.actor)
+            evidence = {"verb": "create-repository",
+                        "project_id": args.project_id,
+                        "adapter": repository_act.ADAPTER_NAME,
+                        "location": str(created.location),
+                        "initial_commit": created.initial_commit}
+    except repository_act.RepositoryActRefused as exc:
+        return _emit({"verb": "create-repository", "refusal": "repository",
+                      "message": _safe_message(exc, args.project_id)},
+                     ok=False)
+    except Exception as exc:  # noqa: BLE001 - reported as evidence, not a traceback
+        return _emit({"verb": "create-repository",
+                      "refusal": type(exc).__name__,
+                      "message": _safe_message(exc, args.project_id)}, ok=False)
+    return _emit(evidence, ok=True)
+
+
+def cmd_attach_remote(args: argparse.Namespace) -> int:
+    """RULING C3: "a remote can be attached later"."""
+    from opendox.runtime import repository_act
+    from opendox.runtime.identity import CoordinationStore
+    from opendox.runtime.local_git_adapter import redact_remote_url
+
+    settings, database = _store_and_settings(args)
+    if database is None:
+        return int(settings)
+    try:
+        with database, database.transaction() as conn:
+            row = repository_act.attach_remote(
+                CoordinationStore(conn), project_id=args.project_id,
+                remote_url=args.remote_url)
+            # REDACTED, like every other value this CLI prints. The act
+            # refuses a credential-bearing URL, so a row written by THIS
+            # runtime carries none — but a row written before that rule
+            # existed can, and the lifecycle contract is that evidence is
+            # redacted, not that it is redacted where we remembered.
+            evidence = {"verb": "attach-remote",
+                        "project_id": args.project_id,
+                        "remote_url": redact_remote_url(row.remote_url),
+                        "note": "no local content changed; the move is a "
+                                "push, not a migration"}
+    except repository_act.RepositoryActRefused as exc:
+        return _emit({"verb": "attach-remote", "refusal": "repository",
+                      "message": _safe_message(exc, args.project_id)},
+                     ok=False)
+    except Exception as exc:  # noqa: BLE001 - same
+        return _emit({"verb": "attach-remote", "refusal": type(exc).__name__,
+                      "message": _safe_message(exc, args.project_id)}, ok=False)
+    return _emit(evidence, ok=True)
+
+
+def cmd_push(args: argparse.Namespace) -> int:
+    """Move the project into a governed factory. RULING C3: this is a PUSH."""
+    from opendox.runtime import repository_act
+    from opendox.runtime.identity import CoordinationStore
+    from opendox.runtime.local_git_adapter import redact_remote_url
+
+    settings, database = _store_and_settings(args)
+    if database is None:
+        return int(settings)
+    try:
+        with database, database.transaction() as conn:
+            remote_url = repository_act.push_to_remote(
+                CoordinationStore(conn), project_id=args.project_id)
+            evidence = {"verb": "push", "project_id": args.project_id,
+                        "pushed_to": redact_remote_url(remote_url),
+                        "note": "a push, not a migration (RULING C3)"}
+    except repository_act.RepositoryActRefused as exc:
+        return _emit({"verb": "push", "refusal": "repository",
+                      "message": _safe_message(exc, args.project_id)},
+                     ok=False)
+    except Exception as exc:  # noqa: BLE001 - same
+        return _emit({"verb": "push", "refusal": type(exc).__name__,
+                      "message": _safe_message(exc, args.project_id)}, ok=False)
+    return _emit(evidence, ok=True)
+
+
 # -- parser -----------------------------------------------------------------
 
 
@@ -825,6 +998,48 @@ def register(subparsers: Any) -> None:
     reset.set_defaults(func=cmd_reset, verb="reset")
 
 
+def register_project(subparsers: Any) -> None:
+    """Attach the `project` command — § 3.6's act and its two successors.
+
+    A SEPARATE COMMAND from `runtime`, because the two are different kinds of
+    thing: `runtime` verbs operate an install (migrate it, serve it, reset it)
+    and `project` verbs act on one project's repository. `opendox.cli` declares
+    no `project` command today (its subcommands are `generate`,
+    `generate-and-open`, `create`, `edit`, `model-binding` and the contributed
+    `gate`), so contributing this name collides with nothing — measured at
+    `src/opendox/cli.py` rather than assumed.
+    """
+    project = subparsers.add_parser(
+        "project",
+        help="acts on one project's repository (split-opendox § 3.6)",
+        description="openDox creates a repository as a first-class act "
+                    "(split-opendox-two-layer-product § 3.6): a PLAIN LOCAL "
+                    "GIT REPOSITORY per project, commits as the write path, a "
+                    "remote attachable later (RULING C3, "
+                    "opensoft/openxFactory#656 comment 5544381563).")
+    verbs = project.add_subparsers(dest="verb", required=True)
+
+    create = verbs.add_parser(
+        "create-repository",
+        help="create this project's repository and write the map row")
+    create.add_argument("--project-id", required=True)
+    create.add_argument("--actor", required=True,
+                        help="who is performing the act; becomes the first "
+                             "commit's author (`Name <address>` is honoured)")
+    create.set_defaults(func=cmd_create_repository, verb="create-repository")
+
+    attach = verbs.add_parser(
+        "attach-remote", help="attach a remote to an existing repository")
+    attach.add_argument("--project-id", required=True)
+    attach.add_argument("--remote-url", required=True)
+    attach.set_defaults(func=cmd_attach_remote, verb="attach-remote")
+
+    push = verbs.add_parser(
+        "push", help="move the project into a governed factory (a push)")
+    push.add_argument("--project-id", required=True)
+    push.set_defaults(func=cmd_push, verb="push")
+
+
 class RuntimeSubcommand:
     """`register`, in an object that conforms to `SubcommandExtension`.
 
@@ -840,6 +1055,20 @@ class RuntimeSubcommand:
         register(subparsers)
 
 
+class ProjectSubcommand:
+    """`register_project`, in an object that conforms to `SubcommandExtension`.
+
+    Same argument as `RuntimeSubcommand`'s, and the same one line at the
+    eventual assembly point: `build_parser(subcommand_extensions=(
+    RuntimeSubcommand(), ProjectSubcommand()))` gives `opendox project
+    create-repository` the spelling § 3.6 names, without this act editing a
+    carved file.
+    """
+
+    def register(self, subparsers: Any) -> None:
+        register_project(subparsers)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The standalone parser `[project.scripts] opendox-runtime` runs.
 
@@ -850,9 +1079,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="opendox-runtime",
         description="The openDox runtime's lifecycle CLI "
-                    "(split-opendox-two-layer-product § 3.5).")
+                    "(split-opendox-two-layer-product § 3.5) and the "
+                    "repository-creation act (§ 3.6).")
     sub = parser.add_subparsers(dest="command", required=True)
     register(sub)
+    register_project(sub)
     return parser
 
 

@@ -445,7 +445,7 @@ jobs:
       # `chore/retire-intent-feed-suites` (#24), whose only hunk in this file
       # is inside that comment block.
       #
-      # WHY THE RUNTIME TESTS ARE SPLIT IN TWO. The five modules named here are
+      # WHY THE RUNTIME TESTS ARE SPLIT IN TWO. The six modules named here are
       # HERMETIC: they import the standard library, `PyYAML` (this package's
       # own base dependency) and the stdlib-only half of `opendox.runtime`, and
       # they read files. They therefore run under THIS job's existing
@@ -461,8 +461,18 @@ jobs:
       # conftest's `collect_ignore` and `tests/conftest.py`'s autouse fixtures
       # are written for a tree that can import `opendox.serve`, and until the
       # BUILD arc repairs that, a file named in this job has to stand on its
-      # own. Each of the five does; `tests_runtime/conftest.py` is read only by
-      # the `runtime` job.
+      # own. Each of the SIX does — this branch's hunk adds
+      # `tests_runtime/test_local_git_adapter.py` to the list below, and this
+      # sentence said "five" after it (Copilot review of openDox-code#26,
+      # round 6, suppressed); `tests_runtime/conftest.py` is read only by the
+      # `runtime` job.
+      #
+      # `tests_runtime/test_local_git_adapter.py` is here too, and it is the
+      # strongest placement § 3.6's proof can have: RULING C3's adapter is
+      # checked against `opendox.corpus_adapter.CorpusAdapter` with `isinstance`
+      # in the REQUIRED job, because the adapter and the interface are both
+      # stdlib-only to import. It does shell out to `git` — present on every
+      # GitHub runner — and skips with the reason printed where there is none.
       #
       # MEASURED, file by file, under this exact invocation before each was
       # named. THE FIGURE MOVES WITH THE TREE, so it is stated with the head
@@ -473,9 +483,9 @@ jobs:
       # description cannot both be the evidence.
       #
       #   87 passed  at `build/3-5-runtime` `8648c119` (2026-09-16,
-      #              python 3.12.3 / pytest 8.4.2) — the five modules § 3.5
-      #              names; `tests_runtime/test_local_git_adapter.py` is not in
-      #              that branch's list because the file arrives with § 3.6.
+      #              python 3.12.3 / pytest 8.4.2) — the FIVE modules § 3.5
+      #              names, without the adapter suite, because that file
+      #              arrives with § 3.6.
       #   97 passed  at `build/3-5-runtime` `a9c6f0d6` (same day, same python
       #              and pytest) — the same five modules. The round that
       #              answered Copilot's fourth review added ten assertions to
@@ -524,14 +534,14 @@ jobs:
       #              canonical gate, and the filename assertion that is now the
       #              runner's own regex rather than a looser restatement.
       #
-      #              READING THIS LIST: the LAST entry is the current figure
-      #              and the PR description states that one at that same
-      #              commit. An earlier entry is the measurement that was
-      #              current when it was written, not a competing claim, and
-      #              SAYS SO in its own words — a reader who lands on one
-      #              entry should not have to reach this note to learn it is
-      #              history (Copilot's round-18 review of the sibling PR
-      #              #26 read a superseded entry as that branch's claim
+      #              READING THIS LIST: the LAST entry for a branch is the
+      #              current figure and the PR description states that one at
+      #              that same commit. An earlier entry is the measurement
+      #              that was current when it was written, not a competing
+      #              claim, and SAYS SO in its own words — a reader who lands
+      #              on one entry should not have to reach this note to learn
+      #              it is history (Copilot review of openDox-code#26, round
+      #              18, which read a superseded entry as the branch's claim
       #              about its own head). The commit that records a figure
       #              changes no test, so each figure also holds at the head
       #              that carries its record.
@@ -586,9 +596,9 @@ jobs:
       #              single-quoted SQL literal, the runbook's claim that the
       #              run checks that prerequisite, and the canonical gate
       #              covering the WHOLE run's bytes before the ledger is
-      #              bootstrapped. SUPERSEDED by a later entry below; the PR
-      #              description stated it at this same commit while it was
-      #              current. ROUND TWELVE'S OTHER TWO
+      #              bootstrapped. SUPERSEDED on `build/3-5-runtime` by a
+      #              later entry below; THAT PR's description stated it at
+      #              this same commit when it was current. ROUND TWELVE'S OTHER TWO
       #              FIXES ARE IN THE DB-BACKED JOB (a run whose served role
       #              was never granted now fails instead of serving, and the
       #              drafts listing bounded in bytes as well as in rows): 223
@@ -678,33 +688,33 @@ jobs:
       #              `pg_class` — the set is compared now), a setting that
       #              promised an OIDC discovery this runtime does not make,
       #              and a migration comment naming a test that does not
-      #              exist. SUPERSEDED by the entry below; the PR
+      #              exist. SUPERSEDED by the entry below; THAT PR's
       #              description stated it at this same commit, and `pytest
       #              -q tests_runtime/` was 236 there.
-      #  135 passed  at `build/3-5-runtime` `01b9876c`
-      #              (2026-09-17, same python and pytest; extras
-      #              unimportable) — the same five modules, after round
-      #              NINETEEN, whose three findings were all measured and
-      #              all real. A libpq password holding a SPACE is quoted,
-      #              and `password\s*=\s*\S+` ends at whitespace, so the
-      #              valid conninfo `password='secret value'` was redacted
-      #              as `<redacted> value'` — half the password beside the
-      #              marker that says it was removed. `search_path`
-      #              resolution asks whether THIS ROLE may use a schema and
-      #              not whether it exists, so an existing `tenant` with no
-      #              `usage` grant passed the round-16 existence probe and
-      #              the run went to `public`; MEASURED on postgres 16.15,
-      #              `pg_namespace` has it, `has_schema_privilege` is false
-      #              and `current_schema()` answers `public`. And the
-      #              compose build context is the whole repository, so a
-      #              filled-in `deploy/compose/.env` — git-ignored, which is
-      #              not a build-context rule — was uploaded to the docker
-      #              daemon on every `--build`; MEASURED with docker server
-      #              29.6.2 by copying the context into a `busybox` image,
-      #              both before (`.env` present) and after (the context is
-      #              the four paths the Dockerfile COPYs), and the real
-      #              image still builds and runs. SUPERSEDED by the entry
-      #              below; `pytest -q tests_runtime/` was 240 there.
+      #  135 passed  at `build/3-5-runtime` `01b9876c` (2026-09-17, same
+      #              python and pytest; extras unimportable) — the same five
+      #              modules, after round NINETEEN, whose three findings were
+      #              all measured and all real. A libpq password holding a
+      #              SPACE is quoted, and `password\s*=\s*\S+` ends at
+      #              whitespace, so the valid conninfo `password='secret
+      #              value'` was redacted as `<redacted> value'` — half the
+      #              password beside the marker that says it was removed.
+      #              `search_path` resolution asks whether THIS ROLE may use
+      #              a schema and not whether it exists, so an existing
+      #              `tenant` with no `usage` grant passed the round-16
+      #              existence probe and the run went to `public` (MEASURED
+      #              on postgres 16.15: `pg_namespace` has it,
+      #              `has_schema_privilege` is false, `current_schema()`
+      #              answers `public`). And the compose build context is the
+      #              whole repository, so a filled-in `deploy/compose/.env` —
+      #              git-ignored, which is not a build-context rule — was
+      #              uploaded to the docker daemon on every `--build`
+      #              (MEASURED with docker server 29.6.2 by copying the
+      #              context into a `busybox` image, before and after, and
+      #              the real image still builds and runs). SUPERSEDED on
+      #              `build/3-5-runtime` by the entry below, which this
+      #              branch also carries; `pytest -q tests_runtime/` was
+      #              240 there.
       #  138 passed  at `build/3-5-runtime` `b9408bf5` (2026-09-17, same
       #              python and pytest; extras unimportable) — the same five
       #              modules, after round nineteen's SUPPRESSED comments:
@@ -725,8 +735,9 @@ jobs:
       #              candidate body — `textoctetlen` reads the varlena
       #              header, so over 200 rows of 1 MiB it costs 0.3 ms
       #              against `count(*)`'s 0.3 ms and `max(md5(body))`'s
-      #              381.9 ms. SUPERSEDED by the entry below; `pytest -q
-      #              tests_runtime/` was 245 there.
+      #              381.9 ms. SUPERSEDED on `build/3-5-runtime` by the
+      #              entry below, which this branch also carries; `pytest
+      #              -q tests_runtime/` was 246 there.
       #  139 passed  at `build/3-5-runtime` `39db0b0f` (2026-09-17, same
       #              python and pytest; extras unimportable) — the same five
       #              modules, after round TWENTY's one finding: `"$user"` is
@@ -737,8 +748,9 @@ jobs:
       #              it skips an absent one — so a schema named for the role,
       #              present and denied, still fell through to `public`. It
       #              goes through the same probe now and is forgiven only for
-      #              not existing. SUPERSEDED by the entry below; `pytest -q
-      #              tests_runtime/` was 246 there.
+      #              not existing. SUPERSEDED on `build/3-5-runtime` by the
+      #              entry below, which this branch also carries; `pytest
+      #              -q tests_runtime/` was 246 there.
       #  141 passed  at `build/3-5-runtime` `8fe2f3fd` (2026-09-17, same
       #              python and pytest; extras unimportable) — the same five
       #              modules, after round TWENTY-TWO's two findings, which
@@ -756,7 +768,8 @@ jobs:
       #              no broker values while the runbook told an operator to
       #              build it, so it rendered a Deployment that fails
       #              `load_settings`; the guard derives the rule from the
-      #              base. SUPERSEDED by the entry below; `pytest -q
+      #              base. SUPERSEDED on `build/3-5-runtime` by the entry
+      #              below, which this branch also carries; `pytest -q
       #              tests_runtime/` was 248 there.
       #  142 passed  at `build/3-5-runtime` `8779a776` (2026-09-17, same
       #              python and pytest; extras unimportable) — the same five
@@ -768,9 +781,10 @@ jobs:
       #              before `load_settings` looked at the port. Exec form for
       #              the first; the second reads the value from `os.environ`
       #              and holds no interpolation — MEASURED with an injected
-      #              value: exit 1, `ValueError`, no marker. SUPERSEDED by
-      #              the entry below; `pytest -q tests_runtime/` was 249
-      #              there.
+      #              value: exit 1, `ValueError`, no marker. SUPERSEDED on
+      #              `build/3-5-runtime` by the entry below, which this
+      #              branch also carries; `pytest -q tests_runtime/` was
+      #              249 there.
       #  144 passed  at `build/3-5-runtime` `65376475` (2026-09-17, same
       #              python and pytest; extras unimportable) — the same five
       #              modules, after round TWENTY-FOUR, which is round 22's
@@ -783,8 +797,9 @@ jobs:
       #              bracket); and `runtime_pg_role` is an edit the
       #              managed-database overlay cannot make, so the Job would
       #              narrow the bundled role while the real served role keeps
-      #              the ledger. SUPERSEDED by the entry below; `pytest -q
-      #              tests_runtime/` was 251 there.
+      #              the ledger. SUPERSEDED on `build/3-5-runtime` by the
+      #              entry below, which this branch also carries; `pytest
+      #              -q tests_runtime/` was 251 there.
       #  145 passed  at `build/3-5-runtime` `a4d0eddf` (2026-09-17, same
       #              python and pytest; extras unimportable) — the same five
       #              modules, after round TWENTY-FIVE's one finding: the
@@ -1094,8 +1109,671 @@ jobs:
       #              LITERALLY named `$user` is skipped too). Both now resolve
       #              what the DSN leaves unsaid, and what cannot be resolved
       #              before connecting is refused rather than assumed equal.
-      #              THE CURRENT FIGURE; the PR description states it at this
-      #              same commit, and `pytest -q tests_runtime/` is 324 here.
+      #              THE CURRENT FIGURE ON `build/3-5-runtime`, which this
+      #              branch carries by merge; THAT PR's description states it
+      #              at this same commit and `pytest -q tests_runtime/` is 324
+      #              there.
+      #
+      #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
+      #              python and pytest, git 2.43.0) — the SIX modules this
+      #              branch names, the sixth being the adapter conformance
+      #              suite described just above. (Copilot's review of #26 read
+      #              this line against a PR description that still said 108,
+      #              which was the figure two heads earlier; the description is
+      #              corrected and both numbers now name their own head.)
+      #  148 passed  at `build/3-6-repository-act` `2f518e5f` (same day, same
+      #              python, pytest and git) — the same six modules, after the
+      #              round that answered Copilot's fourth review on #25 and
+      #              #26 added its assertions to four of them.
+      #  152 passed  at `build/3-6-repository-act` `01531a92` (same day, same
+      #              python, pytest and git) — the same six modules, carrying
+      #              #25's round-5 fixes by merge and adding this branch's own:
+      #              the percent-decoded credential parameter, which both
+      #              halves of the rule now ask ONE predicate about. The
+      #              commits above this one are where they landed; this block
+      #              changes no test, so the figure holds at this head too.
+      #  164 passed  at `build/3-6-repository-act` `378290d9` (same day, same
+      #              python, pytest and git) — the same six modules, carrying
+      #              #25's rounds 5 and 6 by merge and adding this branch's
+      #              round-6 assertions: the decode fixed point, `resolve`
+      #              proving the commit object, a HEAD that is not a branch,
+      #              an option-shaped key, a pathname that is not UTF-8, and an
+      #              embedded NUL.
+      #  167 passed  at `build/3-6-repository-act` `080ef296` (same day, same
+      #              python, pytest and git) — the same six modules, carrying
+      #              #25's rounds 6 and 7 by merge. SUPERSEDED by a later
+      #              entry below; it was stated at the same commit as in the
+      #              PR description while it was current.
+      #  171 passed  at `build/3-6-repository-act` `46f1e5bb` (same day,
+      #              same python, pytest and git) — the same six modules,
+      #              carrying #25's round 8 by merge, and measured with
+      #              the `runtime` extra made UNIMPORTABLE, which is this
+      #              job's own install. SUPERSEDED by a later entry below;
+      #              the PR description stated it at this commit.
+      #  172 passed  at `build/3-6-repository-act` `dd672184` (same day,
+      #              same python, pytest and git; extras unimportable)
+      #              — the same six modules, after the repository
+      #              directory was made an EXCLUSIVE create.
+      #  174 passed  at `build/3-6-repository-act` `57e79746` (same day,
+      #              same python, pytest and git; extras unimportable)
+      #              — the same six modules, after round nine: a NUL
+      #              in a document key, and a corpus failure told
+      #              from a missing document.
+      #  189 passed  at `build/3-6-repository-act` `dff382dd` (same day,
+      #              same python, pytest and git; extras unimportable) —
+      #              the same six modules, carrying #25's round 10 by
+      #              merge (seven of the rise) and adding this branch's
+      #              own eight: a listing filtered to blobs so it agrees
+      #              with `read`, a NUL-carrying revision refused by
+      #              name, the runner's own failure translated at five
+      #              call sites, the initialization bound to the
+      #              directory handle it verified, a space inside a URL
+      #              no longer hiding a credential parameter, a control
+      #              character refused, an over-long URL refused unread,
+      #              and the bracketed-IPv6 pin. SUPERSEDED by a later
+      #              entry below; the PR description stated it at this
+      #              same commit. Round ten's other cases — the command
+      #              transport, the two-URL repair, the `--unset-all`
+      #              status and both redaction paths — are in the
+      #              DB-backed job: 330 passed there at this commit.
+      #  198 passed  at `build/3-6-repository-act` `2006fb8e` (same day,
+      #              same python, pytest and git; extras unimportable) —
+      #              the same six modules, carrying #25's round 11 by
+      #              merge (four of the rise) and adding this branch's own
+      #              five: a pinned revision resolved without HEAD, an
+      #              unreadable location refused rather than raising, the
+      #              write path measured where a write lands, the
+      #              emptiness check and the initialization sharing one
+      #              descriptor, and the CLI's evidence boundary running
+      #              both halves of the credential rule. Round twelve's
+      #              remaining fix — the general remote-helper form refused
+      #              at the attach AND before the push — is in the
+      #              DB-backed job: 342 passed there at this commit.
+      #  219 passed  at `build/3-6-repository-act` `08a99abb` (2026-09-17,
+      #              same python, pytest and git; extras unimportable) —
+      #              the same six modules, carrying #25's round 12 by merge
+      #              and adding this branch's own. THE RULING FIRST (RULED
+      #              openxFactory#656 comment 5714365086): `resolve` pins
+      #              the repository ROOT and refuses a location that is
+      #              INSIDE another repository — which used to resolve, list
+      #              keys it could not read, and COMMIT into that repository
+      #              — and `LocalGitCorpus` grows the three per-corpus
+      #              construction data (`write_path`, `kind_field`,
+      #              `required_fields`, each defaulting to what this class
+      #              already did) with the file-location refusal corrected
+      #              to `corpus-unreadable`. Then round twelve's own: the
+      #              redaction of a credential that holds a SPACE, in both
+      #              halves; the write path answered where a write lands
+      #              (`refs/heads`, and a HEAD `_served_ref` would refuse);
+      #              three probes that raised where a refusal is owed; the
+      #              unborn test limited to branches; the parent chain
+      #              opened `O_NOFOLLOW` component by component; and three
+      #              more named refusals in the act. ALSO FIRST MEASURED
+      #              HERE and corrected in five places: python 3.12's
+      #              `Path.resolve()` raises `RuntimeError` for a symlink
+      #              LOOP, not `OSError`. SUPERSEDED by a later entry
+      #              below; the PR description stated it at this same
+      #              commit. Round twelve's DB-backed cases — the push
+      #              destination rewritten by `pushInsteadOf`, the remote
+      #              carrying only a push URL, and the helper-transport
+      #              message — are in the other job: 369 passed there at
+      #              this commit.
+      #  227 passed  at `build/3-6-repository-act` `b06aa294` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, and
+      #              with NO ambient git config) — the same six modules,
+      #              carrying #25's round 13 by merge and adding this
+      #              branch's own eight: a `pre-push` hook in a project
+      #              repository no longer runs in this runtime's process
+      #              (`-c core.hooksPath=/dev/null` on every invocation);
+      #              an ambient `GIT_DIR`/`GIT_WORK_TREE` can no longer
+      #              outrank `-C`; the helper-transport predicate matches
+      #              what git MEASURABLY does (`9evil::` and `::` were
+      #              missed, `evil_helper::` is ssh and is not one); a
+      #              control character is refused by Unicode CATEGORY and
+      #              not by `isspace()`; `pass` joins the shared credential
+      #              vocabulary; an explicit-revision read revalidates the
+      #              corpus first; two push destinations are refused by
+      #              COUNT rather than by a joined string; and the map row's
+      #              name is re-verified after the history is written, and
+      #              `pytest -q tests_runtime/` is 381 here.
+      #  236 passed  at `build/3-6-repository-act` `338d3050` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, and
+      #              with NO ambient git config — which this round made
+      #              true of the code under test as well as of the suites'
+      #              own `subprocess.run`) — the same six modules, adding
+      #              this branch's round-fourteen nine: `write_back` no
+      #              longer leaks `corpus-unreadable`, a kind it does not
+      #              declare, out of the root re-check; the commit trailer
+      #              names the write path THIS corpus was constructed with;
+      #              a LINKED WORKTREE can reach its write path (its
+      #              `objects/` and `refs/` are the COMMON directory's, and
+      #              `--absolute-git-dir` names neither — measured on git
+      #              2.43.0); the bounded header scan no longer allocates
+      #              the whole document, and is held to `str.splitlines`
+      #              over 2,051 inputs; `expanduser()` is inside the
+      #              translation (`~nosuchuser/x` raises `RuntimeError` on
+      #              python 3.12.3); a legacy remote whose credential spans
+      #              a line is replaced WHOLE, by the caller that holds one
+      #              URL, rather than by widening a pattern that would eat
+      #              unrelated diagnostic lines; the acts that reconfigure
+      #              and push refuse a mapped location INSIDE another
+      #              repository, as `resolve` already does; a refused act
+      #              creates no directory in a linked tree; and the
+      #              post-initialization identity check no longer accepts a
+      #              symlink pointing back at the directory it verified.
+      #              `pytest -q tests_runtime/` is 392 here.
+      #  240 passed  at `build/3-6-repository-act` `e514d8d8` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, carrying
+      #              #25's round FOURTEEN by merge and adding nothing of
+      #              this branch's own: the rise of four is that branch's
+      #              search-path refusal, its printed-invocation sweep and
+      #              its served-role grammar. `pytest -q tests_runtime/` is
+      #              397 here.
+      #  243 passed  at `build/3-6-repository-act` `0f0c4a3d` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after
+      #              rounds FIFTEEN and SIXTEEN: a push can no longer be
+      #              made to run a program the pushed repository's own
+      #              config names (`--receive-pack=git-receive-pack`,
+      #              measured both ways with a planted executable); the
+      #              `-c` channel `GIT_CONFIG_PARAMETERS` is stripped like
+      #              every other repository-selecting override; the root
+      #              re-check and every call after it are ONE OBJECT in the
+      #              adapter and in both acts (a descriptor opened
+      #              `O_NOFOLLOW`, git handed `/proc/self/fd/<n>` — measured
+      #              against the previous head, where a swapped name made
+      #              `write_back` commit into a CLONE and return a receipt);
+      #              a credential holding a space is no longer cut in half
+      #              by the DSN pattern running first; the map pre-check
+      #              catches the store's `NotFoundError` alone; and three
+      #              probes that raised where a refusal is owed. `pytest -q
+      #              tests_runtime/` is 402 here.
+      #  248 passed  at `build/3-6-repository-act` `8a69f712` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              SEVENTEEN: a network operation's OUTPUT is bounded as
+      #              well as its clock (a remote that answers could stream
+      #              for the whole timeout into this process's memory while
+      #              the caller's transaction and row lock were held); every
+      #              operation is bound to an OPEN DIRECTORY rather than to
+      #              a pathname, as `write_back` already was; and a ref name
+      #              is bytes, in all three places this act decodes one. The
+      #              external-diff finding is answered by MEASUREMENT and
+      #              the guard kept: `git diff --name-only` does not run
+      #              `diff.external` or `GIT_EXTERNAL_DIFF` on git 2.43.0 —
+      #              an external driver renders a diff BODY — and the case
+      #              carries the table and is labelled NOT a regression
+      #              test. SUPERSEDED by a later entry below; the PR
+      #              description stated it at this same commit, `pytest -q
+      #              tests_runtime/` was 407 and the neutral conformance
+      #              corpus 17 of 17.
+      #  250 passed  at `build/3-6-repository-act` `c554006e` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, carrying
+      #              #25's round FIFTEEN by merge and adding the two of
+      #              round seventeen's SUPPRESSED comments that were real
+      #              defects: a project id holding a NUL was refused by
+      #              `ValueError` — which this act does not catch — and so
+      #              reached the API as a 500 instead of a named refusal;
+      #              and git's own stderr could still carry a LEGACY row's
+      #              multiline credential, which the credential PATTERN
+      #              cannot match by design, so the push path takes the
+      #              destination it already KNOWS out of the text instead.
+      #              SUPERSEDED by a later entry below; the PR description
+      #              stated it at this same commit, `pytest -q
+      #              tests_runtime/` was 412 and the neutral conformance
+      #              corpus 17 of 17.
+      #  250 passed  at `build/3-6-repository-act` `9858d6a5` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — UNCHANGED, and the same six
+      #              modules: this head carries #25's round SIXTEEN by
+      #              merge, whose two findings — the whole configured
+      #              `search_path` walked rather than only its head, and
+      #              the JWKS cooldown's claim and refresh made ONE lock
+      #              acquisition — are both measured in the DB-backed job.
+      #              SUPERSEDED by a later entry below; the PR description
+      #              stated it at this same commit, `pytest -q
+      #              tests_runtime/` was 413 and the neutral conformance
+      #              corpus 17 of 17.
+      #  253 passed  at `build/3-6-repository-act` `97e86216` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              EIGHTEEN: the bounded push lost its environment (a
+      #              regression this branch's own output cap introduced — it
+      #              ran with four variables and no `PATH`), and a READ
+      #              could still be served from an ENCLOSING repository,
+      #              because a descriptor stops a pathname swap and not
+      #              git's discovery. Aliases are answered by MEASUREMENT
+      #              and the guard kept: on git 2.43.0 an alias that shadows
+      #              a BUILT-IN is ignored, and every command this runner
+      #              invokes is one. SUPERSEDED by the entry below; the PR
+      #              description stated it at this same commit, `pytest -q
+      #              tests_runtime/` was 416 and the neutral conformance
+      #              corpus 17 of 17.
+      #  257 passed  at `build/3-6-repository-act` `81d565a0` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, carrying
+      #              #25's round NINETEEN by merge (three of the four new
+      #              cases here are its) and adding this branch's own: the
+      #              refusal that echoed a project id NOTHING had validated.
+      #              Round 10 answered that site by routing the message
+      #              through the redactors; this round measured that those
+      #              redactors are shaped for URLs and for libpq conninfo and
+      #              do not cover arbitrary caller text — `user:secret@host/
+      #              path` and `//user:pw@h/x` both reach the branch and both
+      #              come back whole — so the act names WHICH rule was broken
+      #              and does not repeat the value. SUPERSEDED by the entry
+      #              below; `pytest -q tests_runtime/` was 421 there.
+      #  259 passed  at `build/3-6-repository-act` `578b0dee` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              nineteen's SUPPRESSED comments and a guard they
+      #              uncovered. This act pushes with `-c
+      #              protocol.ext.allow=never` BEFORE the subcommand, and the
+      #              two readers of that vector disagreed:
+      #              `GitCommandFailed` took `args[0]` and reported `git -c
+      #              exited 128`, which the review found — and under it,
+      #              `_argv` took the first argument not starting with `-`,
+      #              which is the `-c` VALUE, so round 18's `-c
+      #              alias.<subcommand>=` was silently absent on the one call
+      #              that reaches a remote. One rule now, in both places. And
+      #              a ref name is bytes minus ONE newline: `.strip()` also
+      #              removes `\xa0`, which git permits in a branch name, so
+      #              `feature\xa0` was trimmed to a branch that does not
+      #              exist — measured in all three places that decode a ref.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 423 there.
+      #  262 passed  at `build/3-6-repository-act` `9e5301c1` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — UNCHANGED in this branch's own
+      #              code and the same six modules: this head carries #25's
+      #              round-nineteen SUPPRESSED answers by merge, whose three
+      #              new hermetic cases are the whole of the move (a
+      #              readiness probe holding ONE pool checkout, a migration
+      #              wait that ends on the clock, and the managed-database
+      #              overlay). SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 428 there.
+      #  268 passed  at `build/3-6-repository-act` `f5dd586a` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              TWENTY-ONE's ten threads: eight fixed, one already
+      #              answered by the head before it, one registered. A
+      #              DESTINATION'S OWN `pre-receive` ran in this process (git
+      #              2.43.0, measured three ways: plain push RAN, `git -c
+      #              core.hooksPath=/dev/null push` RAN, the option carried
+      #              on `--receive-pack` did NOT and the push still landed);
+      #              a repository-local `credential.helper` was a program
+      #              this runtime executed during a push (measured against a
+      #              401 endpoint), refused rather than overridden so the
+      #              operator's own global helper survives; nothing tied the
+      #              destination to the project, so a push could be aimed at
+      #              a sibling repository under the root this service owns; a
+      #              refusal raised while BINDING took `corpus-unreadable`, a
+      #              kind `write_back` does not declare; `GIT_PROXY_COMMAND`
+      #              was not stripped; a libpq `password=` in a stored remote
+      #              was returned verbatim; a project id was not checked as
+      #              one native path component; and `ValueError` was missing
+      #              from the root's translation. SUPERSEDED by the entry
+      #              below; `pytest -q tests_runtime/` was 439 there.
+      #  269 passed  at `build/3-6-repository-act` `45b7675b` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              TWENTY-TWO: `.strip()` removed more than git wrote at
+      #              the sites that read a PATH, which is round 19's ref-name
+      #              defect one call along. `"project "` is a LEGAL project
+      #              id, so this act creates a location ending in a space —
+      #              and MEASURED against the previous head, `resolve` and
+      #              the act's own root check both REFUSED a repository this
+      #              act had just created, naming the TRIMMED path as the
+      #              repository it is supposedly inside. `decoded_path` is
+      #              one rule for all five sites and removes exactly the one
+      #              newline git wrote; the rest of the ambiguity is closed
+      #              where the name is chosen, by refusing a control
+      #              character in a project id. SUPERSEDED by the entry
+      #              below; `pytest -q tests_runtime/` was 441 there.
+      #  271 passed  at `build/3-6-repository-act` `52b9b74e` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — UNCHANGED in this branch's own
+      #              code and the same six modules: this head carries #25's
+      #              round TWENTY-TWO by merge, whose two new hermetic cases
+      #              are the whole of the move (no broker URL this runtime
+      #              prints can carry a credential, and every applyable
+      #              overlay supplies what the base leaves empty). THE
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 443 there.
+      #  273 passed  at `build/3-6-repository-act` `b41540e4` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              TWENTY-THREE. `check` ran a program the CORPUS named:
+      #              a tracked file with a `filter=` attribute makes `git
+      #              diff --name-only` run that driver's `clean`, because
+      #              deciding whether the file DIFFERS means normalizing it
+      #              (MEASURED: it RAN on this invocation, did not with `-c
+      #              filter.<n>.clean=`, and RAN again with
+      #              `core.attributesfile` emptied — the attribute is the
+      #              repository's). And three ways past round 21's own
+      #              containment check: `file://` is percent-decoded by git
+      #              before it opens the path, a Windows drive or UNC share
+      #              is a PATH and was read as scp syntax, and a relative
+      #              destination is the REPOSITORY's rather than this
+      #              process's. SUPERSEDED (see below); the PR
+      #              description states it at this same commit, `pytest -q
+      #              tests_runtime/` was 446 and the neutral conformance
+      #              corpus 17 of 17. SUPERSEDED by the entry below.
+      #  275 passed  at `build/3-6-repository-act` `b30b46bd` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              TWENTY-FOUR: the AUTHORIZATION answer echoed the path it
+      #              refused. `_require_role` runs before any act has looked
+      #              at the identifier, and this PR's repository routes made
+      #              that reachable with arbitrary text — MEASURED, `GET
+      #              /api/v1/projects/user%3Asecret%40host` returned the
+      #              value in a 403 body, ahead of every redaction the acts
+      #              apply. Both messages there name the RULE now, and the
+      #              session mismatch one message over still names the STORED
+      #              project and not the requested one. SUPERSEDED (see
+      #              below); the PR description stated it at this
+      #              same commit, `pytest -q tests_runtime/` was 449 and the
+      #              neutral conformance corpus 17 of 17. SUPERSEDED below.
+      #  276 passed  at `build/3-6-repository-act` `61973332` (2026-09-17,
+      #              same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the same six modules, after round
+      #              TWENTY-FIVE. Round 21's hook guard was SABOTAGE on a
+      #              network destination: `--receive-pack` is the command
+      #              executed THERE, so `core.hooksPath=<devnull>` disabled a
+      #              governed factory's own `pre-receive` on every SSH or
+      #              HTTPS push — the guard and the sabotage are one string,
+      #              and whose process runs the hooks is what decides. The
+      #              public `initialize_repository` let `ValueError` escape
+      #              for a NUL (the preflight reads such a path as ABSENT, so
+      #              the refusal has to be at the `mkdir`), and a LEGACY row
+      #              holding `file://[bad` raised `ValueError` inside the
+      #              containment check and answered 500. `basis_revision` is
+      #              RULED, not fixed: openxFactory#656 comment 5701772032
+      #              makes it a commit TRAILER and the compare-and-swap the
+      #              adjudicator. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 453 there and the neutral conformance
+      #              corpus 17 of 17.
+      #  304 passed  at `build/3-6-repository-act` `f85ebaf8` (2026-09-18,
+      #  1 skipped   same python, pytest and git; extras unimportable, no
+      #              ambient git config) — the SIX modules this branch names,
+      #              after round TWENTY-NINE's nine threads: seven defects.
+      #              `os.O_DIRECTORY` is undefined on Windows, so the
+      #              no-follow walk raised `AttributeError` before any
+      #              refusal translation — and the creation path's
+      #              non-`dir_fd` branch made the parents BY PATHNAME, which
+      #              follows an existing `<root>/link` every time. Both now
+      #              REFUSE, by name, on a platform without the primitives. A
+      #              worktree-scoped `filter.<name>.clean` is invisible to
+      #              `--local` and still runs (measured), so both scopes are
+      #              read. The push names its LOCAL destination by the open
+      #              directory the guard walked, closing the re-point window
+      #              this act had registered as residue twice. The
+      #              containment check fails closed. `PureWindowsPath(r"\
+      #              outside")` is root-relative, not absolute, and still
+      #              discards the parent — `root` joins the predicate. The
+      #              drive/UNC branch runs only where git reads it as a
+      #              pathname (on POSIX git reads `C:/repo.git` as scp/SSH).
+      #              And signing is pinned off: `commit.gpgSign` does NOT
+      #              reach `commit-tree` (measured) but `push.gpgSign` DID
+      #              reach the push. THE CURRENT FIGURE for this branch; the
+      #              PR description states it at this same commit and `pytest
+      #              -q tests_runtime/` was 492. SUPERSEDED by the entries
+      #              below. THE NEUTRAL CONFORMANCE CORPUS
+      #              WAS NOT RE-RUN at this commit — its harness is
+      #              openxFactory's and was not in this session's workspace;
+      #              17 of 17 at `61973332` stands, and this round changes no
+      #              member of the adapter interface. SUPERSEDED by the entry
+      #              below, which is the same six modules after a merge.
+      #  306 passed  at `build/3-6-repository-act` `67dcbf60` (2026-09-18,
+      #  1 skipped   same python, pytest and git; extras unimportable, no
+      #              ambient git config) — NO CHANGE OF THIS BRANCH'S OWN: the
+      #              merge brings #25's rounds 30 and 31, whose cases are two
+      #              more hermetic and three more in the full suite. Recorded
+      #              because the figure moved, which is the only reason an
+      #              entry is ever added here. THE CURRENT FIGURE for this
+      #              branch; the PR description states it at this same commit
+      #              and `pytest -q tests_runtime/` was 495. SUPERSEDED by the
+      #              entries below. The neutral conformance corpus was not
+      #              re-run; see the entry above.
+      #              SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 495 there.
+      #  308 passed  at `build/3-6-repository-act` `3030d831` (2026-09-18, same
+      #  1 skipped   python, pytest and git; extras unimportable, no ambient
+      #              git config) — after round THIRTY, two of whose five
+      #              threads are about round 29's own answers.
+      #              `NO_FOLLOW_WALK_IS_AVAILABLE` did not require
+      #              `O_NOFOLLOW`, which the walk applies with `getattr(…, 0)`
+      #              — so a platform without it followed every link while the
+      #              constant said the walk was safe — and did not require a
+      #              nameable descriptor, without which `runner_bound_to` fell
+      #              back to the pathname and the same-object guarantee was
+      #              false. Both are in it; the bind raises. THE RACE HAD
+      #              MOVED: the bind re-resolved the NAME, so a symlink
+      #              repointed between the ownership check and the open bound
+      #              the sibling — containment is asked of the OPEN OBJECT
+      #              now. The case that was meant to prove it never drove the
+      #              race and does now. And the multi-destination refusal no
+      #              longer echoes `get-url --push --all` output, which is
+      #              read by LINE and cuts a legacy row's userinfo in half.
+      #              SUPERSEDED by the entry below; the PR description stated
+      #              it at that same commit and `pytest -q tests_runtime/`
+      #              was 498 there. The neutral conformance corpus
+      #              was not re-run; see the entry above. The 1 skipped is the
+      #              live psycopg reproducer carried in from
+      #              `build/3-5-runtime`; see that chain's round-26 entry.
+      #  310 passed  at `build/3-6-repository-act` `b9051b8d` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — SIX added,
+      #              answering rounds THIRTY-ONE and THIRTY-TWO. Two trailer
+      #              values were caller-controlled and unencoded, so
+      #              `A\nWrite-Path: forged` wrote a second, fabricated commit
+      #              trailer and the same newline in `actor` went into the
+      #              author and committer NAMES, which git records verbatim.
+      #              `remote.<name>.vcs` names a remote HELPER off PATH while
+      #              the URL stays ordinary — MEASURED on git 2.43.0 running a
+      #              planted `git-remote-evil`, and running it with `-c
+      #              protocol.ext.allow=never` passed too — and
+      #              `url.<prefix>.insteadOf` reaches the same helper by
+      #              rewriting the destination. The scp credential class
+      #              required no colon before the `@`, so the one form that
+      #              carries a password slipped past it; a `ValueError` from a
+      #              location holding a NUL was a traceback rather than the
+      #              act's refusal; and the push endpoint's 200 path — a
+      #              legacy row's one echo — was covered by nothing.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 504 there.
+      #  320 passed  at `build/3-6-repository-act` `affee88f` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — the six modules, after merging
+      #              `build/3-5-runtime`'s rounds 34-36 in. TEN of the added
+      #              cases are that branch's; the eleventh is this one's own
+      #              defect, found by the walk those rounds brought with them:
+      #              round 35 made the no-credential contract a SHAPE — no use
+      #              of a bound exception outside `_safe_message(exc)` /
+      #              `type(exc)` anywhere in `cli.py` — and § 3.6's
+      #              `_settings_and_database` had added a handler that emitted
+      #              `str(exc)`. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 514 there.
+      #  321 passed  at `build/3-6-repository-act` `52d00a37` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — THREE added, answering round
+      #              THIRTY-THREE, and all three are round 32's own rule in
+      #              places it was not applied: `document.corpus` is the
+      #              `Corpus:` trailer and was left out of that list, the
+      #              document KEY is the message's subject line, and
+      #              `initialize_repository` — public, and reached by the API
+      #              with an authenticated DISPLAY NAME — interpolated the
+      #              project id and the actor into the repository's first and
+      #              permanent commit. The guard is before `git init`, because
+      #              "nothing is created" has to be true. And the bind's
+      #              containment re-ask sat outside the refusal boundary, so a
+      #              parent renamed after the bind answered 500 instead of a
+      #              named refusal. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 517 there.
+      #  323 passed  at `build/3-6-repository-act` `50142b0c` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — FIVE added, answering an
+      #              INDEPENDENT ADVERSARIAL REVIEW of `cec91c08` rather than a
+      #              Copilot round. `git config --includes` defaults OFF when a
+      #              config FILE is named, so `[include] path = extra.cfg` hid
+      #              every executed key from the push guard and every driver
+      #              from `_emptied_filters` while git ran them anyway — two
+      #              BLOCKING findings and one word. The refusal half of the
+      #              credential rule consulted one of the redactor's three
+      #              patterns, and that one is positionally anchored, so
+      #              `host=db password=hunter2 dbname=x` was stored verbatim
+      #              and redacted on read-back; it asks the redactor itself
+      #              now. The scp redaction kept a prefix of the userinfo. And
+      #              the store's permissions were whatever umask the process
+      #              inherited — 0777 at umask 000 — now 0700/0600 under every
+      #              umask, declared and enforced.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 522 there.
+      #  337 passed  at `build/3-6-repository-act` `b736c859` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — the count rises by the fourteen
+      #              `build/3-5-runtime` brought in with its A25 batch and by
+      #              this branch's answer to what that batch's anti-leak walk
+      #              then found HERE: `GitRunner` composed an OS error's text
+      #              and trusted `GitCommandFailed` to clean it a layer later
+      #              (the A25-1 shape), `_write_back_bound` aliased a handler's
+      #              exception into a local the walk cannot follow, and the
+      #              rule itself flagged two correct shapes — a handler that
+      #              catches only this package's own exceptions, and a name
+      #              inside `redact_credentials(str(exc))`.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 540 there.
+      #  339 passed  at `build/3-6-repository-act` `7ed5ee26` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — TWO here and two in the
+      #              DB-backed half, answering all four open threads in one
+      #              batch. A push between two EXTERNAL destinations was
+      #              unguarded, because containment cannot answer it: measured,
+      #              a link repointed the instant the ownership check returned
+      #              sent the corpus to `governed-b.git` while the row named
+      #              `governed-a.git`, so the guard now reports the `(st_dev,
+      #              st_ino)` of what it approved and the push compares it with
+      #              `os.fstat` of the descriptor it writes through.
+      #              `_writable_ref_home` walked PAST an existing ref FILE, so
+      #              a HEAD naming `refs/heads/foo/bar` beside a
+      #              `refs/heads/foo` advertised a write path for a ref git
+      #              cannot create — the blob, the tree and the commit were
+      #              made before it failed. The no-follow walk re-moded a
+      #              directory it did not create when it lost the `mkdir` race
+      #              (0o700 over another owner's 0o755, measured). And
+      #              `create_repository` swallowed the same race, adopting an
+      #              empty directory that appeared after the preflight found
+      #              the location absent.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 544 there.
+      #  341 passed  at `build/3-6-repository-act` `bb450614` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — NO CHANGE OF THIS BRANCH'S OWN
+      #              BEYOND THE MERGE: `build/3-5-runtime`'s five-thread batch
+      #              and its answer to the review at `056d1597` come in, with
+      #              two conflicts resolved by keeping both. `_repository_json`
+      #              redacts on both branches and the merged boundary keeps
+      #              `config.redacted_remote_url`, which removes the secret and
+      #              nothing else, rather than the general redactor written for
+      #              git's stderr. And six cases that wrote a legacy
+      #              credential-bearing row THROUGH the store now write it with
+      #              an UPDATE, because § 3.5 shut that door — which is § 3.5's
+      #              own case, and these are about the row that got in before
+      #              any such rule existed.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 549 there.
+      #  345 passed  at `build/3-6-repository-act` `a86dc3a2` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — TWO added here plus the two
+      #              `build/3-5-runtime` brings in by merge. THE BOUND BOUNDED
+      #              ONLY `git`: `child.kill()` left a push's descendants —
+      #              `ssh`, `git-receive-pack` — holding the pipes and
+      #              finishing the remote write behind a refusal whose caller
+      #              had already rolled back. Measured at `555a03c8` with a
+      #              planted slow descendant and it is worse than the finding
+      #              said: 30.0 SECONDS FOR A 0.6-SECOND BOUND, because the
+      #              surviving group holds the streams this reader drains. The
+      #              child leads its own session now and both refusal paths
+      #              SIGKILL and reap the whole group; the clean path
+      #              deliberately does not. The second case pins the mechanism,
+      #              so dropping `start_new_session=True` cannot pass the
+      #              first on a stub whose descendant dies with its parent.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 553 there.
+      #  346 passed  at `build/3-6-repository-act` `2714f6b1` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — ONE added here and one in the
+      #              DB-backed half, closing a CREDENTIAL EXPOSURE this
+      #              branch's own merge introduced. `bb450614` pointed
+      #              `app._repository_json` at `config.redacted_remote_url`,
+      #              which was written for BROKER URLs and knew neither the
+      #              libpq keyword/value form nor the parameter name `pass` —
+      #              so `host=db password=…`, `?pass=…`, `?sslpassword=…` and
+      #              `host=db sslpassword=…` were all returned VERBATIM to
+      #              every member of the project (measured through the real
+      #              endpoints at `555a03c8`). There is ONE declared list now:
+      #              `config.SECRET_PARAMETER_KEYS`, which `pass` joins and
+      #              from which this module's alternation is BUILT, and one
+      #              `config.LIBPQ_PASSWORD` the adapter holds by identity.
+      #              The two readings differ only in the safe direction, and a
+      #              case states that as a property over a corpus.
+      #              Also in this entry: main merged (§ 3.5 landed SQUASHED,
+      #              so ten add/add conflicts, each resolved to this branch's
+      #              version and each checked for anything main had that this
+      #              branch lacked — nothing).
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 555 there.
+      #  347 passed  at `build/3-6-repository-act` `7977d91e` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — ONE added here, and the one
+      #              declared list of the entry above became ONE REDACTOR.
+      #              Two implementations reading that list still disagreed
+      #              three times, and the case asserting they never disagreed
+      #              PASSED because its corpus held none of the three:
+      #              `?%2574oken=` (decoded once by `config`, to a fixed point
+      #              by the adapter) and a newline in an scp-form userinfo
+      #              (`config` declines a value holding whitespace) came back
+      #              from the map endpoints IN THE CLEAR, and `;` — a
+      #              delimiter to `config` and not to the adapter — made
+      #              `carries_a_credential` answer False, so the act accepted
+      #              an attach the store refused with an error the route does
+      #              not catch: a 500 where a 409 belonged. All three measured
+      #              against a full checkout of `fe421882`.
+      #              `config.redacted_remote_url` is a CALL into
+      #              `redact_remote_url` now, with the API boundary's one
+      #              nuance as an argument; a fourth shape neither reading saw
+      #              — whitespace INSIDE an authority, `user:pa ss@host:path`,
+      #              also measured leaking — is replaced WHOLE at that
+      #              one-URL entry point, where the caller knows it holds one
+      #              value. `redact_credentials` is untouched, so git's stderr
+      #              keeps its lines.
+      #              The added case is the other half: `_stop_the_whole_group`
+      #              looked the pgid up at KILL time, and on a reaped child
+      #              `os.getpgid` raises `ProcessLookupError` (measured,
+      #              CPython 3.12) — so the group survived the refusal. The
+      #              id is captured at `Popen` now, and the case reaps first.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 556 there.
+      #  348 passed  at `build/3-6-repository-act` `727b4769` (2026-09-18, same
+      #  1 skipped   python, pytest and git) — ONE added here, closing this
+      #              batch's OWN regression. `_decoded_parameter_name` decodes
+      #              a parameter name to a fixed point, which is quadratic in
+      #              that name, and its docstring named `repository_act`'s
+      #              length refusal as the bound — true while every path came
+      #              through that refusal. The entry above pointed
+      #              `config.redacted_remote_url` at `redact_remote_url`, and
+      #              a LEGACY `remote_url` row passes no refusal at all, so
+      #              every map read did the work: MEASURED against a full
+      #              checkout of `4156f233`, with the decoder instrumented, a
+      #              9 KB `%2525…` chain cost 0.08 s, 60 KB cost 2.65 s and
+      #              180 KB cost 21.31 s of CPU — per read, per row.
+      #              `MAX_REMOTE_URL_CHARS` moves to `config`, the module both
+      #              readers import (the key list and the libpq pattern are
+      #              there for the same reason), and `repository_act` keeps
+      #              the name by alias. The act refuses a NEW remote longer
+      #              than it; `redact_remote_url` replaces a STORED one longer
+      #              than it WHOLE, so a remote the act accepts is never
+      #              over-redacted and the two numbers cannot drift. The case
+      #              asserts it BY SUBSTITUTION — the decoder is made to raise,
+      #              so reaching it fails — and then drives a value AT the cap
+      #              through the real decoder, because over-refusing is the
+      #              other way to get this wrong.
+      #              THE CURRENT FIGURE for this branch; the PR description
+      #              states it at this same commit and `pytest -q
+      #              tests_runtime/` is 557. The neutral conformance corpus
+      #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
@@ -1104,6 +1782,7 @@ jobs:
           tests_runtime/test_runtime_surface.py
           tests_runtime/test_runtime_cli.py
           tests_runtime/test_deploy_shape.py
+          tests_runtime/test_local_git_adapter.py
           --noconftest
 
   # -------------------------------------------------------------------------

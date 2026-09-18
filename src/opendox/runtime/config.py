@@ -236,14 +236,42 @@ class RuntimeSettings:
 #: its QUERY as easily as in its userinfo — `https://broker/certs?token=…` — and
 #: the userinfo guard looked only at the authority, so that form was accepted
 #: and then printed by `repr(settings)` and by `status` (Copilot review of
-#: openDox-code#25, round 24). `opendox.runtime.local_git_adapter` holds the
-#: same list for the REMOTE rule on the sibling PR, and a case there pins the
-#: two spellings together; this module cannot import it, because that module
-#: does not exist on this branch.
+#: openDox-code#25, round 24).
+#:
+#: THE ONE DECLARATION, SINCE § 3.6 LANDED BESIDE THIS MODULE.
+#: `local_git_adapter` used to hold its own list for the REMOTE rule, and the
+#: two drifted: this one lacked `pass`, so a legacy row spelled
+#: `https://host/r.git?pass=hunter2` was returned verbatim by
+#: `GET /api/v1/project-repositories` while the adapter's redactor hid it
+#: (Copilot review of openDox-code#26, at `555a03c8`). That module now builds
+#: its pattern FROM this tuple, so there is one list and two readings of it —
+#: see `names_a_secret_parameter` for the difference, which is deliberate and
+#: is only ever in the direction of the adapter hiding MORE.
+#: THE LONGEST REMOTE THIS RUNTIME ACCEPTS, OR PRINTS IN PART. One declaration
+#: and two readings, and it lives here because `config` is the module both of
+#: them import. NOT a style rule: the credential predicate decodes each
+#: parameter name to a fixed point, which is quadratic in that name's length,
+#: and `remote_url` is caller-controlled — so a nested `%2525…` chain of
+#: unbounded length is work an attacker chooses for this process (Copilot
+#: review of openDox-code#26, round 10, suppressed). Two kilobytes is the
+#: conventional URL ceiling and is far above any real remote.
+#:
+#: THE SECOND READING WAS ADDED BECAUSE THE FIRST STOPPED BEING ENOUGH.
+#: `repository_act.refuse_credential_bearing_remote` refuses a NEW remote
+#: longer than this, which bounded the decoder as long as everything reaching
+#: it had passed that refusal. Pointing `redacted_remote_url` at the adapter's
+#: redactor put a STORED value on that path for the first time, and a legacy
+#: row — a restore, an older build, `psql` — never passed any refusal, so
+#: every map read of it did the quadratic work (Copilot review of
+#: openDox-code#26, at `4156f233`, suppressed). `local_git_adapter.redact_
+#: remote_url` therefore replaces a longer STORED value whole, which is what
+#: a value that cannot be read as one URL already gets.
+MAX_REMOTE_URL_CHARS = 2048
+
 SECRET_PARAMETER_KEYS = (
     "token", "access_token", "api_key", "apikey", "key", "secret",
-    "password", "passwd", "pwd", "auth", "authorization", "credential",
-    "credentials", "sig", "signature", "session",
+    "pass", "password", "passwd", "pwd", "auth", "authorization",
+    "credential", "credentials", "sig", "signature", "session",
 )
 #: The same list as a SET, because the question is "is this name one of
 #: these", not "does this name contain one of these". The first cut compiled
@@ -262,14 +290,43 @@ _WORD_SEPARATOR = re.compile(r"[^A-Za-z0-9]+")
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
+#: THE NEEDLES LONG ENOUGH TO BE UNAMBIGUOUS INSIDE A LONGER WORD. Whole-word
+#: matching alone answered `sslpassword` — libpq's own keyword, and a query
+#: parameter name a caller can write — as innocent, because it is one word and
+#: is not the word `password` (Copilot review of openDox-code#26, at
+#: `555a03c8`). Six characters is the line: `password`, `passwd`, `secret`,
+#: `token`, `credential`, `signature`, `apikey`, `api_key`, `access_token`,
+#: `authorization` and `credentials` cannot appear inside an innocent
+#: parameter name by accident, while the short ones that CAN — `key` in
+#: `monkey`, `sig` in `sigma`, `auth` in `authority`, `pass` in `passage`,
+#: `pwd` — stay whole-word.
+_LONG_SECRET_NEEDLES = tuple(
+    sorted((key for key in SECRET_PARAMETER_KEYS if len(key) >= 6), key=len))
+
+
 def names_a_secret_parameter(name: str) -> bool:
     """True when a URL parameter's NAME is one of the credential names.
 
-    WHOLE WORDS, for the reason `_SECRET_PARAMETER_WORDS` gives above. The
-    decoded name is what is judged, because `%74oken` is `token`.
+    WHOLE WORDS for the short needles, for the reason
+    `_SECRET_PARAMETER_WORDS` gives above, and SUBSTRINGS for the long ones,
+    for the reason `_LONG_SECRET_NEEDLES` gives. The decoded name is what is
+    judged, because `%74oken` is `token`.
+
+    THIS IS THE NARROWER OF THE TWO READINGS of one declared list.
+    `local_git_adapter` asks the same tuple as a plain alternation, so it
+    matches every name this does and more — `monkey` among them. That
+    difference is deliberate: the adapter redacts git's stderr and a push
+    refusal, where over-redacting costs a word of diagnostic; this answers a
+    CONFIGURATION boundary, where over-refusing costs an install that will not
+    start for a reason that is not true. What must never happen is the other
+    direction — something this calls a secret that the adapter does not — and
+    `test_the_two_readings_of_the_one_list_never_disagree_about_hiding` holds
+    it over a corpus.
     """
-    spaced = _CAMEL_BOUNDARY.sub(" ", name)
-    return any(word.lower() in _SECRET_PARAMETER_WORDS
+    spaced = _CAMEL_BOUNDARY.sub(" ", name).lower()
+    if any(needle in spaced for needle in _LONG_SECRET_NEEDLES):
+        return True
+    return any(word in _SECRET_PARAMETER_WORDS
                for word in _WORD_SEPARATOR.split(spaced) if word)
 
 
@@ -363,6 +420,26 @@ def _redacted_query(query: str) -> str:
     return "".join(parts)
 
 
+#: A LIBPQ KEYWORD/VALUE PASSWORD, in the forms libpq itself accepts. A git
+#: remote is an arbitrary string, and a value such as `host=db password=hunter2`
+#: is neither a URL with userinfo nor a query parameter — so every pattern
+#: above looked straight through it, and `_repository_json` returned it
+#: VERBATIM to every member of the project (Copilot review of openDox-code#26,
+#: at `555a03c8`, on the boundary this branch's own merge had just moved).
+#:
+#: THE ONE DEFINITION: `local_git_adapter._LIBPQ_PASSWORD` is this object, and
+#: this module is where it lives because it is the one the other can import —
+#: the adapter reaches for `config`, never the reverse. libpq documents that a
+#: value containing spaces is single-quoted with `\'` and `\\` escaped inside;
+#: the closing quote is OPTIONAL here and neither quoted form crosses a
+#: newline, because a truncated value must redact MORE rather than less and
+#: must not swallow the next line of a diagnostic. `sslpassword` is named
+#: because `\b` before `password` does not reach it.
+LIBPQ_PASSWORD = re.compile(
+    r"(?i)\b(?:ssl)?password\s*=\s*"
+    r"""(?:'(?:[^'\\\n]|\\.)*'?|"(?:[^"\\\n]|\\.)*"?|\S+)""")
+
+
 def credential_in_a_remote_url(value: str | None) -> str | None:
     """WHAT secret a git remote URL carries, named — or None. Never the value.
 
@@ -404,47 +481,50 @@ def credential_in_a_remote_url(value: str | None) -> str | None:
             return "a password in the URL's authority"
     elif _scp_like_userinfo(value) is not None:
         return "a password in the URL's authority"
+    # AND THE KEYWORD/VALUE FORM, which is neither an authority nor a query.
+    if LIBPQ_PASSWORD.search(value):
+        return "a libpq keyword/value password"
     if _a_secret_parameter_in(split.query + "&" + split.fragment):
         return "a credential-shaped query parameter"
     return None
 
 
 def redacted_remote_url(value: str | None) -> str | None:
-    """The same two shapes with the secret replaced, for a row already written.
+    """A stored git remote with its secret replaced — ONE redactor, called here.
 
-    The store refuses one of these on the way in
-    (`identity.CoordinationStore.create_project_repository` and
-    `attach_remote`), so this is the second layer and not the first: a row
-    written by an earlier build, by a restore or by `psql` is still handed to
-    `GET /api/v1/project-repositories`, and a redactor at the read boundary is
-    what makes "this API never returns a credential" a property of the
-    boundary rather than of everything that can reach the table.
+    THIS USED TO BE A SECOND IMPLEMENTATION and the two disagreed three times
+    in one review: `config` decoded a parameter name ONCE, so
+    `?%2574oken=hunter2` was returned verbatim while the adapter's fixed-point
+    decoder read it as `token`; `config` refused to judge any value holding
+    whitespace, so a legacy `user:sec\nret@host:path` came back whole; and `;`
+    was a parameter delimiter to `config` and NOT to the adapter — the other
+    direction, and the expensive one. `local_git_adapter.carries_a_credential`
+    is the adapter's redactor asked as a predicate, so it answered False for
+    `…?mode=1;token=…`, `repository_act.attach_remote` accepted the value, and
+    `identity.CoordinationStore` then refused it with a `RefusedError` the
+    route does not catch, because it catches `RepositoryActRefused`: a 500
+    where a 409 belonged (all three MEASURED at `fe421882`; Copilot review of
+    openDox-code#26, at `555a03c8` and `fe421882`). A property test said the
+    two never disagreed and passed, because its corpus had none of the three.
 
-    The URL form is `redacted_url`'s job — including the query, which it
-    redacts whether or not there is a netloc. Only the scp-like authority is
-    handled here, because that is the one `urlsplit` cannot see.
+    SO THERE IS ONE REDACTOR NOW AND THIS IS A CALL INTO IT. The agreement is
+    true by construction rather than by assertion, and the case that stated the
+    property stays as a regression guard over the alias. The nuance the API
+    boundary needs — that an ordinary `ssh://git@host/…` keeps its USERNAME,
+    which is not a secret — moved into `redact_remote_url` as an argument, so
+    it is one implementation with one flag and not two implementations with one
+    agreement.
 
-    IT CHANGES NOTHING THE PREDICATE CALLS CLEAN, and that is the contract
-    between the two: `redacted_url` on its own would rewrite
-    `ssh://git@github.com/o/r.git` to `ssh://<redacted>@github.com/o/r.git`,
-    which is right for a broker endpoint and wrong here — it hides the username
-    an operator needs to read and makes every ordinary ssh row look tampered
-    with. Asking the predicate first makes "redacted exactly when a credential
-    is carried" a property a test can assert over every shape at once.
+    THE IMPORT IS INSIDE THE FUNCTION because the dependency runs the other
+    way: `local_git_adapter` imports this module for the declared key list and
+    the libpq pattern. Both are stdlib-only, so nothing here changes the
+    package's import weight — see `src/opendox/runtime/__init__.py`.
     """
-    if not value or credential_in_a_remote_url(value) is None:
+    if not value:
         return value
-    try:
-        split = urllib.parse.urlsplit(value)
-    except ValueError:
-        return "<redacted-url>"
-    text = value
-    if not split.netloc:
-        carried = _scp_like_userinfo(value)
-        if carried is not None:
-            user, _, rest = carried
-            text = user + ":<redacted>@" + rest
-    return redacted_url(text)
+    from opendox.runtime.local_git_adapter import redact_remote_url
+
+    return redact_remote_url(value)
 
 
 def _scp_like_userinfo(value: str) -> tuple[str, str, str] | None:

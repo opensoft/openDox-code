@@ -27,18 +27,84 @@ from opendox.runtime.config import PREFIX, SECRET_NAMES
 # is over the VERB SET, so it has to read the verbs.
 
 
-def test_the_verb_set_is_closed_and_the_parser_declares_exactly_it() -> None:
-    parser = cli.build_parser()
+def _commands(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
     actions = [a for a in parser._actions
                if isinstance(a, argparse._SubParsersAction)]
     assert len(actions) == 1
-    assert list(actions[0].choices) == ["runtime"]
-    runtime_parser = actions[0].choices["runtime"]
-    verbs = [a for a in runtime_parser._actions
+    return actions[0]
+
+
+def _verbs_of(command: argparse.ArgumentParser) -> tuple[str, ...]:
+    verbs = [a for a in command._actions
              if isinstance(a, argparse._SubParsersAction)]
     assert len(verbs) == 1
-    assert tuple(verbs[0].choices) == cli.VERBS
+    return tuple(verbs[0].choices)
+
+
+def test_the_standalone_parser_declares_the_two_commands_and_no_third() -> None:
+    assert list(_commands(cli.build_parser()).choices) == ["runtime", "project"]
+
+
+def test_the_runtime_verb_set_is_closed_and_the_parser_declares_exactly_it() -> None:
+    commands = _commands(cli.build_parser())
+    assert _verbs_of(commands.choices["runtime"]) == cli.VERBS
     assert cli.VERBS == ("init", "migrate", "serve", "status", "reset")
+
+
+def test_the_project_verb_set_is_closed_and_is_section_3_6s_act_and_successors(
+) -> None:
+    commands = _commands(cli.build_parser())
+    assert _verbs_of(commands.choices["project"]) == cli.PROJECT_VERBS
+    assert cli.PROJECT_VERBS == ("create-repository", "attach-remote", "push")
+
+
+def test_the_project_command_collides_with_no_core_subcommand() -> None:
+    """Measured against `src/opendox/cli.py`, not assumed.
+
+    `opendox.cli` cannot be IMPORTED at this leg (its `opendox.serve` reach is
+    what `tests/test_consumer_reach.py::STILL_REACHING` records), so its
+    subcommand names are read out of its source — which is the only way to
+    measure them here, and it is a measurement rather than a claim.
+    """
+    import re
+
+    source = (Path(__file__).resolve().parents[1] / "src" / "opendox" /
+              "cli.py").read_text(encoding="utf-8")
+    core = set(re.findall(r'sub\.add_parser\(\s*"([a-z-]+)"', source))
+    assert core, "no core subcommands found; the regex has drifted from cli.py"
+    assert "project" not in core, (
+        f"`opendox.cli` already declares a `project` command ({sorted(core)}); "
+        "contributing this name would be a collision")
+
+
+def test_the_project_registration_object_conforms_to_the_subcommand_seam() -> None:
+    assert isinstance(cli.ProjectSubcommand(),
+                      subcommand_extension.SubcommandExtension)
+
+
+def test_registering_the_project_command_through_the_seam_gives_the_same_verbs(
+) -> None:
+    parser = argparse.ArgumentParser(prog="opendox")
+    sub = parser.add_subparsers(dest="command", required=True)
+    subcommand_extension.register_all(
+        (cli.RuntimeSubcommand(), cli.ProjectSubcommand()), sub)
+    contributed = [a for a in parser._actions
+                   if isinstance(a, argparse._SubParsersAction)][0]
+    assert list(contributed.choices) == ["runtime", "project"]
+    assert _verbs_of(contributed.choices["project"]) == cli.PROJECT_VERBS
+
+
+def test_every_project_verb_sets_a_dispatch_function_and_its_own_name() -> None:
+    arguments = {
+        "create-repository": ["--project-id", "p", "--actor", "a"],
+        "attach-remote": ["--project-id", "p", "--remote-url", "u"],
+        "push": ["--project-id", "p"],
+    }
+    for verb in cli.PROJECT_VERBS:
+        args = cli.build_parser().parse_args(["project", verb, *arguments[verb]])
+        assert callable(args.func)
+        assert args.verb == verb
+        assert args.project_id == "p"
 
 
 def test_the_registration_object_conforms_to_the_subcommand_seam() -> None:
@@ -509,6 +575,63 @@ def test_the_migrate_preview_runs_the_same_canonical_gate_the_run_does(
     assert evidence["refusal"] == "MigrationError", evidence
     assert str(empty) in evidence["message"]
 
+@pytest.mark.parametrize(
+    ("verb", "arguments"),
+    [("create-repository", ["--project-id", "p", "--actor", "a"]),
+     ("attach-remote", ["--project-id", "p", "--remote-url",
+                        "https://example.invalid/x.git"]),
+     ("push", ["--project-id", "p"])])
+def test_a_project_verb_never_prints_a_dsn_it_caught_itself(
+        monkeypatch: pytest.MonkeyPatch, verb: str,
+        arguments: list[str]) -> None:
+    """These three verbs catch before `main()`'s boundary, so they must redact.
+
+    Each wraps its own body in `except Exception` so the evidence object can
+    name the verb — and catching there means `main()`'s redaction never runs.
+    With `str(exc)` a psycopg connection failure put the configured DSN,
+    password included, straight into the JSON (Copilot review of
+    openDox-code#26: one thread and two suppressed comments, the same shape in
+    three handlers).
+
+    THE DATABASE IS A STUB MODULE, so this runs in the REQUIRED `validate` job
+    rather than only where psycopg is installed. `cli` imports
+    `opendox.runtime.db` inside the function, which is the whole seam.
+    """
+    import sys
+    import types
+
+    dsn = "postgresql://opendox:hunter2@db.internal:5432/opendox"
+
+    class _Exploding:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> "_Exploding":
+            raise RuntimeError(f"connection to {dsn} failed: no password "
+                               "supplied")
+
+        def __exit__(self, *exc: object) -> None:
+            pass
+
+    db_stub = types.ModuleType("opendox.runtime.db")
+    db_stub.Database = _Exploding                      # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "opendox.runtime.db", db_stub)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL", dsn)
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["project", verb, *arguments]))
+    assert code == 1, evidence
+    assert evidence["ok"] is False
+    assert evidence["refusal"] == "RuntimeError"
+    assert "hunter2" not in evidence["message"], evidence["message"]
+    # EITHER MARKER. Round 15 put the general credential rule FIRST, so a DSN
+    # that carries userinfo is replaced whole as `<redacted-url>` and
+    # `_DSN_SHAPED`'s `<redacted>` is the fallback for one that does not. What
+    # this case is about is that the secret does not survive either way.
+    assert "<redacted" in evidence["message"], evidence["message"]
+
 
 # -- Copilot's tenth round on #25 --------------------------------------------
 
@@ -679,6 +802,114 @@ def test_status_keeps_the_connectivity_answer_when_a_later_query_fails(
     assert "hunter2" not in printed, printed
 
 
+def test_a_repository_refusal_is_redacted_like_every_other_message(
+        monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """`RepositoryActRefused` was trusted to be secret-free, and it is not.
+
+    `repository_act.repository_location` refuses a project id it cannot use as
+    a directory name and ECHOES it, before any database is touched — so a
+    caller-supplied id shaped like a DSN came back with its password in the
+    evidence object, and in whatever collects that (Copilot review of
+    openDox-code#26, round 10). A message built from caller-supplied text is
+    redacted like any other this CLI emits — and, since round 19, the
+    identifier is not put into that message in the first place, because
+    redaction that is shaped for URLs is not a guarantee about arbitrary text.
+    """
+    import sys
+    import types
+
+    class _Cursor:
+        def fetchone(self) -> None:
+            return None
+
+        def fetchall(self) -> list:
+            return []
+
+    class _Connection:
+        def execute(self, sql: str, params: tuple | None = None) -> "_Cursor":
+            # THE MAP IS ASKED FIRST, and only the map: round 14 moved the
+            # authoritative row ahead of `repository_location`, so a project
+            # that is already mapped is told so rather than being told about a
+            # filesystem. Nothing else may run before the refusal, which is
+            # what this assertion is now for.
+            assert "project_repositories" in sql, sql
+            assert sql.strip().lower().startswith("select"), sql
+            return _Cursor()
+
+    class _Database:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> "_Database":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        @contextmanager
+        def transaction(self):
+            yield _Connection()
+
+    db_stub = types.ModuleType("opendox.runtime.db")
+    db_stub.Database = _Database                       # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "opendox.runtime.db", db_stub)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                       "postgresql://runtime@127.0.0.1:5432/opendox")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+    monkeypatch.setenv(PREFIX + "PROJECT_REPOSITORY_ROOT", str(tmp_path))
+
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["project", "create-repository",
+         "--project-id", "postgresql://someone:hunter2@db.internal/opendox",
+         "--actor", "Student One"]))
+    assert code == 1, evidence
+    assert evidence["refusal"] == "repository"
+    printed = json.dumps(evidence)
+    assert "hunter2" not in printed, printed
+    # ROUND 19 REPLACED THE REMEDY, so this assertion changed with it. The
+    # round-10 fix routed this message through the redactors and asserted the
+    # marker; round 19 found that those redactors are shaped for URLs and for
+    # libpq conninfo and do not cover arbitrary caller text — measured, both
+    # `user:secret@host/path` and `//user:pw@h/x` reach this refusal and come
+    # back verbatim. So the act does not echo the identifier at all, and the
+    # marker is no longer there to find. The claim is the stronger one: the
+    # WHOLE value is absent, not just the part a pattern recognized.
+    assert "postgresql://someone" not in printed, printed
+    assert "db.internal" not in printed, printed
+    assert "holds a '/'" in printed, printed
+
+
+def test_the_evidence_boundary_redacts_a_credential_parameter_too() -> None:
+    """`_DSN_SHAPED` is half the credential rule, and this helper is the other
+    half's only boundary.
+
+    The repository verbs route caller-controlled text — a project id, a remote
+    URL from a row written before the attach rule — through `_safe_message`,
+    and that helper applied the DSN pattern alone: `?token=…` is not a DSN and
+    is every bit as much a credential, so a token in that shape reached the
+    evidence object despite this CLI's no-token contract (Copilot review of
+    openDox-code#26, round 12). Both halves now, in the one place every message
+    passes.
+    """
+    message = _safe_carrier(
+        "'https://example.invalid/x.git?token=ghp_supersecret' is not a usable "
+        "project id for a directory name")
+    assert "ghp_supersecret" not in message, message
+    assert "example.invalid" in message, message
+
+    # The DSN half is unchanged, and a message with nothing secret in it is
+    # returned as it was.
+    assert "hunter2" not in _safe_carrier(
+        "could not connect to postgresql://someone:hunter2@127.0.0.1/db")
+    plain = "the directory /srv/projects/p1 is not empty"
+    assert _safe_carrier(plain) == plain
+
+
+def _safe_carrier(text: str) -> str:
+    return cli._safe_message(RuntimeError(text))
+
+
 #: Everything this repository's text is scanned for the console script in.
 #: Source, runbook, deploy files and the suites themselves, because a test that
 #: PINS an unrunnable command is how the defect below survived a round.
@@ -734,6 +965,30 @@ def test_every_printed_invocation_names_the_command_group() -> None:
         "`runtime` command group:\n" + "\n".join(offenders))
 
 
+def test_a_credential_holding_a_space_is_not_cut_in_half_by_the_dsn_pattern(
+) -> None:
+    """Two redactions in the wrong order printed half the password.
+
+    `_DSN_SHAPED` ends its match at whitespace, so applied FIRST it cut
+    `postgresql://u:secret value@host/db` at the space and left
+    `<redacted> value@host/db` — the remainder of the credential beside the
+    marker, in the one place this runtime promises there is none. It is the
+    same shape round 12 widened the adapter's userinfo class for: a stored
+    value may hold a space (Copilot review of openDox-code#26, round 15).
+
+    The general rule matches the whole authority, so it goes first; the DSN
+    pattern is the fallback for a DSN with no userinfo at all.
+    """
+    carried = "could not connect to postgresql://u:secret value@host/db"
+    redacted = cli._safe_message(RuntimeError(carried))
+    assert "secret" not in redacted, redacted
+    assert "value@host" not in redacted, redacted
+    assert "<redacted-url>" in redacted
+    # And the fallback still covers what the general rule does not.
+    plain = cli._safe_message(RuntimeError("postgresql://host:5432/db is down"))
+    assert "<redacted>" in plain, plain
+
+
 def test_a_libpq_password_holding_a_space_is_redacted_whole() -> None:
     """libpq QUOTES a value containing spaces, and the pattern stopped at one.
 
@@ -776,6 +1031,63 @@ def test_a_libpq_password_holding_a_space_is_redacted_whole() -> None:
     assert lines.endswith("\nhost=db is up"), lines
     assert cli._safe_message(RuntimeError("passwordless=fine host=db")) == \
         "passwordless=fine host=db"
+
+
+def test_a_caller_supplied_identifier_is_removed_from_evidence_by_identity(
+) -> None:
+    """A pattern cannot recognise an identifier, and the store echoes one.
+
+    `_safe_message` knows two shapes, a URL and a libpq conninfo. A project id
+    is neither — and `CoordinationStore.repository_for_project` puts the id it
+    was given into `NotFoundError`, so `project attach-remote --project-id
+    'user:secret@host/path'` printed `secret` through the generic handler
+    (Copilot review of openDox-code#26, round 21).
+
+    The repair is not a wider pattern. The CLI KNOWS what it passed, so it
+    removes that value by identity before any rule is asked — the same
+    technique the push refusal already uses for the destination it knows.
+    """
+    from opendox.runtime.identity import NotFoundError
+
+    sent = "user:secret@host/path"
+    echoed = NotFoundError(
+        f"no project_repositories row (project_id={sent!r})")
+
+    # Against the previous head this is what the evidence carried.
+    assert "secret" in cli._safe_message(echoed)
+    # Given the value, it goes — in the repr form the store used and plain.
+    removed = cli._safe_message(echoed, sent)
+    assert sent not in removed and "secret" not in removed, removed
+    assert "<caller value>" in removed, removed
+
+    # The patterns still run, and a short or empty value is not a wildcard
+    # that blanks the message.
+    assert "<redacted-url>" in cli._safe_message(
+        RuntimeError("could not reach postgresql://u:p@h/db"), "ab")
+    assert cli._safe_message(RuntimeError("a plain failure"), None, "", "x") \
+        == "a plain failure"
+
+
+def test_every_repository_verb_hands_the_id_it_was_given_to_the_redactor(
+) -> None:
+    """One boundary, and it is asserted rather than remembered.
+
+    The three repository verbs are the ones that take a caller-controlled
+    identifier and hand it to a store; each of them has two handlers, the named
+    refusal and the generic one. All six must pass that identifier, or the one
+    that does not is the leak (Copilot review of openDox-code#26, round 21).
+    """
+    import inspect
+
+    for verb in (cli.cmd_create_repository, cli.cmd_attach_remote,
+                 cli.cmd_push):
+        source = inspect.getsource(verb)
+        handlers = source.count("_safe_message(exc")
+        guarded = source.count("_safe_message(exc, args.project_id)")
+        assert handlers == guarded, (
+            f"{verb.__name__} formats {handlers - guarded} message(s) without "
+            "the identifier it was given")
+        assert guarded >= 2, (verb.__name__, guarded)
 
 
 def test_no_broker_url_this_runtime_prints_can_carry_a_credential() -> None:
@@ -1339,6 +1651,12 @@ BENIGN_EXCEPTION_ATTRIBUTES = frozenset({
 #: "sqlstate", None)` reads a datum, and neither composes a message.
 STRINGIFIERS = frozenset({"str", "repr", "format", "ascii"})
 
+#: This package's own redactors. A value that has been through one of them is
+#: evidence, whatever it was before — `cli._safe_message` for the CLI,
+#: `local_git_adapter.redact_credentials` / `redact_remote_url` for the act.
+REDACTORS = frozenset({"_safe_message", "redact_credentials",
+                       "redact_remote_url"})
+
 
 def _exception_classes_this_package_defines() -> frozenset[str]:
     """Every exception class name declared under `src/opendox/`.
@@ -1391,6 +1709,15 @@ def _unredacted_exception_uses(source: str) -> list[str]:
     for handler in [n for n in ast.walk(tree)
                     if isinstance(n, ast.ExceptHandler) and n.name]:
         ours = caught_is_all_ours(handler)
+        # A HANDLER THAT CATCHES ONLY THIS PACKAGE'S OWN EXCEPTIONS IS FREE OF
+        # THE RULE ENTIRELY, not merely free to format it. `CorpusRefused`
+        # carries a `Refusal` whose `kind` and `detail` this package wrote, and
+        # `_bound` reads both to re-raise in the operation's own vocabulary —
+        # a structured datum, not a library's message, and the rule is about a
+        # LIBRARY's text reaching evidence. Anything narrower turns the benign
+        # attribute list into a list of the attributes somebody remembered.
+        if ours:
+            continue
         allowed: set[int] = set()
         formatted: set[int] = set()
         for node in ast.walk(handler):
@@ -1403,7 +1730,18 @@ def _unredacted_exception_uses(source: str) -> list[str]:
                 arguments = [a for a in node.args
                              if isinstance(a, ast.Name)
                              and a.id == handler.name]
-                if called in {"_safe_message", "type"}:
+                if called in REDACTORS:
+                    # ANYWHERE INSIDE THE REDACTOR'S ARGUMENTS, not only as a
+                    # direct one: `redact_credentials(str(exc))` composes the
+                    # text and then cleans it, which is the contract — and a
+                    # rule that read only the outermost call would flag the
+                    # inner `str` and push authors away from the redactor.
+                    allowed.update(
+                        id(inner) for argument in node.args
+                        for inner in ast.walk(argument)
+                        if isinstance(inner, ast.Name)
+                        and inner.id == handler.name)
+                elif called == "type":
                     allowed.update(id(a) for a in arguments)
                 elif called in STRINGIFIERS:
                     formatted.update(id(a) for a in arguments)

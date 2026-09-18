@@ -104,6 +104,10 @@ class MembershipCreate(BaseModel):
     role: str
 
 
+class RemoteAttach(BaseModel):
+    remote_url: str = Field(min_length=1)
+
+
 class SessionCreate(BaseModel):
     project_id: str | None = None
 
@@ -507,9 +511,15 @@ def _require_own_open_session(store: Any, *,
     if session.project_id != project_id:
         raise HTTPException(
             status_code=409,
+            # THE STORED PROJECT IS NAMED, THE REQUESTED ONE IS NOT: the
+            # first is a row this runtime wrote, the second is whatever the
+            # caller put in the path (Copilot review of openDox-code#26, round
+            # 24, which named `_require_role`; this is the same rule, one
+            # message over).
             detail={"code": "coordination.session_project_mismatch",
                     "message": f"session {session_id} is open on project "
-                               f"{session.project_id}, not {project_id}"})
+                               f"{session.project_id}, which is not the "
+                               "project this path names"})
     if require_open and session.ended_at is not None:
         raise HTTPException(
             status_code=409,
@@ -521,21 +531,32 @@ def _require_own_open_session(store: Any, *,
 
 def _require_role(store: Any, *, user: identity.User,
                   project_id: str, allowed: tuple[str, ...]) -> identity.Membership:
-    """Authorization, asked about the ROW and answered by `memberships.role`."""
+    """Authorization, asked about the ROW and answered by `memberships.role`.
+
+    AND THE PROJECT ID IS NOT ECHOED. This is reached BEFORE any act has
+    validated the identifier — it comes straight off the request path — and the
+    repository routes added by § 3.6 made that reachable with arbitrary text:
+    `GET /projects/user:secret@host/repository` returned the caller's value in
+    a 403 body, ahead of every redaction the acts apply to their own refusals
+    (Copilot review of openDox-code#26, round 24). An authorization answer
+    needs the SUBJECT and the RULE, not the object's name: the caller sent the
+    path and gets back which rule refused it.
+    """
     try:
         membership = store.membership_for(user_id=user.id, project_id=project_id)
     except identity.NotFoundError as exc:
         raise HTTPException(
             status_code=403,
             detail={"code": "authz.not_a_member",
-                    "message": f"user {user.id} has no membership in project "
-                               f"{project_id}"}) from exc
+                    "message": f"user {user.id} has no membership in the "
+                               "project this path names"}) from exc
     if membership.role not in allowed:
         raise HTTPException(
             status_code=403,
             detail={"code": "authz.role_insufficient",
                     "message": f"role {membership.role!r} is not one of "
-                               f"{list(allowed)} for project {project_id}"})
+                               f"{list(allowed)} on the project this path "
+                               "names"})
     return membership
 
 
@@ -733,6 +754,107 @@ def read_project(project_id: str, store: StoreDep,
     _require_role(store, user=principal, project_id=project_id,
                   allowed=identity.ROLES)
     return _project_json(_found(lambda: store.get_project(project_id)))
+
+
+# ---------------------------------------------------------------------------
+# § 3.6 — THE REPOSITORY-CREATION ACT, on the project it belongs to
+#
+# "openDox CREATES A REPOSITORY AS A FIRST-CLASS ACT, or the origin complaint
+# returns one level down" (`split-opendox-two-layer-product` § 3.6). A verb,
+# not a side effect of `POST /projects`: a project with no repository yet is a
+# visible state, and the act that gives it one is a thing somebody did.
+#
+# These three routes hang off `/projects/{id}/repository` rather than off the
+# `project-repositories` collection, because the act is performed ON A PROJECT
+# and the collection is the map it writes into. `COLLECTIONS` therefore does
+# not grow: the closed six are what the database owns, and this is a verb over
+# one of them.
+# ---------------------------------------------------------------------------
+
+
+@projects.post("/{project_id}/repository", status_code=201)
+def create_project_repository(project_id: str, request: Request,
+                              store: StoreDep,
+                              principal: PrincipalDep) -> dict[str, Any]:
+    """Create this project's plain local git repository (RULING C3).
+
+    Writes the map row and creates the repository in ONE act, in this
+    request's transaction — see `repository_act`'s header for why the row goes
+    first and what the remaining window is.
+    """
+    from opendox.runtime import repository_act
+
+    # THE MEMBERSHIP IS ASKED FIRST, as `read_project` asks it and for the same
+    # reason: reading the row first made a project that does not exist (404)
+    # distinguishable from one the caller may not act on (403), which is an
+    # existence oracle over an id space a prober can walk (Copilot review of
+    # openDox-code#26, round 6). `_require_role` refuses a non-member of a
+    # project that does not exist with the same `authz.not_a_member`.
+    _require_role(store, user=principal, project_id=project_id,
+                  allowed=("owner",))
+    _found(lambda: store.get_project(project_id))
+    settings = _context(request).settings
+    try:
+        created = _conflict(lambda: repository_act.create_repository(
+            store, project_id=project_id,
+            root=settings.project_repository_root,
+            actor=principal.display_name or principal.subject))
+    except repository_act.RepositoryActRefused as exc:
+        raise HTTPException(status_code=409,
+                            detail={"code": "repository.refused",
+                                    "message": _refusal_message(exc)}) from exc
+    body = _repository_json(created.row)
+    body["initial_commit"] = created.initial_commit
+    return body
+
+
+@projects.put("/{project_id}/repository/remote")
+def attach_project_remote(project_id: str, body: RemoteAttach, store: StoreDep,
+                          principal: PrincipalDep) -> dict[str, Any]:
+    """RULING C3's "a remote can be attached later" — one update, no migration."""
+    from opendox.runtime import repository_act
+
+    _require_role(store, user=principal, project_id=project_id,
+                  allowed=("owner",))
+    _found(lambda: store.repository_for_project(project_id))
+    try:
+        # The credential check happens in the act, so the CLI gets it too; this
+        # route only has to let the refusal through as a 409 with a message
+        # that never echoes the URL.
+        row = repository_act.attach_remote(store, project_id=project_id,
+                                           remote_url=body.remote_url)
+    except repository_act.RepositoryActRefused as exc:
+        raise HTTPException(status_code=409,
+                            detail={"code": "repository.refused",
+                                    "message": _refusal_message(exc)}) from exc
+    return _repository_json(row)
+
+
+@projects.post("/{project_id}/repository/push")
+def push_project_repository(project_id: str, store: StoreDep,
+                            principal: PrincipalDep) -> dict[str, Any]:
+    """Move this project into a governed factory. RULING C3: it is a PUSH."""
+    from opendox.runtime import repository_act
+
+    _require_role(store, user=principal, project_id=project_id,
+                  allowed=("owner",))
+    _found(lambda: store.repository_for_project(project_id))
+    try:
+        remote_url = repository_act.push_to_remote(store, project_id=project_id)
+    except repository_act.RepositoryActRefused as exc:
+        raise HTTPException(status_code=409,
+                            detail={"code": "repository.refused",
+                                    "message": _refusal_message(exc)}) from exc
+    # REDACTED HERE TOO. This PR keeps a row written before
+    # `refuse_credential_bearing_remote` existed pushable (there is a test for
+    # exactly that), so a SUCCESSFUL push of such a row was the one path that
+    # handed its embedded credential back verbatim while the CLI and every
+    # failure path redacted (Copilot review of openDox-code#26).
+    from opendox.runtime.local_git_adapter import redact_remote_url
+
+    return {"project_id": project_id,
+            "pushed_to": redact_remote_url(remote_url),
+            "note": "a push, not a migration (RULING C3)"}
 
 
 @project_repositories.get("")
@@ -941,15 +1063,23 @@ def _project_json(p: identity.Project) -> dict[str, Any]:
 def _repository_json(r: identity.ProjectRepository) -> dict[str, Any]:
     """The map row as JSON, with `remote_url` REDACTED at the boundary.
 
-    `identity.refuse_a_remote_url_that_carries_a_credential` refuses one on the
-    way in, so this is the second layer: a row written by an earlier build, by
-    a restore or by `psql` is still served here, and these two GETs hand it to
-    every member of the project. Redaction rather than refusal on the way OUT,
-    because a row that already exists is a fact an operator has to be able to
-    see — `config.redacted_remote_url` changes nothing it does not have to, so
-    an ordinary `ssh://git@host/…` comes back exactly as stored (Copilot review
-    of openDox-code#25, on `migrations/0001_identity_and_coordination.sql`'s
-    `remote_url` column).
+    TWO LAYERS AND ONE REDACTOR, which is what the merge of the two branches
+    settled. § 3.5 refuses a credential-bearing URL at the STORE — the
+    column's only writer, and both of its writers — and § 3.6 refuses it again
+    at `repository_act.refuse_credential_bearing_remote` before it ever calls
+    in. Neither reaches a row written by an earlier build, by a restore or by
+    `psql`, and these two GETs hand such a row to every member of the project,
+    so the boundary redacts as well (Copilot review of openDox-code#26, which
+    found the same leak in the push response, and of #25 on
+    `migrations/0001_identity_and_coordination.sql`'s column).
+
+    `config.redacted_remote_url` AND NOT `local_git_adapter.redact_remote_url`,
+    deliberately: the general redactor is written for git's stderr, where
+    over-redacting is the safe direction, and its widened scp branch replaces
+    the userinfo of an ordinary `git@github.com:o/r.git` — a USERNAME, not a
+    secret. The config one is the pair of `credential_in_a_remote_url` and
+    changes nothing that predicate calls clean, so an ordinary remote comes
+    back exactly as stored and the column stays readable for what it is for.
     """
     return {"id": r.id, "project_id": r.project_id, "adapter": r.adapter,
             "location": r.location,
@@ -1006,6 +1136,22 @@ def _conflict(call: Any) -> Any:
 # ---------------------------------------------------------------------------
 # the application
 # ---------------------------------------------------------------------------
+
+
+def _refusal_message(exc: Exception) -> str:
+    """A repository act's refusal, REDACTED before it becomes a response.
+
+    This act's own messages were treated as secret-free by construction, and
+    they are not: `repository_act.repository_location` refuses a project id it
+    cannot use as a directory name and echoes that id, which comes from the
+    request path — so a caller-chosen id shaped like a DSN came back with its
+    password in the 409 body and in every log that keeps one (Copilot review of
+    openDox-code#26, round 10, and the CLI's three handlers took the same fix).
+    `redact_credentials` is the same predicate the adapter prints through.
+    """
+    from opendox.runtime.local_git_adapter import redact_credentials
+
+    return redact_credentials(str(exc))
 
 
 def build_v1_router() -> APIRouter:
