@@ -683,9 +683,26 @@ jobs:
       #              the path replaces the key set and mints tokens whose
       #              `iss` and `aud` still pass. `https` or a LOOPBACK host,
       #              judged by `ipaddress` so the exception cannot be spoofed
-      #              by a name. THE CURRENT FIGURE; the PR description states
-      #              it at this same commit, and `pytest -q tests_runtime/`
-      #              is 252 here.
+      #              by a name. SUPERSEDED by the entry below; `pytest -q
+      #              tests_runtime/` was 252 there.
+      #  153 passed  at `build/3-5-runtime` `c21b8b97` (2026-09-18, same
+      #  1 skipped   python and pytest; extras unimportable) — the same five
+      #              modules, after round TWENTY-SIX. THE SKIP IS NEW AND
+      #              DELIBERATE: the live psycopg reproducer for the DB
+      #              probe's credential leak needs a driver this job does not
+      #              install (`.[test]` alone), and the contract it proves —
+      #              that the probe never interpolates the exception's text —
+      #              is measured beside it against a stub driver, which does
+      #              run here. The round's other two fixes: the documented
+      #              `kubectl apply` reached a clean cluster with the
+      #              PLACEHOLDER image tag at three container sites, which is
+      #              `ImagePullBackOff` before anything starts, so the digest
+      #              replacement is now a required step with a guard on the
+      #              build's own output; and the runbook's four plaintext
+      #              secret files survived a failed `kubectl` or a Ctrl-C,
+      #              which a trap on EXIT/INT/TERM ends. THE CURRENT FIGURE;
+      #              the PR description states it at this same commit, and
+      #              `pytest -q tests_runtime/` is 262 here.
       - name: pytest (runtime, hermetic)
         run: >-
           python -m pytest -q
