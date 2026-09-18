@@ -1352,3 +1352,56 @@ def test_a_comma_in_the_schema_name_is_a_real_connection_and_not_a_refusal(
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {quoted} cascade")
+
+
+def test_a_later_migration_that_is_not_utf8_applies_nothing_at_all(
+        postgres_dsn: str, tmp_path: Path) -> None:
+    """The whole-run promise covers the DECODE, not only the digest.
+
+    THE FINDING (Copilot review of openDox-code#25, round 28):
+    `snapshot_run()` takes every file's bytes before the first commit, but
+    `raw.decode("utf-8")` sat inside the per-migration loop — AFTER the ledger
+    was bootstrapped, protected and written to. A later file holding invalid
+    UTF-8 therefore aborted the run with an untyped `UnicodeDecodeError` once
+    `0001` had COMMITTED: exactly the partial run "a tree carrying the wrong
+    `0001` changes nothing at all" exists to make impossible.
+
+    The decode now happens in `snapshot_run()`, beside the canonical gate and
+    before the first mutation, and raises `MigrationError` naming the file and
+    the byte. Against the previous head this run leaves the six tables and the
+    ledger behind and raises `UnicodeDecodeError` instead.
+    """
+    import uuid
+
+    from opendox.runtime.db import Database
+
+    for name in ("0001_identity_and_coordination.sql",
+                 "0002_migration_state.sql"):
+        shutil.copyfile(ROOT / "migrations" / name, tmp_path / name)
+    # A LATER file, so the run has real work to commit before it reaches it.
+    (tmp_path / "0003_not_utf8.sql").write_bytes(
+        b"create table late_arrival (note text);  -- \xff\xfe\n")
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = Database(postgres_dsn, application_name="opendox-test-admin")
+    with admin:
+        with admin.transaction() as conn:
+            conn.execute(f"create schema {schema}")
+        try:
+            with Database(postgres_dsn, schema=schema) as db:
+                runner = migrations.MigrationRunner(db, migrations_dir=tmp_path)
+                with pytest.raises(migrations.MigrationError) as caught:
+                    runner.apply()
+                message = str(caught.value)
+                assert "0003_not_utf8.sql" in message, message
+                assert "not UTF-8" in message, message
+                assert "nothing has been applied" in message, message
+                assert not isinstance(caught.value, UnicodeDecodeError)
+
+                # NOTHING AT ALL, and the ledger is the strictest form of it:
+                # a bootstrap alone would leave that one table behind.
+                assert _tables_in(db, schema) == set(), (
+                    "the run mutated the schema before refusing")
+        finally:
+            with admin.transaction() as conn:
+                conn.execute(f"drop schema if exists {schema} cascade")

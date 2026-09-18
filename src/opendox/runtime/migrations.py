@@ -713,6 +713,23 @@ class MigrationRunner:
         """
         run = [(migration, migration.snapshot())
                for migration in self.discover()]
+        # AND EVERY ONE OF THEM IS SQL THIS RUNNER CAN EXECUTE, decided here
+        # and not at the statement. `raw.decode("utf-8")` used to sit inside
+        # the per-migration loop, AFTER the ledger was bootstrapped, protected
+        # and written to — so a later file holding invalid UTF-8 aborted the
+        # run with an untyped `UnicodeDecodeError` once earlier migrations had
+        # COMMITTED, which is the partial run this method's whole-run promise
+        # exists to make impossible (Copilot review of openDox-code#25, round
+        # 28). One read of every file, and now one decode of every file,
+        # before the first `commit`.
+        for migration, raw in run:
+            try:
+                raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise MigrationError(
+                    f"{migration.path.name} is not UTF-8 "
+                    f"({exc.reason} at byte {exc.start}), so this runner "
+                    "cannot execute it; nothing has been applied") from exc
         for migration, raw in run:
             if not migration.is_canonical:
                 continue
