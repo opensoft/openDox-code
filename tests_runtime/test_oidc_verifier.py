@@ -633,3 +633,98 @@ def test_the_cooldown_claim_and_the_refresh_are_one_lock_acquisition(
         "a valid token was refused inside the window between the cooldown "
         f"claim and the refresh it claims: {outcome['denied']!r}")
     assert state["loads"] == 2, state    # one priming read, one refresh
+
+
+def test_a_failed_key_set_load_is_not_retried_once_per_request(
+        monkeypatch) -> None:
+    """A broker outage costs ONE fetch per cooldown, not one per request.
+
+    THE FINDING (Copilot review of openDox-code#25, round 27): when
+    `_load_keyset()` raises, the assignment to `_keyset` never completes and
+    `_loaded_monotonic` is unchanged — so before the first successful load, or
+    after a TTL refresh fails, every authenticated request re-enters the
+    refresh branch and performs another fetch. Each one waits the source's
+    whole timeout WITH THE CACHE LOCK HELD, so a broker outage serializes one
+    outbound request per inbound request until the worker pool is spent. The
+    miss cooldown does not bound it: that one is claimed on a `kid` miss.
+
+    FAIL-CLOSED IS PRESERVED, and this test is where that is stated: every
+    call below still RAISES. The cooldown replaces a fetch with the failure
+    that fetch produced; it never serves a key set, so a stale set is not used
+    past its TTL and a broker that is down cannot be made to look up.
+
+    Against the previous head the first assertion reads 5, not 1.
+    """
+    clock = [1000.0]
+    monkeypatch.setattr(oidc.time, "monotonic", lambda: clock[0])
+
+    class _Down:
+        calls = 0
+
+        def load(self):
+            _Down.calls += 1
+            raise oidc.IdentityUnavailableError(
+                "the broker's JWKS endpoint could not be fetched")
+
+    source = _Down()
+    cache = oidc.CachingJwks(source, ttl_seconds=3600,
+                             failed_refresh_cooldown_seconds=10.0)
+
+    for _ in range(5):
+        with pytest.raises(oidc.IdentityUnavailableError):
+            cache.keyset()
+    assert _Down.calls == 1, (
+        f"the outage was fetched {_Down.calls} times in one cooldown; the "
+        f"cache lock is held across each one")
+
+    # THE COOLDOWN EXPIRES and exactly one more fetch is made.
+    clock[0] += 10.0
+    with pytest.raises(oidc.IdentityUnavailableError):
+        cache.keyset()
+    assert _Down.calls == 2
+
+    # AND A MISS DOES NOT BUY A WAY AROUND IT: `keyset_after_miss` claims its
+    # own cooldown and then goes through the same refresh.
+    clock[0] += 1.0
+    with pytest.raises(oidc.IdentityUnavailableError):
+        cache.keyset_after_miss()
+    assert _Down.calls == 2
+
+
+def test_a_recovered_broker_is_used_at_once_and_not_after_the_cooldown(
+        jwks_path: str, monkeypatch) -> None:
+    """The negative cache is cleared by the success that ends the outage.
+
+    A remembered failure that outlived its cause would turn a 5-second blip
+    into a 10-second outage for every caller, which is the opposite of the
+    property the cooldown is for.
+    """
+    clock = [1000.0]
+    monkeypatch.setattr(oidc.time, "monotonic", lambda: clock[0])
+    real = json.loads(Path(jwks_path).read_text(encoding="utf-8"))
+
+    class _Flaky:
+        up = False
+        calls = 0
+
+        def load(self):
+            _Flaky.calls += 1
+            if not _Flaky.up:
+                raise oidc.IdentityUnavailableError("down")
+            return real
+
+    cache = oidc.CachingJwks(_Flaky(), ttl_seconds=3600,
+                             failed_refresh_cooldown_seconds=10.0)
+    with pytest.raises(oidc.IdentityUnavailableError):
+        cache.keyset()
+
+    _Flaky.up = True
+    clock[0] += 10.0                       # the cooldown, and not a second more
+    assert cache.keyset().keys, "the recovered broker was not used"
+    assert _Flaky.calls == 2
+
+    # And the cleared failure does not come back: a later TTL refresh that
+    # succeeds is not charged a cooldown it never earned.
+    clock[0] += 3600.0
+    assert cache.keyset().keys
+    assert _Flaky.calls == 3
