@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
+import stat
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 
@@ -368,6 +370,10 @@ def test_status_reports_every_declared_setting_and_none_as_null(
     # `RUNTIME_PG_ROLE` — the assertion below is that a DECLARED setting is
     # reported with its value, not that every default is non-null.
     monkeypatch.setenv(PREFIX + "SERVED_SCHEMA", "public")
+    # AND ITS TWIN ONE LEVEL UP, declared for the same reason and reported for
+    # the same reason: an operator reading `status` has to see BOTH
+    # declarations the migration run will be refused against.
+    monkeypatch.setenv(PREFIX + "SERVED_DATABASE", "opendox")
     args = cli.build_parser().parse_args(
         ["runtime", "status", "--probe-timeout", "0.2"])
     buffer = io.StringIO()
@@ -2487,3 +2493,77 @@ def test_the_dollar_user_search_path_token_is_expanded_before_it_is_compared() -
         _load(_dsn(None, '"$user",public'), "postgresql://m:p@h/db")
     assert '"$user"' in str(unresolved.value)
     assert "names no user" in str(unresolved.value)
+
+
+# -- the registered follow-ups, from #26's rounds -----------------------------
+
+
+def test_init_creates_the_repository_root_private_whatever_the_umask_is(
+        monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Every repository under it is 0700; the root above them took the umask.
+
+    `repository_act` creates each project's bare repository
+    `REPOSITORY_DIRECTORY_MODE` and `local_git_adapter`'s walk `fchmod`s what it
+    makes to the same number — and `runtime init`, which creates the DIRECTORY
+    THEY ALL LIVE IN, called `Path.mkdir` with its default mode, which is
+    `0o777 & ~umask`. MEASURED under the container's own umask (0o022): the
+    root came out **0755**, so every project id under it was listable, and
+    traversable, by any local account (registered on openDox-code#26 as
+    `local_git_adapter.py:465`; the holder ruled "measure first, fix only if a
+    reachable path leaves it wider than 0700", and `runtime init` is that
+    path).
+
+    0700 IS UMASK-SAFE, which is why the number is passed rather than chmod'd
+    afterwards: a umask can only REMOVE bits, so a mode with none set for group
+    or other cannot be widened by one. This case drives the widest umask that
+    matters, 0o000, where a default-mode `mkdir` would produce 0777.
+    """
+    previous = os.umask(0o000)
+    try:
+        root = tmp_path / "projects"
+        monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                           "postgresql://nobody@127.0.0.1:1/none")
+        monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+        monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+        monkeypatch.setenv(PREFIX + "PROJECT_REPOSITORY_ROOT", str(root))
+        code, evidence = _run(
+            cli.build_parser().parse_args(["runtime", "init"]))
+    finally:
+        os.umask(previous)
+    assert code == 0, evidence
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700, oct(
+        stat.S_IMODE(root.stat().st_mode))
+    # ONE NUMBER WITH THE ACT THAT FILLS IT, not a second literal here.
+    from opendox.runtime import repository_act
+    assert (stat.S_IMODE(root.stat().st_mode)
+            == repository_act.REPOSITORY_DIRECTORY_MODE)
+    # AND THE EVIDENCE SAYS WHAT IT FOUND, which is what an operator upgrading
+    # from a build that created this root 0755 reads.
+    assert evidence["project_repository_root_mode"] == "0700"
+
+
+def test_init_reports_an_existing_root_s_mode_and_does_not_change_it(
+        monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A root that is already there belongs to whoever made it.
+
+    `runtime init` is idempotent, and re-moding a directory this run did not
+    create would be a different act from creating one — the rule
+    `local_git_adapter`'s walk states for the same reason ("only what this walk
+    just made"), where the component that already existed may be an operator's
+    own mount point. So the mode is REPORTED and left alone: an operator
+    upgrading from a build that created the root 0755 sees the number and
+    decides.
+    """
+    root = tmp_path / "projects"
+    root.mkdir(mode=0o755)
+    os.chmod(root, 0o755)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                       "postgresql://nobody@127.0.0.1:1/none")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+    monkeypatch.setenv(PREFIX + "PROJECT_REPOSITORY_ROOT", str(root))
+    code, evidence = _run(cli.build_parser().parse_args(["runtime", "init"]))
+    assert code == 0, evidence
+    assert evidence["directories_created"] == []
+    assert evidence["project_repository_root_mode"] == "0755"
+    assert stat.S_IMODE(root.stat().st_mode) == 0o755

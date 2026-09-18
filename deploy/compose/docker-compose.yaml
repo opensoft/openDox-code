@@ -239,6 +239,12 @@ services:
       # `.env` value the Postgres service grants in, so one edit moves the
       # schema, its grants and this refusal together.
       OPENDOX_SERVED_SCHEMA: ${OPENDOX_PG_SCHEMA:-}
+      # AND THE DATABASE, from the SAME `.env` value the Postgres service
+      # creates, so one edit moves the database and this refusal together. The
+      # wider of the two declarations: a DSN may omit `dbname` altogether, and
+      # libpq then defaults it to the connection USER — two DSNs that look
+      # alike selecting two databases with neither one saying so.
+      OPENDOX_SERVED_DATABASE: ${OPENDOX_PG_DB:-}
     command: ["opendox-runtime", "runtime", "migrate"]
     networks:
       - internal

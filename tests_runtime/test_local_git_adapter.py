@@ -4057,7 +4057,15 @@ def test_the_two_readings_of_the_one_list_never_disagree_about_hiding() -> None:
     hidden_but_not_refused = [
         value for value in carriers
         if config.credential_in_a_remote_url(value) is None]
-    assert len(hidden_but_not_refused) == 2, hidden_but_not_refused
+    # ONE, NOW, AND IT USED TO BE TWO. The whitespace-bearing scp authority was
+    # the other, and the follow-up act closed it at the store as well — the
+    # refusal names the shape rather than the value it cannot read. What is
+    # left is the double-encoded parameter NAME, which stays a deliberate
+    # difference: a server decodes a name ONCE, so `?%74oken=` is the one that
+    # arrives as `token` and IS refused, while `?%2574oken=` arrives as
+    # `%74oken` and is a parameter this runtime has no reason to refuse — and
+    # over-redacting its value costs nothing.
+    assert len(hidden_but_not_refused) == 1, hidden_but_not_refused
     for value in hidden_but_not_refused:
         assert secret not in lga.redact_remote_url(value), value
 
@@ -4194,3 +4202,170 @@ def test_the_group_is_signalled_from_the_id_saved_at_popen_not_looked_up_later(
     while time.monotonic() < deadline:
         assert not marker.exists(), "the descendant finished its work anyway"
         time.sleep(0.2)
+
+
+# -- the registered follow-ups, from #26's last two rounds --------------------
+
+
+def test_the_temporary_index_is_written_through_the_held_descriptor(
+        adapter, repository: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """One call in `write_back` used a PATHNAME, and it was the one that wrote.
+
+    Every other call goes through `-C /proc/self/fd/<n>`, which is what makes
+    this method's "the check and the use are one object" true. The temporary
+    index did not: `rev-parse --absolute-git-dir` was turned back into a path
+    and handed to `GIT_INDEX_FILE`, so a rename or replacement of the location
+    AFTER the root re-check put the index — and the `unlink` that cleans it up
+    — in whatever now answered to that name (Copilot review of
+    openDox-code#26, at `4156f233`, registered there and built here).
+
+    MEASURED on git 2.43.0 before the repair, with the directory renamed away
+    and a symlink to a second repository put in its place after the probe: the
+    absolute form wrote `opendox-index-…` into the DECOY and the descriptor-
+    relative form wrote it into the real repository. The same measurement
+    stands behind the shape of the fix: `--git-dir` asked through `-C` answers
+    RELATIVE — `.` for the bare repository this act creates, `.git` for a
+    checkout — so joining it onto the runner's own root keeps the whole path
+    inside the descriptor.
+
+    THE RACE IS ARRANGED, NOT RACED: the swap is driven from the probe itself,
+    which is the only moment it could happen. It is after the root re-check, so
+    this is not that check's case — that one refuses; this one proceeds, and
+    the question is only WHERE the index lands.
+    """
+    if not Path("/proc/self/fd").is_dir():
+        pytest.skip("no /proc/self/fd on this platform, where the adapter "
+                    "refuses rather than falling back to a pathname")
+    decoy = tmp_path / "decoy.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(decoy)], check=True,
+                   env=_GIT_ENV)
+    corpus = _resolve(adapter, repository)
+
+    real_out = lga.GitRunner.out
+    seen: dict[str, object] = {"index": None, "swapped": False}
+
+    def _swap_after_the_probe(self, *args, **kwargs):
+        answer = real_out(self, *args, **kwargs)
+        # EITHER SPELLING OF THE PROBE, so this case drives the same race
+        # against the head that asked `--absolute-git-dir` — otherwise it would
+        # "fail" there by never swapping at all, which proves nothing.
+        if (args[:1] == ("rev-parse",)
+                and args[1] in ("--git-dir", "--absolute-git-dir")
+                and not seen["swapped"]):
+            seen["swapped"] = True
+            # The name is re-pointed at a DIFFERENT repository, exactly as a
+            # concurrent actor would: the descriptor this runner holds still
+            # refers to the real directory.
+            repository.rename(tmp_path / "moved-aside")
+            repository.symlink_to(decoy)
+        if args[:1] == ("read-tree",):
+            seen["index"] = kwargs.get("env", {}).get("GIT_INDEX_FILE")
+        return answer
+
+    monkeypatch.setattr(lga.GitRunner, "out", _swap_after_the_probe)
+    try:
+        adapter.write_back(corpus, ca.DocumentId("project-1", "a.md"),
+                           b"# a\n", actor=ACTOR,
+                           basis_revision=corpus.revision or "")
+    finally:
+        monkeypatch.undo()
+        if repository.is_symlink():
+            repository.unlink()
+        if (tmp_path / "moved-aside").exists():
+            (tmp_path / "moved-aside").rename(repository)
+    assert seen["swapped"], "the race this test drives did not happen"
+
+    # THE MECHANISM, so a later edit that goes back to a pathname cannot pass
+    # on a platform where the race did not fire: the index git was told to use
+    # is INSIDE the descriptor the runner holds.
+    index = str(seen["index"])
+    assert index.startswith("/proc/self/fd/"), index
+
+    # AND THE CONSEQUENCE. Before the repair the decoy came out holding the
+    # temporary index; it has nothing in it now, and the real repository has
+    # the commit.
+    assert not [name for name in os.listdir(decoy)
+                if name.startswith("opendox-index-")], os.listdir(decoy)
+    assert _git(decoy, "rev-list", "--count", "--all") == "0"
+    assert _git(repository, "ls-tree", "-r", "--name-only", "HEAD") == "a.md"
+    assert not [name for name in os.listdir(repository)
+                if name.startswith("opendox-index-")]
+
+
+def test_a_parameter_name_is_judged_by_its_words_and_its_declared_compounds(
+) -> None:
+    """The substring rule that caught `sslpassword` refused ordinary names.
+
+    Whole-word matching answered `sslpassword` — libpq's own keyword — as
+    innocent, so every declared needle of six characters or more became a
+    SUBSTRING. That bought one true name at the price of every compound of
+    those words: MEASURED at `db5197d0`, `passwordless`, `secretary` and
+    `credentials_version` were all refused as credential-bearing (Copilot
+    review of openDox-code#26, suppressed, and registered there).
+
+    A FALSE REFUSAL AT A CONFIGURATION BOUNDARY IS NOT A SAFE DIRECTION, which
+    is the whole reason the whole-word rule exists: this predicate decides
+    whether an install starts, and refusing a legal name costs an install that
+    will not run for a reason that is not true. The compound is DECLARED now —
+    there is exactly one this runtime meets — so a name joins the list because
+    somebody established that a real protocol spells a secret that way.
+    """
+    from opendox.runtime import config
+
+    for name in ("password", "token", "sslpassword", "access_token",
+                 "X-Api-Key", "sessionToken", "apikey", "pass", "pwd",
+                 # AND THE ONE THAT STAYS REFUSED ON PURPOSE: `credentials` is
+                 # one of its WORDS, and the same reading is what catches the
+                 # three above. Narrowing past it would mean comparing the
+                 # whole NAME, which `X-Api-Key` walks straight through.
+                 "credentials_version"):
+        assert config.names_a_secret_parameter(name), name
+
+    for name in ("passwordless", "secretary", "monkey", "sigma", "tokenizer",
+                 "authority", "keyspace", "passage", "depth", "mode"):
+        assert not config.names_a_secret_parameter(name), name
+
+    # THE DECLARATION IS A LIST SOMEBODY OWNS, not a length rule.
+    assert config.SECRET_PARAMETER_COMPOUNDS == ("sslpassword",)
+    for compound in config.SECRET_PARAMETER_COMPOUNDS:
+        assert config.names_a_secret_parameter(compound), compound
+        # AND EVERY COMPOUND IS STILL HIDDEN BY THE REDACTOR, which is the
+        # one-direction property the pair has to keep.
+        assert "hunter2" not in lga.redact_credentials(
+            f"https://h/r.git?{compound}=hunter2")
+
+
+def test_an_authority_this_runtime_cannot_read_is_refused_by_name() -> None:
+    """Both classes excluded whitespace, and a credential sat in the gap.
+
+    `_scp_like_userinfo` declines a head holding whitespace so the refusal
+    cannot start judging prose, and the redactor's `_CREDENTIAL_SHAPED`
+    excludes it so an unrelated `user@host` further down git's stderr is not
+    joined to the URL above it — and `user:pa ss@host:path` fell between them:
+    the URL form of that value was refused and the scp form was not (Copilot
+    review of openDox-code#26, at `db5197d0`). The redaction half was closed
+    there; this is the STORE's own guard, registered then and built here.
+
+    IT IS REFUSED BY SHAPE AND NEVER BY VALUE, which is what the refusal text
+    has promised since § 3.5: a message that quotes the credential writes it
+    into the log that reports the refusal.
+    """
+    from opendox.runtime import config
+
+    for carrier in ("user:hun ter2@github.com:o/r.git",
+                    "user:hun\nter2@github.com:o/r.git",
+                    "user:hun\tter2@github.com:o/r.git"):
+        named = config.credential_in_a_remote_url(carrier)
+        assert named == "an authority this runtime cannot read as one word"
+        assert "hunter2" not in named and "ter2" not in named
+        # AND THE REDACTOR AGREES, which is the direction that must not open.
+        assert "ter2" not in lga.redact_remote_url(carrier)
+
+    # AND NOTHING ORDINARY IS CAUGHT BY IT. A head without `:` is a username, a
+    # value without `@` has no authority, and a local path with a space in it
+    # is neither.
+    for ordinary in ("git@github.com:o/r.git", "ssh://git@github.com/o/r.git",
+                     "/srv/my repos/x.git", "/srv/a@b/my repos/x.git",
+                     "https://github.com/o/r.git"):
+        assert config.credential_in_a_remote_url(ordinary) is None, ordinary

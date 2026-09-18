@@ -2078,8 +2078,30 @@ class LocalGitCorpus:
             # `<location>/.git` for a checkout and `<location>` itself for the
             # BARE repository the act creates — so it is asked for rather than
             # assumed.
-            git_dir = Path(decoded_path(
-                git.out("rev-parse", "--absolute-git-dir")))
+            #
+            # ASKED AS A RELATIVE NAME AND JOINED ONTO THE HELD DIRECTORY,
+            # because `--absolute-git-dir` is a PATHNAME and this method's
+            # whole guarantee is that the check and the use are one object.
+            # Every other call here goes through `-C /proc/self/fd/<n>`; the
+            # index did not, so a rename or replacement of the location
+            # between this probe and the index operations put the index — and
+            # its `unlink` — somewhere else (Copilot review of
+            # openDox-code#26, at `4156f233`). MEASURED on git 2.43.0 with the
+            # directory renamed away and a symlink to a second repository put
+            # in its place after the handle was opened: the absolute form
+            # wrote `opendox-index-…` into the DECOY and the descriptor-
+            # relative form wrote it into the real repository.
+            #
+            # `--git-dir` ASKED THROUGH `-C` IS RELATIVE — measured on the
+            # same git: `.` for the bare repository this act creates and
+            # `.git` for a checkout — so joining it onto `git.root` keeps the
+            # whole path inside the descriptor. An absolute answer (a `.git`
+            # FILE naming a linked worktree, which `resolve` already serves
+            # read-only) is used as given, because there is nothing to join it
+            # to; it cannot arise for a repository this act writes to.
+            named_git_dir = Path(decoded_path(git.out("rev-parse", "--git-dir")))
+            git_dir = (named_git_dir if named_git_dir.is_absolute()
+                       else git.root / named_git_dir)
             # A UNIQUE NAME PER CALL. Keyed on the process id alone, two
             # concurrent writes to the same repository in ONE process shared
             # `GIT_INDEX_FILE`: their `read-tree`/`update-index`/`write-tree`

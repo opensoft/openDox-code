@@ -26,7 +26,19 @@ jobs:
       # unchanged — is declared once, in the `test` extra, and read from here
       # rather than copied here.
       - name: install the package and its test extra
-        run: python -m pip install -e ".[test]"
+        # `-c` LOCKS THE RESOLVED VERSIONS. Without it this required check
+        # installs whatever the index resolves to on the day it runs, so the
+        # same commit tested twice is two different programs and a dependency
+        # can change under a green light (SonarCloud `githubactions:S8544`,
+        # advisory here, registered on openDox-code#26 and built in the
+        # follow-up). The file pins and installs nothing, so this step still
+        # installs `.[test]` ALONE — the FastAPI and psycopg entries in it
+        # simply do not apply — and the hermetic property this job exists for
+        # is unchanged.
+        run: >-
+          python -m pip install
+          -c constraints-cpython312-linux.txt
+          -e ".[test]"
 
       # RULED Q-L5 (b′), opensoft/openxFactory#656, 2026-09-10: until the
       # BUILD arc (split-opendox § 3.5/3.6) inverts the openDox → openXdox
@@ -1871,7 +1883,9 @@ jobs:
       # The step above uses the same form for the same reason.
       - name: install the package with the runtime and test extras
         run: >-
-          python -m pip install --only-binary :all: -e ".[runtime,test]"
+          python -m pip install --only-binary :all:
+          -c constraints-cpython312-linux.txt
+          -e ".[runtime,test]"
 
       - name: pytest (runtime, database-backed)
         env:

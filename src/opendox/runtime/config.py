@@ -143,6 +143,15 @@ SETTINGS: tuple[Setting, ...] = (
         "what the API will read",
     ),
     Setting(
+        PREFIX + "SERVED_DATABASE", "", False, False,
+        "the NAME (never a credential) of the DATABASE the SERVED application "
+        "reads, declared to the migration run so it can refuse to apply DDL — "
+        "or to DROP the coordination tables — anywhere else; the schema "
+        "declaration above answers the same question one level down, and this "
+        "is the wider of the two, because a DSN may omit `dbname` entirely and "
+        "libpq then defaults it to the connection USER",
+    ),
+    Setting(
         PREFIX + "PUBLISH_OPENAPI", "false", False, False,
         "whether to serve the interactive schema at /docs, /redoc and "
         "/openapi.json; OFF by default, because FastAPI's defaults would "
@@ -185,6 +194,7 @@ class RuntimeSettings:
     bind_port: int
     runtime_pg_role: str | None
     served_schema: str | None
+    served_database: str | None
     publish_openapi: bool
     migrations_dir: Path
     project_repository_root: Path
@@ -209,6 +219,7 @@ class RuntimeSettings:
             f"bind_host={self.bind_host!r}, bind_port={self.bind_port!r}, "
             f"runtime_pg_role={self.runtime_pg_role!r}, "
             f"served_schema={self.served_schema!r}, "
+            f"served_database={self.served_database!r}, "
             f"publish_openapi={self.publish_openapi!r}, "
             f"migrations_dir={str(self.migrations_dir)!r}, "
             f"project_repository_root={str(self.project_repository_root)!r})"
@@ -290,27 +301,41 @@ _WORD_SEPARATOR = re.compile(r"[^A-Za-z0-9]+")
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
-#: THE NEEDLES LONG ENOUGH TO BE UNAMBIGUOUS INSIDE A LONGER WORD. Whole-word
+#: THE COMPOUND NAMES A WORD SPLIT CANNOT SEE, DECLARED ONE BY ONE. Whole-word
 #: matching alone answered `sslpassword` — libpq's own keyword, and a query
 #: parameter name a caller can write — as innocent, because it is one word and
 #: is not the word `password` (Copilot review of openDox-code#26, at
-#: `555a03c8`). Six characters is the line: `password`, `passwd`, `secret`,
-#: `token`, `credential`, `signature`, `apikey`, `api_key`, `access_token`,
-#: `authorization` and `credentials` cannot appear inside an innocent
-#: parameter name by accident, while the short ones that CAN — `key` in
-#: `monkey`, `sig` in `sigma`, `auth` in `authority`, `pass` in `passage`,
-#: `pwd` — stay whole-word.
-_LONG_SECRET_NEEDLES = tuple(
-    sorted((key for key in SECRET_PARAMETER_KEYS if len(key) >= 6), key=len))
+#: `555a03c8`). The first repair called every needle of six characters or more
+#: a SUBSTRING, which bought `sslpassword` at the price of every other compound
+#: of those words: `passwordless` and `secretary` were refused as
+#: credential-bearing, measured (same review, at `db5197d0`, suppressed) — a
+#: false refusal at a CONFIGURATION boundary, which is the defect the
+#: whole-word rule above was written for in the first place.
+#:
+#: SO THE COMPOUNDS ARE NAMED, not derived. There is exactly one this runtime
+#: meets: libpq's `sslpassword`. A name reaches this list because somebody
+#: established that a real protocol spells a secret that way, which is a
+#: decision with an owner — where "every long word, anywhere inside any name"
+#: is a rule that grows false refusals nobody chose.
+SECRET_PARAMETER_COMPOUNDS = ("sslpassword",)
+_SECRET_COMPOUND_WORDS = frozenset(SECRET_PARAMETER_COMPOUNDS)
 
 
 def names_a_secret_parameter(name: str) -> bool:
     """True when a URL parameter's NAME is one of the credential names.
 
-    WHOLE WORDS for the short needles, for the reason
-    `_SECRET_PARAMETER_WORDS` gives above, and SUBSTRINGS for the long ones,
-    for the reason `_LONG_SECRET_NEEDLES` gives. The decoded name is what is
-    judged, because `%74oken` is `token`.
+    WHOLE WORDS, for the reason `_SECRET_PARAMETER_WORDS` gives above, plus the
+    declared compounds `_SECRET_COMPOUND_WORDS` names. The decoded name is what
+    is judged, because `%74oken` is `token`.
+
+    A WORD, NOT A SUBSTRING, AND THE DIFFERENCE IS MEASURED: `passwordless` and
+    `secretary` were refused by the substring rule this replaces, and are
+    accepted now; `sslpassword` is refused because it is DECLARED, not because
+    it contains eight of the letters of `password`. `credentials_version` is
+    still refused, and deliberately — `credentials` is one of its words, and
+    the same reading is what catches `access_token`, `X-Api-Key` and
+    `sessionToken`. Narrowing further would mean comparing the whole NAME,
+    which those three would walk straight through.
 
     THIS IS THE NARROWER OF THE TWO READINGS of one declared list.
     `local_git_adapter` asks the same tuple as a plain alternation, so it
@@ -324,10 +349,9 @@ def names_a_secret_parameter(name: str) -> bool:
     it over a corpus.
     """
     spaced = _CAMEL_BOUNDARY.sub(" ", name).lower()
-    if any(needle in spaced for needle in _LONG_SECRET_NEEDLES):
-        return True
+    words = [word for word in _WORD_SEPARATOR.split(spaced) if word]
     return any(word in _SECRET_PARAMETER_WORDS
-               for word in _WORD_SEPARATOR.split(spaced) if word)
+               or word in _SECRET_COMPOUND_WORDS for word in words)
 
 
 def _split_url(name: str, value: str) -> urllib.parse.SplitResult:
@@ -481,6 +505,20 @@ def credential_in_a_remote_url(value: str | None) -> str | None:
             return "a password in the URL's authority"
     elif _scp_like_userinfo(value) is not None:
         return "a password in the URL's authority"
+    elif _an_authority_this_runtime_cannot_read(value):
+        # THE SHAPE BOTH CLASSES EXCLUDED. `_scp_like_userinfo` declines a head
+        # holding whitespace so this rule cannot start judging prose, and the
+        # redactor's `_CREDENTIAL_SHAPED` excludes it so an unrelated
+        # `user@host` further down git's stderr is not joined to a URL above it
+        # — and between the two sat `user:pa ss@host:path`, which this returned
+        # `None` for while the URL form of the same value was refused (Copilot
+        # review of openDox-code#26, at `db5197d0`; the redaction half was
+        # closed there and this, the STORE's own guard, was registered). No
+        # writer reachable from the API or the CLI could make such a row —
+        # `repository_act.refuse_credential_bearing_remote` refuses the shape
+        # at every one — so what this closes is the raw-SQL and restore path,
+        # and it closes it by NAME rather than by guessing at the value.
+        return "an authority this runtime cannot read as one word"
     # AND THE KEYWORD/VALUE FORM, which is neither an authority nor a query.
     if LIBPQ_PASSWORD.search(value):
         return "a libpq keyword/value password"
@@ -525,6 +563,25 @@ def redacted_remote_url(value: str | None) -> str | None:
     from opendox.runtime.local_git_adapter import redact_remote_url
 
     return redact_remote_url(value)
+
+
+def _an_authority_this_runtime_cannot_read(value: str) -> bool:
+    """`user:pa ss@host:path` — an authority-shaped head holding whitespace.
+
+    THE HEAD IS TAKEN AT THE LAST `@`, for the reason `_scp_like_userinfo`
+    takes it there: a password may contain `@`, and stopping at the first one
+    reads the remainder as a host. A head without `:` is a bare username, which
+    is not a secret in any form, and a value without `@` has no authority at
+    all — so neither is refused, and a local path with a space in it
+    (`/srv/my repos/x.git`, and even `/srv/a@b/my repos/x.git`) is untouched.
+
+    REFUSING IS THE ANSWER FOR A VALUE THIS MODULE CANNOT PARSE — `_split_url`'s
+    reasoning, and the same sentence `credential_in_a_remote_url` already
+    applies to a `urlsplit` that raises. `local_git_adapter.redact_remote_url`
+    made the same judgement for the same shape at the printing end.
+    """
+    head = value.rpartition("@")[0]
+    return bool(head) and ":" in head and any(c.isspace() for c in head)
 
 
 def _scp_like_userinfo(value: str) -> tuple[str, str, str] | None:
@@ -831,6 +888,27 @@ def _served_schema(env: Mapping[str, str]) -> str | None:
     back from the connection.
     """
     return env.get(PREFIX + "SERVED_SCHEMA", "").strip() or None
+
+
+def _served_database(env: Mapping[str, str]) -> str | None:
+    """`OPENDOX_SERVED_DATABASE`, or `None`.
+
+    A DATABASE NAME AND NEVER A CREDENTIAL — the same property that lets a
+    migration container be told `OPENDOX_SERVED_SCHEMA`, one level up. A25-3
+    established the shape and this closes the half it left: the guard it built
+    compares the two DSNs, and NO SHIPPED WORKLOAD HOLDS BOTH, so the served
+    SCHEMA was declared to the migration Job while the served DATABASE was not
+    declared at all. A migration DSN pointed at the wrong database therefore
+    applied DDL — and `runtime reset` DROPPED the six coordination tables —
+    in a database the API does not read, and nothing in the shipped shape could
+    notice (registered on openDox-code#26 from the round at `ebad9d65`, ruled
+    item 4, and built here).
+
+    No shape rule beyond "not empty": like the schema, it is never interpolated
+    into SQL, only COMPARED with what `current_database()` reads back from the
+    connection.
+    """
+    return env.get(PREFIX + "SERVED_DATABASE", "").strip() or None
 
 
 def _role_name(env: Mapping[str, str]) -> str | None:
@@ -1331,6 +1409,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
         bind_port=_positive_int(env, _by_name(PREFIX + "BIND_PORT")),
         runtime_pg_role=_role_name(env),
         served_schema=_served_schema(env),
+        served_database=_served_database(env),
         publish_openapi=_boolean(env, _by_name(PREFIX + "PUBLISH_OPENAPI")),
         migrations_dir=Path(_optional(env, _by_name(PREFIX + "MIGRATIONS_DIR")) or "migrations"),
         project_repository_root=Path(
@@ -1380,6 +1459,7 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
         bind_port=1,
         runtime_pg_role=_role_name(env),
         served_schema=_served_schema(env),
+        served_database=_served_database(env),
         publish_openapi=False,
         migrations_dir=Path(
             _optional(env, _by_name(PREFIX + "MIGRATIONS_DIR")) or "migrations"),

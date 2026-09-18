@@ -117,3 +117,12 @@ configMapGenerator:
       # and the served role's rights in another (Copilot review of
       # openDox-code#25, round 36, suppressed).
       - pg_schema=
+      # The DATABASE the served application reads, declared to the migration
+      # Job so it can refuse to apply DDL anywhere else. EMPTY declares
+      # nothing, which is the bundled shape; an overlay whose DSNs name a
+      # database sets this to the SAME name in the same commit. A NAME and
+      # never a credential — the property that lets a workload which must not
+      # hold the served DSN be told where the API reads (A25-3 established it
+      # for the schema; this is the half it left, openDox-code#26's registered
+      # item 4).
+      - pg_database=

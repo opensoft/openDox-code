@@ -36,12 +36,19 @@ WORKDIR /app
 # cost is a developer's minutes and it is recorded here rather than traded for
 # an invented pin.
 COPY pyproject.toml README.md ./
+# The lock travels with the sources it pins, and BEFORE the install that reads
+# it: an image built from an unlocked resolve is a supply chain that can change
+# without a commit (SonarCloud `docker:S8544`, "using dependencies without
+# locking resolved versions is security-sensitive" — advisory on this
+# repository, registered on openDox-code#26 and built in the follow-up).
+COPY constraints-cpython312-linux.txt ./
 COPY src ./src
 # `--only-binary :all:` so pip never builds a dependency from an sdist —
 # which would run that project's `setup.py` inside the image build. Every
 # package in the `runtime` extra publishes wheels for cpython 3.12 on
 # linux, `psycopg[binary]` by name, so the flag costs nothing.
-RUN python -m pip install --no-cache-dir --only-binary :all: ".[runtime]"
+RUN python -m pip install --no-cache-dir --only-binary :all: \
+      -c constraints-cpython312-linux.txt ".[runtime]"
 
 # The ordered SQL travels with the image: `opendox-runtime runtime migrate` reads
 # `migrations/` relative to the working directory, and an image whose migration

@@ -1711,3 +1711,66 @@ def test_reset_and_plan_ask_the_served_schema_declaration_the_run_asks(
         finally:
             with admin.transaction() as conn:
                 conn.execute(f"drop schema if exists {schema} cascade")
+
+
+# -- the registered follow-ups, from #26's rounds -----------------------------
+
+
+def test_a_run_refuses_a_database_the_served_application_will_not_read(
+        database) -> None:
+    """A25-3 closed the schema half; the DATABASE half stayed open.
+
+    The finding was that the configuration-time comparison of the two DSNs can
+    never fire in a shipped deployment, because no workload holds both — so the
+    migration container has to be TOLD where the API reads. It was told the
+    SCHEMA. It was not told the DATABASE, and that is the wider of the two
+    questions: a schema comparison made in the wrong database compares two
+    names that happen to agree, and `dbname` may be omitted from a DSN
+    ENTIRELY, in which case libpq defaults it to the connection USER (measured
+    on postgres 16 for openDox-code#25's two-DSN guard) — so two DSNs that look
+    alike can select two databases without either one saying so.
+
+    THE CONSEQUENCE IS THE SAME ONE LEVEL UP: DDL and a ledger applied to a
+    database nothing serves, or `runtime reset` DROPPING the six coordination
+    tables of a database that was never this install's. That verb cannot be
+    undone. Registered on openDox-code#26 as ruled item 4 and built here.
+    """
+    declared = "a-database-this-install-does-not-serve"
+    runner = migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations",
+        served_database=declared)
+    with database.connection() as conn:
+        here = migrations.selected_database(conn)
+    assert here != declared
+
+    with pytest.raises(migrations.MigrationError) as caught:
+        runner.apply()
+    message = str(caught.value)
+    assert here in message and declared in message
+    assert "nothing has been changed" in message
+    # AND THE REFUSAL NAMES THE VARIABLE an operator has to correct, not just
+    # the mismatch.
+    assert "OPENDOX_SERVED_DATABASE" in message
+
+    # NOTHING WAS APPLIED: the guard runs before `bootstrap_ledger`, so a
+    # database that had no ledger still has none.
+    assert set(identity.TABLES) | {migrations.LEDGER_TABLE} == _tables_in(
+        database), "the fixture's own migrated schema must be untouched"
+
+    # THE DECLARATION AGREEING IS A RUN, and an undeclared database is the
+    # bundled single-database install rather than an error.
+    agreeing = migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations", served_database=here)
+    assert agreeing.apply() == [], "already applied; the guard is not a refusal"
+    assert migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations").apply() == []
+
+    # AND IT IS ASKED BEFORE THE SCHEMA'S, because it is the wider question:
+    # with BOTH declarations wrong, the database is what the refusal names.
+    both_wrong = migrations.MigrationRunner(
+        database, migrations_dir=ROOT / "migrations",
+        served_database=declared, served_schema="somewhere-else")
+    with pytest.raises(migrations.MigrationError) as first:
+        both_wrong.apply()
+    assert "OPENDOX_SERVED_DATABASE" in str(first.value)
+    assert "OPENDOX_SERVED_SCHEMA" not in str(first.value)

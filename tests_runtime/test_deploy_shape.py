@@ -148,10 +148,23 @@ def test_the_required_job_installs_only_the_test_extra() -> None:
                 if "pip install" in step.get("run", "")]
     assert installs, "the required job installs nothing"
     for line in installs:
-        assert "runtime" not in line, (
-            f"the required `validate` job installs {line!r}; it must install "
-            "the test extra alone, or the hermetic suites stop measuring the "
-            "import-weight contract they exist for")
+        # THE EXTRAS, NOT THE WHOLE COMMAND LINE. This asked whether the word
+        # `runtime` appeared anywhere in the step, which was true of the
+        # dependency LOCK the same step now passes with `-c`
+        # (`…/runtime-and-test-cpython312-linux.txt`) — a name, not an install.
+        # What the job must not do is install the runtime EXTRA, so that is
+        # what is read: every `.[…]` target in the command, by its extras.
+        extras = {extra.strip()
+                  for target in re.findall(r"\.\[([^]]*)\]", line)
+                  for extra in target.split(",")}
+        assert extras, (
+            f"the required `validate` job installs {line!r} and no extra of "
+            "this package could be read from it; this guard reads the `.[…]` "
+            "target, so an install spelled another way has to say so here")
+        assert extras == {"test"}, (
+            f"the required `validate` job installs {sorted(extras)!r}; it must "
+            "install the test extra alone, or the hermetic suites stop "
+            "measuring the import-weight contract they exist for")
 
 
 # -- the three declarations agree -------------------------------------------
@@ -238,11 +251,19 @@ def test_the_image_ships_git_and_installs_the_runtime_extra() -> None:
         "the runtime image must install git: the repository-creation act runs "
         "it as a subprocess, and an image without it fails the one thing "
         "§ 3.6 exists to do")
-    assert 'pip install --no-cache-dir --only-binary :all: ".[runtime]"' in (
-        dockerfile), (
-        "the image must install the runtime extra, and with `--only-binary "
-        ":all:` so pip never builds a dependency from an sdist — which would "
-        "run that project's `setup.py` inside the image build")
+    # THE PARTS, NOT THE WHOLE LINE, because the install now also carries the
+    # dependency lock with `-c` and is wrapped over two lines for it.
+    assert re.search(r"pip install[^\n]*--no-cache-dir", dockerfile)
+    assert re.search(r"pip install[^\n]*--only-binary :all:", dockerfile), (
+        "the image must install with `--only-binary :all:` so pip never "
+        "builds a dependency from an sdist — which would run that project's "
+        "`setup.py` inside the image build")
+    assert '".[runtime]"' in dockerfile, (
+        "the image must install the runtime extra")
+    assert ("-c constraints-cpython312-linux.txt"
+            in dockerfile), (
+        "the image install must read the dependency lock: an unlocked resolve "
+        "is an image that changes without a commit (SonarCloud `docker:S8544`)")
     assert "COPY migrations ./migrations" in dockerfile, (
         "the ordered SQL travels with the image; a migration job that had to "
         "mount the repository could run against SQL the image never saw")
@@ -428,10 +449,16 @@ def test_the_migration_container_carries_no_served_identity() -> None:
     # two workloads and the configuration-time comparison of them could
     # therefore never fire in a shipped deployment (independent adversarial
     # review of openDox-code#25, A25-3).
+    # AND `SERVED_DATABASE` JOINS `SERVED_SCHEMA` IN THAT LIST, by the same
+    # argument and for the wider question: a NAME, never a credential, and the
+    # only way a container holding no served DSN can be told where the API
+    # reads. A25-3 closed the schema half; this is the other one
+    # (openDox-code#26's registered item 4).
     assert set(migrate) == {PREFIX + "MIGRATION_DATABASE_URL",
                             PREFIX + "MIGRATIONS_DIR",
                             PREFIX + "RUNTIME_PG_ROLE",
-                            PREFIX + "SERVED_SCHEMA"}
+                            PREFIX + "SERVED_SCHEMA",
+                            PREFIX + "SERVED_DATABASE"}
 
     job = _load_yaml(KUBERNETES / "base" / "migration-job.yaml")
     names = _env_names_of(_containers(job)[0])
@@ -440,7 +467,8 @@ def test_the_migration_container_carries_no_served_identity() -> None:
     assert names == {PREFIX + "MIGRATION_DATABASE_URL",
                      PREFIX + "MIGRATIONS_DIR",
                      PREFIX + "RUNTIME_PG_ROLE",
-                     PREFIX + "SERVED_SCHEMA"}
+                     PREFIX + "SERVED_SCHEMA",
+                     PREFIX + "SERVED_DATABASE"}
 
 
 def test_the_role_the_migration_narrows_is_a_name_and_not_a_credential() -> None:
@@ -638,7 +666,7 @@ def test_the_image_comment_does_not_claim_a_layer_cache_it_does_not_have() -> No
     """
     text = (COMPOSE / "Dockerfile").read_text(encoding="utf-8")
     copy_src = text.index("COPY src ./src")
-    install = text.index('pip install --no-cache-dir --only-binary :all: ".[runtime]"')
+    install = text.index("pip install --no-cache-dir --only-binary :all:")
     assert copy_src < install, "the layer order changed; re-read the comment"
     claim = text[:copy_src]
     assert "does not reinstall" not in claim, (
@@ -2148,3 +2176,66 @@ def test_the_schema_the_migration_applies_is_the_one_the_api_reads() -> None:
     assert verbs.index("refuse_a_schema_the_api_will_not_read", reset) < \
         verbs.index('sql.SQL("drop table if exists', reset), (
             "`reset` must ask before the first DROP, which cannot be undone")
+
+
+# -- the registered follow-ups, from #26's rounds -----------------------------
+
+
+def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
+    """An unlocked install is a supply chain that changes without a commit.
+
+    `pyproject.toml` declares what this package NEEDS and deliberately does not
+    pin it — a library that pins its dependents' versions cannot be installed
+    beside anything. The other half was missing: the three places that install
+    this package into an environment somebody depends on resolved whatever the
+    index offered on the day they ran, so the same commit tested twice is two
+    different programs (SonarCloud `githubactions:S8544` on
+    `.github/workflows/validate.yml` and `docker:S8544` on
+    `deploy/compose/Dockerfile` — "using dependencies without locking resolved
+    versions is security-sensitive"; advisory on this repository, registered on
+    openDox-code#26 and built here).
+
+    ONE FILE FOR THE THREE, so there is no second list of names to drift, and a
+    CONSTRAINTS file rather than a requirements one: it pins what is installed
+    and installs nothing, which is what lets the required job go on installing
+    `.[test]` ALONE while the entries for FastAPI and psycopg sit unused.
+
+    AT THE REPOSITORY ROOT, and that is load-bearing: `deploy/` holds the
+    git-ignored `.env` that `.dockerignore` exists to keep out of the build
+    context, so a lock living there would have meant a `!deploy…` re-inclusion
+    — and the guard that no such rule exists is what keeps the filled-in `.env`
+    at home.
+    """
+    lock = ROOT / "constraints-cpython312-linux.txt"
+    assert lock.exists(), (
+        "the dependency lock is missing; the three installs below name it")
+    pins = [line.strip() for line in lock.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+    assert pins, "the lock pins nothing"
+    for pin in pins:
+        assert "==" in pin, (
+            f"{pin!r} is not a resolved version; a constraint that is not an "
+            "`==` leaves the resolution open, which is the finding")
+    # THE PACKAGES THIS RUNTIME CANNOT RUN WITHOUT are in it, so an empty-ish
+    # lock cannot pass the loop above.
+    names = {pin.split("==")[0].lower() for pin in pins}
+    assert {"fastapi", "psycopg", "pytest", "pyjwt", "pyyaml"} <= names, (
+        sorted(names))
+
+    workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(
+        encoding="utf-8")
+    # THE STEPS, NOT THE PROSE: this file's comment block quotes old install
+    # lines, so the count is taken from the parsed workflow's `run` steps.
+    parsed = yaml.safe_load(workflow)
+    installs = [step["run"] for job in parsed["jobs"].values()
+                for step in job["steps"] if "pip install" in step.get("run", "")]
+    assert len(installs) == 2, installs
+    for run in installs:
+        assert "-c constraints-cpython312-linux.txt" in run, run
+    dockerfile = (COMPOSE / "Dockerfile").read_text(encoding="utf-8")
+    for text, where in ((workflow, "validate.yml"), (dockerfile, "Dockerfile")):
+        assert text.count("-c constraints-cpython312-linux.txt") >= 1, where
+    # AND THE IMAGE CARRIES IT, before the install that reads it.
+    assert dockerfile.index("COPY constraints-cpython312-linux.txt") < \
+        dockerfile.index("pip install --no-cache-dir"), (
+        "the image installs before it copies the lock; the build would fail")

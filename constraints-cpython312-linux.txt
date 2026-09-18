@@ -1,0 +1,66 @@
+# THE RESOLVED VERSIONS OF THIS PACKAGE'S DEPENDENCY TREE, LOCKED.
+#
+# `pyproject.toml` declares what this package NEEDS and deliberately does not
+# pin it: a library that pins its dependents' versions is a library that cannot
+# be installed beside anything. This file is the other half — what an INSTALL
+# resolved to — and it is passed to pip with `-c` by the three places that
+# install this package into an environment somebody depends on: the required
+# `validate` job, the DB-backed `runtime` job, and the runtime image.
+#
+# WHY IT EXISTS: SonarCloud `githubactions:S8544` / `docker:S8544`, "using
+# dependencies without locking resolved versions is security-sensitive", on
+# `.github/workflows/validate.yml` and `deploy/compose/Dockerfile` — a quality
+# gate that is ADVISORY on this repository, registered on openDox-code#26 and
+# built here. An unlocked install is a supply chain that can change under a
+# green check: the same commit, tested twice, is two different programs.
+#
+# MEASURED, NOT WRITTEN BY HAND. Regenerate it in a clean virtual environment
+# on the platform CI uses (cpython 3.12, linux) and commit the diff as its own
+# act, so the change of a dependency is a change somebody reviewed:
+#
+#     python3 -m venv /tmp/lock && /tmp/lock/bin/python -m pip install \
+#         --only-binary :all: -e ".[runtime,test]"
+#     /tmp/lock/bin/python -m pip freeze --exclude-editable | sort \
+#         > constraints-cpython312-linux.txt
+#
+# A CONSTRAINTS FILE AND NOT A REQUIREMENTS FILE: it pins what is installed and
+# installs nothing itself, so the required job still installs `.[test]` alone —
+# the entries for FastAPI and psycopg simply do not apply there — and the image
+# still installs `.[runtime]`. One file, three installs, no second list of
+# names to drift.
+#
+# Resolved 2026-09-18 on cpython 3.12.3 / linux x86_64.
+PyJWT==2.14.0
+PyYAML==6.0.3
+Pygments==2.21.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+cffi==2.1.1
+click==8.5.0
+cryptography==50.0.1
+fastapi==0.141.1
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+psycopg-binary==3.3.6
+psycopg-pool==3.3.2
+psycopg==3.3.6
+pycparser==3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+pytest==8.4.2
+python-dotenv==1.2.3
+starlette==1.6.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.53.0
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==17.1

@@ -2036,3 +2036,76 @@ def test_the_map_endpoints_redact_every_shape_a_legacy_row_can_carry(
         headers=_auth(owner))
     assert refused.status_code == 409, refused.text
     assert "hun ter2" not in refused.text
+
+
+# -- the registered follow-ups, from #26's rounds -----------------------------
+
+
+def test_a_map_row_deleted_under_an_act_is_a_404_and_not_a_500(
+        client, database, mint_token, monkeypatch) -> None:
+    """`_found` wrapped the PRE-CHECK, and the act is a second statement.
+
+    Both repository routes read the map row with `_found(...)` and then call
+    the act, which takes the row FOR UPDATE inside itself. Between those two
+    statements the row can be deleted — by another owner, by a project being
+    torn down — and `_local_git_row` then raises `identity.NotFoundError` past
+    a handler that catches only `RepositoryActRefused`. The ordinary
+    disappeared-row race therefore answered 500 where this API documents 404
+    (Copilot review of openDox-code#26, at `db5197d0`, suppressed, registered
+    there and built here). It is the same class as openDox-code#25's round 10
+    on the draft-discard path, whose repair this follows: the translation
+    belongs on the call that can raise, not on a read taken beforehand.
+
+    THE RACE IS ARRANGED, NOT RACED: the deletion is driven from inside the
+    act's own entry point, which is the only window where it matters, and it is
+    a REAL delete on another connection — the shape the defect takes.
+    """
+    from opendox.runtime import repository_act
+
+    owner = mint_token(subject="vanishing-row-owner")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "vanishing", "title": "Vanishing"},
+                          headers=_auth(owner)).json()
+
+    def _delete_the_row() -> None:
+        with database.transaction() as conn:
+            conn.execute("delete from project_repositories where project_id = %s",
+                         (project["id"],))
+
+    for verb, call, act_name in (
+            ("attach",
+             lambda: client.put(
+                 f"/api/v1/projects/{project['id']}/repository/remote",
+                 # NO USERINFO AT ALL: the act refuses even a bare
+                 # username in a remote it is asked to STORE, which is its own
+                 # documented trade, and a 409 here would measure that rule
+                 # instead of this race.
+                 json={"remote_url": "https://github.com/o/r.git"},
+                 headers=_auth(owner)),
+             "attach_remote"),
+            ("push",
+             lambda: client.post(
+                 f"/api/v1/projects/{project['id']}/repository/push",
+                 headers=_auth(owner)),
+             "push_to_remote")):
+        with database.transaction() as conn:
+            from opendox.runtime.identity import CoordinationStore
+            CoordinationStore(conn).create_project_repository(
+                project_id=project["id"], adapter="local-git",
+                location="/srv/repos/vanishing.git")
+        real = getattr(repository_act, act_name)
+
+        def _delete_then_act(*args, _real=real, **kwargs):
+            _delete_the_row()
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(repository_act, act_name, _delete_then_act)
+        response = call()
+        monkeypatch.undo()
+        assert response.status_code == 404, (verb, response.status_code,
+                                             response.text)
+        body = response.json()["detail"]
+        assert body["code"] == "coordination.not_found", verb
+        # AND THE MESSAGE IS THE STORE'S OWN, so an operator reading it learns
+        # WHAT was not found rather than that something went wrong.
+        assert "repository" in body["message"].lower(), body["message"]

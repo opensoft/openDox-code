@@ -656,6 +656,34 @@ python -m pytest -q tests_runtime/
 Without that variable the DB-backed cases **skip with the reason printed** —
 never pass silently, never fail a tree for not running Postgres.
 
+### Proving a regression case against an older head
+
+A case that is meant to fail before a fix has to be RUN against the code it
+forbids, and the obvious way to do that does not work here. `pyproject.toml`
+sets `[tool.pytest.ini_options] pythonpath = ["src"]`, and pytest **prepends**
+that entry to `sys.path` — ahead of whatever `PYTHONPATH` carries. So
+
+```sh
+PYTHONPATH=/some/old/checkout/src python -m pytest -q tests_runtime/…   # WRONG
+```
+
+silently measures **this** tree's `src/`: the case passes, the proof is empty,
+and nothing says so. It is the shape of mistake that leaves a "regression test"
+in the suite that never saw the regression.
+
+Check out the old head whole and run there instead, so the interpreter, the
+test file and the code under test come from one place:
+
+```sh
+git archive <old-sha> | tar -x -C /tmp/oldhead
+cp tests_runtime/test_x.py /tmp/oldhead/tests_runtime/
+cd /tmp/oldhead && python -m pytest -q tests_runtime/test_x.py -k the_case
+```
+
+For a measurement that needs no test harness — a timing, a mode, a redactor's
+answer — a plain script with `sys.path.insert(0, "/tmp/oldhead/src")` is enough,
+because nothing is prepending anything to it.
+
 ## 8a. The lifecycle, run end to end (2026-09-16, measured)
 
 Not a test: the installed console script, a real Postgres and a real socket.
