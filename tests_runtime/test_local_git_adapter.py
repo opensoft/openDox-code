@@ -4075,6 +4075,61 @@ def test_the_two_readings_of_the_one_list_never_disagree_about_hiding() -> None:
         assert secret not in lga.redact_credentials(url), key
 
 
+def test_a_legacy_remote_too_long_to_judge_is_replaced_before_it_is_decoded(
+        monkeypatch) -> None:
+    """The quadratic decoder was bounded by a refusal its new caller skips.
+
+    `_decoded_parameter_name` decodes to a fixed point, which is quadratic in
+    the name, and it said so — naming
+    `repository_act.refuse_credential_bearing_remote`'s length refusal as what
+    keeps that safe. True while every path here came through that refusal.
+    Pointing `config.redacted_remote_url` at `redact_remote_url` added a path
+    that does NOT: a legacy `project_repositories.remote_url` row — a restore,
+    an older build, `psql` — passed no refusal at any time, so a nested
+    `%2525…` chain of any length made EVERY read of the map endpoints do that
+    work, once per row, for as long as the row exists (Copilot review of
+    openDox-code#26, at `4156f233`, suppressed — and correct).
+
+    THE BOUND IS ASSERTED BY SUBSTITUTION, NOT BY A CLOCK. A timing assertion
+    on a decoder measures the runner's load as much as the code; this case
+    makes `_decoded_parameter_name` RAISE, so reaching it at all is a failure
+    and short-circuiting is the only way to pass. The value at the cap still
+    goes through it, which is the other half: a remote the act ACCEPTS must
+    never be over-redacted by the boundary that prints it.
+    """
+    from opendox.runtime import config, repository_act
+
+    # ONE DECLARATION, held by identity across all three readers.
+    assert repository_act.MAX_REMOTE_URL_CHARS is config.MAX_REMOTE_URL_CHARS
+
+    def _never(name: str) -> str:
+        raise AssertionError(
+            "the decoder was reached with a value longer than the cap")
+
+    monkeypatch.setattr(lga, "_decoded_parameter_name", _never)
+    oversized = ("https://github.com/o/r.git?"
+                 + "%25" * 3000 + "74oken=hunter2")
+    assert len(oversized) > config.MAX_REMOTE_URL_CHARS
+    assert lga.redact_remote_url(oversized) == "<redacted-url>"
+    assert "hunter2" not in lga.redact_remote_url(oversized)
+    # AND THE BOUNDARY THE API CALLS IS THE SAME ONE.
+    assert config.redacted_remote_url(oversized) == "<redacted-url>"
+
+    # AT THE CAP, the decoder is reached — so the bound cannot be widened into
+    # refusing to read every remote, and a value the act accepts is answered in
+    # part. (The substitute is removed for this half, because reaching the real
+    # decoder is the assertion.)
+    monkeypatch.undo()
+    at_the_cap = ("https://github.com/o/r.git?token=hunter2&pad="
+                  + "a" * (config.MAX_REMOTE_URL_CHARS
+                           - len("https://github.com/o/r.git?token=hunter2&pad=")))
+    assert len(at_the_cap) == config.MAX_REMOTE_URL_CHARS
+    redacted = lga.redact_remote_url(at_the_cap)
+    assert redacted != "<redacted-url>"
+    assert "hunter2" not in redacted
+    assert "github.com" in redacted
+
+
 def test_the_group_is_signalled_from_the_id_saved_at_popen_not_looked_up_later(
         tmp_path: Path) -> None:
     """The lookup happened at KILL time, and by then the child can be reaped.

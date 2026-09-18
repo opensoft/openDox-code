@@ -73,6 +73,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from opendox.corpus_adapter import CorpusRef
+from opendox.runtime import config
 from opendox.runtime.identity import NotFoundError
 from opendox.runtime.local_git_adapter import (
     ADAPTER_NAME,
@@ -132,15 +133,13 @@ _URL_USERINFO = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/@]*@")
 #: URL: `[^/@]+` cannot cross the `//` of a `scheme://`.
 _SCP_USERINFO = re.compile(r"^[^/@]+@[^/:@]+:")
 
-#: A remote URL longer than this is refused. NOT a style rule: the credential
-#: predicate decodes each parameter name to a fixed point, which is quadratic
-#: in the name's length, and `remote_url` is caller-controlled — so a nested
-#: `%2525…` chain of unbounded length is work an attacker chooses for this
-#: process (Copilot review of openDox-code#26, round 10, suppressed). Two
-#: kilobytes is the conventional URL ceiling and is far above any real remote;
-#: the bound is stated here, where the value enters, rather than inside the
-#: predicate, which also reads git's own bounded stderr.
-MAX_REMOTE_URL_CHARS = 2048
+#: A remote URL longer than this is refused — `config.MAX_REMOTE_URL_CHARS`,
+#: which is the one declaration and carries the reasoning. It was declared
+#: HERE, where the value enters, until the redaction of a STORED value needed
+#: the same number: a legacy row passes no refusal, so the bound could not stay
+#: in the refusal alone (Copilot review of openDox-code#26, at `4156f233`).
+#: The name stays because this is where callers and refusal messages say it.
+MAX_REMOTE_URL_CHARS = config.MAX_REMOTE_URL_CHARS
 
 #: Transports whose "URL" is a COMMAND. `ext::<command>` runs it, and
 #: `git-remote-<name>` helpers are resolved off PATH; git gates them behind

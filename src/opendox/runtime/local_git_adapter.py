@@ -993,13 +993,18 @@ def _decoded_parameter_name(name: str) -> str:
     into a space, and neither can be undone by a later pass, so a name of
     length n reaches its fixed point in at most n passes.
 
-    WORST-CASE WORK IS QUADRATIC IN THE NAME, and that is bounded where the
-    value enters: `repository_act.refuse_credential_bearing_remote` refuses a
-    remote URL longer than `MAX_REMOTE_URL_CHARS` before this is ever reached,
-    so a nested `%2525…` chain cannot be made long enough to matter (Copilot
-    review of openDox-code#26, round 10). The other caller is
-    `redact_credentials` over git's own stderr, which this process bounds by
-    reading a finished command's output.
+    WORST-CASE WORK IS QUADRATIC IN THE NAME, and EVERY path to it is bounded —
+    which took two goes to be true. `repository_act.refuse_credential_bearing_
+    remote` refuses a remote URL longer than `config.MAX_REMOTE_URL_CHARS`
+    before this is ever reached (Copilot review of openDox-code#26, round 10),
+    and `redact_credentials` over git's own stderr is bounded by reading a
+    finished command's output. THE THIRD PATH ARRIVED LATER: pointing
+    `config.redacted_remote_url` at `redact_remote_url` put a STORED
+    `remote_url` here, and a legacy row — a restore, an older build, `psql` —
+    passed no refusal at all, so this paragraph named a bound that did not
+    cover its own caller (same review, at `4156f233`, suppressed).
+    `redact_remote_url` applies the same number to a stored value now, so the
+    three paths are bounded by one declaration.
     """
     # BOUNDED BY THE NAME'S OWN LENGTH, and not by an assertion that every
     # pass shortens it: `unquote_plus` also turns `+` into a SPACE, which
@@ -1211,8 +1216,23 @@ def redact_remote_url(url: str) -> str:
     whitespace-bearing authority is a legacy row that cannot be shown in part.
     `redact_credentials` is untouched, so the diagnostic reading keeps its
     lines.
+
+    AND THE LENGTH BOUND IS HERE FOR THE SAME REASON THE OTHER TWO ARE.
+    `_decoded_parameter_name` is quadratic in a parameter name by construction
+    and its docstring named `repository_act`'s refusal as what keeps that safe
+    — true while everything reaching this module had passed that refusal. The
+    delegation from `config.redacted_remote_url` put a STORED value on the path
+    for the first time, and a legacy row passed no refusal, so every map read
+    of an oversized one did the quadratic work (Copilot review of
+    openDox-code#26, at `4156f233`, suppressed). One declaration answers both:
+    `config.MAX_REMOTE_URL_CHARS` is the number the act refuses ABOVE and the
+    number this entry point will not print in PART, so a remote the act accepts
+    is never over-redacted here, and one longer than it — legacy by
+    construction — is replaced whole before the decoder is ever reached.
     """
-    if carries_a_control_character(url) or _whitespace_inside_an_authority(url):
+    if (len(url) > config.MAX_REMOTE_URL_CHARS
+            or carries_a_control_character(url)
+            or _whitespace_inside_an_authority(url)):
         return "<redacted-url>"
     return redact_credentials(url, a_bare_username_is_not_a_secret=True)
 

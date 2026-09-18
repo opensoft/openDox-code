@@ -247,6 +247,27 @@ class RuntimeSettings:
 #: its pattern FROM this tuple, so there is one list and two readings of it —
 #: see `names_a_secret_parameter` for the difference, which is deliberate and
 #: is only ever in the direction of the adapter hiding MORE.
+#: THE LONGEST REMOTE THIS RUNTIME ACCEPTS, OR PRINTS IN PART. One declaration
+#: and two readings, and it lives here because `config` is the module both of
+#: them import. NOT a style rule: the credential predicate decodes each
+#: parameter name to a fixed point, which is quadratic in that name's length,
+#: and `remote_url` is caller-controlled — so a nested `%2525…` chain of
+#: unbounded length is work an attacker chooses for this process (Copilot
+#: review of openDox-code#26, round 10, suppressed). Two kilobytes is the
+#: conventional URL ceiling and is far above any real remote.
+#:
+#: THE SECOND READING WAS ADDED BECAUSE THE FIRST STOPPED BEING ENOUGH.
+#: `repository_act.refuse_credential_bearing_remote` refuses a NEW remote
+#: longer than this, which bounded the decoder as long as everything reaching
+#: it had passed that refusal. Pointing `redacted_remote_url` at the adapter's
+#: redactor put a STORED value on that path for the first time, and a legacy
+#: row — a restore, an older build, `psql` — never passed any refusal, so
+#: every map read of it did the quadratic work (Copilot review of
+#: openDox-code#26, at `4156f233`, suppressed). `local_git_adapter.redact_
+#: remote_url` therefore replaces a longer STORED value whole, which is what
+#: a value that cannot be read as one URL already gets.
+MAX_REMOTE_URL_CHARS = 2048
+
 SECRET_PARAMETER_KEYS = (
     "token", "access_token", "api_key", "apikey", "key", "secret",
     "pass", "password", "passwd", "pwd", "auth", "authorization",
