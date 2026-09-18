@@ -245,7 +245,32 @@ SECRET_PARAMETER_KEYS = (
     "password", "passwd", "pwd", "auth", "authorization", "credential",
     "credentials", "sig", "signature", "session",
 )
-_SECRET_PARAMETER = re.compile("|".join(SECRET_PARAMETER_KEYS), re.IGNORECASE)
+#: The same list as a SET, because the question is "is this name one of
+#: these", not "does this name contain one of these". The first cut compiled
+#: the tuple into an alternation and asked `.search()`, so any name with one of
+#: them as a SUBSTRING matched: `monkey` contains `key`, `sigma` contains
+#: `sig`, `tokenizer` contains `token` and `authority` contains `auth` — and a
+#: broker URL or a git remote carrying `?monkey=1` was refused as
+#: credential-bearing, which is a false refusal at the configuration boundary
+#: (Copilot review of openDox-code#25, at `056d1597`).
+_SECRET_PARAMETER_WORDS = frozenset(SECRET_PARAMETER_KEYS)
+
+#: `access_token`, `X-Api-Key` and `sessionToken` must still match, so the name
+#: is split into WORDS first — on every non-alphanumeric run and at each
+#: camelCase boundary — and each word is compared whole.
+_WORD_SEPARATOR = re.compile(r"[^A-Za-z0-9]+")
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def names_a_secret_parameter(name: str) -> bool:
+    """True when a URL parameter's NAME is one of the credential names.
+
+    WHOLE WORDS, for the reason `_SECRET_PARAMETER_WORDS` gives above. The
+    decoded name is what is judged, because `%74oken` is `token`.
+    """
+    spaced = _CAMEL_BOUNDARY.sub(" ", name)
+    return any(word.lower() in _SECRET_PARAMETER_WORDS
+               for word in _WORD_SEPARATOR.split(spaced) if word)
 
 
 def _split_url(name: str, value: str) -> urllib.parse.SplitResult:
@@ -332,10 +357,109 @@ def _redacted_query(query: str) -> str:
             continue
         name, sep, _ = part.partition("=")
         parts.append(name + sep + "<redacted>"
-                     if sep and _SECRET_PARAMETER.search(
+                     if sep and names_a_secret_parameter(
                          urllib.parse.unquote(name))
                      else part)
     return "".join(parts)
+
+
+def credential_in_a_remote_url(value: str | None) -> str | None:
+    """WHAT secret a git remote URL carries, named — or None. Never the value.
+
+    `project_repositories.remote_url` is free text by design
+    (`migrations/0001_identity_and_coordination.sql`: "`remote_url` is nullable
+    because RULING C3 says so in terms"), and nothing between a caller and that
+    column judged it, so `https://user:hunter2@github.com/o/r.git` was a legal
+    row — stored in the clear, returned verbatim by `GET
+    /api/v1/project-repositories` to every member of the project, and carried
+    into `git remote add` by § 3.6 (Copilot review of openDox-code#25, on the
+    migration's line for that column).
+
+    A REMOTE URL IS NOT A BROKER URL, so `_broker_url`'s test is not reusable
+    as written: `ssh://git@github.com/o/r.git` and `git@github.com:o/r.git` are
+    the ORDINARY forms of an ssh remote and their userinfo is a USERNAME, which
+    is not a secret — while `redacted_url` replaces any userinfo at all,
+    because a broker URL has no business carrying even that. What is a secret
+    is a PASSWORD in the authority, in EITHER of the two shapes git accepts,
+    or a credential-shaped query parameter.
+
+    THE TWO SHAPES, measured rather than assumed (`urllib.parse.urlsplit`,
+    CPython 3.12): the URL form puts the authority in `netloc`
+    (`https://user:pw@host/p` → `'user:pw@host'`), and the scp-like form
+    `[user[:password]@]host:path` has NO netloc at all — `urlsplit` reads
+    `git@github.com:o/r.git` as a bare path and `user:pw@host:p` as the scheme
+    `user` plus a path, so the authority has to be read off the text before the
+    first `/` in both. Refusing is the answer for a value this module cannot
+    parse, on `_split_url`'s reasoning: one that cannot be parsed can still
+    carry a credential.
+    """
+    if not value:
+        return None
+    try:
+        split = urllib.parse.urlsplit(value)
+    except ValueError:
+        return "a value this runtime cannot parse"
+    if split.netloc:
+        authority = split.netloc
+    else:
+        authority = value.partition("/")[0]
+    userinfo = authority.rpartition("@")[0]
+    if userinfo.partition(":")[2]:
+        return "a password in the URL's authority"
+    if _a_secret_parameter_in(split.query + "&" + split.fragment):
+        return "a credential-shaped query parameter"
+    return None
+
+
+def redacted_remote_url(value: str | None) -> str | None:
+    """The same two shapes with the secret replaced, for a row already written.
+
+    The store refuses one of these on the way in
+    (`identity.CoordinationStore.create_project_repository` and
+    `attach_remote`), so this is the second layer and not the first: a row
+    written by an earlier build, by a restore or by `psql` is still handed to
+    `GET /api/v1/project-repositories`, and a redactor at the read boundary is
+    what makes "this API never returns a credential" a property of the
+    boundary rather than of everything that can reach the table.
+
+    The URL form is `redacted_url`'s job — including the query, which it
+    redacts whether or not there is a netloc. Only the scp-like authority is
+    handled here, because that is the one `urlsplit` cannot see.
+
+    IT CHANGES NOTHING THE PREDICATE CALLS CLEAN, and that is the contract
+    between the two: `redacted_url` on its own would rewrite
+    `ssh://git@github.com/o/r.git` to `ssh://<redacted>@github.com/o/r.git`,
+    which is right for a broker endpoint and wrong here — it hides the username
+    an operator needs to read and makes every ordinary ssh row look tampered
+    with. Asking the predicate first makes "redacted exactly when a credential
+    is carried" a property a test can assert over every shape at once.
+    """
+    if not value or credential_in_a_remote_url(value) is None:
+        return value
+    try:
+        split = urllib.parse.urlsplit(value)
+    except ValueError:
+        return "<redacted-url>"
+    text = value
+    if not split.netloc:
+        head, slash, rest = value.partition("/")
+        userinfo, at, host = head.rpartition("@")
+        user, _, password = userinfo.partition(":")
+        if at and password:
+            text = user + ":<redacted>" + at + host + slash + rest
+    return redacted_url(text)
+
+
+def _a_secret_parameter_in(text: str) -> bool:
+    """True when any `name=value` in `text` has a credential-shaped NAME.
+
+    ONE DEFINITION, because two were the reason A25-1 survived: `_broker_url`
+    spelled this inline and the remote-URL judgement needed the same question
+    asked the same way.
+    """
+    return any(names_a_secret_parameter(
+        urllib.parse.unquote(part.partition("=")[0]))
+        for part in re.split(r"[&;]", text) if "=" in part)
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -390,10 +514,7 @@ def _broker_url(env: Mapping[str, str], setting: Setting, *,
     split = _split_url(setting.name, value)
     carried = ("userinfo" if "@" in split.netloc else
                "a credential-shaped query parameter"
-               if any(_SECRET_PARAMETER.search(
-                   urllib.parse.unquote(part.partition("=")[0]))
-                   for part in re.split(r"[&;]", split.query + "&"
-                                        + split.fragment) if "=" in part)
+               if _a_secret_parameter_in(split.query + "&" + split.fragment)
                else None)
     # AND THE SCHEME IS THE TRUST ANCHOR'S OWN. `HttpJwksSource` FETCHES this
     # URL and the keys it returns are what every token is verified against, so
@@ -763,6 +884,7 @@ def schema_selected_by(dsn: str) -> str | None:
         return None
     words = _libpq_option_words(raw)
     setting: str | None = None
+    effective: str | None = None
     for index, word in enumerate(words):
         if word == "-c" and index + 1 < len(words):
             setting = words[index + 1]
@@ -778,9 +900,24 @@ def schema_selected_by(dsn: str) -> str | None:
             # passed the comparison this function exists to feed (Copilot
             # review of openDox-code#25, round 36). It is the same parser
             # `migrations.selected_schema` reads a live connection with.
+            #
+            # AND THE LAST ASSIGNMENT WINS, WHICH IS WHY THIS DOES NOT RETURN
+            # HERE. `options` may carry the setting more than once and the
+            # BACKEND applies them in order, so reporting the first made this
+            # function answer something the connection would not do. MEASURED
+            # on postgres 16 through libpq itself:
+            #
+            #   options=-csearch_path=old -csearch_path=new  ->  'new'
+            #   options=-c search_path=one -c search_path=two -> 'two'
+            #
+            # (`show search_path` on a real connection opened with each.) Two
+            # DSNs could therefore compare EQUAL on `old` while the served one
+            # read `new` — the split this comparison exists to refuse, wearing
+            # the agreement it was looking for (Copilot review of
+            # openDox-code#25, at `0860270f`).
             entries = search_path_entries(setting.split("=", 1)[1])
-            return unquoted_identifier(entries[0]) or None
-    return None
+            effective = unquoted_identifier(entries[0]) or None
+    return effective
 
 
 def database_named_by(dsn: str) -> str | None:
@@ -801,16 +938,42 @@ def database_named_by(dsn: str) -> str | None:
     except ValueError:
         return None
     if split.scheme:
+        # THE QUERY'S `dbname` OVERRIDES THE PATH'S, and a repeated one takes
+        # the LAST. This read the path alone, so
+        # `postgresql://host/?dbname=one` and `...?dbname=two` both answered
+        # `None` and passed the comparison while naming two different
+        # databases (Copilot review of openDox-code#25, at `b9bc3167`).
+        # MEASURED through libpq itself (`PQconninfoParse` by way of
+        # `psycopg.conninfo.conninfo_to_dict`), which is the parser that
+        # actually decides:
+        #
+        #   postgresql://host/frompath                  -> 'frompath'
+        #   postgresql://host/?dbname=fromquery         -> 'fromquery'
+        #   postgresql://host/frompath?dbname=fromquery -> 'fromquery'
+        #   postgresql://host/?dbname=one&dbname=two    -> 'two'
+        #
+        # so the precedence is stated rather than assumed: query over path,
+        # last over first.
+        named: str | None = None
+        for key, value in urllib.parse.parse_qsl(split.query,
+                                                 keep_blank_values=True):
+            if key == "dbname":
+                named = value
+        if named is not None:
+            return named or None
         name = urllib.parse.unquote(split.path).lstrip("/")
         return name or None
     try:
         tokens = shlex.split(dsn)
     except ValueError:
         return None
+    # THE LAST ONE WINS IN THE KEYWORD/VALUE FORM TOO, which is libpq's rule
+    # for every repeated keyword there.
+    named = None
     for token in tokens:
         if token.startswith("dbname="):
-            return token.split("=", 1)[1] or None
-    return None
+            named = token.split("=", 1)[1]
+    return named or None
 
 
 def _refuse_two_dsns_that_select_different_schemas(

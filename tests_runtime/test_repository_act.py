@@ -73,6 +73,23 @@ def _hermetic_git_for_the_whole_process(
             monkeypatch.setenv(name, value)
 
 
+def _legacy_remote_row(store, project_id: str, remote_url: str) -> None:
+    """A map row written AROUND the store's own writers, which is what legacy means.
+
+    These cases need a row carrying a value the act — and, since § 3.5's own
+    batch, `identity.CoordinationStore` itself — refuses to write: a credential
+    in the URL, a command transport, a joined pair, a URL `urlsplit` cannot
+    read. `store.attach_remote` used to be the way to make one, and it is
+    exactly the door that is now shut, so the row goes in the way a real legacy
+    row got there: an UPDATE against the table, from a build or a `psql`
+    session that had no such rule. The file already writes a legacy `location`
+    this way; this is the same idiom for `remote_url`.
+    """
+    store._conn.execute(
+        "update project_repositories set remote_url = %s where project_id = %s",
+        (remote_url, project_id))
+
+
 @pytest.fixture()
 def owner(store) -> identity.User:
     return store.upsert_user(issuer="https://broker.test/realms/opendox",
@@ -734,7 +751,7 @@ def test_a_failed_push_redacts_the_stored_remote(store, project,
     # row predating `refuse_credential_bearing_remote` actually leaves behind:
     # the old act wrote both. `push_to_remote` now checks that the two agree
     # before it sends anything, so a legacy row is only reachable when they do.
-    store.attach_remote(project_id=project.id, remote_url=legacy)
+    _legacy_remote_row(store, project.id, legacy)
     _git(created.location, "remote", "add", act.REMOTE_NAME, legacy)
     with pytest.raises(act.RepositoryActRefused) as caught:
         act.push_to_remote(store, project_id=project.id)
@@ -879,16 +896,28 @@ def test_the_api_never_hands_back_a_legacy_row_s_credential(
     location = Path(created.json()["location"])
 
     legacy = "https://someone:ghp_supersecret@example.invalid/x.git"
+    # AROUND the store, which is what a legacy row is: § 3.5's batch made
+    # `attach_remote` refuse this value, and the point of these cases is the
+    # row that got in before any such rule existed.
     with database.transaction() as conn:
-        identity.CoordinationStore(conn).attach_remote(
-            project_id=project["id"], remote_url=legacy)
+        conn.execute(
+            "update project_repositories set remote_url = %s "
+            "where project_id = %s", (legacy, project["id"]))
     _git(location, "remote", "add", act.REMOTE_NAME, legacy)
 
     mapped = client_with_repositories.get(
         f"/api/v1/project-repositories/{project['id']}", headers=_auth(token))
     assert mapped.status_code == 200, mapped.text
     assert "ghp_supersecret" not in mapped.text
-    assert mapped.json()["remote_url"] == "<redacted-url>"
+    # THE SHAPE CHANGED WITH THE MERGE OF § 3.5, deliberately. This boundary
+    # used to call `local_git_adapter.redact_remote_url`, which replaces the
+    # WHOLE value with `<redacted-url>` — the right trade for git's stderr,
+    # where over-redacting is safe. § 3.5 pairs a refusal at the store with
+    # `config.redacted_remote_url`, which removes the secret and nothing else,
+    # so an operator can still see WHICH endpoint the row names and an ordinary
+    # `ssh://git@host/…` comes back exactly as stored. The secret is gone
+    # either way, which is the assertion above.
+    assert mapped.json()["remote_url"] == "https://<redacted>@example.invalid/x.git"
 
     pushed = client_with_repositories.post(
         f"/api/v1/projects/{project['id']}/repository/push",
@@ -1216,7 +1245,7 @@ def test_a_legacy_command_transport_row_is_not_executed_by_the_push(
     hostile = f"ext::{helper}"
 
     # A row that predates the refusal, written through the store directly.
-    store.attach_remote(project_id=project.id, remote_url=hostile)
+    _legacy_remote_row(store, project.id, hostile)
     _git(created.location, "remote", "add", act.REMOTE_NAME, hostile)
     # The ambient policy this runtime must not depend on.
     _git(created.location, "config", "protocol.ext.allow", "user")
@@ -1352,7 +1381,7 @@ def test_a_legacy_helper_row_is_refused_before_the_push_runs_it(
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
 
     hostile = "evil::anything"
-    store.attach_remote(project_id=project.id, remote_url=hostile)
+    _legacy_remote_row(store, project.id, hostile)
     _git(created.location, "remote", "add", act.REMOTE_NAME, hostile)
 
     with pytest.raises(act.RepositoryActRefused) as caught:
@@ -1523,7 +1552,7 @@ def test_two_push_destinations_are_refused_by_COUNT_and_not_by_a_delimiter(
     second = tmp_path / "b"
     joined = f"{first} and {second}"
     # The map records the string that USED to equal the join of the two.
-    store.attach_remote(project_id=project.id, remote_url=joined)
+    _legacy_remote_row(store, project.id, joined)
     _git(created.location, "config", "remote.origin.url", joined)
     _git(created.location, "config", "--add", "remote.origin.pushurl",
          str(first))
@@ -2077,7 +2106,7 @@ def test_a_legacy_remote_that_cannot_be_parsed_is_a_refusal_not_a_500(
                                     root=project_repository_root, actor=ACTOR)
     malformed = "file://[bad"
     # Written the way a LEGACY row is: through the store, not through the act.
-    store.attach_remote(project_id=project.id, remote_url=malformed)
+    _legacy_remote_row(store, project.id, malformed)
     _git(created.location, "remote", "add", act.REMOTE_NAME, malformed)
 
     with pytest.raises(act.RepositoryActRefused) as caught:
@@ -2363,8 +2392,7 @@ def test_a_map_row_whose_location_cannot_be_opened_refuses_by_name(
     """
     act.create_repository(store, project_id=project.id,
                           root=project_repository_root, actor=ACTOR)
-    store.attach_remote(project_id=project.id,
-                        remote_url=str(project_repository_root / "d.git"))
+    _legacy_remote_row(store, project.id, str(project_repository_root / "d.git"))
     row = act._local_git_row(store, project.id)
     broken = dataclasses.replace(row, location=str(row.location) + "\0x")
     with pytest.raises(act.RepositoryActRefused) as caught:
@@ -2401,9 +2429,13 @@ def test_a_successful_push_of_a_legacy_row_still_redacts_its_credential(
     destination = tmp_path / "reachable.git"
     _git(tmp_path, "init", "--bare", "--initial-branch=main", str(destination))
     legacy = f"file://someone:ghp_supersecret@{destination}"
+    # AROUND the store, which is what a legacy row is: § 3.5's batch made
+    # `attach_remote` refuse this value, and the point of these cases is the
+    # row that got in before any such rule existed.
     with database.transaction() as conn:
-        identity.CoordinationStore(conn).attach_remote(
-            project_id=project["id"], remote_url=legacy)
+        conn.execute(
+            "update project_repositories set remote_url = %s "
+            "where project_id = %s", (legacy, project["id"]))
     _git(location, "remote", "add", act.REMOTE_NAME, legacy)
 
     pushed = client_with_repositories.post(

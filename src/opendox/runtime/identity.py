@@ -26,6 +26,11 @@ so this module imports under the leg's `validate` check, which installs
 `.[test]` and not `.[runtime]`. See `opendox/runtime/__init__.py`'s
 import-weight contract.
 
+The one first-party import is `config`, which is stdlib-only for the same
+reason and is measured to be so by
+`tests_runtime/test_runtime_surface.py::test_the_stdlib_only_modules_really_import_without_the_extra`
+— it is imported for the remote-URL judgement below and for nothing else.
+
 IDENTITY IS A DURABLE ROW, WHICH INVERTS A PROMOTED RULE, and `upsert_user` is
 where the inversion happens. Design § D5: "Two current requirements say in
 terms that the dashboard authorizes nothing on the hosted actor and that
@@ -44,6 +49,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from .config import credential_in_a_remote_url, redacted_remote_url
 
 #: The closed table list, in RULING Q1's own order. Read by
 #: `tests_runtime/test_schema_shape.py` against the canonical migration: a
@@ -98,6 +105,19 @@ class ConflictError(CoordinationError):
     """A uniqueness or vocabulary rule the caller broke, named."""
 
 
+class RefusedError(CoordinationError):
+    """A VALUE this store will not write, named by its shape and never echoed.
+
+    Distinct from `ConflictError`, which is about the rows that already exist:
+    this one is about the argument, and it is the answer before any statement
+    runs. Like every `CoordinationError` it "carries no secret material" — the
+    refusal names WHAT was found (`config.credential_in_a_remote_url` returns
+    the shape, not the value), because a refusal that quotes the value it
+    refused writes the credential into the log that reports the refusal, which
+    is the failure `cli._safe_message` exists for.
+    """
+
+
 #: Postgres's SQLSTATE for `foreign_key_violation`. A row naming a user or a
 #: project that does not exist is a NOT-FOUND, not an internal error — and the
 #: pre-check the API makes cannot close the race where the referenced row is
@@ -134,6 +154,37 @@ def _conflict_if_duplicate(call: Any, message: str) -> Any:
         if sqlstate != UNIQUE_VIOLATION:
             raise
         raise ConflictError(message) from exc
+
+
+def refuse_a_remote_url_that_carries_a_credential(remote_url: str | None) -> None:
+    """The one gate on `project_repositories.remote_url`, at its only writer.
+
+    The column is stored in the clear — RULING Q1 gives this database identity
+    and coordination, not secrets — and `GET /api/v1/project-repositories`
+    returns it to every member of the project, so a URL carrying a password is
+    a credential published to a group and written to every backup of this
+    database. It is refused rather than redacted for `_broker_url`'s reason:
+    redaction would make the evidence safe and leave the row wrong, and a
+    remote that only works with an embedded password is not a remote this
+    runtime can use — § 3.6 hands the URL to `git`, which would then carry the
+    password onto the process table.
+
+    HERE RATHER THAN IN THE ROUTE, because there is no route: the API exposes
+    only the two reads today, so the writer of record is this store and a check
+    in a caller would be a check in the one caller that exists. § 3.6's
+    `repository_act` refuses the same shape again before it ever calls in,
+    which is layering and not duplication — this one is the guarantee about the
+    COLUMN.
+    """
+    carried = credential_in_a_remote_url(remote_url)
+    if carried is not None:
+        raise RefusedError(
+            f"remote_url carries {carried}; this column is stored in the clear "
+            "and is readable by every member of the project, so the credential "
+            "belongs in the deployment's credential store and the URL belongs "
+            "here without it — the value is not repeated here, because a "
+            "refusal that quotes it writes it into the log that reports the "
+            "refusal")
 
 
 def clamp_limit(limit: int | None) -> int:
@@ -190,7 +241,7 @@ class Project:
     created_at: datetime
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ProjectRepository:
     """One project's entry in the PROJECT-TO-REPOSITORY MAP (RULING Q1).
 
@@ -207,6 +258,22 @@ class ProjectRepository:
     location: str
     remote_url: str | None
     created_at: datetime
+
+    def __repr__(self) -> str:
+        """`remote_url` REDACTED, exactly as `RuntimeSettings.__repr__` does.
+
+        The store refuses a credential-bearing URL on the way in, so a row
+        carrying one came from an earlier build, a restore or `psql` — and the
+        generated `repr` would then put it in any log line, traceback or
+        pytest assertion message that names the object. The same argument
+        `config` makes for its own settings object: the object built outside
+        the checked path is exactly the one nothing else protects.
+        """
+        return (f"ProjectRepository(id={self.id!r}, "
+                f"project_id={self.project_id!r}, adapter={self.adapter!r}, "
+                f"location={self.location!r}, "
+                f"remote_url={redacted_remote_url(self.remote_url)!r}, "
+                f"created_at={self.created_at!r})")
 
 
 @dataclass(frozen=True)
@@ -481,6 +548,7 @@ class CoordinationStore:
     def create_project_repository(self, *, project_id: str, adapter: str,
                                   location: str,
                                   remote_url: str | None = None) -> ProjectRepository:
+        refuse_a_remote_url_that_carries_a_credential(remote_url)
         row = self._conn.execute(
             f"select {_REPOSITORY_COLUMNS} from project_repositories "
             "where project_id = %s", (project_id,)
@@ -532,6 +600,7 @@ class CoordinationStore:
         "is a push, not a migration", and a schema that made it a re-creation
         would contradict the ruling in the one place a reader would believe it.
         """
+        refuse_a_remote_url_that_carries_a_credential(remote_url)
         row = self._conn.execute(
             "update project_repositories set remote_url = %s "
             f"where project_id = %s returning {_REPOSITORY_COLUMNS}",

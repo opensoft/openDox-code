@@ -1719,7 +1719,7 @@ def test_the_readiness_probe_bounds_its_own_statements() -> None:
 
     source = (ROOT / "src" / "opendox" / "runtime" / "app.py").read_text(
         encoding="utf-8")
-    assert '"set local statement_timeout = "' in source, (
+    assert "set local statement_timeout = " in source, (
         "the readiness path no longer bounds its own statements")
     assert "READINESS_STATEMENT_TIMEOUT_SECONDS" in source
     assert "READINESS_DATABASE_BUDGET_SECONDS" in source, (
@@ -1728,33 +1728,47 @@ def test_the_readiness_probe_bounds_its_own_statements() -> None:
     assert 'conn.execute("set statement_timeout' not in source, (
         "a session-level statement timeout leaks out of the checkout")
 
-    # ASKED OF THE PARSE TREE, because the bound is now set by a closure the
-    # transaction calls rather than by a literal beside it — and proximity in
-    # the source proves nothing about a function. What must hold is that every
-    # call that sets the bound, and every statement it guards, happens INSIDE
-    # `with conn.transaction():`: `SET LOCAL` outside a transaction is a no-op
-    # with a warning, and a session-level SET leaks onto the next borrower of
-    # a pooled connection.
-    readyz = next(n for n in ast.walk(ast.parse(source))
-                  if isinstance(n, ast.FunctionDef) and n.name == "readyz")
-    setter = next(n for n in ast.walk(readyz)
-                  if isinstance(n, ast.FunctionDef) and n.name == "_bound_by")
+    # ASKED OF THE PARSE TREE, because the bound is set by a wrapper the
+    # runner's statements pass through rather than by a literal beside them —
+    # and proximity in the source proves nothing about a class. What must hold
+    # is that the wrapper sets the bound, that nothing inside the transaction
+    # reaches the RAW connection to run a statement, and that the transaction
+    # is where it all happens: `SET LOCAL` outside one is a no-op with a
+    # warning, and a session-level SET leaks onto the next borrower of a
+    # pooled connection.
+    tree = ast.parse(source)
+    setter = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)
+                  and n.name == "WithinTheDeadline")
     assert any(isinstance(node, ast.Constant) and isinstance(node.value, str)
                and node.value.startswith("set local statement_timeout")
                for node in ast.walk(setter)), (
-        "`_bound_by` no longer sets the bound it is named for")
+        "`WithinTheDeadline` no longer sets the bound it exists for")
+    # IT SETS THE BOUND BEFORE EVERY STATEMENT, which is the whole finding:
+    # the `set local` and the caller's statement are one method, so there is
+    # no granularity between them to lose a budget in.
+    execute = next(n for n in ast.walk(setter) if isinstance(n, ast.FunctionDef)
+                   and n.name == "execute")
+    executed = [n for n in ast.walk(execute) if isinstance(n, ast.Call)
+                and getattr(n.func, "attr", "") == "execute"]
+    assert len(executed) == 2, (
+        "`execute` must issue the bound and then the caller's statement")
 
+    readyz = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "readyz")
     transactions = [n for n in ast.walk(readyz) if isinstance(n, ast.With)
                     and "transaction" in ast.dump(n.items[0].context_expr)]
     assert len(transactions) == 1
-    inside = {id(n) for n in ast.walk(transactions[0])}
-    calls = [n for n in ast.walk(readyz) if isinstance(n, ast.Call)
-             and isinstance(n.func, ast.Name) and n.func.id == "_bound_by"]
-    assert len(calls) == 3, (
-        "the probe runs `select 1`, `plan()` and `drift()`; each phase must "
-        "re-read the deadline or the budget is not a total")
-    assert all(id(call) in inside for call in calls), (
-        "a `SET LOCAL` outside the transaction is a no-op with a warning")
+    raw = [n for n in ast.walk(transactions[0]) if isinstance(n, ast.Call)
+           and getattr(n.func, "attr", "") == "execute"
+           and isinstance(n.func.value, ast.Name) and n.func.value.id == "conn"]
+    assert raw == [], (
+        "a statement inside the readiness transaction bypasses the deadline "
+        "wrapper and runs unbounded")
+    handed = [n for n in ast.walk(transactions[0]) if isinstance(n, ast.Name)
+              and n.id == "bounded"]
+    assert len(handed) >= 3, (
+        "the probe runs `select 1`, `plan()` and `drift()`; each must go "
+        "through the wrapper or the budget is not a total")
 
 
 def test_every_secret_prompt_aborts_the_block_and_every_create_is_idempotent(
@@ -2113,3 +2127,24 @@ def test_the_schema_the_migration_applies_is_the_one_the_api_reads() -> None:
         "the refusal must come before the ledger is bootstrapped, or a "
         "refused run has already written to the wrong schema")
     assert guard < applied
+
+    # AND EVERY ACT THAT CHANGES OR PREVIEWS A SCHEMA ASKS IT, not just the
+    # run. It was a METHOD reached from `apply()` alone, so `migrate --plan`
+    # printed a plan the real run would refuse and `reset` — which DROPS the
+    # six tables — never asked at all (Copilot review of openDox-code#25, at
+    # `056d1597`). One module-level definition, three callers.
+    assert guard < source.index("class MigrationRunner:"), (
+        "the guard is module-level, so `cli` can ask it without a runner")
+    verbs = (ROOT / "src" / "opendox" / "runtime" / "cli.py").read_text(
+        encoding="utf-8")
+    preview = verbs.index("if args.plan:")
+    assert verbs.index("refuse_a_schema_the_api_will_not_read", preview) < \
+        verbs.index("runner.plan(conn)", preview), (
+            "`migrate --plan` must ask before it prints a plan")
+    reset = verbs.index("def cmd_reset")
+    # The DDL itself and not the paragraph that explains it: the comment
+    # block above the drops quotes the statement, and matching that would
+    # pass on a file where only the prose is in the right order.
+    assert verbs.index("refuse_a_schema_the_api_will_not_read", reset) < \
+        verbs.index('sql.SQL("drop table if exists', reset), (
+            "`reset` must ask before the first DROP, which cannot be undone")

@@ -1045,9 +1045,55 @@ jobs:
       #              the served schema by name and refuses; and
       #              `OPENDOX_OIDC_LEEWAY_SECONDS` was unbounded, which is
       #              `exp` switched off by a number.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 317 there.
+      #  197 passed  at `build/3-5-runtime` `2c3e9bae` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — ONE added here and two
+      #              more in the DB-backed half, answering the FIVE open
+      #              threads in one batch. `schema_selected_by` took the FIRST
+      #              `-c search_path=` where libpq takes the LAST (measured:
+      #              `-csearch_path=old -csearch_path=new` then `show
+      #              search_path` prints `new`), so a DSN assembled by
+      #              appending an override was read as saying what it
+      #              overrode. `database_named_by` read the URI path alone, so
+      #              two URIs naming two databases in the QUERY both answered
+      #              `None` and passed the preflight — measured against
+      #              `PQconninfoParse` itself, where the query beats the path
+      #              and a repeated key takes the last. `/readyz` bounded each
+      #              PHASE and not the total: the real `plan()`/`drift()`
+      #              issue SEVEN statements under three bounds, 7 x 1.5s
+      #              against a declared 3.0s budget, all inside the probe's own
+      #              25s `timeoutSeconds` — so it is one deadline re-applied
+      #              before every statement now, and the probe refuses partway
+      #              rather than answering late. And
+      #              `project_repositories.remote_url` was free text nothing
+      #              judged, so a URL carrying a password was a legal row,
+      #              returned verbatim to every member of the project: refused
+      #              at the store and redacted at the JSON boundary and in the
+      #              object's `repr`, with an ordinary `ssh://git@host/…` left
+      #              exactly as stored.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 320 there.
+      #  198 passed  at `build/3-5-runtime` `61ab8576` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — ONE added here and one
+      #              in the DB-backed half, answering the review submitted at
+      #              this branch's own head. A25-3's served-schema guard was a
+      #              METHOD reached from `apply()` alone, so the two verbs
+      #              beside it never asked: measured at `056d1597`, `migrate
+      #              --plan` printed a plan for a run that would refuse, and a
+      #              confirmed `reset` — the verb that cannot be undone —
+      #              DROPPED the coordination table of a schema the
+      #              declaration says the API does not read. It is
+      #              module-level now, one definition and three callers. And
+      #              the credential-parameter test was a SUBSTRING search, so
+      #              `monkey` matched `key` and `sigma` matched `sig`: a valid
+      #              broker URL or git remote carrying `?monkey=1` was refused
+      #              as credential-bearing. Whole words now, with the compound
+      #              spellings (`access_token`, `X-Api-Key`, `sessionToken`)
+      #              still matching and the declared list unchanged.
       #              THE CURRENT FIGURE ON `build/3-5-runtime`, which this
       #              branch carries by merge; THAT PR's description states it
-      #              at this same commit and `pytest -q tests_runtime/` is 317
+      #              at this same commit and `pytest -q tests_runtime/` is 322
       #              there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
