@@ -46,6 +46,15 @@ services:
       # 12). EMPTY means "the same role as POSTGRES_USER", which is the bundled
       # shape; the init script applies that default.
       OPENDOX_MIGRATION_PG_USER: ${OPENDOX_MIGRATION_PG_USER:-}
+      # AND THE SCHEMA THOSE GRANTS ARE MADE IN. A runtime DSN may select one
+      # with `options=-c search_path=<schema>` — a form the migration runner
+      # supports and validates — and every grant in the bootstrap named
+      # `public`, so in that configuration the DDL landed in the selected
+      # schema and the served role had no rights there at all (Copilot review
+      # of openDox-code#25, round 36, suppressed). It must be the SAME schema
+      # both DSNs select; `verify_runtime_access` is what makes a mismatch a
+      # failed migration rather than a failed first request.
+      OPENDOX_PG_SCHEMA: ${OPENDOX_PG_SCHEMA:-public}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - pg_data:/var/lib/postgresql/data
@@ -158,7 +167,22 @@ services:
         # HAS the variable — the `environment:` block above sets it from the
         # same `.env` — so python reads it itself and the script holds no
         # interpolated text at all.
-        - "import os,urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:%s/livez' % int(os.environ.get('OPENDOX_BIND_PORT') or 8080),timeout=3).status==200 else 1)"
+        #
+        # AND THE CONFIGURED HOST, for the same reason and read the same way.
+        # `OPENDOX_BIND_HOST` is a service setting here (`${OPENDOX_BIND_HOST
+        # :-0.0.0.0}` above) and the probe always connected to `localhost`, so
+        # a container told to bind its own address served every request while
+        # this check got `connection refused`, marked it unhealthy and had the
+        # orchestrator restart a working server — the exact defect the port
+        # line above fixed, one setting over (Copilot review of
+        # openDox-code#25, round 35, suppressed). A WILDCARD IS MAPPED, not
+        # dialled: nothing connects TO `0.0.0.0`, so the two wildcards become
+        # the loopback address of their own family and every other value is
+        # used verbatim, bracketed when it is an IPv6 literal. MEASURED:
+        # `0.0.0.0` and unset both give `http://127.0.0.1:8080/livez`, `::`
+        # gives `http://[::1]:9443/livez` at port 9443, and `172.20.0.5` gives
+        # `http://172.20.0.5:8080/livez`.
+        - "import os,urllib.request,sys; h=os.environ.get('OPENDOX_BIND_HOST') or '127.0.0.1'; h={'0.0.0.0':'127.0.0.1','::':'::1'}.get(h,h); h='['+h+']' if ':' in h else h; sys.exit(0 if urllib.request.urlopen('http://%s:%s/livez' % (h,int(os.environ.get('OPENDOX_BIND_PORT') or 8080)),timeout=3).status==200 else 1)"
       interval: 15s
       timeout: 5s
       retries: 5

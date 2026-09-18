@@ -170,8 +170,16 @@ kubectl apply -f deploy/kubernetes/base/namespace.yaml
 # `exit` rather than re-raising for the same reason: `$$` inside a subshell is
 # still the parent's pid, so `kill -INT $$` would have signalled the operator's
 # shell. The EXIT trap fires on every one of these paths.
+# AND `pipefail`, BECAUSE EVERY CREATE BELOW IS A PIPELINE. Without it a shell
+# reports a pipeline's status as its RIGHT-hand command's, so a failed `kubectl
+# create --dry-run` followed by a `kubectl apply` that exits 0 left `set -e`
+# nothing to act on and the block carried on as if the Secret had been made
+# (Copilot review of openDox-code#25, round 35, suppressed). MEASURED, bash
+# 5.2: `set -e; (exit 3) | cat; echo reached` prints `reached` and exits 0;
+# `set -e -o pipefail` stops the block with status 3. This block is bash
+# already — `read -rs -p` is not POSIX — so it costs no portability it had.
 (
-  set -e
+  set -e -o pipefail
   umask 077
   secrets="$(mktemp -d)"
   trap 'rm -rf "$secrets"' EXIT
@@ -350,21 +358,68 @@ export OPENDOX_RUNTIME_PG_PASSWORD
 export OPENDOX_RUNTIME_PG_ROLE=...      # the user in opendox-db-runtime's DSN
 export OPENDOX_MIGRATION_PG_USER=...    # the user in opendox-db-migration's DSN
 export OPENDOX_PG_DB=...                # the database both DSNs name
+export OPENDOX_PG_SCHEMA=public         # the schema BOTH DSNs select
 fi
 ```
 
 ```sql
+-- STOP ON THE FIRST ERROR, the way the bundled bootstrap does. psql's default
+-- is to report a failed statement and RUN THE NEXT ONE, so an unprovisioned
+-- migration owner made the `create role` fail and the grants below still ran —
+-- a prerequisite that ended looking successful while the identity it exists to
+-- create was never made (Copilot review of openDox-code#25, round 35,
+-- suppressed). `deploy/*/init-runtime-role.sh` spell the same setting
+-- `psql -v ON_ERROR_STOP=1` because they INVOKE psql; this block is pasted
+-- into a session, where `\set` is how the same variable is set.
+\set ON_ERROR_STOP on
 \getenv runtime_role OPENDOX_RUNTIME_PG_ROLE
 \getenv migration_owner OPENDOX_MIGRATION_PG_USER
 \getenv database OPENDOX_PG_DB
+\getenv schema OPENDOX_PG_SCHEMA
 \getenv runtime_password OPENDOX_RUNTIME_PG_PASSWORD
+-- THE SCHEMA THE DSNs SELECT, and not a hard-coded `public`. A DSN may carry
+-- `options=-c search_path=<schema>`, a form the migration runner supports and
+-- validates and `load_settings` refuses two DSNs from disagreeing about — and
+-- every grant below named `public`, so the DDL landed in the selected schema
+-- while the served role got no USAGE, no table grants and no default
+-- privilege there: `verify_runtime_access` then failed the migration and the
+-- install could not start (Copilot review of openDox-code#25, round 36,
+-- suppressed). Unset means `public`.
+\if :{?schema}
+\else
+\set schema public
+\endif
+-- AND THE REFUSAL ABOVE IS ENFORCED HERE, because the shell block cannot do
+-- it. That block must EXPORT into the operator's own shell for `\getenv` to
+-- see anything, so it cannot run in a subshell and `exit 1` in it would close
+-- the operator's shell (the reason the Secret block two sections up is a
+-- subshell in the first place). What it can do is decline to export — and an
+-- operator who pastes this block anyway would otherwise reach
+-- `create role … password %L` with no password at all. So the guard is where
+-- the act is (Copilot review of openDox-code#25, round 35, suppressed).
+\if :{?runtime_password}
+select :'runtime_password' = '' as opendox_blank_password
+\gset
+\else
+\set opendox_blank_password t
+\endif
+\if :opendox_blank_password
+do $refuse$ begin
+  raise exception 'OPENDOX_RUNTIME_PG_PASSWORD is unset or empty; the shell '
+                  'block above refused it, and nothing here is provisioned';
+end $refuse$;
+\endif
 select format('create role %I login password %L', :'runtime_role',
               :'runtime_password')
 \gexec
 select format('grant connect on database %I to %I', :'database',
               :'runtime_role')
 \gexec
-select format('grant usage on schema public to %I', :'runtime_role')
+select format('create schema if not exists %I authorization %I',
+              :'schema', :'migration_owner')
+ where :'schema' <> 'public'
+\gexec
+select format('grant usage on schema %I to %I', :'schema', :'runtime_role')
 \gexec
 -- THE COORDINATION TABLES THAT ALREADY EXIST, and only those. A database
 -- migrated before this prerequisite ran already holds them, and a `grant … on
@@ -379,17 +434,47 @@ select format('grant select, insert, update, delete on table %I to %I',
               c.relname, :'runtime_role')
   from pg_class c
   join pg_namespace n on n.oid = c.relnamespace
- where n.nspname = 'public' and c.relkind = 'r'
+ where n.nspname = :'schema' and c.relkind = 'r'
    and c.relname = any (array['drafts', 'memberships',
                               'opendox_schema_migrations',
                               'project_repositories', 'projects', 'sessions',
                               'users'])
 \gexec
--- and everything the migration owner creates from here on, so a later
--- migration that adds a table needs no second visit
-select format('alter default privileges for role %I in schema public grant '
+-- AND EVERYTHING THE MIGRATION OWNER CREATES FROM HERE ON, so a later
+-- migration that adds a table needs no second visit — WHICH IS ONLY THE
+-- NARROW SET IT SOUNDS LIKE WHEN THAT OWNER IS THIS INSTALL'S. `alter default
+-- privileges` follows the ROLE, not a table list, so on a shared or reused
+-- database a reused owner would hand the served role select/insert/update/
+-- delete on every table it creates afterwards — another application's data,
+-- which is the boundary replacing `grant … on all tables` was meant to draw
+-- (Copilot review of openDox-code#25, round 36). The managed path is exactly
+-- where a reused owner is plausible, so the grant is refused when the owner
+-- already owns a table this runtime did not create. MEASURED on postgres
+-- 16.15: the query returns no row for a schema with no tables and for one
+-- holding only the seven, and exactly one for an owner that also owns
+-- `invoices` — and `\gexec` runs nothing when there is no row, so the
+-- `having` is the whole conditional.
+select format('do $refuse$ begin raise exception %L; end $refuse$',
+              format('the migration owner %s already owns tables this runtime '
+                     'did not create (%s). `alter default privileges` follows '
+                     'the OWNER, so every future table it creates would become '
+                     'readable and writable by the served role. Use a '
+                     'migration owner dedicated to this install.',
+                     :'migration_owner', string_agg(c.relname, ', ')))
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  join pg_roles r on r.oid = c.relowner
+ where n.nspname = :'schema' and c.relkind = 'r'
+   and r.rolname = :'migration_owner'
+   and c.relname <> all (array['drafts', 'memberships',
+                               'opendox_schema_migrations',
+                               'project_repositories', 'projects', 'sessions',
+                               'users'])
+having count(*) > 0
+\gexec
+select format('alter default privileges for role %I in schema %I grant '
               'select, insert, update, delete on tables to %I',
-              :'migration_owner', :'runtime_role')
+              :'migration_owner', :'schema', :'runtime_role')
 \gexec
 ```
 

@@ -84,6 +84,18 @@ spec:
                 configMapKeyRef:
                   name: opendox-runtime-config
                   key: migration_pg_user
+            # AND THE SCHEMA EVERY ONE OF THOSE GRANTS IS MADE IN. A runtime
+            # DSN may select one with `options=-c search_path=<schema>`, which
+            # the migration runner supports and validates, and the bootstrap
+            # named `public` everywhere — so that configuration put the DDL in
+            # one schema and the served role's rights in another (Copilot
+            # review of openDox-code#25, round 36, suppressed). Empty is
+            # `public`, the bundled shape.
+            - name: OPENDOX_PG_SCHEMA
+              valueFrom:
+                configMapKeyRef:
+                  name: opendox-runtime-config
+                  key: pg_schema
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

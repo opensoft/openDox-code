@@ -167,12 +167,16 @@ spec:
             # network latency or serializing the response, so the probe could
             # cut a request the endpoint was about to answer and mark the pod
             # unavailable (Copilot review of openDox-code#25, round 10,
-            # suppressed). Twenty is five seconds over the endpoint's whole
-            # budget, and `periodSeconds` moved to thirty with it so a probe
+            # suppressed). TWENTY-FIVE is five and a half seconds over the
+            # endpoint's whole budget — which grew when the database term
+            # became a TOTAL (three seconds) plus one statement ceiling (one
+            # and a half) rather than a single statement's three, because the
+            # probe runs four statements and not one (round 36, suppressed) —
+            # and `periodSeconds` moved to thirty with it so a probe
             # still cannot outlive its own period and overlap itself.
             # `tests_runtime/test_deploy_shape.py` reads both budgets out of
             # the modules that declare them and holds this relation.
-            timeoutSeconds: 20
+            timeoutSeconds: 25
           volumeMounts:
             - name: project-repositories
               mountPath: /var/lib/opendox/projects

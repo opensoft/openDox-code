@@ -110,3 +110,10 @@ configMapGenerator:
       # on the tables the run creates (Copilot review of openDox-code#25,
       # round 12).
       - migration_pg_user=
+      # The schema the bootstrap creates, grants in, and aims the migration
+      # owner's default privileges at. EMPTY is `public`, the bundled shape;
+      # an overlay whose DSNs carry `options=-c search_path=<schema>` sets this
+      # to the SAME schema in the same commit, or the DDL lands in one schema
+      # and the served role's rights in another (Copilot review of
+      # openDox-code#25, round 36, suppressed).
+      - pg_schema=

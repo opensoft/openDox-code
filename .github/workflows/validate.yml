@@ -880,11 +880,46 @@ jobs:
       #              managed-database prerequisite accepted an EMPTY password
       #              (`read` succeeds on an empty line) and would have
       #              provisioned a login role with a blank credential, which
-      #              the bundled bootstrap refuses by name.
+      #              the bundled bootstrap refuses by name. SUPERSEDED by the
+      #              entry below; `pytest -q tests_runtime/` was 291 there.
+      #  181 passed  at `build/3-5-runtime` `bb84c6c6` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — SEVEN added, answering
+      #              rounds THIRTY-FOUR and THIRTY-FIVE. Four in the CLI: the
+      #              served and migration DSNs could select different schemas,
+      #              so a run applied and verified schema A while /readyz and
+      #              the API read schema B; uvicorn logged a failed lifespan
+      #              with the whole conninfo in the traceback while the JSON
+      #              beside it was redacted; and thirteen handlers — Copilot
+      #              named five — put an exception's own text into evidence
+      #              without `_safe_message`, which an AST walk now forbids as
+      #              a shape. Three in the deployment: the compose healthcheck
+      #              dialled `localhost` while the bind host is a setting, the
+      #              Secret subshell's `set -e` did not see a failed left side
+      #              of a pipeline, and the managed-database prerequisite ran
+      #              on after its first SQL error and would provision a role
+      #              with no password.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 298 there.
+      #  184 passed  at `build/3-5-runtime` `ad077e2f` (2026-09-18, same python
+      #  1 skipped   and pytest; extras unimportable) — THREE added, answering
+      #              round THIRTY-SIX, and one of its findings was round 34's
+      #              own: the preflight split `search_path` with
+      #              `.split(",")[0]` while the runner it feeds has had a
+      #              quote-aware parser since round 26, so `"tenant,blue"` and
+      #              `"tenant,red"` compared equal — and `shlex` had already
+      #              removed the quotes that make a comma part of a name,
+      #              because libpq's `options` has no quote processing at all.
+      #              The schema comparison also meant nothing across two
+      #              DATABASES. The readiness bound was per-statement for a
+      #              probe that runs four statements, so it is a deadline now
+      #              and `timeoutSeconds` is 25. And every grant in the
+      #              bootstrap named `public` while a DSN may select a schema,
+      #              with `alter default privileges` following a migration
+      #              owner that may not be this install's.
       #              THE CURRENT FIGURE ON `build/3-5-runtime`, which this
       #              branch carries by merge; THAT PR's description states it
-      #              at this same commit — its head `1c6cd9e6` adds only the
-      #              record — and `pytest -q tests_runtime/` is 291 there.
+      #              at this same commit and `pytest -q tests_runtime/` is 301
+      #              there.
       #
       #  129 passed  at `build/3-6-repository-act` `63e057bb` (same day, same
       #              python and pytest, git 2.43.0) — the SIX modules this
