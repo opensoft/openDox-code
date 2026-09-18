@@ -97,6 +97,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
+from opendox.runtime import config
 from opendox.corpus_adapter import (
     CORPUS_ABSENT,
     CORPUS_READ_ONLY,
@@ -883,8 +884,21 @@ _CREDENTIAL_SHAPED = re.compile(
 #: matches `?password=` and `?my_password=` — and not `?pass=`, which is a
 #: name a great many services use (Copilot review of openDox-code#26, round
 #: 13). `pass` is the shorter needle and matches all three.
-SECRET_PARAMETER_KEYS = (
-    "token|secret|pass|pwd|key|credential|auth|sig|signature")
+#:
+#: AND IT IS DERIVED, NOT DECLARED. This module and `config` each held a list,
+#: and they drifted: `config`'s lacked `pass`, so a legacy row spelled
+#: `https://host/r.git?pass=hunter2` was hidden by THIS redactor and returned
+#: verbatim by `app._repository_json`, which the merge of § 3.5 had just
+#: pointed at `config`'s (Copilot review of openDox-code#26, at `555a03c8`).
+#: One declaration now — `config.SECRET_PARAMETER_KEYS` — and two readings of
+#: it: this one is a plain alternation asked with `.search()`, so it matches
+#: every name `config.names_a_secret_parameter` matches and more. That
+#: direction is the safe one and it is the only one allowed: this redactor
+#: cleans git's stderr and a push refusal, where over-redacting costs a word
+#: of diagnostic, while `config` answers a configuration boundary where
+#: over-refusing costs an install that will not start for a reason that is not
+#: true.
+SECRET_PARAMETER_KEYS = "|".join(config.SECRET_PARAMETER_KEYS)
 _SECRET_KEY = re.compile(SECRET_PARAMETER_KEYS, re.IGNORECASE)
 
 #: EVERY query or fragment parameter, whose NAME is then DECODED and tested —
@@ -973,22 +987,17 @@ def names_a_secret_parameter(text: str) -> bool:
                for match in _ANY_PARAMETER_ANCHORED.finditer(text))
 
 
-#: A LIBPQ KEYWORD/VALUE PASSWORD, in the forms libpq itself accepts. A remote
-#: is an arbitrary string, and a value such as `host=db password=hunter2` is
-#: neither a URL with userinfo nor a query parameter, so both halves of the
-#: rule above looked straight through it and the attach response, the map
-#: endpoints and the CLI returned it verbatim (Copilot review of
-#: openDox-code#26, round 21). libpq documents that a value containing spaces
-#: is single-quoted with `\'` and `\\` escaped inside; the closing quote is
-#: OPTIONAL here and neither quoted form crosses a newline, because a truncated
-#: value must redact MORE rather than less and must not swallow the next line
-#: of a diagnostic. `sslpassword` is named because `\b` before `password` does
-#: not reach it. `opendox.runtime.cli._DSN_SHAPED` spells the same rule for the
-#: CLI's own fallback, and
-#: `test_the_two_libpq_password_patterns_agree` keeps them in step.
-_LIBPQ_PASSWORD = re.compile(
-    r"(?i)\b(?:ssl)?password\s*=\s*"
-    r"""(?:'(?:[^'\\\n]|\\.)*'?|"(?:[^"\\\n]|\\.)*"?|\S+)""")
+#: A LIBPQ KEYWORD/VALUE PASSWORD — `config.LIBPQ_PASSWORD`, which is the one
+#: definition. A remote is an arbitrary string, and a value such as
+#: `host=db password=hunter2` is neither a URL with userinfo nor a query
+#: parameter, so both halves of the rule above looked straight through it and
+#: the attach response, the map endpoints and the CLI returned it verbatim
+#: (Copilot review of openDox-code#26, round 21). It MOVED to `config` when
+#: `app._repository_json` needed it too and had no way to reach this module
+#: without pulling the adapter into the API's import graph: `config` is the
+#: module this one imports, never the reverse. `opendox.runtime.cli._DSN_SHAPED`
+#: spells a wider rule for the CLI's own fallback.
+_LIBPQ_PASSWORD = config.LIBPQ_PASSWORD
 
 
 def redact_credentials(text: str) -> str:

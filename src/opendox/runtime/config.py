@@ -236,14 +236,21 @@ class RuntimeSettings:
 #: its QUERY as easily as in its userinfo — `https://broker/certs?token=…` — and
 #: the userinfo guard looked only at the authority, so that form was accepted
 #: and then printed by `repr(settings)` and by `status` (Copilot review of
-#: openDox-code#25, round 24). `opendox.runtime.local_git_adapter` holds the
-#: same list for the REMOTE rule on the sibling PR, and a case there pins the
-#: two spellings together; this module cannot import it, because that module
-#: does not exist on this branch.
+#: openDox-code#25, round 24).
+#:
+#: THE ONE DECLARATION, SINCE § 3.6 LANDED BESIDE THIS MODULE.
+#: `local_git_adapter` used to hold its own list for the REMOTE rule, and the
+#: two drifted: this one lacked `pass`, so a legacy row spelled
+#: `https://host/r.git?pass=hunter2` was returned verbatim by
+#: `GET /api/v1/project-repositories` while the adapter's redactor hid it
+#: (Copilot review of openDox-code#26, at `555a03c8`). That module now builds
+#: its pattern FROM this tuple, so there is one list and two readings of it —
+#: see `names_a_secret_parameter` for the difference, which is deliberate and
+#: is only ever in the direction of the adapter hiding MORE.
 SECRET_PARAMETER_KEYS = (
     "token", "access_token", "api_key", "apikey", "key", "secret",
-    "password", "passwd", "pwd", "auth", "authorization", "credential",
-    "credentials", "sig", "signature", "session",
+    "pass", "password", "passwd", "pwd", "auth", "authorization",
+    "credential", "credentials", "sig", "signature", "session",
 )
 #: The same list as a SET, because the question is "is this name one of
 #: these", not "does this name contain one of these". The first cut compiled
@@ -262,14 +269,43 @@ _WORD_SEPARATOR = re.compile(r"[^A-Za-z0-9]+")
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
+#: THE NEEDLES LONG ENOUGH TO BE UNAMBIGUOUS INSIDE A LONGER WORD. Whole-word
+#: matching alone answered `sslpassword` — libpq's own keyword, and a query
+#: parameter name a caller can write — as innocent, because it is one word and
+#: is not the word `password` (Copilot review of openDox-code#26, at
+#: `555a03c8`). Six characters is the line: `password`, `passwd`, `secret`,
+#: `token`, `credential`, `signature`, `apikey`, `api_key`, `access_token`,
+#: `authorization` and `credentials` cannot appear inside an innocent
+#: parameter name by accident, while the short ones that CAN — `key` in
+#: `monkey`, `sig` in `sigma`, `auth` in `authority`, `pass` in `passage`,
+#: `pwd` — stay whole-word.
+_LONG_SECRET_NEEDLES = tuple(
+    sorted((key for key in SECRET_PARAMETER_KEYS if len(key) >= 6), key=len))
+
+
 def names_a_secret_parameter(name: str) -> bool:
     """True when a URL parameter's NAME is one of the credential names.
 
-    WHOLE WORDS, for the reason `_SECRET_PARAMETER_WORDS` gives above. The
-    decoded name is what is judged, because `%74oken` is `token`.
+    WHOLE WORDS for the short needles, for the reason
+    `_SECRET_PARAMETER_WORDS` gives above, and SUBSTRINGS for the long ones,
+    for the reason `_LONG_SECRET_NEEDLES` gives. The decoded name is what is
+    judged, because `%74oken` is `token`.
+
+    THIS IS THE NARROWER OF THE TWO READINGS of one declared list.
+    `local_git_adapter` asks the same tuple as a plain alternation, so it
+    matches every name this does and more — `monkey` among them. That
+    difference is deliberate: the adapter redacts git's stderr and a push
+    refusal, where over-redacting costs a word of diagnostic; this answers a
+    CONFIGURATION boundary, where over-refusing costs an install that will not
+    start for a reason that is not true. What must never happen is the other
+    direction — something this calls a secret that the adapter does not — and
+    `test_the_two_readings_of_the_one_list_never_disagree_about_hiding` holds
+    it over a corpus.
     """
-    spaced = _CAMEL_BOUNDARY.sub(" ", name)
-    return any(word.lower() in _SECRET_PARAMETER_WORDS
+    spaced = _CAMEL_BOUNDARY.sub(" ", name).lower()
+    if any(needle in spaced for needle in _LONG_SECRET_NEEDLES):
+        return True
+    return any(word in _SECRET_PARAMETER_WORDS
                for word in _WORD_SEPARATOR.split(spaced) if word)
 
 
@@ -363,6 +399,26 @@ def _redacted_query(query: str) -> str:
     return "".join(parts)
 
 
+#: A LIBPQ KEYWORD/VALUE PASSWORD, in the forms libpq itself accepts. A git
+#: remote is an arbitrary string, and a value such as `host=db password=hunter2`
+#: is neither a URL with userinfo nor a query parameter — so every pattern
+#: above looked straight through it, and `_repository_json` returned it
+#: VERBATIM to every member of the project (Copilot review of openDox-code#26,
+#: at `555a03c8`, on the boundary this branch's own merge had just moved).
+#:
+#: THE ONE DEFINITION: `local_git_adapter._LIBPQ_PASSWORD` is this object, and
+#: this module is where it lives because it is the one the other can import —
+#: the adapter reaches for `config`, never the reverse. libpq documents that a
+#: value containing spaces is single-quoted with `\'` and `\\` escaped inside;
+#: the closing quote is OPTIONAL here and neither quoted form crosses a
+#: newline, because a truncated value must redact MORE rather than less and
+#: must not swallow the next line of a diagnostic. `sslpassword` is named
+#: because `\b` before `password` does not reach it.
+LIBPQ_PASSWORD = re.compile(
+    r"(?i)\b(?:ssl)?password\s*=\s*"
+    r"""(?:'(?:[^'\\\n]|\\.)*'?|"(?:[^"\\\n]|\\.)*"?|\S+)""")
+
+
 def credential_in_a_remote_url(value: str | None) -> str | None:
     """WHAT secret a git remote URL carries, named — or None. Never the value.
 
@@ -404,6 +460,9 @@ def credential_in_a_remote_url(value: str | None) -> str | None:
             return "a password in the URL's authority"
     elif _scp_like_userinfo(value) is not None:
         return "a password in the URL's authority"
+    # AND THE KEYWORD/VALUE FORM, which is neither an authority nor a query.
+    if LIBPQ_PASSWORD.search(value):
+        return "a libpq keyword/value password"
     if _a_secret_parameter_in(split.query + "&" + split.fragment):
         return "a credential-shaped query parameter"
     return None
@@ -444,7 +503,10 @@ def redacted_remote_url(value: str | None) -> str | None:
         if carried is not None:
             user, _, rest = carried
             text = user + ":<redacted>@" + rest
-    return redacted_url(text)
+    # ONLY THE PASSWORD FIELD GOES; `host=db` stays, for the same reason the
+    # query form keeps its host — an operator has to be able to see WHICH
+    # endpoint the row names.
+    return LIBPQ_PASSWORD.sub("<redacted>", redacted_url(text))
 
 
 def _scp_like_userinfo(value: str) -> tuple[str, str, str] | None:

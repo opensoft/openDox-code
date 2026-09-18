@@ -1866,3 +1866,83 @@ def test_no_credential_ever_enters_or_leaves_the_remote_url_column(
     assert "<redacted>" in repr(carried)
     # AND AN ORDINARY ROW PRINTS UNCHANGED, so the redaction is not noise.
     assert "ssh://git@github.com/o/r.git" in repr(made)
+
+
+def test_the_map_endpoints_redact_every_shape_a_legacy_row_can_carry(
+        client, database, mint_token) -> None:
+    """The merge of § 3.5 moved this boundary and narrowed what it can see.
+
+    `_repository_json` used to call `local_git_adapter.redact_remote_url` and
+    now calls `config.redacted_remote_url`, for a real reason — the general
+    redactor replaces the userinfo of an ordinary `git@github.com:o/r.git`,
+    which is a username and not a secret. But `config`'s redactor was written
+    for BROKER URLs, and a `remote_url` is free text: it knew neither the
+    libpq keyword/value form nor the parameter name `pass`, so
+    `host=db password=hunter2 dbname=x` and `https://host/r.git?pass=hunter2`
+    were returned VERBATIM by both map endpoints to every member of the
+    project — a credential exposure introduced by this branch's own merge
+    (Copilot review of openDox-code#26, at `555a03c8`).
+
+    THE FOUR SHAPES ARE DRIVEN THROUGH THE REAL ENDPOINTS, not through the
+    redactor: the defect was in which redactor the boundary called, and a case
+    that asked the redactor directly would have passed throughout.
+    """
+    from opendox.runtime import app as app_module
+
+    owner = mint_token(subject="legacy-shapes-owner")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "legacy-shapes", "title": "Shapes"},
+                          headers=_auth(owner)).json()
+    with database.transaction() as conn:
+        from opendox.runtime.identity import CoordinationStore
+        CoordinationStore(conn).create_project_repository(
+            project_id=project["id"], adapter="local-git",
+            location="/srv/repos/legacy-shapes.git")
+
+    shapes = ("host=db password=hunter2 dbname=x",
+              "https://github.com/o/r.git?pass=hunter2",
+              "https://github.com/o/r.git?sslpassword=hunter2",
+              "host=db sslpassword=hunter2")
+    for legacy in shapes:
+        # AROUND THE STORE, which is what a legacy row is: § 3.5 refuses these
+        # at `identity.CoordinationStore` itself, and the row this boundary
+        # exists for is the one written before any such rule.
+        with database.transaction() as conn:
+            conn.execute(
+                "update project_repositories set remote_url = %s "
+                "where project_id = %s", (legacy, project["id"]))
+
+        listed = client.get("/api/v1/project-repositories",
+                            headers=_auth(owner))
+        one = client.get(f"/api/v1/project-repositories/{project['id']}",
+                         headers=_auth(owner))
+        for response in (listed, one):
+            assert response.status_code == 200, response.text
+            assert "hunter2" not in response.text, legacy
+        assert "<redacted>" in one.json()["remote_url"], legacy
+        # AND THE HOST SURVIVES, so the row stays readable for what it is for.
+        assert ("github.com" in one.json()["remote_url"]
+                or "host=db" in one.json()["remote_url"]), legacy
+
+    # THE ORDINARY REMOTE IS STILL RETURNED EXACTLY AS STORED, which is the
+    # reason this boundary uses the narrow redactor at all.
+    with database.transaction() as conn:
+        conn.execute(
+            "update project_repositories set remote_url = %s "
+            "where project_id = %s",
+            ("ssh://git@github.com/o/r.git", project["id"]))
+    unchanged = client.get(f"/api/v1/project-repositories/{project['id']}",
+                           headers=_auth(owner)).json()
+    assert unchanged["remote_url"] == "ssh://git@github.com/o/r.git"
+
+    # AND THE BOUNDARY IS THE FUNCTION, asked directly for the four shapes so
+    # a future edit that stops calling it is not hidden by the route.
+    from datetime import datetime
+
+    from opendox.runtime import identity as identity_module
+    for legacy in shapes:
+        row = identity_module.ProjectRepository(
+            id="r", project_id=project["id"], adapter="local-git",
+            location="/srv/repos/legacy-shapes.git", remote_url=legacy,
+            created_at=datetime(2026, 9, 18))
+        assert "hunter2" not in app_module._repository_json(row)["remote_url"]

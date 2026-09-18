@@ -3939,3 +3939,82 @@ def test_the_bounded_runner_gives_the_child_its_own_process_group(
     assert child_group != os.getpgrp(), (
         "the child shares this process's group, so killing the group would "
         "signal the test runner instead of the push")
+
+
+def test_the_two_readings_of_the_one_list_never_disagree_about_hiding() -> None:
+    """Two lists drifted, and the API returned what the adapter would hide.
+
+    `config` and this module each declared the credential-parameter names, and
+    `config`'s lacked `pass` — so when § 3.5's merge pointed
+    `app._repository_json` at `config.redacted_remote_url`, a legacy row
+    spelled `https://host/r.git?pass=hunter2` was handed to every member of the
+    project while this module's redactor hid it perfectly well. The same gap
+    covered `sslpassword=` and the whole libpq keyword/value form (Copilot
+    review of openDox-code#26, at `555a03c8`).
+
+    ONE DECLARATION AND TWO READINGS NOW, and the readings differ ON PURPOSE:
+    this module asks the tuple as a plain alternation (so `monkey` matches
+    `key`), and `config` asks it whole-word with a substring rule for the
+    needles too long to collide. The difference is only ever in ONE direction,
+    and that is what this case holds: whatever `config` hides, this module
+    hides. The reverse — something `config` calls a secret that this module
+    prints — is the defect above, and no corpus entry may show it.
+    """
+    from opendox.runtime import config
+
+    # ONE DECLARATION, asserted structurally rather than by eye.
+    assert lga.SECRET_PARAMETER_KEYS == "|".join(config.SECRET_PARAMETER_KEYS)
+    assert lga._LIBPQ_PASSWORD is config.LIBPQ_PASSWORD
+
+    secret = "hunter2"
+    carriers = [
+        # the four shapes the review measured through the API boundary
+        f"host=db password={secret} dbname=x",
+        f"https://github.com/o/r.git?pass={secret}",
+        f"https://github.com/o/r.git?sslpassword={secret}",
+        f"host=db sslpassword={secret}",
+        # and the ones that were already covered, so a narrowing shows up here
+        f"https://ci:{secret}@github.com/o/r.git",
+        f"ci:{secret}@github.com:o/r.git",
+        f"https://github.com/o/r.git?token={secret}",
+        f"https://github.com/o/r.git?access_token={secret}",
+        f"https://github.com/o/r.git?%74oken={secret}",
+        f"https://github.com/o/r.git?api_key={secret}",
+        f"https://github.com/o/r.git?X-Api-Key={secret}",
+        f"https://github.com/o/r.git?sessionToken={secret}",
+        f"host=db password='{secret} two' dbname=x",
+    ]
+    innocent = [
+        "ssh://git@github.com/o/r.git",
+        "git@github.com:o/r.git",
+        "https://github.com/o/r.git",
+        "https://github.com/o/r.git?depth=1",
+        "/srv/repos/project.git",
+        "file:///srv/repos/project.git",
+    ]
+
+    for value in carriers:
+        assert secret not in config.redacted_remote_url(value), value
+        assert secret not in lga.redact_credentials(value), value
+
+    # THE PROPERTY, over both halves of the corpus: anything `config` hides,
+    # the adapter hides. Stated as an implication and not as equality, because
+    # the adapter deliberately hides more.
+    for value in carriers + innocent:
+        if config.redacted_remote_url(value) != value:
+            assert lga.redact_credentials(value) != value, (
+                f"{value!r} is a secret to config and plain text to the "
+                "adapter, which is the direction that leaks")
+
+    # AND THE INNOCENT ONES ARE UNTOUCHED BY THE NARROW READING, so the fix
+    # did not buy its safety by refusing everything. (The adapter is allowed
+    # to redact some of these: `git@host:path` is its scp form.)
+    for value in innocent:
+        assert config.redacted_remote_url(value) == value, value
+
+    # EVERY DECLARED NAME IS A SECRET TO BOTH, so the list cannot grow an
+    # entry that only one of the two readings honours.
+    for key in config.SECRET_PARAMETER_KEYS:
+        url = f"https://github.com/o/r.git?{key}={secret}"
+        assert secret not in config.redacted_remote_url(url), key
+        assert secret not in lga.redact_credentials(url), key
