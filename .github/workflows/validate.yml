@@ -367,6 +367,25 @@ jobs:
       # `test_provider_boundary.py`'s is itself a cross-leg reach worth naming:
       # it asserts that seven per-module scan suites still exist BY FILENAME,
       # and the carve sent all seven to openXdox-code.
+      #
+      # `tests/test_triple_pin.py`, LAST ON THE LIST, is the one entry that
+      # measures this workflow rather than the package — openDox-code#29
+      # registered it when it added the `Pin the triple` step below, on the
+      # ground that a shell script in a workflow file is the only code here
+      # that nothing executes until CI does. It EXTRACTS that step (its `run`
+      # and its `env`) and runs it over reports it writes itself, so the pin
+      # under test is the one the runner will execute and not a restatement of
+      # it; it is hermetic on the same footing as its neighbours (stdlib plus
+      # `PyYAML`, this package's own base dependency), imports no `opendox`
+      # submodule, and skips where `bash` or `python3` is absent.
+      #
+      # Which means the pin below now counts the three cases that hold the pin.
+      # That is deliberate and not circular: they assert the step's OUTCOMES on
+      # reports of their own making, and each was proved against the mutation it
+      # forbids before it was named here — deleting the missing-report refusal
+      # leaves the step reporting `selected=1099 passed=1096 … margin 0` over a
+      # run that never wrote a third of the suite, and that state is green until
+      # this file fails on it.
       - name: pytest
         run: >-
           python -m pytest -q
@@ -400,6 +419,7 @@ jobs:
           tests/test_wheel_paint_and_reach.py
           tests/test_binding_stylesheets.py
           tests/test_conformance_corpus.py
+          tests/test_triple_pin.py
           --noconftest
 
       # § 3.4 SLICE S7 RESIDUE — `tests/test_display_facet_leaves.py`, as its
@@ -2024,8 +2044,29 @@ jobs:
           # way on `acbb6d46`: `tests/` 723 passed 2 skipped, the S7 residue 13,
           # the hermetic six 360 passed 1 skipped, so selected 1099, passed
           # 1096, skipped still 3.
-          MIN_SELECTED: "1099"
-          MIN_PASSED: "1096"
+          #
+          # AND AGAIN HERE, for the § 3.7 residue act: four cases on
+          # `tests/test_conformance_corpus.py` (the excludes-file pair and the
+          # seed-identity pair) and three on the new `tests/test_triple_pin.py`
+          # named on the required list above. MEASURED over the tree of this
+          # commit by running this job's three invocations and summing their
+          # JUnit reports WITH THIS STEP'S OWN SCRIPT rather than by hand —
+          # `tests/` 730 passed 2 skipped, the S7 residue 13, the hermetic six
+          # 360 passed 1 skipped, which the script reads as `triple:
+          # selected=1106 passed=1103 skipped=3 failures=0 errors=0`. `pytest
+          # -q tests_runtime/` is 573, unmoved: this act adds no DB-backed
+          # case.
+          #
+          # NOT DERIVED, on the rule two paragraphs up: 1099 + 7 is a CHECK on
+          # the reading and not its source.
+          #
+          # AND THE PIN NOW COUNTS THREE CASES THAT HOLD THE PIN — deliberate,
+          # and recorded here beside the numbers so a later move does not have
+          # to rediscover why they are in the sum. They assert this step's
+          # OUTCOMES over reports of their own making; they do not assert the
+          # figures above, so a re-pin never needs a matching edit in that file.
+          MIN_SELECTED: "1106"
+          MIN_PASSED: "1103"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
@@ -2064,7 +2105,7 @@ jobs:
           [ -z "${MISSING:-}" ] || { echo "::error::JUnit report(s) missing: $MISSING — a report that did not appear is a refusal, not a smaller sum. A step that failed to write one has taken its tests out of every number below"; rc=1; }
           [ "$SELECTED" -ge "$MIN_SELECTED" ] || { echo "::error::selected $SELECTED is BELOW the floor $MIN_SELECTED — tests stopped being collected. Find them; do not lower the floor"; rc=1; }
           [ "$PASSED" -ge "$MIN_PASSED" ] || { echo "::error::passed $PASSED is BELOW the floor $MIN_PASSED — find the tests that stopped passing or stopped being collected; do not lower the floor"; rc=1; }
-          [ "$SKIPPED" = "$EXPECT_SKIPPED" ] || { echo "::error::skipped $SKIPPED, pinned exactly $EXPECT_SKIPPED — a file or directory that silently turned into skips is exactly what this pin exists to catch. If the change is intended, move the pin WITH the reason. The causes, and this list is not closed: (1) an edit to one of the three explicit lists above; (2) a module- or test-level skip that FIRED on this runner where it did not before — tests/test_conformance_corpus.py skips its git-backed cases when git is absent, and a case may skip on a platform without /proc/self/fd; (3) a new case that ships already-skipped; (4) a dependency the runner resolved differently, where an importorskip is the gate. No conftest is loaded here, so collect_ignore is NOT among them — that cause was named once and is false, and this message named an ABSOLUTE once and that was false too (Copilot review of openDox-code#31)"; rc=1; }
+          [ "$SKIPPED" = "$EXPECT_SKIPPED" ] || { echo "::error::skipped $SKIPPED, pinned exactly $EXPECT_SKIPPED — a file or directory that silently turned into skips is exactly what this pin exists to catch. If the change is intended, move the pin WITH the reason. The causes, and this list is not closed: (1) an edit to one of the three explicit lists above; (2) a module- or test-level skip that FIRED on this runner where it did not before — tests/test_conformance_corpus.py skips its git-backed cases when git is absent, and a case may skip on a platform without /proc/self/fd, and tests/test_triple_pin.py skips where `bash` or `python3` is not on PATH; (3) a new case that ships already-skipped; (4) a dependency the runner resolved differently, where an importorskip is the gate. No conftest is loaded here, so collect_ignore is NOT among them — that cause was named once and is false, and this message named an ABSOLUTE once and that was false too (Copilot review of openDox-code#31)"; rc=1; }
           [ "$FAILURES" = "0" ] || { echo "::error::failures $FAILURES, clause (d) requires zero"; rc=1; }
           [ "$ERRORS" = "0" ] || { echo "::error::errors $ERRORS, clause (d) requires zero"; rc=1; }
           exit $rc
