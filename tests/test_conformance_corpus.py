@@ -242,3 +242,37 @@ def test_ambient_EOL_normalization_cannot_change_the_committed_bytes(
         ("git", "cat-file", "blob", "HEAD:notes/crlf.md"),
         cwd=built / POPULATED, check=True, capture_output=True).stdout
     assert blob == crlf, "the committed blob is not the file's bytes"
+
+
+@requires_git
+def test_a_hostile_init_template_cannot_rewrite_the_committed_bytes(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`init.templateDir` is the channel that survives the other defences.
+
+    `git init` copies the template into the new `$GIT_DIR`, and a template
+    carrying `info/attributes` installs REPOSITORY-LOCAL attributes that
+    `core.attributesFile` does not override. Measured before the fix: a
+    template saying `* filter=evil` plus a global `filter.evil.clean` rewrote
+    a document's bytes straight through `core.attributesFile=/dev/null`.
+    """
+    template = tmp_path / "template" / "info"
+    template.mkdir(parents=True)
+    (template / "attributes").write_text("* filter=evil\n", encoding="utf-8")
+    hostile = tmp_path / "hostile.gitconfig"
+    hostile.write_text(
+        f"[init]\n\ttemplateDir = {template.parent}\n"
+        '[filter "evil"]\n\tclean = sed s/Alpha/TAMPERED/\n', encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile))
+
+    fixtures = tmp_path / "fixtures"
+    body = b"Type: note\nTitle: Alpha\n\n# Alpha\n\nThe word Alpha must survive.\n"
+    (fixtures / POPULATED / "notes").mkdir(parents=True)
+    (fixtures / POPULATED / "notes" / "alpha.md").write_bytes(body)
+    (fixtures / EMPTY).mkdir(parents=True)
+    (fixtures / UNREADABLE).write_text("not a directory\n", encoding="utf-8")
+
+    built = transpose(fixtures, tmp_path / "transposition")
+    blob = subprocess.run(
+        ("git", "cat-file", "blob", "HEAD:notes/alpha.md"),
+        cwd=built / POPULATED, check=True, capture_output=True).stdout
+    assert blob == body

@@ -88,7 +88,18 @@ def reader(name: str, location: str) -> LocalGitCorpus:
 #: `core.hooksPath` and the three signing switches name PROGRAMS the ambient
 #: configuration chooses, which `local_git_adapter` already refuses for the
 #: runtime and refuses here for the same reason.
+#: `init.templateDir` IS THE ONE THAT SURVIVES THE REST, and it is disabled
+#: here rather than argued about: `git init` copies the template into the new
+#: `$GIT_DIR`, and a template carrying `info/attributes` installs REPOSITORY-
+#: LOCAL attributes that `core.attributesFile` does not override. MEASURED on
+#: this tree — a template whose `info/attributes` says `* filter=evil` and a
+#: global `filter.evil.clean` rewrote a document's bytes straight through
+#: `core.attributesFile=/dev/null`; the byte check below caught it and refused,
+#: which is the right failure and still the wrong outcome, because the
+#: transposition then cannot be built at all on that machine. Emptied, the same
+#: run commits the file's own bytes. (Copilot review of PR #31, round 2.)
 _HARDENING = (
+    "-c", "init.templateDir=",
     "-c", "core.hooksPath=" + os.devnull,
     "-c", "core.autocrlf=false",
     "-c", "core.eol=lf",
