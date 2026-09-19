@@ -1868,9 +1868,24 @@ jobs:
       #              count and the triple below does. Re-measured rather than
       #              carried: a figure that was not taken on the tree it is
       #              stated for is a figure nobody measured.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 572 there.
+      #  360 passed  at `build/3-7-followup-2-worktree-and-refusals` `acbb6d46`
+      #  1 skipped   (2026-09-19, same python, pytest and git) — ONE added,
+      #              closing this branch's own regression. Holding a linked
+      #              worktree's metadata moved the `rev-parse --git-dir` probe
+      #              out of `_write_back_bound`'s handler — it had been one
+      #              line inside it — and added two opens beside it, so a
+      #              failing probe escaped as a raw `GitCommandFailed` and a
+      #              vanished metadata directory as `FileNotFoundError`, where
+      #              this operation declares two kinds and a caller may branch
+      #              on them. MEASURED at `97a1b37e`, both raw, and the probe
+      #              one on EVERY shape rather than only a linked worktree.
+      #              `metadata_held_open` owns the translation now, because it
+      #              owns the calls.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 572. The neutral conformance corpus
+      #              tests_runtime/` is 573. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
@@ -2002,8 +2017,15 @@ jobs:
           # NOT DERIVED, on the rule the paragraph above states: 1096 + 2 is a
           # CHECK on the reading and not its source, and the reading came from
           # a run.
-          MIN_SELECTED: "1098"
-          MIN_PASSED: "1095"
+          #
+          # AND ONCE MORE, for the case that closes this branch's OWN
+          # regression — the metadata probe and open that escaped as raw
+          # exceptions where `write_back` declares two kinds. MEASURED the same
+          # way on `acbb6d46`: `tests/` 723 passed 2 skipped, the S7 residue 13,
+          # the hermetic six 360 passed 1 skipped, so selected 1099, passed
+          # 1096, skipped still 3.
+          MIN_SELECTED: "1099"
+          MIN_PASSED: "1096"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
