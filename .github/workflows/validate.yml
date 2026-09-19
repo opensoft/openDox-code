@@ -399,6 +399,7 @@ jobs:
           tests/test_smoke_signals.py
           tests/test_wheel_paint_and_reach.py
           tests/test_binding_stylesheets.py
+          tests/test_conformance_corpus.py
           --noconftest
 
       # § 3.4 SLICE S7 RESIDUE — `tests/test_display_facet_leaves.py`, as its
@@ -1926,8 +1927,37 @@ jobs:
           # FLOORS - may only RISE, and only with the reason in the commit
           # message. Set to the measured values above, which are numbers this
           # suite has actually met on CI rather than an aspiration.
-          MIN_SELECTED: "1076"
-          MIN_PASSED: "1073"
+          # RAISED 2026-09-18 by the § 3.7 FLOOR PART 3 act (PR #31), TWICE,
+          # and the second time is the one that governs.
+          #
+          # First: eight tests joined the list with
+          # `tests/test_conformance_corpus.py` -- measured on run 35400706354,
+          # 1076 -> 1084 and 1073 -> 1081.
+          #
+          # Then #30 landed (merge `5c867137`, 22:12:50Z) and this branch
+          # merged it, and the number moved AGAIN -- measured on run
+          # 35400771494 over the merged head: selected 1093, passed 1090.
+          # NINE of those are #30's, added to files ALREADY in the lists
+          # (`tests_runtime/test_deploy_shape.py`,
+          # `test_local_git_adapter.py`, `test_runtime_cli.py`), and #30 left
+          # the floors where it found them -- so main carried a nine-test
+          # slack that this pin could no longer see past. Closed here because
+          # this act was re-measuring anyway; a floor with slack in it is a
+          # floor that stops catching the regression it was set to catch.
+          #
+          # And a THIRD time, for the two hardening tests Copilot's review of
+          # this PR asked for (an ambient `GIT_DIR` that must not redirect the
+          # transposition; an ambient `core.autocrlf` that must not rewrite
+          # its bytes) — measured on run 35410846287: selected 1095, passed
+          # 1092, skipped still 3.
+          #
+          # NO FIGURE HERE WAS DERIVED. 1093 + 2 = 1095 is a check on the
+          # reading, not the source of it, and the same is true of the two
+          # earlier moves.
+          # And once more for the `init.templateDir` regression case — run
+          # 35411... on head b48dd4b4: selected 1096, passed 1093, skipped 3.
+          MIN_SELECTED: "1096"
+          MIN_PASSED: "1093"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
@@ -1966,7 +1996,7 @@ jobs:
           [ -z "${MISSING:-}" ] || { echo "::error::JUnit report(s) missing: $MISSING — a report that did not appear is a refusal, not a smaller sum. A step that failed to write one has taken its tests out of every number below"; rc=1; }
           [ "$SELECTED" -ge "$MIN_SELECTED" ] || { echo "::error::selected $SELECTED is BELOW the floor $MIN_SELECTED — tests stopped being collected. Find them; do not lower the floor"; rc=1; }
           [ "$PASSED" -ge "$MIN_PASSED" ] || { echo "::error::passed $PASSED is BELOW the floor $MIN_PASSED — find the tests that stopped passing or stopped being collected; do not lower the floor"; rc=1; }
-          [ "$SKIPPED" = "$EXPECT_SKIPPED" ] || { echo "::error::skipped $SKIPPED, pinned exactly $EXPECT_SKIPPED — a file or directory that silently turned into skips is exactly what this pin exists to catch. If the change is intended (the root conftest's collect_ignore lifting as the openXdox leg or the BUILD arc lands is the expected cause), move the pin WITH the reason"; rc=1; }
+          [ "$SKIPPED" = "$EXPECT_SKIPPED" ] || { echo "::error::skipped $SKIPPED, pinned exactly $EXPECT_SKIPPED — a file or directory that silently turned into skips is exactly what this pin exists to catch. If the change is intended, move the pin WITH the reason. The cause is always an edit to one of the three explicit lists above: no conftest is loaded here, so collect_ignore cannot reach these numbers"; rc=1; }
           [ "$FAILURES" = "0" ] || { echo "::error::failures $FAILURES, clause (d) requires zero"; rc=1; }
           [ "$ERRORS" = "0" ] || { echo "::error::errors $ERRORS, clause (d) requires zero"; rc=1; }
           exit $rc
