@@ -1903,6 +1903,20 @@ jobs:
       #              one on EVERY shape rather than only a linked worktree.
       #              `metadata_held_open` owns the translation now, because it
       #              owns the calls.
+      #              SUPERSEDED by the entry below, which is the § 3.7
+      #              residue act's tree; `pytest -q tests_runtime/` was 573
+      #              there and is 573 here.
+      #  360 passed  at `build/3-7-residue-excludes-and-triple-pin` `acfa3e26`
+      #  1 skipped   (2026-09-19, same python, pytest and git) — UNCHANGED on
+      #              the hermetic six, and the entry exists because the TREE
+      #              changed and the triple below MOVED. Seven cases land on
+      #              the FIRST list, which this figure does not count: four on
+      #              `tests/test_conformance_corpus.py` (`core.excludesFile=`
+      #              and the shipped-seed fixture) and three on the new
+      #              `tests/test_triple_pin.py`, so that list reads 730 passed
+      #              2 skipped and the triple reads selected 1106, passed
+      #              1103, skipped 3. Re-measured rather than carried, on the
+      #              rule the entry above states.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
       #              tests_runtime/` is 573. The neutral conformance corpus
