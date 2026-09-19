@@ -329,18 +329,33 @@ def transpose(shipped: Path, destination: Path) -> Path:
         # database or a lock left by a crashed process produces identically
         # (Copilot review of PR #33 at `conformance_corpus.py:258`). That is
         # the same defect this act removes from the workflow's skip-pin
-        # message one file over, so it is removed here too: `diff --cached`
-        # answers whether anything was staged, and the two shapes get two
-        # sentences. MEASURED on git 2.43.0 — nothing staged exits 1 with
-        # `nothing to commit …` on STDOUT, a held `index.lock` exits 128 with
-        # `fatal: Unable to create …` on STDERR, and `diff --cached
-        # --name-only` answers correctly in both.
+        # message one file over, so it is removed here too: the INDEX answers
+        # whether anything was staged, and the two shapes get two sentences.
+        # MEASURED on git 2.43.0 — nothing staged exits 1 with `nothing to
+        # commit …` on STDOUT, a held `index.lock` exits 128 with `fatal:
+        # Unable to create …` on STDERR, and the index reads correctly in both.
+        #
+        # `ls-files --cached -z` AND NOT `diff --cached --name-only`, for two
+        # measured reasons (Copilot review of PR #33 at
+        # `conformance_corpus.py:343`). First, `-z` is the only spelling that
+        # survives a pathname with a SPACE in it: `.split()` reported `my
+        # notes/a b.md` and `plain.md` as FOUR paths, and the count is the
+        # evidence the refusal below offers its reader. Second, `ls-files` is
+        # index-only plumbing with no diff machinery in it at all. The review
+        # held that `diff --cached --name-only` could run a configured
+        # `diff.external` or textconv; MEASURED, it does not — with a global
+        # `diff.external`, a `textconv` and an in-tree `.gitattributes`, the
+        # `--name-only` form ran NOTHING while a bare `git diff --cached` ran
+        # the program once per path — so the claim is false and the objection
+        # is still right: that safety came from a FLAG, and an edit dropping it
+        # would open exactly that hole. This spelling has no such flag to drop.
         staged = subprocess.run(
-            ("git", *_HARDENING, "diff", "--cached", "--name-only"),
+            ("git", *_HARDENING, "ls-files", "--cached", "-z"),
             cwd=target, capture_output=True,
             env={**_sanitized_git_environment(),
                  "GIT_NO_REPLACE_OBJECTS": "1"})
-        names = staged.stdout.split() if staged.returncode == 0 else None
+        names = ([name for name in staged.stdout.split(b"\0") if name]
+                 if staged.returncode == 0 else None)
         said = _what_git_said(failed.stderr, failed.stdout)
         if names == []:
             raise ValueError(
