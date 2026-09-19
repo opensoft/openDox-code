@@ -1835,9 +1835,29 @@ jobs:
       #              corrected and nothing there behaves differently: an
       #              absolute `--git-dir` DOES arise, for a linked worktree,
       #              measured — that repair is a ruled separate act.
+      #              SUPERSEDED by the entry below, which is on a NEW branch cut
+      #              from main after #30 landed; `pytest -q tests_runtime/`
+      #              was 568 there.
+      #  359 passed  at `build/3-7-followup-2-worktree-and-refusals` `f8cb7a90`
+      #  1 skipped   (2026-09-19, same python, pytest and git) — TWO added here
+      #              and two in the DB-backed half: openDox-code#30's four
+      #              registered follow-ups, each measured against a full
+      #              checkout of `5c867137`. A LINKED WORKTREE's metadata is
+      #              held by descriptor (`GIT_DIR` and `GIT_COMMON_DIR` as
+      #              `/proc/self/fd/<n>`), which is the shape `--git-dir`
+      #              answers absolutely and the one the index binding did not
+      #              reach; `identity.RefusedError` is a 409 on the three
+      #              routes that call an act writing through the store, which
+      #              closes the CLASS whose two instances were #26's
+      #              `;token=` 500 and `/srv/repos/a:b@c.git`, measured a 500
+      #              at `5c867137`; the whitespace fallback takes git's own
+      #              first-colon rule, so `/srv/my repos/a:b@c.git` is a local
+      #              path again in both the refusal and the printer; and the
+      #              served-database guard's other two acts — `migrate --plan`
+      #              and `reset` — have the case the schema guard's twin has.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 568. The neutral conformance corpus
+      #              tests_runtime/` is 572. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
@@ -1926,8 +1946,17 @@ jobs:
           # FLOORS - may only RISE, and only with the reason in the commit
           # message. Set to the measured values above, which are numbers this
           # suite has actually met on CI rather than an aspiration.
-          MIN_SELECTED: "1076"
-          MIN_PASSED: "1073"
+          # MOVED WITH THE TESTS THAT RAISED THEM, and only upward. § 5.4
+          # clause (d)'s floors are a ratchet: a number that goes down is a
+          # test that stopped being collected, which is what they exist to
+          # catch, so an act that ADDS cases moves them and an act that finds
+          # them low leaves them alone. MEASURED at this branch's own head
+          # across the three reports — selected 1087, passed 1084, skipped 3 —
+          # after openDox-code#30's four registered follow-ups added two
+          # hermetic cases here and two in the DB-backed job (which this triple
+          # does not count).
+          MIN_SELECTED: "1087"
+          MIN_PASSED: "1084"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
