@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import shutil
 import random
 import subprocess
 from pathlib import Path
@@ -4369,3 +4370,159 @@ def test_an_authority_this_runtime_cannot_read_is_refused_by_name() -> None:
                      "/srv/my repos/x.git", "/srv/a@b/my repos/x.git",
                      "https://github.com/o/r.git"):
         assert config.credential_in_a_remote_url(ordinary) is None, ordinary
+
+
+# -- openDox-code#30's follow-up #1, ruled --------------------------------
+
+
+def test_a_linked_worktree_writes_through_held_metadata_descriptors(
+        adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third shape, which the index binding did not reach.
+
+    `-C /proc/self/fd/<n>` binds the working directory, and for the two shapes
+    this act creates that IS the repository: a bare repository is its own git
+    directory and a checkout's is `.git` inside it, so `rev-parse --git-dir`
+    answers a RELATIVE name and the index joins onto the held root. A LINKED
+    WORKTREE is neither. Measured on git 2.43.0: `<worktree>/.git` is a FILE
+    naming an absolute path, `--git-dir` answers
+    `<main>/.git/worktrees/<name>` — which holds the INDEX and neither
+    `objects/` nor `refs/` — and those live in the COMMON directory. `resolve`
+    serves that shape WRITABLE (`test_a_linked_worktree_can_reach_its_write_
+    path`, landed with § 3.6), so the pathname branch was live for a supported
+    corpus and its `GIT_INDEX_FILE` sat outside every descriptor this module
+    holds (Copilot review of openDox-code#30).
+
+    RULED THERE: bind both directories by descriptor and keep linked worktrees
+    writable — taking the write away would reverse what § 3.6 landed with its
+    own case. So `GIT_DIR` and `GIT_COMMON_DIR` name `/proc/self/fd/<n>`.
+
+    WHAT THIS CASE DOES NOT DO IS RENAME THE GIT DIRECTORY UNDER A RUNNING
+    WRITE, and that is worth recording rather than leaving as an absence.
+    MEASURED: git enumerates worktrees through `<common>/worktrees/<name>` and
+    compares that with the git directory in hand to decide whether a branch is
+    checked out ELSEWHERE, so re-pointing that name mid-write makes `update-ref`
+    refuse with `cannot lock ref … unable to resolve reference` — git's own
+    bookkeeping, through a name no descriptor of ours binds, and nothing to do
+    with this finding. The binding property is therefore asserted where it
+    lives: on the descriptors, after the write.
+    """
+    if not Path("/proc/self/fd").is_dir():
+        pytest.skip("no /proc/self/fd on this platform, where the adapter "
+                    "refuses rather than falling back to a pathname")
+    main = tmp_path / "main"
+    main.mkdir()
+    _git(main, "init", "--initial-branch=main", ".")
+    (main / "a.md").write_text("a\n", encoding="utf-8")
+    _git(main, "add", "a.md")
+    _git(main, "commit", "-m", "first")
+    worktree = tmp_path / "wt"
+    _git(main, "worktree", "add", "-b", "side", str(worktree))
+    corpus = adapter.resolve(ca.CorpusRef(name="wt", location=str(worktree)))
+    assert corpus.write_path_available, "§ 3.6 serves this shape writable"
+
+    git_dir = Path(_git(worktree, "rev-parse", "--absolute-git-dir"))
+    common = Path(_git(worktree, "rev-parse", "--path-format=absolute",
+                       "--git-common-dir"))
+    assert git_dir.is_absolute(), "the premise: this shape names a path"
+    assert git_dir != common, "and two directories, not one"
+
+    real_out = lga.GitRunner.out
+    seen: dict[str, object] = {"index": None, "env": None, "resolved": None}
+
+    def _watch(self, *args, **kwargs):
+        if args[:1] == ("read-tree",):
+            seen["index"] = kwargs.get("env", {}).get("GIT_INDEX_FILE")
+            seen["env"] = dict(self.held_environment)
+            # WHERE THE INDEX ACTUALLY IS while git holds it open, not where
+            # its name says: the descriptor is resolved at the moment of use.
+            seen["resolved"] = str(Path(str(seen["index"])).parent.resolve())
+        return real_out(self, *args, **kwargs)
+
+    monkeypatch.setattr(lga.GitRunner, "out", _watch)
+    receipt = adapter.write_back(corpus, ca.DocumentId("wt", "b.md"),
+                                 b"# b\n", actor=ACTOR,
+                                 basis_revision=corpus.revision or "")
+    monkeypatch.undo()
+
+    # THE MECHANISM: two variables, two descriptors, and the index inside the
+    # worktree's own git directory rather than the common one.
+    environment = seen["env"] or {}
+    assert environment.get("GIT_DIR", "").startswith("/proc/self/fd/"), environment
+    assert environment.get("GIT_COMMON_DIR", "").startswith("/proc/self/fd/")
+    assert environment["GIT_DIR"] != environment["GIT_COMMON_DIR"], (
+        "a linked worktree's own git directory and the common one are two "
+        "places; one descriptor for both would put the index in the wrong half")
+    assert str(seen["index"]).startswith("/proc/self/fd/"), seen["index"]
+    assert seen["resolved"] == str(git_dir.resolve()), seen["resolved"]
+
+    # THE WRITE LANDS WHERE IT SAYS, which is what "keep them writable" means.
+    assert _git(worktree, "rev-parse", "refs/heads/side") == \
+        receipt.correlation_id
+    assert _git(worktree, "ls-tree", "-r", "--name-only", "refs/heads/side") \
+        == "a.md\nb.md"
+    assert _git(main, "rev-parse", "refs/heads/main") != receipt.correlation_id
+    assert not [name for name in os.listdir(git_dir)
+                if name.startswith("opendox-index-")], "the index is cleaned up"
+
+    # AND THE PROPERTY THE DESCRIPTORS BUY, measured on this platform rather
+    # than assumed: once the directory is open, re-pointing its NAME at another
+    # valid git directory moves the name and not the descriptor. That is the
+    # whole difference between this and the pathname the old code used.
+    decoy = tmp_path / "decoy-gitdir"
+    shutil.copytree(git_dir, decoy)
+    handle = os.open(git_dir, os.O_RDONLY)
+    try:
+        held = lga.descriptor_path(handle)
+        git_dir.rename(tmp_path / "gitdir-moved-aside")
+        git_dir.symlink_to(decoy)
+        assert Path(held).resolve() == (tmp_path / "gitdir-moved-aside").resolve()
+        assert git_dir.resolve() == decoy.resolve(), "the NAME did move"
+    finally:
+        os.close(handle)
+        if git_dir.is_symlink():
+            git_dir.unlink()
+        (tmp_path / "gitdir-moved-aside").rename(git_dir)
+
+
+def test_a_local_path_that_holds_a_colon_and_an_at_sign_is_not_an_authority(
+) -> None:
+    """The whitespace fallback could not tell a path from an authority.
+
+    `_an_authority_this_runtime_cannot_read` was added so a whitespace-bearing
+    `user:pa ss@host:path` — invisible to both the refusal's class and the
+    redactor's — could not be stored in the clear. It read the whole head
+    before the last `@`, so `/srv/my repos/a:b@c.git`, a DIRECTORY whose name
+    holds a colon and an at-sign and a legal `git push` destination, was
+    refused as credential-bearing (Copilot review of openDox-code#30).
+
+    GIT'S OWN RULE IS THE TEST, and it is about the FIRST colon: the
+    `[user@]host:path` form is recognised only when nothing before that colon
+    is a `/`. It separates the two cases exactly, which is why it is this rule
+    and not "a head holding any slash" — `ci:hun/ter2@github.com:o/r.git` is a
+    password containing a slash, the hole openDox-code#25 closed at `0968ff8b`,
+    and its head before the first colon is `ci`.
+    """
+    from opendox.runtime import config
+
+    authorities = {
+        "user:pa ss@h:p": "whitespace in the password",
+        "ci:hun/ter 2@github.com:o/r.git": "a slash AND a space in it",
+        "user:hun\nter2@github.com:o/r.git": "a newline in it",
+    }
+    for carrier, why in authorities.items():
+        assert config.credential_in_a_remote_url(carrier) == \
+            "an authority this runtime cannot read as one word", why
+        assert "ter2" not in str(config.credential_in_a_remote_url(carrier))
+        assert "ss@" not in str(config.credential_in_a_remote_url(carrier))
+
+    paths = ("/srv/my repos/a:b@c.git",
+             "/srv/my repos/x.git",
+             "/srv/a@b/my repos/x.git",
+             "/srv/repos/2026-09-18 10:00 backup@main.git")
+    for path in paths:
+        assert config.credential_in_a_remote_url(path) is None, path
+
+    # AND THE PASSWORD-WITH-A-SLASH STAYS REFUSED, by the branch it has always
+    # been refused by: this rule may not buy its accuracy back from #25.
+    assert config.credential_in_a_remote_url(
+        "ci:hun/ter2@github.com:o/r.git") == "a password in the URL's authority"

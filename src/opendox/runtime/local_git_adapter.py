@@ -93,7 +93,7 @@ import urllib.parse
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO
 
@@ -497,10 +497,21 @@ def runner_bound_to(handle: int, location: Path,
     guard rather than here; this raise is the one that would fire if the
     directory went away between the two.
     """
+    return GitRunner(descriptor_path(handle), executable, inherit_fd=handle)
+
+
+def descriptor_path(handle: int) -> Path:
+    """`/proc/self/fd/<n>` — the NAME of an open directory, on this platform.
+
+    One spelling for the three callers that need one: `-C` for the root,
+    `GIT_DIR` and `GIT_COMMON_DIR` for a linked worktree's metadata. `/dev/fd`
+    is the same thing on Linux and the BSD spelling elsewhere. The descriptor
+    has to be INHERITED for the name to mean anything in the child, which is
+    what `GitRunner._inherited` passes.
+    """
     for base in ("/proc/self/fd", "/dev/fd"):
         if os.path.isdir(base):
-            return GitRunner(Path(base) / str(handle), executable,
-                             inherit_fd=handle)
+            return Path(base) / str(handle)
     raise PlatformCannotGuardPaths(
         "this platform names no open descriptor (`/proc/self/fd`, `/dev/fd`), "
         "so the directory this act verified cannot be the directory git "
@@ -541,11 +552,26 @@ class GitRunner:
     #: inherited descriptors, so passing it is what makes `/proc/self/fd/<n>`
     #: mean anything in the child.
     extra_fd: int | None = None
+    #: DESCRIPTORS FOR A LINKED WORKTREE'S METADATA, and the environment that
+    #: names them. A linked worktree keeps its index in its OWN git directory
+    #: (`<main>/.git/worktrees/<name>`) and its objects and refs in the COMMON
+    #: one, and neither is reachable through the worktree root this runner
+    #: holds — `<worktree>/.git` is a FILE naming an absolute path elsewhere.
+    #: So the two are opened `O_NOFOLLOW` and passed as `GIT_DIR` and
+    #: `GIT_COMMON_DIR` spelled `/proc/self/fd/<n>`, which is the same binding
+    #: `-C` already uses for the root (openDox-code#30's follow-up #1, ruled:
+    #: bind them, keep linked worktrees writable).
+    metadata_fds: tuple[int, ...] = ()
+    #: Environment every call through this runner carries — the two variables
+    #: above, as pairs so the runner stays hashable. A caller's own `env=`
+    #: still wins over it, which is what lets `GIT_INDEX_FILE` be added per
+    #: call.
+    held_environment: tuple[tuple[str, str], ...] = ()
 
     def _inherited(self) -> tuple[int, ...]:
         """The descriptors this runner's children keep, in a stable order."""
         return tuple(fd for fd in (self.inherit_fd, self.extra_fd)
-                     if fd is not None)
+                     if fd is not None) + tuple(self.metadata_fds)
 
     def _argv(self, args: tuple[str, ...]) -> list[str]:
         """The command line, with this package's two policy options on it.
@@ -601,7 +627,8 @@ class GitRunner:
             env: dict[str, str] | None = None,
             timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
         argv = self._argv(args)          # see `_argv` for the two options
-        merged = {**_sanitized_git_environment(), **(env or {})}
+        merged = {**_sanitized_git_environment(),
+                  **dict(self.held_environment), **(env or {})}
         try:
             return subprocess.run(argv, input=stdin, capture_output=True,
                                   check=False, env=merged, timeout=timeout,
@@ -822,6 +849,7 @@ class GitRunner:
             "GIT_ASKPASS": "",
             "SSH_ASKPASS": "",
             "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes",
+            **dict(self.held_environment),
             **(env or {}),
         }
         try:
@@ -1246,8 +1274,82 @@ def _whitespace_inside_an_authority(url: str) -> bool:
     is not a secret in any form; a value without `@` has no authority at all.
     """
     head = url.rpartition("@")[0]
-    return bool(head) and ":" in head and any(c.isspace() for c in head)
+    if not head or ":" not in head or not any(c.isspace() for c in head):
+        return False
+    # AND A LOCAL PATH IS NOT AN AUTHORITY — the same rule `config`'s twin
+    # applies, for the same reason and in the same act. `/srv/my repos/a:b@c.
+    # git` is a directory whose name holds a colon and an at-sign, and reading
+    # its head as userinfo made this entry point answer `<redacted-url>` for an
+    # ordinary remote: the "every row looks tampered with" cost this function's
+    # own flag exists to avoid (Copilot review of openDox-code#30, which found
+    # the refusal half; the printing half is the same misreading).
+    #
+    # GIT'S RULE IS ABOUT THE FIRST COLON: the `[user@]host:path` form is
+    # recognised only when nothing before it is a `/`. `ci:hun/ter2@host:path`
+    # — a password containing a slash, openDox-code#25's hole — has `ci`
+    # before its first colon and stays an authority.
+    return "/" not in head.partition(":")[0]
 
+
+@contextmanager
+def metadata_held_open(git: GitRunner) -> Iterator[tuple[GitRunner, Path]]:
+    """`(runner, git_dir)` with a LINKED WORKTREE's metadata held by descriptor.
+
+    `-C /proc/self/fd/<n>` binds the working directory, and for the two shapes
+    this act creates that is the whole repository: a bare repository IS its git
+    directory and a checkout's is `.git` inside it, so `rev-parse --git-dir`
+    answers a RELATIVE name (`.` and `.git`, measured on git 2.43.0) and the
+    index path joins onto the held root.
+
+    A LINKED WORKTREE IS THE THIRD SHAPE AND IT IS NOT REACHABLE THAT WAY.
+    Measured on the same git: `<worktree>/.git` is a FILE naming an absolute
+    path, `rev-parse --git-dir` answers `<main>/.git/worktrees/<name>` — which
+    holds the INDEX and neither `objects/` nor `refs/` — and the objects and
+    refs live in the COMMON directory `--path-format=absolute
+    --git-common-dir` names. `resolve` serves that shape WRITABLE, with a case
+    that has been landed since § 3.6, so the pathname branch was live for a
+    supported corpus and its `GIT_INDEX_FILE` sat outside every descriptor this
+    module holds (Copilot review of openDox-code#30; ruled there: bind them,
+    and keep linked worktrees writable rather than taking the write away).
+
+    SO BOTH DIRECTORIES ARE OPENED `O_NOFOLLOW` AND NAMED BY DESCRIPTOR.
+    MEASURED end to end on git 2.43.0 with `GIT_DIR=/proc/self/fd/<a>` and
+    `GIT_COMMON_DIR=/proc/self/fd/<b>` inherited: `rev-parse`, `hash-object
+    -w`, `read-tree`, `update-index`, `write-tree`, `commit-tree` and
+    `update-ref` all behave as they do without them — the commit landed on the
+    worktree's own branch, the main branch was untouched, and the temporary
+    index landed inside the held git directory.
+
+    THE TWO ARE OPENED SEPARATELY EVEN THOUGH ONE CONTAINS THE OTHER, because
+    what git is told is two variables and a descriptor is what each must name:
+    the worktree's git directory is inside the common one for the bundled
+    layout, and `GIT_COMMON_DIR` may point anywhere at all once a repository
+    has been moved or shared.
+    """
+    named = Path(decoded_path(git.out("rev-parse", "--git-dir")))
+    if not named.is_absolute():
+        yield git, git.root / named
+        return
+    # BOTH NAMES ARE ASKED FOR BEFORE EITHER IS OPENED, so the pathname-bound
+    # window is the two `rev-parse` calls and nothing else. It cannot be closed
+    # altogether — a descriptor can only be taken for a name somebody has said
+    # — and what the descriptors buy is everything AFTER them: once they are
+    # open, no re-pointing of these names reaches the objects, the refs or the
+    # index, which is where the whole write happens.
+    common = Path(decoded_path(
+        git.out("rev-parse", "--path-format=absolute", "--git-common-dir")))
+    handles: list[int] = []
+    try:
+        for directory in (named, common):
+            handles.append(open_no_follow_chain(directory))
+        held = [descriptor_path(handle) for handle in handles]
+        yield (replace(git, metadata_fds=tuple(handles),
+                       held_environment=(("GIT_DIR", str(held[0])),
+                                         ("GIT_COMMON_DIR", str(held[1])))),
+               held[0])
+    finally:
+        for handle in handles:
+            os.close(handle)
 
 class GitCommandFailed(Exception):
     """An internal signal. Never escapes: every caller converts it to a Refusal.
@@ -2071,143 +2173,119 @@ class LocalGitCorpus:
                 "the name was re-pointed after the corpus resolved. Nothing "
                 "is written, because a commit must land in the repository the "
                 "caller named and nowhere else")
-        try:
-            blob = git.out("hash-object", "-w", "--stdin",
-                           stdin=content).decode().strip()
-            # The temporary index lives inside the REAL git directory, which is
-            # `<location>/.git` for a checkout and `<location>` itself for the
-            # BARE repository the act creates — so it is asked for rather than
-            # assumed.
-            #
-            # ASKED AS A RELATIVE NAME AND JOINED ONTO THE HELD DIRECTORY,
-            # because `--absolute-git-dir` is a PATHNAME and this method's
-            # whole guarantee is that the check and the use are one object.
-            # Every other call here goes through `-C /proc/self/fd/<n>`; the
-            # index did not, so a rename or replacement of the location
-            # between this probe and the index operations put the index — and
-            # its `unlink` — somewhere else (Copilot review of
-            # openDox-code#26, at `4156f233`). MEASURED on git 2.43.0 with the
-            # directory renamed away and a symlink to a second repository put
-            # in its place after the handle was opened: the absolute form
-            # wrote `opendox-index-…` into the DECOY and the descriptor-
-            # relative form wrote it into the real repository.
-            #
-            # `--git-dir` ASKED THROUGH `-C` IS RELATIVE for the two shapes
-            # this act creates and serves most — measured on the same git: `.`
-            # for a bare repository and `.git` for a checkout — so joining it
-            # onto `git.root` keeps the whole path inside the descriptor.
-            #
-            # AND FOR A LINKED WORKTREE IT IS NOT, WHICH THIS COMMENT USED TO
-            # DENY. It said an absolute answer "cannot arise for a repository
-            # this act writes to". That is FALSE, and measured false on git
-            # 2.43.0: `git -C <worktree> rev-parse --git-dir` answers the
-            # absolute `<main>/.git/worktrees/<name>`, and
-            # `test_a_linked_worktree_can_reach_its_write_path` — landed with
-            # § 3.6 — serves exactly that shape WRITABLE and drives
-            # `write_back` through it (Copilot review of openDox-code#30). So
-            # the branch below is live for a supported corpus, and for it the
-            # index is still bound to a PATHNAME: the race this act closes for
-            # the other two shapes remains open there.
-            #
-            # IT IS NOT CLOSED HERE, DELIBERATELY. A linked worktree has TWO
-            # directories — its own gitdir, which holds the index, and the
-            # common directory `--git-common-dir` names, which holds `objects/`
-            # and `refs/` — so binding it means holding two more descriptors
-            # and threading them through this method; and the other answer,
-            # serving linked worktrees read-only, reverses a decision § 3.6
-            # landed with its own case. RULED a separate act (the holder, on
-            # openDox-code#30): bind by descriptor, keep them writable. This
-            # comment is the truth in the meantime, which is the one thing a
-            # comment owes.
-            named_git_dir = Path(decoded_path(git.out("rev-parse", "--git-dir")))
-            git_dir = (named_git_dir if named_git_dir.is_absolute()
-                       else git.root / named_git_dir)
-            # A UNIQUE NAME PER CALL. Keyed on the process id alone, two
-            # concurrent writes to the same repository in ONE process shared
-            # `GIT_INDEX_FILE`: their `read-tree`/`update-index`/`write-tree`
-            # steps could interleave into a wrong tree, and one cleanup could
-            # unlink the other's index. The ref compare-and-swap protects the
-            # REF and not the index (Copilot review of openDox-code#26).
-            index = git_dir / f"opendox-index-{os.getpid()}-{uuid.uuid4().hex}"
-            index_env = {"GIT_INDEX_FILE": str(index)}
-            uncleaned: str | None = None
+        # THE METADATA IS HELD FOR THE WHOLE OPERATION, not only for the
+        # index. `metadata_held_open` yields this same runner unchanged for a
+        # bare repository and a checkout — their git directory IS the held root
+        # or a name inside it — and for a LINKED WORKTREE it yields one
+        # carrying `GIT_DIR` and `GIT_COMMON_DIR` as `/proc/self/fd/<n>`, so
+        # the objects, the refs and the index are all written through
+        # descriptors this act opened `O_NOFOLLOW` rather than through names a
+        # concurrent actor can re-point (openDox-code#30's follow-up #1).
+        with metadata_held_open(git) as (git, git_dir):
             try:
-                if corpus.revision is not None:
-                    git.out("read-tree", corpus.revision, env=index_env)
-                else:
-                    git.out("read-tree", "--empty", env=index_env)
-                # THE THREE-ARGUMENT FORM. The single comma-delimited
-                # argument is parsed as `mode,object,path`, and git permits a
-                # comma IN A PATH — so a perfectly valid `DocumentId.key` such
-                # as `notes,2026.md` was rejected or, worse, split into the
-                # wrong path (Copilot review of openDox-code#26). `key` is
-                # opaque to this adapter and must not have to avoid a
-                # delimiter this call chose.
-                # `--index-info` ON STDIN, so the path is DATA. The
-                # three-argument `--cacheinfo` form fixed the comma, and left
-                # the path as a positional argument with nothing terminating
-                # git's option parsing — so a valid tracked key such as
-                # `-notes.md` was read as an option and `write_back` refused a
-                # path `list_documents` and `read` both serve (Copilot review
-                # of openDox-code#26, round 6). The stdin form has no option
-                # parsing at all: `<mode> SP <object> TAB <path> NUL`, with
-                # `-z` so a path may contain anything but NUL — which is the
-                # comma fix kept, by construction.
-                git.out("update-index", "--add", "-z", "--index-info",
-                        stdin=(f"100644 {blob}\t"
-                               + document.key).encode(
-                                   "utf-8", "surrogateescape") + b"\0",
-                        env=index_env)
-                tree = git.out("write-tree", env=index_env).decode().strip()
-            finally:
-                # THE CLEANUP IS TRANSLATED TOO, AND NOT FROM INSIDE THE
-                # `finally`. `unlink` can raise `OSError` — a git directory
-                # whose permissions changed under the write, a temporary path
-                # replaced — and the outer handler translates only
-                # `GitCommandFailed`, so that escaped `write_back` as an OS
-                # exception where the adapter owes `WRITE_PATH_UNREACHABLE`
-                # (Copilot review of openDox-code#26, round 12, suppressed).
-                # Raising from a `finally` would REPLACE an in-flight failure
-                # with a cleanup one, so it is recorded here and raised below,
-                # where an exception already on its way still wins.
+                blob = git.out("hash-object", "-w", "--stdin",
+                               stdin=content).decode().strip()
+                # THE TEMPORARY INDEX LIVES INSIDE THE REAL GIT DIRECTORY —
+                # `<location>/.git` for a checkout, `<location>` itself for the
+                # bare repository this act creates, and `<main>/.git/worktrees/
+                # <name>` for a linked worktree — and `git_dir` above is that
+                # directory named by a DESCRIPTOR in every one of the three
+                # cases. It used to be `rev-parse --absolute-git-dir` turned
+                # back into a path, so a rename or replacement of the location
+                # after the probe put the index, and the `unlink` that cleans
+                # it up, in whatever then answered to that name: MEASURED on
+                # git 2.43.0 with a symlink to a second repository put in
+                # place, the absolute form wrote `opendox-index-…` into the
+                # DECOY (Copilot review of openDox-code#26 at `4156f233`, and
+                # of #30 for the linked-worktree half). See
+                # `metadata_held_open` for the three shapes and the
+                # measurement.
+                # A UNIQUE NAME PER CALL. Keyed on the process id alone, two
+                # concurrent writes to the same repository in ONE process shared
+                # `GIT_INDEX_FILE`: their `read-tree`/`update-index`/`write-tree`
+                # steps could interleave into a wrong tree, and one cleanup could
+                # unlink the other's index. The ref compare-and-swap protects the
+                # REF and not the index (Copilot review of openDox-code#26).
+                index = git_dir / f"opendox-index-{os.getpid()}-{uuid.uuid4().hex}"
+                index_env = {"GIT_INDEX_FILE": str(index)}
+                uncleaned: str | None = None
                 try:
-                    index.unlink(missing_ok=True)
-                except OSError as exc:
-                    # THE CLASS NAME, NOT THE EXCEPTION. Stashing the object
-                    # aliased it past the anti-leak walk `build/3-5-runtime`'s
-                    # A25-4 answer made total over this package: the walk reads
-                    # one handler at a time and cannot follow a name out of it,
-                    # so an alias is a blind spot whether or not this
-                    # particular one leaked. It did not — only the class name
-                    # was ever formatted — and the code now says that in a
-                    # shape the walk can see.
-                    uncleaned = type(exc).__name__
-            if uncleaned is not None:
-                raise _refuse(
-                    WRITE_PATH_UNREACHABLE, corpus.write_path,
-                    f"the temporary index {index.name} could not be removed "
-                    f"({uncleaned}); this write path has become unreachable "
-                    "and the document remains unsaved")
+                    if corpus.revision is not None:
+                        git.out("read-tree", corpus.revision, env=index_env)
+                    else:
+                        git.out("read-tree", "--empty", env=index_env)
+                    # THE THREE-ARGUMENT FORM. The single comma-delimited
+                    # argument is parsed as `mode,object,path`, and git permits a
+                    # comma IN A PATH — so a perfectly valid `DocumentId.key` such
+                    # as `notes,2026.md` was rejected or, worse, split into the
+                    # wrong path (Copilot review of openDox-code#26). `key` is
+                    # opaque to this adapter and must not have to avoid a
+                    # delimiter this call chose.
+                    # `--index-info` ON STDIN, so the path is DATA. The
+                    # three-argument `--cacheinfo` form fixed the comma, and left
+                    # the path as a positional argument with nothing terminating
+                    # git's option parsing — so a valid tracked key such as
+                    # `-notes.md` was read as an option and `write_back` refused a
+                    # path `list_documents` and `read` both serve (Copilot review
+                    # of openDox-code#26, round 6). The stdin form has no option
+                    # parsing at all: `<mode> SP <object> TAB <path> NUL`, with
+                    # `-z` so a path may contain anything but NUL — which is the
+                    # comma fix kept, by construction.
+                    git.out("update-index", "--add", "-z", "--index-info",
+                            stdin=(f"100644 {blob}\t"
+                                   + document.key).encode(
+                                       "utf-8", "surrogateescape") + b"\0",
+                            env=index_env)
+                    tree = git.out("write-tree", env=index_env).decode().strip()
+                finally:
+                    # THE CLEANUP IS TRANSLATED TOO, AND NOT FROM INSIDE THE
+                    # `finally`. `unlink` can raise `OSError` — a git directory
+                    # whose permissions changed under the write, a temporary path
+                    # replaced — and the outer handler translates only
+                    # `GitCommandFailed`, so that escaped `write_back` as an OS
+                    # exception where the adapter owes `WRITE_PATH_UNREACHABLE`
+                    # (Copilot review of openDox-code#26, round 12, suppressed).
+                    # Raising from a `finally` would REPLACE an in-flight failure
+                    # with a cleanup one, so it is recorded here and raised below,
+                    # where an exception already on its way still wins.
+                    try:
+                        index.unlink(missing_ok=True)
+                    except OSError as exc:
+                        # THE CLASS NAME, NOT THE EXCEPTION. Stashing the object
+                        # aliased it past the anti-leak walk `build/3-5-runtime`'s
+                        # A25-4 answer made total over this package: the walk reads
+                        # one handler at a time and cannot follow a name out of it,
+                        # so an alias is a blind spot whether or not this
+                        # particular one leaked. It did not — only the class name
+                        # was ever formatted — and the code now says that in a
+                        # shape the walk can see.
+                        uncleaned = type(exc).__name__
+                if uncleaned is not None:
+                    raise _refuse(
+                        WRITE_PATH_UNREACHABLE, corpus.write_path,
+                        f"the temporary index {index.name} could not be removed "
+                        f"({uncleaned}); this write path has become unreachable "
+                        "and the document remains unsaved")
 
-            message = self._message(document, actor, basis_revision, reason,
-                                    corpus.write_path)
-            parents: list[str] = []
-            if corpus.revision is not None:
-                parents = ["-p", corpus.revision]
-            commit = git.out("commit-tree", tree, *parents, "-m", message,
-                             env=git_identity(actor)).decode().strip()
-            ref = self._served_ref(git, corpus.location)
-            if corpus.revision is None:
-                git.out("update-ref", ref, commit, "")
-            else:
-                # COMPARE-AND-SWAP: the ref moves only if it is still where
-                # this corpus was resolved. A concurrent writer therefore loses
-                # its dispatch rather than silently overwriting the other one.
-                git.out("update-ref", ref, commit, corpus.revision)
-        except GitCommandFailed as failed:
-            raise _refuse(WRITE_PATH_UNREACHABLE, corpus.write_path,
-                          f"the commit could not be made ({failed}); the "
-                          "document remains unsaved") from failed
+                message = self._message(document, actor, basis_revision, reason,
+                                        corpus.write_path)
+                parents: list[str] = []
+                if corpus.revision is not None:
+                    parents = ["-p", corpus.revision]
+                commit = git.out("commit-tree", tree, *parents, "-m", message,
+                                 env=git_identity(actor)).decode().strip()
+                ref = self._served_ref(git, corpus.location)
+                if corpus.revision is None:
+                    git.out("update-ref", ref, commit, "")
+                else:
+                    # COMPARE-AND-SWAP: the ref moves only if it is still where
+                    # this corpus was resolved. A concurrent writer therefore loses
+                    # its dispatch rather than silently overwriting the other one.
+                    git.out("update-ref", ref, commit, corpus.revision)
+            except GitCommandFailed as failed:
+                raise _refuse(WRITE_PATH_UNREACHABLE, corpus.write_path,
+                              f"the commit could not be made ({failed}); the "
+                              "document remains unsaved") from failed
         return WriteReceipt(correlation_id=commit,
                             dispatched_to=corpus.write_path)
 

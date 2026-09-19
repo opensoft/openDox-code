@@ -2109,3 +2109,66 @@ def test_a_map_row_deleted_under_an_act_is_a_404_and_not_a_500(
         # AND THE MESSAGE IS THE STORE'S OWN, so an operator reading it learns
         # WHAT was not found rather than that something went wrong.
         assert "repository" in body["message"].lower(), body["message"]
+
+
+# -- openDox-code#30's follow-up #2 ------------------------------------------
+
+
+def test_a_store_refusal_the_act_did_not_pre_empt_is_a_409_and_not_a_500(
+        client_with_repositories, database, mint_token) -> None:
+    """Two readings of one rule, and whatever falls between them was a crash.
+
+    `repository_act` refuses a credential-bearing remote and so does
+    `identity.CoordinationStore` — layering, not duplication, and the two
+    readings are deliberately not identical. Nothing translated the STORE's
+    refusal, though: `app.py` caught `RepositoryActRefused` and nothing else,
+    so a value ONE of them refuses and the other accepts left the route as an
+    unhandled exception, which FastAPI answers 500.
+
+    IT HAS HAPPENED TWICE, and both times it was closed one shape at a time:
+    `…?mode=1;token=…` on openDox-code#26, where the act accepted what the
+    store refused, and `/srv/repos/a:b@c.git` — a local path holding a colon
+    and an at-sign — which was **measured a 500 on `main` at `373b05a`**
+    (Copilot review of openDox-code#30). This closes the CLASS: a refusal from
+    the store is a refusal, and a refusal is a 409 naming the shape.
+
+    The path below is still refused by the store — `_scp_like_userinfo` reads
+    `/srv/repos/a:b` as userinfo — and that reading is landed § 3.5 code this
+    act does not widen. What changes is that a caller is told, in the terms
+    every other refusal uses, instead of being handed a server error.
+    """
+    client = client_with_repositories
+    owner = mint_token(subject="store-refusal-owner")
+    project = client.post("/api/v1/projects",
+                          json={"slug": "store-refusal", "title": "Store"},
+                          headers=_auth(owner)).json()
+    # A REAL REPOSITORY ON DISK, because the accepted half of this case runs
+    # the whole act: attaching a remote configures it in the repository, and a
+    # map row naming a directory that is not there refuses for that reason
+    # instead of the one under test.
+    created = client.post(f"/api/v1/projects/{project['id']}/repository",
+                          headers=_auth(owner))
+    assert created.status_code in (200, 201), created.text
+
+    refused = client.put(
+        f"/api/v1/projects/{project['id']}/repository/remote",
+        json={"remote_url": "/srv/repos/a:b@c.git"},
+        headers=_auth(owner))
+    assert refused.status_code == 409, refused.text
+    body = refused.json()["detail"]
+    assert body["code"] == "repository.refused"
+    assert "remote_url carries" in body["message"]
+    # AND THE REFUSAL NAMES THE SHAPE AND NOT THE VALUE, which is what every
+    # refusal on this column has promised since § 3.5.
+    assert "a:b@c" not in refused.text
+
+    # AND THE PATH THE REVIEW WAS ACTUALLY ABOUT IS ACCEPTED: a directory whose
+    # name holds a colon and an at-sign is a legal `git push` destination, and
+    # the whitespace fallback no longer reads one as an authority (git's own
+    # rule: nothing before the first colon may be a `/`).
+    accepted = client.put(
+        f"/api/v1/projects/{project['id']}/repository/remote",
+        json={"remote_url": "/srv/my repos/a:b@c.git"},
+        headers=_auth(owner))
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["remote_url"] == "/srv/my repos/a:b@c.git"
