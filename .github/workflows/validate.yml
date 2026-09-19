@@ -1954,8 +1954,10 @@ jobs:
           # NO FIGURE HERE WAS DERIVED. 1093 + 2 = 1095 is a check on the
           # reading, not the source of it, and the same is true of the two
           # earlier moves.
-          MIN_SELECTED: "1095"
-          MIN_PASSED: "1092"
+          # And once more for the `init.templateDir` regression case — run
+          # 35411... on head b48dd4b4: selected 1096, passed 1093, skipped 3.
+          MIN_SELECTED: "1096"
+          MIN_PASSED: "1093"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
@@ -1994,7 +1996,7 @@ jobs:
           [ -z "${MISSING:-}" ] || { echo "::error::JUnit report(s) missing: $MISSING — a report that did not appear is a refusal, not a smaller sum. A step that failed to write one has taken its tests out of every number below"; rc=1; }
           [ "$SELECTED" -ge "$MIN_SELECTED" ] || { echo "::error::selected $SELECTED is BELOW the floor $MIN_SELECTED — tests stopped being collected. Find them; do not lower the floor"; rc=1; }
           [ "$PASSED" -ge "$MIN_PASSED" ] || { echo "::error::passed $PASSED is BELOW the floor $MIN_PASSED — find the tests that stopped passing or stopped being collected; do not lower the floor"; rc=1; }
-          [ "$SKIPPED" = "$EXPECT_SKIPPED" ] || { echo "::error::skipped $SKIPPED, pinned exactly $EXPECT_SKIPPED — a file or directory that silently turned into skips is exactly what this pin exists to catch. If the change is intended (the root conftest's collect_ignore lifting as the openXdox leg or the BUILD arc lands is the expected cause), move the pin WITH the reason"; rc=1; }
+          [ "$SKIPPED" = "$EXPECT_SKIPPED" ] || { echo "::error::skipped $SKIPPED, pinned exactly $EXPECT_SKIPPED — a file or directory that silently turned into skips is exactly what this pin exists to catch. If the change is intended, move the pin WITH the reason. The cause is always an edit to one of the three explicit lists above: no conftest is loaded here, so collect_ignore cannot reach these numbers"; rc=1; }
           [ "$FAILURES" = "0" ] || { echo "::error::failures $FAILURES, clause (d) requires zero"; rc=1; }
           [ "$ERRORS" = "0" ] || { echo "::error::errors $ERRORS, clause (d) requires zero"; rc=1; }
           exit $rc
