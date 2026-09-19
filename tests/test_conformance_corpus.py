@@ -39,11 +39,42 @@ from opendox.conformance_corpus import (  # noqa: E402
 #: the spelling openxFactory's seed uses. Rebuilt here rather than imported
 #: because openxFactory is not a dependency of this leg and must not become
 #: one to satisfy a test.
+#: THE SHIPPED SEED'S OWN BYTES, and that is the point of this block rather
+#: than a convenience. The first cut gave all three documents BOTH header
+#: fields, and the real seed does not: `notes/beta.md` carries no `Title` and
+#: `papers/gamma.md` carries no `Type`, which are the classification
+#: vocabulary's missing-field and unclassifiable cases — the awkward parts the
+#: seventeen checks exist for. A fixture derived from simplified values, with a
+#: `_fingerprint` derived from the same values, proves byte fidelity over a
+#: corpus shaped like the seed and never over the seed (Copilot review of
+#: PR #31 at `tests/test_conformance_corpus.py:45`, measured and registered by
+#: the lander in comment 5738108117, taken here).
+#:
+#: COPIED AND NOT IMPORTED, which is the constraint: openxFactory is not a
+#: dependency of this leg and must not become one to satisfy a test. The bytes
+#: below are `tests/corpus-adapter/fixtures/neutral/**` verbatim — 165, 171 and
+#: 175 bytes, the sizes the lander measured — so the fixture is the seed rather
+#: than a description of it.
 _DOCUMENTS = {
-    "notes/alpha.md": b"Type: note\nTitle: Alpha\n\n# Alpha\n\nA complete document.\n",
-    "notes/beta.md": b"Type: note\nTitle: Beta\n\n# Beta\n\nAnother one.\n",
-    "papers/gamma.md": b"Type: paper\nTitle: Gamma\n\n# Gamma\n\nIn the second root.\n",
+    "notes/alpha.md": (
+        b"Type: note\nTitle: Alpha\n\n# Alpha\n\nA complete document in a "
+        b"corpus that has never heard of a factory. It carries\nthis corpus's "
+        b"own two-field header and nothing else.\n"),
+    "notes/beta.md": (
+        b"Type: note\n\n# Beta\n\nA classified document that is missing one "
+        b"of the fields its kind obliges, so\nthe reader has something to "
+        b"report without anything being unrecognizable.\n"),
+    "papers/gamma.md": (
+        b"Title: Gamma\n\n# Gamma\n\nA document this corpus cannot classify: "
+        b"it carries no kind header at all. It\nmust still be LISTED, and "
+        b"classifying it must name it rather than omit it.\n"),
 }
+
+#: The sizes the shipped seed has, asserted rather than trusted: a fixture that
+#: drifts from the corpus it mirrors is the defect this block closes, and the
+#: byte count is the cheapest thing that would notice.
+_SHIPPED_SIZES = {"notes/alpha.md": 165, "notes/beta.md": 171,
+                  "papers/gamma.md": 175}
 
 
 def _git_available() -> bool:
@@ -276,3 +307,183 @@ def test_a_hostile_init_template_cannot_rewrite_the_committed_bytes(
         ("git", "cat-file", "blob", "HEAD:notes/alpha.md"),
         cwd=built / POPULATED, check=True, capture_output=True).stdout
     assert blob == body
+
+
+# -- the residue openDox-code#31 registered ----------------------------------
+
+
+@requires_git
+def test_the_fixture_is_the_shipped_seed_and_not_a_description_of_it(
+) -> None:
+    """A fixture derived from simplified values proves nothing about the seed.
+
+    The first cut gave all three documents BOTH header fields and computed the
+    fidelity table off those same values, so the suite proved byte fidelity
+    over a corpus SHAPED LIKE the seed and never over the seed — and the seed's
+    awkward parts are exactly what the seventeen checks are for (Copilot review
+    of PR #31, measured and registered in comment 5738108117).
+
+    THE BYTES ARE COPIED, NOT IMPORTED, because openxFactory is not a
+    dependency of this leg and must not become one to satisfy a test. What can
+    be asserted here without that dependency is the SHAPE the lander measured:
+    three documents of 165, 171 and 175 bytes, one missing `Title` and one
+    missing `Type`.
+    """
+    assert set(_DOCUMENTS) == set(_SHIPPED_SIZES)
+    for key, size in _SHIPPED_SIZES.items():
+        assert len(_DOCUMENTS[key]) == size, (
+            f"{key} is {len(_DOCUMENTS[key])} bytes and the shipped seed is "
+            f"{size}; this fixture has drifted from the corpus it mirrors")
+
+    def _header(body: bytes) -> set[str]:
+        fields = set()
+        for line in body.split(b"\n\n", 1)[0].splitlines():
+            name, sep, _ = line.partition(b":")
+            if sep:
+                fields.add(name.decode())
+        return fields
+
+    assert _header(_DOCUMENTS["notes/alpha.md"]) == {"Type", "Title"}
+    assert _header(_DOCUMENTS["notes/beta.md"]) == {"Type"}, (
+        "beta is the MISSING-FIELD case: classified, and short one field its "
+        "kind obliges")
+    assert _header(_DOCUMENTS["papers/gamma.md"]) == {"Title"}, (
+        "gamma is the UNCLASSIFIABLE case: no kind header at all")
+
+
+@requires_git
+def test_the_seed_s_awkward_documents_are_reported_and_never_omitted(
+        shipped: Path, tmp_path: Path) -> None:
+    """The two cases the simplified fixture could not exercise.
+
+    `classify` "never omits": a document whose kind this vocabulary does not
+    recognize comes back with `kind=None` and a reason NAMING it, and it still
+    appears in `list_documents`. A corpus that quietly dropped its
+    unclassifiable document would pass a suite whose fixture has none.
+    """
+    built = transpose(shipped, tmp_path / "transposition")
+    served = reader("populated", str(built / POPULATED))
+    corpus = served.resolve(CorpusRef(name="populated",
+                                      location=str(built / POPULATED)))
+    listed = {d.key: d for d in served.list_documents(corpus)}
+    assert set(listed) == set(_DOCUMENTS), "every document is listed, all three"
+
+    complete = served.classify(corpus, listed["notes/alpha.md"])
+    assert complete.kind == "note"
+    assert complete.missing_fields == ()
+    assert complete.unclassifiable is None
+
+    # THE MISSING-FIELD CASE: classified, and short one field its kind obliges.
+    short = served.classify(corpus, listed["notes/beta.md"])
+    assert short.kind == "note"
+    assert short.required_fields == NEUTRAL_REQUIRED_FIELDS
+    assert short.missing_fields == ("Title",)
+    assert short.unclassifiable is None, (
+        "a document missing a field is still classified; only a missing KIND "
+        "makes it unclassifiable")
+
+    # THE UNCLASSIFIABLE CASE: no kind header at all, reported by name.
+    unknown = served.classify(corpus, listed["papers/gamma.md"])
+    assert unknown.kind is None
+    assert unknown.unclassifiable, "the reason is the whole obligation here"
+    assert "papers/gamma.md" in unknown.unclassifiable, (
+        "the reason must NAME the document, so a human can go look at it")
+    # AND IT IS STILL SERVED, byte for byte, which is what "never omits" costs
+    # if it is not true.
+    assert served.read(corpus, listed["papers/gamma.md"]).content == \
+        _DOCUMENTS["papers/gamma.md"]
+
+
+@requires_git
+def test_a_global_excludes_file_cannot_take_documents_out_of_the_corpus(
+        shipped: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fourth channel, in both of its shapes.
+
+    `GIT_CONFIG_GLOBAL` is retained deliberately — it names the operator's own
+    git — so a global `core.excludesFile` reached the `git add`. MEASURED at
+    `776d2a80`, both shapes failed CLOSED and both failed UNHELPFULLY: a
+    `*.md` excludes file staged nothing, so `commit` exited non-zero and a
+    `CalledProcessError` came out; an excludes file naming only `beta.md` let
+    the commit succeed with a SHORT TREE and the byte read-back then died on
+    `cat-file`, again as a `CalledProcessError` (Copilot review of PR #31,
+    registered by the lander in its comment on `conformance_corpus.py:107`).
+
+    BOTH SHAPES ARE DRIVEN THROUGH THE REAL HOSTILE CONFIGURATION, and both
+    must now TRANSPOSE — the channel is closed, not reported. The refusal text
+    is asserted separately below, with the switch taken away, because a
+    sentence nobody can reach is a sentence nobody has read.
+    """
+    for rule in ("*.md", "beta.md"):
+        hostile = tmp_path / f"excludes-{rule.replace('*', 'star')}"
+        hostile.write_text(rule + "\n", encoding="utf-8")
+        config = tmp_path / f"gitconfig-{rule.replace('*', 'star')}"
+        config.write_text(
+            f"[core]\n\texcludesFile = {hostile}\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+
+        built = transpose(shipped, tmp_path / f"transposition-{rule}")
+        served = reader("populated", str(built / POPULATED))
+        corpus = served.resolve(CorpusRef(name="populated",
+                                          location=str(built / POPULATED)))
+        listed = {d.key for d in served.list_documents(corpus)}
+        assert listed == set(_DOCUMENTS), (
+            f"a global excludes file of {rule!r} took documents out of the "
+            f"transposition: {sorted(set(_DOCUMENTS) - listed)}")
+        reference = _fingerprint(shipped / POPULATED)
+        for document_id in served.list_documents(corpus):
+            assert hashlib.sha256(
+                served.read(corpus, document_id).content).hexdigest() \
+                == reference[document_id.key]
+
+
+@requires_git
+def test_an_exclusion_this_act_cannot_reach_is_named_and_not_a_git_error(
+        shipped: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """And if some entrance nobody thought of opens, a sentence comes out.
+
+    The switch and `--force` close the two shapes above, and the refusal they
+    leave behind has to be readable anyway: an exclusion is a property of the
+    MACHINE, so the reader who meets it is the one who can fix it, and an exit
+    status tells them nothing. Both shapes are driven with the switch taken
+    out of `_HARDENING`, which is the only honest way to reach the text — it
+    is what the code did at `776d2a80` and what it would do again if the
+    switch were dropped.
+    """
+    import opendox.conformance_corpus as module
+
+    without = tuple(part for index, part in enumerate(module._HARDENING)
+                    if part != "core.excludesFile=" + os.devnull
+                    and not (part == "-c"
+                             and module._HARDENING[index + 1]
+                             == "core.excludesFile=" + os.devnull))
+    assert len(without) == len(module._HARDENING) - 2, "the switch is there"
+    monkeypatch.setattr(module, "_HARDENING", without)
+
+    for rule, expected in (("*.md", "committed nothing"),
+                           ("beta.md", "does not hold 'notes/beta.md'")):
+        hostile = tmp_path / f"ex-{rule.replace('*', 'star')}"
+        hostile.write_text(rule + "\n", encoding="utf-8")
+        config = tmp_path / f"cfg-{rule.replace('*', 'star')}"
+        config.write_text(
+            f"[core]\n\texcludesFile = {hostile}\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+
+        # `--force` ALSO HAS TO GO for the total shape, because forcing the add
+        # defeats the excludes file on its own: what is being measured here is
+        # the SENTENCE, and reaching it means removing both halves of the
+        # repair rather than only the one the comment names.
+        real_git = module._git
+
+        def _unforced(repo, *args, _real=real_git):
+            return _real(repo, *(a for a in args if a != "--force"))
+
+        monkeypatch.setattr(module, "_git", _unforced)
+        with pytest.raises(ValueError) as refused:
+            transpose(shipped, tmp_path / f"raw-{rule.replace('*', 'star')}")
+        monkeypatch.setattr(module, "_git", real_git)
+        assert expected in str(refused.value), str(refused.value)
+        # A SENTENCE AND NOT AN EXIT STATUS: the class name of the underlying
+        # failure is chained for a debugger, and the message is what a reader
+        # meets.
+        assert isinstance(refused.value.__cause__, subprocess.CalledProcessError)
+        assert "ignore rule" in str(refused.value)

@@ -85,6 +85,20 @@ def reader(name: str, location: str) -> LocalGitCorpus:
 #: they are. `core.attributesFile` and `GIT_ATTR_NOSYSTEM` close the same
 #: channel's other two entrances.
 #:
+#: `core.excludesFile` IS THE FOURTH CHANNEL AND IT IS NOT A BYTE ONE — it
+#: decides which files exist in the transposition at all. `GIT_CONFIG_GLOBAL`
+#: is retained deliberately (an operator's own git is this act's git), so a
+#: global ignore file reaches the `git add` below. MEASURED at `776d2a80`, both
+#: shapes: an excludes file of `*.md` staged NOTHING, so the commit refused and
+#: `transpose` raised; one naming only `beta.md` let the commit SUCCEED with a
+#: short tree, and the byte read-back then refused because git cannot answer
+#: for a key it never committed (Copilot review of PR #31, and the lander's
+#: measurement on it). Neither is a silent short transposition — that is what
+#: the read-back is for — but both met a raw `CalledProcessError` instead of a
+#: sentence, and both are closed here rather than reported: this switch, and
+#: `--force` on the add for the entrances a config switch cannot reach (a
+#: `.gitignore` COPIED IN with the corpus, and `$GIT_DIR/info/exclude`).
+#:
 #: `core.hooksPath` and the three signing switches name PROGRAMS the ambient
 #: configuration chooses, which `local_git_adapter` already refuses for the
 #: runtime and refuses here for the same reason.
@@ -105,6 +119,7 @@ _HARDENING = (
     "-c", "core.eol=lf",
     "-c", "core.safecrlf=false",
     "-c", "core.attributesFile=" + os.devnull,
+    "-c", "core.excludesFile=" + os.devnull,
     "-c", "commit.gpgSign=false",
     "-c", "tag.gpgSign=false",
     "-c", "user.name=conformance",
@@ -142,12 +157,31 @@ def _git(repo: Path, *args: str) -> None:
 
 
 def _committed_blob(repo: Path, key: str) -> bytes:
-    """The bytes git actually holds for `key` at HEAD."""
-    return subprocess.run(
-        ("git", *_HARDENING, "cat-file", "blob", f"HEAD:{key}"),
-        cwd=repo, check=True, capture_output=True,
-        env={**_sanitized_git_environment(), "GIT_NO_REPLACE_OBJECTS": "1"},
-    ).stdout
+    """The bytes git actually holds for `key` at HEAD.
+
+    A KEY THAT WAS NEVER COMMITTED IS NAMED, not left as a git error. git
+    answers `fatal: path … exists on disk, but not in 'HEAD'` and exits
+    non-zero, and `check=True` turned that into a `CalledProcessError` whose
+    reader learns that a subprocess failed rather than that their corpus is
+    short one document. The failure is real and still refuses — this only
+    decides what the refusal SAYS (Copilot review of PR #31, registered by the
+    lander and taken here).
+    """
+    try:
+        return subprocess.run(
+            ("git", *_HARDENING, "cat-file", "blob", f"HEAD:{key}"),
+            cwd=repo, check=True, capture_output=True,
+            env={**_sanitized_git_environment(),
+                 "GIT_NO_REPLACE_OBJECTS": "1"},
+        ).stdout
+    except subprocess.CalledProcessError as failed:
+        raise ValueError(
+            f"the transposition does not hold {key!r} at all: it was copied "
+            f"into the working tree and git has no blob for it at HEAD, so "
+            f"something kept it out of the commit. An ignore rule is the "
+            f"usual cause — a `.gitignore` carried in with the corpus, or an "
+            f"`info/exclude` — and a transposition missing a document is not "
+            f"a transposition of this corpus") from failed
 
 
 def _fingerprint(populated: Path) -> dict[str, str]:
@@ -208,8 +242,31 @@ def transpose(shipped: Path, destination: Path) -> Path:
         laid = target / source.relative_to(populated)
         laid.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, laid)
-    _git(target, "add", "-A")
-    _git(target, "commit", "-q", "-m", "the neutral conformance corpus")
+    # `--force` BESIDE THE SWITCH, because they close different doors.
+    # `core.excludesFile=` disables the ambient ignore file; `--force` is what
+    # answers the two entrances no config switch reaches — a `.gitignore`
+    # COPIED IN with the corpus (the shipped corpus is arbitrary files and one
+    # of them may be exactly that), and `$GIT_DIR/info/exclude`. Forcing is
+    # right here and would be wrong in the runtime: this repository is built by
+    # this function, one commit old, holding nothing a rule could sensibly
+    # exclude.
+    _git(target, "add", "-A", "--force")
+    try:
+        _git(target, "commit", "-q", "-m", "the neutral conformance corpus")
+    except subprocess.CalledProcessError as failed:
+        # NOTHING STAGED IS THE TOTAL-EXCLUSION SHAPE, and it used to arrive as
+        # a `CalledProcessError` naming a git command (measured at `776d2a80`
+        # with a global excludes file of `*.md`). The switch and `--force`
+        # above close it; this names it if some entrance nobody has thought of
+        # opens it again, because a reader meeting an exit status learns
+        # nothing about their machine.
+        raise ValueError(
+            "the transposition committed nothing: every file copied into it "
+            "was excluded before `git commit` saw it. An ignore rule is the "
+            "usual cause, and this act disables the configured one and forces "
+            "the add, so the rule is somewhere this act does not reach — and "
+            "a corpus with no documents in it is not a transposition of this "
+            "corpus") from failed
 
     # AND THE BYTES ARE VERIFIED OUT OF GIT, not trusted to the settings above.
     # Pinning the filters off is a defence; reading the committed blob back is
