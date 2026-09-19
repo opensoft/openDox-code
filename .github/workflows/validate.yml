@@ -383,7 +383,7 @@ jobs:
       # That is deliberate and not circular: they assert the step's OUTCOMES on
       # reports of their own making, and each was proved against the mutation it
       # forbids before it was named here — deleting the missing-report refusal
-      # leaves the step reporting `selected=1099 passed=1096 … margin 0` over a
+      # leaves the step reporting `selected=1109 passed=1106 … margin 0` over a
       # run that never wrote a third of the suite, and that state is green until
       # this file fails on it.
       - name: pytest
@@ -1917,6 +1917,21 @@ jobs:
       #              2 skipped and the triple reads selected 1106, passed
       #              1103, skipped 3. Re-measured rather than carried, on the
       #              rule the entry above states.
+      #              SUPERSEDED by the entry below, which is the same branch
+      #              after Copilot's three findings were taken; `pytest -q
+      #              tests_runtime/` was 573 there and is 573 here.
+      #  360 passed  at `build/3-7-residue-excludes-and-triple-pin` `f9c8e4d5`
+      #  1 skipped   (2026-09-19, same python, pytest and git) — UNCHANGED
+      #              again, and the entry exists for the same reason as the
+      #              one above: the tree changed and the triple MOVED. Three
+      #              cases land on the FIRST list, all of them on the
+      #              transposition's refusals — an object git holds but cannot
+      #              read is named as such and not as an exclusion; a commit
+      #              failure with three paths staged is not an exclusion
+      #              either; and the nothing-staged branch is reached through
+      #              a populated state with no files in it. So that list reads
+      #              733 passed 2 skipped and the triple reads selected 1109,
+      #              passed 1106, skipped 3.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
       #              tests_runtime/` is 573. The neutral conformance corpus
@@ -2079,8 +2094,21 @@ jobs:
           # to rediscover why they are in the sum. They assert this step's
           # OUTCOMES over reports of their own making; they do not assert the
           # figures above, so a re-pin never needs a matching edit in that file.
-          MIN_SELECTED: "1106"
-          MIN_PASSED: "1103"
+          #
+          # AND ONCE MORE, for Copilot's three findings on this PR taken in one
+          # push: two cases that hold the transposition's diagnostics apart
+          # (an object git holds but cannot read is not an exclusion; a commit
+          # failure with a full index is not one either) and one that reaches
+          # the nothing-staged branch honestly, through a populated state with
+          # no files in it. MEASURED the same way on `f9c8e4d5` — `tests/` 733
+          # passed 2 skipped, the S7 residue 13, the hermetic six 360 passed 1
+          # skipped, which this step's script reads as `triple: selected=1109
+          # passed=1106 skipped=3 failures=0 errors=0`. `pytest -q
+          # tests_runtime/` is 573, still unmoved.
+          #
+          # NOT DERIVED: 1106 + 3 is a CHECK on the reading, not its source.
+          MIN_SELECTED: "1109"
+          MIN_PASSED: "1106"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
