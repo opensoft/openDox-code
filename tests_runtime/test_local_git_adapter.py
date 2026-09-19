@@ -4526,3 +4526,83 @@ def test_a_local_path_that_holds_a_colon_and_an_at_sign_is_not_an_authority(
     # been refused by: this rule may not buy its accuracy back from #25.
     assert config.credential_in_a_remote_url(
         "ci:hun/ter2@github.com:o/r.git") == "a password in the URL's authority"
+
+
+def test_a_metadata_probe_that_fails_is_the_kind_write_back_declares(
+        adapter, repository: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two kinds and no others — and this act's own change broke that promise.
+
+    `write_back` declares `CORPUS_READ_ONLY` and `WRITE_PATH_UNREACHABLE`, and
+    a caller may branch on `err.refusal.kind`; the module has been fixed for
+    this before (round 13's `_repository_root`, which refused with a kind this
+    operation does not declare). Holding a linked worktree's metadata moved the
+    `rev-parse --git-dir` probe OUT of `_write_back_bound`'s handler — it had
+    been one line inside it — and added two `open_no_follow_chain` calls beside
+    it. MEASURED at `97a1b37e` with the real adapter: a failing open escaped as
+    a raw `FileNotFoundError` and a failing probe as a raw `GitCommandFailed`,
+    the second on EVERY shape and not only a worktree (Copilot review of
+    openDox-code#32).
+
+    BOTH ROWS ARE DRIVEN HERE, and the second on an ORDINARY repository,
+    because that is where the wider half of the regression lived.
+    """
+    # -- row one: the git command the probe runs fails --------------------
+    corpus = _resolve(adapter, repository)
+    real_out = lga.GitRunner.out
+
+    def _probe_fails(self, *args, **kwargs):
+        if args[:2] == ("rev-parse", "--git-dir"):
+            raise lga.GitCommandFailed(
+                args, subprocess.CompletedProcess(
+                    ["git"], returncode=128, stdout=b"",
+                    stderr=b"fatal: not a git repository"))
+        return real_out(self, *args, **kwargs)
+
+    monkeypatch.setattr(lga.GitRunner, "out", _probe_fails)
+    with pytest.raises(ca.CorpusRefused) as refused:
+        adapter.write_back(corpus, ca.DocumentId("project-1", "a.md"),
+                           b"# a\n", actor=ACTOR,
+                           basis_revision=corpus.revision or "")
+    monkeypatch.undo()
+    assert refused.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+    assert "could not be held open" in refused.value.refusal.detail
+    # THE CLASS, NOT THE MESSAGE: git's own stderr is not repeated into a
+    # refusal that reaches an API response.
+    assert "GitCommandFailed" in refused.value.refusal.detail
+    assert "not a git repository" not in refused.value.refusal.detail
+    # AND NOTHING WAS WRITTEN.
+    assert _git(repository, "ls-tree", "-r", "--name-only", "HEAD") == ""
+
+    # -- row two: the metadata directory cannot be opened -----------------
+    if not Path("/proc/self/fd").is_dir():
+        pytest.skip("no /proc/self/fd, so the linked-worktree half of this "
+                    "case cannot run; the first half above already ran")
+    main = tmp_path / "wt-main"
+    main.mkdir()
+    _git(main, "init", "--initial-branch=main", ".")
+    (main / "a.md").write_text("a\n", encoding="utf-8")
+    _git(main, "add", "a.md")
+    _git(main, "commit", "-m", "first")
+    worktree = tmp_path / "wt-linked"
+    _git(main, "worktree", "add", "-b", "side", str(worktree))
+    linked = adapter.resolve(ca.CorpusRef(name="wt", location=str(worktree)))
+    git_dir = _git(worktree, "rev-parse", "--absolute-git-dir")
+
+    real_open = lga.open_no_follow_chain
+
+    def _open_fails(directory, **kwargs):
+        if str(directory) == git_dir:
+            raise FileNotFoundError(2, "No such file or directory",
+                                    str(directory))
+        return real_open(directory, **kwargs)
+
+    monkeypatch.setattr(lga, "open_no_follow_chain", _open_fails)
+    with pytest.raises(ca.CorpusRefused) as vanished:
+        adapter.write_back(linked, ca.DocumentId("wt", "b.md"), b"# b\n",
+                           actor=ACTOR, basis_revision=linked.revision or "")
+    monkeypatch.undo()
+    assert vanished.value.refusal.kind == ca.WRITE_PATH_UNREACHABLE
+    assert "FileNotFoundError" in vanished.value.refusal.detail
+    assert _git(worktree, "ls-tree", "-r", "--name-only", "refs/heads/side") \
+        == "a.md", "a refused write left the branch alone"

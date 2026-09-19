@@ -1292,7 +1292,8 @@ def _whitespace_inside_an_authority(url: str) -> bool:
 
 
 @contextmanager
-def metadata_held_open(git: GitRunner) -> Iterator[tuple[GitRunner, Path]]:
+def metadata_held_open(git: GitRunner, *, subject: str
+                       ) -> Iterator[tuple[GitRunner, Path]]:
     """`(runner, git_dir)` with a LINKED WORKTREE's metadata held by descriptor.
 
     `-C /proc/self/fd/<n>` binds the working directory, and for the two shapes
@@ -1325,31 +1326,58 @@ def metadata_held_open(git: GitRunner) -> Iterator[tuple[GitRunner, Path]]:
     the worktree's git directory is inside the common one for the bundled
     layout, and `GIT_COMMON_DIR` may point anywhere at all once a repository
     has been moved or shared.
+
+    AND EVERY WAY THE PROBE OR THE OPEN CAN FAIL IS `WRITE_PATH_UNREACHABLE`,
+    which is this helper's own job because it owns both. `write_back` declares
+    exactly two kinds and its caller may branch on them; when this function was
+    first written the `rev-parse` sat at the `with` statement — OUTSIDE
+    `_write_back_bound`'s handler, where the same line had been INSIDE it
+    before — so a git failure escaped as `GitCommandFailed` and a vanished
+    metadata directory as `FileNotFoundError`. MEASURED at `97a1b37e`, both
+    raw, and the first on EVERY shape rather than only a linked worktree
+    (Copilot review of openDox-code#32). `RuntimeError` is caught with them for
+    the reason `_write_back_bound`'s root probe catches it: a symlink loop
+    raises that and not `OSError`.
     """
-    named = Path(decoded_path(git.out("rev-parse", "--git-dir")))
-    if not named.is_absolute():
-        yield git, git.root / named
-        return
-    # BOTH NAMES ARE ASKED FOR BEFORE EITHER IS OPENED, so the pathname-bound
-    # window is the two `rev-parse` calls and nothing else. It cannot be closed
-    # altogether — a descriptor can only be taken for a name somebody has said
-    # — and what the descriptors buy is everything AFTER them: once they are
-    # open, no re-pointing of these names reaches the objects, the refs or the
-    # index, which is where the whole write happens.
-    common = Path(decoded_path(
-        git.out("rev-parse", "--path-format=absolute", "--git-common-dir")))
     handles: list[int] = []
     try:
-        for directory in (named, common):
-            handles.append(open_no_follow_chain(directory))
-        held = [descriptor_path(handle) for handle in handles]
-        yield (replace(git, metadata_fds=tuple(handles),
-                       held_environment=(("GIT_DIR", str(held[0])),
-                                         ("GIT_COMMON_DIR", str(held[1])))),
-               held[0])
+        named = Path(decoded_path(git.out("rev-parse", "--git-dir")))
+        if named.is_absolute():
+            # BOTH NAMES ARE ASKED FOR BEFORE EITHER IS OPENED, so the
+            # pathname-bound window is the two `rev-parse` calls and nothing
+            # else. It cannot be closed altogether — a descriptor can only be
+            # taken for a name somebody has said — and what the descriptors buy
+            # is everything AFTER them: once they are open, no re-pointing of
+            # these names reaches the objects, the refs or the index, which is
+            # where the whole write happens.
+            common = Path(decoded_path(
+                git.out("rev-parse", "--path-format=absolute",
+                        "--git-common-dir")))
+            for directory in (named, common):
+                handles.append(open_no_follow_chain(directory))
+            held = [descriptor_path(handle) for handle in handles]
+            bound = (replace(git, metadata_fds=tuple(handles),
+                             held_environment=(("GIT_DIR", str(held[0])),
+                                               ("GIT_COMMON_DIR", str(held[1])))),
+                     held[0])
+        else:
+            bound = (git, git.root / named)
+    except (GitCommandFailed, OSError, RuntimeError) as exc:
+        for handle in handles:
+            os.close(handle)
+        raise _refuse(
+            WRITE_PATH_UNREACHABLE, subject,
+            "this repository's git metadata could not be held open "
+            f"({exc.__class__.__name__}); nothing is written, because a "
+            "commit whose objects, refs and index cannot be bound to the "
+            "directories this act verified is a commit that may land "
+            "somewhere else") from exc
+    try:
+        yield bound
     finally:
         for handle in handles:
             os.close(handle)
+
 
 class GitCommandFailed(Exception):
     """An internal signal. Never escapes: every caller converts it to a Refusal.
@@ -2181,7 +2209,8 @@ class LocalGitCorpus:
         # the objects, the refs and the index are all written through
         # descriptors this act opened `O_NOFOLLOW` rather than through names a
         # concurrent actor can re-point (openDox-code#30's follow-up #1).
-        with metadata_held_open(git) as (git, git_dir):
+        with metadata_held_open(
+                git, subject=corpus.write_path) as (git, git_dir):
             try:
                 blob = git.out("hash-object", "-w", "--stdin",
                                stdin=content).decode().strip()
