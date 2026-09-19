@@ -17,6 +17,7 @@ while the transposition quietly dropped a document.
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -170,3 +171,74 @@ def test_transpose_refuses_a_shipped_root_with_no_populated_state(
         tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         transpose(tmp_path / "nothing-here", tmp_path / "out")
+
+
+# ---------------------------------------------------------------------------
+# THE AMBIENT MACHINE, which is the half a transposition cannot see going
+# wrong. Both cases below are Copilot's findings on PR #31, turned into
+# runnable ones: each sets a real hostile value in the environment this
+# function actually reads, and asserts the bytes and the repository survive it.
+
+
+@requires_git
+def test_an_ambient_GIT_DIR_does_not_redirect_the_transposition(
+        shipped: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GIT_DIR` OUTRANKS `cwd`, so an unsanitized helper builds elsewhere.
+
+    A CI job running inside another checkout, a git hook, an alias — all set
+    it, and all are ordinary places for this to run.
+    """
+    decoy = tmp_path / "decoy.git"
+    subprocess.run(("git", "init", "-q", "--bare", str(decoy)),
+                   check=True, capture_output=True)
+    monkeypatch.setenv("GIT_DIR", str(decoy))
+    built = transpose(shipped, tmp_path / "transposition")
+
+    # THE VERIFICATION HAS TO DROP `GIT_DIR` TOO, and the first version of
+    # this test did not — it ran `git ls-files` with the decoy still in the
+    # environment, read the decoy, and failed. That failure is the hazard
+    # demonstrating itself: an unsanitized git in this file was redirected by
+    # exactly the variable the code under test now strips, which is a better
+    # argument for the fix than the assertion was.
+    clean = {name: value for name, value in os.environ.items()
+             if name != "GIT_DIR"}
+    tracked = subprocess.run(
+        ("git", "ls-files"), cwd=built / POPULATED, env=clean,
+        check=True, capture_output=True, text=True).stdout.split()
+    assert sorted(tracked) == sorted(_DOCUMENTS)
+    # AND THE DECOY IS UNTOUCHED — the transposition went where it said.
+    decoy_log = subprocess.run(
+        ("git", "--git-dir", str(decoy), "log", "--oneline"),
+        env=clean, capture_output=True, text=True)
+    assert decoy_log.stdout.strip() == ""
+
+
+@requires_git
+def test_ambient_EOL_normalization_cannot_change_the_committed_bytes(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`core.autocrlf=input` rewrites CRLF on the way INTO the object store.
+
+    A document with CRLF in it is the case that catches it: `copyfile` is
+    byte-for-byte and the commit is not, so the promise breaks between them
+    and only a check on the COMMITTED blob sees it.
+    """
+    fixtures = tmp_path / "fixtures"
+    crlf = b"Type: note\r\nTitle: Windows\r\n\r\n# Windows\r\n\r\nCRLF, deliberately.\r\n"
+    (fixtures / POPULATED / "notes").mkdir(parents=True)
+    (fixtures / POPULATED / "notes" / "crlf.md").write_bytes(crlf)
+    (fixtures / EMPTY).mkdir(parents=True)
+    (fixtures / UNREADABLE).write_text("not a directory\n", encoding="utf-8")
+
+    hostile = tmp_path / "hostile.gitconfig"
+    hostile.write_text("[core]\n\tautocrlf = input\n\tsafecrlf = false\n",
+                       encoding="utf-8")
+    # `GIT_CONFIG_GLOBAL` is deliberately NOT stripped by the runtime's
+    # sanitizer — it names the operator's own configuration — so it is a LIVE
+    # channel here and the right one to test with.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile))
+
+    built = transpose(fixtures, tmp_path / "transposition")
+    blob = subprocess.run(
+        ("git", "cat-file", "blob", "HEAD:notes/crlf.md"),
+        cwd=built / POPULATED, check=True, capture_output=True).stdout
+    assert blob == crlf, "the committed blob is not the file's bytes"

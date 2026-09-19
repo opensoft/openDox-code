@@ -26,11 +26,15 @@ would be FLOOR PART 3 deleted to tick FLOOR PART 3.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
-from .runtime.local_git_adapter import LocalGitCorpus
+from .runtime.local_git_adapter import (
+    LocalGitCorpus, _sanitized_git_environment,
+)
 
 #: The corpus's four states, by the names openxFactory's seed laid them down
 #: under and the runner looks for. They are the CORPUS's vocabulary, not
@@ -71,18 +75,80 @@ def reader(name: str, location: str) -> LocalGitCorpus:
                           required_fields=NEUTRAL_REQUIRED_FIELDS)
 
 
+#: Settings pinned OFF for every git this module runs, and each one is a way
+#: the ambient machine could change the bytes or the repository under it.
+#:
+#: `core.autocrlf` / `core.eol` / `core.safecrlf` are the byte channel:
+#: `git add` runs the clean filter and EOL normalization on the way IN, so a
+#: machine configured for CRLF would commit bytes that are not the ones
+#: `shutil.copyfile` laid down — and this function's entire promise is that
+#: they are. `core.attributesFile` and `GIT_ATTR_NOSYSTEM` close the same
+#: channel's other two entrances.
+#:
+#: `core.hooksPath` and the three signing switches name PROGRAMS the ambient
+#: configuration chooses, which `local_git_adapter` already refuses for the
+#: runtime and refuses here for the same reason.
+_HARDENING = (
+    "-c", "core.hooksPath=" + os.devnull,
+    "-c", "core.autocrlf=false",
+    "-c", "core.eol=lf",
+    "-c", "core.safecrlf=false",
+    "-c", "core.attributesFile=" + os.devnull,
+    "-c", "commit.gpgSign=false",
+    "-c", "tag.gpgSign=false",
+    "-c", "user.name=conformance",
+    "-c", "user.email=conformance@openDox.invalid",
+)
+
+
 def _git(repo: Path, *args: str) -> None:
-    """Run one git command in `repo`, with an identity that cannot be absent.
+    """Run one git command in `repo`, with nothing ambient reaching it.
+
+    THE ENVIRONMENT IS THE RUNTIME'S OWN SANITIZED ONE, not `os.environ`.
+    `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and
+    their relatives OUTRANK `cwd`, so a process started with one of them set —
+    a CI job inside another checkout, a git hook, an alias — would have had
+    `init`, `add` and `commit` operate on a DIFFERENT repository while this
+    function reported building the transposition. `local_git_adapter` strips
+    exactly that set for the runtime and the same list is the right one here;
+    it is imported rather than restated so the two cannot drift apart.
+    (Copilot review of PR #31.)
+
+    `GIT_NO_REPLACE_OBJECTS` is set ON TOP: replacement objects can make git
+    serve different content for an object than the one committed, which would
+    put the transposition's bytes back in the ambient machine's gift after
+    everything above took them out of it.
 
     The identity is supplied per-command rather than written into the new
     repository's config: a transposition is a throwaway and must not depend on
-    the machine's global git identity being set, which on a CI runner it is
-    not.
+    the machine's git identity being set, which on a CI runner it is not.
     """
-    subprocess.run(
-        ("git", "-c", "user.name=conformance", "-c",
-         "user.email=conformance@openDox.invalid", *args),
-        cwd=repo, check=True, capture_output=True)
+    environment = _sanitized_git_environment()
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["GIT_ATTR_NOSYSTEM"] = "1"
+    subprocess.run(("git", *_HARDENING, *args), cwd=repo, check=True,
+                   capture_output=True, env=environment)
+
+
+def _committed_blob(repo: Path, key: str) -> bytes:
+    """The bytes git actually holds for `key` at HEAD."""
+    return subprocess.run(
+        ("git", *_HARDENING, "cat-file", "blob", f"HEAD:{key}"),
+        cwd=repo, check=True, capture_output=True,
+        env={**_sanitized_git_environment(), "GIT_NO_REPLACE_OBJECTS": "1"},
+    ).stdout
+
+
+def _fingerprint(populated: Path) -> dict[str, str]:
+    """`{key: sha256(bytes)}` off the FILES — the runner's own table.
+
+    The same rule the runner applies, deliberately: every file under the
+    populated state counts, and no judgement about what a "document" is enters
+    into it.
+    """
+    return {path.relative_to(populated).as_posix():
+            hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(populated.rglob("*")) if path.is_file()}
 
 
 def transpose(shipped: Path, destination: Path) -> Path:
@@ -133,6 +199,25 @@ def transpose(shipped: Path, destination: Path) -> Path:
         shutil.copyfile(source, laid)
     _git(target, "add", "-A")
     _git(target, "commit", "-q", "-m", "the neutral conformance corpus")
+
+    # AND THE BYTES ARE VERIFIED OUT OF GIT, not trusted to the settings above.
+    # Pinning the filters off is a defence; reading the committed blob back is
+    # a PROOF, and this function's whole claim is byte preservation. A
+    # transposition that differs by one byte must refuse here rather than be
+    # handed to the runner, which would refuse it as
+    # `conformance-corpus-unfaithful` after the fact — the same verdict, but
+    # reported against the corpus instead of against the thing that changed
+    # the bytes. (Copilot review of PR #31.)
+    for key, expected in _fingerprint(populated).items():
+        served = hashlib.sha256(_committed_blob(target, key)).hexdigest()
+        if served != expected:
+            raise ValueError(
+                f"the transposition does not carry {key!r} byte for byte: "
+                f"the file hashes {expected} and the committed blob hashes "
+                f"{served}. Something between `copyfile` and `commit` changed "
+                f"it — a clean filter or an EOL normalization is the usual "
+                f"cause — and a transposition whose bytes are not the "
+                f"corpus's is not a transposition of this corpus")
 
     # --- the empty state: a repository, and no documents in it --------------
     # `--allow-empty` rather than a placeholder file, deliberately. A
