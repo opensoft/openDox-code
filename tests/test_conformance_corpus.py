@@ -76,6 +76,28 @@ _DOCUMENTS = {
 _SHIPPED_SIZES = {"notes/alpha.md": 165, "notes/beta.md": 171,
                   "papers/gamma.md": 175}
 
+#: AND THE DIGESTS, because a length is not an identity. `_SHIPPED_SIZES` plus
+#: the header-shape assertions let any SAME-LENGTH substitution inside a body
+#: through, and `_DOCUMENTS` is also what `shipped` is built from and what
+#: `_fingerprint` is computed over — so a drifted fixture would agree with
+#: itself all the way down and the suite would still be green (Copilot review
+#: of PR #33 at `tests/test_conformance_corpus.py:77`).
+#:
+#: These three are sha256 of `tests/corpus-adapter/fixtures/neutral/**` in
+#: openxFactory, measured against the files on disk at
+#: `openxFactory-worktrees/pin-f5a41d18`. Recording them here is the only way
+#: to detect drift WITHOUT making openxFactory a dependency of this leg, which
+#: is the constraint that produced the copied bytes in the first place: the
+#: seed is not reachable from this repository, so the digest has to be.
+_SHIPPED_DIGESTS = {
+    "notes/alpha.md":
+        "5a8c06574b3240ad38f2a7b861d5fa1b15572f36adf261701facff55cbbc24ff",
+    "notes/beta.md":
+        "971e78fb9fda1fe75012b455fe209344b8adb144169d7af15905712c2a00737b",
+    "papers/gamma.md":
+        "0473352024f384327694dc19cae4d465f8ddbeb50c1781e655cec72f99951e31",
+}
+
 
 def _git_available() -> bool:
     try:
@@ -324,12 +346,22 @@ def test_the_fixture_is_the_shipped_seed_and_not_a_description_of_it(
     of PR #31, measured and registered in comment 5738108117).
 
     THE BYTES ARE COPIED, NOT IMPORTED, because openxFactory is not a
-    dependency of this leg and must not become one to satisfy a test. What can
-    be asserted here without that dependency is the SHAPE the lander measured:
-    three documents of 165, 171 and 175 bytes, one missing `Title` and one
-    missing `Type`.
+    dependency of this leg and must not become one to satisfy a test. What is
+    asserted here without that dependency is the seed's own sha256 PER KEY,
+    recorded in `_SHIPPED_DIGESTS` — a length and a header shape let a
+    same-length substitution through, and `_DOCUMENTS` is also what `shipped`
+    and `_fingerprint` are built from, so a drifted fixture agrees with itself
+    everywhere else in this file (Copilot review of PR #33). The sizes stay
+    beside the digests: when a digest fails, the size says whether the drift
+    was an edit or a replacement.
     """
-    assert set(_DOCUMENTS) == set(_SHIPPED_SIZES)
+    assert set(_DOCUMENTS) == set(_SHIPPED_SIZES) == set(_SHIPPED_DIGESTS)
+    for key, digest in _SHIPPED_DIGESTS.items():
+        served = hashlib.sha256(_DOCUMENTS[key]).hexdigest()
+        assert served == digest, (
+            f"{key} hashes {served} and the shipped seed hashes {digest}; "
+            f"this fixture has drifted from the corpus it mirrors, and every "
+            f"other assertion in this file would follow it")
     for key, size in _SHIPPED_SIZES.items():
         assert len(_DOCUMENTS[key]) == size, (
             f"{key} is {len(_DOCUMENTS[key])} bytes and the shipped seed is "
@@ -459,7 +491,7 @@ def test_an_exclusion_this_act_cannot_reach_is_named_and_not_a_git_error(
     assert len(without) == len(module._HARDENING) - 2, "the switch is there"
     monkeypatch.setattr(module, "_HARDENING", without)
 
-    for rule, expected in (("*.md", "committed nothing"),
+    for rule, expected in (("*.md", "staged NOTHING"),
                            ("beta.md", "does not hold 'notes/beta.md'")):
         hostile = tmp_path / f"ex-{rule.replace('*', 'star')}"
         hostile.write_text(rule + "\n", encoding="utf-8")
@@ -487,3 +519,125 @@ def test_an_exclusion_this_act_cannot_reach_is_named_and_not_a_git_error(
         # meets.
         assert isinstance(refused.value.__cause__, subprocess.CalledProcessError)
         assert "ignore rule" in str(refused.value)
+        # AND GIT'S OWN WORDS ARE IN IT, which is the half a chained exception
+        # does not carry: `CalledProcessError.__str__` is `Command … returned
+        # non-zero exit status N` and the captured streams are dropped.
+        assert "git said" in str(refused.value)
+        assert "nothing at all" not in str(refused.value), (
+            "git was quoted as having said nothing — the total shape writes "
+            "its sentence to STDOUT, so a refusal that reads only stderr "
+            "quotes an empty string in exactly this case")
+
+
+@requires_git
+def test_a_blob_git_holds_but_cannot_read_is_not_named_an_exclusion(
+        shipped: Path, tmp_path: Path) -> None:
+    """The other way `cat-file` fails, and it is not the corpus's fault.
+
+    `cat-file blob HEAD:<key>` exits non-zero for a key that was never
+    committed AND for a key whose object the database can no longer produce,
+    and the first cut of the translation told both operators that an ignore
+    rule was the usual cause — a diagnosis of something that did not happen,
+    on a machine whose real problem is a damaged repository (Copilot review of
+    PR #33).
+
+    THE SHAPE IS BUILT, not simulated: a real transposition, and then the
+    loose object behind one document is removed. `ls-tree` still lists the key
+    — it reads the TREE — which is exactly the discrimination the repair makes
+    (MEASURED on git 2.43.0: `fatal: git cat-file HEAD:notes/beta.md: bad
+    file`, with `ls-tree` rc 0 naming the path).
+    """
+    import opendox.conformance_corpus as module
+
+    built = transpose(shipped, tmp_path / "transposition")
+    target = built / POPULATED
+    key = "notes/beta.md"
+    oid = subprocess.run(("git", "rev-parse", f"HEAD:{key}"), cwd=target,
+                         check=True, capture_output=True,
+                         text=True).stdout.strip()
+    loose = target / ".git" / "objects" / oid[:2] / oid[2:]
+    assert loose.is_file(), "the object is loose in a one-commit repository"
+    loose.unlink()
+
+    with pytest.raises(ValueError) as refused:
+        module._committed_blob(target, key)
+
+    said = str(refused.value)
+    assert "NOT an exclusion" in said, said
+    assert key in said
+    assert "ignore rule" not in said, (
+        "an unreadable object is not an exclusion, and saying so sends the "
+        "reader looking for a `.gitignore` that does not exist")
+    assert "git said" in said and "bad file" in said, (
+        "git named the real failure and the refusal must carry it: "
+        f"{said}")
+    assert isinstance(refused.value.__cause__, subprocess.CalledProcessError)
+
+
+@requires_git
+def test_a_commit_failure_that_is_not_an_exclusion_is_not_reported_as_one(
+        shipped: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A held `index.lock`: a real commit failure with the index full.
+
+    The first cut answered EVERY `git commit` failure with "every file copied
+    into it was excluded" — an absolute, and false for a full disk, an
+    unwritable object database, or a lock left behind by a crashed process
+    (Copilot review of PR #33). This drives the last of those, because it is
+    the one shape a test can create on any platform and as any user: the
+    others need a full filesystem or a permission this process can hold.
+
+    THE LOCK IS REAL AND SO IS THE FAILURE — git refuses on its own
+    bookkeeping (MEASURED: exit 128, `fatal: Unable to create '…index.lock':
+    File exists.` on STDERR), and `git diff --cached --name-only` still lists
+    the three staged paths, which is what the repair reads.
+    """
+    import opendox.conformance_corpus as module
+
+    real_git = module._git
+
+    def _locked(repo: Path, *args: str, _real=real_git) -> None:
+        if args[:1] == ("commit",) and repo.name == POPULATED:
+            (repo / ".git" / "index.lock").write_bytes(b"")
+        return _real(repo, *args)
+
+    monkeypatch.setattr(module, "_git", _locked)
+    with pytest.raises(ValueError) as refused:
+        transpose(shipped, tmp_path / "transposition")
+
+    said = str(refused.value)
+    assert "NOT an exclusion" in said, said
+    assert "3 path(s) are staged" in said, (
+        "the index is what rules the exclusion out, and the count is the "
+        f"evidence a reader can check: {said}")
+    assert "no space left on the device" in said and "permission" in said, (
+        f"the causes are enumerated rather than asserted: {said}")
+    assert "index.lock" in said, (
+        f"git named the real failure and the refusal must carry it: {said}")
+    assert isinstance(refused.value.__cause__, subprocess.CalledProcessError)
+
+
+@requires_git
+def test_a_populated_state_with_no_files_says_the_index_was_empty(
+        tmp_path: Path) -> None:
+    """The other side of the same fork, reached without breaking anything.
+
+    A shipped root whose populated state is a directory with nothing in it is
+    a malformed corpus, and it is the one way to reach the nothing-staged
+    branch now that the switch and `--force` close the ignore-rule routes. The
+    refusal must say the index was empty — and it must NOT be the sentence the
+    case above gets, which is the whole point of reading `diff --cached`
+    (MEASURED: exit 1, `nothing to commit …` on STDOUT with stderr EMPTY).
+    """
+    shipped = tmp_path / "fixtures"
+    (shipped / POPULATED).mkdir(parents=True)
+
+    with pytest.raises(ValueError) as refused:
+        transpose(shipped, tmp_path / "transposition")
+
+    said = str(refused.value)
+    assert "staged NOTHING" in said, said
+    assert "a populated state with no files in it" in said, said
+    assert "nothing to commit" in said, (
+        "the total shape writes its sentence to STDOUT, so a refusal reading "
+        f"only stderr would quote an empty string here: {said}")
+    assert isinstance(refused.value.__cause__, subprocess.CalledProcessError)

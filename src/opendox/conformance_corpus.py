@@ -156,32 +156,94 @@ def _git(repo: Path, *args: str) -> None:
                    capture_output=True, env=environment)
 
 
+def _what_git_said(*streams: bytes | None) -> str:
+    """git's own words for a failure, from WHICHEVER stream carried them.
+
+    BOTH STREAMS, AND THAT IS MEASURED rather than defensive (git 2.43.0):
+    `commit -q` with nothing staged writes `nothing to commit (create/copy
+    files and use "git add" to track)` to STDOUT and leaves stderr EMPTY,
+    while a `commit` blocked by an `index.lock` writes `fatal: Unable to
+    create …` to STDERR and leaves stdout empty. A refusal that quoted only
+    stderr would quote nothing in exactly the exclusion case these messages
+    exist to name.
+
+    QUOTING GIT IS SAFE HERE, and the asymmetry with `local_git_adapter` —
+    which refuses to put git's stderr in a refusal — is deliberate and not an
+    oversight. That module runs `push` against a REMOTE, and a remote URL can
+    carry an authority and a credential in it. Nothing in this module touches
+    a remote: the transposition is `init`, `add`, `commit`, `ls-tree` and
+    `cat-file` inside a directory this process just made, so git's words here
+    carry local paths and object ids and nothing that could be a secret.
+    """
+    said = b"\n".join(part for part in streams if part)
+    return " ".join(said.decode("utf-8", "replace").split()) or "nothing at all"
+
+
 def _committed_blob(repo: Path, key: str) -> bytes:
     """The bytes git actually holds for `key` at HEAD.
 
     A KEY THAT WAS NEVER COMMITTED IS NAMED, not left as a git error. git
-    answers `fatal: path … exists on disk, but not in 'HEAD'` and exits
-    non-zero, and `check=True` turned that into a `CalledProcessError` whose
-    reader learns that a subprocess failed rather than that their corpus is
-    short one document. The failure is real and still refuses — this only
-    decides what the refusal SAYS (Copilot review of PR #31, registered by the
-    lander and taken here).
+    answers `fatal: path … does not exist in 'HEAD'` and exits non-zero, and
+    `check=True` turned that into a `CalledProcessError` whose reader learns
+    that a subprocess failed rather than that their corpus is short one
+    document. The failure is real and still refuses — this only decides what
+    the refusal SAYS (Copilot review of PR #31, registered by the lander and
+    taken here).
+
+    AND THE EXIT STATUS DOES NOT SAY WHICH FAILURE IT WAS, so this asks the
+    TREE instead of inferring from it. A corrupt or pruned object database
+    fails `cat-file` identically to a missing path, and the first cut of this
+    translation told that operator an ignore rule was the usual cause, which
+    is a diagnosis of something that did not happen (Copilot review of PR #33
+    at `conformance_corpus.py:181`). `ls-tree` separates the two exactly
+    (MEASURED on git 2.43.0, in a one-commit repository):
+
+    ================================  =========================  ============
+    state                             `cat-file blob HEAD:<key>`  `ls-tree`
+    ================================  =========================  ============
+    key absent from HEAD              `does not exist in 'HEAD'`  rc 0, EMPTY
+    key present, object unreadable    `bad file`                  rc 0, names
+    HEAD itself unreadable            non-zero                    non-zero
+    ================================  =========================  ============
+
+    So all three are answered, each in its own sentence, and each quotes what
+    git actually said.
     """
+    reading = {**_sanitized_git_environment(), "GIT_NO_REPLACE_OBJECTS": "1"}
     try:
         return subprocess.run(
             ("git", *_HARDENING, "cat-file", "blob", f"HEAD:{key}"),
-            cwd=repo, check=True, capture_output=True,
-            env={**_sanitized_git_environment(),
-                 "GIT_NO_REPLACE_OBJECTS": "1"},
+            cwd=repo, check=True, capture_output=True, env=reading,
         ).stdout
     except subprocess.CalledProcessError as failed:
+        said = _what_git_said(failed.stderr, failed.stdout)
+        listed = subprocess.run(
+            ("git", *_HARDENING, "ls-tree", "--name-only", "HEAD", "--", key),
+            cwd=repo, capture_output=True, env=reading)
+        if listed.returncode != 0:
+            raise ValueError(
+                f"the transposition would not give up {key!r}, and this act "
+                f"cannot even ask its tree what it holds — `git ls-tree HEAD` "
+                f"failed too, so HEAD or the repository itself is the "
+                f"problem and no ignore rule is implicated. git said "
+                f"{said!r} for the blob and "
+                f"{_what_git_said(listed.stderr, listed.stdout)!r} for the "
+                f"tree") from failed
+        if listed.stdout.strip():
+            raise ValueError(
+                f"git HOLDS {key!r} at HEAD and would not give up its bytes, "
+                f"so this is NOT an exclusion: the key is in the commit and "
+                f"the object behind it did not come back. A corrupt or pruned "
+                f"object database is the shape that does this. git said "
+                f"{said!r}") from failed
         raise ValueError(
             f"the transposition does not hold {key!r} at all: it was copied "
-            f"into the working tree and git has no blob for it at HEAD, so "
-            f"something kept it out of the commit. An ignore rule is the "
-            f"usual cause — a `.gitignore` carried in with the corpus, or an "
-            f"`info/exclude` — and a transposition missing a document is not "
-            f"a transposition of this corpus") from failed
+            f"into the working tree, `git ls-tree HEAD` does not list it, and "
+            f"git has no blob for it — so something kept it out of the "
+            f"commit. An ignore rule is the usual cause — a `.gitignore` "
+            f"carried in with the corpus, or an `info/exclude` — and a "
+            f"transposition missing a document is not a transposition of "
+            f"this corpus. git said {said!r}") from failed
 
 
 def _fingerprint(populated: Path) -> dict[str, str]:
@@ -260,13 +322,48 @@ def transpose(shipped: Path, destination: Path) -> Path:
         # above close it; this names it if some entrance nobody has thought of
         # opens it again, because a reader meeting an exit status learns
         # nothing about their machine.
+        #
+        # AND IT IS THE INDEX THAT SAYS SO, not this act's confidence. The
+        # first cut stated an ABSOLUTE — "every file copied into it was
+        # excluded" — for a failure that a full disk, an unwritable object
+        # database or a lock left by a crashed process produces identically
+        # (Copilot review of PR #33 at `conformance_corpus.py:258`). That is
+        # the same defect this act removes from the workflow's skip-pin
+        # message one file over, so it is removed here too: `diff --cached`
+        # answers whether anything was staged, and the two shapes get two
+        # sentences. MEASURED on git 2.43.0 — nothing staged exits 1 with
+        # `nothing to commit …` on STDOUT, a held `index.lock` exits 128 with
+        # `fatal: Unable to create …` on STDERR, and `diff --cached
+        # --name-only` answers correctly in both.
+        staged = subprocess.run(
+            ("git", *_HARDENING, "diff", "--cached", "--name-only"),
+            cwd=target, capture_output=True,
+            env={**_sanitized_git_environment(),
+                 "GIT_NO_REPLACE_OBJECTS": "1"})
+        names = staged.stdout.split() if staged.returncode == 0 else None
+        said = _what_git_said(failed.stderr, failed.stdout)
+        if names == []:
+            raise ValueError(
+                f"the transposition staged NOTHING, so `git commit` had "
+                f"nothing to make: every file copied in was kept out of the "
+                f"index. An ignore rule this act cannot reach is the usual "
+                f"cause — the configured one is disabled with "
+                f"`core.excludesFile=` and the add is forced, so a rule that "
+                f"still bites is somewhere neither reaches — and a populated "
+                f"state with no files in it does the same thing. A corpus "
+                f"with no documents in it is not a transposition of this "
+                f"corpus. git said {said!r}") from failed
+        counted = ("and the index could not be read either"
+                   if names is None else
+                   f"{len(names)} path(s) are staged and waiting")
         raise ValueError(
-            "the transposition committed nothing: every file copied into it "
-            "was excluded before `git commit` saw it. An ignore rule is the "
-            "usual cause, and this act disables the configured one and forces "
-            "the add, so the rule is somewhere this act does not reach — and "
-            "a corpus with no documents in it is not a transposition of this "
-            "corpus") from failed
+            f"`git commit` failed and it is NOT an exclusion: {counted}. The "
+            f"causes, and this list is not closed: (1) an exclusion — ruled "
+            f"out here by the index itself; (2) no space left on the device; "
+            f"(3) a permission the object database or the index does not "
+            f"grant this process; (4) another git failure entirely, a lock "
+            f"left by a crashed process among them. git said "
+            f"{said!r}") from failed
 
     # AND THE BYTES ARE VERIFIED OUT OF GIT, not trusted to the settings above.
     # Pinning the filters off is a defence; reading the committed blob back is
