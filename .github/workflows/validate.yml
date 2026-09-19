@@ -1945,10 +1945,17 @@ jobs:
           # this act was re-measuring anyway; a floor with slack in it is a
           # floor that stops catching the regression it was set to catch.
           #
-          # NEITHER FIGURE WAS DERIVED. 1084 + 9 = 1093 is a check on the
-          # reading, not the source of it.
-          MIN_SELECTED: "1093"
-          MIN_PASSED: "1090"
+          # And a THIRD time, for the two hardening tests Copilot's review of
+          # this PR asked for (an ambient `GIT_DIR` that must not redirect the
+          # transposition; an ambient `core.autocrlf` that must not rewrite
+          # its bytes) — measured on run 35410846287: selected 1095, passed
+          # 1092, skipped still 3.
+          #
+          # NO FIGURE HERE WAS DERIVED. 1093 + 2 = 1095 is a check on the
+          # reading, not the source of it, and the same is true of the two
+          # earlier moves.
+          MIN_SELECTED: "1095"
+          MIN_PASSED: "1092"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
