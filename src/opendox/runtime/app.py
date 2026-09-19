@@ -799,7 +799,21 @@ def create_project_repository(project_id: str, request: Request,
             store, project_id=project_id,
             root=settings.project_repository_root,
             actor=principal.display_name or principal.subject))
-    except repository_act.RepositoryActRefused as exc:
+    # AND `identity.RefusedError` IS A 409 HERE TOO — on this route, on attach
+    # and on push, which are the three that call an act that writes through the
+    # store. The act refuses a credential-bearing remote and so does
+    # `CoordinationStore`, deliberately (layering, not duplication), and the
+    # two readings are not identical: whatever ONE of them refuses and the
+    # other does not arrives here as an exception nothing translates, which
+    # FastAPI answers 500. It has happened twice — `…?mode=1;token=…` on
+    # openDox-code#26, where the act accepted what the store refused, and
+    # `/srv/repos/a:b@c.git`, which is a 500 on `main` today (Copilot review of
+    # openDox-code#30, measured at `373b05a`). Both were closed by making one
+    # reading agree with the other, which closes an instance and leaves the
+    # class. This closes the class: a refusal from the store is a REFUSAL, and
+    # a refusal is a 409 naming the shape — never a crash.
+    except (repository_act.RepositoryActRefused,
+            identity.RefusedError) as exc:
         raise HTTPException(status_code=409,
                             detail={"code": "repository.refused",
                                     "message": _refusal_message(exc)}) from exc
@@ -833,7 +847,8 @@ def attach_project_remote(project_id: str, body: RemoteAttach, store: StoreDep,
         # repair: the translation belongs on the call that can raise it.
         row = _found(lambda: repository_act.attach_remote(
             store, project_id=project_id, remote_url=body.remote_url))
-    except repository_act.RepositoryActRefused as exc:
+    except (repository_act.RepositoryActRefused,
+            identity.RefusedError) as exc:
         raise HTTPException(status_code=409,
                             detail={"code": "repository.refused",
                                     "message": _refusal_message(exc)}) from exc
@@ -857,7 +872,8 @@ def push_project_repository(project_id: str, store: StoreDep,
         # openDox-code#26, at `db5197d0`, suppressed).
         remote_url = _found(lambda: repository_act.push_to_remote(
             store, project_id=project_id))
-    except repository_act.RepositoryActRefused as exc:
+    except (repository_act.RepositoryActRefused,
+            identity.RefusedError) as exc:
         raise HTTPException(status_code=409,
                             detail={"code": "repository.refused",
                                     "message": _refusal_message(exc)}) from exc

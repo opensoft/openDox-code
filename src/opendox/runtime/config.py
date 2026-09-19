@@ -581,7 +581,25 @@ def _an_authority_this_runtime_cannot_read(value: str) -> bool:
     made the same judgement for the same shape at the printing end.
     """
     head = value.rpartition("@")[0]
-    return bool(head) and ":" in head and any(c.isspace() for c in head)
+    if not head or ":" not in head or not any(c.isspace() for c in head):
+        return False
+    # A LOCAL PATH IS NOT AN AUTHORITY, and the first cut could not tell them
+    # apart. `/srv/my repos/a:b@c.git` is a directory whose name holds a colon
+    # and an at-sign — a legal remote for `git push` — and it was read as
+    # userinfo and refused, which reached `CoordinationStore` and raised where
+    # the act had accepted: a 500 (Copilot review of openDox-code#30).
+    #
+    # GIT'S OWN RULE IS THE TEST, and it is a rule about the FIRST colon: the
+    # `[user@]host:path` form is recognised only when nothing before that colon
+    # is a `/`. It separates the two cases exactly, which is why it is this rule
+    # and not "a head holding any slash":
+    #
+    #   `ci:hun/ter2@github.com:o/r.git`  before the first `:` is `ci`      -> an
+    #                                     authority, and the password holding a
+    #                                     `/` is the #25 hole that stays closed
+    #   `/srv/my repos/a:b@c.git`         before the first `:` is a PATH     -> a
+    #                                     local path, not judged here
+    return "/" not in head.partition(":")[0]
 
 
 def _scp_like_userinfo(value: str) -> tuple[str, str, str] | None:

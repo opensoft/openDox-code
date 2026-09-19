@@ -1836,9 +1836,56 @@ jobs:
       #              corrected and nothing there behaves differently: an
       #              absolute `--git-dir` DOES arise, for a linked worktree,
       #              measured — that repair is a ruled separate act.
+      #              SUPERSEDED by the entry below, which is on a NEW branch cut
+      #              from main after #30 landed; `pytest -q tests_runtime/`
+      #              was 568 there.
+      #  359 passed  at `build/3-7-followup-2-worktree-and-refusals` `f8cb7a90`
+      #  1 skipped   (2026-09-19, same python, pytest and git) — TWO added here
+      #              and two in the DB-backed half: openDox-code#30's four
+      #              registered follow-ups, each measured against a full
+      #              checkout of `5c867137`. A LINKED WORKTREE's metadata is
+      #              held by descriptor (`GIT_DIR` and `GIT_COMMON_DIR` as
+      #              `/proc/self/fd/<n>`), which is the shape `--git-dir`
+      #              answers absolutely and the one the index binding did not
+      #              reach; `identity.RefusedError` is a 409 on the three
+      #              routes that call an act writing through the store, which
+      #              closes the CLASS whose two instances were #26's
+      #              `;token=` 500 and `/srv/repos/a:b@c.git`, measured a 500
+      #              at `5c867137`; the whitespace fallback takes git's own
+      #              first-colon rule, so `/srv/my repos/a:b@c.git` is a local
+      #              path again in both the refusal and the printer; and the
+      #              served-database guard's other two acts — `migrate --plan`
+      #              and `reset` — have the case the schema guard's twin has.
+      #              SUPERSEDED by the entry below, which is the same tree with
+      #              main merged into it; `pytest -q tests_runtime/` was 572
+      #              there and is 572 here.
+      #  359 passed  at `build/3-7-followup-2-worktree-and-refusals` `d6cb2621`
+      #  1 skipped   (2026-09-19, same python, pytest and git) — UNCHANGED on
+      #              the hermetic six, and the entry exists because the TREE
+      #              changed: openDox-code#31 (§ 3.7's conformance factory)
+      #              merged in, adding `tests/test_conformance_corpus.py` to
+      #              the required job's FIRST list — which this figure does not
+      #              count and the triple below does. Re-measured rather than
+      #              carried: a figure that was not taken on the tree it is
+      #              stated for is a figure nobody measured.
+      #              SUPERSEDED by the entry below; `pytest -q tests_runtime/`
+      #              was 572 there.
+      #  360 passed  at `build/3-7-followup-2-worktree-and-refusals` `acbb6d46`
+      #  1 skipped   (2026-09-19, same python, pytest and git) — ONE added,
+      #              closing this branch's own regression. Holding a linked
+      #              worktree's metadata moved the `rev-parse --git-dir` probe
+      #              out of `_write_back_bound`'s handler — it had been one
+      #              line inside it — and added two opens beside it, so a
+      #              failing probe escaped as a raw `GitCommandFailed` and a
+      #              vanished metadata directory as `FileNotFoundError`, where
+      #              this operation declares two kinds and a caller may branch
+      #              on them. MEASURED at `97a1b37e`, both raw, and the probe
+      #              one on EVERY shape rather than only a linked worktree.
+      #              `metadata_held_open` owns the translation now, because it
+      #              owns the calls.
       #              THE CURRENT FIGURE for this branch; the PR description
       #              states it at this same commit and `pytest -q
-      #              tests_runtime/` is 568. The neutral conformance corpus
+      #              tests_runtime/` is 573. The neutral conformance corpus
       #              was not re-run; see the entry above.
       - name: pytest (runtime, hermetic)
         run: >-
@@ -1956,8 +2003,29 @@ jobs:
           # earlier moves.
           # And once more for the `init.templateDir` regression case — run
           # 35411... on head b48dd4b4: selected 1096, passed 1093, skipped 3.
-          MIN_SELECTED: "1096"
-          MIN_PASSED: "1093"
+          #
+          # AND AGAIN HERE, over the merge of that act into openDox-code#30's
+          # follow-up #2 (`d6cb2621`). MEASURED on the merged tree, by running the
+          # three invocations this job runs and summing their JUnit reports —
+          # `tests/` 725 selected 2 skipped, the S7 residue 13, the hermetic
+          # six 360 selected 1 skipped — selected 1098, passed 1095, skipped
+          # still 3. The two added are this branch's own hermetic cases (a
+          # linked worktree's metadata held by descriptor, and a local path
+          # that is not an authority); its other two are in the DB-backed job,
+          # which this triple does not count.
+          #
+          # NOT DERIVED, on the rule the paragraph above states: 1096 + 2 is a
+          # CHECK on the reading and not its source, and the reading came from
+          # a run.
+          #
+          # AND ONCE MORE, for the case that closes this branch's OWN
+          # regression — the metadata probe and open that escaped as raw
+          # exceptions where `write_back` declares two kinds. MEASURED the same
+          # way on `acbb6d46`: `tests/` 723 passed 2 skipped, the S7 residue 13,
+          # the hermetic six 360 passed 1 skipped, so selected 1099, passed
+          # 1096, skipped still 3.
+          MIN_SELECTED: "1099"
+          MIN_PASSED: "1096"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
