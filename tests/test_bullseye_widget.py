@@ -1363,7 +1363,12 @@ def test_the_drafted_seed_moves_to_doxbench_instead_of_being_copied(tmp_path):
     if not NODE:
         pytest.skip("node not available for the JS derivation probe")
     shutil.copy(WEB / "views" / "lens.js", tmp_path / "lens.mjs")
-    for dep in ("lens-model.js", "bullseye.js", "composed-model.js"):
+    # `display.js` TOO, since `views/lens.js` reads the station vocabulary
+    # through the facet: a standalone copy of a view that resolves BY ROLE is a
+    # two-file harness, exactly as `views/helpers.js`'s own note records for the
+    # four model modules slice S7 put on the same footing.
+    for dep in ("lens-model.js", "bullseye.js", "composed-model.js",
+                "display.js"):
         shutil.copy(WEB / "views" / dep, tmp_path / dep)
     (tmp_path / "m.mjs").write_text("""
 import { createSeedFromStagingSeed } from './lens.mjs';
@@ -2032,7 +2037,12 @@ def test_the_draft_view_lands_on_an_editable_body_with_its_fields_behind_a_tab()
     lens = (WEB / "views" / "lens.js").read_text(encoding="utf-8")
     # the TILE spelling; `createRequest` maps it to `staged-topic` (see
     # `test_the_lens_names_its_scope_in_the_tile_vocabulary_so_a_session_opens`)
-    assert 'scopeKind: "staged",' in lens
+    # — AND IT NAMES IT THROUGH THE SAME ONE TABLE the workbench does, since the
+    # act that wired `views/lens.js` onto the display facet. The literal that
+    # stood here was the SECOND of "the same vocabulary applied in two places"
+    # the sentence above is about; the value is unchanged and is checked against
+    # `SCOPE_KINDS` below, so this reads the declaration rather than a copy.
+    assert "scopeKind: SCOPE_KINDS.selection," in lens
     assert "scopeId: String(data?.staging_id" in lens
     # THE DRAFTER'S OWN HALF IS NOT THIS REPOSITORY'S TO ASSERT. The id is
     # RETURNED by `doc_health.staging_seed` (`"staging_id": self.staging_id`),
@@ -2067,7 +2077,12 @@ def test_every_create_field_carries_a_default_so_nothing_blocks_the_create(tmp_p
     """
     if not NODE:
         pytest.skip("node not available for the JS derivation probe")
-    for dep in ("lens-model.js", "bullseye.js", "composed-model.js"):
+    # `display.js` TOO, since `views/lens.js` reads the station vocabulary
+    # through the facet: a standalone copy of a view that resolves BY ROLE is a
+    # two-file harness, exactly as `views/helpers.js`'s own note records for the
+    # four model modules slice S7 put on the same footing.
+    for dep in ("lens-model.js", "bullseye.js", "composed-model.js",
+                "display.js"):
         shutil.copy(WEB / "views" / dep, tmp_path / dep)
     shutil.copy(WEB / "views" / "lens.js", tmp_path / "lens.mjs")
     (tmp_path / "m.mjs").write_text("""
@@ -2125,8 +2140,12 @@ def test_the_lens_names_its_scope_in_the_tile_vocabulary_so_a_session_opens(tmp_
     applied twice again.
     """
     lens = (WEB / "views" / "lens.js").read_text(encoding="utf-8")
-    assert 'scopeKind: "staged",' in lens
+    # NAMED THROUGH THE TABLE, not spelled (the act that wired `views/lens.js`
+    # onto the display facet). The two spellings are still pinned against each
+    # other below, on the declaration this now points at.
+    assert "scopeKind: SCOPE_KINDS.selection," in lens
     assert 'scopeKind: "staged-topic"' not in lens
+    assert 'scopeKind: "staged"' not in lens
 
     # THE CANONICAL DECLARATION MOVED (§ 3.4 slice S7): `SESSION_SCOPE_KINDS`
     # and `SCOPE_KINDS` are seam-key tables and now live together in

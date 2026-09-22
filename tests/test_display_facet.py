@@ -1066,3 +1066,83 @@ console.log(JSON.stringify({{
 """, tmp_path)
     assert out["declared"] == ["a.md brainstorm jotted"]
     assert out["neutral"] == ["a.md brainstorm captured"]
+
+
+# ---------------------------------------------------------------------------
+# `views/lens.js` -- the last view in the bundle that never read the facet.
+# ---------------------------------------------------------------------------
+
+def test_the_lens_reads_the_facet_it_has_been_handed_all_along():
+    """`app.js` has passed `display: ctx.display` on the `lens.keyword` mount
+    since slice S7, and `views/lens.js` simply never read it: fourteen rendered
+    sites spelled `documents` / `docs` / `cluster`, so a host that renamed its
+    source station read one word in the lens and another everywhere else.
+
+    THIS FILE IS CLASS "?" AND STAYS SO. The census records that none of RULED
+    Q1-Q5 rules on it and that it is "assertion 1's one declared, ruled-later
+    exception"; reading the facet decides nothing about that, exactly as
+    `app.js` (class A) reading it decided nothing about app.js. So this is the
+    ratchet for the WIRING, not a claim about the boundary -- the file is
+    outside assertion 4's scope, so `test_every_in_scope_file_reads_the_display
+    _facet` never looks at it and nothing else would notice it being unwired.
+    """
+    lens = (WEB / "views" / "lens.js").read_text(encoding="utf-8")
+    assert 'from "./display.js"' in lens, (
+        "views/lens.js stopped importing the display facet")
+    # RESET, NEVER CARRIED FORWARD -- `views/lineage.js`'s measured defect, in
+    # the shape this file's own render entry point takes. `renderLens` holds the
+    # facet in a per-render `const`, so there is no module-level binding to go
+    # stale; that is stronger than resetting one and is why
+    # `test_every_module_vocabulary_resets` does not (and must not) list it.
+    assert "const display = options.display || neutralDisplay();" in lens
+    assert "let display" not in lens and "\ndisplay =" not in lens
+    # every pane reads it off the ONE context object the panes already receive
+    assert "\n    display,\n" in lens, "the lens ctx does not carry the facet"
+    assert "ctx.display" in lens
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_lens_vocabulary_notes_and_seam_keys_come_off_the_facet(tmp_path):
+    """The two halves of that wiring that a text search cannot judge.
+
+    `VOCABULARIES` is evaluated at IMPORT, so the two of its notes that name the
+    source station cannot ask a facet that arrives per render -- they are
+    functions of it, and this calls them. And `createSeedFromStagingSeed` builds
+    the create request's `tab` and `scopeKind`: seam KEYS, never rendered words,
+    which `views/display.js` already declares in `TAB_IDS` and `SCOPE_KINDS` and
+    which this file used to spell a second time. One silent mismatch of exactly
+    that kind put a real create on `main` with no branch session
+    (`tests/test_bullseye_widget.py`'s own account of it), so the VALUE is
+    asserted here and not only the spelling.
+    """
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(f"""
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const L = await import(base + "lens.js");
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  stages: {{ source: {{ one: "chart", many: "charts", short: "charts",
+                      label: "charts" }} }},
+}} }});
+const neutral = D.neutralDisplay();
+const seed = L.createSeedFromStagingSeed(
+  {{ path: "ideation/staging/t/t.md", shared: ["a"], partial: [],
+    documents: ["x.md"], staging_id: "t" }}, "repo");
+console.log(JSON.stringify({{
+  declaredRail: L.VOCABULARIES.keywords.railNote(declared),
+  neutralRail: L.VOCABULARIES.keywords.railNote(neutral),
+  declaredNote: L.VOCABULARIES.repositories.note(declared),
+  tab: seed.tab, scopeKind: seed.scopeKind,
+  tabId: D.TAB_IDS.source, scopeId: D.SCOPE_KINDS.selection,
+}}));
+""", tmp_path)
+    assert "one dot per chart;" in out["declaredRail"].lower(), out["declaredRail"]
+    assert "CHART IDENTITY" in out["declaredNote"], out["declaredNote"]
+    assert "charts" in out["declaredNote"]
+    # …and the neutral install says openDox's own word, never openxFactory's
+    assert NEUTRAL_DISPLAY["stages"]["source"]["one"] in out["neutralRail"]
+    assert "document" not in out["neutralRail"]
+    # the seam keys are the facet's declarations, not a second spelling
+    assert out["tab"] == out["tabId"]
+    assert out["scopeKind"] == out["scopeId"] == "staged"
