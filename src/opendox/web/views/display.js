@@ -64,6 +64,21 @@ export const AREA_ROLES = ["captured", "organized", "proposed", "reference"];
 // surface". The NAMES become `--st-<role>`; the values come from the facet.
 export const TOKEN_ROLES = ["captured", "organized", "proposed", "completion"];
 
+// THE SAME FOUR AS NAMED CONSTANTS, for `STATUS_ROLE`'s reason one family
+// over. THREE of the four token roles are spelled identically to three status
+// roles and the fourth identically to a STAGE role, so a view that wrote the
+// word would be saying which family it meant by luck. `views/board.js` carried
+// exactly that: three of its four column tokens were named through
+// `STATUS_ROLE` and the fourth was the bare literal `"completion"` — one table
+// in two idioms, with nothing to fail if a role left `TOKEN_ROLES`. A view
+// names a token role through this table and carries no literal.
+export const TOKEN_ROLE = {
+  CAPTURED: "captured",
+  ORGANIZED: "organized",
+  PROPOSED: "proposed",
+  COMPLETION: "completion",
+};
+
 // The status vocabularies the shell renders, one per artifact-kind role. A
 // profile declares one closed word list per kind, and collapsing them would
 // make `proposed` mean two different words at once.
@@ -600,7 +615,19 @@ export class Display {
   }
 
   // ---- design tokens ----
+  // MEMBERSHIP IN `TOKEN_ROLES`, NOT "is there a value" (Copilot round 1, and
+  // the finding is right). `this._tokens` is `NEUTRAL_DISPLAY.tokens` merged
+  // with whatever `facet.tokens` carried, and `readDisplay` does NOT check that
+  // table's KEYS — `display_profile.normalize_display` refuses an unknown token
+  // role, but a facet object handed straight to `Display` (a fixture, a node
+  // probe, a test) never passes through it. So a stray `tokens: { submission:
+  // "#fff" }` made `token("submission")` answer, `tokenVar` compose
+  // `var(--st-submission)` and `stripeClass` compose `stage-submission`: three
+  // names the stylesheet declares no rule for, from a guard that was checking
+  // the wrong thing. The closed family is the declaration; the merged table is
+  // only where its values happen to live.
   token(role) {
+    if (TOKEN_ROLES.indexOf(role) === -1) refuseRole("token", role, TOKEN_ROLES);
     const value = this._tokens[role];
     if (value === undefined) refuseRole("token", role, TOKEN_ROLES);
     return value;
@@ -610,6 +637,33 @@ export class Display {
   tokenVar(role) {
     this.token(role);
     return "var(--st-" + role + ")";
+  }
+
+  // THE CARD-STRIPE HOOK FOR A TOKEN ROLE — `tokenVar`'s other end, and the
+  // second half of the `<prefix>-<role>` contract `registerRole`'s own comment
+  // already states: "a view resolves the value to a role HERE and then asks for
+  // the word … and the class (`<prefix>-<role>`) by that role, so both follow
+  // the override together."
+  //
+  // WHY A METHOD AND NOT A STRING EACH VIEW COMPOSES. `styles.css` declares
+  // `.card.stage-<role> { --stripe: var(--st-<role>); }` for each of the four
+  // `TOKEN_ROLES`, so the class and the custom property it reaches are the SAME
+  // role — and the rule that pairs them is the only thing holding a card's
+  // stripe to its column's colour. `views/board.js` and `views/funnel.js` each
+  // spelled that class as a literal (`stage-brainstorm`, `stage-staged`,
+  // `stage-proposal`, `stage-realized`: one domain's stage words in the one
+  // styling surface RULED Q7 keeps stable), so the stylesheet and the two views
+  // had to be renamed in step by hand and nothing failed if they were not.
+  // Asking the facet makes the pairing mechanical, and the `token(role)` call
+  // below makes an undeclared role a REFUSAL rather than a class that matches
+  // no rule — a stripe that silently stops being drawn is precisely the
+  // regression a test over the DOM does not catch.
+  //
+  // THE ROLE TRAVELS, THE WORD DOES NOT: a host that renames its captured stage
+  // changes no class here, because the class was never its word.
+  stripeClass(role) {
+    this.token(role);
+    return "stage-" + role;
   }
 
   // Set the HOST-DECLARED tokens as custom properties on the given element

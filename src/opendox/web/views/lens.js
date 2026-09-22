@@ -34,6 +34,23 @@ import {
 // so the rendered SVG is exactly what it was before the lift.
 import { renderBullseye } from "./bullseye.js";
 import { identitiesFor, isComposed, repositoryVocabulary } from "./composed-model.js";
+// THE DISPLAY FACET (§ 4.3 step 4). `app.js` has handed this view `display:
+// ctx.display` since slice S7 and this module simply never read it: every other
+// view in the bundle resolves its station words BY ROLE and the lens spelled
+// `documents`, `docs`, `cluster` and `staged` as literals — fourteen rendered
+// sites and four seam keys the facet already declares.
+//
+// THIS FILE IS CLASS "?" AND STAYS SO. `tests/fixtures/web_boundary_census.yaml`
+// records that none of RULED Q1-Q5 rules on `views/lens.js` and that it is
+// "assertion 1's one declared, ruled-later exception"; reading the facet decides
+// nothing about that, exactly as `app.js` (class A) reading it decided nothing
+// about app.js. What it does decide is that a host which renames its source
+// station no longer reads one word in the lens and another everywhere else.
+import {
+  SCOPE_KINDS, STAGE_ROLES, TAB_IDS, neutralDisplay,
+} from "./display.js";
+
+const [SOURCE, GROUPING, , , SUBMISSION] = STAGE_ROLES;
 
 // add-shared-identity-seeds: DRAFTING route (writes nothing; returns the
 // register row + detail section as TEXT for a human to merge).
@@ -64,12 +81,15 @@ export const VOCABULARIES = {
     termsShort: "KW",
     railCount: "declared",
     searchHint: "search keywords…",
-    railNote: "One dot per document; rings by how many checked keywords it "
-      + "matches (centre = all of them). Pin = require.",
-    note: "Rings by match count (centre = matches every checked keyword); "
-      + "pin = require (hard filter). Overrides are evidence — a manual +/− "
-      + "needs a recorded reason. Nothing is persisted until you save; "
-      + "machinery enters nothing into the register.",
+    // THE TWO NOTES ARE FUNCTIONS OF THE FACET, and only these two: they are
+    // the entries in this table that name the SOURCE station, and a table
+    // evaluated once at import cannot ask a facet that arrives per render.
+    railNote: (d) => "One dot per " + d.one(SOURCE) + "; rings by how many "
+      + "checked keywords it matches (centre = all of them). Pin = require.",
+    note: () => "Rings by match count (centre = matches every checked "
+      + "keyword); pin = require (hard filter). Overrides are evidence — a "
+      + "manual +/− needs a recorded reason. Nothing is persisted until you "
+      + "save; machinery enters nothing into the register.",
   },
   repositories: {
     id: "repositories",
@@ -82,15 +102,15 @@ export const VOCABULARIES = {
     termsShortOne: "Repo",
     railCount: "members",
     searchHint: "search repositories…",
-    railNote: "One dot per document identity; rings by how many visible "
-      + "repositories carry it (centre = every one, ring 1 = only one). "
-      + "Pin = require.",
-    note: "One dot per DOCUMENT IDENTITY; rings by how many visible "
-      + "repositories carry it (centre = every one of them, ring 1 = only "
-      + "one). This is the filter's union/shared toggle drawn out: union is "
-      + "ring 1 and inward, shared is ring 2 and inward. Pin = require. "
-      + "Activate the centre or a sector to drill the dashboard into exactly "
-      + "those documents.",
+    railNote: (d) => "One dot per " + d.one(SOURCE) + " identity; rings by "
+      + "how many visible repositories carry it (centre = every one, ring 1 = "
+      + "only one). Pin = require.",
+    note: (d) => "One dot per " + d.one(SOURCE).toUpperCase() + " IDENTITY; "
+      + "rings by how many visible repositories carry it (centre = every one "
+      + "of them, ring 1 = only one). This is the filter's union/shared toggle "
+      + "drawn out: union is ring 1 and inward, shared is ring 2 and inward. "
+      + "Pin = require. Activate the centre or a sector to drill the dashboard "
+      + "into exactly those " + d.many(SOURCE) + ".",
   },
 };
 
@@ -151,10 +171,14 @@ function renderReasonForm(container, labelText, onConfirm) {
 // realized; the tested engine lens_submission.add_as_cluster submits it).
 function renderPlan(container, plan, opts) {
   const o = opts || {};
+  // `plan.kind` is the ENGINE's key (`lens_submission.add_as_cluster`), never a
+  // rendered word — the caption beside it is, and it names two stations.
+  const display = o.display || neutralDisplay();
   container.innerHTML = "";
   const box = el("div", "draft-confirm");
   const title = plan.kind === "add-as-cluster"
-    ? "planned: add as cluster (workbench set + human-seen proposal)"
+    ? "planned: add as " + display.one(GROUPING) + " (workbench set + "
+      + "human-seen " + display.one(SUBMISSION) + ")"
     : "planned: save recipe (workbench manifest)";
   box.appendChild(el("div", "dc-h", title));
   box.appendChild(el("div", "dc-line", "set: " + plan.name + " · repository " + plan.repository));
@@ -243,6 +267,7 @@ function fitVocabSwitch(root) {
 }
 
 function keywordRail(model, ctx) {
+  const display = ctx.display;
   // `pane-rail` (T092 acceptance sweep, defect 9d): the lens now scrolls as ONE
   // region, and this is the one pane that must not — 151 declared keywords is
   // ~10,370px of rows, and unbounded it would set the height of the region the
@@ -302,11 +327,11 @@ function keywordRail(model, ctx) {
   summary.appendChild(el("div", "railsum-v", String(model.universe.length)));
   summary.appendChild(el("div", "railsum-k",
     vocab.id === "repositories"
-      ? "document identities on the radar, across " + shown + " of "
-        + model.rail.length + " repositories"
-      : "documents matching " + shown + " of " + model.rail.length
-        + " checked keywords"));
-  summary.appendChild(el("div", "railsum-note", vocab.railNote));
+      ? display.one(SOURCE) + " identities on the radar, across " + shown
+        + " of " + model.rail.length + " repositories"
+      : display.many(SOURCE) + " matching " + shown + " of "
+        + model.rail.length + " checked keywords"));
+  summary.appendChild(el("div", "railsum-note", vocab.railNote(display)));
   pane.appendChild(summary);
 
   // THE RELATIONSHIPS THAT ALREADY EXIST (Brett, 2026-08-08). The rail used
@@ -325,17 +350,19 @@ function keywordRail(model, ctx) {
     // mean?") — a number a reader has to hover to understand is a number
     // that has not been labelled.
     rel.appendChild(el("div", "railrel-note",
-      "Keyword pairs that already share documents — the count is how many "
-      + "documents carry BOTH. Opening one checks both."));
+      "Keyword pairs that already share " + display.many(SOURCE) + " — the "
+      + "count is how many " + display.many(SOURCE) + " carry BOTH. Opening "
+      + "one checks both."));
     for (const pair of model.pairs.slice(0, RELATIONSHIPS_SHOWN)) {
       const row = el("button", "relrow");
       row.type = "button";
       row.title = "check " + pair.a + " and " + pair.b + " — "
-        + pair.documents + " document" + (pair.documents === 1 ? "" : "s")
+        + pair.documents + " " + display.count(SOURCE, pair.documents)
         + " carry both";
       row.appendChild(el("span", "relpair", pair.a + " + " + pair.b));
-      row.appendChild(el("span", "reln", pair.documents
-        + (pair.documents === 1 ? " doc" : " docs")));
+      row.appendChild(el("span", "reln", pair.documents + " "
+        + (pair.documents === 1 ? display.one(SOURCE)
+                                : display.short(SOURCE))));
       row.addEventListener("click", () => ctx.only([pair.a, pair.b]));
       rel.appendChild(row);
     }
@@ -448,11 +475,13 @@ function keywordRail(model, ctx) {
   if (solos.length) {
     const toggle = el("button", "railmore",
       showSolos
-        ? "hide the " + solos.length + " single-document " + vocab.terms
-        : "show " + solos.length + " more on a single document only");
+        ? "hide the " + solos.length + " single-" + display.one(SOURCE) + " "
+          + vocab.terms
+        : "show " + solos.length + " more on a single " + display.one(SOURCE)
+          + " only");
     toggle.type = "button";
-    toggle.title = "a " + vocab.term + " carried by a single document can "
-      + "only ever put one dot on the radar";
+    toggle.title = "a " + vocab.term + " carried by a single "
+      + display.one(SOURCE) + " can only ever put one dot on the radar";
     toggle.addEventListener("click", () => ctx.setShowSolos(!showSolos));
     pane.appendChild(toggle);
   }
@@ -466,13 +495,19 @@ function keywordRail(model, ctx) {
 // ---- pane 2: bullseye (the shared widget) + the always-present flat matrix ----
 
 function matrix(model, ctx) {
+  const display = ctx.display;
   const table = el("table", "lensmatrix");
   table.setAttribute("aria-label", "Keyword membership matrix (flat view of the bullseye)");
   const head = el("tr");
   const pickHead = el("th", "pickcol");
   head.appendChild(pickHead);
   head.appendChild(el("th", null, "#"));
-  head.appendChild(el("th", null, "doc"));
+  // THE MATRIX'S OWN COLUMN HEADING (Copilot round 2). It was the literal
+  // `doc` — openxFactory's short spelling of the source station, rendered as a
+  // table header — and it survived the first pass BECAUSE it is short: `doc`
+  // is not one of the twenty words `tests/test_web_boundary.py` watches (only
+  // `docs` is), so no sweep in this tree could have found it.
+  head.appendChild(el("th", null, display.one(SOURCE)));
   // the column heads carry the keyword's RAIL LETTER too, so a sector label
   // like "A ∧ G" reads straight off this table
   for (const k of model.checked) {
@@ -486,8 +521,9 @@ function matrix(model, ctx) {
   if (model.matrix.length && ctx.pickDoc) {
     const all = el("input");
     all.type = "checkbox";
-    all.title = "select every listed document";
-    all.setAttribute("aria-label", "select every listed document");
+    const selectAll = "select every listed " + display.one(SOURCE);
+    all.title = selectAll;
+    all.setAttribute("aria-label", selectAll);
     all.checked = model.matrix.every((r) => ctx.isPicked(r.document));
     all.addEventListener("change", () =>
       ctx.pickDocs(model.matrix.map((r) => r.document), all.checked));
@@ -524,8 +560,8 @@ function matrix(model, ctx) {
     // checked keywords" over an unchecked rail was the lens's opening state and
     // read as a dead end (Brett, 2026-08-10).
     const td = el("td", "empty", model.checked.length
-      ? "no documents match the checked keywords"
-      : "this view carries no documents");
+      ? "no " + display.many(SOURCE) + " match the checked keywords"
+      : "this view carries no " + display.many(SOURCE));
     td.setAttribute("colspan", String(model.checked.length + 4));
     tr.appendChild(td);
     table.appendChild(tr);
@@ -601,9 +637,9 @@ function renderStagingSeed(container, data, ctx) {
   if (ctx && ctx.onOpenDoxbench && ctx.canCreate) {
     const move = el("button", "cbtn", "open in doxBench");
     move.type = "button";
-    move.title = "carry this seed into doxBench as a new document: the "
-      + "staging area, the shared terms and the provenance are filled in, "
-      + "and you write the rest there";
+    move.title = "carry this seed into doxBench as a new "
+      + ctx.display.one(SOURCE) + ": the staging area, the shared terms and "
+      + "the provenance are filled in, and you write the rest there";
     move.addEventListener("click", () => ctx.onOpenDoxbench(data));
     head.appendChild(move);
   } else if (ctx && ctx.onOpenDoxbench && owners.length === 1
@@ -614,10 +650,11 @@ function renderStagingSeed(container, data, ctx) {
     const go = el("button", "cbtn", "open " + owners[0] + " to draft");
     go.type = "button";
     go.title = "A project view composes published snapshots and is read-only:"
-      + " a document is created IN a repository, not in a project. This "
+      + " a " + ctx.display.one(SOURCE) + " is created IN a repository, not "
+      + "in a project. This "
       + "switches to " + owners[0] + ", where the create is live. The "
-      + "selection does not survive the switch — the same documents draft "
-      + "this seed again there.";
+      + "selection does not survive the switch — the same "
+      + ctx.display.many(SOURCE) + " draft this seed again there.";
     go.addEventListener("click", () => ctx.onOpenRepository(owners[0]));
     head.appendChild(go);
   } else if (ctx && ctx.onOpenDoxbench) {
@@ -626,12 +663,13 @@ function renderStagingSeed(container, data, ctx) {
     // not a click the machine can make for them.
     const why = el("span", "dc-why", owners.length
       ? "read-only here — these live in " + owners.join(", ")
-        + "; open the one that should own the new document"
+        + "; open the one that should own the new " + ctx.display.one(SOURCE)
       : "read-only here — open a single repository to draft this");
     why.title = "A project view composes published snapshots from several "
-      + "repositories, so it can be read but never written: a document is "
-      + "created IN a repository, not in a project. The seed above is "
-      + "complete — the same selection drafts it again there.";
+      + "repositories, so it can be read but never written: a "
+      + ctx.display.one(SOURCE) + " is created IN a repository, not in a "
+      + "project. The seed above is complete — the same selection drafts it "
+      + "again there.";
     head.appendChild(why);
   }
   // A WAY BACK (Brett, 2026-08-08: "there is no back from this widget"). A
@@ -695,7 +733,13 @@ export function createSeedFromStagingSeed(data, repository) {
   const name = terms.join(" + ");
   const n = (data?.documents || []).length;
   return {
-    tab: "docs",
+    // THE SEAM KEYS COME OFF THE FACET'S OWN TABLES. `tab` and `scopeKind` are
+    // keys, never rendered words (§ 2.2 rule 3), and `views/display.js` already
+    // declares both — `TAB_IDS` for the workbench's three tab keys and
+    // `SCOPE_KINDS` for its scope vocabulary, the table whose `staged` ->
+    // `staged-topic` mapping the comment below is about. Spelling them here as
+    // well is the two-ends-of-a-seam problem this bundle keeps one table for.
+    tab: TAB_IDS.source,
     area,
     title: name,
     // MARKED, at Brett's instruction. The header field is filled so the create
@@ -724,7 +768,7 @@ export function createSeedFromStagingSeed(data, repository) {
     // entirely — so no session opened and the create took its PRE-SESSION
     // path, landing the document in the served checkout on main. Nothing
     // refused, nothing warned: one silent vocabulary mismatch.
-    scopeKind: "staged",
+    scopeKind: SCOPE_KINDS.selection,
     scopeId: String(data?.staging_id || ""),
     // a staged fragment is born `staged`, which is one of the three statuses a
     // create accepts — a document is never born ratified
@@ -766,7 +810,8 @@ function drillPane(model, ctx) {
   // The pane says what it is FOR before it lists anything — it is the one
   // place in the lens whose rows are sets rather than items.
   pane.appendChild(el("div", "drill-note",
-    "Each row is the documents carried by one combination of repositories. "
+    "Each row is the " + ctx.display.many(SOURCE) + " carried by one "
+    + "combination of repositories. "
     + "Drill in scopes the whole dashboard to that set; the seed drafts a "
     + "candidate-register entry for a set two or more repositories share."));
 
@@ -800,12 +845,12 @@ function drillPane(model, ctx) {
       combinationName(row, model.checked.length)));
     const acts = el("div", "drill-acts");
     acts.appendChild(el("span", "drill-count",
-      n + " document" + (n === 1 ? "" : "s")));
+      n + " " + ctx.display.count(SOURCE, n)));
 
     const go = el("button", "cbtn", "drill in");
     go.type = "button";
-    go.title = "scope the dashboard to these " + n
-      + " document" + (n === 1 ? "" : "s");
+    go.title = "scope the dashboard to these " + n + " "
+      + ctx.display.count(SOURCE, n);
     go.disabled = !ctx.onDrill;
     go.addEventListener("click", () => ctx.onDrill({
       kind: isCentre ? "centre" : "sector",
@@ -822,9 +867,9 @@ function drillPane(model, ctx) {
     if (ctx.onSeed && row.matchCount >= 2) {
       const seed = el("button", "cbtn", "draft seed");
       seed.type = "button";
-      seed.title = "draft a candidate-register seed for the documents these "
-        + row.matchCount + " repositories share (text you merge; nothing is "
-        + "written)";
+      seed.title = "draft a candidate-register seed for the "
+        + ctx.display.many(SOURCE) + " these " + row.matchCount
+        + " repositories share (text you merge; nothing is written)";
       seed.addEventListener("click", () => ctx.onSeed(row.keywords, seed));
       seed.dataset.carriers = String(row.matchCount);
       acts.appendChild(seed);
@@ -926,8 +971,8 @@ function pickBar(model, ctx) {
   clear.type = "button";
   clear.disabled = !n;
   clear.title = n
-    ? "unselect all " + n + " selected document" + (n === 1 ? "" : "s")
-    : "no documents are selected";
+    ? "unselect all " + n + " selected " + ctx.display.count(SOURCE, n)
+    : "no " + ctx.display.many(SOURCE) + " are selected";
   clear.addEventListener("click", () => ctx.clearPicks());
   bar.appendChild(clear);
   // the DRAFT action is CENTRED on the bar — the one thing this bar is for
@@ -939,14 +984,14 @@ function pickBar(model, ctx) {
   draft.type = "button";
   draft.disabled = !n;
   draft.title = "Draft a staging-queue fragment covering the selected "
-    + "documents and the terms they share. Nothing is written — the draft is "
-    + "text you carry into doxBench or place yourself.";
+    + ctx.display.many(SOURCE) + " and the terms they share. Nothing is "
+    + "written — the draft is text you carry into doxBench or place yourself.";
   draft.addEventListener("click", () => ctx.onStagingSeed(draft));
   bar.appendChild(draft);
   // the right cell balances the centre; it states the empty case, which is the
   // only time this bar has anything to explain
   bar.appendChild(el("span", "pickn", n
-    ? "" : "tick documents to draft from them"));
+    ? "" : "tick " + ctx.display.many(SOURCE) + " to draft from them"));
   return bar;
 }
 
@@ -962,7 +1007,7 @@ function formingPane(model, ctx) {
   const summaries = ctx.summaries;
   const pane = el("div", "pane");
   const h = el("div", "pane-h");
-  h.appendChild(el("span", null, "forming cluster"));
+  h.appendChild(el("span", null, "forming " + ctx.display.one(GROUPING)));
   h.appendChild(el("span", "n", model.formingSet.members.length + " included"));
   pane.appendChild(h);
 
@@ -1013,6 +1058,18 @@ export function renderLens(root, snapshot, opts) {
   // S4). Null where no gate column is registered, which is exactly what a
   // student install is — the plan panel then renders plan-only.
   const mountLensGate = options.mountLensGate || null;
+  // THE STATION VOCABULARY, from the shell's one read of `/capabilities`
+  // (§ 4.3 step 3). `app.js` has passed `display: ctx.display` on this mount
+  // since slice S7; this view is the last one in the bundle to read it.
+  //
+  // RESET, NEVER CARRIED FORWARD. `neutralDisplay()` and not a previous
+  // render's facet, on `views/lineage.js`'s own measured footing: `|| vocab`
+  // kept a withdrawn host's words on the next render, which is the
+  // invisible-survival failure § 4.3 point 5's refusal rule exists to end.
+  // Named `display` and not `vocab` because `vocab` in this module is the
+  // KEYWORD-versus-REPOSITORY choice (`VOCABULARIES`), which is openDox's own
+  // and is a different question from the registered domain's words.
+  const display = options.display || neutralDisplay();
   root.innerHTML = "";
 
   // D21 — the vocabulary. `composedSnapshot` is the UNNARROWED composed
@@ -1078,7 +1135,7 @@ export function renderLens(root, snapshot, opts) {
         ? "this view is one repository, so there is no member set to lens "
           + "over — open a project with two or more repositories to compare "
           + "what they carry"
-        : candidate.note;
+        : candidate.note(display);
       btn.addEventListener("click", () => renderLens(root, snapshot,
         { ...options, vocabulary: candidate.id }));
       swap.appendChild(btn);
@@ -1145,6 +1202,8 @@ export function renderLens(root, snapshot, opts) {
     summaries,
     repository,
     vocab,
+    // the registered domain's station words, read by every pane that names one
+    display,
     vocabularies,
     confirmHost: confirm,
     // whether a drafted panel is currently on screen — the draft button's
@@ -1379,15 +1438,16 @@ export function renderLens(root, snapshot, opts) {
       save.addEventListener("click", () => {
         const model = buildLensModel(snapshot, query());
         renderPlan(confirm, savePlan(model, repository, ctx.setName()),
-                   { caps, fetcher, mountLensGate });
+                   { caps, fetcher, mountLensGate, display });
       });
       const cluster = el("button", "cbtn",
-        "→ add as cluster (workbench set + human-seen proposal)");
+        "→ add as " + display.one(GROUPING) + " (workbench set + human-seen "
+        + display.one(SUBMISSION) + ")");
       cluster.type = "button";
       cluster.addEventListener("click", () => {
         const model = buildLensModel(snapshot, query());
         renderPlan(confirm, clusterPlan(model, repository, ctx.setName()),
-                   { caps, fetcher, mountLensGate });
+                   { caps, fetcher, mountLensGate, display });
       });
       box.appendChild(save);
       box.appendChild(cluster);

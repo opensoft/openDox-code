@@ -345,17 +345,35 @@ svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacit
   padding: 7px 10px 7px 12px; transition: border-color 120ms, opacity 120ms;
 }
 .card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; border-radius: 5px 0 0 5px; background: var(--stripe, transparent); }
-.card.stage-brainstorm { --stripe: var(--st-captured); }
-.card.stage-staged { --stripe: var(--st-organized); }
-.card.stage-proposal { --stripe: var(--st-proposed); }
-.card.stage-realized { --stripe: var(--st-completion); }
+/* THE CARD-STRIPE HOOKS ARE KEYED BY ROLE, like the `cstate-` family below.
+   They were `stage-brainstorm` / `stage-staged` / `stage-proposal` /
+   `stage-realized` — one domain's four stage words, composed into a class by
+   the board and the funnel — in the ONE styling surface RULED Q7 (comment
+   `5648049748`) calls stable. The class is now the same role as the token it
+   reaches, so the pair is `--st-<role>` under `.stage-<role>` for each of
+   `TOKEN_ROLES`, and `display.stripeClass(role)` is the only thing that spells
+   it. The role travels with a host's override; the word never did.
+
+   THE RETIRED NAMES ARE WRITTEN WITHOUT THEIR LEADING DOT, here and in the two
+   comments below, and that is load-bearing: `test_web_boundary`'s
+   `_style_hook_tokens` harvests every `.<token>` in this file WITHOUT stripping
+   comments, so a dotted mention would re-declare a retired hook as a legal one
+   and let a view spell `stage-proposal` again with assertion 4 still green. */
+.card.stage-captured { --stripe: var(--st-captured); }
+.card.stage-organized { --stripe: var(--st-organized); }
+.card.stage-proposed { --stripe: var(--st-proposed); }
+.card.stage-completion { --stripe: var(--st-completion); }
 .card:hover { border-color: var(--faint-ink); }
 .card .title { font-weight: 600; font-size: 13px; text-wrap: balance; }
 .card .meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
 .card .id { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 
-.cluster-card .title { font-family: var(--mono); font-size: 13.5px; }
-.cluster-card .meta { margin-top: 4px; }
+/* The GROUPING station's card chrome, named by its role. It was
+   `cluster-card`: openxFactory's word for a group, in the one styling surface
+   RULED Q7 keeps stable, and the other end of a class string `views/funnel.js`
+   had to spell to match it. */
+.grouping-card .title { font-family: var(--mono); font-size: 13.5px; }
+.grouping-card .meta { margin-top: 4px; }
 .tally { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; color: var(--muted); }
 .tally b { color: var(--ink); }
 
@@ -430,9 +448,14 @@ svg.edges path.topic { stroke: var(--st-captured); stroke-dasharray: 4 3; opacit
    SHALL be six-column). The five-column collapse is the opt-in modifier, so a
    renderer grown from this skeleton cannot silently regress to five columns by
    dropping a mode class. */
-.funnel-inner.collapsed-docs .only-docs { display: none; }
-.funnel-inner.collapsed-docs { min-width: 1240px; }
-.funnel-inner.collapsed-docs .colheads, .funnel-inner.collapsed-docs .funnel-cols {
+/* The five-column collapse modifier, named by the station it collapses. It was
+   `collapsed-docs` / `only-docs` — `docs` is openxFactory's spelling of the
+   SOURCE station and one of the twenty words the census sweep watches, carried
+   here under the declared style-hook exemption. The role reaches the same two
+   rules and needs no exemption. */
+.funnel-inner.collapsed-source .only-source { display: none; }
+.funnel-inner.collapsed-source { min-width: 1240px; }
+.funnel-inner.collapsed-source .colheads, .funnel-inner.collapsed-source .funnel-cols {
   grid-template-columns: 1.05fr 1.35fr 1.15fr 1.35fr 1.05fr;
 }
 .card.stage-doc { --stripe: var(--faint-ink); }

@@ -450,6 +450,26 @@ def test_the_client_half_resolves_by_role_and_refuses_an_unknown_one(tmp_path):
 const neutral = D.neutralDisplay();
 let refused = null;
 try { neutral.one("triage"); } catch (e) { refused = e.name + ": " + e.message; }
+// THE STRIPE HOOK REFUSES THE SAME WAY, and it must: a class composed from an
+// undeclared role matches no rule in `styles.css`, so the card silently loses
+// its stripe where the word would have loudly gone missing.
+let stripeRefused = null;
+try { neutral.stripeClass("submission"); }
+catch (e) { stripeRefused = e.name + ": " + e.message; }
+// A FACET HANDED STRAIGHT TO `Display` NEVER PASSED THROUGH
+// `display_profile.normalize_display`, so its `tokens` table may carry a role
+// openDox does not declare. The merged table then HAS a value for it, and a
+// guard that asked "is there a value" answered yes — three names the stylesheet
+// declares no rule for (Copilot round 1).
+const stray = D.readDisplay({ display: {
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  tokens: { submission: "#123456" },
+} });
+const strayRefusals = {};
+for (const call of ["token", "tokenVar", "stripeClass"]) {
+  try { strayRefusals[call] = stray[call]("submission"); }
+  catch (e) { strayRefusals[call] = e.name; }
+}
 const declared = D.readDisplay({ display: {
   schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
   stages: { grouping: { one: "cluster", many: "clusters", short: "clusters",
@@ -468,6 +488,9 @@ console.log(JSON.stringify({
   declaredArea: declared.areaOf("ideation/brainstorm/a.md").role,
   declaredSourceOne: declared.one("source"),
   tokenVar: declared.tokenVar("organized"),
+  stripeRefused, strayRefusals,
+  stripeClass: declared.stripeClass("organized"),
+  neutralStripe: neutral.stripeClass("completion"),
 }));
 """, tmp_path)
     assert out["neutralOne"] == NEUTRAL_DISPLAY["stages"]["grouping"]["one"]
@@ -482,6 +505,21 @@ console.log(JSON.stringify({
     # the roles the host did not declare keep openDox's own words
     assert out["declaredSourceOne"] == NEUTRAL_DISPLAY["stages"]["source"]["one"]
     assert out["tokenVar"] == "var(--st-organized)"
+    # THE STRIPE HOOK IS THE SAME ROLE AS THE TOKEN, on a declared facet and on
+    # the neutral one alike -- the class never carried the host's word, so it
+    # does not move when the host's word does.
+    assert out["stripeClass"] == "stage-organized"
+    assert out["neutralStripe"] == "stage-completion"
+    # `submission` is a STAGE role and not a design-token one, which is exactly
+    # the mistake a bare string would make silently.
+    assert out["stripeRefused"].startswith("DisplayRoleError")
+    assert "submission" in out["stripeRefused"]
+    # …and the closed family is what is checked, not the merged table's keys:
+    # a stray `tokens` entry buys a colour, a `var(--st-*)` and a class that
+    # nothing in `styles.css` matches, so all three refuse.
+    assert out["strayRefusals"] == {"token": "DisplayRoleError",
+                                    "tokenVar": "DisplayRoleError",
+                                    "stripeClass": "DisplayRoleError"}
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -550,6 +588,212 @@ def test_the_payload_names_which_tokens_the_host_declared():
     assert sorted(partial["tokens"]) == sorted(TOKEN_ROLES)
     whole = display_manifest({"tokens": {role: "#123456" for role in TOKEN_ROLES}})
     assert whole["declared_tokens"] == list(TOKEN_ROLES)
+
+
+def test_the_card_stripe_hook_pairs_the_class_with_the_token_of_its_role():
+    """`display.stripeClass(role)` is `tokenVar(role)`'s other end, and this is
+    the pairing it exists to make mechanical.
+
+    `styles.css` declares one rule per design-token role -- `.card.stage-<role>
+    { --stripe: var(--st-<role>); }` -- and that rule is the ONLY thing holding
+    a card's stripe to its column's colour. Both halves used to be spelled by
+    hand at three sites: the stylesheet's four selectors, `views/board.js`'s
+    four card classes and `views/funnel.js`'s four, all in openxFactory's stage
+    words (`stage-brainstorm` / `stage-staged` / `stage-proposal` /
+    `stage-realized`) in the ONE styling surface RULED Q7 keeps stable. Nothing
+    failed if the three drifted -- a stripe that stops being drawn is invisible
+    to every DOM assertion in this tree, which is exactly why this pairing is
+    asserted on the TEXT of both files rather than on a render.
+    """
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    for role in TOKEN_ROLES:
+        assert re.search(
+            rf"^\.card\.stage-{re.escape(role)} \{{ --stripe: "
+            rf"var\(--st-{re.escape(role)}\); \}}$", css, re.M), (
+            f"styles.css declares no `.card.stage-{role}` rule reaching "
+            f"`var(--st-{role})`, so `display.stripeClass({role!r})` names a "
+            "class that matches nothing and that card loses its stripe")
+    # AND NO STRIPE SELECTOR NAMES A DOMAIN. `.card.stage-doc` is the one
+    # member of this family that is not a token role -- the source station's
+    # card takes a chrome colour (`var(--faint-ink)`) and no `--st-*` -- and it
+    # is openDox's SCHEMA word under § 2.2 rule 3 (`SNAPSHOT_FIELDS.source.field`
+    # is `documents`), not a domain's mapping, so it stays and is checked here
+    # rather than exempted silently.
+    named = set(re.findall(r"\.card\.stage-([A-Za-z0-9_-]+)", css))
+    assert named == set(TOKEN_ROLES) | {"doc"}, named
+    assert not named & set(OPENXFACTORY_WORDS), (
+        f"a card-stripe selector still names a domain's word: "
+        f"{sorted(named & set(OPENXFACTORY_WORDS))}")
+    # ONE SPELLER. The class is composed in the facet and nowhere else, so a
+    # role added to `TOKEN_ROLES` reaches every card without a view changing.
+    assert 'return "stage-" + role;' in _js_text()
+    for view in ("views/board.js", "views/funnel.js"):
+        text = (WEB / view).read_text(encoding="utf-8")
+        assert "vocab.stripeClass(" in text, (
+            f"{view} draws cards and composes no stripe class through the facet")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_board_really_emits_a_stripe_class_the_stylesheet_matches(tmp_path):
+    """THE PROOF THE TEXT PAIRING ABOVE CANNOT GIVE: the REAL `views/board.js`
+    is rendered under a DOM stub and every card class it emits is checked
+    against the selectors `styles.css` really declares.
+
+    A card class is the one thing in this bundle that fails SILENTLY. A missing
+    WORD is a blank label a human sees; a class that matches no rule is a card
+    that looks almost right — it keeps its border, its title and its metadata,
+    and loses a 3px stripe nobody is looking at. So the two ends are joined here
+    by RENDERING rather than by reading, and with a DECLARED facet as well as a
+    neutral one, because the class must not move when the host's words do.
+    """
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(_DOM_STUB + f"""
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const {{ renderBoard }} = await import(base + "board.js");
+const snap = {{
+  documents: [{{ id: "a.md", path: "ideation/brainstorm/a.md", kind: "document",
+               stage: "brainstorm", summary: "a note", dates: {{ captured: "2026-01-01" }} }}],
+  clusters: [], possibles: [],
+  staged_topics: [{{ staging_id: "topic-x", files: ["a.md"] }}],
+  changes: [{{ id: "ch-1", status: "active" }},
+            {{ id: "ch-2", status: "archived" }}],
+}};
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  stages: {{ source: {{ one: "doc", many: "docs", short: "docs", label: "docs" }} }},
+  statuses: {{ document: {{ captured: "brainstorm" }} }},
+}} }});
+function stripes(display) {{
+  const root = document.createElement("div");
+  renderBoard(root, snap, {{ display }});
+  return flatten(root)
+    .flatMap((n) => String(n.className || "").split(" "))
+    .filter((c) => c.startsWith("stage-"));
+}}
+console.log(JSON.stringify({{
+  neutral: stripes(D.neutralDisplay()), declared: stripes(declared),
+  roles: D.TOKEN_ROLES,
+}}));
+""", tmp_path)
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    selectors = set(re.findall(r"\.card\.stage-([A-Za-z0-9_-]+)", css))
+    # ALL FOUR COLUMNS DREW A CARD, so all four stripe roles are exercised: a
+    # run that silently rendered none would otherwise assert over an empty set.
+    assert sorted(set(out["neutral"])) == sorted(
+        "stage-" + role for role in out["roles"]), out["neutral"]
+    for emitted in set(out["neutral"]) | set(out["declared"]):
+        assert emitted[len("stage-"):] in selectors, (
+            f"views/board.js emits the class {emitted!r} and styles.css "
+            f"declares no `.card.{emitted}` rule — the card renders with no "
+            "stripe, which no assertion over its words would notice")
+    # THE CLASS DOES NOT MOVE WITH THE HOST'S WORDS. `declared` renames the
+    # source station and keeps openxFactory's `brainstorm` enum; the classes are
+    # identical because they were never that word.
+    assert sorted(out["declared"]) == sorted(out["neutral"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_funnel_draws_each_builder_with_its_own_stripe(tmp_path):
+    """THE SAME PROOF FOR `views/funnel.js` (Copilot round 1, and the finding is
+    right): the board's render test covered the board, and the funnel had only
+    a text assertion that `vocab.stripeClass(` appears SOMEWHERE in the file.
+
+    That is not coverage of anything. Handing `TOKEN_ROLE.CAPTURED` to the
+    selection, submission or completion builder would satisfy it exactly, and
+    every card would render with the WRONG stripe — the funnel's five builders
+    draw four different stripes and a text search cannot tell which builder got
+    which. So the real module is rendered here and each builder's card is
+    checked by the station it belongs to.
+    """
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(_DOM_STUB + f"""
+globalThis.ResizeObserver = class {{ observe() {{}} disconnect() {{}} }};
+globalThis.requestAnimationFrame = (fn) => fn();
+// the edge layer looks its endpoints up by id; a stub that answers `null`
+// makes `draw()` skip them, which is what a card-class probe wants.
+globalThis.document.getElementById = () => null;
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const {{ renderFunnel }} = await import(base + "funnel.js");
+// one card in EVERY station: a source document, a multi-member group, a
+// candidate, a selection, and a change at each of the two change stations.
+const snap = {{
+  documents: [{{ id: "a.md", path: "ideation/brainstorm/a.md", kind: "document",
+               stage: "brainstorm", summary: "a note", topics: ["t"] }},
+              {{ id: "b.md", path: "ideation/brainstorm/b.md", kind: "document",
+               stage: "brainstorm", summary: "another", topics: ["t"] }}],
+  clusters: [{{ id: "c1", name: "C", tallies: {{ document_links: 2 }},
+              document_edges: [{{ document: "a.md" }}, {{ document: "b.md" }}] }}],
+  possibles: [{{ id: "p1", title: "P", state: "latent",
+                claiming_clusters: ["c1"] }}],
+  staged_topics: [{{ staging_id: "topic-x", files: ["a.md"] }}],
+  changes: [{{ id: "ch-1", status: "active" }},
+            {{ id: "ch-2", status: "archived" }}],
+}};
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  stages: {{ source: {{ one: "chart", many: "charts", short: "charts",
+                      label: "charts" }} }},
+}} }});
+// every card, as (its identifying text, its stripe classes) — the funnel puts
+// each builder's card in its own column, and a card carries exactly one
+// `stage-*` class.
+function render(display) {{
+  const root = new Node("div");
+  renderFunnel(root, snap, {{ display }});
+  return {{
+    cards: flatten(root)
+      .filter((n) => String(n.className || "").split(" ").includes("card"))
+      .map((n) => String(n.className).split(" ")
+        .filter((c) => c.startsWith("stage-"))),
+    // the STATION words live on the column heads and the legend, never on a
+    // card: a card shows a name, a count and a status.
+    page: texts(root).join("|"),
+  }};
+}}
+const n = render(D.neutralDisplay()), d = render(declared);
+console.log(JSON.stringify({{
+  neutral: n.cards, neutralPage: n.page,
+  declared: d.cards, declaredPage: d.page,
+  roles: D.TOKEN_ROLES,
+}}));
+""", tmp_path)
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    selectors = set(re.findall(r"\.card\.stage-([A-Za-z0-9_-]+)", css))
+    cards = out["neutral"]
+    # EVERY card carries exactly one stripe class, and it is a real selector.
+    assert cards, "views/funnel.js rendered no cards at all"
+    for card in cards:
+        assert len(card) == 1, card
+        assert card[0][len("stage-"):] in selectors, (
+            f"views/funnel.js emits {card[0]!r} and styles.css declares "
+            f"no `.card.{card[0]}` rule — that card renders with no "
+            "stripe, and no assertion over its words would notice")
+    # …and the FIVE BUILDERS drew the four stripes the stations call for: the
+    # two source cards take the funnel's own chrome stripe, the group and the
+    # candidate take CAPTURED, the selection ORGANIZED, and the two change
+    # stations PROPOSED and COMPLETION. A builder handed the wrong role fails
+    # here and passes every text search.
+    got = sorted(c[0] for c in cards)
+    assert got == sorted([
+        "stage-doc", "stage-doc",          # the two source documents
+        "stage-captured",                  # the group
+        "stage-captured",                  # the candidate
+        "stage-organized",                 # the selection
+        "stage-proposed",                  # the open change
+        "stage-completion",                # the completed change
+    ]), got
+    # the four TOKEN stripes are all exercised, so none of them is untested
+    assert {c[0] for c in cards} - {"stage-doc"} == {
+        "stage-" + role for role in out["roles"]}
+    # THE STRIPES DO NOT MOVE WITH THE HOST'S WORDS.
+    assert sorted(c[0] for c in out["declared"]) == got
+    # …and the declared run really DID render the host's words, so the identical
+    # class lists above are evidence and not two runs of the same thing.
+    assert "charts" in out["declaredPage"], out["declaredPage"][:300]
+    assert "charts" not in out["neutralPage"]
+    assert NEUTRAL_DISPLAY["stages"]["source"]["short"] in out["neutralPage"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -945,3 +1189,229 @@ console.log(JSON.stringify({{
 """, tmp_path)
     assert out["declared"] == ["a.md brainstorm jotted"]
     assert out["neutral"] == ["a.md brainstorm captured"]
+
+
+# ---------------------------------------------------------------------------
+# `views/lens.js` -- the last view in the bundle that never read the facet.
+# ---------------------------------------------------------------------------
+
+def test_the_lens_reads_the_facet_it_has_been_handed_all_along():
+    """`app.js` has passed `display: ctx.display` on the `lens.keyword` mount
+    since slice S7, and `views/lens.js` simply never read it: fourteen rendered
+    sites spelled `documents` / `docs` / `cluster`, so a host that renamed its
+    source station read one word in the lens and another everywhere else.
+
+    THIS FILE IS CLASS "?" AND STAYS SO. The census records that none of RULED
+    Q1-Q5 rules on it and that it is "assertion 1's one declared, ruled-later
+    exception"; reading the facet decides nothing about that, exactly as
+    `app.js` (class A) reading it decided nothing about app.js. So this is the
+    ratchet for the WIRING, not a claim about the boundary -- the file is
+    outside assertion 4's scope, so `test_every_in_scope_file_reads_the_display
+    _facet` never looks at it and nothing else would notice it being unwired.
+    """
+    lens = (WEB / "views" / "lens.js").read_text(encoding="utf-8")
+    assert 'from "./display.js"' in lens, (
+        "views/lens.js stopped importing the display facet")
+    # RESET, NEVER CARRIED FORWARD -- `views/lineage.js`'s measured defect, in
+    # the shape this file's own render entry point takes. `renderLens` holds the
+    # facet in a per-render `const`, so there is no module-level binding to go
+    # stale; that is stronger than resetting one and is why
+    # `test_every_module_vocabulary_resets` does not (and must not) list it.
+    assert "const display = options.display || neutralDisplay();" in lens
+    assert "let display" not in lens and "\ndisplay =" not in lens
+    # every pane reads it off the ONE context object the panes already receive
+    assert "\n    display,\n" in lens, "the lens ctx does not carry the facet"
+    assert "ctx.display" in lens
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_lens_vocabulary_notes_and_seam_keys_come_off_the_facet(tmp_path):
+    """The two halves of that wiring that a text search cannot judge.
+
+    `VOCABULARIES` is evaluated at IMPORT, so the two of its notes that name the
+    source station cannot ask a facet that arrives per render -- they are
+    functions of it, and this calls them. And `createSeedFromStagingSeed` builds
+    the create request's `tab` and `scopeKind`: seam KEYS, never rendered words,
+    which `views/display.js` already declares in `TAB_IDS` and `SCOPE_KINDS` and
+    which this file used to spell a second time. One silent mismatch of exactly
+    that kind put a real create on `main` with no branch session
+    (`tests/test_bullseye_widget.py`'s own account of it), so the VALUE is
+    asserted here and not only the spelling.
+    """
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(f"""
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const L = await import(base + "lens.js");
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  stages: {{ source: {{ one: "chart", many: "charts", short: "charts",
+                      label: "charts" }} }},
+}} }});
+const neutral = D.neutralDisplay();
+const seed = L.createSeedFromStagingSeed(
+  {{ path: "ideation/staging/t/t.md", shared: ["a"], partial: [],
+    documents: ["x.md"], staging_id: "t" }}, "repo");
+console.log(JSON.stringify({{
+  declaredRail: L.VOCABULARIES.keywords.railNote(declared),
+  neutralRail: L.VOCABULARIES.keywords.railNote(neutral),
+  declaredNote: L.VOCABULARIES.repositories.note(declared),
+  tab: seed.tab, scopeKind: seed.scopeKind,
+  tabId: D.TAB_IDS.source, scopeId: D.SCOPE_KINDS.selection,
+}}));
+""", tmp_path)
+    assert "one dot per chart;" in out["declaredRail"].lower(), out["declaredRail"]
+    assert "CHART IDENTITY" in out["declaredNote"], out["declaredNote"]
+    assert "charts" in out["declaredNote"]
+    # …and the neutral install says openDox's own word, never openxFactory's
+    assert NEUTRAL_DISPLAY["stages"]["source"]["one"] in out["neutralRail"]
+    assert "document" not in out["neutralRail"]
+    # the seam keys are the facet's declarations, not a second spelling
+    assert out["tab"] == out["tabId"]
+    assert out["scopeKind"] == out["scopeId"] == "staged"
+
+
+def test_no_view_hands_one_role_families_constant_to_another_families_reader():
+    """THE COINCIDENCE `TOKEN_ROLE` EXISTS TO STOP A VIEW RELYING ON (Copilot
+    round 2, and the finding was right).
+
+    Three of the four design-token roles are spelled identically to three status
+    roles and the fourth identically to a stage role, so `tokenVar(STATUS_ROLE
+    .ORGANIZED)` WORKS -- and works for no reason a reader can rely on. It is
+    not reachable by the runtime guard either: `token(role)` refuses a role
+    outside `TOKEN_ROLES`, and `STATUS_ROLE.ORGANIZED` is inside it. Only the
+    TEXT can tell the two families apart, so the ratchet is over the text.
+
+    `views/board.js`'s four column heads were corrected in the act that declared
+    `TOKEN_ROLE`, and `views/funnel.js`'s legend swatch -- one call, in a
+    different function -- was not. A sweep by hand misses one; this does not.
+    """
+    offenders = []
+    for path in sorted((WEB / "views").glob("*.js")):
+        if path.name == "display.js":
+            continue  # the facet itself takes the role as a parameter
+        text = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"\.(tokenVar|stripeClass)\(\s*([^),]+)", text):
+            arg = m.group(2).strip()
+            if arg.startswith("TOKEN_ROLE."):
+                continue
+            if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$.]*", arg) and not (
+                    arg.startswith("STATUS_ROLE.") or arg.startswith("VOCABULARY.")):
+                continue  # a local variable already holding a token role
+            line = text[:m.start()].count("\n") + 1
+            offenders.append(f"{path.name}:{line} {m.group(1)}({arg})")
+    assert not offenders, (
+        "a design-token reader was handed a role from another family, or a bare "
+        f"string: {offenders}. Three of the four token roles are spelled like "
+        "status roles, so this compiles, renders and is wrong for a reason "
+        "nothing else in the tree can see. Name it through `TOKEN_ROLE`.")
+
+
+#: THE FOUR DOM AFFORDANCES `views/lens.js` USES AND THE BOARD AND FUNNEL DO
+#: NOT. Kept beside the test that needs them rather than folded into
+#: `_DOM_STUB`, so the two render tests above go on driving exactly the surface
+#: they were written against.
+_LENS_DOM_EXTRAS = r"""
+Node.prototype.append = function (...nodes) {
+  for (const c of nodes) this.appendChild(
+    typeof c === "string" ? globalThis.document.createTextNode(c) : c);
+};
+Node.prototype.remove = function () {};
+Node.prototype.querySelector = function () { return null; };
+Object.defineProperty(Node.prototype, "childElementCount",
+  { get() { return this.children.length; } });
+Object.defineProperty(Node.prototype, "classList", { get() {
+  const self = this;
+  return { add(...c) { self.className = (self.className + " " + c.join(" ")).trim(); },
+           remove() {}, toggle() {},
+           contains: (c) => String(self.className).split(" ").includes(c) };
+} });
+globalThis.document.getElementById = () => null;
+"""
+
+#: The station nouns `views/lens.js` used to spell. NOT the whole watched set:
+#: `draft` is in it and is also the plain English verb this view's own declared
+#: prose exemptions are about ("a draft a human commits"), so sweeping it would
+#: be asserting that openDox may not use an English word.
+#:
+#: `doc` IS HERE AND IS NOT IN THE WATCHED SET, deliberately. The matrix's
+#: column heading was the literal `doc`, and it survived every sweep in this
+#: branch because `tests/test_web_boundary.py` watches only the plural: a
+#: governance word abbreviated is still that word where a human reads it. This
+#: sweep is over RENDERED TEXT, where the short form is exactly as visible as
+#: the long one, so it watches both.
+_STATION_NOUNS = ("documents", "docs", "doc", "cluster", "clusters",
+                  "possible", "possibles", "proposal", "proposals")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_lens_renders_the_declared_words_and_none_of_openxfactorys(tmp_path):
+    """RENDER-LEVEL COVERAGE for `views/lens.js` (Copilot round 3's overview,
+    which listed no finding for it -- read anyway, and it was worth taking).
+
+    The two lens tests above are a text ratchet and a node call on two
+    `VOCABULARIES` notes. Neither renders anything, so neither could tell that a
+    pane was still spelling a station -- which is exactly how the matrix's `doc`
+    column heading survived this branch until round 2. This drives the REAL
+    module end to end and reads the whole page it produces.
+    """
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(_DOM_STUB + _LENS_DOM_EXTRAS + f"""
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const L = await import(base + "lens.js");
+const snap = {{
+  documents: [{{ id: "a.md", path: "a.md", topics: ["alpha", "beta"], summary: "s" }},
+              {{ id: "b.md", path: "b.md", topics: ["alpha"], summary: "t" }}],
+  keyword_index: [{{ keyword: "alpha", documents: ["a.md", "b.md"] }},
+                  {{ keyword: "beta", documents: ["a.md"] }}],
+  clusters: [], possibles: [], staged_topics: [], changes: [],
+}};
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  stages: {{ source: {{ one: "chart", many: "charts", short: "charts",
+                      label: "charts" }},
+           grouping: {{ one: "bundle", many: "bundles", short: "bundles",
+                      label: "bundles" }},
+           submission: {{ one: "filing", many: "filings", short: "filings",
+                        label: "filings" }} }},
+}} }});
+function page(display) {{
+  const root = new Node("div");
+  L.renderLens(root, snap, {{ display }});
+  // every rendered string on the page: text nodes AND the title/aria-label
+  // attributes, because half this view's station words are on a tooltip.
+  const nodes = flatten(root);
+  return nodes.map((n) => n.textContent).concat(
+    nodes.map((n) => n.title || ""),
+    nodes.map((n) => n.attrs["aria-label"] || "")).filter(Boolean).join(" | ");
+}}
+console.log(JSON.stringify({{
+  neutral: page(D.neutralDisplay()), declared: page(declared),
+}}));
+""", tmp_path)
+    neutral, declared = out["neutral"], out["declared"]
+    # THE NEUTRAL INSTALL SPEAKS openDox's OWN WORDS, in every pane.
+    one = NEUTRAL_DISPLAY["stages"]["source"]["one"]
+    many = NEUTRAL_DISPLAY["stages"]["source"]["many"]
+    assert f"{many} matching" in neutral            # the rail summary
+    assert f"One dot per {one}" in neutral          # its note
+    assert f"tick {many} to draft from them" in neutral   # the pick bar
+    assert f"select every listed {one}" in neutral        # the matrix header
+    assert "forming " + NEUTRAL_DISPLAY["stages"]["grouping"]["one"] in neutral
+    # …AND NONE OF openxFactory's STATION NOUNS SURVIVES ANYWHERE ON THE PAGE.
+    leaked = [w for w in _STATION_NOUNS
+              if re.search(rf"\b{re.escape(w)}\b", neutral)]
+    assert not leaked, (
+        f"a neutral lens still renders {leaked} — openxFactory's words for "
+        f"stations openDox has its own words for")
+    # THE DECLARED FACET MOVES EVERY ONE OF THEM, in the same places.
+    assert "charts matching" in declared
+    assert "One dot per chart" in declared
+    assert "tick charts to draft from them" in declared
+    assert "select every listed chart" in declared
+    assert "forming bundle" in declared
+    assert "human-seen filing" in declared
+    assert not re.search(rf"\b{re.escape(many)}\b", declared), (
+        "the declared run still shows openDox's own source word, so the facet "
+        "reached some panes and not others")
