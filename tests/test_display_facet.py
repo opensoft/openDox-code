@@ -1269,3 +1269,39 @@ console.log(JSON.stringify({{
     # the seam keys are the facet's declarations, not a second spelling
     assert out["tab"] == out["tabId"]
     assert out["scopeKind"] == out["scopeId"] == "staged"
+
+
+def test_no_view_hands_one_role_familys_constant_to_another_familys_reader():
+    """THE COINCIDENCE `TOKEN_ROLE` EXISTS TO STOP A VIEW RELYING ON (Copilot
+    round 2, and the finding was right).
+
+    Three of the four design-token roles are spelled identically to three status
+    roles and the fourth identically to a stage role, so `tokenVar(STATUS_ROLE
+    .ORGANIZED)` WORKS -- and works for no reason a reader can rely on. It is
+    not reachable by the runtime guard either: `token(role)` refuses a role
+    outside `TOKEN_ROLES`, and `STATUS_ROLE.ORGANIZED` is inside it. Only the
+    TEXT can tell the two families apart, so the ratchet is over the text.
+
+    `views/board.js`'s four column heads were corrected in the act that declared
+    `TOKEN_ROLE`, and `views/funnel.js`'s legend swatch -- one call, in a
+    different function -- was not. A sweep by hand misses one; this does not.
+    """
+    offenders = []
+    for path in sorted((WEB / "views").glob("*.js")):
+        if path.name == "display.js":
+            continue  # the facet itself takes the role as a parameter
+        text = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"\.(tokenVar|stripeClass)\(\s*([^),]+)", text):
+            arg = m.group(2).strip()
+            if arg.startswith("TOKEN_ROLE."):
+                continue
+            if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$.]*", arg) and not (
+                    arg.startswith("STATUS_ROLE.") or arg.startswith("VOCABULARY.")):
+                continue  # a local variable already holding a token role
+            line = text[:m.start()].count("\n") + 1
+            offenders.append(f"{path.name}:{line} {m.group(1)}({arg})")
+    assert not offenders, (
+        "a design-token reader was handed a role from another family, or a bare "
+        f"string: {offenders}. Three of the four token roles are spelled like "
+        "status roles, so this compiles, renders and is wrong for a reason "
+        "nothing else in the tree can see. Name it through `TOKEN_ROLE`.")

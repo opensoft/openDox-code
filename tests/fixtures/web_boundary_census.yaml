@@ -193,8 +193,8 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 totals:
   A: {files: 26, loc: 18073}
   B: {files: 1, loc: 73}
-  C: {files: 14, loc: 12580}
-  "?": {files: 1, loc: 1490}
+  C: {files: 14, loc: 12587}
+  "?": {files: 1, loc: 1495}
 files:
   - path: app.js
     class: A
@@ -309,7 +309,7 @@ files:
 
   - path: views/funnel.js
     class: C
-    loc: 633
+    loc: 640
     note: "realization funnel; imports model.js's COLUMN_KEYS; 10 governance literals"
 
   - path: views/grouping.js
@@ -335,8 +335,8 @@ files:
 
   - path: views/lens.js
     class: "?"
-    loc: 1490
-    note: "VOCABULARIES is a class-C vocabulary table; DTN_SEED_ROUTE and STAGING_SEED_ROUTE are answered ONLY by openxFactory's adapter (a THIRD column, note \u00a7 3.3). OUT OF SCOPE FOR S4 and still \"?\": none of Q1-Q5 rules on it (\u00a7 5's S4 row: 'lens.js is OUT OF SCOPE ... it stays \"?\" as assertion 1's one declared, ruled-later exception'). The S1 note read 'splits at S4', which contradicted that row; corrected by S4, which is the slice that would have had to do the splitting. Its two lane sites are assertion 2's own declared exception. loc 1524 -> 1435: the execute affordance, the organizer-evidence form and the outcome panel left for views/gate-lens.js with the two gate routes they called. loc 1435 -> 1490 when this file was WIRED ONTO THE DISPLAY FACET: app.js had passed it `display: ctx.display` since slice S7 and it was the last view in the bundle that never read it, so twenty-six rendered sites naming the SOURCE, GROUPING and SUBMISSION stations now resolve BY ROLE (sixteen in the first pass; the solo-term toggle, the matrix select-all, the drill rows, the staging-seed panel's four refusal captions and the two add-as-<grouping> captions on Copilot's round-1 findings) and three seam keys (`tab`, `scopeKind`) come off `views/display.js`'s own TAB_IDS / SCOPE_KINDS rather than being spelled a second time. THE CLASS DOES NOT MOVE and this act does not rule on it: reading the facet decided nothing about app.js's class either, and the two lane sites, the two routes and the VOCABULARIES table are untouched, so every sentence above still holds. Its module-level VOCABULARIES notes are the one place a station noun survives, and only two of them: they are evaluated at import and are now functions of the facet, called at the render that reads them."
+    loc: 1495
+    note: "VOCABULARIES is a class-C vocabulary table; DTN_SEED_ROUTE and STAGING_SEED_ROUTE are answered ONLY by openxFactory's adapter (a THIRD column, note \u00a7 3.3). OUT OF SCOPE FOR S4 and still \"?\": none of Q1-Q5 rules on it (\u00a7 5's S4 row: 'lens.js is OUT OF SCOPE ... it stays \"?\" as assertion 1's one declared, ruled-later exception'). The S1 note read 'splits at S4', which contradicted that row; corrected by S4, which is the slice that would have had to do the splitting. Its two lane sites are assertion 2's own declared exception. loc 1524 -> 1435: the execute affordance, the organizer-evidence form and the outcome panel left for views/gate-lens.js with the two gate routes they called. loc 1435 -> 1495 when this file was WIRED ONTO THE DISPLAY FACET: app.js had passed it `display: ctx.display` since slice S7 and it was the last view in the bundle that never read it, so twenty-six rendered sites naming the SOURCE, GROUPING and SUBMISSION stations now resolve BY ROLE (sixteen in the first pass; the solo-term toggle, the matrix select-all, the drill rows, the staging-seed panel's four refusal captions and the two add-as-<grouping> captions on Copilot's round-1 findings, and the matrix's own `doc` column heading on its round-2 finding — a word no sweep in this tree could have found, since only `docs` is watched) and three seam keys (`tab`, `scopeKind`) come off `views/display.js`'s own TAB_IDS / SCOPE_KINDS rather than being spelled a second time. THE CLASS DOES NOT MOVE and this act does not rule on it: reading the facet decided nothing about app.js's class either, and the two lane sites, the two routes and the VOCABULARIES table are untouched, so every sentence above still holds. Its module-level VOCABULARIES notes are the one place a station noun survives, and only two of them: they are evaluated at import and are now functions of the facet, called at the render that reads them."
 
   - path: views/lineage.js
     class: C

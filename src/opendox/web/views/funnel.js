@@ -333,7 +333,14 @@ function buildLegend() {
   const legend = el("div", "legend");
   legend.appendChild(legendEntry([legendDot("border:1.5px dashed var(--faint-ink)"),
     txt(" " + vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.CAPTURED) + " " + vocab.one(CANDIDATE))]));
-  legend.appendChild(legendEntry([legendDot("background:" + vocab.tokenVar(STATUS_ROLE.ORGANIZED)),
+  // THE SWATCH IS A TOKEN ROLE, the caption beside it a STATUS role (Copilot
+  // round 2). This read `tokenVar(STATUS_ROLE.ORGANIZED)` — a role from the
+  // status family handed to the reader that answers the design-token family,
+  // working only because the two happen to be spelled the same. That is the
+  // coincidence `TOKEN_ROLE` was declared to stop a view relying on, and
+  // `views/board.js`'s four column heads were corrected in the same act while
+  // this one was missed.
+  legend.appendChild(legendEntry([legendDot("background:" + vocab.tokenVar(TOKEN_ROLE.ORGANIZED)),
     txt(" " + vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.PROPOSED) + " at " + vocab.gate(CANDIDATE))]));
   const strike = el("span", null, vocab.status(VOCABULARY.CANDIDATE, STATUS_ROLE.SUPERSEDED));
   strike.style.textDecoration = "line-through";

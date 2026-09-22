@@ -502,7 +502,12 @@ function matrix(model, ctx) {
   const pickHead = el("th", "pickcol");
   head.appendChild(pickHead);
   head.appendChild(el("th", null, "#"));
-  head.appendChild(el("th", null, "doc"));
+  // THE MATRIX'S OWN COLUMN HEADING (Copilot round 2). It was the literal
+  // `doc` — openxFactory's short spelling of the source station, rendered as a
+  // table header — and it survived the first pass BECAUSE it is short: `doc`
+  // is not one of the twenty words `tests/test_web_boundary.py` watches (only
+  // `docs` is), so no sweep in this tree could have found it.
+  head.appendChild(el("th", null, display.one(SOURCE)));
   // the column heads carry the keyword's RAIL LETTER too, so a sector label
   // like "A ∧ G" reads straight off this table
   for (const k of model.checked) {
