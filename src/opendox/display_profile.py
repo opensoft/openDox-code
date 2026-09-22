@@ -74,7 +74,7 @@ that: it is openDox's OWN vocabulary, the neutral product's plain words for
 the neutral product's own shape, and a shell that renders it is VISIBLY not
 rendering a domain's. A student who installs openDox alone gets a working
 funnel that says `sources → groups → candidates → selections → submissions →
-completions`, which is RULING OQ-2's student install and § 2.1's own test for
+completed`, which is RULING OQ-2's student install and § 2.1's own test for
 class C — *"replace every governance word in it with a placeholder and the file
 still renders correctly"* — performed by the product rather than asserted about
 it.
