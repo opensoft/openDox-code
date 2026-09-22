@@ -1271,7 +1271,7 @@ console.log(JSON.stringify({{
     assert out["scopeKind"] == out["scopeId"] == "staged"
 
 
-def test_no_view_hands_one_role_familys_constant_to_another_familys_reader():
+def test_no_view_hands_one_role_families_constant_to_another_families_reader():
     """THE COINCIDENCE `TOKEN_ROLE` EXISTS TO STOP A VIEW RELYING ON (Copilot
     round 2, and the finding was right).
 
@@ -1305,3 +1305,113 @@ def test_no_view_hands_one_role_familys_constant_to_another_familys_reader():
         f"string: {offenders}. Three of the four token roles are spelled like "
         "status roles, so this compiles, renders and is wrong for a reason "
         "nothing else in the tree can see. Name it through `TOKEN_ROLE`.")
+
+
+#: THE FOUR DOM AFFORDANCES `views/lens.js` USES AND THE BOARD AND FUNNEL DO
+#: NOT. Kept beside the test that needs them rather than folded into
+#: `_DOM_STUB`, so the two render tests above go on driving exactly the surface
+#: they were written against.
+_LENS_DOM_EXTRAS = r"""
+Node.prototype.append = function (...nodes) {
+  for (const c of nodes) this.appendChild(
+    typeof c === "string" ? globalThis.document.createTextNode(c) : c);
+};
+Node.prototype.remove = function () {};
+Node.prototype.querySelector = function () { return null; };
+Object.defineProperty(Node.prototype, "childElementCount",
+  { get() { return this.children.length; } });
+Object.defineProperty(Node.prototype, "classList", { get() {
+  const self = this;
+  return { add(...c) { self.className = (self.className + " " + c.join(" ")).trim(); },
+           remove() {}, toggle() {},
+           contains: (c) => String(self.className).split(" ").includes(c) };
+} });
+globalThis.document.getElementById = () => null;
+"""
+
+#: The station nouns `views/lens.js` used to spell. NOT the whole watched set:
+#: `draft` is in it and is also the plain English verb this view's own declared
+#: prose exemptions are about ("a draft a human commits"), so sweeping it would
+#: be asserting that openDox may not use an English word.
+#:
+#: `doc` IS HERE AND IS NOT IN THE WATCHED SET, deliberately. The matrix's
+#: column heading was the literal `doc`, and it survived every sweep in this
+#: branch because `tests/test_web_boundary.py` watches only the plural: a
+#: governance word abbreviated is still that word where a human reads it. This
+#: sweep is over RENDERED TEXT, where the short form is exactly as visible as
+#: the long one, so it watches both.
+_STATION_NOUNS = ("documents", "docs", "doc", "cluster", "clusters",
+                  "possible", "possibles", "proposal", "proposals")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_lens_renders_the_declared_words_and_none_of_openxfactorys(tmp_path):
+    """RENDER-LEVEL COVERAGE for `views/lens.js` (Copilot round 3's overview,
+    which listed no finding for it -- read anyway, and it was worth taking).
+
+    The two lens tests above are a text ratchet and a node call on two
+    `VOCABULARIES` notes. Neither renders anything, so neither could tell that a
+    pane was still spelling a station -- which is exactly how the matrix's `doc`
+    column heading survived this branch until round 2. This drives the REAL
+    module end to end and reads the whole page it produces.
+    """
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(_DOM_STUB + _LENS_DOM_EXTRAS + f"""
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const L = await import(base + "lens.js");
+const snap = {{
+  documents: [{{ id: "a.md", path: "a.md", topics: ["alpha", "beta"], summary: "s" }},
+              {{ id: "b.md", path: "b.md", topics: ["alpha"], summary: "t" }}],
+  keyword_index: [{{ keyword: "alpha", documents: ["a.md", "b.md"] }},
+                  {{ keyword: "beta", documents: ["a.md"] }}],
+  clusters: [], possibles: [], staged_topics: [], changes: [],
+}};
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  stages: {{ source: {{ one: "chart", many: "charts", short: "charts",
+                      label: "charts" }},
+           grouping: {{ one: "bundle", many: "bundles", short: "bundles",
+                      label: "bundles" }},
+           submission: {{ one: "filing", many: "filings", short: "filings",
+                        label: "filings" }} }},
+}} }});
+function page(display) {{
+  const root = new Node("div");
+  L.renderLens(root, snap, {{ display }});
+  // every rendered string on the page: text nodes AND the title/aria-label
+  // attributes, because half this view's station words are on a tooltip.
+  const nodes = flatten(root);
+  return nodes.map((n) => n.textContent).concat(
+    nodes.map((n) => n.title || ""),
+    nodes.map((n) => n.attrs["aria-label"] || "")).filter(Boolean).join(" | ");
+}}
+console.log(JSON.stringify({{
+  neutral: page(D.neutralDisplay()), declared: page(declared),
+}}));
+""", tmp_path)
+    neutral, declared = out["neutral"], out["declared"]
+    # THE NEUTRAL INSTALL SPEAKS openDox's OWN WORDS, in every pane.
+    one = NEUTRAL_DISPLAY["stages"]["source"]["one"]
+    many = NEUTRAL_DISPLAY["stages"]["source"]["many"]
+    assert f"{many} matching" in neutral            # the rail summary
+    assert f"One dot per {one}" in neutral          # its note
+    assert f"tick {many} to draft from them" in neutral   # the pick bar
+    assert f"select every listed {one}" in neutral        # the matrix header
+    assert "forming " + NEUTRAL_DISPLAY["stages"]["grouping"]["one"] in neutral
+    # …AND NONE OF openxFactory's STATION NOUNS SURVIVES ANYWHERE ON THE PAGE.
+    leaked = [w for w in _STATION_NOUNS
+              if re.search(rf"\b{re.escape(w)}\b", neutral)]
+    assert not leaked, (
+        f"a neutral lens still renders {leaked} — openxFactory's words for "
+        f"stations openDox has its own words for")
+    # THE DECLARED FACET MOVES EVERY ONE OF THEM, in the same places.
+    assert "charts matching" in declared
+    assert "One dot per chart" in declared
+    assert "tick charts to draft from them" in declared
+    assert "select every listed chart" in declared
+    assert "forming bundle" in declared
+    assert "human-seen filing" in declared
+    assert not re.search(rf"\b{re.escape(many)}\b", declared), (
+        "the declared run still shows openDox's own source word, so the facet "
+        "reached some panes and not others")
