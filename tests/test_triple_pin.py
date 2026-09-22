@@ -15,13 +15,18 @@ directory and runs the step there, with the step's OWN `env:` block — so the
 numbers under test are the pinned numbers, and a re-pin does not need a matching
 edit here.
 
-The three cases are the three outcomes, each isolated so that exactly one
+The five cases are the five outcomes, each isolated so that exactly one
 refusal can fire:
 
   * the pinned state passes;
   * a report that did not appear is a refusal that NAMES the file, even where
     the two that did appear satisfy every number;
-  * one skip more is a refusal, with the floors still met.
+  * one skip more is a refusal, with the floors still met;
+  * one failure is a refusal, with both floors and the skip count still met
+    (openDox-code#33, Copilot review comment 5738550542, finding R4: the step
+    has six refusals and three had cases before this one; `FAILURES != 0` and
+    `ERRORS != 0` did not);
+  * one error is a refusal, on the same ground.
 """
 
 from __future__ import annotations
@@ -63,18 +68,24 @@ def _pins() -> tuple[int, int, int]:
     return max(floor_selected, floor_passed + skipped), skipped, skipped
 
 
-def _report(path: Path, tests: int, skipped: int) -> None:
+def _report(path: Path, tests: int, skipped: int, failures: int = 0,
+            errors: int = 0) -> None:
     path.write_text(
         '<?xml version="1.0" encoding="utf-8"?>\n<testsuites><testsuite '
-        f'name="pytest" errors="0" failures="0" skipped="{skipped}" '
-        f'tests="{tests}" time="0.1"/></testsuites>\n',
+        f'name="pytest" errors="{errors}" failures="{failures}" '
+        f'skipped="{skipped}" tests="{tests}" time="0.1"/></testsuites>\n',
         encoding="utf-8")
 
 
-def _run(where: Path, reports: dict[str, tuple[int, int]]) -> subprocess.CompletedProcess[str]:
+def _run(where: Path,
+         reports: dict[str, tuple[int, int] | tuple[int, int, int, int]],
+         ) -> subprocess.CompletedProcess[str]:
+    """Write one report per entry, `(tests, skipped)` or `(tests, skipped,
+    failures, errors)` — the shorter form is the common case and leaves
+    failures and errors at `_report`'s own zero default."""
     step = _step()
-    for name, (tests, skipped) in reports.items():
-        _report(where / name, tests, skipped)
+    for name, spec in reports.items():
+        _report(where / name, *spec)
     return subprocess.run(
         ("bash", "-c", step["run"]), cwd=where, capture_output=True, text=True,
         # A hermetic environment plus the step's own pins: an inherited
@@ -129,4 +140,46 @@ def test_one_skip_more_than_pinned_is_a_refusal() -> None:
     assert f"skipped {pinned + 1}, pinned exactly {pinned}" in completed.stdout, completed.stdout
     assert completed.stdout.count("::error::") == 1, (
         "the moved skip count must be the ONLY refusal in this case:\n"
+        f"{completed.stdout}")
+
+
+@needs_a_shell
+def test_a_failure_is_a_refusal_with_both_floors_and_the_skip_count_met() -> None:
+    """Clause (d) requires zero failures on its own, not as a side effect of
+    the floors: a suite that collected enough, passed enough and skipped
+    exactly the pinned number can still have FAILED one test, and that is not
+    a state this pin may wave through. `total - 19` is the same one-more
+    adjustment `test_one_skip_more_than_pinned_is_a_refusal` uses, here
+    covering the one test this case moves from passed to failed rather than
+    from collected to skipped, so SELECTED and PASSED both still clear their
+    floors and only FAILURES moves (openDox-code#33 Copilot review comment
+    5738550542, finding R4)."""
+    total, skipped, pinned = _pins()
+    with TemporaryDirectory() as directory:
+        completed = _run(Path(directory), {
+            "pytest-report-main.xml": (total - 19, skipped, 1, 0),
+            "pytest-report-s7.xml": (13, 0),
+            "pytest-report-runtime.xml": (7, 0)})
+    assert completed.returncode == 1, completed.stdout
+    assert "failures 1, clause (d) requires zero" in completed.stdout, completed.stdout
+    assert completed.stdout.count("::error::") == 1, (
+        "the failure must be the ONLY refusal in this case:\n"
+        f"{completed.stdout}")
+
+
+@needs_a_shell
+def test_an_error_is_a_refusal_with_both_floors_and_the_skip_count_met() -> None:
+    """Clause (d)'s other half: a collection ERROR is a distinct JUnit outcome
+    from a failure, and this pin must catch it exactly as certainly. Same
+    adjustment as the failure case above, so only ERRORS moves."""
+    total, skipped, pinned = _pins()
+    with TemporaryDirectory() as directory:
+        completed = _run(Path(directory), {
+            "pytest-report-main.xml": (total - 19, skipped, 0, 1),
+            "pytest-report-s7.xml": (13, 0),
+            "pytest-report-runtime.xml": (7, 0)})
+    assert completed.returncode == 1, completed.stdout
+    assert "errors 1, clause (d) requires zero" in completed.stdout, completed.stdout
+    assert completed.stdout.count("::error::") == 1, (
+        "the error must be the ONLY refusal in this case:\n"
         f"{completed.stdout}")
