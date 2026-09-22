@@ -2107,8 +2107,34 @@ jobs:
           # tests_runtime/` is 573, still unmoved.
           #
           # NOT DERIVED: 1106 + 3 is a CHECK on the reading, not its source.
-          MIN_SELECTED: "1109"
-          MIN_PASSED: "1106"
+          #
+          # AND ONCE MORE, for the four items #33's own Copilot review left
+          # REGISTERED (R4, F4, F5, F6) rather than taken, closed in one
+          # hygiene pass over `tests/test_triple_pin.py` and
+          # `tests/test_conformance_corpus.py`: two cases on THIS step's own
+          # clause (d), `FAILURES != 0` and `ERRORS != 0`, which had none
+          # before (R4); one stray `@requires_git` dropped from a test that
+          # runs no git, so the digest guard it carries stops depending on
+          # git's presence (F4, no case of its own — a marker, not an
+          # assertion); two cases for `--force`'s SUCCESS path, asserted
+          # nowhere until now — a `.gitignore` copied in with the corpus, and
+          # `$GIT_DIR/info/exclude` (F5); and one case for a key that merely
+          # LOOKS like git pathspec magic, closed in `conformance_corpus.py`
+          # with `--literal-pathspecs` on the `ls-tree` probe (F6). MEASURED
+          # over the tree of `2b78d54f`, by running this
+          # job's three invocations and summing their JUnit reports WITH THIS
+          # STEP'S OWN SCRIPT — `tests/` 738 passed 2 skipped, the S7 residue
+          # 13, the hermetic six 360 passed 1 skipped, which the script reads
+          # as `triple: selected=1114 passed=1111 skipped=3 failures=0
+          # errors=0`. `pytest -q tests_runtime/` is DB-backed and this act
+          # touched no file under `tests_runtime/`, so it is not re-measured
+          # here.
+          #
+          # NOT DERIVED: 1109 + 5 is a CHECK on the reading, not its source —
+          # five new passing cases (two on `test_triple_pin.py`, three on
+          # `test_conformance_corpus.py`), none of them a new skip.
+          MIN_SELECTED: "1114"
+          MIN_PASSED: "1111"
           # EXACT - the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "3"
         run: |
