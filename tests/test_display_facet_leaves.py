@@ -402,19 +402,22 @@ def test_the_docs_haystack_really_carries_both_spellings(tmp_path):
 # 6. views/board.js -- the card's date word is the column's word (suppressed 1)
 # ---------------------------------------------------------------------------
 
-def test_the_brainstorm_cards_date_metadata_resolves_the_status():
+def test_the_source_cards_date_metadata_resolves_the_status():
     """`columnLabel(SOURCE)` resolves the CAPTURED status through the facet
     while the metadata line beneath the same card spelled openDox's own
     `captured` as a literal. Invisible to `tests/test_web_boundary.py`
     assertion 4 -- `captured` is in neither of its word lists -- which is why a
     review round and not the census found it."""
     text = _text(BOARD_JS)
-    card = re.search(r"function brainstormCard\(d, indexes\) \{(.*?)\n\}",
+    # RENAMED BY ROLE: `brainstormCard` became `sourceCard` when the board's
+    # four builders stopped spelling one domain's stage words in the names a
+    # reader navigates that file by. The assertion below is unchanged.
+    card = re.search(r"function sourceCard\(d, indexes\) \{(.*?)\n\}",
                      text, re.S)
-    assert card, "views/board.js declares no brainstormCard(d, indexes)"
+    assert card, "views/board.js declares no sourceCard(d, indexes)"
     body = card.group(1)
     assert '"captured "' not in body, (
-        "brainstormCard still prefixes its date with the literal `captured`")
+        "the source card still prefixes its date with the literal `captured`")
     assert "vocab.status(VOCABULARY.DOCUMENT, STATUS_ROLE.CAPTURED)" in body
     # The SCHEMA key is untouched: `d.dates.captured` is the snapshot's own
     # field name (§ 2.2 rule 3), not a rendered word.

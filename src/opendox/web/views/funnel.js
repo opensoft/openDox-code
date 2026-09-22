@@ -1,7 +1,7 @@
 // Realization funnel view (T009). Grows the mockup's six-column docs-first
 // funnel: SVG #edgeLayer hand-drawn edges, per-hop link tallies rendered
 // VERBATIM from the snapshot's cluster.tallies (links, not cards), the
-// five-column collapsed-docs modifier as the opt-in (six columns is default),
+// five-column collapsed-source modifier as the opt-in (six columns is default),
 // and the mockup's hover-to-trace + click-to-pin interaction. Reads only the
 // in-memory snapshot object app.js fetched; issues no network/filesystem read.
 //
@@ -23,7 +23,7 @@
 import { buildFunnelModel, visibleEdges } from "./model.js";
 import { el, txt, basename, readinessHeat } from "./helpers.js";
 import {
-  DRILL_KINDS, STAGE_ROLES, STATUS_ROLE, TILE_KINDS, VOCABULARY,
+  DRILL_KINDS, STAGE_ROLES, STATUS_ROLE, TILE_KINDS, TOKEN_ROLE, VOCABULARY,
   neutralDisplay,
 } from "./display.js";
 
@@ -78,8 +78,24 @@ function openButton(kind, id, onOpenTile) {
 }
 
 // ---- per-column card builders (render snapshot fields verbatim) ----
+//
+// NAMED BY THEIR STATION'S ROLE, not by one domain's word for it (the same act
+// that renamed `views/board.js`'s four). `docCard` / `clusterCard` /
+// `possibleCard` / `stagedCard` spelled the source, grouping, candidate and
+// selection stations in the names a reader navigates this file by, beside
+// columns the same file already resolves through `vocab.label(role)`. The
+// census sweep never saw them — a name is machinery and renders nowhere, and
+// `\bcluster\b` does not match `clusterCard` — but § 2.2 rule 2's rule is "no
+// governance word in a NAME that would have to change if the domain's word
+// changed", and four of these five would have.
+//
+// `changeCard` IS THE FIFTH AND IT STAYS. `changes` is the SNAPSHOT's own field
+// name (`SNAPSHOT_FIELDS.submission.field`), openDox's schema under § 2.2 rule 3
+// and not a domain's mapping — "a descendant that renamed `clusters` would be
+// shipping a different snapshot, not a different domain" — and it is the one
+// builder that serves BOTH change stations, so no single station role names it.
 
-function docCard(node) {
+function sourceCard(node) {
   const d = node.document;
   const shared = (d.topics || []).length > 1;
   const card = el("div", "card stage-doc" + (shared ? " shared" : ""));
@@ -121,9 +137,10 @@ function maybeNotebookButton(card, notebook, kind, id) {
   if (btn) card.appendChild(btn);
 }
 
-function clusterCard(node, notebook) {
+function groupingCard(node, notebook) {
   const c = node.cluster;
-  const card = el("div", "card cluster-card stage-brainstorm");
+  const card = el("div", "card grouping-card "
+    + vocab.stripeClass(TOKEN_ROLE.CAPTURED));
   card.id = node.domId;
   card.tabIndex = 0;
   card.dataset.node = "";
@@ -174,7 +191,7 @@ function possibleMeta(p, state, shared) {
   return word;
 }
 
-function possibleCard(node) {
+function candidateCard(node) {
   const p = node.possible;
   const state = p.state || vocab.registerState(STATUS_ROLE.CAPTURED);
   const shared = (p.claiming_clusters || []).length > 1;
@@ -182,7 +199,8 @@ function possibleCard(node) {
   const stateRole = vocab.registerRole(state);
   const card = el("div", "card tile-candidate"
     + (stateRole ? " cstate-" + stateRole : "")
-    + " stage-brainstorm" + (shared ? " shared" : ""));
+    + " " + vocab.stripeClass(TOKEN_ROLE.CAPTURED)
+    + (shared ? " shared" : ""));
   card.id = node.domId;
   card.tabIndex = 0;
   card.dataset.node = "";
@@ -194,9 +212,9 @@ function possibleCard(node) {
   return card;
 }
 
-function stagedCard(node, onOpenTile, notebook) {
+function selectionCard(node, onOpenTile, notebook) {
   const t = node.staged;
-  const card = el("div", "card stage-staged");
+  const card = el("div", "card " + vocab.stripeClass(TOKEN_ROLE.ORGANIZED));
   card.id = node.domId;
   card.tabIndex = 0;
   card.dataset.node = "";
@@ -253,12 +271,18 @@ function changeCard(node, stageClass, onOpenTile, kind, notebook) {
 
 // Keyed by STAGE ROLE since slice S7 (the two change stations keep their own
 // card class and their own notebook tile kind; the completed station has none).
+// The two change stations' stripe classes are resolved WHEN THE ARROW RUNS, so
+// each render composes them from that render's own facet rather than from a
+// module-level string frozen at import.
 const CARD_BUILDERS = {
-  [CANDIDATE]: (n) => possibleCard(n),
-  [SELECTION]: (n, cb, nb) => stagedCard(n, cb, nb),
+  [CANDIDATE]: (n) => candidateCard(n),
+  [SELECTION]: (n, cb, nb) => selectionCard(n, cb, nb),
   [SUBMISSION]: (n, cb, nb) =>
-    changeCard(n, "stage-proposal", cb, DRILL_KINDS[SUBMISSION], nb),
-  [COMPLETION]: (n, cb) => changeCard(n, "stage-realized", cb, DRILL_KINDS[COMPLETION]),
+    changeCard(n, vocab.stripeClass(TOKEN_ROLE.PROPOSED), cb,
+               DRILL_KINDS[SUBMISSION], nb),
+  [COMPLETION]: (n, cb) =>
+    changeCard(n, vocab.stripeClass(TOKEN_ROLE.COMPLETION), cb,
+               DRILL_KINDS[COMPLETION]),
 };
 
 // #15: multi-member clusters render as cards; one-member clusters fold into a
@@ -275,7 +299,7 @@ function buildClusterColumn(stack, nodes, onToggle, notebook, label) {
   if (!nodes.length) { stack.appendChild(emptyStation(label || vocab.label(GROUPING))); return; }
   const multi = nodes.filter((n) => (n.cluster.document_edges || []).length > 1);
   const singles = nodes.filter((n) => (n.cluster.document_edges || []).length <= 1);
-  for (const n of multi) stack.appendChild(clusterCard(n, notebook));
+  for (const n of multi) stack.appendChild(groupingCard(n, notebook));
   if (!singles.length) return;
   const det = document.createElement("details");
   det.className = "singleton-group";
@@ -284,7 +308,7 @@ function buildClusterColumn(stack, nodes, onToggle, notebook, label) {
     + " (one contributing doc each)";
   det.appendChild(sum);
   const inner = el("div", "col-stack");
-  for (const n of singles) inner.appendChild(clusterCard(n, notebook));
+  for (const n of singles) inner.appendChild(groupingCard(n, notebook));
   det.appendChild(inner);
   det.addEventListener("toggle", onToggle);
   stack.appendChild(det);
@@ -362,7 +386,7 @@ function fillDocsStack(stack, nodes, docCards, label) {
     return null;
   }
   for (const node of nodes) {
-    const card = docCard(node);
+    const card = sourceCard(node);
     docCards.push(card);
     stack.appendChild(card);
   }
@@ -387,7 +411,7 @@ function buildColumns(model, inner, onOpenTile, requestDraw, notebook) {
   let docHeadN = null;
   let docsEmptyNote = null;
   for (const col of model.columns) {
-    const onlyDocs = col.collapsible ? " only-docs" : "";
+    const onlyDocs = col.collapsible ? " only-source" : "";
     const { head, n } = columnHead(col, onlyDocs);
     colheads.appendChild(head);
     const stack = el("div", "col-stack" + onlyDocs);
@@ -584,7 +608,7 @@ export function renderFunnel(root, snapshot, opts) {
 
   function setVariant(isCollapsed) {
     collapsed = isCollapsed;
-    inner.classList.toggle("collapsed-docs", collapsed);
+    inner.classList.toggle("collapsed-source", collapsed);
     v5.setAttribute("aria-pressed", String(collapsed));
     v6.setAttribute("aria-pressed", String(!collapsed));
     edges = visibleEdges(model, { collapsed });

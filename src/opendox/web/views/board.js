@@ -1,8 +1,10 @@
-// Pipeline board view (T010). Four lifecycle columns — brainstorm, staged,
-// active proposals, realized/archived — grown from the mockup's board. Reads
-// only the in-memory snapshot: brainstorm cards carry a possibles badge derived
-// purely by walking the snapshot's cluster membership + claiming links (layout
-// aggregation, never a re-scan). Staged cards surface exit-readiness verbatim.
+// Pipeline board view (T010). Four lifecycle columns, grown from the mockup's
+// board — which drew them as brainstorm, staged, active proposals and
+// realized/archived, one domain's words for the four STATIONS this file now
+// resolves by role. Reads only the in-memory snapshot: a source card carries a
+// candidate badge derived purely by walking the snapshot's cluster membership +
+// claiming links (layout aggregation, never a re-scan). A selection card
+// surfaces exit-readiness verbatim.
 //
 // v3 sweep: documents that fit no column are surfaced in an "everything else"
 // footer with a jump to the doc list instead of being silently hidden (#18);
@@ -15,7 +17,7 @@
 
 import { el, txt, basename } from "./helpers.js";
 import {
-  DRILL_KINDS, STAGE_ROLES, STATUS_ROLE, TILE_KINDS, VOCABULARY,
+  DRILL_KINDS, STAGE_ROLES, STATUS_ROLE, TILE_KINDS, TOKEN_ROLE, VOCABULARY,
   neutralDisplay,
 } from "./display.js";
 
@@ -109,8 +111,20 @@ function colHead(color, label, count) {
 
 // ---- per-column card builders ----
 
-function brainstormCard(d, indexes) {
-  const card = el("div", "card stage-brainstorm");
+// THE BUILDERS ARE NAMED BY THEIR STATION'S ROLE, not by one domain's word for
+// it. They were `brainstormCard` / `stagedTopicCard` / `proposalCard` /
+// `realizedCard` — four of openxFactory's stage words in the names a reader
+// navigates this file by, each beside a column the same file already resolves
+// through `columnLabel(role)`. A name is machinery and renders nowhere, which is
+// why the census sweep never saw them (`\bbrainstorm\b` does not match
+// `brainstormCard`) and why a review round had to; but § 2.2 rule 2's own rule,
+// as `tests/test_web_boundary.py` states it, is "no governance word in a NAME
+// that would have to change if the domain's word changed", and these four would
+// have. `changeCard` in `views/funnel.js` is the one that stays: `changes` is
+// the SNAPSHOT's field name under § 2.2 rule 3, openDox's schema and not a
+// domain's mapping.
+function sourceCard(d, indexes) {
+  const card = el("div", "card " + vocab.stripeClass(TOKEN_ROLE.CAPTURED));
   card.appendChild(el("div", "title", d.summary || basename(d.path)));
   // THE DATE'S OWN WORD IS THE COLUMN'S WORD (Copilot review 5192900474 on
   // PR #21, suppressed comment 1; slice S7 residue). The heading above this
@@ -140,8 +154,8 @@ function maybeNotebookButton(card, notebook, kind, id) {
   if (btn) card.appendChild(btn);
 }
 
-function stagedTopicCard(t, onOpenTile, notebook) {
-  const card = el("div", "card stage-staged");
+function selectionCard(t, onOpenTile, notebook) {
+  const card = el("div", "card " + vocab.stripeClass(TOKEN_ROLE.ORGANIZED));
   card.appendChild(el("div", "title", t.staging_id));
   const n = (t.files || []).length;
   card.appendChild(el("div", "meta", n + " file" + (n === 1 ? "" : "s")));
@@ -155,8 +169,8 @@ function stagedTopicCard(t, onOpenTile, notebook) {
   return card;
 }
 
-function proposalCard(c, onOpenTile, notebook) {
-  const card = el("div", "card stage-proposal");
+function submissionCard(c, onOpenTile, notebook) {
+  const card = el("div", "card " + vocab.stripeClass(TOKEN_ROLE.PROPOSED));
   card.appendChild(el("div", "id", c.id));
   const bits = [];
   if (c.task_progress?.total) bits.push((c.task_progress.completed || 0) + "/" + c.task_progress.total + " tasks");
@@ -169,8 +183,8 @@ function proposalCard(c, onOpenTile, notebook) {
   return card;
 }
 
-function realizedCard(c, onOpenTile) {
-  const card = el("div", "card stage-realized");
+function completionCard(c, onOpenTile) {
+  const card = el("div", "card " + vocab.stripeClass(TOKEN_ROLE.COMPLETION));
   card.appendChild(el("div", "id", c.id));
   if (c.ratification) {
     card.appendChild(el("div", "meta",
@@ -280,22 +294,22 @@ export function renderBoard(root, snapshot, opts) {
 
   const columns = [
     buildColumn(SOURCE,
-      colHead(vocab.tokenVar(STATUS_ROLE.CAPTURED), columnLabel(SOURCE), brainstorms.length),
-      brainstorms, (d) => brainstormCard(d, indexes),
+      colHead(vocab.tokenVar(TOKEN_ROLE.CAPTURED), columnLabel(SOURCE), brainstorms.length),
+      brainstorms, (d) => sourceCard(d, indexes),
       (d) => [d.summary, d.path, d.kind, ...(d.topics || [])],
       emptyNote(SOURCE), track),
     buildColumn(SELECTION,
-      colHead(vocab.tokenVar(STATUS_ROLE.ORGANIZED), columnLabel(SELECTION), staged.length),
-      staged, (t) => stagedTopicCard(t, onOpenTile, notebook),
+      colHead(vocab.tokenVar(TOKEN_ROLE.ORGANIZED), columnLabel(SELECTION), staged.length),
+      staged, (t) => selectionCard(t, onOpenTile, notebook),
       (t) => [t.staging_id, t.target_change, t.readiness_state],
       emptyNote(SELECTION), track),
     buildColumn(SUBMISSION,
-      colHead(vocab.tokenVar(STATUS_ROLE.PROPOSED), columnLabel(SUBMISSION), active.length),
-      active, (c) => proposalCard(c, onOpenTile, notebook),
+      colHead(vocab.tokenVar(TOKEN_ROLE.PROPOSED), columnLabel(SUBMISSION), active.length),
+      active, (c) => submissionCard(c, onOpenTile, notebook),
       (c) => [c.id, c.origin_staging_id], emptyNote(SUBMISSION), track),
     buildColumn(COMPLETION,
-      colHead(vocab.tokenVar("completion"), columnLabel(COMPLETION), archived.length),
-      archived, (c) => realizedCard(c, onOpenTile),
+      colHead(vocab.tokenVar(TOKEN_ROLE.COMPLETION), columnLabel(COMPLETION), archived.length),
+      archived, (c) => completionCard(c, onOpenTile),
       (c) => [c.id, c.ratification?.ratifier], emptyNote(COMPLETION), track),
   ];
 

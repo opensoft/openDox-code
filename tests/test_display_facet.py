@@ -450,6 +450,12 @@ def test_the_client_half_resolves_by_role_and_refuses_an_unknown_one(tmp_path):
 const neutral = D.neutralDisplay();
 let refused = null;
 try { neutral.one("triage"); } catch (e) { refused = e.name + ": " + e.message; }
+// THE STRIPE HOOK REFUSES THE SAME WAY, and it must: a class composed from an
+// undeclared role matches no rule in `styles.css`, so the card silently loses
+// its stripe where the word would have loudly gone missing.
+let stripeRefused = null;
+try { neutral.stripeClass("submission"); }
+catch (e) { stripeRefused = e.name + ": " + e.message; }
 const declared = D.readDisplay({ display: {
   schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
   stages: { grouping: { one: "cluster", many: "clusters", short: "clusters",
@@ -468,6 +474,9 @@ console.log(JSON.stringify({
   declaredArea: declared.areaOf("ideation/brainstorm/a.md").role,
   declaredSourceOne: declared.one("source"),
   tokenVar: declared.tokenVar("organized"),
+  stripeRefused,
+  stripeClass: declared.stripeClass("organized"),
+  neutralStripe: neutral.stripeClass("completion"),
 }));
 """, tmp_path)
     assert out["neutralOne"] == NEUTRAL_DISPLAY["stages"]["grouping"]["one"]
@@ -482,6 +491,15 @@ console.log(JSON.stringify({
     # the roles the host did not declare keep openDox's own words
     assert out["declaredSourceOne"] == NEUTRAL_DISPLAY["stages"]["source"]["one"]
     assert out["tokenVar"] == "var(--st-organized)"
+    # THE STRIPE HOOK IS THE SAME ROLE AS THE TOKEN, on a declared facet and on
+    # the neutral one alike -- the class never carried the host's word, so it
+    # does not move when the host's word does.
+    assert out["stripeClass"] == "stage-organized"
+    assert out["neutralStripe"] == "stage-completion"
+    # `submission` is a STAGE role and not a design-token one, which is exactly
+    # the mistake a bare string would make silently.
+    assert out["stripeRefused"].startswith("DisplayRoleError")
+    assert "submission" in out["stripeRefused"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -550,6 +568,109 @@ def test_the_payload_names_which_tokens_the_host_declared():
     assert sorted(partial["tokens"]) == sorted(TOKEN_ROLES)
     whole = display_manifest({"tokens": {role: "#123456" for role in TOKEN_ROLES}})
     assert whole["declared_tokens"] == list(TOKEN_ROLES)
+
+
+def test_the_card_stripe_hook_pairs_the_class_with_the_token_of_its_role():
+    """`display.stripeClass(role)` is `tokenVar(role)`'s other end, and this is
+    the pairing it exists to make mechanical.
+
+    `styles.css` declares one rule per design-token role -- `.card.stage-<role>
+    { --stripe: var(--st-<role>); }` -- and that rule is the ONLY thing holding
+    a card's stripe to its column's colour. Both halves used to be spelled by
+    hand at three sites: the stylesheet's four selectors, `views/board.js`'s
+    four card classes and `views/funnel.js`'s four, all in openxFactory's stage
+    words (`stage-brainstorm` / `stage-staged` / `stage-proposal` /
+    `stage-realized`) in the ONE styling surface RULED Q7 keeps stable. Nothing
+    failed if the three drifted -- a stripe that stops being drawn is invisible
+    to every DOM assertion in this tree, which is exactly why this pairing is
+    asserted on the TEXT of both files rather than on a render.
+    """
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    for role in TOKEN_ROLES:
+        assert re.search(
+            rf"^\.card\.stage-{re.escape(role)} \{{ --stripe: "
+            rf"var\(--st-{re.escape(role)}\); \}}$", css, re.M), (
+            f"styles.css declares no `.card.stage-{role}` rule reaching "
+            f"`var(--st-{role})`, so `display.stripeClass({role!r})` names a "
+            "class that matches nothing and that card loses its stripe")
+    # AND NO STRIPE SELECTOR NAMES A DOMAIN. `.card.stage-doc` is the one
+    # member of this family that is not a token role -- the source station's
+    # card takes a chrome colour (`var(--faint-ink)`) and no `--st-*` -- and it
+    # is openDox's SCHEMA word under § 2.2 rule 3 (`SNAPSHOT_FIELDS.source.field`
+    # is `documents`), not a domain's mapping, so it stays and is checked here
+    # rather than exempted silently.
+    named = set(re.findall(r"\.card\.stage-([A-Za-z0-9_-]+)", css))
+    assert named == set(TOKEN_ROLES) | {"doc"}, named
+    assert not named & set(OPENXFACTORY_WORDS), (
+        f"a card-stripe selector still names a domain's word: "
+        f"{sorted(named & set(OPENXFACTORY_WORDS))}")
+    # ONE SPELLER. The class is composed in the facet and nowhere else, so a
+    # role added to `TOKEN_ROLES` reaches every card without a view changing.
+    assert 'return "stage-" + role;' in _js_text()
+    for view in ("views/board.js", "views/funnel.js"):
+        text = (WEB / view).read_text(encoding="utf-8")
+        assert "vocab.stripeClass(" in text, (
+            f"{view} draws cards and composes no stripe class through the facet")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_board_really_emits_a_stripe_class_the_stylesheet_matches(tmp_path):
+    """THE PROOF THE TEXT PAIRING ABOVE CANNOT GIVE: the REAL `views/board.js`
+    is rendered under a DOM stub and every card class it emits is checked
+    against the selectors `styles.css` really declares.
+
+    A card class is the one thing in this bundle that fails SILENTLY. A missing
+    WORD is a blank label a human sees; a class that matches no rule is a card
+    that looks almost right — it keeps its border, its title and its metadata,
+    and loses a 3px stripe nobody is looking at. So the two ends are joined here
+    by RENDERING rather than by reading, and with a DECLARED facet as well as a
+    neutral one, because the class must not move when the host's words do.
+    """
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(_DOM_STUB + f"""
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const {{ renderBoard }} = await import(base + "board.js");
+const snap = {{
+  documents: [{{ id: "a.md", path: "ideation/brainstorm/a.md", kind: "document",
+               stage: "brainstorm", summary: "a note", dates: {{ captured: "2026-01-01" }} }}],
+  clusters: [], possibles: [],
+  staged_topics: [{{ staging_id: "topic-x", files: ["a.md"] }}],
+  changes: [{{ id: "ch-1", status: "active" }},
+            {{ id: "ch-2", status: "archived" }}],
+}};
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  stages: {{ source: {{ one: "doc", many: "docs", short: "docs", label: "docs" }} }},
+  statuses: {{ document: {{ captured: "brainstorm" }} }},
+}} }});
+function stripes(display) {{
+  const root = document.createElement("div");
+  renderBoard(root, snap, {{ display }});
+  return flatten(root)
+    .flatMap((n) => String(n.className || "").split(" "))
+    .filter((c) => c.startsWith("stage-"));
+}}
+console.log(JSON.stringify({{
+  neutral: stripes(D.neutralDisplay()), declared: stripes(declared),
+  roles: D.TOKEN_ROLES,
+}}));
+""", tmp_path)
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    selectors = set(re.findall(r"\.card\.stage-([A-Za-z0-9_-]+)", css))
+    # ALL FOUR COLUMNS DREW A CARD, so all four stripe roles are exercised: a
+    # run that silently rendered none would otherwise assert over an empty set.
+    assert sorted(set(out["neutral"])) == sorted(
+        "stage-" + role for role in out["roles"]), out["neutral"]
+    for emitted in set(out["neutral"]) | set(out["declared"]):
+        assert emitted[len("stage-"):] in selectors, (
+            f"views/board.js emits the class {emitted!r} and styles.css "
+            f"declares no `.card.{emitted}` rule — the card renders with no "
+            "stripe, which no assertion over its words would notice")
+    # THE CLASS DOES NOT MOVE WITH THE HOST'S WORDS. `declared` renames the
+    # source station and keeps openxFactory's `brainstorm` enum; the classes are
+    # identical because they were never that word.
+    assert sorted(out["declared"]) == sorted(out["neutral"])
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
