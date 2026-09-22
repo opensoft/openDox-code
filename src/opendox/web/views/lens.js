@@ -640,8 +640,8 @@ function renderStagingSeed(container, data, ctx) {
     go.title = "A project view composes published snapshots and is read-only:"
       + " a document is created IN a repository, not in a project. This "
       + "switches to " + owners[0] + ", where the create is live. The "
-      + "selection does not survive the switch — the same documents draft "
-      + "this seed again there.";
+      + "selection does not survive the switch — the same "
+      + ctx.display.many(SOURCE) + " draft this seed again there.";
     go.addEventListener("click", () => ctx.onOpenRepository(owners[0]));
     head.appendChild(go);
   } else if (ctx && ctx.onOpenDoxbench) {
@@ -853,9 +853,9 @@ function drillPane(model, ctx) {
     if (ctx.onSeed && row.matchCount >= 2) {
       const seed = el("button", "cbtn", "draft seed");
       seed.type = "button";
-      seed.title = "draft a candidate-register seed for the documents these "
-        + row.matchCount + " repositories share (text you merge; nothing is "
-        + "written)";
+      seed.title = "draft a candidate-register seed for the "
+        + ctx.display.many(SOURCE) + " these " + row.matchCount
+        + " repositories share (text you merge; nothing is written)";
       seed.addEventListener("click", () => ctx.onSeed(row.keywords, seed));
       seed.dataset.carriers = String(row.matchCount);
       acts.appendChild(seed);
