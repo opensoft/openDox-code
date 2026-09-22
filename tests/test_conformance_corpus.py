@@ -334,10 +334,21 @@ def test_a_hostile_init_template_cannot_rewrite_the_committed_bytes(
 # -- the residue openDox-code#31 registered ----------------------------------
 
 
-@requires_git
 def test_the_fixture_is_the_shipped_seed_and_not_a_description_of_it(
 ) -> None:
     """A fixture derived from simplified values proves nothing about the seed.
+
+    NOT MARKED `@requires_git`, and that is the fix rather than an oversight:
+    every assertion below is `hashlib.sha256` over the module-level
+    `_DOCUMENTS`/`_SHIPPED_SIZES`/`_SHIPPED_DIGESTS` dicts, and none of it
+    shells out to git. The marker sat on this test anyway, which drops the
+    digest guard — the one check standing between this whole file and a
+    fixture that has quietly drifted from the seed it claims to mirror — on
+    any runner without git, and moves `EXPECT_SKIPPED` there for a reason
+    that is not this test's own. Removing it does not move the pinned triple
+    on a runner that HAS git (this one always has, so the skipif condition
+    was already false and the test already ran) — it only makes the skip
+    count honest on one that does not.
 
     The first cut gave all three documents BOTH header fields and computed the
     fidelity table off those same values, so the suite proved byte fidelity
@@ -530,6 +541,39 @@ def test_an_exclusion_this_act_cannot_reach_is_named_and_not_a_git_error(
 
 
 @requires_git
+def test_a_magic_looking_key_is_named_absent_and_not_a_repository_problem(
+        shipped: Path, tmp_path: Path) -> None:
+    """A key that merely LOOKS like pathspec magic is not a repository fault.
+
+    `git ls-tree` parses a leading `:` as PATHSPEC MAGIC before it ever asks
+    the tree: MEASURED on git 2.43.0, a probe of `':!doomed.md'` exits 128
+    with `pathspec magic not supported by this command: 'exclude'`, for a key
+    that is otherwise ordinary and simply was never committed — `cat-file`
+    fails it exactly like any absent key (`does not exist in 'HEAD'`).
+    WITHOUT `--literal-pathspecs` on the probe, that 128 reads as "HEAD or
+    the repository itself is the problem" (Copilot review of PR #33, comment
+    5738611955, finding F6); the transposition below is real and undamaged,
+    so a key merely SHAPED like magic must still be named an ordinary absent
+    document, the same as any other key nobody committed.
+    """
+    import opendox.conformance_corpus as module
+
+    built = transpose(shipped, tmp_path / "transposition")
+    target = built / POPULATED
+    key = ":!doomed.md"
+
+    with pytest.raises(ValueError) as refused:
+        module._committed_blob(target, key)
+
+    said = str(refused.value)
+    assert f"does not hold {key!r} at all" in said, said
+    assert "ignore rule" in said, said
+    assert "cannot even ask its tree" not in said, (
+        "a magic-looking key was reported as a repository/HEAD problem "
+        f"instead of an ordinary absent document: {said}")
+
+
+@requires_git
 def test_a_blob_git_holds_but_cannot_read_is_not_named_an_exclusion(
         shipped: Path, tmp_path: Path) -> None:
     """The other way `cat-file` fails, and it is not the corpus's fault.
@@ -641,3 +685,87 @@ def test_a_populated_state_with_no_files_says_the_index_was_empty(
         "the total shape writes its sentence to STDOUT, so a refusal reading "
         f"only stderr would quote an empty string here: {said}")
     assert isinstance(refused.value.__cause__, subprocess.CalledProcessError)
+# -- the residue openDox-code#33 registered (F5) -----------------------------
+#
+# `--force`'s SUCCESS PATH was asserted NOWHERE: every exclusion case above
+# reaches a CONFIGURED ignore file through `GIT_CONFIG_GLOBAL`, which is what
+# `core.excludesFile=` disables — none of them ever lays a `.gitignore` down
+# INSIDE the populated state, or writes to `$GIT_DIR/info/exclude`, which are
+# the two entrances `--force` exists for (Copilot review of PR #33, comment
+# 5738550542, finding F5). Commit `521abb7c`'s own message additionally
+# MISDESCRIBED `test_an_exclusion_this_act_cannot_reach_is_named_and_not_a_git_error`
+# above as driving `$GIT_DIR/info/exclude` — it does not: both its cases are
+# the same `GIT_CONFIG_GLOBAL` excludes file as the test before it, with the
+# switch and `--force` monkeypatched out. That commit is already pushed and
+# its message cannot be corrected; the two cases below are the ones that were
+# actually missing, and this comment is the correction.
+
+
+@requires_git
+def test_a_gitignore_copied_in_with_the_corpus_does_not_shrink_it(
+        shipped: Path, tmp_path: Path) -> None:
+    """`--force`'s OWN entrance: a `.gitignore` the corpus carries in itself.
+
+    The shipped corpus is arbitrary files, and one of them may be exactly
+    this — nothing upstream of `transpose` promises otherwise. `core.
+    excludesFile=` disables the OPERATOR's ignore file and says nothing about
+    one the corpus brought with it; `--force` is what still adds it. This is
+    driven as a real `.gitignore` on disk, inside `shipped / POPULATED`
+    itself, rather than through `GIT_CONFIG_GLOBAL` — the channel none of the
+    cases above exercise.
+    """
+    (shipped / POPULATED / ".gitignore").write_text("*.md\n", encoding="utf-8")
+    built = transpose(shipped, tmp_path / "transposition")
+    served = reader("populated", str(built / POPULATED))
+    corpus = served.resolve(CorpusRef(name="populated",
+                                      location=str(built / POPULATED)))
+    listed = tuple(served.list_documents(corpus))
+    reference = _fingerprint(shipped / POPULATED)
+    assert sorted(d.key for d in listed) == sorted(reference), (
+        "a .gitignore copied in with the corpus took documents out of the "
+        f"transposition: {sorted(set(reference) - {d.key for d in listed})}")
+    for document_id in listed:
+        document = served.read(corpus, document_id)
+        assert hashlib.sha256(document.content).hexdigest() \
+            == reference[document_id.key], f"bytes differ at {document_id.key}"
+
+
+@requires_git
+def test_an_info_exclude_written_after_init_does_not_shrink_the_corpus(
+        shipped: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--force`'s OTHER entrance: `$GIT_DIR/info/exclude`.
+
+    No corpus file and no `GIT_CONFIG_GLOBAL` reaches this one — it lives
+    inside the repository `transpose` itself just created, so it is written
+    straight there, right after `init` and before `add`, which is exactly
+    where a real one would appear (a template, a hook, an operator poking the
+    fresh `.git` between the two calls this function makes back to back).
+    Driven with `_git` monkeypatched to seed it at that exact point, on the
+    populated repository only — the empty state's `.git` gets one too and it
+    is inert there, since nothing is ever added to it.
+    """
+    import opendox.conformance_corpus as module
+
+    real_git = module._git
+
+    def _seeded(repo: Path, *args: str, _real=real_git) -> None:
+        _real(repo, *args)
+        if args[:1] == ("init",) and repo.name == POPULATED:
+            exclude = repo / ".git" / "info" / "exclude"
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text("*.md\n", encoding="utf-8")
+
+    monkeypatch.setattr(module, "_git", _seeded)
+    built = transpose(shipped, tmp_path / "transposition")
+    served = reader("populated", str(built / POPULATED))
+    corpus = served.resolve(CorpusRef(name="populated",
+                                      location=str(built / POPULATED)))
+    listed = tuple(served.list_documents(corpus))
+    reference = _fingerprint(shipped / POPULATED)
+    assert sorted(d.key for d in listed) == sorted(reference), (
+        "an info/exclude written after init took documents out of the "
+        f"transposition: {sorted(set(reference) - {d.key for d in listed})}")
+    for document_id in listed:
+        document = served.read(corpus, document_id)
+        assert hashlib.sha256(document.content).hexdigest() \
+            == reference[document_id.key], f"bytes differ at {document_id.key}"

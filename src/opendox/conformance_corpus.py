@@ -208,6 +208,27 @@ def _committed_blob(repo: Path, key: str) -> bytes:
 
     So all three are answered, each in its own sentence, and each quotes what
     git actually said.
+
+    THE PROBE'S OWN PATHSPEC MUST BE LITERAL, or the table above is not the
+    whole story. A key beginning with `:` and a reserved short-magic mnemonic
+    (`!`, `^`, `@`, `-`, among others) or with `:(` is not read as a path at
+    all: git parses the leading `:` as PATHSPEC MAGIC and refuses the whole
+    `ls-tree` before it ever asks the tree. MEASURED on git 2.43.0: a key of
+    `:!doomed.md` — never committed, ordinary in every other way — makes
+    `cat-file` fail exactly like any absent key (`does not exist in 'HEAD'`),
+    and then makes THIS probe exit 128 with `pathspec magic not supported by
+    this command: 'exclude'`, which the branch below reads as "HEAD or the
+    repository itself is the problem" — true of the exit status and false of
+    the key, which was simply never committed. `--literal-pathspecs` closes
+    it: measured on the same key, the probe then reports rc 0 and an empty
+    listing, indistinguishable from any other absent key.
+
+    A key CONTAINING `*` was measured to need no such guard. `ls-tree` does
+    not expand a bare pathspec as a glob at all — measured on a tree holding
+    `alpha.md`, `beta.md` and a file literally named `a*.md`, `-- '*.md'`
+    matched NONE of the three, and `-- 'a*.md'` matched only the one file
+    actually named that — so `--literal-pathspecs` is added here for the `:`
+    case alone, and not because a glob was found to misbehave.
     """
     reading = {**_sanitized_git_environment(), "GIT_NO_REPLACE_OBJECTS": "1"}
     try:
@@ -218,7 +239,8 @@ def _committed_blob(repo: Path, key: str) -> bytes:
     except subprocess.CalledProcessError as failed:
         said = _what_git_said(failed.stderr, failed.stdout)
         listed = subprocess.run(
-            ("git", *_HARDENING, "ls-tree", "--name-only", "HEAD", "--", key),
+            ("git", *_HARDENING, "--literal-pathspecs", "ls-tree",
+             "--name-only", "HEAD", "--", key),
             cwd=repo, capture_output=True, env=reading)
         if listed.returncode != 0:
             raise ValueError(
