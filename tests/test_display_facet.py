@@ -456,6 +456,20 @@ try { neutral.one("triage"); } catch (e) { refused = e.name + ": " + e.message; 
 let stripeRefused = null;
 try { neutral.stripeClass("submission"); }
 catch (e) { stripeRefused = e.name + ": " + e.message; }
+// A FACET HANDED STRAIGHT TO `Display` NEVER PASSED THROUGH
+// `display_profile.normalize_display`, so its `tokens` table may carry a role
+// openDox does not declare. The merged table then HAS a value for it, and a
+// guard that asked "is there a value" answered yes — three names the stylesheet
+// declares no rule for (Copilot round 1).
+const stray = D.readDisplay({ display: {
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  tokens: { submission: "#123456" },
+} });
+const strayRefusals = {};
+for (const call of ["token", "tokenVar", "stripeClass"]) {
+  try { strayRefusals[call] = stray[call]("submission"); }
+  catch (e) { strayRefusals[call] = e.name; }
+}
 const declared = D.readDisplay({ display: {
   schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
   stages: { grouping: { one: "cluster", many: "clusters", short: "clusters",
@@ -474,7 +488,7 @@ console.log(JSON.stringify({
   declaredArea: declared.areaOf("ideation/brainstorm/a.md").role,
   declaredSourceOne: declared.one("source"),
   tokenVar: declared.tokenVar("organized"),
-  stripeRefused,
+  stripeRefused, strayRefusals,
   stripeClass: declared.stripeClass("organized"),
   neutralStripe: neutral.stripeClass("completion"),
 }));
@@ -500,6 +514,12 @@ console.log(JSON.stringify({
     # the mistake a bare string would make silently.
     assert out["stripeRefused"].startswith("DisplayRoleError")
     assert "submission" in out["stripeRefused"]
+    # …and the closed family is what is checked, not the merged table's keys:
+    # a stray `tokens` entry buys a colour, a `var(--st-*)` and a class that
+    # nothing in `styles.css` matches, so all three refuse.
+    assert out["strayRefusals"] == {"token": "DisplayRoleError",
+                                    "tokenVar": "DisplayRoleError",
+                                    "stripeClass": "DisplayRoleError"}
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -671,6 +691,109 @@ console.log(JSON.stringify({{
     # source station and keeps openxFactory's `brainstorm` enum; the classes are
     # identical because they were never that word.
     assert sorted(out["declared"]) == sorted(out["neutral"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_funnel_draws_each_builder_with_its_own_stripe(tmp_path):
+    """THE SAME PROOF FOR `views/funnel.js` (Copilot round 1, and the finding is
+    right): the board's render test covered the board, and the funnel had only
+    a text assertion that `vocab.stripeClass(` appears SOMEWHERE in the file.
+
+    That is not coverage of anything. Handing `TOKEN_ROLE.CAPTURED` to the
+    selection, submission or completion builder would satisfy it exactly, and
+    every card would render with the WRONG stripe — the funnel's five builders
+    draw four different stripes and a text search cannot tell which builder got
+    which. So the real module is rendered here and each builder's card is
+    checked by the station it belongs to.
+    """
+    views = json.dumps(str(WEB / "views"))
+    out = _run_node(_DOM_STUB + f"""
+globalThis.ResizeObserver = class {{ observe() {{}} disconnect() {{}} }};
+globalThis.requestAnimationFrame = (fn) => fn();
+// the edge layer looks its endpoints up by id; a stub that answers `null`
+// makes `draw()` skip them, which is what a card-class probe wants.
+globalThis.document.getElementById = () => null;
+const base = {views} + "/";
+const D = await import(base + "display.js");
+const {{ renderFunnel }} = await import(base + "funnel.js");
+// one card in EVERY station: a source document, a multi-member group, a
+// candidate, a selection, and a change at each of the two change stations.
+const snap = {{
+  documents: [{{ id: "a.md", path: "ideation/brainstorm/a.md", kind: "document",
+               stage: "brainstorm", summary: "a note", topics: ["t"] }},
+              {{ id: "b.md", path: "ideation/brainstorm/b.md", kind: "document",
+               stage: "brainstorm", summary: "another", topics: ["t"] }}],
+  clusters: [{{ id: "c1", name: "C", tallies: {{ document_links: 2 }},
+              document_edges: [{{ document: "a.md" }}, {{ document: "b.md" }}] }}],
+  possibles: [{{ id: "p1", title: "P", state: "latent",
+                claiming_clusters: ["c1"] }}],
+  staged_topics: [{{ staging_id: "topic-x", files: ["a.md"] }}],
+  changes: [{{ id: "ch-1", status: "active" }},
+            {{ id: "ch-2", status: "archived" }}],
+}};
+const declared = D.readDisplay({{ display: {{
+  schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
+  stages: {{ source: {{ one: "chart", many: "charts", short: "charts",
+                      label: "charts" }} }},
+}} }});
+// every card, as (its identifying text, its stripe classes) — the funnel puts
+// each builder's card in its own column, and a card carries exactly one
+// `stage-*` class.
+function render(display) {{
+  const root = new Node("div");
+  renderFunnel(root, snap, {{ display }});
+  return {{
+    cards: flatten(root)
+      .filter((n) => String(n.className || "").split(" ").includes("card"))
+      .map((n) => String(n.className).split(" ")
+        .filter((c) => c.startsWith("stage-"))),
+    // the STATION words live on the column heads and the legend, never on a
+    // card: a card shows a name, a count and a status.
+    page: texts(root).join("|"),
+  }};
+}}
+const n = render(D.neutralDisplay()), d = render(declared);
+console.log(JSON.stringify({{
+  neutral: n.cards, neutralPage: n.page,
+  declared: d.cards, declaredPage: d.page,
+  roles: D.TOKEN_ROLES,
+}}));
+""", tmp_path)
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    selectors = set(re.findall(r"\.card\.stage-([A-Za-z0-9_-]+)", css))
+    cards = out["neutral"]
+    # EVERY card carries exactly one stripe class, and it is a real selector.
+    assert cards, "views/funnel.js rendered no cards at all"
+    for card in cards:
+        assert len(card) == 1, card
+        assert card[0][len("stage-"):] in selectors, (
+            f"views/funnel.js emits {card[0]!r} and styles.css declares "
+            f"no `.card.{card[0]}` rule — that card renders with no "
+            "stripe, and no assertion over its words would notice")
+    # …and the FIVE BUILDERS drew the four stripes the stations call for: the
+    # two source cards take the funnel's own chrome stripe, the group and the
+    # candidate take CAPTURED, the selection ORGANIZED, and the two change
+    # stations PROPOSED and COMPLETION. A builder handed the wrong role fails
+    # here and passes every text search.
+    got = sorted(c[0] for c in cards)
+    assert got == sorted([
+        "stage-doc", "stage-doc",          # the two source documents
+        "stage-captured",                  # the group
+        "stage-captured",                  # the candidate
+        "stage-organized",                 # the selection
+        "stage-proposed",                  # the open change
+        "stage-completion",                # the completed change
+    ]), got
+    # the four TOKEN stripes are all exercised, so none of them is untested
+    assert {c[0] for c in cards} - {"stage-doc"} == {
+        "stage-" + role for role in out["roles"]}
+    # THE STRIPES DO NOT MOVE WITH THE HOST'S WORDS.
+    assert sorted(c[0] for c in out["declared"]) == got
+    # …and the declared run really DID render the host's words, so the identical
+    # class lists above are evidence and not two runs of the same thing.
+    assert "charts" in out["declaredPage"], out["declaredPage"][:300]
+    assert "charts" not in out["neutralPage"]
+    assert NEUTRAL_DISPLAY["stages"]["source"]["short"] in out["neutralPage"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")

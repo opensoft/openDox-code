@@ -50,7 +50,7 @@ import {
   SCOPE_KINDS, STAGE_ROLES, TAB_IDS, neutralDisplay,
 } from "./display.js";
 
-const [SOURCE, GROUPING] = STAGE_ROLES;
+const [SOURCE, GROUPING, , , SUBMISSION] = STAGE_ROLES;
 
 // add-shared-identity-seeds: DRAFTING route (writes nothing; returns the
 // register row + detail section as TEXT for a human to merge).
@@ -171,10 +171,14 @@ function renderReasonForm(container, labelText, onConfirm) {
 // realized; the tested engine lens_submission.add_as_cluster submits it).
 function renderPlan(container, plan, opts) {
   const o = opts || {};
+  // `plan.kind` is the ENGINE's key (`lens_submission.add_as_cluster`), never a
+  // rendered word — the caption beside it is, and it names two stations.
+  const display = o.display || neutralDisplay();
   container.innerHTML = "";
   const box = el("div", "draft-confirm");
   const title = plan.kind === "add-as-cluster"
-    ? "planned: add as cluster (workbench set + human-seen proposal)"
+    ? "planned: add as " + display.one(GROUPING) + " (workbench set + "
+      + "human-seen " + display.one(SUBMISSION) + ")"
     : "planned: save recipe (workbench manifest)";
   box.appendChild(el("div", "dc-h", title));
   box.appendChild(el("div", "dc-line", "set: " + plan.name + " · repository " + plan.repository));
@@ -471,11 +475,13 @@ function keywordRail(model, ctx) {
   if (solos.length) {
     const toggle = el("button", "railmore",
       showSolos
-        ? "hide the " + solos.length + " single-document " + vocab.terms
-        : "show " + solos.length + " more on a single document only");
+        ? "hide the " + solos.length + " single-" + display.one(SOURCE) + " "
+          + vocab.terms
+        : "show " + solos.length + " more on a single " + display.one(SOURCE)
+          + " only");
     toggle.type = "button";
-    toggle.title = "a " + vocab.term + " carried by a single document can "
-      + "only ever put one dot on the radar";
+    toggle.title = "a " + vocab.term + " carried by a single "
+      + display.one(SOURCE) + " can only ever put one dot on the radar";
     toggle.addEventListener("click", () => ctx.setShowSolos(!showSolos));
     pane.appendChild(toggle);
   }
@@ -510,8 +516,9 @@ function matrix(model, ctx) {
   if (model.matrix.length && ctx.pickDoc) {
     const all = el("input");
     all.type = "checkbox";
-    all.title = "select every listed document";
-    all.setAttribute("aria-label", "select every listed document");
+    const selectAll = "select every listed " + display.one(SOURCE);
+    all.title = selectAll;
+    all.setAttribute("aria-label", selectAll);
     all.checked = model.matrix.every((r) => ctx.isPicked(r.document));
     all.addEventListener("change", () =>
       ctx.pickDocs(model.matrix.map((r) => r.document), all.checked));
@@ -625,9 +632,9 @@ function renderStagingSeed(container, data, ctx) {
   if (ctx && ctx.onOpenDoxbench && ctx.canCreate) {
     const move = el("button", "cbtn", "open in doxBench");
     move.type = "button";
-    move.title = "carry this seed into doxBench as a new document: the "
-      + "staging area, the shared terms and the provenance are filled in, "
-      + "and you write the rest there";
+    move.title = "carry this seed into doxBench as a new "
+      + ctx.display.one(SOURCE) + ": the staging area, the shared terms and "
+      + "the provenance are filled in, and you write the rest there";
     move.addEventListener("click", () => ctx.onOpenDoxbench(data));
     head.appendChild(move);
   } else if (ctx && ctx.onOpenDoxbench && owners.length === 1
@@ -638,7 +645,8 @@ function renderStagingSeed(container, data, ctx) {
     const go = el("button", "cbtn", "open " + owners[0] + " to draft");
     go.type = "button";
     go.title = "A project view composes published snapshots and is read-only:"
-      + " a document is created IN a repository, not in a project. This "
+      + " a " + ctx.display.one(SOURCE) + " is created IN a repository, not "
+      + "in a project. This "
       + "switches to " + owners[0] + ", where the create is live. The "
       + "selection does not survive the switch — the same "
       + ctx.display.many(SOURCE) + " draft this seed again there.";
@@ -650,12 +658,13 @@ function renderStagingSeed(container, data, ctx) {
     // not a click the machine can make for them.
     const why = el("span", "dc-why", owners.length
       ? "read-only here — these live in " + owners.join(", ")
-        + "; open the one that should own the new document"
+        + "; open the one that should own the new " + ctx.display.one(SOURCE)
       : "read-only here — open a single repository to draft this");
     why.title = "A project view composes published snapshots from several "
-      + "repositories, so it can be read but never written: a document is "
-      + "created IN a repository, not in a project. The seed above is "
-      + "complete — the same selection drafts it again there.";
+      + "repositories, so it can be read but never written: a "
+      + ctx.display.one(SOURCE) + " is created IN a repository, not in a "
+      + "project. The seed above is complete — the same selection drafts it "
+      + "again there.";
     head.appendChild(why);
   }
   // A WAY BACK (Brett, 2026-08-08: "there is no back from this widget"). A
@@ -831,12 +840,12 @@ function drillPane(model, ctx) {
       combinationName(row, model.checked.length)));
     const acts = el("div", "drill-acts");
     acts.appendChild(el("span", "drill-count",
-      n + " document" + (n === 1 ? "" : "s")));
+      n + " " + ctx.display.count(SOURCE, n)));
 
     const go = el("button", "cbtn", "drill in");
     go.type = "button";
-    go.title = "scope the dashboard to these " + n
-      + " document" + (n === 1 ? "" : "s");
+    go.title = "scope the dashboard to these " + n + " "
+      + ctx.display.count(SOURCE, n);
     go.disabled = !ctx.onDrill;
     go.addEventListener("click", () => ctx.onDrill({
       kind: isCentre ? "centre" : "sector",
@@ -1424,15 +1433,16 @@ export function renderLens(root, snapshot, opts) {
       save.addEventListener("click", () => {
         const model = buildLensModel(snapshot, query());
         renderPlan(confirm, savePlan(model, repository, ctx.setName()),
-                   { caps, fetcher, mountLensGate });
+                   { caps, fetcher, mountLensGate, display });
       });
       const cluster = el("button", "cbtn",
-        "→ add as cluster (workbench set + human-seen proposal)");
+        "→ add as " + display.one(GROUPING) + " (workbench set + human-seen "
+        + display.one(SUBMISSION) + ")");
       cluster.type = "button";
       cluster.addEventListener("click", () => {
         const model = buildLensModel(snapshot, query());
         renderPlan(confirm, clusterPlan(model, repository, ctx.setName()),
-                   { caps, fetcher, mountLensGate });
+                   { caps, fetcher, mountLensGate, display });
       });
       box.appendChild(save);
       box.appendChild(cluster);

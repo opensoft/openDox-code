@@ -367,8 +367,8 @@ function buildVariantToggle() {
 
 // ---- column/head assembly (extracted so renderFunnel stays an orchestrator) ----
 
-function columnHead(col, onlyDocs) {
-  const head = el("div", "colhead" + onlyDocs);
+function columnHead(col, onlySource) {
+  const head = el("div", "colhead" + onlySource);
   head.appendChild(txt(col.label + " "));
   const n = el("span", "n", String(col.nodes.length));
   head.appendChild(n);
@@ -411,10 +411,10 @@ function buildColumns(model, inner, onOpenTile, requestDraw, notebook) {
   let docHeadN = null;
   let docsEmptyNote = null;
   for (const col of model.columns) {
-    const onlyDocs = col.collapsible ? " only-source" : "";
-    const { head, n } = columnHead(col, onlyDocs);
+    const onlySource = col.collapsible ? " only-source" : "";
+    const { head, n } = columnHead(col, onlySource);
     colheads.appendChild(head);
-    const stack = el("div", "col-stack" + onlyDocs);
+    const stack = el("div", "col-stack" + onlySource);
     if (col.key === SOURCE) {
       docHeadN = n;
       docsEmptyNote = fillDocsStack(stack, col.nodes, docCards, col.label);

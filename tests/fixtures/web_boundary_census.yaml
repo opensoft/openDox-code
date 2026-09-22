@@ -191,10 +191,10 @@ measured_at: "opensoft/openDox-code main a99eba03e31a0aee1cc15a061fdf718cc88a2c4
 # shape and `test_the_declared_totals_are_re_derived_from_the_rows` can refuse a
 # drift between the two. Measured at slice S4 (see the S4 block above).
 totals:
-  A: {files: 26, loc: 18061}
+  A: {files: 26, loc: 18073}
   B: {files: 1, loc: 73}
   C: {files: 14, loc: 12580}
-  "?": {files: 1, loc: 1480}
+  "?": {files: 1, loc: 1490}
 files:
   - path: app.js
     class: A
@@ -229,7 +229,7 @@ files:
   - path: views/board.js
     class: C
     loc: 332
-    note: "four lifecycle columns; 25 governance literals loc 306 -> 318 on the § 3.4 SLICE S7 RESIDUE (Copilot review 5192900474 on openDox-code#21 @ c7a216c, suppressed comment 1): brainstormCard()'s date metadata resolved the CAPTURED status through the facet instead of spelling openDox's own `captured` beside a heading that already resolved it. Invisible to assertion 4 -- `captured` is in neither _STATUS_WORDS nor _STAGE_WORDS -- which is why a review round and not this census found it."
+    note: "four lifecycle columns; 25 governance literals loc 306 -> 318 on the § 3.4 SLICE S7 RESIDUE (Copilot review 5192900474 on openDox-code#21 @ c7a216c, suppressed comment 1): brainstormCard()'s date metadata resolved the CAPTURED status through the facet instead of spelling openDox's own `captured` beside a heading that already resolved it. Invisible to assertion 4 -- `captured` is in neither _STATUS_WORDS nor _STAGE_WORDS -- which is why a review round and not this census found it. THAT BUILDER IS NOW `sourceCard()`: this file's four per-column builders are named by the STATION each draws for (`sourceCard` / `selectionCard` / `submissionCard` / `completionCard`), and their card class comes from `display.stripeClass(role)` rather than from `stage-brainstorm` and its three siblings. loc 318 -> 332."
 
   - path: views/bullseye.js
     class: A
@@ -254,7 +254,7 @@ files:
 
   - path: views/display.js
     class: A
-    loc: 734
+    loc: 746
     exempt: [SNAPSHOT_FIELDS, ACT_IDS, TILE_KINDS, SCOPE_KINDS, TAB_IDS,
              SESSION_SCOPE_KINDS, SESSION_BRANCH_NAMESPACES, SNAPSHOT_VALUES,
              DRILL_KINDS, DRAFT_PATHS, SECTION_ORDER]
@@ -335,8 +335,8 @@ files:
 
   - path: views/lens.js
     class: "?"
-    loc: 1480
-    note: "VOCABULARIES is a class-C vocabulary table; DTN_SEED_ROUTE and STAGING_SEED_ROUTE are answered ONLY by openxFactory's adapter (a THIRD column, note \u00a7 3.3). OUT OF SCOPE FOR S4 and still \"?\": none of Q1-Q5 rules on it (\u00a7 5's S4 row: 'lens.js is OUT OF SCOPE ... it stays \"?\" as assertion 1's one declared, ruled-later exception'). The S1 note read 'splits at S4', which contradicted that row; corrected by S4, which is the slice that would have had to do the splitting. Its two lane sites are assertion 2's own declared exception. loc 1524 -> 1435: the execute affordance, the organizer-evidence form and the outcome panel left for views/gate-lens.js with the two gate routes they called. loc 1435 -> 1479 when this file was WIRED ONTO THE DISPLAY FACET: app.js had passed it `display: ctx.display` since slice S7 and it was the last view in the bundle that never read it, so fourteen rendered sites naming the SOURCE and GROUPING stations now resolve BY ROLE and three seam keys (`tab`, `scopeKind`) come off `views/display.js`'s own TAB_IDS / SCOPE_KINDS rather than being spelled a second time. THE CLASS DOES NOT MOVE and this act does not rule on it: reading the facet decided nothing about app.js's class either, and the two lane sites, the two routes and the VOCABULARIES table are untouched, so every sentence above still holds. Its module-level VOCABULARIES notes are the one place a station noun survives, and only two of them: they are evaluated at import and are now functions of the facet, called at the render that reads them."
+    loc: 1490
+    note: "VOCABULARIES is a class-C vocabulary table; DTN_SEED_ROUTE and STAGING_SEED_ROUTE are answered ONLY by openxFactory's adapter (a THIRD column, note \u00a7 3.3). OUT OF SCOPE FOR S4 and still \"?\": none of Q1-Q5 rules on it (\u00a7 5's S4 row: 'lens.js is OUT OF SCOPE ... it stays \"?\" as assertion 1's one declared, ruled-later exception'). The S1 note read 'splits at S4', which contradicted that row; corrected by S4, which is the slice that would have had to do the splitting. Its two lane sites are assertion 2's own declared exception. loc 1524 -> 1435: the execute affordance, the organizer-evidence form and the outcome panel left for views/gate-lens.js with the two gate routes they called. loc 1435 -> 1490 when this file was WIRED ONTO THE DISPLAY FACET: app.js had passed it `display: ctx.display` since slice S7 and it was the last view in the bundle that never read it, so twenty-six rendered sites naming the SOURCE, GROUPING and SUBMISSION stations now resolve BY ROLE (sixteen in the first pass; the solo-term toggle, the matrix select-all, the drill rows, the staging-seed panel's four refusal captions and the two add-as-<grouping> captions on Copilot's round-1 findings) and three seam keys (`tab`, `scopeKind`) come off `views/display.js`'s own TAB_IDS / SCOPE_KINDS rather than being spelled a second time. THE CLASS DOES NOT MOVE and this act does not rule on it: reading the facet decided nothing about app.js's class either, and the two lane sites, the two routes and the VOCABULARIES table are untouched, so every sentence above still holds. Its module-level VOCABULARIES notes are the one place a station noun survives, and only two of them: they are evaluated at import and are now functions of the facet, called at the render that reads them."
 
   - path: views/lineage.js
     class: C

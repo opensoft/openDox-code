@@ -615,7 +615,19 @@ export class Display {
   }
 
   // ---- design tokens ----
+  // MEMBERSHIP IN `TOKEN_ROLES`, NOT "is there a value" (Copilot round 1, and
+  // the finding is right). `this._tokens` is `NEUTRAL_DISPLAY.tokens` merged
+  // with whatever `facet.tokens` carried, and `readDisplay` does NOT check that
+  // table's KEYS — `display_profile.normalize_display` refuses an unknown token
+  // role, but a facet object handed straight to `Display` (a fixture, a node
+  // probe, a test) never passes through it. So a stray `tokens: { submission:
+  // "#fff" }` made `token("submission")` answer, `tokenVar` compose
+  // `var(--st-submission)` and `stripeClass` compose `stage-submission`: three
+  // names the stylesheet declares no rule for, from a guard that was checking
+  // the wrong thing. The closed family is the declaration; the merged table is
+  // only where its values happen to live.
   token(role) {
+    if (TOKEN_ROLES.indexOf(role) === -1) refuseRole("token", role, TOKEN_ROLES);
     const value = this._tokens[role];
     if (value === undefined) refuseRole("token", role, TOKEN_ROLES);
     return value;
