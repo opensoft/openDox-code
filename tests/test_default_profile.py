@@ -92,20 +92,23 @@ ACT_VERBS = ("demote", "edit-apply", "ratify", "kickoff", "propose",
              "approve-model", "create-project", "edit-project",
              "lens-save-recipe", "lens-add-as-cluster")
 
-#: One word, compared whole against each token of a NAME.
-_NAME_WORDS = frozenset(STATUS_TAXONOMY + CHANGE_SPEC_DELTA_NOUNS
-                        + tuple(verb for verb in ACT_VERBS if "-" not in verb))
+#: One word each: compared whole against each token of a NAME, and matched as a
+#: whole word in help text and in rendered words.
+_WORDS = frozenset(STATUS_TAXONOMY + CHANGE_SPEC_DELTA_NOUNS
+                   + tuple(verb for verb in ACT_VERBS if "-" not in verb))
 
-#: The words a sentence of HELP TEXT is swept for: all three families, less
-#: `change` and `changes`. In English prose those are verbs as often as the
-#: OpenSpec noun, and the runtime's own help uses one that way:
+#: The help strings that use a swept word in ANOTHER sense, each one measured,
+#: whole, with the word it may carry. `change` is an English verb as often as
+#: the OpenSpec noun, and the runtime's own help uses it that way once:
 #: `runtime migrate --plan` reads "report what would be applied and change
-#: nothing". Both words stay in the NAME sweep and the DISPLAY sweep, where no
-#: verb reading exists.
-_PROSE_WORDS = frozenset(STATUS_TAXONOMY
-                         + tuple(n for n in CHANGE_SPEC_DELTA_NOUNS
-                                 if n not in ("change", "changes"))
-                         + tuple(verb for verb in ACT_VERBS if "-" not in verb))
+#: nothing". Only that exact string is exempt, and only for that word. So any
+#: other use of `change` or `changes` in help text, noun or verb, fails the
+#: sweep until someone has read it and entered it here.
+#: `test_every_exempt_help_string_is_one_the_default_really_carries` keeps the
+#: list from outliving the text it names.
+_OTHER_SENSES = frozenset({
+    ("change", "report what would be applied and change nothing"),
+})
 
 
 def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
@@ -216,7 +219,7 @@ def _offending_names(names: list[str]) -> list[str]:
         normalized = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
         tokens = normalized.split("-")
         for token in tokens:
-            if token in _NAME_WORDS:
+            if token in _WORDS:
                 offences.add(f"{name!r} names {token!r}")
         for verb in ACT_VERBS:
             if "-" in verb and f"-{verb}-" in f"-{normalized}-":
@@ -224,12 +227,20 @@ def _offending_names(names: list[str]) -> list[str]:
     return sorted(offences)
 
 
-def _offending_words(texts: list[str], words: frozenset[str]) -> list[str]:
-    """Each whole word of `words`, and each hyphenated act verb, in `texts`."""
+def _offending_words(texts: list[str], words: frozenset[str], *,
+                     exempt: frozenset[tuple[str, str]] = frozenset()
+                     ) -> list[str]:
+    """Each whole word of `words`, and each hyphenated act verb, in `texts`.
+
+    `exempt` holds `(word, text)` pairs read and found to use the word in
+    another sense. It exempts that word in that whole text, and nothing else.
+    """
     offences: set[str] = set()
     for text in texts:
         lowered = text.lower()
         for word in words:
+            if (word, text) in exempt:
+                continue
             if re.search(rf"\b{re.escape(word)}\b", lowered):
                 offences.add(f"{word!r} in {text!r}")
         for verb in ACT_VERBS:
@@ -343,17 +354,34 @@ def test_the_defaults_help_carries_none_of_the_publishers_vocabulary() -> None:
     """The same sweep over every description and help string it contributes."""
     _names, prose, _words = _declared(default_profile)
     assert prose, "the sweep read no help text"
-    offences = _offending_words(prose, _PROSE_WORDS)
+    offences = _offending_words(prose, _WORDS, exempt=_OTHER_SENSES)
     assert not offences, (
         f"the default profile's help text carries {offences}, words of the "
-        "publishing repository's status taxonomy, nouns or acts")
+        "publishing repository's status taxonomy, nouns or acts. If one is used "
+        "in another sense, read it and enter the whole string in _OTHER_SENSES")
+
+
+def test_every_exempt_help_string_is_one_the_default_really_carries() -> None:
+    """An exemption names text that exists, and a swept word that is in it.
+
+    Otherwise the list would go on exempting a string after the text had
+    changed, and a new use of the word could come in under a stale entry.
+    """
+    _names, prose, _words = _declared(default_profile)
+    for word, text in sorted(_OTHER_SENSES):
+        assert text in prose, (
+            f"_OTHER_SENSES exempts {text!r}, which the default no longer "
+            "carries as a help string; remove the entry")
+        assert word in _WORDS and re.search(rf"\b{re.escape(word)}\b",
+                                            text.lower()), (
+            f"_OTHER_SENSES exempts {word!r} in {text!r}, where it does not occur")
 
 
 def test_the_default_renders_none_of_the_publishers_vocabulary() -> None:
     """The same sweep over every word the default's display renders."""
     _names, _prose, words = _declared(default_profile)
     assert words, "the sweep read no rendered word"
-    offences = _offending_words(words, _NAME_WORDS)
+    offences = _offending_words(words, _WORDS)
     assert not offences, (
         f"the default profile's display renders {offences}, words of the "
         "publishing repository's vocabulary, where openDox's own words belong")
@@ -383,10 +411,13 @@ def test_the_sweep_catches_a_profile_that_carries_the_vocabulary() -> None:
     names, prose, words = _declared(_GovernedProfile())
     assert {"'ratify' names 'ratify'", "'open-pr' names 'open-pr'",
             "'--staged' names 'staged'"} <= set(_offending_names(names))
-    assert any("'spec'" in offence
-               for offence in _offending_words(prose, _PROSE_WORDS))
+    help_offences = _offending_words(prose, _WORDS, exempt=_OTHER_SENSES)
+    assert {"'spec' in 'ratify the spec delta'",
+            "'change' in 'ratify a change'"} <= set(help_offences), (
+        "the help sweep missed a noun, `change` among them: the exemption for "
+        "the runtime's verb must not exempt the word elsewhere")
     assert any("'brainstorm'" in offence
-               for offence in _offending_words(words, _NAME_WORDS))
+               for offence in _offending_words(words, _WORDS))
 
 
 # --------------------------------------------------------------------------
