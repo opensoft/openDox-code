@@ -1635,8 +1635,26 @@ def build_server(
     # UNDECLARED MOVEMENT that the arrival verifier refuses (RULED OQ-1) —
     # RULED ASK-7 -> 1 leaves those four stale lines standing until the next
     # declared-edit window. This comment is the correction until then.
+    #
+    # ONE STATEMENT, and it names the extensions it collects (`contributed`),
+    # because the handler-contribution facet below reads them again.
+    # `tests/test_profile_registration.py` lifts every statement of this body
+    # that reads `ROUTE_EXTENSIONS` off the proxy and EXECUTES it against a
+    # stand-in seam that carries `collect_bindings` alone. A read split from its
+    # collection would leave that test executing a read that collects nothing,
+    # and a second read would hand the stand-in a call it does not have.
     route_bindings = route_extension.collect_bindings(
-        tuple(profile_openxfactory.ROUTE_EXTENSIONS) + tuple(route_extensions))
+        contributed := tuple(profile_openxfactory.ROUTE_EXTENSIONS)
+        + tuple(route_extensions))
+    # THE HANDLER-CONTRIBUTION FACET (R1Q1 (a), openxFactory#656 comment
+    # 5817152735): the mixins holding the methods those bindings name, read
+    # off the host profile and off every extension collected above. They are
+    # checked against the core handler HERE, beside the bindings and for the
+    # same reason: a contribution that would shadow the core, or clash with
+    # another, refuses the build before any expensive work starts. They are
+    # composed into the bound class below, ahead of `resolve_handlers`.
+    handler_contributions = route_extension.collect_handler_contributions(
+        (profile_openxfactory, *contributed), base=DashboardHandler)
 
     web_dir = Path(web_dir).resolve()
     snapshot_path = Path(snapshot_path).resolve()
@@ -1806,7 +1824,12 @@ def build_server(
         host_profile=view_extension.host_profile_name(profile_openxfactory),
     )
 
-    bound = type("BoundDashboardHandler", (DashboardHandler,), {
+    # The core handler FIRST among the bases and the declared contributions
+    # after it (`route_extension.compose_handler`). With none declared, this is
+    # exactly the `type("BoundDashboardHandler", (DashboardHandler,), {...})`
+    # it replaces.
+    bound = route_extension.compose_handler(
+        "BoundDashboardHandler", DashboardHandler, handler_contributions, {
         "checkout_root": checkout_root,
         "snapshot_path": snapshot_path,
         "snapshot_route": snapshot_route,
