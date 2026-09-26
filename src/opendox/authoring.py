@@ -298,12 +298,26 @@ def _classify_proposal(text: str):
     invented. A create gate's whole question is about a body that is not in the
     corpus yet, so the proposal is presented as a corpus of one: staged in a
     throwaway tree under the same prefix the create path writes into, resolved
-    through `home_corpus()` like any other location, and classified through the
-    same six operations every other caller gets. The shortcut — importing the
-    package's classifier and calling it on a string — is exactly the route
-    `corpus-adapter-seam` requirement 4 forbids ("no privileged direct call, no
-    bypass of the interface for openxFactory's own corpus"), and
+    through the registered home-corpus seam (`corpus_adapter.home()`) like any
+    other location, and classified through the same six operations every other
+    caller gets. The shortcut — importing the package's classifier and calling
+    it on a string — is exactly the route `corpus-adapter-seam` requirement 4
+    forbids ("no privileged direct call, no bypass of the interface for
+    openxFactory's own corpus"), and
     `tests/corpus-adapter/test_no_privileged_route.py` fails the build for it.
+
+    THE SEAM, NOT A NAME (`split-opendox-two-layer-product` § 4.1, plan 034
+    T021). This used to read `from corpus_adapter_openxfactory import
+    home_corpus` — a deferred reach into the publisher, one of #1144's F4.1
+    scan's 27 hits, and design.md § D6's more dangerous class: it survived any
+    import-based health check and failed only when a caller reached this far.
+    It now resolves the REGISTERED factory through `corpus_adapter.home()`
+    instead: with nothing registered, `home()` raises `CorpusRefused` naming
+    the seam and the remedy (4.2, unchanged by this task); with a factory
+    registered — a host's own, or openDox's `LocalGitCorpus` default an entry
+    point registers where no host has (4.1a, T022) — `home()` returns it,
+    unevaluated, for this function to call with its own root, exactly as
+    `corpus_adapter.py`'s own contract says: `adapter, ref = home()(root)`.
 
     The imports are function-local for the reason `home.py`'s own were: this
     module's dependence on the seam sits at ONE readable point, and no import
@@ -314,14 +328,13 @@ def _classify_proposal(text: str):
     read exactly as it was written and one that cannot be encoded is read the
     way this corpus would read it rather than raising inside a gate.
     """
-    from .corpus_adapter import DocumentId
-    from corpus_adapter_openxfactory import home_corpus
+    from .corpus_adapter import DocumentId, home
 
     with tempfile.TemporaryDirectory(prefix="xf-proposal-") as staged:
         document = Path(staged) / PROPOSAL_KEY
         document.parent.mkdir(parents=True, exist_ok=True)
         document.write_bytes(text.encode("utf-8", errors="replace"))
-        adapter, ref = home_corpus(staged)
+        adapter, ref = home()(staged)
         resolved = adapter.resolve(ref)
         return adapter.classify(resolved,
                                 DocumentId(corpus=ref.name, key=PROPOSAL_KEY))
