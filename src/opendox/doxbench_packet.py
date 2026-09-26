@@ -231,18 +231,36 @@ def register_status_exemption(rail: object) -> object:
     `STATUS_EXEMPTION_REQUIRED` as callables: `lifecycle_status(text)`, the
     document's own declared `Status:` or None, and
     `is_compression_exempt(text)`. The other five of `_STATUS_EXEMPTION_NAMES`
-    answer on this module where the rail carries them."""
+    answer on this module where the rail carries them.
+
+    A rail that does not carry either is refused with `TypeError` naming what
+    it lacks, and so is one that CANNOT HAND EITHER OVER: a lazy rail whose
+    lookup of a required name raises (a `ModuleNotFoundError` from what it
+    loads on first use, say) is a rail that lacks that name. Its failure is
+    chained to the refusal, so the reason stays readable, and it never escapes
+    the registration as a failure of some other kind."""
     global _status_exemption_rail
-    missing = [name for name in STATUS_EXEMPTION_REQUIRED
-               if not callable(getattr(rail, name, None))]
+    missing: list[str] = []
+    probe_failure: Exception | None = None
+    for name in STATUS_EXEMPTION_REQUIRED:
+        try:
+            member = getattr(rail, name)
+        except Exception as exc:  # noqa: BLE001 - a name it cannot hand over is a name it lacks
+            probe_failure = probe_failure or exc
+            member = None
+        if not callable(member):
+            missing.append(name)
     if rail is None or missing:
-        raise TypeError(
+        refusal = TypeError(
             "register_status_exemption() takes the host's status-exemption "
             "rail, which must carry callable "
             f"{', '.join(STATUS_EXEMPTION_REQUIRED)}; "
             f"{type(rail).__name__} lacks {', '.join(missing) or 'them'}. A "
             "host with no rail does not register one: it leaves the seam "
             "empty, and the assembler refuses, naming this call.")
+        if probe_failure is None:
+            raise refusal
+        raise refusal from probe_failure
     if _status_exemption_rail is not None and _status_exemption_rail is not rail:
         raise StatusExemptionAlreadyRegistered(
             "a status-exemption rail is already registered at openDox's "
@@ -1482,12 +1500,18 @@ def __getattr__(name: str):
     `REQUIRED_HEADER_FIELDS` under § 2.3. Every name the lifecycle-status block
     used to define here still answers here, resolved through
     `_status_exemption()` on access, so nothing outside this file had to be
-    edited for the carve. Today the only reader outside the module is
-    `tests/ideation-dashboard/test_doxbench_packet.py`, which spells all seven
-    `pk.<name>` across four tests — including the two that guard the wide
-    ruling `align-status-reader-to-real-lines` closed, which must go on
-    pointing at whatever this module's exemption actually uses rather than at
-    a second copy of it.
+    edited for the carve. The readers outside this repository are two test
+    files, each binding this module as `pk`. openXdox-code's
+    `tests/test_doxbench_packet.py` spells five of the seven `pk.<name>`
+    across six tests, including the two that guard the wide ruling
+    `align-status-reader-to-real-lines` closed, which must go on pointing at
+    whatever this module's exemption actually uses rather than at a second
+    copy of it. openxFactory's
+    `tests/ideation-dashboard/test_doxbench_status_exemption.py` reads all
+    seven, to prove each alias IS the carved rail's own object. Against an
+    openDox that carries this seam, each needs its test process to register
+    a rail first; one that has not reads every name as an `AttributeError`
+    naming the seam.
 
     ONE POINT OF DEPENDENCE, WHICH IS THE PROPERTY A SCAN CAN CHECK. This
     function imports nothing itself; it goes through `_status_exemption()`,

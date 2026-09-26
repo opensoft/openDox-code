@@ -34,7 +34,8 @@ WHAT IT ASSERTS, FOR EACH SEAM
    sources marked by the rail's own verdicts.
 5. THE REGISTRATION DISCIPLINE: one registration, idempotent for the same
    object, refused for a different one, and a rail that could not mark a
-   source is refused when it is registered.
+   source is refused when it is registered, with the seam's own `TypeError`,
+   including a lazy one whose names fail to resolve.
 6. THE STATIC HALF: the seams' functions make no deferred reach into the
    publisher or the consumer, read by `ast` the way F4.1's scan reads the
    whole package.
@@ -429,6 +430,50 @@ def test_a_rail_that_could_not_mark_a_source_is_refused_when_registered(not_a_ra
     with pytest.raises(TypeError, match="takes the host's status-exemption rail"):
         pk.register_status_exemption(not_a_rail)
     assert pk.status_exemption_registered() is False
+
+
+@pytest.mark.parametrize("failure", [
+    ModuleNotFoundError("No module named 'a_hosts_rail_backend'"),
+    AttributeError("module 'a_hosts_rail_backend' has no attribute 'READER'"),
+    RuntimeError("the host's rail could not load its vocabulary"),
+], ids=["module-not-found", "attribute-error", "any-other-failure"])
+def test_a_rail_that_cannot_hand_over_its_names_is_refused_when_registered(failure):
+    """A LAZY rail whose required names fail to resolve is a rail that lacks
+    them. It is refused at registration with the seam's own `TypeError`, the
+    failure chained as the cause, and not let through as a failure of
+    whatever the rail tripped on while loading."""
+    class _BrokenLazyRail:
+        def __getattr__(self, name):
+            raise failure
+
+    with pytest.raises(TypeError,
+                       match="takes the host's status-exemption rail") as refused:
+        pk.register_status_exemption(_BrokenLazyRail())
+    assert "lacks lifecycle_status, is_compression_exempt" in str(refused.value)
+    assert refused.value.__cause__ is failure
+    assert pk.status_exemption_registered() is False
+
+
+def test_the_refusal_names_only_the_name_the_rail_could_not_hand_over():
+    class _HalfLazyRail(_StandInRail):
+        @property
+        def is_compression_exempt(self):
+            raise ModuleNotFoundError("No module named 'a_hosts_exemptions'")
+
+    with pytest.raises(TypeError) as refused:
+        pk.register_status_exemption(_HalfLazyRail())
+    assert "_HalfLazyRail lacks is_compression_exempt." in str(refused.value)
+    assert isinstance(refused.value.__cause__, ModuleNotFoundError)
+    assert pk.status_exemption_registered() is False
+
+
+def test_a_plainly_non_conforming_rail_is_refused_with_no_cause_to_chain():
+    with pytest.raises(TypeError) as refused:
+        pk.register_status_exemption(
+            types.SimpleNamespace(lifecycle_status="ratified",
+                                  is_compression_exempt=lambda text: False))
+    assert "lacks lifecycle_status." in str(refused.value)
+    assert refused.value.__cause__ is None
 
 
 def test_one_rail_registration():
