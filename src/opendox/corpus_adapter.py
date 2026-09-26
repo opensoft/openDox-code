@@ -420,9 +420,25 @@ def register_home(
     stored exactly as given -- UNEVALUATED. It is called later, by the reader
     that has a root to offer, not here, where none has been offered yet.
 
+    Refuses a non-callable `factory` with `TypeError`, consistent with
+    `domain_profile.register()` rejecting `None` for the same reason:
+    storing one anyway would let THIS call "succeed" while every later
+    `home()(root)` failed with a raw `TypeError` instead of a named refusal
+    -- the registry would hold something that answers `home()` but cannot
+    satisfy the one contract `home()` promises (Copilot review, PR
+    opensoft/openDox-code#37).
+
     Returns `factory`, so a registrant can register and hold it in one
     expression, as `domain_profile.register()` does for a profile.
     """
+    if not callable(factory):
+        raise TypeError(
+            "register_home() takes a home_corpus-shaped factory -- a "
+            "callable such that adapter, ref = factory(root) -- and "
+            f"{factory!r} is not callable. Storing it anyway would let this "
+            "registration succeed while every later home()(root) failed "
+            "with a raw TypeError, which is exactly the failure this seam "
+            "exists to replace with a named refusal.")
     global _home_factory
     _home_factory = factory
     return factory

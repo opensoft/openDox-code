@@ -137,3 +137,23 @@ def test_home_returns_the_latest_registration_and_does_not_cache() -> None:
     ca.register_home(second)
     assert ca.home() is second, (
         "home() answered from a stale registration after a new one replaced it")
+
+
+def test_register_home_refuses_a_non_callable_factory() -> None:
+    """Storing anything but a callable defers today's clean refusal to a raw
+    `TypeError` on the caller's NEXT line -- `adapter, ref = home()(root)`
+    cannot unpack what a non-callable would hand back. Consistent with
+    `domain_profile.register()` rejecting `None` for the same reason
+    (Copilot review, PR opensoft/openDox-code#37).
+    """
+    with pytest.raises(TypeError):
+        ca.register_home(None)  # type: ignore[arg-type]
+    with pytest.raises(ca.CorpusRefused):
+        ca.home()  # nothing valid was ever stored
+
+    stand_in = lambda root: (root, root)  # noqa: E731
+    ca.register_home(stand_in)
+    with pytest.raises(TypeError):
+        ca.register_home("not-a-factory")  # type: ignore[arg-type]
+    assert ca.home() is stand_in, (
+        "a rejected registration must not clobber a good one already in place")
