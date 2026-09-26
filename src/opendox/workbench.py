@@ -68,6 +68,10 @@ from .path_slug import (  # noqa: F401  (re-export)
 )
 from .boundary import OutputBoundary
 from . import consumer_reach
+# The home-corpus seam (4.1, 4.2): stdlib only, and it imports nothing back
+# from this package, so reading it at import time adds no edge a cycle or a
+# consumer could hang on.
+from . import corpus_adapter
 find_validator = consumer_reach.find_validator
 
 # --------------------------------------------------------------------------
@@ -726,29 +730,146 @@ def managed_notebook_prefix(alias: str) -> str:
         "for branch sessions), so nothing here creates, syncs, or deletes it")
 
 
+# --------------------------------------------------------------------------
+# the session notebook's MEMBERSHIP: the registered home corpus, listed under
+# the registered scope (`add-neutral-product-standalone-operability` task 4.3;
+# plan 034 T025)
+# --------------------------------------------------------------------------
+#
+# `session_documents` used to import openxFactory's `doc_health.corpus` inside
+# its body and apply that corpus's own rule: its governed roots plus a declared
+# `Status:` header. That was a deferred reach, which passed every import test
+# and failed at the call in any tree without the publisher's package. The
+# membership is now the REGISTERED home corpus's: the factory a host (or an
+# entry point standing in for one, 4.1a) registered with
+# `corpus_adapter.register_home(...)` is called on the worktree, and its
+# adapter lists the corpus under one declared scope.
+#
+# THE SCOPE IS REGISTERED TOO, AND openDox's DEFAULT IS `all`. A corpus lists
+# `all` under every conformant adapter, so that is what the notebook takes
+# where nobody said otherwise, and openDox's core names no host scope. A host
+# whose notebook is a narrower set registers that set's scope name, once, at
+# process start, with `register_session_notebook_scope(...)`. openxFactory
+# registers its adapter's `documents` scope (plan 034's T046), which at
+# openxFactory `c415c3d1` lists exactly the notebook's 398 documents, where
+# `all` lists 794. A scope the resolved corpus does not declare is refused
+# (`SCOPE_UNKNOWN`), never widened to `all`: a silent widening is
+# indistinguishable from a correct answer.
+
+#: openDox's own default scope for the session notebook: every document the
+#: home corpus lists (the interface's one scope every implementation SHALL
+#: accept).
+DEFAULT_SESSION_NOTEBOOK_SCOPE = corpus_adapter.SCOPE_ALL
+
+#: The ONE call a host makes to narrow the notebook's membership, quoted
+#: verbatim in the refusal of a scope the corpus does not declare.
+SESSION_NOTEBOOK_SCOPE_REGISTRATION_CALL = (
+    "opendox.workbench.register_session_notebook_scope(<a scope the home "
+    "corpus declares>)")
+
+_session_notebook_scope: str | None = None
+
+
+def register_session_notebook_scope(scope: str) -> str:
+    """Register the scope the session notebook lists. Returns it.
+
+    `scope` is a scope NAME the host's home corpus declares
+    (`ResolvedCorpus.scopes`). Registering the SAME name again is a no-op, so
+    an idempotent host start is not punished. A DIFFERENT name is refused: one
+    process whose session notebooks list two memberships, depending on which
+    registration an open happened to reach, is the failure one registration
+    exists to prevent. Call `unregister_session_notebook_scope()` first if the
+    swap is deliberate."""
+    global _session_notebook_scope
+    if not isinstance(scope, str) or not scope.strip():
+        raise TypeError(
+            "register_session_notebook_scope() takes the NAME of a scope the "
+            f"home corpus declares, a non-empty str, not {scope!r}. A host "
+            "whose notebook lists everything does not register one: the "
+            f"notebook lists {DEFAULT_SESSION_NOTEBOOK_SCOPE!r}.")
+    if (_session_notebook_scope is not None
+            and _session_notebook_scope != scope):
+        raise WorkbenchError(
+            f"the session notebook already lists the registered scope "
+            f"{_session_notebook_scope!r}, and {scope!r} would replace it. "
+            "Registration happens once, at process start. Call "
+            "opendox.workbench.unregister_session_notebook_scope() first if "
+            "the swap is deliberate.")
+    _session_notebook_scope = scope
+    return scope
+
+
+def unregister_session_notebook_scope() -> None:
+    """Drop the registration. For test isolation and for a host tearing down."""
+    global _session_notebook_scope
+    _session_notebook_scope = None
+
+
+def session_notebook_scope() -> str:
+    """The scope the session notebook lists: the registered one, or openDox's
+    default, `all`."""
+    return (DEFAULT_SESSION_NOTEBOOK_SCOPE if _session_notebook_scope is None
+            else _session_notebook_scope)
+
+
+def _document_text(content: bytes) -> str:
+    """A document's bytes, decoded exactly as the corpus reader this module
+    used to call read a document from disk: UTF-8 with replacement, and
+    universal newlines (`Path.read_text(encoding="utf-8", errors="replace")`),
+    so each source's text, and the content hash it is diffed by, are
+    unchanged."""
+    text = content.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def session_documents(worktree: Path | str, *, repository: str | None = None,
                       max_bytes: int = _MAX_SESSION_SOURCE_BYTES
                       ) -> list[tuple[str, str]]:
     """The session notebook's source set, read FROM the session WORKTREE
     (FR-036, FR-039; T073).
 
-    Membership is the corpus's own rule, not a second one: `doc_health.corpus`'s
-    governed roots (`contracts/ docs/ examples/ ideation/ templates/`, `tests/`
-    and `installs/` never scanned) plus a declared `Status:` header — the same
-    "membership follows Status" the lifecycle books use. Returns
-    (worktree-relative posix path, text) pairs in the shape `project_documents`
-    consumes, so create-at-open and the `--session-ref` re-sync project exactly
-    the same set.
+    Membership is the REGISTERED home corpus's, never a rule of this module's
+    own: the factory `corpus_adapter.home()` hands back is called on the
+    worktree, and its adapter lists that corpus under
+    `session_notebook_scope()`, the scope a host registered or `all`. Returns
+    (document key, text) pairs in the shape `project_documents` consumes, so
+    create-at-open and the `--session-ref` re-sync project exactly the same
+    set. A document over `max_bytes` is skipped, as before.
+
+    With no home corpus registered this REFUSES as 4.2 does: `CorpusRefused`
+    of kind `ADAPTER_NOT_REGISTERED`, naming the seam and `register_home(...)`.
+    A scope the resolved corpus does not declare refuses `SCOPE_UNKNOWN`, and
+    any refusal of the adapter's own reaches the caller unchanged. The session's
+    caller (`branch_session.open_session_notebook`) turns each of them into the
+    FR-042 notice, so a notebook never blocks a session.
+
+    `repository` is accepted for the callers that pass it
+    (`branch_session._session_notebook_documents`, and openxFactory's
+    `scripts/sync-notebooklm-books.py`). The registered factory names its own
+    corpus, so the argument no longer selects anything.
 
     Reading the WORKTREE is the whole point: the session's documents live on an
     unmerged branch, so a scan of the served checkout would show the human
     `main`'s copies of their own drafts."""
-    from doc_health import corpus            # lazy: keeps this module's graph flat
-
-    root = Path(worktree)
-    docs = corpus.load_docs(repository or root.name, root)
-    return [(doc.path, doc.text) for doc in docs
-            if doc.status and len(doc.text.encode("utf-8")) <= max_bytes]
+    factory = corpus_adapter.home()
+    adapter, ref = factory(str(Path(worktree)))
+    resolved = adapter.resolve(ref)
+    scope = session_notebook_scope()
+    if scope not in resolved.scopes:
+        raise corpus_adapter.CorpusRefused(corpus_adapter.Refusal(
+            kind=corpus_adapter.SCOPE_UNKNOWN, subject=scope,
+            detail=(f"the session notebook lists the scope {scope!r}, and the "
+                    f"home corpus {ref.name!r} declares "
+                    f"{list(resolved.scopes)}; the scope is registered with "
+                    + SESSION_NOTEBOOK_SCOPE_REGISTRATION_CALL + ", and a "
+                    "scope the corpus does not declare is refused, never "
+                    "widened")))
+    documents: list[tuple[str, str]] = []
+    for document_id in adapter.list_documents(resolved, scope):
+        text = _document_text(adapter.read(resolved, document_id).content)
+        if len(text.encode("utf-8")) <= max_bytes:
+            documents.append((document_id.key, text))
+    return documents
 
 
 class NotebookAdapter:
