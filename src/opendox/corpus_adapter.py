@@ -79,7 +79,7 @@ noun that arrived by way of the reader.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 #: RULING OQ-1 (2026-09-06, YES). Machine-readable, asserted by the
 #: conformance suite, so the marker cannot be dropped silently when openDox
@@ -132,6 +132,12 @@ DOCUMENT_UNKNOWN = "document-unknown"              #: no such document identity 
 CORPUS_READ_ONLY = "corpus-read-only"              #: no declared governed write path
 WRITE_PATH_UNREACHABLE = "write-path-unreachable"  #: declared, and it cannot be reached
 
+#: Not a `CorpusAdapter` method's refusal -- the seam's OWN, raised by `home()`
+#: below when nothing has called `register_home(...)` yet (4.2). Reusing
+#: `CorpusRefused`/`Refusal` rather than a second exception keeps a caller's
+#: branch on `err.refusal.kind` the one place it has to look.
+ADAPTER_NOT_REGISTERED = "adapter-not-registered"
+
 REFUSAL_KINDS: tuple[str, ...] = (
     CORPUS_ABSENT,
     CORPUS_UNREADABLE,
@@ -141,6 +147,7 @@ REFUSAL_KINDS: tuple[str, ...] = (
     DOCUMENT_UNKNOWN,
     CORPUS_READ_ONLY,
     WRITE_PATH_UNREACHABLE,
+    ADAPTER_NOT_REGISTERED,
 )
 
 
@@ -357,3 +364,109 @@ class CorpusAdapter(Protocol):
         An implementation that writes the corpus tree here is not conformant,
         even where it would produce identical bytes.
         """
+
+
+# --------------------------------------------------------------------------
+# the home-corpus seam -- ONE registration, read wherever a deferred reach
+# used to import a publisher's adapter by name (4.1, 4.2; design.md D6, D7)
+# --------------------------------------------------------------------------
+#
+# `authoring.py:318` used to read the publisher's factory by name, INSIDE a
+# function body -- so the module imported cleanly and the failure waited for
+# the call. That is design.md D6's more dangerous class: it survives any
+# import-based health check and fails in front of a user. This seam replaces
+# the name with a REGISTRATION, beside `domain_profile.register()`: a host
+# (or, failing that, openDox's own entry points, 4.1a) hands over a factory
+# ONCE, at process start, and every later call reads it back here rather than
+# importing anything by name.
+#
+# THE FACTORY IS WHAT IS HELD, NOT ITS RESULT. A registered factory takes the
+# corpus's ROOT and returns a ready adapter paired with the reference to
+# resolve it with -- `adapter, ref = factory(root)`, the shape the one
+# existing caller of this kind already used before it was carved here. This
+# module stores exactly that callable, unevaluated: nothing has a root to
+# offer AT REGISTRATION time (`build_parser()`, `build_server()`, `main()`),
+# only the caller that later resolves the home corpus does
+# (`authoring.py:324`). Storing the call's result instead would need a root
+# before any caller has offered one, or would resolve one corpus for every
+# caller regardless of the root it was actually handed.
+#
+# REFUSAL, NOT A DEFAULT -- the same discipline `domain_profile.py` keeps for
+# the profile registry, and for the same reason. Nothing here degrades to
+# `None` or to a bare local checkout: a verb that silently read the wrong
+# corpus, or no corpus, would look exactly like a working one until its
+# output was checked by hand. So `home()` raises THIS interface's one
+# exception, naming the seam and the exact call that is missing, and never a
+# `ModuleNotFoundError` raised from inside a function -- the failure mode
+# this seam exists to retire.
+
+_UNSET: Any = object()  #: distinct from a registered `None`, which nothing here forbids
+_home_factory: Any = _UNSET
+
+
+def register_home(
+    factory: Callable[[str], tuple[CorpusAdapter, CorpusRef]],
+) -> Callable[[str], tuple[CorpusAdapter, CorpusRef]]:
+    """THE one registration for openDox's home corpus.
+
+    Called once, by whichever entry point resolves first. A host that keeps
+    its own corpus reader registers a factory over it here, exactly as it
+    registers its profile with `domain_profile.register()`; where no host
+    has, openDox's own entry points register a factory over its own
+    conformant reader instead (4.1a), and never as a fallback INSIDE `home()`
+    -- the registration is always explicit.
+
+    `factory` takes the corpus's root and returns `(adapter, ref)`, and is
+    stored exactly as given -- UNEVALUATED. It is called later, by the reader
+    that has a root to offer, not here, where none has been offered yet.
+
+    Refuses a non-callable `factory` with `TypeError`, consistent with
+    `domain_profile.register()` rejecting `None` for the same reason:
+    storing one anyway would let THIS call "succeed" while every later
+    `home()(root)` failed with a raw `TypeError` instead of a named refusal
+    -- the registry would hold something that answers `home()` but cannot
+    satisfy the one contract `home()` promises (Copilot review, PR
+    opensoft/openDox-code#37).
+
+    Returns `factory`, so a registrant can register and hold it in one
+    expression, as `domain_profile.register()` does for a profile.
+    """
+    if not callable(factory):
+        raise TypeError(
+            "register_home() takes a home_corpus-shaped factory -- a "
+            "callable such that adapter, ref = factory(root) -- and "
+            f"{factory!r} is not callable. Storing it anyway would let this "
+            "registration succeed while every later home()(root) failed "
+            "with a raw TypeError, which is exactly the failure this seam "
+            "exists to replace with a named refusal.")
+    global _home_factory
+    _home_factory = factory
+    return factory
+
+
+def home() -> Callable[[str], tuple[CorpusAdapter, CorpusRef]]:
+    """The registered home-corpus factory, or a refusal naming the seam and the remedy.
+
+    Every deferred reach that used to import a publisher's adapter by name
+    calls this instead of that name. With nothing registered it raises
+    `CorpusRefused`, this interface's ONE exception, carrying the new
+    `ADAPTER_NOT_REGISTERED` kind: `subject` names this seam
+    (`opendox.corpus_adapter`) and `detail` names the exact call that is
+    missing, `register_home(...)`. It is never a `ModuleNotFoundError` raised
+    from inside a function, and never any other exception (4.2).
+
+    Returns exactly what was registered -- the factory itself, never its
+    result. The caller supplies the root and unpacks the pair itself:
+    `adapter, ref = home()(root)`.
+    """
+    if _home_factory is _UNSET:
+        raise CorpusRefused(Refusal(
+            kind=ADAPTER_NOT_REGISTERED,
+            subject="opendox.corpus_adapter",
+            detail=(
+                "no home-corpus adapter is registered; a host, or an entry "
+                "point standing in for one, calls "
+                "register_home(<a factory: adapter, ref = factory(root)>) "
+                "before anything resolves the home corpus"),
+        ))
+    return _home_factory
