@@ -31,13 +31,15 @@ The pipeline this module owns, in the order design §3.1 fixes:
      header is read by the ASSEMBLER, at this stage, and approved/ratified
      content is marked exempt from aggressive compression. Upstream of any
      compressor, and never delegated to one: only this stage can read a
-     lifecycle status. The READ itself moved to
-     ``ideation_dashboard.doxbench_status_exemption`` under
+     lifecycle status. The READ itself left this file under
      ``split-opendox-two-layer-product`` § 2.4 (OQ-1) — a corpus's own
      ``Status:`` vocabulary is that corpus's, and it is what made this file
-     un-carveable; the MARKING, which is generic, stayed here. Nothing about
-     the rail's position in the pipeline changed: it still runs inside the
-     assembler, before the packet exists.
+     un-carveable; the MARKING, which is generic, stayed here. The read is
+     now the one a HOST registers at the status-exemption seam
+     (``register_status_exemption``), and with none registered the assembler
+     refuses rather than marking nothing. Nothing about the rail's position
+     in the pipeline changed: it still runs inside the assembler, before the
+     packet exists.
   4. **THE BOUNDS CHECK** — refuse with the MEASURED DIMENSION. No truncation,
      ever, and no packet content in the refusal.
   5. **DETERMINISTIC ASSEMBLY** — the packet, and the prompt sections it
@@ -130,25 +132,37 @@ class PacketExpired(PacketRejected):
 # THE RAIL MOVED COLUMN; THE NAMES DID NOT MOVE
 # (`split-opendox-two-layer-product` § 2.4, OQ-1 as ruled).
 #
-# The four constants and three functions that read THIS corpus's `Status:`
-# header against THIS corpus's lifecycle vocabulary now live in
-# `ideation_dashboard.doxbench_status_exemption`, on the openxFactory-adapter
-# side of the carve, and they took their `doc_health.lines.split_keepends`
-# import with them. Everything else about the exemption is generic and stays:
+# The four constants and three functions that read a corpus's `Status:` header
+# against that corpus's lifecycle vocabulary are not in this file. openxFactory
+# keeps its own in `ideation_dashboard.doxbench_status_exemption`, on the
+# openxFactory-adapter side of the carve, beside the `doc_health` primitive
+# they read through. Everything else about the exemption is generic and stays:
 # `exemption_rail` below is the MARKING mechanism, and marking a source with
 # whatever status a reader reports is a thing any corpus's packet assembler
 # does. That split is the whole of OQ-1 — this module travels to openDox with
 # the chat-turn route that calls it, and it can no longer take an
 # openxFactory-only `doc_health` dependency along.
 #
-# WHY A MODULE `__getattr__` AND NOT A TOP-LEVEL `from … import`. A top-level
-# re-export would put the adapter-column module back into THIS module's import
-# graph, which is the fork this carve exists to prevent — the import would read
-# as neutral in the AST scan and be a hard dependency in fact. Resolved lazily,
+# THE STATUS-EXEMPTION SEAM (`add-neutral-product-standalone-operability` task
+# 4.3; plan 034 T027). `_status_exemption` used to IMPORT the host's module by
+# name, inside its body: a deferred reach, which passed every import test and
+# failed at the first assembly in any tree without openxFactory, which is every
+# tree openDox ships in. It now resolves the rail a host REGISTERED with
+# `register_status_exemption(rail)`, once, at process start, as the host
+# registers its profile (`opendox.domain_profile.register`). The rail is any
+# object that carries the reader's names, openxFactory's module itself among
+# them, so the names still answer on this module as the SAME objects. With
+# nothing registered the seam REFUSES, naming itself and the call
+# (`StatusExemptionNotRegistered`, 4.2's discipline): a packet assembled with
+# its sources unmarked would carry the exemption silently switched off.
+#
+# WHY A MODULE `__getattr__` AND NOT A TOP-LEVEL RE-EXPORT. The names are read
+# off this module by existing callers, and a registration happens after this
+# module is imported, so nothing can bind them at import time. Resolved lazily,
 # the dependence on the seam sits at ONE readable point (`_status_exemption`
-# below), exactly the discipline `authoring._classify_proposal` states for its
-# own function-local seam imports, and after the carve the names raise a clean
-# `AttributeError` instead of failing an import of the whole module.
+# below), which is the discipline `authoring._classify_proposal` states for its
+# own seam, and with no rail registered the names raise a clean
+# `AttributeError` rather than failing an import of the whole module.
 #
 # The exported set includes the two UNDERSCORE names. They are private to the
 # rail, and `test_doxbench_packet.py`'s mutation check reads `pk._STATUS_RE`
@@ -165,16 +179,104 @@ _STATUS_EXEMPTION_NAMES: frozenset[str] = frozenset({
     "lifecycle_status", "status_word", "is_compression_exempt",
 })
 
+#: The two names `exemption_rail` calls on the rail, once per source. A rail
+#: that lacks either cannot mark a source, so it is refused when it is
+#: registered rather than at the first assembly.
+STATUS_EXEMPTION_REQUIRED: tuple[str, ...] = (
+    "lifecycle_status", "is_compression_exempt")
+
+#: The ONE call a host makes, quoted verbatim in the not-registered refusal so
+#: the refusal names its remedy rather than its symptom.
+STATUS_EXEMPTION_REGISTRATION_CALL = (
+    "opendox.doxbench_packet.register_status_exemption(<the host's "
+    "status-exemption rail>)")
+
+#: What the seam says when nothing is registered. A constant, so a host's own
+#: tests can hold the refusal they expect to the one it gives.
+STATUS_EXEMPTION_NOT_REGISTERED = (
+    "no status-exemption rail is registered at openDox's status-exemption "
+    "seam (opendox.doxbench_packet), so no source can be marked and no packet "
+    "is assembled. A host registers its rail at process start with "
+    + STATUS_EXEMPTION_REGISTRATION_CALL + ".")
+
+
+class StatusExemptionNotRegistered(PacketError):
+    """The status-exemption seam has no registered rail.
+
+    A PACKET refusal, because that is what it is: rail 3 has no reader, and a
+    packet whose sources were never marked is one assembled with the exemption
+    silently off. Like every refusal in this module it carries this module's
+    own words (the seam and its registration call) and no packet content, and
+    a caller that maps packet refusals to a fixed code maps this one too,
+    rather than letting it escape the request mid-turn."""
+
+
+class StatusExemptionAlreadyRegistered(RuntimeError):
+    """A second, different rail was registered over a first.
+
+    ONE registration: a process whose packets are marked by two readers,
+    depending on which registration an assembly happened to reach, is the
+    failure one registration exists to prevent. Registering the SAME rail
+    again is not refused. `unregister_status_exemption()` makes a deliberate
+    swap explicit."""
+
+
+_status_exemption_rail: object | None = None
+
+
+def register_status_exemption(rail: object) -> object:
+    """Register the host's status-exemption rail. Returns it.
+
+    `rail` is a MODULE or an OBJECT carrying the reader's names. It must carry
+    `STATUS_EXEMPTION_REQUIRED` as callables: `lifecycle_status(text)`, the
+    document's own declared `Status:` or None, and
+    `is_compression_exempt(text)`. The other five of `_STATUS_EXEMPTION_NAMES`
+    answer on this module where the rail carries them."""
+    global _status_exemption_rail
+    missing = [name for name in STATUS_EXEMPTION_REQUIRED
+               if not callable(getattr(rail, name, None))]
+    if rail is None or missing:
+        raise TypeError(
+            "register_status_exemption() takes the host's status-exemption "
+            "rail, which must carry callable "
+            f"{', '.join(STATUS_EXEMPTION_REQUIRED)}; "
+            f"{type(rail).__name__} lacks {', '.join(missing) or 'them'}. A "
+            "host with no rail does not register one: it leaves the seam "
+            "empty, and the assembler refuses, naming this call.")
+    if _status_exemption_rail is not None and _status_exemption_rail is not rail:
+        raise StatusExemptionAlreadyRegistered(
+            "a status-exemption rail is already registered at openDox's "
+            "status-exemption seam, and a different one would replace it. "
+            "Registration happens once, at process start. Call "
+            "opendox.doxbench_packet.unregister_status_exemption() first if "
+            "the swap is deliberate.")
+    _status_exemption_rail = rail
+    return rail
+
+
+def unregister_status_exemption() -> None:
+    """Drop the registration. For test isolation and for a host tearing down."""
+    global _status_exemption_rail
+    _status_exemption_rail = None
+
+
+def status_exemption_registered() -> bool:
+    """Is a rail registered, without resolving anything or refusing?"""
+    return _status_exemption_rail is not None
+
 
 def _status_exemption():
-    """The status-exemption rail, imported HERE and nowhere else in this file.
+    """The REGISTERED status-exemption rail, resolved HERE and nowhere else in
+    this file, or a refusal naming the seam and its registration call.
 
-    Function-local for the reason `authoring._classify_proposal` gives for its
-    own: this module's dependence on the seam sits at one readable point that a
-    scan can assert on, and no import ordering between the two modules can turn
-    into a cycle. Repeat calls cost a `sys.modules` lookup.
+    Every reader in this module goes through it — `exemption_rail` once per
+    call, `__getattr__` once per name — so the dependence on the host's rail
+    sits at one readable point, as it did when this function imported the
+    publisher's module by name.
     """
-    import ideation_dashboard.doxbench_status_exemption as rail
+    rail = _status_exemption_rail
+    if rail is None:
+        raise StatusExemptionNotRegistered(STATUS_EXEMPTION_NOT_REGISTERED)
     return rail
 
 
@@ -956,10 +1058,12 @@ def exemption_rail(
     not apply it, and one that could would be a second place this rule lives.
 
     The READ moved column with § 2.4's OQ-1 carve; the MARKING did not. `rail`
-    is resolved once per call rather than per source, and the signature is
-    unchanged — `exemption_rail(sources)` positionally, as every caller and
-    `test_doxbench_memory_gateway.py`'s rails-before-I/O check already have
-    it."""
+    is the one a host registered, resolved once per call rather than per
+    source, and with none registered this refuses
+    (`StatusExemptionNotRegistered`) before any source is marked. The
+    signature is unchanged — `exemption_rail(sources)` positionally, as every
+    caller and `test_doxbench_memory_gateway.py`'s rails-before-I/O check
+    already have it."""
 
     rail = _status_exemption()
     marked: list[PacketSource] = []
@@ -1372,7 +1476,7 @@ def packet_sections(
 
 
 def __getattr__(name: str):
-    """The rail's seven names, kept on THIS module; the rail itself, gone.
+    """The rail's seven names, kept on THIS module; the rail itself, the host's.
 
     PEP 562, and the same shape `authoring.__getattr__` uses for
     `REQUIRED_HEADER_FIELDS` under § 2.3. Every name the lifecycle-status block
@@ -1386,34 +1490,38 @@ def __getattr__(name: str):
     a second copy of it.
 
     ONE POINT OF DEPENDENCE, WHICH IS THE PROPERTY A SCAN CAN CHECK. This
-    function does not import anything itself; it goes through
-    `_status_exemption()`, so the seam is a single import statement in this
-    file and a neutrality test asserts exactly that.
+    function imports nothing itself; it goes through `_status_exemption()`,
+    which resolves the REGISTERED rail and names no package at all.
 
-    THE ALIAS IS A BRIDGE, NOT A HOME. After the carve the adapter-column
-    module is not in openDox's tree, and these names then raise `AttributeError`
-    naming the missing attribute — a loud failure at the first assembly rather
-    than a packet quietly assembled with every source unmarked. Choosing a
-    declared neutral posture instead is a ruling, not an author's call, and it
-    is reported as such rather than taken here.
+    THE ALIAS IS A BRIDGE, NOT A HOME. The rail is the host's, registered at
+    the status-exemption seam, and each name answers as the rail's own object.
+    With no rail registered these names raise `AttributeError` naming the
+    missing attribute and the seam — a loud failure at the first assembly
+    rather than a packet quietly assembled with every source unmarked.
+    openDox's own neutral default is a later act (plan 034's T085), and until
+    then there is none to fall back to.
 
-    THE ABSENT-MODULE CASE IS TRANSLATED, NOT LET THROUGH RAW. `_status_exemption()`
-    performs the import itself, so an absent adapter-column module surfaces
-    there first as `ModuleNotFoundError` — an `ImportError`, not an
-    `AttributeError`, and one `hasattr`/`getattr`-with-default would not
-    swallow. Left uncaught, `hasattr(pk, "lifecycle_status")` would raise
-    instead of answering `False`, which is not the loud-but-ordinary failure
-    this docstring promises. Caught here and re-raised as `AttributeError`, the
-    failure stays loud (fails the first assembly, names the missing
-    attribute) while restoring the semantics an `AttributeError` is supposed
-    to have.
+    THE SEAM'S REFUSAL IS TRANSLATED, NOT LET THROUGH RAW. `_status_exemption()`
+    refuses with `StatusExemptionNotRegistered`, a `PacketError`, which
+    `hasattr`/`getattr`-with-default would not swallow. Left uncaught,
+    `hasattr(pk, "lifecycle_status")` would raise instead of answering
+    `False`, which is not the loud-but-ordinary failure this docstring
+    promises. A rail that loads what it reads lazily can raise
+    `ModuleNotFoundError` instead, which is the refusal this function
+    translated when it imported the rail by name. And a name the registered
+    rail does not carry raises the rail's own `AttributeError`, which names
+    the rail rather than this module. Each of the three is re-raised as an
+    `AttributeError` naming this module and the attribute, chained to its
+    cause: the failure stays loud (it fails the first assembly and names the
+    missing attribute), and an `AttributeError` keeps the semantics it is
+    supposed to have.
     """
     if name in _STATUS_EXEMPTION_NAMES:
         try:
-            rail = _status_exemption()
-        except ModuleNotFoundError as exc:
+            return getattr(_status_exemption(), name)
+        except (StatusExemptionNotRegistered, ModuleNotFoundError,
+                AttributeError) as exc:
             raise AttributeError(
                 f"module {__name__!r} has no attribute {name!r}: the "
-                "status-exemption rail is not in this tree") from exc
-        return getattr(rail, name)
+                f"status-exemption rail cannot answer it ({exc})") from exc
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
