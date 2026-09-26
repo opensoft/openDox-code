@@ -400,7 +400,7 @@ class CorpusAdapter(Protocol):
 # `ModuleNotFoundError` raised from inside a function -- the failure mode
 # this seam exists to retire.
 
-_UNSET: Any = object()  #: distinct from a registered `None`, which nothing here forbids
+_UNSET: Any = object()  #: UNREGISTERED. `register_home()` rejects every non-callable, `None` included, so this is the only value `_home_factory` ever holds without a valid registration behind it
 _home_factory: Any = _UNSET
 
 
