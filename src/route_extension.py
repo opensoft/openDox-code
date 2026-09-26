@@ -103,8 +103,11 @@ wherever it would do more:
   * an ancestor it shares with the core handler, other than `object`. So
     composing it can never reorder the core's MRO, which stays a prefix of the
     composed class's own;
-  * a declaration that is not a class, a class declared twice, or classes that
-    cannot be composed at all.
+  * a declaration that is not a TUPLE of classes (a set's order would hang on
+    hashing, and a generator would compose nothing on a second build), a class
+    declared twice, or classes `type()` cannot compose at all. That last one
+    `collect_handler_contributions` finds by composing once, before the build
+    does its expensive work.
 
 The facet is OPTIONAL, and its absence is not a defect: a profile or an
 extension that declares none contributes no mixin, and the server binds the
@@ -598,7 +601,10 @@ def declared_handler_contributions(contributor) -> tuple[type, ...]:
     """What ONE contributor declares under `HANDLER_FACET`.
 
     Returns `()` when the contributor declares nothing, and the classes when it
-    declares some. A malformed declaration is refused.
+    declares some. A malformed declaration is refused: the value must be a
+    TUPLE of classes. Every refusal names what it was handed through
+    `_describe`, so a declaration whose `repr` raises is still refused with
+    `RouteBindingError`.
 
     `contributor` is a host profile (or the lazy proxy over one) or a route
     extension. Nothing about its type is checked, because this module may name
@@ -610,27 +616,23 @@ def declared_handler_contributions(contributor) -> tuple[type, ...]:
     declared = getattr(contributor, HANDLER_FACET, None)
     if declared is None:
         return ()
-    if isinstance(declared, (str, bytes)):
-        items = None
-    else:
-        try:
-            items = tuple(declared)
-        except TypeError:
-            items = None
-    if items is None:
+    if not isinstance(declared, tuple):
         raise RouteBindingError(
             f"{_describe(contributor)} declares {HANDLER_FACET} = "
-            f"{declared!r}, which is not a tuple of classes. Declare the "
-            "mixins as a tuple, even for one: `(Mixin,)`, not `Mixin`.")
-    for item in items:
+            f"{_describe(declared)}, which is not a tuple of classes. Declare "
+            "the mixins as a tuple, even for one: `(Mixin,)`, not `Mixin`. A "
+            "list, a set or a generator is refused too. A set would make the "
+            "composed class's MRO depend on hashing, and a generator would "
+            "compose nothing the second time a server is built.")
+    for item in declared:
         if not isinstance(item, type):
             raise RouteBindingError(
-                f"{_describe(contributor)} declares {item!r} under "
+                f"{_describe(contributor)} declares {_describe(item)} under "
                 f"{HANDLER_FACET}, which is not a class. A handler "
                 "contribution is a mixin CLASS whose methods a binding names; "
                 "it is composed into the class the server binds, so it cannot "
                 "be an instance, a function or a name.")
-    return items
+    return declared
 
 
 def _refuse_an_unsafe_composition(base: type, contributions, *,
@@ -649,8 +651,9 @@ def _refuse_an_unsafe_composition(base: type, contributions, *,
     for mixin in contributions:
         if not isinstance(mixin, type):
             raise RouteBindingError(
-                f"{mixin!r} is not a class, so it cannot be composed onto "
-                f"{_describe(base)}: a handler contribution is a mixin CLASS.")
+                f"{_describe(mixin)} is not a class, so it cannot be composed "
+                f"onto {_describe(base)}: a handler contribution is a mixin "
+                "CLASS.")
         if mixin in core:
             raise RouteBindingError(
                 f"the handler contribution {_describe(mixin)} is already in "
@@ -715,16 +718,34 @@ def _refuse_an_unsafe_composition(base: type, contributions, *,
             owner[name] = mixin
 
 
+def _compose(name: str, base: type, contributions: tuple,
+             namespace) -> type:
+    """`type(name, (base, *contributions), namespace)`, with the `TypeError`
+    that `type` raises for an MRO, layout or metaclass conflict converted into
+    the module's one refusal."""
+    try:
+        return type(name, (base, *contributions), dict(namespace))
+    except TypeError as exc:
+        raise RouteBindingError(
+            f"the handler contributions "
+            f"{[_describe(mixin) for mixin in contributions]} cannot be "
+            f"composed onto {_describe(base)}: {exc}") from exc
+
+
 def collect_handler_contributions(contributors, *, base: type) -> tuple[type, ...]:
     """Every mixin the contributors declare, in declaration order, checked
     against `base`, the core request-handler class they will be composed onto.
 
     Called at WIRING time beside `collect_bindings`, and for the same reason: a
     contribution that cannot be composed refuses the build before a socket, a
-    checkout read or a session bootstrap. The same class declared twice is
-    refused, whether one contributor declared it twice or two contributors
-    declared it once each: which declaration composed it would be an accident
-    of assembly.
+    checkout read or a session bootstrap. So the checks are not all it runs. It
+    also composes the contributions onto `base` ONCE, as a throwaway class, so
+    that an MRO or layout conflict that only `type()` can find is found here,
+    before any of that work, rather than at the end of the build.
+
+    The same class declared twice is refused, whether one contributor declared
+    it twice or two contributors declared it once each: which declaration
+    composed it would be an accident of assembly.
 
     The composition itself belongs to `compose_handler`, which repeats these
     checks against the class it actually creates.
@@ -741,8 +762,11 @@ def collect_handler_contributions(contributors, *, base: type) -> tuple[type, ..
                     "the bindings whose methods it holds.")
             declared_by[mixin] = contributor
             contributions.append(mixin)
-    _refuse_an_unsafe_composition(base, contributions)
-    return tuple(contributions)
+    collected = tuple(contributions)
+    _refuse_an_unsafe_composition(base, collected)
+    if collected:
+        _compose("_ComposabilityPreflight", base, collected, {})
+    return collected
 
 
 def compose_handler(name: str, base: type, contributions, namespace) -> type:
@@ -756,8 +780,16 @@ def compose_handler(name: str, base: type, contributions, namespace) -> type:
     exactly `type(name, (base,), namespace)`, the class a server bound before
     this facet existed. A `TypeError` from `type` itself, such as an MRO or
     layout conflict, is converted into the module's one refusal.
+
+    `contributions` is a TUPLE, as `collect_handler_contributions` returns
+    it, for the reason the facet is one: the composition must not depend on
+    iteration state.
     """
-    contributions = tuple(contributions)
+    if not isinstance(contributions, tuple):
+        raise RouteBindingError(
+            f"compose_handler takes the contributions as a tuple, as "
+            f"collect_handler_contributions returns them, not "
+            f"{_describe(contributions)}.")
     duplicates = sorted({_describe(mixin) for mixin in contributions
                          if contributions.count(mixin) > 1})
     if duplicates:
@@ -765,13 +797,7 @@ def compose_handler(name: str, base: type, contributions, namespace) -> type:
             f"the handler contributions {duplicates} are each listed more "
             "than once. Compose each mixin once.")
     _refuse_an_unsafe_composition(base, contributions, namespace=namespace)
-    try:
-        return type(name, (base, *contributions), dict(namespace))
-    except TypeError as exc:
-        raise RouteBindingError(
-            f"the handler contributions "
-            f"{[_describe(mixin) for mixin in contributions]} cannot be "
-            f"composed onto {_describe(base)}: {exc}") from exc
+    return _compose(name, base, contributions, namespace)
 
 
 #: Sentinel distinguishing "no such attribute" from "the attribute is None" —

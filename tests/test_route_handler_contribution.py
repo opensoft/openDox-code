@@ -325,14 +325,43 @@ def test_a_contribution_entangled_with_the_core_is_refused(mixin, because):
     (_Lanes, "not a tuple of classes"),
     ("_Lanes", "not a tuple of classes"),
     (7, "not a tuple of classes"),
+    ([_Lanes], "not a tuple of classes"),
+    ({_Lanes}, "not a tuple of classes"),
+    ((mixin for mixin in (_Lanes,)), "not a tuple of classes"),
     ((_Lanes(),), "is not a class"),
     ((lambda self: None,), "is not a class"),
-), ids=("a bare class", "a string", "an int", "an instance", "a function"))
+), ids=("a bare class", "a string", "an int", "a list", "a set", "a generator",
+        "an instance", "a function"))
 def test_a_malformed_declaration_is_refused(declared, because):
+    """A TUPLE of classes, and nothing looser. A set's iteration order would
+    decide the composed MRO, and a generator would declare its mixins once and
+    nothing on the next build."""
     contributor = type("_Malformed", (), {
         route_extension.HANDLER_FACET: declared})()
     with pytest.raises(RouteBindingError, match=because):
         route_extension.declared_handler_contributions(contributor)
+
+
+class _Unprintable:
+    """An object whose `repr` raises, as an object this module cannot vet may."""
+
+    def __repr__(self):
+        raise RuntimeError("this repr refuses to be formatted")
+
+
+@pytest.mark.parametrize("declared", (_Unprintable(), (_Unprintable(),)),
+                         ids=("the facet itself", "an item of the facet"))
+def test_a_refusal_never_raises_while_formatting_what_it_refuses(declared):
+    """The refusal is `RouteBindingError`, never the `repr`'s own exception: a
+    refusal that fails while formatting itself replaces the reader's problem
+    with a worse one."""
+    contributor = type("_Malformed", (), {
+        route_extension.HANDLER_FACET: declared})()
+    with pytest.raises(RouteBindingError, match="a _Unprintable"):
+        route_extension.declared_handler_contributions(contributor)
+    with pytest.raises(RouteBindingError, match="a _Unprintable is not a class"):
+        route_extension.compose_handler("BoundHandler", _CoreHandler,
+                                        (_Unprintable(),), {})
 
 
 def test_a_mixin_declared_twice_is_refused_whoever_declares_it():
@@ -370,6 +399,27 @@ def test_classes_type_cannot_compose_are_refused_not_raised_as_typeerror():
     with pytest.raises(RouteBindingError, match="cannot be composed"):
         route_extension.compose_handler("BoundHandler", _CoreHandler,
                                         (left, right), {})
+
+
+def test_collect_finds_what_type_cannot_compose_before_the_build_does():
+    """The PREFLIGHT. `collect_handler_contributions` runs where the bindings
+    are collected, before the build does any expensive work, and it composes
+    the contributions once itself. So a conflict only `type()` can find refuses
+    there, rather than after the snapshot source and the sessions are up."""
+    left = type("_Left", (), {"__slots__": ("_left",)})
+    right = type("_Right", (), {"__slots__": ("_right",)})
+    with pytest.raises(RouteBindingError, match="cannot be composed"):
+        route_extension.collect_handler_contributions(
+            (_contributor(left, right),), base=_CoreHandler)
+
+
+def test_compose_handler_takes_the_contributions_as_a_tuple():
+    with pytest.raises(RouteBindingError, match="as a tuple"):
+        route_extension.compose_handler("BoundHandler", _CoreHandler,
+                                        [_Lanes], {})
+    with pytest.raises(RouteBindingError, match="as a tuple"):
+        route_extension.compose_handler("BoundHandler", _CoreHandler,
+                                        (m for m in (_Lanes,)), {})
 
 
 # ---------------------------------------------------------------------------
