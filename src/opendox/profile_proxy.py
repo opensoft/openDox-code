@@ -31,7 +31,10 @@ WHAT IT RESOLVES, AND WHEN. Nothing at import time. `import
 opendox.profile_proxy` performs no lookup, touches no registry and cannot fail
 for want of a host. The FIRST attribute read — `SUBCOMMAND_EXTENSIONS`,
 `ROUTE_EXTENSIONS`, anything else a composition point comes to need — calls
-`domain_profile.current()` and forwards. The resolved profile is deliberately
+`domain_profile.current_for_build()` and forwards. That is `current()` plus
+one record: where the registration is openDox's own default, a parser or a
+server has now been built from it, so a host's later `register()` is refused
+rather than applied (R1Q3 (ii); RN-1 (a)). The resolved profile is deliberately
 NOT cached here: `domain_profile` holds the one registration, caching a second
 copy would let this module answer with a profile a host had since
 `unregister()`ed, and the lookup is an attribute read on a module global.
@@ -44,6 +47,12 @@ distinct messages:
   own terms and by the failure mode: a parser whose contributed verbs are
   silently absent is indistinguishable from a working one until someone types
   the missing command, and the same is true of a server's contributed routes.
+  The refusal is KEPT for the case this file was written for (R1Q3 (i),
+  `openxFactory#656` comment `5817152735`). The entry points register openDox's
+  own default first, so a read reached through `cli.build_parser()` or
+  `serve.build_server()` resolves the default where no host registered one. The
+  refusal is what a process meets when it reads the profile having built
+  nothing through an entry point.
 * REGISTERED, BUT LACKING THE FACET -> `ProfileFacetMissing`, naming the
   attribute, the profile and the reader. That is a real and reportable gap in a
   host's profile rather than a missing registration, and telling a host to
@@ -117,10 +126,13 @@ class _LateProfile:
     def resolve(self) -> Any:
         """The registered profile, or `ProfileNotRegistered` naming the call.
 
-        Every read goes through `domain_profile.current()` — no local cache, so
-        an `unregister()` is seen immediately and one registration stays one.
+        Every read goes through `domain_profile.current_for_build()` — no local
+        cache, so an `unregister()` is seen immediately and one registration
+        stays one. A resolution is a composition point BUILDING from the
+        profile, so where that profile is the entry point's default the build is
+        recorded there (R1Q3 (ii); RN-1 (a)).
         """
-        return domain_profile.current()
+        return domain_profile.current_for_build()
 
     def __getattr__(self, attr: str) -> Any:
         # Dunder lookups must NOT resolve the profile. `copy`, `pickle`,

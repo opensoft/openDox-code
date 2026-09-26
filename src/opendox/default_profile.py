@@ -70,12 +70,21 @@ THE FOUR FACETS, AND WHY ONLY TWO ARE DECLARED.
   `view_extension.host_view_facet()` answers an empty column, named `absent`,
   for a profile without the facet.
 
-HOW IT IS REGISTERED: not here, and never at import. Importing this module
-registers nothing, so a process that builds nothing still meets
-`domain_profile.ProfileNotRegistered`, which is the library caller's case. The
-entry points register it where no host has, as plan 034's T016 wires (R1Q3
-(a)): the default is a registration an entry point makes, and never a fallback
-inside `domain_profile.current()`.
+HOW IT IS REGISTERED: by the entry points, and never at import (R1Q3 (a)).
+`cli.build_parser()`, `serve.build_server()` and both `main()`s call
+`domain_profile.register_default(default_profile)` before anything reads the
+profile, and that call registers this module only where nothing is registered.
+The default is a registration an entry point makes, and never a fallback inside
+`domain_profile.current()`. So:
+
+* importing this module registers nothing, and a process that builds nothing
+  still meets `domain_profile.ProfileNotRegistered`, the library caller's case;
+* a host that registers its own profile BEFORE anything is built replaces this
+  one, whether it registered first or an entry point's `main()` had already
+  registered the default;
+* AFTER a parser or a server has been built from this default, a host's
+  registration is refused as `AlreadyRegistered` (R1Q3 (ii); RN-1 (a),
+  `openxFactory#656` comment `5850003126`).
 
 A PROFILE IS A MODULE OR AN OBJECT (RULED ASK-2's words: "registers the real
 module"). This one is a MODULE, so `domain_profile.name_of()` names it by its

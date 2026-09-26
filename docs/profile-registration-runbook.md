@@ -12,6 +12,13 @@ verbatim:
 This is that runbook. It is the whole of what a host has to do, and the whole of
 what openDox promises in return.
 
+> **Amended by plan 034** (openxFactory `specs/034-opendox-standalone-operation`,
+> tasks T015 and T016; R1Q3 (a) and RN-1 (a)). openDox now ships a default
+> profile of its own, and its entry points register it where no host has.
+> [§ The default profile, since plan 034](#the-default-profile-since-plan-034),
+> at the end, states the contract as it now stands. It supersedes what the
+> sections before it say about the case where no host registers.
+
 ## Why there is a profile at all
 
 openDox is the **neutral** product. Its command line and its server are
@@ -251,8 +258,79 @@ binding and `serve.py` to its deferred one, and none of it is pinned to a line
 number that the next declared edit would move — or has to change the day the two
 modules become importable.
 
+## The default profile, since plan 034
+
+**What changed.** Requirement 3 of openxFactory's
+`add-neutral-product-standalone-operability` (RATIFIED on comment
+[`5815412869`](https://github.com/opensoft/openxFactory/issues/656#issuecomment-5815412869))
+asks openDox to ship a DEFAULT PROFILE for its own domain, and to start on it
+with no host present, while any host can still register its own. Brett Heap
+ruled how on `opensoft/openxFactory#656`: R1Q3 (a), with (i) and (ii), on
+comment
+[`5817152735`](https://github.com/opensoft/openxFactory/issues/656#issuecomment-5817152735),
+and RN-1 (a) on comment
+[`5850003126`](https://github.com/opensoft/openxFactory/issues/656#issuecomment-5850003126).
+
+* **openDox ships `opendox.default_profile`** (plan 034's T015). It contributes
+  openDox's OWN verbs, through `RuntimeSubcommand`, so a parser built on it
+  carries `runtime init | migrate | serve | status | reset` (R1Q4 (a),
+  R1Q5 (a)). Its `ROUTE_EXTENSIONS` is empty. It declares no `DISPLAY` and no
+  `VIEW_EXTENSIONS` facet, so the shell renders `NEUTRAL_DISPLAY` unchanged and
+  shows no consumer panel.
+* **The entry points register it, and only where nothing is registered.**
+  `cli.build_parser()`, `serve.build_server()`, `cli.main()` and `serve.main()`
+  each call `domain_profile.register_default(default_profile)` first. The
+  default is a registration an ENTRY POINT makes, and never a fallback inside
+  `domain_profile.current()`.
+* **A host still registers ONCE, at process start**, with the same
+  `domain_profile.register(<the host's profile>)`. Registered before the first
+  parser or server is built, the host's profile is the one every composition
+  point reads, and the default is never used. That holds even after an entry
+  point's `main()` has registered the default, because registering is not
+  building.
+* **After a build from the default, a host's registration is refused.** Once a
+  parser or a server has been built from the default, `register()` raises
+  `AlreadyRegistered`, and the message names the default and the build
+  (R1Q3 (ii); RN-1 (a)). The reason is ASK-4 Q5's: the built parser or server
+  would keep the default's contributions while every later reader saw the
+  host's. A deliberate swap calls `unregister()` first.
+* **A process that builds nothing still meets the refusal.** A library caller
+  that asks for the profile without building anything through an entry point
+  finds nothing registered, and `current()` and the proxy both raise
+  `ProfileNotRegistered`. That is the case the proxy's refusal was written for
+  (R1Q3 (i)), and it is kept: it is never weakened into an empty tuple.
+
+**What counts as a build.** A composition point reading a facet through the
+proxy, which resolves through `domain_profile.current_for_build()`. Asking is
+not building: `is_registered()`, `current()`, `repr` and a dunder probe record
+nothing. So openXdox's `_upstream()` never closes the window in which a host's
+registration still replaces the default.
+
+| raised | when | what it means |
+| --- | --- | --- |
+| `domain_profile.ProfileNotRegistered` | nothing registered | no host registered, and the process has built nothing through an entry point |
+| `domain_profile.AlreadyRegistered` | a different profile over a host's, or over the default once something was built from it | one registration is the contract, and the default is replaceable only before anything is built from it |
+
+**What this section supersedes above.**
+
+* *"nothing in them ships one"* (§ The contract): openDox ships its own default,
+  and its entry points register it.
+* § What happens when a host does not: an entry point registers openDox's
+  default and builds on it. The refusal is what a process meets when it builds
+  nothing, and its text now names the default and says why this process has
+  none.
+* § What a host that only ever built a server must now do: a host that wants
+  ITS routes served still registers before the first build. A server built
+  with no host registered builds on openDox's default rather than refusing.
+* § Where this is executed rather than described:
+  `tests/test_profile_registration.py` holds forty-five cases. Plan 034's T011
+  made `opendox.cli` and `opendox.serve` importable, so the parser's entry
+  point is built for real there. A server still cannot be built in a lone
+  checkout until phase 2, so the server's composition point stays lifted by AST.
+
 ---
 
 *Status: record. Authored under `split-opendox-two-layer-product` § 4.3, lane
 `openxfactory-4-opendox-extraction`. A CREATED file: no carve-manifest row
-(RULED OQ-C).*
+(RULED OQ-C). The section "The default profile, since plan 034" was added by
+plan 034's T016, lane `openxfactory-4`.*

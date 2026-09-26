@@ -14,8 +14,9 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE RATHER THAN IMPLIED
    `test_importing_the_seam_resolves_nothing` for the same reason.
 2. THE UNREGISTERED READ REFUSES, AND THE MESSAGE NAMES THE CALL. A refusal
    whose text does not name the fix is a stack trace with extra steps, so the
-   assertion is on the CONTENT — the registration call, the ruling, the runbook
-   — not merely on the exception type.
+   assertion is on the CONTENT — the registration call, the ruling, the runbook,
+   and that openDox's default is registered by an entry point and not here —
+   not merely on the exception type.
 3. IT NEVER ANSWERS EMPTY. The one failure mode the ruling forecloses is a
    silent `()`: a parser whose contributed verbs are absent looks exactly like a
    working one. So a read is asserted to RAISE, not to return something falsy.
@@ -30,15 +31,25 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE RATHER THAN IMPLIED
    `AttributeError` — `hasattr`, `getattr(..., default)`, `copy` and pytest's
    own rewriting all depend on it.
 7. THE SERVED COMPOSITION POINT IS EXECUTED, NOT DESCRIBED (RULED ASK-6 -> 1,
-   `5635150678`). `serve.build_server()` now reads `ROUTE_EXTENSIONS` through
-   this proxy, and `import opendox.serve` CANNOT be performed in this
-   repository — `serve.py:181` still reaches `ideation_dashboard`, openxFactory's
-   pre-carve package, which exists at neither carve destination (recorded in
-   `test_consumer_reach.py`'s `STILL_REACHING` and owed to a later act). So the
-   two statements that make up the composition point are lifted OUT of
-   `build_server`'s body BY AST and executed against a stand-in `route_extension`
-   seam. That runs the real source lines — an assertion about the tree, not a
-   paraphrase of it — and it keeps working the day `serve.py` becomes importable.
+   `5635150678`). `serve.build_server()` reads `ROUTE_EXTENSIONS` through this
+   proxy. `opendox.serve` imports in a lone checkout since plan 034's T011, but a
+   SERVER still cannot be BUILT in one until phase 2: `build_server()` reaches
+   `openxdox.snapshot_registry` for its snapshot source and
+   `openxdox.corpus_root` in `_checkout_real` (plan 034, research R7). So the
+   statements that make up the composition point are lifted OUT of
+   `build_server`'s body BY AST and executed against a stand-in
+   `route_extension` seam. That runs the real source lines — an assertion about
+   the tree, not a paraphrase of it.
+8. THE ENTRY POINTS REGISTER openDox's OWN DEFAULT (R1Q3 (a), with (i) and
+   (ii), `5817152735`; RN-1 (a), `5850003126`). `cli.build_parser()`,
+   `serve.build_server()` and both `main()`s register `opendox.default_profile`
+   where nothing is registered, so `is_registered()` then answers True. The
+   three cases the ruling names are each asserted: a bare process that builds
+   nothing still meets `ProfileNotRegistered`; a host registration made BEFORE
+   anything is built replaces the default; one made AFTER a parser or a server
+   was built from the default is refused as `AlreadyRegistered`. So are the
+   seams between them: asking which profile is registered is not a build, a
+   facet read off the default is, and `unregister()` clears both.
 
 `--noconftest` SAFE, deliberately: `validate` runs this file alongside
 `test_leg_shape.py` and `test_consumer_reach.py` with conftest collection off
@@ -51,6 +62,7 @@ A CREATED file: no carve-manifest row (RULED OQ-C).
 
 from __future__ import annotations
 
+import argparse
 import ast
 import subprocess
 import sys
@@ -59,7 +71,7 @@ from pathlib import Path
 
 import pytest
 
-from opendox import domain_profile, profile_proxy
+from opendox import default_profile, domain_profile, profile_proxy
 from opendox.profile_proxy import profile_openxfactory
 
 
@@ -101,13 +113,23 @@ def _empty_registry():
     fixing rather than noting: this file runs there under `--noconftest`
     (RULED Q-L5 (b′)), so there is no conftest registration to destroy and the
     bug would have waited for the day the ignore list shrinks.
+
+    THE RESTORE IS EXACT, AND READS THE REGISTRY'S OWN STATE (plan 034, T016).
+    The registry now holds three facts: the registration; whether it is the
+    default an entry point registered; and whether anything was built from that
+    default. A restore through `register()` alone would hand back an entry
+    point's default as a HOST's registration, and a later test here would then
+    meet the wrong one of two refusals. So the three are saved and put back as
+    they were. This is the one place in the suite that reads them, and it reads
+    them because it is the suite of that module.
     """
-    previous = domain_profile.current() if domain_profile.is_registered() else None
+    saved = (domain_profile._registered, domain_profile._is_default,
+             domain_profile._built_from_default)
     domain_profile.unregister()
     yield
     domain_profile.unregister()
-    if previous is not None:
-        domain_profile.register(previous)
+    (domain_profile._registered, domain_profile._is_default,
+     domain_profile._built_from_default) = saved
 
 
 # --------------------------------------------------------------------------
@@ -162,6 +184,26 @@ def test_the_refusal_names_the_registration_call_the_ruling_and_the_runbook() ->
     for expected in ("5628886636", "docs/profile-registration-runbook.md",
                      "build_parser", "build_server", "REFUSAL"):
         assert expected in message, f"the refusal no longer names {expected!r}"
+
+
+def test_the_refusal_says_the_default_is_an_entry_points_to_register() -> None:
+    """R1Q3 (a): the message must not claim openDox ships no profile, and must
+    not send a reader looking for a fallback that does not exist.
+
+    openDox ships `opendox.default_profile`, and the refusal says where it comes
+    from: an ENTRY POINT registers it, and this process built nothing through
+    one. That is what tells a library caller why it, and not a CLI user, meets
+    this refusal.
+    """
+    with pytest.raises(domain_profile.ProfileNotRegistered) as caught:
+        domain_profile.current()
+    message = str(caught.value)
+    for expected in ("opendox.default_profile", "ENTRY POINT", "R1Q3 (a)",
+                     "5817152735", "never a fallback"):
+        assert expected in message, f"the refusal no longer says {expected!r}"
+    assert "ships no profile" not in message, (
+        "the refusal still says openDox ships no profile of its own, which "
+        "requirement 3's default (plan 034, T015) made false")
 
 
 def test_current_refuses_the_same_way_as_the_proxy() -> None:
@@ -431,26 +473,27 @@ def test_the_repr_names_the_whole_composition_surface() -> None:
 #     (RULED ASK-6 -> 1, `5635150678`; Copilot review threads on openDox-code#11)
 # --------------------------------------------------------------------------
 #
-# NEITHER `opendox.cli` NOR `opendox.serve` CAN BE IMPORTED IN THIS REPOSITORY.
-# `serve.py:181` still reaches `ideation_dashboard`, openxFactory's PRE-CARVE
-# package, which exists at neither carve destination — and `cli.py` imports
-# `serve`, so it inherits the block. Both are recorded in
-# `tests/test_consumer_reach.py`'s `STILL_REACHING`, by name and with the
-# blocker named, and both are owed to a later act of the BUILD arc.
+# THE BINDING AND THE READ, LIFTED OUT BY AST. When these cases were written,
+# neither `opendox.cli` nor `opendox.serve` could be imported in a lone checkout:
+# `serve.py` still reached `ideation_dashboard`, openxFactory's PRE-CARVE
+# package, and `cli.py` imports `serve`. That stood in the way of the assertion
+# Copilot asked for ("add an integration assertion that registers a profile and
+# builds the parser"). Narrowing to "the proxy works in isolation" would have
+# been the wrong answer, because the regression under discussion is
+# `NameError: profile_openxfactory` AT A COMPOSITION POINT, which a unit test of
+# `_LateProfile` cannot see. So the composition points were lifted OUT of their
+# own files BY AST and executed against stand-ins for the two § 2.4 seams.
 #
-# That is a real obstacle to the assertion Copilot asked for ("add an
-# integration assertion that registers a profile and builds the parser"), and
-# narrowing to "the proxy works in isolation" would have been the wrong answer:
-# the regression under discussion is `NameError: profile_openxfactory` AT A
-# COMPOSITION POINT, which a unit test of `_LateProfile` cannot see.
+# Plan 034's T011 made both modules import, and section 10 below builds the
+# parser for real. A server still cannot be BUILT in a lone checkout until
+# phase 2 (research R7), so its composition point stays lifted. The parser's
+# lifted cases stay beside it: they hold the READ itself, apart from the entry
+# point's registration of the default that now precedes it.
 #
-# So the composition points are lifted OUT of their own files BY AST and
-# executed against stand-ins for the two § 2.4 seams. What runs is the tree's
-# own statements — the module-level or function-level binding of the proxy, and
-# the statement that reads a facet off it — so a deleted binding, a renamed
-# import or a deleted read all fail here, which is the whole of the regression
-# class. Nothing is pinned to a line number, which the next declared edit would
-# move, and none of it has to change the day the two modules become importable.
+# What runs is the tree's own statements — the module-level or function-level
+# binding of the proxy, and the statement that reads a facet off it — so a
+# deleted binding, a renamed import or a deleted read all fail here, which is
+# the whole of the regression class. Nothing is pinned to a line number.
 
 PROXY_IMPORT = "opendox.profile_proxy"
 PROXY_NAME = "profile_openxfactory"
@@ -537,6 +580,59 @@ def _run(path: Path, function: str, facet: str, namespace: dict) -> dict:
     return namespace
 
 
+#: The two names an entry point's registration of the default needs in scope.
+DEFAULT_NAMES = frozenset({"default_profile", "domain_profile"})
+
+
+def _binds_default(node: ast.AST) -> bool:
+    """`from opendox import default_profile, domain_profile`, wherever it sits."""
+    return (isinstance(node, ast.ImportFrom) and node.level == 0
+            and node.module == "opendox"
+            and DEFAULT_NAMES <= {alias.asname or alias.name
+                                  for alias in node.names})
+
+
+def _registers_default(node: ast.stmt) -> bool:
+    """`domain_profile.register_default(default_profile)`, as its own statement."""
+    call = node.value if isinstance(node, ast.Expr) else None
+    return (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "register_default"
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "domain_profile"
+            and [ast.unparse(arg) for arg in call.args] == ["default_profile"]
+            and not call.keywords)
+
+
+def _run_entry(path: Path, function: str, facet: str, namespace: dict) -> dict:
+    """Execute an entry point's registration of the default, and its read.
+
+    Section 9's statements, the proxy's binding and the read, together with the
+    import of the default and the registration call, in the order `function`
+    holds them, and with the module-scope imports ahead of them. The
+    registration must come BEFORE the first read, or the read would refuse.
+    """
+    module_body, function_body = _module_body(path, function)
+    registrations = [n for n in function_body if _registers_default(n)]
+    assert len(registrations) == 1, (
+        f"{path.name}:{function}() makes {len(registrations)} registrations of "
+        "the default, where R1Q3 (a) asks for exactly one "
+        "`domain_profile.register_default(default_profile)`")
+    reads = [n for n in function_body if _reads_facet(n, facet)]
+    assert reads and registrations[0].lineno < reads[0].lineno, (
+        f"{path.name}:{function}() reads {facet} before it registers the "
+        "default, so a build with no host registered would refuse")
+    lifted = {id(n) for n in registrations + reads}
+    at_module = [n for n in module_body if _binds_proxy(n) or _binds_default(n)]
+    in_body = [n for n in function_body
+               if id(n) in lifted or _binds_proxy(n) or _binds_default(n)]
+    assert any(_binds_default(n) for n in at_module + in_body), (
+        f"{path.name} registers the default without importing it")
+    module = ast.Module(body=at_module + in_body, type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), str(path), "exec"),  # noqa: S102
+         namespace)
+    return namespace
+
+
 class _RecordingSeam:
     """A stand-in for the § 2.4 seam module each composition point calls."""
 
@@ -594,13 +690,20 @@ def test_the_served_routes_put_the_hosts_contribution_ahead_of_the_callers() -> 
     assert _run_server(()).handed == [("the host's routes",)]
 
 
-def test_the_served_composition_point_refuses_when_no_host_registered() -> None:
-    """ASK-2's "REFUSAL, NOT A DEFAULT", now true of the server as well.
+def test_the_served_read_refuses_where_nothing_is_registered() -> None:
+    """ASK-2's "REFUSAL, NOT A DEFAULT", held at the server's READ.
 
     `domain_profile.current()`'s message has always told a host to register
-    "before it calls `cli.build_parser()` or `serve.build_server()`". Until this
-    slice that was half aspirational: slice 2b had removed serve's read, so a
-    server composed from whatever it was handed and never asked. It asks now.
+    "before it calls `cli.build_parser()` or `serve.build_server()`". Until the
+    routes half landed that was half aspirational: slice 2b had removed serve's
+    read, so a server composed from whatever it was handed and never asked.
+
+    Since plan 034's T016, `build_server()` registers openDox's own default
+    BEFORE this read (section 10), so a server built through the entry point
+    never meets the refusal. The lifted read runs here WITHOUT that
+    registration, and it shows the refusal is kept for the case `profile_proxy`
+    was written for, nothing registered (R1Q3 (i)), and never weakened into
+    `()`.
     """
     with pytest.raises(domain_profile.ProfileNotRegistered) as caught:
         _run_server(("the caller's",))
@@ -644,8 +747,12 @@ def test_the_parser_composition_point_resolves_instead_of_raising_nameerror() ->
     assert _run_parser().handed == [("the host's subcommands",)]
 
 
-def test_the_parser_composition_point_refuses_when_no_host_registered() -> None:
-    """The same refusal at the same shape, for the reader that has always read."""
+def test_the_parser_read_refuses_where_nothing_is_registered() -> None:
+    """The same refusal at the same shape, for the reader that has always read.
+
+    As at the server: `build_parser()` registers the default before this read
+    (section 10), and the lifted read, run without it, still refuses.
+    """
     with pytest.raises(domain_profile.ProfileNotRegistered) as caught:
         _run_parser()
     assert domain_profile.REGISTRATION_CALL in str(caught.value)
@@ -662,3 +769,278 @@ def test_the_parser_binds_the_proxy_at_module_scope() -> None:
     module_body, _ = _module_body(CLI, "build_parser")
     assert [n for n in _import_time_nodes(module_body) if _binds_proxy(n)], (
         "cli.py no longer binds the proxy at module scope")
+
+
+# --------------------------------------------------------------------------
+# 10 — THE ENTRY POINTS' DEFAULT: R1Q3 (a), with (i) and (ii); RN-1 (a)
+#      (openxFactory#656 comments `5817152735` and `5850003126`)
+# --------------------------------------------------------------------------
+#
+# openDox ships a default profile for its own domain, `opendox.default_profile`
+# (requirement 3; plan 034's T015). It is a registration an ENTRY POINT makes
+# and never a fallback inside `current()`: `cli.build_parser()`,
+# `serve.build_server()` and both `main()`s call
+# `domain_profile.register_default(default_profile)` before anything reads the
+# profile. Brett Heap ruled the three cases on `5817152735` (R1Q3 (a), with (i)
+# and (ii)), and the scenario text on `5850003126` (RN-1 (a): *"reword
+# requirement 3 so a host registration overrides the default only before
+# anything is built from it, and add the after-build refusal scenario"*):
+#
+#   1. a bare process that builds nothing still meets `ProfileNotRegistered`;
+#   2. a host registration made BEFORE anything is built replaces the default;
+#   3. one made AFTER a parser or a server was built from the default is
+#      refused.
+#
+# `opendox.cli` and `opendox.serve` are imported INSIDE each case rather than
+# at the top of this file, so no other case here depends on them importing.
+
+
+class _HostTree:
+    """A host at the shape the parser reads, contributing no verb of its own.
+
+    Where `_HostProfile` carries strings, this one carries real, empty tuples,
+    so a parser can actually be built on it: a host that has grown both facets
+    and contributes nothing, which is the root conftest's `_SuiteProfile`.
+    """
+
+    SUBCOMMAND_EXTENSIONS: tuple = ()
+    ROUTE_EXTENSIONS: tuple = ()
+
+
+def _commands(parser: argparse.ArgumentParser) -> list[str]:
+    """The top-level commands a built parser offers."""
+    found = [action for action in parser._actions
+             if isinstance(action, argparse._SubParsersAction)]
+    assert len(found) == 1, f"{parser.prog} has {len(found)} subparsers actions"
+    return list(found[0].choices)
+
+
+def _fresh_process(program: str) -> subprocess.CompletedProcess:
+    """`program` in a fresh interpreter, with this checkout's `src` first.
+
+    The registry is process-global, so a case about what a PROCESS meets runs
+    in one of its own.
+    """
+    return subprocess.run(
+        [sys.executable, "-c", f"import sys; sys.path.insert(0, {str(SRC)!r})\n"
+         + textwrap.dedent(program)],
+        capture_output=True, text=True)
+
+
+# --- case 1: a bare process that builds nothing still refuses (R1Q3 (i)) ----
+
+def test_a_bare_process_that_builds_nothing_still_meets_the_refusal() -> None:
+    """The library caller's case, and the one `profile_proxy` was written for.
+
+    A fresh interpreter imports both entry-point modules and the default,
+    builds nothing, and asks. Nothing is registered, because the default is a
+    registration an entry point MAKES and importing one makes nothing.
+    `current()` refuses, and so does the proxy at both of its facets.
+    """
+    done = _fresh_process("""
+        import opendox.cli, opendox.serve, opendox.default_profile
+        from opendox import domain_profile
+        from opendox.profile_proxy import profile_openxfactory
+        assert domain_profile.is_registered() is False, "an import registered"
+        reads = (domain_profile.current,
+                 lambda: profile_openxfactory.SUBCOMMAND_EXTENSIONS,
+                 lambda: profile_openxfactory.ROUTE_EXTENSIONS)
+        for read in reads:
+            try:
+                read()
+            except domain_profile.ProfileNotRegistered:
+                continue
+            raise AssertionError(f"{read} answered with nothing registered")
+        print("refused")
+    """)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "refused"
+
+
+# --- the entry points register the default (R1Q3 (a)) ----------------------
+
+def test_f3_1s_second_line_as_amended_names_the_default() -> None:
+    """F3.1 line 2 as T007 batch A amends it, run verbatim in a fresh process.
+
+    *"The line asks after `build_parser()`"* (plan 034, tasks.md § Ruled
+    amendments, batch A, from R1Q3 (a)). `current()` is the call every
+    consumer of the profile makes, and once an entry point has built, it
+    answers with the default, by name.
+    """
+    done = _fresh_process(
+        "from opendox.cli import build_parser; from opendox import domain_profile "
+        "as d; build_parser(); print('OK', d.name_of(d.current()))")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "OK opendox.default_profile"
+
+
+def test_build_parser_registers_the_default_and_builds_on_it() -> None:
+    """`build_parser()` in a process no host touched: the default, and its verb."""
+    from opendox import cli
+
+    parser = cli.build_parser()
+    assert domain_profile.is_registered() is True
+    assert domain_profile.current() is default_profile
+    assert "runtime" in _commands(parser), (
+        "the parser was not built on the default: the `runtime` command the "
+        "default contributes is missing (R1Q5 (a))")
+
+
+def test_build_server_registers_the_default_before_its_first_read() -> None:
+    """The server's half, executed from `serve.py`'s own lines.
+
+    Lifted by AST, for the reason section 9 gives: the proxy's binding, the
+    import of the default, the registration and the `ROUTE_EXTENSIONS` read, in
+    the order `build_server()` holds them. The registration must come first, or
+    the read would refuse, and the read is the build.
+    """
+    seam = _RecordingSeam()
+    _run_entry(SERVE, "build_server", "ROUTE_EXTENSIONS",
+               {"route_extension": seam, "route_extensions": ()})
+    assert seam.handed == [tuple(default_profile.ROUTE_EXTENSIONS)]
+    assert domain_profile.current() is default_profile
+    with pytest.raises(domain_profile.AlreadyRegistered):
+        domain_profile.register(_HostProfile())
+
+
+def test_cli_main_registers_the_default_and_builds_on_it() -> None:
+    """`main()` is the console script's entry point, and it registers first."""
+    from opendox import cli
+
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["--help"])
+    assert exited.value.code == 0
+    assert domain_profile.current() is default_profile
+    with pytest.raises(domain_profile.AlreadyRegistered):
+        domain_profile.register(_HostProfile())
+
+
+# --- case 2: a host registration BEFORE anything is built replaces it ------
+
+def test_a_host_registered_before_any_entry_point_keeps_its_own_tree() -> None:
+    """RN-1 (a): the host registered first, so the default never comes in.
+
+    The parser is built on the HOST's profile. It offers no `runtime` command,
+    so a host that registers its own profile keeps its own `--help` tree, which
+    is how openxFactory's 31-entry golden stands (R1Q5 (a)).
+    """
+    from opendox import cli
+
+    host = _HostTree()
+    domain_profile.register(host)
+    parser = cli.build_parser()
+    assert domain_profile.current() is host
+    assert "runtime" not in _commands(parser)
+    assert domain_profile.register_default(default_profile) is host, (
+        "an entry point's registration displaced a host's")
+
+
+def test_a_host_registration_replaces_a_default_nothing_was_built_from() -> None:
+    """RN-1 (a): the default IS registered, and nothing has been built from it."""
+    assert domain_profile.register_default(default_profile) is default_profile
+    host = _HostProfile()
+    assert domain_profile.register(host) is host
+    assert domain_profile.current() is host
+    assert profile_openxfactory.SUBCOMMAND_EXTENSIONS == ("the host's subcommands",)
+
+
+def test_serve_main_registers_the_default_first_and_a_host_may_still_replace_it(
+) -> None:
+    """The same window, reached through a real entry point's own lines.
+
+    `serve.main()` registers the default as its FIRST act, where a host would
+    register its own, and registering builds nothing. So a host that registers
+    afterwards still replaces the default.
+
+    `serve.main()` cannot yet be run in a lone checkout, even to `--help`: its
+    own option defaults read `openxdox.snapshot_registry` (research R7; T055
+    routes that reach in phase 2). So its registration is executed from its own
+    source, as the server's is.
+    """
+    _module_body_, main_body = _module_body(SERVE, "main")
+    first = main_body[:2]
+    assert len(first) == 2 and _binds_default(first[0]) \
+        and _registers_default(first[1]), (
+            "serve.main() no longer opens by importing and registering "
+            "openDox's default, so an entry point's process start is no longer "
+            "an entry-point registration (R1Q3 (a))")
+    exec(compile(ast.fix_missing_locations(ast.Module(body=first, type_ignores=[])),  # noqa: S102
+                 str(SERVE), "exec"), {})
+    assert domain_profile.current() is default_profile
+    host = _HostProfile()
+    assert domain_profile.register(host) is host
+    assert domain_profile.current() is host
+
+
+# --- case 3: a host registration AFTER a build from the default is refused --
+
+def test_a_host_registration_after_a_build_from_the_default_is_refused() -> None:
+    """R1Q3 (ii), as RN-1 (a) rules it: ASK-4 Q5's reason, in a message that
+    names the default, the build and the remedy."""
+    from opendox import cli
+
+    cli.build_parser()
+    host = _HostProfile()
+    with pytest.raises(domain_profile.AlreadyRegistered) as caught:
+        domain_profile.register(host)
+    message = str(caught.value)
+    for expected in ("opendox.default_profile", "built", "5634195861",
+                     "R1Q3 (ii)", "RN-1 (a)", "5850003126", "BEFORE",
+                     "build_parser", "build_server", "unregister()"):
+        assert expected in message, f"the refusal no longer says {expected!r}"
+    assert domain_profile.current() is default_profile, "the default survived"
+
+
+# --- the seams between the cases -------------------------------------------
+
+def test_asking_which_profile_is_registered_is_not_a_build() -> None:
+    """Only a composition point's read is a build.
+
+    `is_registered()` and `current()` are what openXdox's `_upstream()` asks,
+    and `repr` and a dunder probe are what debuggers and pytest reach for. None
+    of them builds anything, so none of them may close the window in which a
+    host's registration replaces the default.
+    """
+    domain_profile.register_default(default_profile)
+    assert domain_profile.is_registered() is True
+    assert domain_profile.current() is default_profile
+    repr(profile_openxfactory)
+    with pytest.raises(AttributeError):
+        profile_openxfactory.__wrapped__
+    host = _HostProfile()
+    assert domain_profile.register(host) is host
+
+
+def test_a_facet_read_off_the_default_is_a_build() -> None:
+    """A composition point that reads any facet has built from the default."""
+    domain_profile.register_default(default_profile)
+    assert profile_openxfactory.ROUTE_EXTENSIONS == ()
+    with pytest.raises(domain_profile.AlreadyRegistered):
+        domain_profile.register(_HostProfile())
+
+
+def test_unregister_clears_the_default_and_its_build() -> None:
+    """A deliberate swap stays possible, and it is spelled `unregister()`."""
+    domain_profile.register_default(default_profile)
+    assert profile_openxfactory.SUBCOMMAND_EXTENSIONS
+    domain_profile.unregister()
+    assert domain_profile.is_registered() is False
+    host = _HostProfile()
+    assert domain_profile.register(host) is host
+
+
+def test_register_default_leaves_any_registration_as_it_found_it() -> None:
+    """The entry point's call registers only where NOTHING is registered."""
+    host = _HostProfile()
+    domain_profile.register(host)
+    assert domain_profile.register_default(default_profile) is host
+    domain_profile.unregister()
+    assert domain_profile.register_default(default_profile) is default_profile
+    assert domain_profile.register_default(_HostTree()) is default_profile
+
+
+def test_register_default_refuses_none() -> None:
+    """`None` is how "my default is missing" arrives, as it is for `register()`."""
+    with pytest.raises(TypeError):
+        domain_profile.register_default(None)
+    assert domain_profile.is_registered() is False

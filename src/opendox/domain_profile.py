@@ -1,4 +1,4 @@
-"""THE ONE REGISTRATION: the host's domain profile, held for late resolution.
+"""THE ONE REGISTRATION: the host's domain profile, or openDox's own default, held for late resolution.
 
 WHY THIS FILE EXISTS. `split-opendox-two-layer-product` § 4.3 asks what becomes
 of `profile_openxfactory` — the in-tree composition point `build_parser()` and
@@ -78,14 +78,37 @@ documented in the runbook, and is deliberately not enforced from here: openDox
 refusing an object for lacking a facet IT does not read would be openDox
 legislating for the other leg.
 
-REFUSAL, NOT A DEFAULT. When nothing is registered, the accessors REFUSE and
-name the registration call. They do not hand back an empty tuple. An empty
+REFUSAL, NOT AN EMPTY DEFAULT. When nothing is registered, the accessors REFUSE
+and name the registration call. They do not hand back an empty tuple. An empty
 tuple is the failure that cannot be seen: a CLI that silently lost its
 contributed verbs and a server that silently lost its contributed routes both
 look exactly like a working one until someone types the missing command. This is
 the same stance openXdox-code #14 takes for the same reason, in the words
 `domain-mapping-declaration` uses for it: a permissive default is the wrong
 answer to a question that was asked precisely because permissiveness is unsafe.
+
+THE PRODUCT'S OWN DEFAULT IS A REGISTRATION AN ENTRY POINT MAKES (R1Q3 (a),
+`openxFactory#656` comment `5817152735`). openDox ships a default profile for its
+own domain, `opendox.default_profile`, as requirement 3 of
+`add-neutral-product-standalone-operability` asks. It is not a fallback inside
+`current()`, which would make the refusal above unreachable. `cli.build_parser()`,
+`serve.build_server()` and both `main()`s call `register_default()` first, and it
+registers the default only where nothing is registered. So:
+
+* a process that BUILDS through an entry point composes from the host's profile
+  where a host registered one, and from openDox's own default where none did;
+* a process that builds NOTHING, which is the library caller's case, still has
+  no registration and still meets `ProfileNotRegistered`. That is the case
+  `profile_proxy` was written for (R1Q3 (i));
+* a host registration made BEFORE anything is built from the default replaces
+  it. One made AFTER a parser or a server was built from the default is refused
+  as `AlreadyRegistered`, for ASK-4 Q5's reason (R1Q3 (ii); RN-1 (a), comment
+  `5850003126`).
+
+"Built from" is recorded where openDox composes. `profile_proxy` resolves the
+profile through `current_for_build()`, which is `current()` plus that record.
+`current()` itself records nothing, so openXdox's `_upstream()`, and any reader
+that only asks which profile is registered, is never taken for a build.
 
 A CREATED FILE: no row in openxFactory's `docs/opendox-carve-manifest.yaml`,
 because the manifest declares what LEAVES openxFactory and never what a
@@ -101,9 +124,11 @@ __all__ = [
     "ProfileNotRegistered",
     "REGISTRATION_CALL",
     "current",
+    "current_for_build",
     "is_registered",
     "name_of",
     "register",
+    "register_default",
     "unregister",
 ]
 
@@ -120,13 +145,16 @@ _NAME_LIMIT = 120
 
 
 class ProfileNotRegistered(RuntimeError):
-    """No host profile has been registered, and openDox composes no profile.
+    """Nothing is registered: no host's profile, and no entry point's default.
 
-    Raised instead of returning an empty contribution. openDox is the NEUTRAL
-    product: it has no domain, no in-tree profile (the § 3 carve deleted the one
-    it had) and therefore nothing to fall back TO. A process that builds a
-    parser or a server from a host's profile registers that profile at start, or
-    the composition refuses and says which call is missing.
+    Raised instead of returning an empty contribution. openDox ships a default
+    of its own, `opendox.default_profile`, but the default is a registration an
+    ENTRY POINT makes and never a fallback here (R1Q3 (a)). `cli.build_parser()`,
+    `serve.build_server()` and both `main()`s register it where no host has. So
+    this is what a process meets when it asks for the profile without building
+    anything through an entry point. That is the library caller's case, and the
+    one `profile_proxy` was written for (R1Q3 (i)). A host registers its own
+    profile at process start, before the first build.
     """
 
 
@@ -143,10 +171,27 @@ class AlreadyRegistered(RuntimeError):
     Mirrors `openxdox.domain_profile.AlreadyRegistered` in name and stance, so
     the two accessors of Q5's one registration fail the same way (openXdox-code
     #14). It is NOT the same class — that would be an import between the legs.
+
+    THE ENTRY POINT'S DEFAULT IS REPLACEABLE UNTIL SOMETHING IS BUILT FROM IT
+    (R1Q3 (ii); RN-1 (a), `openxFactory#656` comment `5850003126`). A host
+    registration made while openDox's own default is registered, and before
+    any parser or server has been built from it, replaces the default: nothing
+    has composed from it, so there is nothing left for a swap to strand. After
+    a build, a host's registration meets this refusal for the reason above, and
+    the message says that the registration it met is the default.
     """
 
 
+#: THE one registration, host's or default, or `None`.
 _registered: Any = None
+
+#: Whether `_registered` is the default an ENTRY POINT registered
+#: (`register_default()`), rather than a host's own `register()`.
+_is_default: bool = False
+
+#: Whether a parser or a server has been built from that default. Recorded by
+#: `current_for_build()`, the accessor the composition points resolve through.
+_built_from_default: bool = False
 
 
 def register(profile: Any) -> Any:
@@ -168,8 +213,15 @@ def register(profile: Any) -> Any:
     Re-registering the SAME object is a no-op, so an idempotent host start-up —
     two entry points that both call the hook, a test that re-enters it — is not
     punished. A DIFFERENT object raises `AlreadyRegistered`.
+
+    OVER THE ENTRY POINT'S DEFAULT (R1Q3 (ii); RN-1 (a), `openxFactory#656`
+    comment `5850003126`). Where the registration is openDox's own default,
+    which an entry point registered because no host had, a host's profile
+    REPLACES it while nothing has been built from it, and is refused as
+    `AlreadyRegistered` once a parser or a server has been. Either way the host
+    ends up holding the one registration, or knows why it does not.
     """
-    global _registered
+    global _registered, _is_default, _built_from_default
     if profile is None:
         raise TypeError(
             "register() takes the host's profile module or object, not None. "
@@ -178,24 +230,82 @@ def register(profile: Any) -> Any:
             "registration call named (ProfileNotRegistered), which is the "
             "state RULED ASK-2 asks for rather than a silent empty profile.")
     if _registered is not None and _registered is not profile:
-        raise AlreadyRegistered(
-            f"a host profile is already registered ({name_of(_registered)}), "
-            f"and {name_of(profile)} would replace it. Registration happens "
-            "ONCE, at process start (RULED ASK-4 Q5, openxFactory#656 comment "
-            "5634195861): a parser or a server built before the swap keeps the "
-            "first profile's contributed subcommands and routes, so a second "
-            "registration would leave one process composing from two profiles "
-            "with nothing to report it. Call "
-            "opendox.domain_profile.unregister() first if the swap is "
-            "deliberate.")
+        if not _is_default:
+            raise AlreadyRegistered(
+                f"a host profile is already registered "
+                f"({name_of(_registered)}), and {name_of(profile)} would "
+                "replace it. Registration happens ONCE, at process start "
+                "(RULED ASK-4 Q5, openxFactory#656 comment 5634195861): a "
+                "parser or a server built before the swap keeps the first "
+                "profile's contributed subcommands and routes, so a second "
+                "registration would leave one process composing from two "
+                "profiles with nothing to report it. Call "
+                "opendox.domain_profile.unregister() first if the swap is "
+                "deliberate.")
+        if _built_from_default:
+            raise AlreadyRegistered(
+                f"openDox's own default profile ({name_of(_registered)}) is "
+                "registered, because an entry point registered it where no "
+                "host had, and a parser or a server has already been built from "
+                f"it, so {name_of(profile)} cannot replace it now. The build "
+                "keeps the default's contributed subcommands and routes, so a "
+                "swap would leave one process composing from two profiles with "
+                "nothing to report it (RULED ASK-4 Q5, openxFactory#656 comment "
+                "5634195861). A host registration replaces the default only "
+                "BEFORE anything is built from it (R1Q3 (ii), comment "
+                "5817152735; RN-1 (a), comment 5850003126), so register the "
+                "host's profile at process start, ahead of the first "
+                "`cli.build_parser()` or `serve.build_server()`. Call "
+                "opendox.domain_profile.unregister() first if the swap is "
+                "deliberate.")
     _registered = profile
+    _is_default = False
+    _built_from_default = False
     return profile
 
 
+def register_default(profile: Any) -> Any:
+    """AN ENTRY POINT'S registration of the product's OWN default (R1Q3 (a)).
+
+    `cli.build_parser()`, `serve.build_server()` and both `main()`s call this,
+    with `opendox.default_profile`, before anything reads the profile. It
+    registers `profile` ONLY where nothing is registered. A host's registration,
+    or a default already registered, is left exactly as it is. Returns whatever
+    is registered afterwards, so an entry point can name the profile it builds
+    on in one expression.
+
+    It is NOT for hosts. A host calls `register()`, and its profile replaces
+    this one until something has been built from it (see `register()`).
+
+    `None` is refused for the reason `register()` gives: it is how "my profile
+    is missing" arrives, and storing it would record a registration that
+    promises the opposite.
+    """
+    global _registered, _is_default, _built_from_default
+    if profile is None:
+        raise TypeError(
+            "register_default() takes the product's default profile, not None. "
+            "An entry point that has no default to offer registers nothing, "
+            "and the composition points then refuse with the registration call "
+            "named (ProfileNotRegistered).")
+    if _registered is None:
+        _registered = profile
+        _is_default = True
+        _built_from_default = False
+    return _registered
+
+
 def unregister() -> None:
-    """Drop the registration. For test isolation and for a host tearing down."""
-    global _registered
+    """Drop the registration, whether a host's or the entry point's default.
+
+    For test isolation and for a host tearing down. The record of a build from
+    the default goes with it, so a deliberate swap after `unregister()` is an
+    ordinary first registration.
+    """
+    global _registered, _is_default, _built_from_default
     _registered = None
+    _is_default = False
+    _built_from_default = False
 
 
 def is_registered() -> bool:
@@ -204,33 +314,65 @@ def is_registered() -> bool:
     Part of the duck-typed contract openXdox's `_upstream()` consults
     (openXdox-code #14): it asks this BEFORE `current()` precisely so that "no
     profile here" is answered without provoking a refusal that is not its.
+
+    True for a host's registration and for the default an entry point
+    registered alike (R1Q3 (a)): after `cli.build_parser()` in a process no host
+    touched, it answers True, and `current()` names `opendox.default_profile`.
     """
     return _registered is not None
 
 
 def current() -> Any:
-    """The registered host profile, or a refusal naming the registration call.
+    """The registered profile, or a refusal naming the registration call.
 
     The SECOND half of the duck-typed contract openXdox's `_upstream()`
-    consults. It is also what `profile_proxy` resolves through, so both of Q5's
-    accessors read the same object from the same place — which is what makes it
-    ONE registration rather than two that happen to agree.
+    consults. `profile_proxy` resolves through it too, by way of
+    `current_for_build()`, so both of Q5's accessors read the same object from
+    the same place — which is what makes it ONE registration rather than two
+    that happen to agree.
+
+    It answers what is registered: a host's profile, or the default an entry
+    point registered (R1Q3 (a)). It never falls back to the default itself, so
+    a process that built nothing through an entry point meets the refusal
+    below. Asking records nothing, either: only a build is a build.
     """
     if _registered is None:
         raise ProfileNotRegistered(
-            "no host profile is registered, so openDox has no contributed "
-            "subcommands and no contributed routes to compose from. openDox is "
-            "the NEUTRAL product and ships no profile of its own: the § 3 carve "
-            "deleted the in-tree `profile_openxfactory.py` rather than moving "
-            "it, and the descendant that drives openDox registers its own "
-            "profile at process start with\n\n    " + REGISTRATION_CALL +
+            "no profile is registered, so openDox has no contributed "
+            "subcommands and no contributed routes to compose from. openDox "
+            "ships a default profile of its own, `opendox.default_profile`, but "
+            "the default is a registration an ENTRY POINT makes and never a "
+            "fallback here (R1Q3 (a), openxFactory#656 comment 5817152735): "
+            "`cli.build_parser()`, `serve.build_server()` and each `main()` "
+            "register it where no host has, and this process has built nothing "
+            "through one. A host that drives openDox registers its own profile "
+            "at process start with\n\n    " + REGISTRATION_CALL +
             "\n\nbefore it calls `cli.build_parser()` or `serve.build_server()` "
             "(RULED ASK-2 option (2), openxFactory#656 comment 5628886636; the "
             "operational contract is docs/profile-registration-runbook.md). "
-            "This is a REFUSAL, not a missing default: composing from an empty "
-            "profile would produce a parser with its contributed verbs silently "
-            "absent, which looks exactly like a working one.")
+            "This is a REFUSAL, not a missing default: answering with an empty "
+            "profile here would produce a parser with its contributed verbs "
+            "silently absent, which looks exactly like a working one.")
     return _registered
+
+
+def current_for_build() -> Any:
+    """`current()`, for a composition point that is BUILDING from the profile.
+
+    The one accessor `profile_proxy` resolves through, so every facet a parser
+    or a server reads comes through here. It refuses exactly as `current()`
+    does, and it records one thing more. Where the registered profile is the
+    default an entry point registered, a parser or a server has now been built
+    from it, and from that moment a host's `register()` is refused rather than
+    applied (R1Q3 (ii); RN-1 (a), `openxFactory#656` comment `5850003126`). A
+    host's own registration needs no record: it is refused against a different
+    profile already.
+    """
+    global _built_from_default
+    profile = current()
+    if _is_default:
+        _built_from_default = True
+    return profile
 
 
 def name_of(profile: Any) -> str:
