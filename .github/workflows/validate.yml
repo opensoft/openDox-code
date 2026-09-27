@@ -224,9 +224,11 @@ jobs:
           #    never ships. Their both-legs halves go to the composition
           #    (openXdox-code's `tests/integration/`, T042). The half this leg
           #    can prove alone stays, as a passing case. With the two cases
-          #    that served only them, four cases leave and one arrives:
-          #    SELECTED -3, PASSED -1, SKIPPED -2. The file's closing comment
-          #    lists each case with its destination.
+          #    that served only them, four cases leave. Two arrive: that
+          #    passing half, and a case that drives the own-bundle exclusion
+          #    over an assembled bundle. So SELECTED -2, PASSED 0 and
+          #    SKIPPED -2. The file's closing comment lists each case with its
+          #    destination.
           # 2. THE MARGIN IS RESTORED. The floors sit THREE below CI's reading
           #    instead of on it. That is the reference implementation's rule,
           #    openxFactory `pytest-suite.yml`: "three below the lower of the

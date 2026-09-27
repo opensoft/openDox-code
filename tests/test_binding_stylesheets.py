@@ -83,12 +83,13 @@ NODE = shutil.which("node")
 
 #: The six modules openXdox contributes (RULED Q5's package data). They are NOT
 #: in this repository — slice S5 sent them to openXdox-code — and no case here
-#: reads them any more: the one that did is an integration test at the
-#: composition now (plan 034 T037 → T042). The names stay because a
+#: reads the real ones any more: the one that did is an integration test at
+#: the composition now (plan 034 T037 → T042). The names stay because a
 #: developer's assembly may have placed the six in this bundle, and openDox's
 #: own corpus must EXCLUDE them there, or a class only they name would read as
-#: openDox's (`_own_bundle_text()`).
-GATE_MODULES =("gate.js", "gate-lens.js", "gate-projects.js", "dispose.js",
+#: openDox's (`_own_bundle_text()`). The exclusion case below writes six
+#: stand-ins under these names into a throwaway bundle, to drive that rule.
+GATE_MODULES = ("gate.js", "gate-lens.js", "gate-projects.js", "dispose.js",
                 "swb-create.js", "swb-session.js")
 
 #: The 54 classes the census measures as the gate loop's own at openDox-code
