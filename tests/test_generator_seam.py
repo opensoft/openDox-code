@@ -236,6 +236,42 @@ def test_generate_with_nothing_registered_refuses_as_the_seam(tmp_path) -> None:
     assert gs.is_registered() is False
 
 
+def test_current_answers_the_registration_it_checked() -> None:
+    """`current()` reads the registration once. `generate()` calls it holding
+    the seam's lock, but a host or a test may call it bare while another thread
+    unregisters. So a registration dropped between its check and its answer
+    never makes it answer `None`: it answers the registration it checked.
+
+    The interleaving is forced, deterministically. A line tracer drops the
+    registration before every line of `current()` after its first, which is
+    where another thread's `unregister()` could land."""
+    declared, _ = _declared()
+    gs.register(declared)
+    lines = []
+
+    def inside_current(frame, event, arg):
+        if event == "line":
+            lines.append(frame.f_lineno)
+            if len(lines) > 1:
+                gs.unregister()
+        return inside_current
+
+    def tracer(frame, event, arg):
+        return inside_current if frame.f_code is gs.current.__code__ else None
+
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        answer = gs.current()
+    finally:
+        sys.settrace(previous)
+    assert len(lines) > 1, "the tracer never reached a second line of current()"
+    assert gs.is_registered() is False, "the interleaved unregister() never ran"
+    assert answer is declared, (
+        f"current() answered {answer!r} after passing its check, not the "
+        "registration it checked")
+
+
 # --------------------------------------------------------------------------
 # 3 — the declaration is checked when it is made
 # --------------------------------------------------------------------------

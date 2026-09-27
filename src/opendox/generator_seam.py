@@ -509,8 +509,14 @@ def current() -> SnapshotGenerator:
     It answers what is registered: a host's generator, or the default an entry
     point registered. It never falls back to the default itself, and asking
     records nothing. Only a generation closes the default's window, while it
-    runs and once it has answered."""
-    if _registered is None:
+    runs and once it has answered.
+
+    It reads the registration ONCE. So a registration another thread drops
+    while it answers never makes it answer `None`: it answers the registration
+    it checked. It takes no lock of its own, because `generate()` calls it
+    while holding the seam's lock."""
+    registered = _registered
+    if registered is None:
         raise GeneratorNotRegistered(
             "no snapshot generator is registered at openDox's generator seam "
             "(opendox.generator_seam), so there is nothing to generate a "
@@ -525,7 +531,7 @@ def current() -> SnapshotGenerator:
             "dropped the registration since. A host that contributes its own "
             "generator registers it at process start with\n\n    "
             + REGISTRATION_CALL + "\n\nbefore the first generation.")
-    return _registered
+    return registered
 
 
 def generate(repo_root: Path | str, repository: str, *,
