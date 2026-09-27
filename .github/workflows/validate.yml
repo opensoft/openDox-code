@@ -203,8 +203,15 @@ jobs:
           # selected=2471 passed=2458 skipped=13 failures=0 errors=0`, which
           # printed `margin 12` against the floors above. 2459 + 12 is a check
           # on that reading, not its source.
-          MIN_SELECTED: "2471"
-          MIN_PASSED: "2458"
+          #
+          # AND AGAIN for the ten cases the next two reviews led to: the same
+          # parametrized case now also drives the count over runs hidden inside
+          # a wrapper (`env`, `timeout`, `uv run`, `xargs`, `sh -c`, `bash -c`).
+          # Read from run 36337919108 (job 108672216615) over `db3e8a4f`:
+          # `triple: selected=2481 passed=2468 skipped=13 failures=0
+          # errors=0`, `margin 10`. 2471 + 10 is a check, not the source.
+          MIN_SELECTED: "2481"
+          MIN_PASSED: "2468"
           # EXACT — the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "13"
         run: |
