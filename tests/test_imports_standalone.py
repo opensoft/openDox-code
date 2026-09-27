@@ -13,17 +13,21 @@ stood in for can answer for the package:
 1. It asserts that the four siblings are ABSENT, before anything is imported.
    They are the consumer, the publisher's two packages, and the publisher's
    corpus adapter. A sweep run beside an installed sibling proves nothing.
-2. It walks the package with `pkgutil.walk_packages` and imports every module
-   it finds. The sweep is GENERATED, so a module added later is covered with no
-   edit here. It is also held COMPLETE: the modules walked must be exactly the
-   `.py` files under the package directory, so a walk that silently found
-   nothing, or missed a subpackage, fails instead of passing.
+2. It imports EVERY module the package's `.py` files define, in sorted order,
+   so a package precedes its own modules. The list is GENERATED from the
+   files, so a module added later is covered with no edit here, and a
+   subpackage whose `__init__` fails is imported, and reported, rather than
+   skipped. `pkgutil.walk_packages` would skip it: it calls `onerror` and
+   never visits the children.
 3. It fails naming the FIRST module that did not import, and says what it
    needed. A sibling is the finding this test exists for. Any other failure is
    a finding too, as F2.1 treats it. A missing third-party package means the
    environment lacks a declared extra: the sweep runs where every extra the
    package declares is installed, as F2.1's `pip install ".[runtime,test]"`
    does.
+4. Once every module imports, it holds the sweep COMPLETE: `pkgutil`'s own
+   walk must visit exactly the modules the files define, so a list that
+   silently found nothing, or a walk that disagrees with it, fails.
 
 `--noconftest` safe, and also safe with the root conftest in play, which is
 how F2.1 runs it. A CREATED file: no carve-manifest row (RULED OQ-C).
@@ -58,23 +62,24 @@ if present:
     print(json.dumps({{"present": present}}))
     raise SystemExit(0)
 import opendox
-walked, failed = [], []
-for info in pkgutil.walk_packages(opendox.__path__, "opendox.",
-                                  onerror=lambda name: None):
-    walked.append(info.name)
+failed = []
+for name in {modules!r}:
     try:
-        importlib.import_module(info.name)
+        importlib.import_module(name)
     except Exception as exc:  # noqa: BLE001 - every failure is a finding here
-        failed.append({{"module": info.name, "type": type(exc).__name__,
+        failed.append({{"module": name, "type": type(exc).__name__,
                         "message": str(exc),
                         "missing": getattr(exc, "name", None)}})
+walked = [info.name for info in pkgutil.walk_packages(
+    opendox.__path__, "opendox.", onerror=lambda name: None)]
 print(json.dumps({{"present": [], "walked": walked, "failed": failed}}))
 """
 
 
 def _run_sweep() -> dict:
-    program = textwrap.dedent(_SWEEP.format(root=str(IMPORT_ROOT),
-                                            siblings=SIBLINGS))
+    program = textwrap.dedent(_SWEEP.format(
+        root=str(IMPORT_ROOT), siblings=SIBLINGS,
+        modules=sorted(_modules_on_disk())))
     done = subprocess.run([sys.executable, "-c", program],
                           capture_output=True, text=True, timeout=300)
     assert done.returncode == 0, (
@@ -105,12 +110,6 @@ def test_every_module_imports_with_no_sibling() -> None:
         f"a sibling is importable here: {result['present']}. This sweep "
         "proves that openDox imports with NO sibling installed, so it must "
         "run where none is, as F2.1 asserts before it runs")
-    walked = set(result["walked"])
-    on_disk = _modules_on_disk()
-    assert walked == on_disk, (
-        "the walk did not visit exactly the package's modules. Never walked: "
-        f"{sorted(on_disk - walked)}; walked but not on disk: "
-        f"{sorted(walked - on_disk)}")
     failed = result["failed"]
     if failed:
         first = failed[0]
@@ -128,3 +127,10 @@ def test_every_module_imports_with_no_sibling() -> None:
             f"{first['module']} does not import with no sibling installed: "
             f"{why}.\n  {first['type']}: {first['message']}\n"
             f"  Every other module that failed: {others}")
+    walked = set(result["walked"])
+    on_disk = _modules_on_disk()
+    assert on_disk, "the package's files define no module: the sweep swept nothing"
+    assert walked == on_disk, (
+        "pkgutil's walk did not visit exactly the modules the package's files "
+        f"define. Never walked: {sorted(on_disk - walked)}; walked but not on "
+        f"disk: {sorted(walked - on_disk)}")
