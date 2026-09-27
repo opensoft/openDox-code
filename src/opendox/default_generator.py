@@ -26,6 +26,15 @@ as a hexadecimal object id, so a revision is never handed to `git` where it
 could read as an option. It is left out where the lookup fails. Nothing reads
 the clock, so the same tree at the same anchors answers the same snapshot.
 
+A PIN LABELS THE SNAPSHOT; IT DOES NOT CHOOSE THE BYTES. The content is the
+working tree's, on Brett's T022 ruling ("Working tree (Recommended)"), which the
+holder confirmed for T054. A supplied `source_revision` is recorded as the
+anchor the caller asserts, exactly as openXdox's governed generator records one
+and scans the tree it is handed (its sealed-artifact lane pins a revision for a
+tree that is not a checkout at all). So the pin never reaches the `CorpusRef`,
+and a pin that names no commit here is still recorded rather than refused. A
+caller that wants the tree at an older commit checks that commit out first.
+
 WHAT IT REPORTS. The projection's notices go to standard error, one line each,
 `notice: <document>: <what was read otherwise>`. A `stage:` value outside the
 six role keys is one (R1Q13 (a)): the line names the document, the value and

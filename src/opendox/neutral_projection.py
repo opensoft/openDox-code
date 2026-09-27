@@ -147,8 +147,9 @@ STOPWORDS: frozenset[str] = frozenset("""
     will with within without would yet you your yours yourself yourselves
 """.split())
 
-#: A run of letters or digits: what the topic rule reads as one token.
-_TOKEN = re.compile(r"[^\W_]+")
+#: A run of letters, or a run of digits: what the topic rule reads as one
+#: token. The two are split apart, so `Q3planning` holds the word `planning`.
+_TOKEN = re.compile(r"[^\W\d_]+|\d+")
 
 #: An ATX heading (`# Roadmap`, `## Budget ##`), its text in group 1.
 _ATX_HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")

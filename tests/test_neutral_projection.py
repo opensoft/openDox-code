@@ -734,6 +734,19 @@ def test_an_empty_topics_header_declares_no_topic(tmp_path: Path) -> None:
     assert violations(snapshot) == []
 
 
+def test_a_word_is_a_run_of_letters_even_beside_digits(tmp_path: Path) -> None:
+    """A word is a run of three or more letters: `Q3planning` holds `planning`,
+    so it groups with a source whose name spells the word on its own."""
+    snapshot = _generate(_repository(tmp_path, files={
+        "a.md": "title: Q3planning review\n\n.\n",
+        "b.md": "title: planning review\n\n.\n",
+    }))
+    assert _by_path(snapshot)["a.md"]["topics"] == ["planning", "review"]
+    [group] = snapshot["clusters"]
+    assert group["topics"] == ["planning", "review"]
+    assert violations(snapshot) == []
+
+
 def test_a_declared_group_gathers_the_sources_that_share_its_topics(
         tmp_path: Path) -> None:
     root = _repository(tmp_path, files={
