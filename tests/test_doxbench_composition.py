@@ -40,13 +40,17 @@ from conftest import REPO_ROOT
 # The SAME DOM instrument the canvas suite drives, imported rather than copied:
 # a second shim is a second set of behaviours to keep in step, and the two
 # drifting is precisely how a composition defect hides.
-from test_doxbench_view import _EDITOR_DOM_SHIM
+# …and the SAME contributed workbench gate column its shell harnesses mount
+# with (§ 3.4 slice S5; the `_CONTRIBUTED_GATE` note there says why a harness
+# that mounts the shell is the host, and so contributes the column `app.js`
+# would resolve). Imported for the same reason the shim is.
+from test_doxbench_view import _CONTRIBUTED_GATE, _EDITOR_DOM_SHIM
 
 NODE = shutil.which("node")
 VIEWS = REPO_ROOT / "src" / "opendox" / "web" / "views"
 VENDOR = REPO_ROOT / "src" / "opendox" / "web" / "vendor"
 
-_COMPOSITION_HARNESS = _EDITOR_DOM_SHIM + r"""
+_COMPOSITION_HARNESS = _EDITOR_DOM_SHIM + _CONTRIBUTED_GATE + r"""
 import { createRequire } from 'node:module';
 
 globalThis.markdownit = createRequire(import.meta.url)('../vendor/markdown-it.min.js');
@@ -140,6 +144,12 @@ async function mount({ files, gate = true, saveAnswer = null }) {
   const opened = [];
   const workbench = mountStagingWorkbench(container, snapshotFor(files), {
     caps,
+    // The harness is the host, so it contributes the workbench gate column
+    // `app.js` resolves (§ 3.4 slice S5). Without one the canvas is withheld,
+    // and every case below waited for a canvas a student install is correctly
+    // not offered. `gate: false` still means no gate: the column answers
+    // `createGateLive` off the same `caps`.
+    gate: contributedGate().column,
     // A real embedding supplies the reader (app.js hands the explorer's own
     // `openDoc`). Without it the tile's `read` is correctly unreachable, which
     // would have made this harness prove the wrong thing.

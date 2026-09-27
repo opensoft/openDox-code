@@ -293,10 +293,14 @@ def test_the_server_runs_as_a_real_child_over_real_pipes(tmp_path):
     manifest = _manifest(tmp_path)
     manifest_path = tmp_path / "mount.json"
     manifest_path.write_text(json.dumps(manifest.as_dict()), encoding="utf-8")
+    # The module's name and its import root at THIS leg (plan 034 T034): the
+    # package is `opendox` under `src/`. This case named the pre-carve
+    # `ideation_dashboard.doxbench_mcp` under `scripts/`, a package this
+    # repository never had, so the child died before it read a frame.
     environment = {"PATH": "/usr/bin:/bin",
-                   "PYTHONPATH": str(REPO_ROOT / "scripts")}
+                   "PYTHONPATH": str(REPO_ROOT / "src")}
     child = subprocess.Popen(
-        [sys.executable, "-m", "ideation_dashboard.doxbench_mcp",
+        [sys.executable, "-m", "opendox.doxbench_mcp",
          "--manifest", str(manifest_path)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=environment, text=True)

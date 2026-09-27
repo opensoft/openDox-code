@@ -45,7 +45,11 @@ from conftest import REPO_ROOT  # noqa: F401  (sys.path side effect)
 
 from opendox import doxbench_knowledge as kn  # noqa: E402
 
-from test_doxbench_view import _EDITOR_DOM_SHIM  # noqa: E402
+# The canvas suite's DOM shim, and the contributed workbench gate column its
+# shell harnesses mount with (§ 3.4 slice S5; the `_CONTRIBUTED_GATE` note there
+# says why a harness that mounts the shell is the host, and so contributes the
+# column `app.js` would resolve). Both imported, never copied.
+from test_doxbench_view import _CONTRIBUTED_GATE, _EDITOR_DOM_SHIM  # noqa: E402
 
 NODE = shutil.which("node")
 WEB = REPO_ROOT / "src" / "opendox" / "web"
@@ -402,7 +406,7 @@ def test_the_source_digest_escalates_only_where_a_buffer_exists(formatter):
 # `catalog` and `chatTurn` already use in that file, so the pane is driven
 # exactly as `app.js` drives it and no test reaches around the seam.
 
-_PANE_PRELUDE = _EDITOR_DOM_SHIM + r"""
+_PANE_PRELUDE = _EDITOR_DOM_SHIM + _CONTRIBUTED_GATE + r"""
 import { createRequire } from 'node:module';
 
 globalThis.markdownit = createRequire(import.meta.url)('../vendor/markdown-it.min.js');
@@ -487,6 +491,12 @@ function mountWorkbench(container, abstracts, capOverrides, activeOverride,
   return mountStagingWorkbench(container, snapshotFor(), {
     caps: { actions: { gate: true, session: true }, actor: 'brett',
             console_token: 'tok', ...(capOverrides || {}) },
+    // The harness is the host, so it contributes the workbench gate column
+    // `app.js` resolves (§ 3.4 slice S5). The generate control is offered only
+    // where `canvasOffered()` is, and that reads the column's
+    // `createGateLive`. It answers off these same `caps`, so the ungated and
+    // hosted mounts below still have no gate.
+    gate: contributedGate().column,
     fetcher: async () => ({ ok: false }),
     active: activeOverride || { repository: 'fixture-repo', ref: 'main' },
     index: { entries: [] },
