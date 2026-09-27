@@ -233,7 +233,10 @@ def test_the_violation_survives_open_session_notebooks_degradation_clause(
 
     The listing is asserted on its own first, so the raise below can only be
     the runner's."""
-    monkeypatch.setattr(ca, "_home_factory", ca._home_factory)   # restored after
+    # Handing monkeypatch the CURRENT value records it for teardown. The
+    # registration below then replaces it, and teardown puts the recorded
+    # value back, whether that was a registration or none at all.
+    monkeypatch.setattr(ca, "_home_factory", ca._home_factory)
     ca.register_home(cli_mod._default_home_factory)
     worktree = tmp_path / "worktree"
     worktree.mkdir()
