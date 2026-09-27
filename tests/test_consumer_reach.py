@@ -929,18 +929,29 @@ def _import_time_uses(path: Path, names: frozenset[str]) -> list[tuple[int, str]
 
 def _names_bound_to_the_seam(path: Path) -> set[str]:
     """Every name a module binds, at its top level, to a `consumer_reach`
-    stand-in: `from .consumer_reach import X`, or, once `consumer_reach`
-    itself is imported, `Y = consumer_reach.X`, its annotated form
-    `Y: T = consumer_reach.X`, or `Y = consumer_reach.f(...)`, which mints
-    one (`module`, `function`, `constant`)."""
+    stand-in.
+
+    Every spelling of the seam counts. `from .consumer_reach import X` (`..`
+    in a subpackage) and `from opendox.consumer_reach import X` bind one
+    directly. Once the seam itself is reachable, so do `Y = <seam>.X`, its
+    annotated form `Y: T = <seam>.X`, and `Y = <seam>.f(...)`, which mints one
+    (`module`, `function`, `constant`). `<seam>` is a name bound to the
+    module (`from . import consumer_reach`, `import opendox.consumer_reach as
+    cr`, or `cr = consumer_reach` after either), or the package's attribute
+    `opendox.consumer_reach`, once `import opendox` or `import
+    opendox.consumer_reach` has bound `opendox`."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    # The leading dots from this file to the `opendox` package: one for a
+    # module at the top of it, two in a subpackage, and so on.
+    level = len(path.relative_to(PACKAGE).parts)
     seam_aliases: set[str] = set()
+    package_aliases: set[str] = set()
     bound: set[str] = set()
     for node in tree.body:
         if isinstance(node, ast.ImportFrom):
-            package = (node.level == 1 and node.module is None) or \
+            package = (node.level == level and node.module is None) or \
                 (node.level == 0 and node.module == "opendox")
-            seam = (node.level == 1 and node.module == "consumer_reach") or \
+            seam = (node.level == level and node.module == "consumer_reach") or \
                 (node.level == 0 and node.module == "opendox.consumer_reach")
             if package:
                 seam_aliases |= {a.asname or a.name for a in node.names
@@ -948,16 +959,30 @@ def _names_bound_to_the_seam(path: Path) -> set[str]:
             if seam:
                 bound |= {a.asname or a.name for a in node.names}
         elif isinstance(node, ast.Import):
-            seam_aliases |= {a.asname for a in node.names
-                             if a.name == "opendox.consumer_reach" and a.asname}
+            for alias in node.names:
+                if alias.name == "opendox.consumer_reach" and alias.asname:
+                    seam_aliases.add(alias.asname)
+                elif alias.name == "opendox" or (
+                        alias.name.startswith("opendox.") and not alias.asname):
+                    package_aliases.add(alias.asname or "opendox")
+
+    def is_the_seam(expr: ast.expr | None) -> bool:
+        return (isinstance(expr, ast.Name) and expr.id in seam_aliases) or (
+            isinstance(expr, ast.Attribute) and expr.attr == "consumer_reach"
+            and isinstance(expr.value, ast.Name)
+            and expr.value.id in package_aliases)
+
     for node in tree.body:
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names = {t.id for t in targets if isinstance(t, ast.Name)}
+        if is_the_seam(node.value):
+            seam_aliases |= names
+            continue
         value = node.value.func if isinstance(node.value, ast.Call) else node.value
-        if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) \
-                and value.value.id in seam_aliases:
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            bound |= {t.id for t in targets if isinstance(t, ast.Name)}
+        if isinstance(value, ast.Attribute) and is_the_seam(value.value):
+            bound |= names
     return bound
 
 
