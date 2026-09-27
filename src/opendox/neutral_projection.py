@@ -17,6 +17,12 @@ them.
   .SNAPSHOT_VALUES` defaults to those same values, so openDox's views place
   every card by them and render the six words.
 
+WHAT IS A DOCUMENT. An entry the adapter lists AND classifies. An entry it
+cannot classify (a `Makefile`, an image) is not a document: it is left out
+unread, and nothing mentions it (the holder's ruling on T054). So is an entry
+whose path the neutral schema cannot carry (`path-is-repo-relative`), and the
+projection reports that one, since the adapter did classify it.
+
 WHERE A DOCUMENT LANDS (RULED R1Q13 (a) with (c), same comment). A document
 names its station with the neutral `stage:` key of its leading `Name: value`
 header, which is `local_git_adapter.leading_header`'s block. That is the same
@@ -37,9 +43,7 @@ that document's name, or that document's file name, as a run of whole words.
 A word is a run of three or more letters, case-folded, that is not one of
 `STOPWORDS`. So the rule needs no front matter at all. AT-R1's repository (b)
 (quickstart.md § 2) is three notes named by their headings, and a note that
-mentions another shares that note's name as a topic. An entry the adapter
-cannot classify is listed but never read, so it carries no topic and nothing
-mentions it.
+mentions another shares that note's name as a topic.
 
 GROUPS (the grouping station). A group forms wherever two or more sources
 share a topic. Topics that the same sources share form one group, named by
@@ -194,7 +198,6 @@ class _Document:
     title: str | None = None
     summary: str | None = None
     topics: tuple[str, ...] = ()
-    read: bool = False
     name: str = ""
     tokens: tuple[str, ...] = ()
     declared_topics: tuple[str, ...] | None = None
@@ -281,12 +284,14 @@ def _unique(base: str, taken: set[str]) -> str:
 
 def _read_documents(adapter: CorpusAdapter, corpus: ResolvedCorpus,
                     notices: list[Notice]) -> list[_Document]:
-    """Every listed document the snapshot can carry, in path order, with its
-    station, its two copied fields, its name and its tokens."""
+    """Every document the snapshot can carry, in path order, with its station,
+    its two copied fields, its name and its tokens."""
     stations = set(STAGE_ROLES)
     documents: list[_Document] = []
     listed = sorted(adapter.list_documents(corpus), key=lambda d: d.key)
     for identity in listed:
+        if adapter.classify(corpus, identity).kind is None:
+            continue            # not a document (this module's docstring)
         reason = _unwritable(identity.key)
         if reason is not None:
             # NAMED BY ITS repr: the path is one no snapshot can carry, and a
@@ -299,13 +304,8 @@ def _read_documents(adapter: CorpusAdapter, corpus: ResolvedCorpus,
             continue
         document = _Document(path=identity.key)
         documents.append(document)
-        if adapter.classify(corpus, identity).kind is None:
-            # UNCLASSIFIABLE: listed, never read. It is a source with nothing
-            # to copy, no topic, and no name another document can mention.
-            continue
         text = adapter.read(corpus, identity).content.decode("utf-8", "replace")
         header = leading_header(text)
-        document.read = True
         document.title = header.get(TITLE_KEY)
         document.summary = header.get(SUMMARY_KEY)
         declared = header.get(STAGE_KEY)
@@ -327,14 +327,13 @@ def _read_documents(adapter: CorpusAdapter, corpus: ResolvedCorpus,
 
 
 def _assign_topics(documents: list[_Document]) -> None:
-    """The topic rule (this module's docstring), over the documents read."""
-    read = [document for document in documents if document.read]
-    own = [_words(document.name) for document in read]
+    """The topic rule (this module's docstring), over every document."""
+    own = [_words(document.name) for document in documents]
     # Each name is looked for by its first WORD, at that word's offset, so a
     # text is scanned once and a common short token ("the") costs nothing.
     by_first_word: dict[str, list[tuple[tuple[str, ...], int, int]]] = {}
-    for index, document in enumerate(read):
-        for alias in {_tokens(document.name), _tokens(document.stem)}:
+    for index, document in enumerate(documents):
+        for alias in sorted({_tokens(document.name), _tokens(document.stem)}):
             # A name with no word in it contributes no topic, so it is not
             # looked for: `a.md` would otherwise be mentioned by every "a".
             offset = next((at for at, token in enumerate(alias)
@@ -342,7 +341,7 @@ def _assign_topics(documents: list[_Document]) -> None:
             if offset is not None:
                 by_first_word.setdefault(alias[offset], []).append(
                     (alias, offset, index))
-    for index, document in enumerate(read):
+    for index, document in enumerate(documents):
         if document.declared_topics is not None:
             document.topics = document.declared_topics
             continue

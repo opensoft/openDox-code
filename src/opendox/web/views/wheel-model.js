@@ -47,6 +47,9 @@ const CANDIDATE_ROLE = STAGE_ROLES[2];
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
 const MAX_DEMO_POSSIBLES = 6;
+// A group's document count: its tally where the snapshot carries one, and its
+// edges otherwise (openDox's neutral snapshot, whose groups carry no tallies).
+const docLinks = (c) => c?.tallies?.document_links ?? (c?.document_edges || []).length;
 
 function basename(path) {
   return String(path).split("/").at(-1) || String(path);
@@ -68,9 +71,7 @@ export function isUndisposedDerived(possible) {
 export function synthesizeDemoPossibles(clusters, display) {
   const d = display || neutralDisplay();
   const ranked = [...(clusters || [])].sort((a, b) => {
-    const ta = a.tallies?.document_links || 0;
-    const tb = b.tallies?.document_links || 0;
-    return tb - ta || String(a.id).localeCompare(String(b.id));
+    return docLinks(b) - docLinks(a) || String(a.id).localeCompare(String(b.id));
   });
   return ranked.slice(0, MAX_DEMO_POSSIBLES).map((c) => ({
     id: "demo-" + c.id,
@@ -117,8 +118,7 @@ function buildItems({ display, sources, groups, candidates, selections,
     })),
     [GROUPING]: groups.map((c) => ({
       id: c.id, label: c.name || c.id,
-      sub: (c.tallies?.document_links || 0) + " "
-        + display.count(SOURCE, c.tallies?.document_links || 0), ref: c,
+      sub: docLinks(c) + " " + display.count(SOURCE, docLinks(c)), ref: c,
     })),
     [CANDIDATE]: candidates.map((p) => ({
       id: p.id, label: p.title || p.id,
