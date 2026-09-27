@@ -33,9 +33,10 @@ included, is not a declaration either. The document is read as a source, and
 the projection reports it, naming the document, the value and the six keys. So
 no other value can reach the snapshot, whose schema admits only the six.
 
-THE TOPIC RULE. Every document carries `topics`. A document that declares a
-`topics:` header carries the ones it lists, split on commas, with whitespace
-collapsed and letters case-folded. A document that declares none carries the
+THE TOPIC RULE. Every document carries `topics`. A document with a `topics:`
+header carries exactly the topics it lists, split on commas, with whitespace
+collapsed and letters case-folded, and none where it lists none: the header is
+a declaration even when it is empty. A document without the header carries the
 words of its NAME, plus the words of the name of every other document it
 MENTIONS. Its name is its `title:`, else its first `#` heading, else its file
 name without the suffix. It mentions another document where its text holds
@@ -318,8 +319,8 @@ def _read_documents(adapter: CorpusAdapter, corpus: ResolvedCorpus,
                     f"its stage: value {declared!r} is not one of the six "
                     f"station role keys ({', '.join(STAGE_ROLES)}), so it is "
                     "not a declaration; the document is read as a source"))
-        listed_topics = _declared_topics(header.get(TOPICS_KEY) or "")
-        document.declared_topics = listed_topics or None
+        if TOPICS_KEY in header:            # a declaration, even an empty one
+            document.declared_topics = _declared_topics(header[TOPICS_KEY])
         document.name = (document.title or _first_heading(text)
                          or document.stem)
         document.tokens = _tokens(text)

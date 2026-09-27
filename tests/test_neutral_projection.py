@@ -718,6 +718,22 @@ def test_declared_topics_replace_the_derived_ones(tmp_path: Path) -> None:
     assert violations(snapshot) == []
 
 
+def test_an_empty_topics_header_declares_no_topic(tmp_path: Path) -> None:
+    """A `topics:` header is a declaration even when it lists nothing: the
+    document carries no topic, and none is derived for it, so it joins no
+    group although its name shares words with two sources that do group."""
+    root = _repository(tmp_path, files={
+        "a.md": "title: Rain barrel\ntopics:\n\n.\n",
+        "b.md": "title: Rain barrel notes\n\n.\n",
+        "c.md": "title: Rain barrel log\n\n.\n",
+    })
+    snapshot = _generate(root)
+    assert _by_path(snapshot)["a.md"]["topics"] == []
+    [group] = snapshot["clusters"]
+    assert [e["document"] for e in group["document_edges"]] == ["b.md", "c.md"]
+    assert violations(snapshot) == []
+
+
 def test_a_declared_group_gathers_the_sources_that_share_its_topics(
         tmp_path: Path) -> None:
     root = _repository(tmp_path, files={

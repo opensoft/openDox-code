@@ -5,10 +5,10 @@ the publishing repository's own vocabulary (plan 034, T050).
 2, slice P2-F): a handful of `.md` documents a plain, ungoverned git
 repository could contain, read by AT-R1 (spec.md § "AT-R1 — the release-1
 acceptance test", step 3(a)) and by F5.3, F7.2, F10.1 and F13.1 once those
-falsifiers exist. None of it is wired to any `opendox` code yet — T052 and
-T054 (the generator seam and the neutral projection) have not landed — so
-this suite tests the fixture's own two guarantees rather than a projection
-over it.
+falsifiers exist. T054's neutral projection reads it:
+`tests/test_neutral_projection.py` projects it with every sibling blocked and
+validates the snapshot against T053's schema. This suite tests the fixture's
+own two guarantees, which hold whatever reads it.
 
 THE TWO GUARANTEES, AND WHY.
 
@@ -26,22 +26,20 @@ THE TWO GUARANTEES, AND WHY.
    document that declares no `stage:` line at all is a SOURCE. This fixture
    carries one document per explicit station (`grouping`, `candidate`,
    `selection`, `submission`, `completion`) and three sources, two of which
-   share the phrase "rain barrel" verbatim so a future topic-based grouping
-   pass (T054) has a pair to find — the fixture must yield at least one
+   share the phrase "rain barrel" verbatim so T054's topic rule has a pair
+   to find — the fixture must yield at least one
    group, so AT-R1 can open the chat pane from a grouping tile (spec.md
    § AT-R1 steps 6-7).
 
 Every document also carries the small neutral field set the default adapter
-will require regardless of station — `title` and `summary` — per T050's task
-line and the answer's own example.
+requires regardless of station — `title` and `summary`
+(`local_git_adapter.NEUTRAL_FIELDS`, T054) — per T050's task line and the
+answer's own example.
 
-NOT YET WIRED INTO `.github/workflows/validate.yml`'s explicit pytest list:
-the phase-2 draft-ahead scope keeps this PR out of that file (conftest.py,
-pyproject.toml, validate.yml and README.md are the phase-1 chain's), so this
-suite runs by node id today, exactly as other narrowed-out suites in this
-tree have (`tests/test_display_facet_leaves.py`'s own S7-residue history).
-It joins the enumerated list whichever later task next touches it — most
-likely F5.3/T056, or T049's own close.
+COLLECTED BY THE REQUIRED CHECK. Since T036, `validate` runs the whole suite
+(`python -m pytest -q` over the configured testpaths) instead of an explicit
+list of files, so this suite is collected like every other and needs no entry
+anywhere.
 
 A CREATED file: no row in openxFactory's `docs/opendox-carve-manifest.yaml`
 (RULED OQ-C: the manifest declares what LEAVES openxFactory, never what a
