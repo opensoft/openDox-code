@@ -1,0 +1,643 @@
+"""#1144 task 2.3, the sweep: no module under `src/` reaches a sibling at
+import time, and none reaches openxFactory at all. Plan 034 T032.
+
+WHAT 2.3 ASKS. *"Sweep every remaining module-level reach: grep `src/` for
+`ideation_dashboard`, `corpus_adapter_openxfactory`, `doc_health` and
+`openxdox` at import position, and close or defer each with a recorded
+reason."* T032 ran that sweep where phase 1's lanes joined, and its pull
+request records every hit with its reason. At that tree:
+
+* No import under `src/` names any of the four where it runs at import time.
+  The two there were, `serve.py:199` and `:206` at `1e4a57fb`, T011 closed.
+* The eight deferred reaches into openxFactory that research R5 measured are
+  closed, each by its own phase-1 task: `authoring.py:318` (T021),
+  `serve.py:713` (T012), `workbench.py:746` (T025), `workbench.py:1407-1409`
+  (T026), and `serve_wire.py:1369` and `doxbench_packet.py:177` (T027).
+* Nineteen deferred reaches remain, every one of them into `openxdox` and
+  inside a function body. The release map routes them in phases 2 and 3
+  (T055, T084), and openXdox-code's `OPENDOX_BACK_IMPORTS` ratchet counts them
+  module by module.
+
+THIS FILE HOLDS THE FIRST TWO FACTS, AND DOES NOT PIN THE THIRD'S COUNT. A
+deferred reach into `openxdox` is still lawful in release 1. Each one that a
+later task routes through a seam simply stops being one, and the ratchet that
+already counts them is where that count moves. So nothing here needs an edit
+when a reach closes. What may not come back is a reach at import time, into
+any of the four, or a reach of any kind into openxFactory, which a standalone
+openDox can never have. This is the openDox -> openxFactory direction that no
+instrument watched (#1144 task 9.2a). `tests/test_imports_standalone.py`
+proves the import-time half by importing every module; this file reads it off
+the source, so it also holds where a sibling happens to be installed.
+
+PARSED, NOT GREPPED (`tests/import_scan.py`'s rule). These modules name the
+four packages in prose on purpose: a docstring saying which reach a seam
+replaced, or a comment saying why an import is lazy. So the sweep reads import
+statements, and `importlib.import_module(...)` or `__import__(...)` calls with
+a literal name, by position or as `name=`, out of the syntax tree, as #1144's
+F4.1 scan does. That includes a call under a name an import gives one of the
+two (`from importlib import import_module as load`). A module that handles an
+importer as a VALUE (assigns it, passes it, stores it, or looks it up by its
+name as a string) is read strictly: there, every call whose module argument
+is a literal counts, whatever it calls, and it is read as either importer,
+since it may be bound to either. So the importer can travel under any name by
+any binding, and a literal module name still counts. Literal `*[...]` and
+`**{...}` arguments are spelled out, however deep. An importing call whose
+module a spread of anything else hides (`import_module(*names)`) is refused,
+because it could hide a reach into openxFactory. So is a star import from a
+package a sibling lives under (`from scripts import *`), which may import any
+submodule the package's `__all__` lists. A computed name is not refused,
+because `consumer_reach`'s seam imports one. A relative call is read against
+`globals()` or `__package__` as the module's own only where the module never
+rebinds either; where it does, the call is refused too. A name in a comment,
+a docstring or a string is not an import. The openxFactory ban goes one step
+further, because an import needs the package's name and openDox can never
+install the package: no code under `src/` spells an openxFactory package's
+name at all, in a string or bytes literal outside documentation either.
+Relative imports stay inside this package and are not read. Each node is read
+by `import_scan.names_imported_by`, the reader the repository's other
+direction checks share, so the sweep is not a second copy of it.
+
+WHEN A REACH RUNS decides its class. A function body defers, and so does a
+lambda's. So do the positions PEP 695 evaluates lazily, only when something
+reads them: a type parameter's bound or constraints, and a `type` alias's
+value. Everything else runs when the module is imported: a module body, a
+class body, an `if`/`try`/`with` at module level, and a `def`'s decorators,
+default values and annotations.
+
+WHERE POSITION AND RUN TIME PART, THE SWEEP READS POSITION, which is the
+stricter reading. An import under `if TYPE_CHECKING:` never runs, but it sits
+in import position, and a standalone openDox could not type-check an import it
+cannot resolve. A `def`'s annotations count as import time even where `from
+__future__ import annotations` postpones them. A comprehension or generator
+expression counts as running where it sits, though a generator nobody consumes
+at import time would defer. Each of these can only make the sweep call a reach
+import-time when it is not; none can hide one. What a source read cannot see is
+a CALL: a function body runs at import time if the module calls it there.
+`tests/test_imports_standalone.py` and `tests/test_consumer_reach.py` import
+every module with the siblings blocked, which is the proof for that case.
+
+WHAT THE SWEEP IS FOR. It is a regression guard over the code this repository
+writes, not a sandbox. It reads each form named above literally, and it
+refuses the forms where a spread, a star, a rebinding or an unknown relative
+context hides what an import names. A module written to evade it, one that
+builds a module's or an importer's name from pieces at run time, is outside
+what any source read can see. Review holds that, and for import time so do
+the runtime sweeps.
+
+It reads `src/` whole, so `src/route_extension.py` and
+`src/subcommand_extension.py` are swept with the package. `--noconftest` safe.
+A CREATED file: no carve-manifest row (RULED OQ-C).
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+import sys
+import textwrap
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
+
+sys.path.insert(0, str(ROOT / "tests"))
+from import_scan import (  # noqa: E402
+    CONTEXT_NAMES, UNREADABLE, importer_escapes, importing_calls,
+    names_a_forbidden_package, names_imported_by, rebinds, string_literals)
+
+#: The consumer. Its deferred reaches are phase 2's and 3's to route.
+CONSUMER = "openxdox"
+
+#: openxFactory's packages, spelled as F2.1 and F4.1 spell them. openDox can
+#: never install one, so no reach of any kind may name them.
+OPENXFACTORY = ("ideation_dashboard", "doc_health", "corpus_adapter_openxfactory")
+
+#: Both spellings of each, for the reason `tests/import_scan.py`'s header
+#: gives: in openxFactory, `scripts/__init__.py` makes every package under
+#: `scripts/` importable as `scripts.<name>` too, and a one-spelling
+#: forbidden list is a hole (`tests/test_subcommand_extension.py` holds both).
+OPENXFACTORY_SPELLINGS = (*OPENXFACTORY, *(f"scripts.{name}" for name in OPENXFACTORY))
+
+SIBLINGS = (CONSUMER, *OPENXFACTORY_SPELLINGS)
+
+
+@dataclass(frozen=True, order=True)
+class Reach:
+    """One import-position name of a sibling, and when it runs."""
+
+    path: str
+    line: int
+    name: str
+    deferred: bool
+    inside: str
+
+    @property
+    def target(self) -> str:
+        return self.name.split(".")[0]
+
+    def __str__(self) -> str:
+        when = "deferred" if self.deferred else "AT IMPORT TIME"
+        return f"{self.path}:{self.line}: {self.name} ({when}, in {self.inside})"
+
+
+def _a_star_that_may_hide_a_sibling(name: str) -> bool:
+    """`from a.b import *` may import any submodule that `a.b`'s `__all__`
+    lists, so it hides a sibling wherever one lives under `a.b`:
+    `from scripts import *`, but not `from os import *`."""
+    return name.endswith(".*") and any(
+        sibling.startswith(name[:-1]) for sibling in SIBLINGS)
+
+
+def sweep(source: str, path: str = "<source>") -> list[Reach]:
+    """Every reach of a sibling in `source`, classified by when it runs."""
+    found: list[Reach] = []
+    tree = ast.parse(source, filename=path)
+    calls = importing_calls(tree)
+    any_call = importer_escapes(tree, calls)
+    trusted = not rebinds(tree, CONTEXT_NAMES)
+
+    def visit(node: ast.AST, deferred: bool, inside: str) -> None:
+        lazy: list[ast.AST] = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef, ast.TypeAlias)):
+            # PEP 695: a type parameter's bound and constraints are evaluated
+            # only when something reads them, and so is an alias's value.
+            owner = node.name.id if isinstance(node, ast.TypeAlias) else node.name
+            for param in node.type_params:
+                visit(param, True, f"{owner}[{param.name}]")
+            lazy = list(node.type_params)
+            if isinstance(node, ast.TypeAlias):
+                visit(node.value, True, f"type {owner}")
+                return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Everything but the BODY is evaluated where the `def` sits.
+            args = node.args
+            for part in (*node.decorator_list, *args.defaults,
+                         *[d for d in args.kw_defaults if d is not None],
+                         *[a.annotation for a in (*args.posonlyargs, *args.args,
+                                                  *args.kwonlyargs, args.vararg,
+                                                  args.kwarg)
+                           if a is not None and a.annotation is not None],
+                         *([node.returns] if node.returns is not None else [])):
+                visit(part, deferred, inside)
+            for statement in node.body:
+                visit(statement, True, node.name)
+            return
+        if isinstance(node, ast.Lambda):
+            for default in (*node.args.defaults,
+                            *[d for d in node.args.kw_defaults if d is not None]):
+                visit(default, deferred, inside)
+            visit(node.body, True, f"{inside}.<lambda>")
+            return
+        named = [UNREADABLE if _a_star_that_may_hide_a_sibling(name) else name
+                 for name in names_imported_by(
+                     node, calls=calls, any_call=any_call, trusted=trusted,
+                     members=True)]
+        named = [name for name in named
+                 if name == UNREADABLE or names_a_forbidden_package(name, SIBLINGS)]
+        if isinstance(node, (ast.ImportFrom, ast.Call)):
+            # One reach per statement or call: its module, or, where the
+            # module is not a sibling's (`from scripts import doc_health`,
+            # `__import__("scripts", ..., ("doc_health",))`), the first member
+            # that is.
+            named = named[:1]
+        for name in named:
+            found.append(Reach(path, node.lineno, name, deferred, inside))
+        for child in ast.iter_child_nodes(node):
+            if not any(child is param for param in lazy):
+                visit(child, deferred, inside)
+
+    visit(tree, False, "<module>")
+    return sorted(found)
+
+
+def _sweep_src() -> list[Reach]:
+    reaches: list[Reach] = []
+    for path in sorted(SRC.rglob("*.py")):
+        reaches += sweep(path.read_text(encoding="utf-8"),
+                         path.relative_to(ROOT).as_posix())
+    return reaches
+
+
+# ---------------------------------------------------------------------------
+# the sweep, over `src/`
+# ---------------------------------------------------------------------------
+
+
+def test_no_module_under_src_reaches_a_sibling_at_import_time():
+    """Task 2.3's first finding, held: an import-time reach into any of the
+    four is a module that cannot be imported where openDox runs alone."""
+    at_import = [str(r) for r in _sweep_src() if not r.deferred]
+    assert not at_import, (
+        f"{len(at_import)} reach(es) into a sibling run at IMPORT time, so the "
+        "module cannot be imported without it (#1144 task 2.1's defect): "
+        + "; ".join(at_import))
+
+
+def test_no_module_under_src_reaches_openxfactory_at_all():
+    """F4.1's scan lists only `openxdox` targets.
+
+    Phase 1 closed the eight deferred reaches into openxFactory, each through a
+    seam openDox declares. A new one is openDox needing, at the moment a verb
+    runs, a package it can never install. Route it through a seam the product
+    declares, as 4.2 does, and do not add it here."""
+    into = [str(r) for r in _sweep_src()
+            if names_a_forbidden_package(r.name, OPENXFACTORY_SPELLINGS)
+            or r.name == UNREADABLE]
+    assert not into, (
+        f"{len(into)} reach(es) into openxFactory, which openDox can never "
+        "install (#1144 task 4.3's phase-1 cut), or imports the source does "
+        "not spell out (behind a spread, a star, or a context that is not a "
+        "literal), which could be: " + "; ".join(into))
+
+
+#: An openxFactory package's name, alone or as part of a dotted name, in any
+#: text: `doc_health`, `doc_health.corpus`, `scripts.doc_health`, `import
+#: doc_health`, but not `doc_health_x` or `mydoc_health`.
+_SPELLS_OPENXFACTORY = re.compile(
+    r"(?<!\w)(?:" + "|".join(map(re.escape, OPENXFACTORY)) + r")(?!\w)")
+
+
+def test_no_code_under_src_spells_an_openxfactory_package():
+    """The openxFactory ban, held however a module might reach one.
+
+    Every import needs the package's NAME. The sweep reads it in each
+    importing position it knows. This reads it anywhere else that code can
+    hold it: every string or bytes literal under `src/` outside documentation
+    (a docstring or a bare string statement; comments never reach the tree).
+    So a name in an import line handed to `exec`, in a constant passed to a
+    call later, or in an argument to an importer the sweep does not know
+    (`importlib.util.find_spec`, `runpy.run_module`), fails here. Prose in
+    documentation may still say which reach a seam replaced. What no source
+    read can see is a name built from pieces at run time."""
+    spelled = [f"{path.relative_to(ROOT).as_posix()}:{line}: {value[:80]!r}"
+               for path in sorted(SRC.rglob("*.py"))
+               for value, line in string_literals(path, with_bytes=True)
+               if _SPELLS_OPENXFACTORY.search(value)]
+    assert not spelled, (
+        f"{len(spelled)} literal(s) under src/ spell an openxFactory package, "
+        "which openDox can never install: " + "; ".join(spelled))
+
+
+def test_every_reach_the_sweep_finds_is_deferred_into_the_consumer():
+    """The positive form of the two above: what is left is phase 2's and 3's.
+
+    Every reach names `openxdox` and sits in a function body. Their count is
+    openXdox-code's ratchet's, and it is not pinned here."""
+    others = [str(r) for r in _sweep_src()
+              if not (r.deferred and r.target == CONSUMER)]
+    assert not others, "; ".join(others)
+
+
+# ---------------------------------------------------------------------------
+# the scanner bites
+# ---------------------------------------------------------------------------
+
+#: One module that reaches every sibling from every position the scanner
+#: tells apart, and names them where it must not be fooled: in prose, in a
+#: string, in a relative import, and in a package that merely starts with a
+#: sibling's letters.
+_SPECIMEN = textwrap.dedent('''
+    """Prose names openxdox, doc_health and ideation_dashboard; not a reach."""
+    import importlib
+    from typing import TYPE_CHECKING
+    import openxdox_lookalike
+    from . import doc_health
+    from .ideation_dashboard import thing
+
+    import doc_health.corpus
+    if TYPE_CHECKING:
+        from openxdox import gate_console
+    try:
+        import corpus_adapter_openxfactory
+    except ImportError:
+        pass
+    NOTE = "from ideation_dashboard import lanes"
+
+    class Column:
+        from ideation_dashboard import serve_openxfactory_lanes
+
+    @importlib.import_module("doc_health.runner").decorate
+    def verb(default=__import__("openxdox.corpus_root")):
+        from openxdox.snapshot_registry import SnapshotRegistry
+        importlib.import_module("doc_health.families")
+
+        def inner():
+            import corpus_adapter_openxfactory
+
+        return lambda: __import__("ideation_dashboard")
+''')
+
+
+def test_the_scanner_classifies_every_position_it_reads():
+    found = {(r.line, r.name, r.deferred, r.inside)
+             for r in sweep(_SPECIMEN, "specimen.py")}
+    assert found == {
+        (9, "doc_health.corpus", False, "<module>"),
+        (11, "openxdox", False, "<module>"),
+        (13, "corpus_adapter_openxfactory", False, "<module>"),
+        (19, "ideation_dashboard", False, "<module>"),
+        (21, "doc_health.runner", False, "<module>"),
+        (22, "openxdox.corpus_root", False, "<module>"),
+        (23, "openxdox.snapshot_registry", True, "verb"),
+        (24, "doc_health.families", True, "verb"),
+        (27, "corpus_adapter_openxfactory", True, "inner"),
+        (29, "ideation_dashboard", True, "verb.<lambda>"),
+    }, sorted(found)
+
+
+#: The positions PEP 695 evaluates lazily, and the importing calls' keyword
+#: spelling. The class body is not lazy, so its reach runs at import time. A
+#: `__import__` with a nonzero `level` is relative, and names no sibling. A
+#: relative `import_module` names the module its literal `package` resolves it
+#: to, by position or by keyword. Relative to `__package__`, it names none;
+#: relative to any other package that is not a literal, it is `UNREADABLE`.
+#: `__import__` reads its relative context off its `globals`: `globals()` is
+#: the module's own, a literal `{"__package__": ...}` resolves (its own case,
+#: below), and anything else, or a level that is not a literal, is
+#: `UNREADABLE`. The pre-carve `scripts.` spelling is openxFactory's too,
+#: and `from scripts import doc_health` imports `scripts.doc_health`, as does
+#: `__import__("scripts", ..., ("doc_health",))`. A `fromlist` that is not a
+#: literal is `UNREADABLE`, and so is a star from `scripts`, in either form,
+#: which may import any of its submodules. A star from `os` hides none.
+#: Arguments spelled out with a literal `*[...]` or `**{...}`, however deep,
+#: count where they land. A spread that hides the name, or the package a
+#: relative name needs, makes the call `UNREADABLE`, which the sweep refuses.
+#: So does one that could overwrite a literal name before it; a literal name
+#: after it still counts.
+_LAZY_SPECIMEN = textwrap.dedent('''
+    import importlib
+
+    def generic[T: __import__("doc_health")](x: T) -> T:
+        return x
+
+    class Box[T: (importlib.import_module(name="ideation_dashboard"), int)]:
+        field = __import__(name="openxdox.gate_console")
+
+    type Alias = __import__("corpus_adapter_openxfactory")
+    RELATIVE = __import__("doc_health", globals(), None, (), 1)
+    RESOLVED = importlib.import_module(".corpus", package="doc_health")
+    BY_POSITION = importlib.import_module(".families", "doc_health")
+    LOCAL = importlib.import_module(".corpus", package=__package__)
+    STARRED = importlib.import_module(*["ideation_dashboard.lanes"])
+    SPREAD = importlib.import_module(**{"name": ".runner", "package": "doc_health"})
+    UNKNOWN = importlib.import_module(*NAMES)
+    NESTED = importlib.import_module(*[*["doc_health.corpus"]])
+    DEEP = importlib.import_module(**{**{"name": "ideation_dashboard"}})
+    HIDDEN = importlib.import_module(**OPTIONS)
+    HIDDEN_PACKAGE = importlib.import_module(".corpus", *PACKAGES)
+    COMPUTED = importlib.import_module(NAME)
+    OVERRIDDEN = importlib.import_module(**{"name": "safe", **OPTIONS})
+    OVERRIDES = importlib.import_module(**{**OPTIONS, "name": "doc_health"})
+    KEYED = importlib.import_module(**{"name": "safe", KEY: "doc_health"})
+    NESTED_OVER = importlib.import_module(**{"name": "safe", **{**OPTIONS}})
+    BOUND = importlib.import_module(".corpus", package=PKG)
+    import scripts.doc_health.corpus
+    from scripts import ideation_dashboard, doc_health
+    OWN = __import__("corpus", globals(), None, (), 1)
+    CONTEXT = __import__("corpus", CONTEXT, None, (), 1)
+    LEVELLED = __import__("corpus", globals(), None, (), LEVEL)
+    FROMLIST = __import__("scripts", globals(), None, ("doc_health",), 0)
+    UNKNOWN_FROM = __import__("scripts", globals(), None, NAMES, 0)
+    CONSUMER_FROM = __import__("openxdox", globals(), None, ("gate_console",), 0)
+    from scripts import *
+    from os import *
+    STAR_FROM = __import__("scripts", globals(), None, ("*",), 0)
+''')
+
+
+def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
+    found = {(r.line, r.name, r.deferred, r.inside)
+             for r in sweep(_LAZY_SPECIMEN, "lazy.py")}
+    assert found == {
+        (4, "doc_health", True, "generic[T]"),
+        (7, "ideation_dashboard", True, "Box[T]"),
+        (8, "openxdox.gate_console", False, "<module>"),
+        (10, "corpus_adapter_openxfactory", True, "type Alias"),
+        (12, "doc_health.corpus", False, "<module>"),
+        (13, "doc_health.families", False, "<module>"),
+        (15, "ideation_dashboard.lanes", False, "<module>"),
+        (16, "doc_health.runner", False, "<module>"),
+        (17, UNREADABLE, False, "<module>"),
+        (18, "doc_health.corpus", False, "<module>"),
+        (19, "ideation_dashboard", False, "<module>"),
+        (20, UNREADABLE, False, "<module>"),
+        (21, UNREADABLE, False, "<module>"),
+        (23, UNREADABLE, False, "<module>"),
+        (24, "doc_health", False, "<module>"),
+        (25, UNREADABLE, False, "<module>"),
+        (26, UNREADABLE, False, "<module>"),
+        (27, UNREADABLE, False, "<module>"),
+        (28, "scripts.doc_health.corpus", False, "<module>"),
+        (29, "scripts.ideation_dashboard", False, "<module>"),
+        (31, UNREADABLE, False, "<module>"),
+        (32, UNREADABLE, False, "<module>"),
+        (33, "scripts.doc_health", False, "<module>"),
+        (34, UNREADABLE, False, "<module>"),
+        (35, "openxdox", False, "<module>"),
+        (36, UNREADABLE, False, "<module>"),
+        (38, UNREADABLE, False, "<module>"),
+    }, sorted(found)
+
+
+def test_a_literal_globals_mapping_resolves_a_relative_dunder_import():
+    """A literal `{"__package__": ...}` says what a relative `__import__` is
+    relative to, so it resolves. The mapping spells `__package__`, so its
+    module is not trusted with `globals()`, and the resolution does not need
+    that trust. It is its own specimen for that reason."""
+    source = 'X = __import__("corpus", {"__package__": "doc_health"}, None, (), 1)\n'
+    assert [(r.name, r.deferred) for r in sweep(source, "declared.py")] \
+        == [("doc_health.corpus", False)]
+
+
+#: The two importing calls under the names an import gives them. The module
+#: never handles either as a value, so it is read call by call: the relative
+#: call names no sibling under its alias either, and a call that is not an
+#: importer names nothing, whatever its arguments say or a spread hides.
+_ALIAS_SPECIMEN = textwrap.dedent('''
+    import importlib as il
+    from importlib import import_module as load
+    from builtins import __import__ as imp
+
+    def verb():
+        load("doc_health")
+        il.import_module("openxdox.kickoff")
+        imp("doc_health", None, None, (), 1)
+        print("ideation_dashboard")
+        print(*NAMES)
+''')
+
+
+def test_the_scanner_follows_an_importing_call_under_another_name():
+    found = {(r.line, r.name, r.deferred, r.inside)
+             for r in sweep(_ALIAS_SPECIMEN, "alias.py")}
+    assert found == {
+        (7, "doc_health", True, "verb"),
+        (8, "openxdox.kickoff", True, "verb"),
+    }, sorted(found)
+
+
+#: Each way a module can hold an importer as a value, with a later call through
+#: it. None of them is followed binding by binding. Each makes the module read
+#: strictly, so the literal module name counts, whatever the call is spelled.
+_AS_A_VALUE = {
+    "an assignment": "load = importlib.import_module\n",
+    "a destructuring assignment": "load, _ = (importlib.import_module, object)\n",
+    "an assignment expression": "(load := importlib.import_module)\n",
+    "a container": "load = [importlib.import_module][0]\n",
+    "its name as a string": "load = getattr(importlib, 'import_module')\n",
+    "a default value": ("def pick(load=importlib.import_module):\n"
+                        "    return load\n\n\nload = pick()\n"),
+}
+
+
+def test_an_alias_looked_up_by_its_name_makes_every_literal_call_count():
+    """An alias an import gives is a value too, once the module looks it up by
+    its name, and the lookup's call is then read like any other."""
+    source = ("from importlib import import_module as load\n\n\n"
+              "def verb():\n    globals()['load']('doc_health')\n")
+    assert [(r.name, r.deferred, r.inside) for r in sweep(source, "lookup.py")] \
+        == [("doc_health", True, "verb")]
+
+
+#: A module that gives the namespace or the package a meaning of its own,
+#: each followed by a relative call that would trust it.
+_REBOUND = {
+    "a rebound __package__": (
+        "__package__ = 'openxdox'\n"
+        "X = importlib.import_module('.gate_console', package=__package__)\n"),
+    "a shadowed globals": (
+        "globals = lambda: {'__package__': 'openxdox'}\n"
+        "X = __import__('gate_console', globals(), None, (), 1)\n"),
+    "__package__ set through the namespace": (
+        "globals()['__package__'] = 'openxdox'\n"
+        "X = importlib.import_module('.gate_console', package=__package__)\n"),
+    "a def named globals": (
+        "def globals():\n    return {'__package__': 'openxdox'}\n\n\n"
+        "X = __import__('gate_console', globals(), None, (), 1)\n"),
+    "an attribute store": (
+        "import sys\nsys.modules[__name__].__package__ = 'openxdox'\n"
+        "X = importlib.import_module('.gate_console', package=__package__)\n"),
+}
+
+
+@pytest.mark.parametrize("rebinding", sorted(_REBOUND))
+def test_a_module_that_rebinds_its_context_is_not_trusted(rebinding):
+    """`globals()` and `__package__` are read as the module's own only where
+    the module never rebinds them. Where it does, a relative call that leans
+    on them is `UNREADABLE`, and the sweep refuses it."""
+    reaches = sweep("import importlib\n" + _REBOUND[rebinding], "rebound.py")
+    assert [(r.name, r.deferred) for r in reaches] == [(UNREADABLE, False)], rebinding
+
+
+@pytest.mark.parametrize("binding", sorted(_AS_A_VALUE))
+def test_an_importer_held_as_a_value_makes_every_literal_call_count(binding):
+    source = ("import importlib\n" + _AS_A_VALUE[binding]
+              + "\n\ndef verb():\n    load('doc_health')\n")
+    assert [(r.name, r.deferred, r.inside) for r in sweep(source, "value.py")] \
+        == [("doc_health", True, "verb")], binding
+
+
+#: A module that holds an importer as a value, and three calls that only one
+#: importer's reading finds: `__import__`'s `fromlist` member under the name
+#: `import_module`, a star member under a name neither importer has, and a
+#: relative `import_module` under the name `__import__`.
+_EITHER_IMPORTER = textwrap.dedent('''
+    import_module = __import__
+
+    def verb():
+        import_module("scripts", None, None, ("doc_health",))
+        load("scripts", fromlist=["*"])
+        __import__(".corpus", "doc_health")
+''')
+
+
+def test_a_strict_module_reads_each_call_as_either_importer():
+    """Where an importer is a value, a callable may be bound to either
+    importer, whatever it is spelled, so each call counts under both
+    readings."""
+    found = [(r.line, r.name) for r in sweep(_EITHER_IMPORTER, "either.py")]
+    assert found == [(5, "scripts.doc_health"), (6, UNREADABLE),
+                     (7, "doc_health.corpus")], found
+
+
+def test_a_deferred_reach_into_the_consumer_passes_all_three(monkeypatch, tmp_path):
+    """The lawful case, planted: a function body that imports `openxdox`
+    passes every assertion. So the three draw the line where release 1 draws
+    it, and keep passing the consumer's deferred reaches after the last of
+    the real ones is routed away."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "deferring.py").write_text(
+        "def verb():\n    from openxdox import gate_console\n    return gate_console\n",
+        encoding="utf-8")
+    this_module = sys.modules[__name__]
+    monkeypatch.setattr(this_module, "SRC", tmp_path / "src")
+    monkeypatch.setattr(this_module, "ROOT", tmp_path)
+    assert [str(r) for r in _sweep_src()] == [
+        "src/deferring.py:2: openxdox (deferred, in verb)"]
+    test_no_module_under_src_reaches_a_sibling_at_import_time()
+    test_no_module_under_src_reaches_openxfactory_at_all()
+    test_every_reach_the_sweep_finds_is_deferred_into_the_consumer()
+
+
+def test_an_importing_call_it_cannot_read_is_refused(monkeypatch, tmp_path):
+    """A spread that hides an importing call's module could hide a reach
+    into openxFactory, so the sweep refuses it. A computed name is another
+    matter (`consumer_reach`'s seam imports one), and is not refused."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "spreading.py").write_text(
+        "import importlib\n\n\ndef verb(names):\n"
+        "    return importlib.import_module(*names)\n", encoding="utf-8")
+    this_module = sys.modules[__name__]
+    monkeypatch.setattr(this_module, "SRC", tmp_path / "src")
+    monkeypatch.setattr(this_module, "ROOT", tmp_path)
+    test_no_module_under_src_reaches_a_sibling_at_import_time()
+    for test in (test_no_module_under_src_reaches_openxfactory_at_all,
+                 test_every_reach_the_sweep_finds_is_deferred_into_the_consumer):
+        with pytest.raises(AssertionError, match="spread"):
+            test()
+
+
+@pytest.mark.parametrize("source", [
+    "NAME = 'doc_health'\n",
+    "exec('import ideation_dashboard')\n",
+    "SPEC = b'corpus_adapter_openxfactory.home'\n",
+    "ROOT = 'scripts.doc_health'\n",
+    "from importlib import import_module as load; "
+    "globals()['lo' + 'ad']('doc_health')\n",
+    "__import__('corpus', {'__package__': 'doc_health'}, None, (), 1)\n",
+], ids=["a constant", "exec", "bytes", "the pre-carve spelling",
+        "a lookup key built from pieces", "a globals mapping"])
+def test_the_spelling_check_fails_on_a_name_in_a_literal(source, monkeypatch, tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "spelling.py").write_text(
+        '"""Documentation may name doc_health."""\n' + source, encoding="utf-8")
+    this_module = sys.modules[__name__]
+    monkeypatch.setattr(this_module, "SRC", tmp_path / "src")
+    monkeypatch.setattr(this_module, "ROOT", tmp_path)
+    with pytest.raises(AssertionError, match="spelling.py:2"):
+        test_no_code_under_src_spells_an_openxfactory_package()
+
+
+@pytest.mark.parametrize("reach", ["doc_health", "scripts.doc_health.corpus"])
+@pytest.mark.parametrize("test", [
+    test_no_module_under_src_reaches_a_sibling_at_import_time,
+    test_no_module_under_src_reaches_openxfactory_at_all,
+    test_every_reach_the_sweep_finds_is_deferred_into_the_consumer,
+], ids=lambda t: t.__name__)
+def test_each_assertion_fails_on_the_reach_it_forbids(test, reach, monkeypatch,
+                                                      tmp_path):
+    """Each sweep assertion, run over a `src/` that holds one reach it
+    forbids, fails, in either spelling of the package. So a green run of it
+    is a finding about the tree, and not a scan that reads nothing."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "reaching.py").write_text(
+        f"import {reach}\n", encoding="utf-8")
+    this_module = sys.modules[__name__]
+    monkeypatch.setattr(this_module, "SRC", tmp_path / "src")
+    monkeypatch.setattr(this_module, "ROOT", tmp_path)
+    with pytest.raises(AssertionError):
+        test()

@@ -20,6 +20,12 @@ catching things, silently, while still passing. `tests/hermeticity.py` and
 `tests/` root; both consumers reach it by inserting `TESTS_ROOT` on `sys.path`,
 which their conftest or their own header already does.
 
+ONE NODE READER, FOR THE CALLERS THAT WALK A TREE THEIR OWN WAY. Plan 034
+T032's sweep (`tests/test_reach_sweep.py`) has to know WHEN each import runs, so
+it cannot take `imported_modules`' flat walk. It reads each node with
+`names_imported_by` instead, which is what `imported_modules` reads with too, so
+the sweep is not a third copy of the extraction.
+
 BOTH SPELLINGS ARE ALWAYS THE CALLER'S JOB. `scripts/__init__.py` exists, so
 every package under `scripts/` is importable BOTH as a top-level name and as
 `scripts.<name>`. A one-spelling forbidden list is a hole, so callers pass both
@@ -29,6 +35,323 @@ every package under `scripts/` is importable BOTH as a top-level name and as
 from __future__ import annotations
 
 import ast
+import importlib.util
+
+#: The two calls that import a module named by a STRING, as #1144's F4.1 scan
+#: reads them, each mapped to itself: `importlib.import_module` and the
+#: builtin `__import__`, reached through a module (`importlib.import_module`)
+#: or by a bare name. `importing_calls` adds the names an import gives them.
+IMPORTING_CALLS = {"import_module": "import_module", "__import__": "__import__"}
+
+
+def _called_name(expr):
+    """The name a call site reaches its callable by: `f` for `f(...)` and for
+    `m.f(...)`, and None for anything else."""
+    if isinstance(expr, ast.Attribute):
+        return expr.attr
+    if isinstance(expr, ast.Name):
+        return expr.id
+    return None
+
+
+#: What `names_imported_by` names for an importing call it cannot read off the
+#: source: where a `*` or `**` it cannot spell out hides the module's name, or
+#: the `package`, `globals`, `level` or `fromlist` that says what the call
+#: imports, or where one of those four is not a literal and the reading needs
+#: one. The sweep names a star import this way too, where the package may hold
+#: a sibling (`tests/test_reach_sweep.py`). No module is spelled this way, so
+#: a caller that forbids packages refuses it as a reach it cannot read.
+UNREADABLE = "<an import the source does not spell out>"
+
+
+def _positional(elements):
+    """The positions a run of arguments fills, with every literal `*[...]` or
+    `*(...)` spelled out, however deep, and whether every position is known.
+    Past a `*` of anything else, positions are unknown."""
+    known = []
+    for element in elements:
+        if not isinstance(element, ast.Starred):
+            known.append(element)
+            continue
+        if not isinstance(element.value, (ast.List, ast.Tuple)):
+            return known, False
+        inner, complete = _positional(element.value.elts)
+        known += inner
+        if not complete:
+            return known, False
+    return known, True
+
+
+def _literal_keywords(mapping):
+    """A literal `{...}`'s string keys and their values, with every nested
+    `**{...}` spelled out, and whether every key is known.
+
+    An entry that cannot be spelled out, a key that is not a literal string or
+    a `**` of anything else, could overwrite any key before it. So the keys
+    before it are forgotten, and only a literal key after it still counts."""
+    found, complete = {}, True
+    for key, value in zip(mapping.keys, mapping.values):
+        if key is None and isinstance(value, ast.Dict):
+            inner, inner_complete = _literal_keywords(value)
+            if not inner_complete:
+                found.clear()
+                complete = False
+            found.update(inner)
+        elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+            found[key.value] = value
+        else:
+            found.clear()
+            complete = False
+    return found, complete
+
+
+def _arguments(call):
+    """A call's positional arguments and keywords, with every literal `*[...]`,
+    `*(...)` and `**{...}` spelled out, however deep, and whether all of them
+    are known. Past a `*` of anything else, positions are unknown."""
+    positional, complete = _positional(call.args)
+    keywords = {}
+    for keyword in call.keywords:
+        if keyword.arg is not None:
+            keywords[keyword.arg] = keyword.value
+        elif isinstance(keyword.value, ast.Dict):
+            inner, inner_complete = _literal_keywords(keyword.value)
+            keywords.update(inner)
+            complete = complete and inner_complete
+        else:
+            complete = False
+    return positional, keywords, complete
+
+
+#: The names the reader trusts to mean what Python binds them to: the calling
+#: module's namespace and its package. It trusts them only in a module that
+#: never rebinds them (`rebinds`).
+CONTEXT_NAMES = ("globals", "__package__")
+
+
+def rebinds(tree, names):
+    """Whether `tree` gives any of `names` a meaning of its own.
+
+    That is a binding anywhere: an assignment or deletion, a `def` or `class`,
+    an import, a parameter, a loop or `with` target, an `except ... as`, a
+    pattern capture, a type parameter, or a `global` or `nonlocal` statement.
+    It is also an attribute store (`module.__package__ = ...`), and a name as
+    a string outside documentation, the way `globals()["__package__"] = ...`
+    or `setattr(module, "__package__", ...)` spell it."""
+    documentation = {id(node.value) for node in ast.walk(tree)
+                     if isinstance(node, ast.Expr)
+                     and isinstance(node.value, ast.Constant)}
+    for node in ast.walk(tree):
+        bound = ()
+        if isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
+            bound = (_called_name(node),)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                               ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple,
+                               ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            bound = (node.name,)
+        elif isinstance(node, ast.alias):
+            bound = (node.asname or node.name.split(".")[0],)
+        elif isinstance(node, ast.arg):
+            bound = (node.arg,)
+        elif isinstance(node, ast.MatchMapping):
+            bound = (node.rest,)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound = tuple(node.names)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and id(node) not in documentation:
+            bound = (node.value,)
+        if any(name in names for name in bound if name):
+            return True
+    return False
+
+
+def _own_namespace(context, trusted):
+    """Whether an `__import__` call's `globals` is the calling module's own:
+    absent or `None`, which leaves no package to be relative to, or
+    `globals()` in a module that is `trusted` not to rebind it."""
+    return context is None or (isinstance(context, ast.Constant) and context.value is None) \
+        or (trusted and isinstance(context, ast.Call) and isinstance(context.func, ast.Name)
+            and context.func.id == "globals" and not context.args and not context.keywords)
+
+
+def _dunder_import(name, args, keywords, complete, trusted, members):
+    """What `__import__(name, globals, locals, fromlist, level)` names.
+
+    A zero `level`, or none, is absolute. A nonzero one is relative to the
+    package its `globals` declares: its own module's for `globals()`, which
+    names nothing here, or a literal `{"__package__": ...}`'s, which is
+    resolved. Any other `globals`, or a `level` that is not a literal, could
+    be relative to a sibling, so the call names `UNREADABLE`. With
+    `members`, a literal `fromlist` names its members after the module, as a
+    `from` statement's do (`__import__("scripts", ..., ("doc_health",))`
+    imports `scripts.doc_health`, and a `"*"` member is named `scripts.*`),
+    and a `fromlist` that is not a literal adds `UNREADABLE`."""
+    level = args[4] if len(args) > 4 else keywords.get("level")
+    context = args[1] if len(args) > 1 else keywords.get("globals")
+    if (level is None or context is None) and not complete:
+        return [UNREADABLE]
+    if level is None or (isinstance(level, ast.Constant) and level.value == 0):
+        module = name
+    elif not (isinstance(level, ast.Constant) and isinstance(level.value, int)):
+        return [UNREADABLE]
+    elif _own_namespace(context, trusted):
+        return []
+    else:
+        declared = _literal_keywords(context)[0].get("__package__") \
+            if isinstance(context, ast.Dict) else None
+        if not (isinstance(declared, ast.Constant) and isinstance(declared.value, str)):
+            return [UNREADABLE]
+        try:
+            module = importlib.util.resolve_name("." * level.value + name, declared.value)
+        except ImportError:
+            return []
+    if not members:
+        return [module]
+    fromlist = args[3] if len(args) > 3 else keywords.get("fromlist")
+    if fromlist is None:
+        return [module] if complete else [module, UNREADABLE]
+    if isinstance(fromlist, ast.Constant) and fromlist.value is None:
+        return [module]
+    if isinstance(fromlist, (ast.Tuple, ast.List, ast.Set)) and all(
+            isinstance(e, ast.Constant) and isinstance(e.value, str) for e in fromlist.elts):
+        return [module, *(f"{module}.{e.value}" for e in fromlist.elts)]
+    return [module, UNREADABLE]
+
+
+def _import_module(name, args, keywords, complete, trusted):
+    """What `import_module(name, package)` names, by the rule
+    `names_imported_by` gives: an absolute `name` itself, and a relative one
+    resolved against a literal `package`."""
+    if not name.startswith("."):
+        return [name]
+    package = args[1] if len(args) > 1 else keywords.get("package")
+    if package is None and not complete:
+        return [UNREADABLE]
+    if package is None or (isinstance(package, ast.Constant) and package.value is None) \
+            or (trusted and isinstance(package, ast.Name) and package.id == "__package__"):
+        return []
+    if not (isinstance(package, ast.Constant) and isinstance(package.value, str)):
+        return [UNREADABLE]
+    try:
+        return [importlib.util.resolve_name(name, package.value)]
+    except ImportError:
+        return []
+
+
+def importing_calls(tree):
+    """`IMPORTING_CALLS`, and each name an import gives one of them:
+    `from importlib import import_module as load`, or `from builtins import
+    __import__ as imp`. The result maps each name to the call it is.
+
+    A call is matched by the name it SPELLS, not by what the name is bound to
+    when it runs, so a parameter or another object's attribute spelled
+    `import_module` is read as the importer too. That is the stricter reading,
+    the one the sweep takes wherever it cannot tell (`tests/test_reach_sweep.py`):
+    it can only refuse a module, never pass one.
+    """
+    calls = dict(IMPORTING_CALLS)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 \
+                and node.module in ("importlib", "builtins"):
+            for alias in node.names:
+                if alias.name in IMPORTING_CALLS and alias.asname:
+                    calls[alias.asname] = alias.name
+    return calls
+
+
+def importer_escapes(tree, calls):
+    """Whether `tree` handles an importer as a VALUE, not only by calling it.
+
+    That is any mention of a name in `calls` other than as the callable of a
+    call: an assignment (`load = importlib.import_module`), a tuple, a
+    container, an argument, a default value, a `:=`, a rebinding. It is also
+    the name of an importer or of an alias of one, as a string outside
+    documentation (`getattr(importlib, "import_module")`,
+    `globals()["load"]`). Once the importer is a value, it can travel under
+    any name by any binding, and no source read follows every one. So a
+    module where this holds is read strictly, with `names_imported_by(...,
+    any_call=True)`.
+    """
+    callables = {id(node.func) for node in ast.walk(tree)
+                 if isinstance(node, ast.Call)}
+    documentation = {id(node.value) for node in ast.walk(tree)
+                     if isinstance(node, ast.Expr)
+                     and isinstance(node.value, ast.Constant)}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Name, ast.Attribute)) \
+                and id(node) not in callables and _called_name(node) in calls:
+            return True
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and node.value in calls and id(node) not in documentation:
+            return True
+    return False
+
+
+def names_imported_by(node, *, calls=None, any_call=False, trusted=True,
+                      members=False):
+    """The absolute module names ONE syntax node imports.
+
+    `import a.b, c` names `a.b` and `c`; `from a.b import c` names `a.b`; a
+    relative import names nothing, for the reason `imported_modules` gives.
+    With `members`, `from a.b import c` also names `a.b.c`, after `a.b`,
+    because a name imported from a package may be its submodule:
+    `from scripts import doc_health` imports `scripts.doc_health`. A star
+    member is named `a.b.*`: it may import any submodule that `a.b`'s
+    `__all__` lists, and the caller says which of those it forbids.
+
+    With `calls`, a mapping from callable names to the importing call each is
+    (`IMPORTING_CALLS`, or `importing_calls(tree)`), a call to one of them
+    names its module too, when the name is a string LITERAL, passed by
+    position or as `name=`. With `any_call`, EVERY call does, whatever it
+    calls: the reading for a module where `importer_escapes` holds. There a
+    callable may be bound to either importer, so a call names what either
+    reading of it names, its own spelling's first. Without `trusted`, the
+    reading for a module that `rebinds` `CONTEXT_NAMES`, `globals()` and
+    `__package__` are not taken to be the module's own.
+
+    Arguments spelled out with a literal `*[...]` or `**{...}`, however
+    deep, count where they land. Where a `*` or `**` of anything else hides
+    the name, or the package a relative name needs, the call names
+    `UNREADABLE`. A relative name is resolved where the call itself says what it
+    is relative to, a literal `package`, by keyword or as the second argument. So
+    `import_module(".corpus", package="doc_health")` names
+    `doc_health.corpus`. Relative to the calling module's own package
+    (`package=__package__`), or with no package at all, it names nothing
+    here. Any other package that is not a literal could be a sibling, so the
+    call names `UNREADABLE`. `__import__` reads its relative context off its
+    `globals` instead (`_dunder_import`). A name computed at run
+    time cannot be read off the source.
+    """
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    if isinstance(node, ast.ImportFrom):
+        if node.level or not node.module:
+            return []
+        return [node.module, *(f"{node.module}.{alias.name}" for alias in node.names
+                               if members)]
+    if not isinstance(node, ast.Call) or not (calls or any_call):
+        return []
+    called = (calls or {}).get(_called_name(node.func))
+    if called is None and not any_call:
+        return []
+    args, keywords, complete = _arguments(node)
+    name = args[0] if args else keywords.get("name")
+    if name is None and not complete:
+        return [UNREADABLE]
+    if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+        return []
+    readings = [called] if called else []
+    if any_call:
+        # The callable may be bound to either importer (`importer_escapes`).
+        readings += [each for each in IMPORTING_CALLS.values() if each != called]
+    named = []
+    for reading in readings:
+        if reading == "__import__":
+            named += _dunder_import(name.value, args, keywords, complete,
+                                    trusted, members)
+        else:
+            named += _import_module(name.value, args, keywords, complete, trusted)
+    return named
 
 
 def imported_modules(path):
@@ -44,14 +367,8 @@ def imported_modules(path):
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                yield alias.name, node.lineno
-        elif isinstance(node, ast.ImportFrom):
-            if node.level:            # relative: confined to this package
-                continue
-            if node.module:
-                yield node.module, node.lineno
+        for name in names_imported_by(node):
+            yield name, node.lineno
 
 
 def names_a_forbidden_package(module: str, forbidden) -> bool:
@@ -88,7 +405,7 @@ def bound_names(source_path, packages):
                 yield node.lineno, ""
 
 
-def string_literals(path):
+def string_literals(path, *, with_bytes=False):
     """Every string literal in a file EXCEPT its documentation, as (value, line).
 
     Docstrings and bare string expression statements are excluded on purpose: a
@@ -97,7 +414,9 @@ def string_literals(path):
     deleting the explanation. Comments never reach the syntax tree at all.
 
     f-strings contribute only their literal segments; an interpolated
-    expression is not a literal.
+    expression is not a literal. With `with_bytes`, bytes literals count too,
+    decoded byte for byte (latin-1), so a name spelled in bytes is read as
+    that name.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     documentation = {
@@ -106,6 +425,9 @@ def string_literals(path):
         and isinstance(node.value.value, str)
     }
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) \
-                and id(node) not in documentation:
+        if not isinstance(node, ast.Constant) or id(node) in documentation:
+            continue
+        if isinstance(node.value, str):
             yield node.value, node.lineno
+        elif with_bytes and isinstance(node.value, bytes):
+            yield node.value.decode("latin-1"), node.lineno
