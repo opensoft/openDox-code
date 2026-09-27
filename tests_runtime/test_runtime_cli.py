@@ -1271,10 +1271,11 @@ def test_the_broker_url_must_be_https_because_it_is_the_trust_anchor() -> None:
 def _conftest_module():
     """`tests_runtime/conftest.py`, loaded BY PATH.
 
-    The `validate` job runs pytest with `--noconftest`, so this file cannot
-    reach that module as a fixture provider and must not depend on it being on
-    `sys.path` either. Loading it by path is the one form that works in both
-    jobs — and the module is definitions only, so importing it starts nothing.
+    This file was written for a job that loaded no conftest, so it could not
+    reach that module as a fixture provider, and it must not depend on it being
+    on `sys.path` either. Loading it by path works with the conftest chain in
+    play, as the required job runs it since plan 034 T036, and without it. The
+    module is definitions only, so importing it starts nothing.
     """
     import importlib.util
 

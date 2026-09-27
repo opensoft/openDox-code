@@ -13,6 +13,7 @@ dependency and is therefore present wherever `.[test]` is.
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +90,8 @@ def _containers(document: Any) -> list[dict[str, Any]]:
 # simply never appears. Measured on this act: `run: python -m pip install
 # --only-binary :all: -e ".[runtime,test]"` written as a PLAIN scalar contains
 # `: `, which YAML reads as a mapping indicator, so at head `4d3ce664` neither
-# `validate` nor `runtime` started and only SonarCloud reported. Nothing in the
-# tree noticed; a green-looking PR page did.
+# `validate` nor `runtime` (the DB-backed job then beside it) started and only
+# SonarCloud reported. Nothing in the tree noticed; a green-looking PR page did.
 
 
 def test_the_workflow_file_parses_as_yaml() -> None:
@@ -105,55 +106,79 @@ def test_the_workflow_file_parses_as_yaml() -> None:
     assert isinstance(workflow.get("jobs"), dict)
 
 
-def test_the_workflow_declares_both_jobs_and_their_steps() -> None:
-    """The required job, and the DB-backed job this act adds beside it."""
+def test_the_workflow_declares_the_required_job_and_its_steps() -> None:
+    """ONE job, the required one, running the WHOLE suite (plan 034 T036).
+
+    The DB-backed `runtime` job this pin used to require is folded into
+    `validate` (RULED R1Q8 (a): `tests_runtime/` is part of the whole suite,
+    with PostgreSQL in the required job). A second job would now only run the
+    same database-backed cases twice, once required and once not."""
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     assert "validate" in jobs, (
         "`validate` is this repository's one REQUIRED status check "
         "(openDox-code#2) and the workflow no longer declares it")
-    assert "runtime" in jobs, (
-        "the DB-backed `runtime` job is gone; the suites that need Postgres, a "
-        "token or a web framework would then run nowhere")
-    names = [step.get("name") for step in jobs["validate"]["steps"]]
-    assert "pytest (runtime, hermetic)" in names, (
-        "the required job no longer runs this act's hermetic suites")
-    assert names.index("pytest") < names.index("pytest (runtime, hermetic)"), (
-        "this act's step must stay APPENDED after the existing pytest step; "
-        "reordering is an edit to what the required check already ran")
-    runtime_names = [step.get("name") for step in jobs["runtime"]["steps"]]
-    assert runtime_names[-1] == "pytest (runtime, database-backed)"
+    assert sorted(jobs) == ["validate"], (
+        f"the workflow declares {sorted(jobs)}; the whole suite runs in the "
+        "required job, so a second job runs nothing the required one does not")
+    steps = jobs["validate"]["steps"]
+    names = [step.get("name") for step in steps]
+    assert "pytest" in names and "Pin the triple" in names, names
+    assert names.index("pytest") < names.index("Pin the triple"), (
+        "the pin reads the report the pytest step writes, so it runs after it")
+    # ONE INVOCATION, counted across every step's script rather than by
+    # step, so a second run chained onto the first line is counted too.
+    invocations = [line for step in steps
+                   for line in re.split(r"&&|;|\n", step.get("run", ""))
+                   if "-m pytest" in line]
+    assert len(invocations) == 1, (
+        f"the required job runs pytest {len(invocations)} times "
+        f"({invocations}); the whole suite is one invocation")
+    # NO FILE LIST: `pyproject.toml`'s `testpaths` is the suite, so every
+    # argument after `-m pytest` is an option. A path, bare or not, would make
+    # it a list again, which is what requirement 9 retired.
+    arguments = shlex.split(invocations[0].split("-m pytest", 1)[1])
+    positional = [token for token in arguments if not token.startswith("-")]
+    assert positional == [], (
+        f"the pytest step names {positional}; the whole suite is what "
+        "`testpaths` names, so the step names nothing")
 
 
-def test_the_runtime_job_supplies_a_postgres_service_and_the_extras() -> None:
+def test_the_required_job_supplies_a_postgres_service_and_the_extras() -> None:
+    """What the `runtime` job carried, now carried by the required one."""
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-    service = jobs["runtime"]["services"]["postgres"]
+    service = jobs["validate"]["services"]["postgres"]
     assert service["image"].startswith("postgres:")
-    install = next(step["run"] for step in jobs["runtime"]["steps"]
+    install = next(step["run"] for step in jobs["validate"]["steps"]
                    if step.get("name", "").startswith("install"))
     assert "--only-binary :all:" in install
     assert '.[runtime,test]' in install
-    probe = next(step for step in jobs["runtime"]["steps"]
-                 if step.get("name") == "pytest (runtime, database-backed)")
+    probe = next(step for step in jobs["validate"]["steps"]
+                 if step.get("name") == "pytest")
     assert probe["env"]["OPENDOX_TEST_DATABASE_URL"].startswith("postgresql://")
 
 
-def test_the_required_job_installs_only_the_test_extra() -> None:
-    """The import-weight contract, read off the workflow rather than the prose.
+def test_the_required_job_installs_the_runtime_and_test_extras() -> None:
+    """RULED R1Q8 (a), read off the workflow rather than the prose.
 
-    If the required job ever installed `.[runtime]`, every assertion about what
-    imports without the extra would still pass and would stop meaning anything.
-    """
+    This pin used to require the OPPOSITE: the test extra alone, on the ground
+    that with `.[runtime]` installed "every assertion about what imports
+    without the extra would still pass and would stop meaning anything". That
+    no longer holds, and the reason is measured, not assumed.
+    `test_runtime_surface.py` holds the import-weight contract by importing
+    the stdlib-only modules in a FRESH interpreter and reading which extra
+    distributions landed in `sys.modules`. With the extra installed, a leak
+    imports and is named. Without it, the import fails. Either way the case
+    goes red. So installing the extra in the required job costs the contract
+    nothing, and R1Q8 (a) needs it there: half of `tests_runtime/` cannot run
+    without it."""
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     installs = [step.get("run", "") for step in jobs["validate"]["steps"]
                 if "pip install" in step.get("run", "")]
     assert installs, "the required job installs nothing"
     for line in installs:
-        # THE EXTRAS, NOT THE WHOLE COMMAND LINE. This asked whether the word
-        # `runtime` appeared anywhere in the step, which was true of the
-        # dependency LOCK the same step now passes with `-c`
-        # (`…/runtime-and-test-cpython312-linux.txt`) — a name, not an install.
-        # What the job must not do is install the runtime EXTRA, so that is
-        # what is read: every `.[…]` target in the command, by its extras.
+        # THE EXTRAS, NOT THE WHOLE COMMAND LINE: every `.[…]` target in the
+        # command, by its extras. The dependency lock the same step passes
+        # with `-c` is a name, not an install.
         extras = {extra.strip()
                   for target in re.findall(r"\.\[([^]]*)\]", line)
                   for extra in target.split(",")}
@@ -161,10 +186,10 @@ def test_the_required_job_installs_only_the_test_extra() -> None:
             f"the required `validate` job installs {line!r} and no extra of "
             "this package could be read from it; this guard reads the `.[…]` "
             "target, so an install spelled another way has to say so here")
-        assert extras == {"test"}, (
-            f"the required `validate` job installs {sorted(extras)!r}; it must "
-            "install the test extra alone, or the hermetic suites stop "
-            "measuring the import-weight contract they exist for")
+        assert extras == {"runtime", "test"}, (
+            f"the required `validate` job installs {sorted(extras)!r}; the "
+            "whole suite needs the runtime extra and the test extra "
+            "(R1Q8 (a))")
 
 
 # -- the three declarations agree -------------------------------------------
@@ -2258,7 +2283,7 @@ def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
 
     `pyproject.toml` declares what this package NEEDS and deliberately does not
     pin it — a library that pins its dependents' versions cannot be installed
-    beside anything. The other half was missing: the three places that install
+    beside anything. The other half was missing: the places that install
     this package into an environment somebody depends on resolved whatever the
     index offered on the day they ran, so the same commit tested twice is two
     different programs (SonarCloud `githubactions:S8544` on
@@ -2267,10 +2292,11 @@ def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
     versions is security-sensitive"; advisory on this repository, registered on
     openDox-code#26 and built here).
 
-    ONE FILE FOR THE THREE, so there is no second list of names to drift, and a
-    CONSTRAINTS file rather than a requirements one: it pins what is installed
-    and installs nothing, which is what lets the required job go on installing
-    `.[test]` ALONE while the entries for FastAPI and psycopg sit unused.
+    ONE FILE FOR ALL OF THEM, so there is no second list of names to drift, and
+    a CONSTRAINTS file rather than a requirements one: it pins what is installed
+    and installs nothing, so each install still chooses its own extras. There
+    are TWO since plan 034 T036 folded the DB-backed `runtime` job into the
+    required one: that job's install, and the image's.
 
     AT THE REPOSITORY ROOT, and that is load-bearing: `deploy/` holds the
     git-ignored `.env` that `.dockerignore` exists to keep out of the build
@@ -2301,7 +2327,7 @@ def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
     parsed = yaml.safe_load(workflow)
     installs = [step["run"] for job in parsed["jobs"].values()
                 for step in job["steps"] if "pip install" in step.get("run", "")]
-    assert len(installs) == 2, installs
+    assert len(installs) == 1, installs
     for run in installs:
         assert "-c constraints-cpython312-linux.txt" in run, run
     dockerfile = (COMPOSE / "Dockerfile").read_text(encoding="utf-8")

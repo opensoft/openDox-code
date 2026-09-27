@@ -3,9 +3,10 @@
 # `pyproject.toml` declares what this package NEEDS and deliberately does not
 # pin it: a library that pins its dependents' versions is a library that cannot
 # be installed beside anything. This file is the other half — what an INSTALL
-# resolved to — and it is passed to pip with `-c` by the three places that
+# resolved to — and it is passed to pip with `-c` by the two places that
 # install this package into an environment somebody depends on: the required
-# `validate` job, the DB-backed `runtime` job, and the runtime image.
+# `validate` job and the runtime image. (A third, the DB-backed `runtime` job,
+# was folded into `validate` by plan 034 T036.)
 #
 # WHY IT EXISTS: SonarCloud `githubactions:S8544` / `docker:S8544`, "using
 # dependencies without locking resolved versions is security-sensitive", on
@@ -24,10 +25,9 @@
 #         > constraints-cpython312-linux.txt
 #
 # A CONSTRAINTS FILE AND NOT A REQUIREMENTS FILE: it pins what is installed and
-# installs nothing itself, so the required job still installs `.[test]` alone —
-# the entries for FastAPI and psycopg simply do not apply there — and the image
-# still installs `.[runtime]`. One file, three installs, no second list of
-# names to drift.
+# installs nothing itself, so each install still chooses its own extras: the
+# required job installs `.[runtime,test]` and the image `.[runtime]`. One file,
+# two installs, no second list of names to drift.
 #
 # Resolved 2026-09-18 on cpython 3.12.3 / linux x86_64.
 PyJWT==2.14.0

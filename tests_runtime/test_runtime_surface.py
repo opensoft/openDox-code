@@ -278,7 +278,9 @@ def test_only_asymmetric_algorithms_can_be_configured_and_they_keep_pyjwts_spell
 
 def test_ci_turns_the_db_backed_skip_into_a_failure() -> None:
     """A skipped suite exits 0, so "skip where there is no Postgres" made the
-    `runtime` job green while running no database-backed assertion.
+    DB-backed job green while running no database-backed assertion (the
+    advisory `runtime` job then; the required `validate` job since plan 034
+    T036 folded it in).
 
     The job exists to supply a `postgres:16` service; its absence there is the
     job's defect and is reported as one (Copilot review of openDox-code#25,
@@ -289,8 +291,8 @@ def test_ci_turns_the_db_backed_skip_into_a_failure() -> None:
     source = (ROOT / "tests_runtime" / "conftest.py").read_text(encoding="utf-8")
     assert "def _skip_or_fail(" in source
     assert "pytest.fail(" in source, (
-        "conftest still only skips; a `runtime` job whose Postgres service "
-        "failed to start would report green")
+        "conftest still only skips; a CI job whose Postgres service failed to "
+        "start would report green")
     # Every exit from the probe goes through the asymmetry, not around it.
     assert "pytest.skip(_SKIP_REASON)" not in source
     assert source.count("_skip_or_fail(") >= 3
