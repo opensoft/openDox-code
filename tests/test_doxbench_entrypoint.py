@@ -23,13 +23,49 @@ refusal for the whole fixture. If a future edit makes resolution start a child,
 these tests fail with that sentence rather than silently launching a harness.
 That is the same discipline `tests/hermeticity.py` now applies to the `omp`
 binary itself (§2.3): two independent layers, neither one's substitute.
+
+THE ENTRYPOINT RUNS FOR REAL, AND SIX OF ITS REACHES ARE STOOD IN (plan 034
+T035). `cmd_generate_and_open` is what these cases exist to drive, and they now
+drive it in a lone checkout. Before this, all four fixture cases errored in
+fixture setup at the first reach across the carve, `openxdox.corpus_root`
+(`ConsumerReachUnavailable`). The reaches are the ones plan 034 names as its
+phase-1 limit (plan.md, "Phase-1 limit"; research R7), and phase 2 gives
+openDox its own snapshot and generator. Until then each one is stood in here,
+and nothing else is:
+
+  * three in `cli`, the `consumer_reach` names `generate-and-open` calls:
+    `corpus_root_refusal`, `generate_snapshot` and
+    `snapshot_mod.write_snapshot`. A fourth, `SCANNED_ROOTS`, is read only to
+    warn about a snapshot with no document, and the stand-in snapshot carries
+    one, so it is never reached;
+  * three in `serve`, T011's `standalone` stand-ins
+    (`tests/test_route_handler_contribution.py`, section 6): the snapshot
+    source, through `build_server`'s own `snapshot_source=` seam;
+    `_checkout_real`; and `registry_mod`'s two `BINDING_*` constants.
+
+`_checkout_real` ANSWERS TRUE HERE, where T011's answers false. The model port
+is gated on the `session` verdict (`serve_workbench._workbench_model_port`):
+loopback, a real checkout, and a resolved human actor. The carve's `base-repo`
+fixture, which these cases used to serve, was a real corpus checkout, so the
+stand-in gives the answer that fixture gave. The predicate itself is
+openXdox's (`corpus_root.corpus_scan_defect`), and a lone checkout cannot ask
+it.
+
+What these cases test is openDox's own: the port the entrypoint declares
+(`doxbench_install.declared_model_port_factory`), the one adapter it resolves
+to, and the session root it is handed. None of them reads the snapshot. The
+checkout is an empty scratch directory rather than the carve's `base-repo`
+fixture, which stayed in openxFactory and does not exist at this leg.
 """
 
 from __future__ import annotations
 
+import json
+import types
+
 import pytest
 
-from conftest import BASE_REPO, PINNED_REVISION  # noqa: F401  (sys.path side effect)
+from conftest import PINNED_REVISION
 
 from opendox import cli as cli_mod
 from opendox import doxbench_bridge as br
@@ -42,6 +78,41 @@ def _handler_class(httpd):
     """The bound `DashboardHandler` subclass a server was built with — the same
     unwrap `test_doxbench_request_handling.py` uses."""
     return getattr(httpd.RequestHandlerClass, "func", httpd.RequestHandlerClass)
+
+
+# --------------------------------------------------------------------------
+# the phase-1 stand-ins (see the module docstring), and nothing else
+# --------------------------------------------------------------------------
+
+class _StandInSource:
+    """`build_server`'s snapshot source as T011's `standalone` fixture injects
+    it: nothing registered, nothing baked, so no session is re-derived."""
+
+    refresh_binding = None
+    baked_repository = None
+
+    class registry:
+        active = None
+
+    def bootstrap(self):
+        pass
+
+
+def _stand_in_generate_snapshot(repo_root, repository, *, source_revision=None,
+                                **_ignored):
+    """`generate_snapshot`'s stand-in: exactly the fields `generate-and-open`
+    reads back when it reports the run. ONE document, so `_report` has no empty
+    projection to warn about and never reaches `SCANNED_ROOTS`."""
+    return {"repository": repository,
+            "generation": {"source_revision": source_revision},
+            "documents": [{"id": "stand-in.md"}]}
+
+
+def _stand_in_write_snapshot(snapshot, output, boundary):
+    """`snapshot.write_snapshot`'s stand-in: the file `build_server` is handed,
+    which it opens only to read `generation.source_revision` back."""
+    output.write_text(json.dumps(snapshot), encoding="utf-8")
+    return output
 
 
 @pytest.fixture()
@@ -63,20 +134,38 @@ def entrypoint_server(tmp_path, monkeypatch):
 
     monkeypatch.setattr(br, "_spawn_child", _refuse_spawn)
 
+    monkeypatch.setattr(cli_mod, "corpus_root_refusal",
+                        lambda root, shape=None: None)
+    monkeypatch.setattr(cli_mod, "generate_snapshot", _stand_in_generate_snapshot)
+    monkeypatch.setattr(cli_mod, "snapshot_mod", types.SimpleNamespace(
+        write_snapshot=_stand_in_write_snapshot))
+    monkeypatch.setattr(serve_mod, "_checkout_real", lambda root: True)
+    monkeypatch.setattr(serve_mod, "registry_mod", types.SimpleNamespace(
+        BINDING_REGENERATE="regenerate", BINDING_REFETCH="refetch"))
+
     built = []
     real_build_server = serve_mod.build_server
 
     def _capture(*args, **kwargs):
-        httpd = real_build_server(*args, **kwargs)
+        # A TRIPWIRE, not only an injection: the day the entrypoint declares a
+        # snapshot source of its own (phase 2), this stand-in must go, and this
+        # line says so instead of silently standing in over it.
+        assert "snapshot_source" not in kwargs, (
+            "the entrypoint now declares its own snapshot source; drop the "
+            "phase-1 stand-in from this fixture")
+        httpd = real_build_server(*args, snapshot_source=_StandInSource(),
+                                  **kwargs)
         built.append(httpd)
         return httpd
 
     monkeypatch.setattr(serve_mod, "build_server", _capture)
 
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
     session_root = tmp_path / "model-sessions"
     args = cli_mod.build_parser().parse_args([
         "generate-and-open",
-        "--repo-root", str(BASE_REPO),
+        "--repo-root", str(checkout),
         "--repository", "fixture-repo",
         "--source-revision", PINNED_REVISION,
         "--run-dir", str(tmp_path / "run"),

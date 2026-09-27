@@ -45,8 +45,13 @@ MODULE = REPO_ROOT / "src" / "subcommand_extension.py"
 #: The top-level command set as it stands, in DECLARATION order — which is the
 #: order `argparse` prints in the usage line, so this is the observable order
 #: and not an incidental one.
+#:
+#: FIVE, not six (plan 034 T035). `gate` was a core verb before the carve. It
+#: is now contributed by the host profile's `SUBCOMMAND_EXTENSIONS` (openXdox's
+#: `cli_gate.GateSubcommands`), so a parser built on this suite's own empty
+#: profile carries the five core verbs only (plan 034 research R8).
 CORE_COMMANDS = ("generate", "generate-and-open", "create", "edit",
-                 "model-binding", "gate")
+                 "model-binding")
 
 #: Both spellings of both packages, for the reason `tests/import_scan.py`
 #: states in its own header: `scripts/__init__.py` exists, so a one-spelling

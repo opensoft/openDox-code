@@ -75,6 +75,20 @@ FAKE_INTAKE_AUDIT = "opaud-9c31e0b57af2648d0d13a5ce"
 
 ENDPOINT = "https://provider.invalid/turn"
 
+# The port's banned member spellings, CARRIED HERE (plan 034 T035). This test
+# imported them from `test_doxbench_model`, a test module that stayed in
+# openxFactory at the carve and never arrived at this leg, so the import failed
+# and the case never ran. The set is copied verbatim from that module's
+# `FORBIDDEN_PORT_MEMBERS` (openxFactory `tests/ideation-dashboard/
+# test_doxbench_model.py`, where it pins `opendox.doxbench_model
+# .WorkbenchModelPort`'s own member set). This is its only reader here, so it
+# lives beside the one test that reads it, rather than in a new helper module.
+FORBIDDEN_PORT_MEMBERS = frozenset({
+    "generate", "complete", "chat", "send", "assemble_prompt", "prompt",
+    "validate", "validate_response", "render", "save", "ensemble", "review",
+    "credentials", "api_key", "endpoint", "client",
+})
+
 
 def _binding(**overrides):
     fields = dict(id="openprofiler-demo", label="Demo brokered provider",
@@ -297,7 +311,7 @@ def test_the_binding_store_needs_no_yaml_parser_until_a_document_exists():
     here kills every hosted serve before it prints its URL. That was MEASURED
     during this change, not theorised: the test above went red the moment the
     import was at module scope."""
-    source = (REPO_ROOT / "scripts" / "ideation_dashboard"
+    source = (REPO_ROOT / "src" / "opendox"
               / "doxbench_binding.py").read_text(encoding="utf-8")
     module_scope = [line for line in source.splitlines()
                     if line.startswith("import ") or line.startswith("from ")]
@@ -1132,7 +1146,6 @@ def test_a_broker_that_has_refused_marks_the_catalog_unavailable(tmp_path):
 
 
 def test_the_port_satisfies_the_seam_without_growing_a_fourth_verb(tmp_path):
-    from test_doxbench_model import FORBIDDEN_PORT_MEMBERS
     port, _opener = _port(tmp_path)
     assert isinstance(port, model_mod.WorkbenchModelPort)
     declared = {name for name in dir(port) if not name.startswith("_")}
@@ -1276,7 +1289,7 @@ def test_the_broker_child_inherits_no_credential_shaped_environment(tmp_path,
         Path(str(script) + ".env.json").read_text(encoding="utf-8"))
     assert "SENTINEL_PROVIDER_API_KEY" not in inherited
     assert set(inherited) <= set(
-        __import__("ideation_dashboard.doxbench_bridge", fromlist=["x"])
+        __import__("opendox.doxbench_bridge", fromlist=["x"])
         .INHERITED_ENVIRONMENT)
 
 
@@ -1318,7 +1331,7 @@ def test_the_subprocess_runner_never_uses_a_shell(tmp_path):
     """argv, never a shell string — asserted on the source, because a
     behavioural test cannot prove the absence of a `shell=True` on a path it
     did not take."""
-    source = (REPO_ROOT / "scripts" / "ideation_dashboard"
+    source = (REPO_ROOT / "src" / "opendox"
               / provider_mod.PROVIDER_CLIENT_MODULE).read_text(encoding="utf-8")
     assert "shell=True" not in source
     assert "os.system" not in source
