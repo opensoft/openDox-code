@@ -185,9 +185,10 @@ def sweep(source: str, path: str = "<source>") -> list[Reach]:
                      node, calls=calls, any_call=any_call, trusted=trusted,
                      members=True)
                  if name == UNREADABLE or names_a_forbidden_package(name, SIBLINGS)]
-        if isinstance(node, ast.ImportFrom):
-            # One reach per statement: its module, or, where the module is not
-            # a sibling's (`from scripts import doc_health`), the first member
+        if isinstance(node, (ast.ImportFrom, ast.Call)):
+            # One reach per statement or call: its module, or, where the
+            # module is not a sibling's (`from scripts import doc_health`,
+            # `__import__("scripts", ..., ("doc_health",))`), the first member
             # that is.
             named = named[:1]
         for name in named:
@@ -344,7 +345,9 @@ def test_the_scanner_classifies_every_position_it_reads():
 #: the module's own, a literal `{"__package__": ...}` resolves (its own case,
 #: below), and anything else, or a level that is not a literal, is
 #: `UNREADABLE`. The pre-carve `scripts.` spelling is openxFactory's too,
-#: and `from scripts import doc_health` imports `scripts.doc_health`.
+#: and `from scripts import doc_health` imports `scripts.doc_health`, as does
+#: `__import__("scripts", ..., ("doc_health",))`. A `fromlist` that is not a
+#: literal is `UNREADABLE`.
 #: Arguments spelled out with a literal `*[...]` or `**{...}`, however deep,
 #: count where they land. A spread that hides the name, or the package a
 #: relative name needs, makes the call `UNREADABLE`, which the sweep refuses.
@@ -382,6 +385,9 @@ _LAZY_SPECIMEN = textwrap.dedent('''
     OWN = __import__("corpus", globals(), None, (), 1)
     CONTEXT = __import__("corpus", CONTEXT, None, (), 1)
     LEVELLED = __import__("corpus", globals(), None, (), LEVEL)
+    FROMLIST = __import__("scripts", globals(), None, ("doc_health",), 0)
+    UNKNOWN_FROM = __import__("scripts", globals(), None, NAMES, 0)
+    CONSUMER_FROM = __import__("openxdox", globals(), None, ("gate_console",), 0)
 ''')
 
 
@@ -411,6 +417,9 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (29, "scripts.ideation_dashboard", False, "<module>"),
         (31, UNREADABLE, False, "<module>"),
         (32, UNREADABLE, False, "<module>"),
+        (33, "scripts.doc_health", False, "<module>"),
+        (34, UNREADABLE, False, "<module>"),
+        (35, "openxdox", False, "<module>"),
     }, sorted(found)
 
 

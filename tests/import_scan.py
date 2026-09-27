@@ -171,32 +171,48 @@ def _own_namespace(context, trusted):
             and context.func.id == "globals" and not context.args and not context.keywords)
 
 
-def _dunder_import(name, args, keywords, complete, trusted):
+def _dunder_import(name, args, keywords, complete, trusted, members):
     """What `__import__(name, globals, locals, fromlist, level)` names.
 
     A zero `level`, or none, is absolute. A nonzero one is relative to the
     package its `globals` declares: its own module's for `globals()`, which
     names nothing here, or a literal `{"__package__": ...}`'s, which is
     resolved. Any other `globals`, or a `level` that is not a literal, could
-    be relative to a sibling, so the call names `UNREADABLE`."""
+    be relative to a sibling, so the call names `UNREADABLE`. With
+    `members`, a literal `fromlist` names its members after the module, as a
+    `from` statement's do (`__import__("scripts", ..., ("doc_health",))`
+    imports `scripts.doc_health`), and a `fromlist` that is not a literal
+    adds `UNREADABLE`."""
     level = args[4] if len(args) > 4 else keywords.get("level")
     context = args[1] if len(args) > 1 else keywords.get("globals")
     if (level is None or context is None) and not complete:
         return [UNREADABLE]
     if level is None or (isinstance(level, ast.Constant) and level.value == 0):
-        return [name]
-    if not (isinstance(level, ast.Constant) and isinstance(level.value, int)):
+        module = name
+    elif not (isinstance(level, ast.Constant) and isinstance(level.value, int)):
         return [UNREADABLE]
-    if _own_namespace(context, trusted):
+    elif _own_namespace(context, trusted):
         return []
-    declared = _literal_keywords(context)[0].get("__package__") \
-        if isinstance(context, ast.Dict) else None
-    if not (isinstance(declared, ast.Constant) and isinstance(declared.value, str)):
-        return [UNREADABLE]
-    try:
-        return [importlib.util.resolve_name("." * level.value + name, declared.value)]
-    except ImportError:
-        return []
+    else:
+        declared = _literal_keywords(context)[0].get("__package__") \
+            if isinstance(context, ast.Dict) else None
+        if not (isinstance(declared, ast.Constant) and isinstance(declared.value, str)):
+            return [UNREADABLE]
+        try:
+            module = importlib.util.resolve_name("." * level.value + name, declared.value)
+        except ImportError:
+            return []
+    if not members:
+        return [module]
+    fromlist = args[3] if len(args) > 3 else keywords.get("fromlist")
+    if fromlist is None:
+        return [module] if complete else [module, UNREADABLE]
+    if isinstance(fromlist, ast.Constant) and fromlist.value is None:
+        return [module]
+    if isinstance(fromlist, (ast.Tuple, ast.List, ast.Set)) and all(
+            isinstance(e, ast.Constant) and isinstance(e.value, str) for e in fromlist.elts):
+        return [module, *(f"{module}.{e.value}" for e in fromlist.elts if e.value != "*")]
+    return [module, UNREADABLE]
 
 
 def importing_calls(tree):
@@ -297,7 +313,8 @@ def names_imported_by(node, *, calls=None, any_call=False, trusted=True,
     if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
         return []
     if called == "__import__":
-        return _dunder_import(name.value, args, keywords, complete, trusted)
+        return _dunder_import(name.value, args, keywords, complete, trusted,
+                              members)
     if not name.value.startswith("."):
         return [name.value]
     package = args[1] if len(args) > 1 else keywords.get("package")
