@@ -3154,7 +3154,7 @@ def test_the_environment_sanitizer_strips_git_template_dir(
 
     A LIVE DEMONSTRATION, not only list membership: a template directory
     carrying a hostile `info/exclude` really does get copied into a fresh
-    repository when `GIT_TEMPLATE_DIR` reaches `git init` unsanitized, and
+    repository when `GIT_TEMPLATE_DIR` reaches `git init` unfiltered, and
     really does not once `sanitized_git_environment()` has filtered it."""
     assert "GIT_TEMPLATE_DIR" in lga._GIT_ENVIRONMENT_OVERRIDES
 
@@ -3174,19 +3174,28 @@ def test_the_environment_sanitizer_strips_git_template_dir(
     assert "PLANTED-BY-HOSTILE-TEMPLATE" not in planted, planted
 
     # The hazard is real, not hypothetical: the SAME template, reached
-    # through an unfiltered environment, really does plant the file --
-    # proving this is a demonstrated exploit this fix closes, not a
-    # defensive-looking no-op that never fires either way.
-    unsanitized_repo = tmp_path / "unsanitized"
-    unsanitized_repo.mkdir()
+    # through an environment that still carries GIT_TEMPLATE_DIR, really
+    # does plant the file -- proving this is a demonstrated exploit this
+    # fix closes, not a defensive-looking no-op that never fires either
+    # way. Built from `sanitized_git_environment()` WITH GIT_TEMPLATE_DIR
+    # explicitly added back, never a raw `os.environ` copy (Copilot review
+    # of openDox-code#45, "Sanitize Git environment in template directory
+    # demonstration"): a raw copy would let whatever GIT_DIR/GIT_WORK_TREE
+    # the process running this suite already has reach `git init` here
+    # too, exactly the hazard the OTHER fix on this same PR closes for
+    # `_init_ordinary_checkout` -- this control isolates the ONE variable
+    # under test instead of reintroducing every variable this file's own
+    # sanitizer exists to strip.
+    control_repo = tmp_path / "control"
+    control_repo.mkdir()
     subprocess.run(
-        ["git", "init", "--quiet", "--initial-branch=main", str(unsanitized_repo)],
+        ["git", "init", "--quiet", "--initial-branch=main", str(control_repo)],
         check=True, capture_output=True,
-        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull})
-    planted_unsanitized = (unsanitized_repo / ".git" / "info" / "exclude"
-                          ).read_text(encoding="utf-8")
-    assert "PLANTED-BY-HOSTILE-TEMPLATE" in planted_unsanitized, (
+        env={**lga.sanitized_git_environment(), "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull, "GIT_TEMPLATE_DIR": str(template)})
+    planted_in_control = (control_repo / ".git" / "info" / "exclude"
+                        ).read_text(encoding="utf-8")
+    assert "PLANTED-BY-HOSTILE-TEMPLATE" in planted_in_control, (
         "the exploit this test demonstrates did not reproduce -- either "
         "this platform's git does not consult GIT_TEMPLATE_DIR the way the "
         "finding assumes, or the setup above is not exercising it")

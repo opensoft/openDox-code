@@ -522,9 +522,24 @@ def test_the_default_can_actually_classify_a_proposal() -> None:
     Deliberately NOT asserting the exact `required_fields` tuple: T054
     (phase 2) sets the neutral fields; today's bare default is `()`, and
     hard-coding that would make this test wrong the day T054 lands rather
-    than testing what it actually claims to -- that the call SUCCEEDS."""
+    than testing what it actually claims to -- that the call SUCCEEDS.
+
+    SKIPS WHERE `git` IS NOT ON PATH, like the falsifier above (Copilot
+    review of openDox-code#45, "Skip Git-dependent integration test when
+    Git is unavailable"): `_stage_as_a_repository_if_git_is_available`
+    deliberately SWALLOWS a missing `git` executable (its own docstring:
+    "never this function's failure"), so without this guard, a runner with
+    no `git` on PATH would still reach `WorkingTreeCorpus.resolve()` on a
+    plain, never-initialized temporary directory and fail on
+    `CorpusRefused(CORPUS_UNCLASSIFIABLE)` -- a fresh, misleading failure
+    unrelated to what this case actually tests, in exactly the environment
+    the rest of this suite already knows to skip in instead."""
     cli = _import_opendox_cli_or_skip()
     from opendox import domain_profile
+    from opendox.runtime import local_git_adapter as lga
+
+    if not lga.git_available():
+        pytest.skip("`git` is not on PATH")
 
     try:
         cli.build_parser()
