@@ -878,7 +878,8 @@ def _declared_seconds(module: str, constant: str) -> float:
 
     As text because this suite is the hermetic one: `opendox.runtime.db`
     imports `psycopg` and `opendox.runtime.oidc` imports `jwt` and `httpx`, all
-    of which belong to the `runtime` extra the REQUIRED job does not install.
+    of which belong to the `runtime` extra, and this file must run without it.
+    (The REQUIRED job did not install the extra until plan 034 T036.)
     The number still has to come from the declaration rather than from a copy
     of it here, or the relation below is asserted against this file's memory of
     the budgets instead of against the budgets.
@@ -2382,7 +2383,8 @@ def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
     """
     lock = ROOT / "constraints-cpython312-linux.txt"
     assert lock.exists(), (
-        "the dependency lock is missing; the three installs below name it")
+        "the dependency lock is missing; the required job's install and the "
+        "image's both name it")
     pins = [line.strip() for line in lock.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.strip().startswith("#")]
     assert pins, "the lock pins nothing"

@@ -165,7 +165,8 @@ def test_the_collection_set_is_closed_and_is_what_the_app_mounts() -> None:
     """`COLLECTIONS` and `app.build_v1_router`'s routers are one list.
 
     Read by PARSING `app.py` rather than by importing it, because this test
-    runs in the job that does not install FastAPI. What it reads is the
+    is one of the hermetic ones and must run without the `runtime` extra,
+    which is where FastAPI comes from. What it reads is the
     `include_router` call list of `build_v1_router`, which is the function
     that decides the surface.
     """
