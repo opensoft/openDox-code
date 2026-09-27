@@ -86,6 +86,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import unicodedata
@@ -319,8 +320,20 @@ def decoded_ref_name(stdout: bytes) -> str:
     return stdout.decode("utf-8", "surrogateescape").rstrip("\r\n")
 
 
-def _sanitized_git_environment() -> dict[str, str]:
-    """`os.environ` without the repository-selection and config overrides."""
+def sanitized_git_environment() -> dict[str, str]:
+    """`os.environ` without the repository-selection and config overrides.
+
+    PUBLIC (no leading underscore) because `opendox.authoring` is a second
+    caller (Copilot review of openDox-code#45, "Sanitize Git environment
+    before repository initialization"): a staging helper there runs its own
+    `git init` of a throwaway tree, and that call inherited
+    `GIT_DIR`/`GIT_WORK_TREE` (and their relatives) from the process,
+    exactly the hazard this function exists to strip for every OTHER `git`
+    this package runs -- a caller started with one of them set would have
+    initialized or mutated THAT repository instead of the throwaway tree,
+    silently. Same reasoning `GitRunner`'s own class docstring gives for
+    staying public: a second module reaching into this one's underscore
+    names would be a seam nobody declared."""
     return {name: value for name, value in os.environ.items()
             if name not in _GIT_ENVIRONMENT_OVERRIDES
             and not name.startswith("GIT_CONFIG_KEY_")
@@ -627,7 +640,7 @@ class GitRunner:
             env: dict[str, str] | None = None,
             timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
         argv = self._argv(args)          # see `_argv` for the two options
-        merged = {**_sanitized_git_environment(),
+        merged = {**sanitized_git_environment(),
                   **dict(self.held_environment), **(env or {})}
         try:
             return subprocess.run(argv, input=stdin, capture_output=True,
@@ -863,7 +876,7 @@ class GitRunner:
             # openDox-code#26, round 18, and it is a regression this round's
             # own output cap introduced).
             completed = self._run_bounded(
-                args, {**_sanitized_git_environment(), **merged}, timeout)
+                args, {**sanitized_git_environment(), **merged}, timeout)
         except subprocess.TimeoutExpired as expired:
             raise GitCommandFailed(
                 args, subprocess.CompletedProcess(
@@ -2029,7 +2042,7 @@ class LocalGitCorpus:
             # which is the same class as the `pre-push` hook and the `ext::`
             # transport and was covered by neither (Copilot review of
             # openDox-code#26, round 17). The environment channel
-            # `GIT_EXTERNAL_DIFF` is stripped by `_sanitized_git_environment`
+            # `GIT_EXTERNAL_DIFF` is stripped by `sanitized_git_environment`
             # for the same reason.
             # AND EVERY CLEAN/SMUDGE FILTER THE REPOSITORY DEFINES IS
             # EMPTIED. `--no-ext-diff` and `--no-textconv` cover the two
@@ -2817,22 +2830,51 @@ def _open_confined(root_fd: int, key: PurePosixPath) -> int:
 
     Every intermediate handle THIS WALK ITSELF opened is closed before
     returning, whether it returns a descriptor or raises; `root_fd` is the
-    caller's, and is never closed here."""
+    caller's, and is never closed here.
+
+    ONLY A REGULAR FILE IS EVER RETURNED (Copilot review of
+    openDox-code#45, "Prevent blocking opens of tracked special files"):
+    git accepts a FIFO, a socket or a device into the index exactly as it
+    would any other blob, and a plain BLOCKING open of a FIFO for reading
+    hangs until a writer opens the other end -- possibly forever, taking
+    `list_documents()`'s own existence check down with it, not only a
+    direct `read()`. The leaf is opened `O_NONBLOCK` (which POSIX defines
+    as making a FIFO's open return immediately instead of blocking; a
+    regular file's open and later read are unaffected by the flag either
+    way), and its MODE is checked before this function ever hands the
+    descriptor back: a directory raises `IsADirectoryError` (unchanged, the
+    gitlink/nested-checkout case callers already translate), anything else
+    that is not a plain regular file -- a FIFO, a socket, a character or
+    block device -- raises it too, under the same name, since neither
+    caller draws a finer distinction than "not a document this adapter can
+    read"."""
     parts = key.parts
     if not parts:
         raise FileNotFoundError(str(key))
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
-    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    leaf_flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     handle = root_fd
     opened: list[int] = []
     try:
         for component in parts[:-1]:
             handle = os.open(component, directory_flags, dir_fd=handle)
             opened.append(handle)
-        return os.open(parts[-1], leaf_flags, dir_fd=handle)
+        fd = os.open(parts[-1], leaf_flags, dir_fd=handle)
     finally:
-        for fd in opened:
-            os.close(fd)
+        for opened_handle in opened:
+            os.close(opened_handle)
+    try:
+        mode = os.fstat(fd).st_mode
+    except OSError:
+        os.close(fd)
+        raise
+    if not stat.S_ISREG(mode):
+        os.close(fd)
+        raise IsADirectoryError(
+            f"{str(key)!r} is a directory, a gitlink, or a special file "
+            "(a FIFO, a socket or a device) -- not a document this "
+            "adapter can read")
+    return fd
 
 
 class WorkingTreeCorpus(LocalGitCorpus):
@@ -3036,6 +3078,22 @@ class WorkingTreeCorpus(LocalGitCorpus):
         except FileNotFoundError:
             raise _refuse(DOCUMENT_UNKNOWN, document.key,
                           f"{document.key!r} is not on disk in the working tree")
+        except IsADirectoryError as not_a_document:
+            # `_open_confined` ITSELF raises this -- a directory, a gitlink,
+            # or a special file (FIFO/socket/device) it refused to hand back
+            # a descriptor for -- so this is DOCUMENT_UNKNOWN, never a
+            # corpus-wide `CORPUS_UNREADABLE`: the corpus is fine, this one
+            # entry is not a document. A FRESH message, not `str(exc)`: this
+            # handler catches a BUILT-IN exception type, so the anti-leak
+            # walk (`tests_runtime/test_runtime_cli.py`) scrutinizes it the
+            # same as any other non-package one, even though every byte of
+            # `_open_confined`'s own message is this file's own text, never
+            # a library's.
+            raise _refuse(
+                DOCUMENT_UNKNOWN, document.key,
+                f"{document.key!r} is a directory, a gitlink, or a special "
+                "file (a FIFO, a socket or a device) -- not a document this "
+                "adapter can read") from not_a_document
         except OSError as failed:
             # COVERS BOTH a symlink `O_NOFOLLOW` refused (`ELOOP`) at any
             # component and any other OS-level failure opening the
@@ -3046,13 +3104,13 @@ class WorkingTreeCorpus(LocalGitCorpus):
             # this package).
             raise _refuse(CORPUS_UNREADABLE, corpus.location,
                           redact_credentials(str(failed))) from failed
+        # `_open_confined` already guarantees a REGULAR file by the time it
+        # returns a descriptor, so nothing left to read here can raise
+        # `IsADirectoryError` -- only a genuine I/O failure partway through
+        # the read itself (a disk error, the file removed after the open).
         try:
             with os.fdopen(fd, "rb") as opened:
                 content = opened.read()
-        except IsADirectoryError:
-            raise _refuse(DOCUMENT_UNKNOWN, document.key,
-                          f"{document.key!r} is a directory (a gitlink?), not "
-                          "a document this adapter can read")
         except OSError as failed:
             raise _refuse(CORPUS_UNREADABLE, corpus.location,
                           redact_credentials(str(failed))) from failed

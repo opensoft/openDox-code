@@ -2860,7 +2860,9 @@ def test_a_bounded_push_keeps_the_environment_every_other_call_gets(
         tmp_path: Path) -> None:
     """`out_bounded` handed `Popen` four variables and no `PATH`.
 
-    `run()` builds its environment from `_sanitized_git_environment()` and
+    `run()` builds its environment from `sanitized_git_environment()` (made
+    public alongside `GitRunner` once `opendox.authoring` became a second
+    caller, openDox-code#45) and
     layers the call's own on top; this round's output cap passed the call's own
     STRAIGHT to `Popen`, so the push ran without `PATH` and without
     `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` — which this package keeps on

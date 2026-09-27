@@ -400,17 +400,36 @@ def _stage_as_a_repository_if_git_is_available(adapter, staged: str) -> None:
     WHY SWALLOWED, NOT RAISED. Where `git` is missing from `PATH`, or
     refuses for some other reason, this staging step leaves the tree
     exactly as it would have been before this fix -- no worse than today,
-    and no new hard dependency on `git` for anything else registered."""
+    and no new hard dependency on `git` for anything else registered.
+
+    THE ENVIRONMENT IS SANITIZED THE SAME WAY EVERY OTHER `git` CALL IN
+    THIS PRODUCT IS (Copilot review of openDox-code#45, "Sanitize Git
+    environment before repository initialization"): a bare `git init`
+    inherits `GIT_DIR`/`GIT_WORK_TREE` (and their relatives) from the
+    process, so a caller started with one of them set -- a unit file that
+    inherited it, a process started from inside a git hook -- would have
+    initialized or MUTATED THAT REPOSITORY instead of the throwaway
+    `staged` tree, silently, and the later sanitized `resolve()` would then
+    refuse the temporary tree it never actually touched. `local_git_adapter
+    .sanitized_git_environment()` is the same stripped base every
+    `GitRunner` call already runs on; `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`
+    are layered to `/dev/null` on top of it here, since THIS call (unlike a
+    `GitRunner`'s) has no legitimate use for an operator's own git
+    configuration -- it never leaves this throwaway tree or touches a
+    remote."""
     if type(adapter).__module__ != _GIT_ADAPTER_MODULE:
         return
     import os
     import subprocess
 
+    from opendox.runtime.local_git_adapter import sanitized_git_environment
+
     try:
         subprocess.run(
             ["git", "init", "--quiet", "--initial-branch=main", staged],
             check=True, capture_output=True,
-            env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+            env={**sanitized_git_environment(),
+                 "GIT_CONFIG_GLOBAL": os.devnull,
                  "GIT_CONFIG_SYSTEM": os.devnull})
     except (OSError, subprocess.CalledProcessError):
         pass

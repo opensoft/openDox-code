@@ -33,7 +33,7 @@ import subprocess
 from pathlib import Path
 
 from .runtime.local_git_adapter import (
-    LocalGitCorpus, _sanitized_git_environment,
+    LocalGitCorpus, sanitized_git_environment,
 )
 
 #: The corpus's four states, by the names openxFactory's seed laid them down
@@ -149,7 +149,7 @@ def _git(repo: Path, *args: str) -> None:
     repository's config: a transposition is a throwaway and must not depend on
     the machine's git identity being set, which on a CI runner it is not.
     """
-    environment = _sanitized_git_environment()
+    environment = sanitized_git_environment()
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     environment["GIT_ATTR_NOSYSTEM"] = "1"
     subprocess.run(("git", *_HARDENING, *args), cwd=repo, check=True,
@@ -230,7 +230,7 @@ def _committed_blob(repo: Path, key: str) -> bytes:
     actually named that — so `--literal-pathspecs` is added here for the `:`
     case alone, and not because a glob was found to misbehave.
     """
-    reading = {**_sanitized_git_environment(), "GIT_NO_REPLACE_OBJECTS": "1"}
+    reading = {**sanitized_git_environment(), "GIT_NO_REPLACE_OBJECTS": "1"}
     try:
         return subprocess.run(
             ("git", *_HARDENING, "cat-file", "blob", f"HEAD:{key}"),
@@ -374,7 +374,7 @@ def transpose(shipped: Path, destination: Path) -> Path:
         staged = subprocess.run(
             ("git", *_HARDENING, "ls-files", "--cached", "-z"),
             cwd=target, capture_output=True,
-            env={**_sanitized_git_environment(),
+            env={**sanitized_git_environment(),
                  "GIT_NO_REPLACE_OBJECTS": "1"})
         names = ([name for name in staged.stdout.split(b"\0") if name]
                  if staged.returncode == 0 else None)
