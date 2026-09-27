@@ -64,6 +64,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple
 
@@ -777,7 +778,11 @@ def test_the_anchors_come_from_the_source_revision_and_the_bytes_repeat(
         "source_revision": head,
         "generated_at": _git(root, "show", "-s", "--format=%cI", "HEAD").strip(),
         "generator_version": projection.GENERATOR_VERSION}
-    assert first["generation"]["generated_at"] == ANCHOR_DATE
+    # The same instant as the commit's date. git spells a zero offset `Z` or
+    # `+00:00` depending on its version, and the stamp is recorded as git
+    # spells it, so the two are compared as times, not as strings.
+    assert datetime.fromisoformat(first["generation"]["generated_at"]) == \
+        datetime.fromisoformat(ANCHOR_DATE)
 
     pinned = _generate(root, source_revision="release-candidate",
                        generated_at="2026-01-02T03:04:05Z")["generation"]
