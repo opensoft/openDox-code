@@ -22,9 +22,8 @@ parameter, never interpolated").
 
 NO DRIVER IS IMPORTED HERE. The store is handed a connection — anything with
 `.execute(sql, params)` returning a cursor with `.fetchone()` / `.fetchall()` —
-so this module imports under the leg's `validate` check, which installs
-`.[test]` and not `.[runtime]`. See `opendox/runtime/__init__.py`'s
-import-weight contract.
+so this module imports without the `runtime` extra installed. See
+`opendox/runtime/__init__.py`'s import-weight contract.
 
 The one first-party import is `config`, which is stdlib-only for the same
 reason and is measured to be so by

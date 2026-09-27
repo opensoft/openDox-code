@@ -4,8 +4,10 @@ An in-process client over the real application, the real `TokenVerifier`
 (local key set) and the real migrated schema — so what is measured here is what
 a deployed runtime does, not what a stub agrees to.
 
-DB-BACKED — runs in the `runtime` CI job; skipped, with the reason printed,
-where no `OPENDOX_TEST_DATABASE_URL` is reachable.
+DB-BACKED — runs in the required `validate` job, against its `postgres:16`
+service, since plan 034 T036 folded the `runtime` job into it. Where no
+`OPENDOX_TEST_DATABASE_URL` is reachable it is skipped, with the reason
+printed, and under `CI` it fails instead (see `conftest.py`).
 """
 
 from __future__ import annotations

@@ -49,11 +49,11 @@ WHAT IT HOLDS, and why each is here rather than implied:
    2026-09-13 (RULED `openxFactory#656` comment 5656343213), and the reason it
    is worth the subprocess.
 
-`--noconftest` SAFE, deliberately: `validate` runs this file in the explicit
-list with conftest collection off (RULED Q-L5 (b')), so nothing here may need a
-fixture, a path insertion or an installed consumer. `ROOT` is computed from
-`__file__` for that reason and the package is importable because the workflow
-installs it (`pip install -e ".[test]"`).
+`--noconftest` SAFE, deliberately: `validate` ran this file in the explicit
+list with conftest collection off (RULED Q-L5 (b')) until plan 034 T036, so
+nothing here may need a fixture, a path insertion or an installed consumer.
+`ROOT` is computed from `__file__` for that reason, and the package is
+importable because the workflow installs it (`-e ".[runtime,test]"`).
 
 A CREATED file: no carve-manifest row (RULED OQ-C).
 """

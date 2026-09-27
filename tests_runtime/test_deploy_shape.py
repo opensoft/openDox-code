@@ -13,6 +13,7 @@ dependency and is therefore present wherever `.[test]` is.
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +90,8 @@ def _containers(document: Any) -> list[dict[str, Any]]:
 # simply never appears. Measured on this act: `run: python -m pip install
 # --only-binary :all: -e ".[runtime,test]"` written as a PLAIN scalar contains
 # `: `, which YAML reads as a mapping indicator, so at head `4d3ce664` neither
-# `validate` nor `runtime` started and only SonarCloud reported. Nothing in the
-# tree noticed; a green-looking PR page did.
+# `validate` nor `runtime` (the DB-backed job then beside it) started and only
+# SonarCloud reported. Nothing in the tree noticed; a green-looking PR page did.
 
 
 def test_the_workflow_file_parses_as_yaml() -> None:
@@ -105,55 +106,155 @@ def test_the_workflow_file_parses_as_yaml() -> None:
     assert isinstance(workflow.get("jobs"), dict)
 
 
-def test_the_workflow_declares_both_jobs_and_their_steps() -> None:
-    """The required job, and the DB-backed job this act adds beside it."""
+#: EVERY WAY A SHELL SCRIPT PUTS ONE COMMAND AFTER ANOTHER: `&&`, `||`, `;`, a
+#: pipe, a background `&`, a newline, a subshell and a command substitution.
+#: This split takes all of them. The first version of the count split on `&&`,
+#: `;` and newlines only, so it read `python -m pytest -q || python -m pytest
+#: tests_runtime` as ONE command. A failed run followed by a second, pinned one
+#: would then have passed the one-run check (Copilot review of
+#: openDox-code#52 at `83fb977e`). A redirection's `&` (`2>&1`, `&>log`) is not
+#: a separator, so it is excluded.
+_COMMAND_SEPARATORS = re.compile(
+    r"&&|\|\||(?<![<>])&(?![>&])|[;|\n()`]|\$\(")
+
+#: A PYTEST RUN, IN ANY SPELLING AND UNDER ANY WRAPPER (Copilot's reviews of
+#: openDox-code#52 at `485e085a` and `b8623bf9`). The word is counted wherever
+#: it stands in a command, not only as its first word: `python -m pytest`, a
+#: bare `pytest`, `env CI=true pytest`, `timeout 900 pytest`, `uv run pytest`,
+#: `xargs pytest`, `.venv/bin/pytest`, `sh -c "pytest …"`, and `pytest.main(` in
+#: a `python -c` program. A second run cannot hide inside a wrapper this list
+#: never heard of. The word inside a longer name is not counted:
+#: `pytest-report.xml`, `pytest.ini`, `test_pytest_x.py`.
+#:
+#: IT ERRS TOWARD COUNTING, and says so. It reads no quotes and strips no
+#: comments, so a comment or an echoed sentence that names the word bare counts
+#: as a run, and so does an `import pytest` in a `-c` program. That is why no
+#: step's script names it that way. A false red here means a message to
+#: reword; a false green would be a second run.
+_PYTEST_RUN = re.compile(
+    r"(?<![\w.-])(?:pytest|py\.test)(?=$|[\s\"'`;|&()]|\.main\b)")
+
+
+def _pytest_runs(script: str) -> list[str]:
+    """Every pytest run in `script`, as the command it sits in, once per run."""
+    runs: list[str] = []
+    for command in _COMMAND_SEPARATORS.split(script):
+        runs.extend([command] * len(_PYTEST_RUN.findall(command)))
+    return runs
+
+
+@pytest.mark.parametrize("script, runs", [
+    # the step as it stands, and the controls that must count one
+    ("python -m pytest -q --junitxml=pytest-report.xml", 1),
+    ("timeout 900 python -m pytest -q 2>&1 | tee pytest.log", 1),
+    ('echo "the test step" && python -m pytest -q', 1),
+    ("CI=1 pytest -q", 1),
+    (".venv/bin/pytest -q", 1),
+    ("cat pytest.ini tests/test_pytest_x.py", 0),
+    # a second run chained on by every shell separator
+    ("python -m pytest -q && python -m pytest tests_runtime", 2),
+    ("python -m pytest -q || python -m pytest tests_runtime", 2),
+    ("python -m pytest -q; python -m pytest tests_runtime", 2),
+    ("python -m pytest -q | python -m pytest tests_runtime", 2),
+    ("python -m pytest -q & python -m pytest tests_runtime", 2),
+    ("python -m pytest -q\npython -m pytest tests_runtime", 2),
+    ("python -m pytest -q $(python -m pytest --co -q)", 2),
+    # a second run inside a wrapper
+    ("python -m pytest -q || pytest tests_runtime", 2),
+    ("python -m pytest -q || env CI=true pytest -q tests_runtime", 2),
+    ("python -m pytest -q && timeout 600 pytest tests_runtime", 2),
+    ("python -m pytest -q && uv run pytest tests_runtime", 2),
+    ("python -m pytest -q | xargs pytest", 2),
+    ('python -m pytest -q || sh -c "python -m pytest tests_runtime"', 2),
+    ("python -m pytest -q; bash -c 'pytest -q'", 2),
+    # and the direction it errs in, pinned so it is a decision and not an
+    # accident: a sentence that names the word bare, and an import, count
+    ('echo "the pytest step" && python -m pytest -q', 2),
+    ("python -m pytest -q && python -c 'import pytest; pytest.main()'", 3),
+])
+def test_the_run_count_sees_every_shell_separator(script: str, runs: int) -> None:
+    """The one-run assertion below is worth making only if its count sees
+    every way a second run could be chained onto the first, or wrapped. So the
+    count is driven here, over the chains it must see and the lines it must not
+    miscount, rather than trusted."""
+    assert len(_pytest_runs(script)) == runs, _pytest_runs(script)
+
+
+def test_the_workflow_declares_the_required_job_and_its_steps() -> None:
+    """ONE job, the required one, running the WHOLE suite (plan 034 T036).
+
+    The DB-backed `runtime` job this pin used to require is folded into
+    `validate` (RULED R1Q8 (a): `tests_runtime/` is part of the whole suite,
+    with PostgreSQL in the required job). A second job would now only run the
+    same database-backed cases twice, once required and once not."""
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     assert "validate" in jobs, (
         "`validate` is this repository's one REQUIRED status check "
         "(openDox-code#2) and the workflow no longer declares it")
-    assert "runtime" in jobs, (
-        "the DB-backed `runtime` job is gone; the suites that need Postgres, a "
-        "token or a web framework would then run nowhere")
-    names = [step.get("name") for step in jobs["validate"]["steps"]]
-    assert "pytest (runtime, hermetic)" in names, (
-        "the required job no longer runs this act's hermetic suites")
-    assert names.index("pytest") < names.index("pytest (runtime, hermetic)"), (
-        "this act's step must stay APPENDED after the existing pytest step; "
-        "reordering is an edit to what the required check already ran")
-    runtime_names = [step.get("name") for step in jobs["runtime"]["steps"]]
-    assert runtime_names[-1] == "pytest (runtime, database-backed)"
+    assert sorted(jobs) == ["validate"], (
+        f"the workflow declares {sorted(jobs)}; the whole suite runs in the "
+        "required job, so a second job runs nothing the required one does not")
+    steps = jobs["validate"]["steps"]
+    names = [step.get("name") for step in steps]
+    assert "pytest" in names and "Pin the triple" in names, names
+    assert names.index("pytest") < names.index("Pin the triple"), (
+        "the pin reads the report the pytest step writes, so it runs after it")
+    # ONE INVOCATION, counted across every step's script rather than by
+    # step, so a second run chained onto the first line is counted too.
+    invocations = [run for step in steps
+                   for run in _pytest_runs(step.get("run", "") or "")]
+    assert len(invocations) == 1, (
+        f"the required job runs pytest {len(invocations)} times "
+        f"({invocations}); the whole suite is one invocation")
+    # NO FILE LIST: `pyproject.toml`'s `testpaths` is the suite, so every
+    # argument after `-m pytest` is an option. A path, bare or not, would make
+    # it a list again, which is what requirement 9 retired. The reading errs
+    # toward refusing: an option's value is joined with `=`
+    # (`--junitxml=…`), because a separate word reads as a path here.
+    command = invocations[0]
+    arguments = shlex.split(command[_PYTEST_RUN.search(command).end():])
+    positional = [token for token in arguments if not token.startswith("-")]
+    assert positional == [], (
+        f"the pytest step names {positional}; the whole suite is what "
+        "`testpaths` names, so the step names nothing")
 
 
-def test_the_runtime_job_supplies_a_postgres_service_and_the_extras() -> None:
+def test_the_required_job_supplies_a_postgres_service_and_the_extras() -> None:
+    """What the `runtime` job carried, now carried by the required one."""
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-    service = jobs["runtime"]["services"]["postgres"]
+    service = jobs["validate"]["services"]["postgres"]
     assert service["image"].startswith("postgres:")
-    install = next(step["run"] for step in jobs["runtime"]["steps"]
+    install = next(step["run"] for step in jobs["validate"]["steps"]
                    if step.get("name", "").startswith("install"))
     assert "--only-binary :all:" in install
     assert '.[runtime,test]' in install
-    probe = next(step for step in jobs["runtime"]["steps"]
-                 if step.get("name") == "pytest (runtime, database-backed)")
+    probe = next(step for step in jobs["validate"]["steps"]
+                 if step.get("name") == "pytest")
     assert probe["env"]["OPENDOX_TEST_DATABASE_URL"].startswith("postgresql://")
 
 
-def test_the_required_job_installs_only_the_test_extra() -> None:
-    """The import-weight contract, read off the workflow rather than the prose.
+def test_the_required_job_installs_the_runtime_and_test_extras() -> None:
+    """RULED R1Q8 (a), read off the workflow rather than the prose.
 
-    If the required job ever installed `.[runtime]`, every assertion about what
-    imports without the extra would still pass and would stop meaning anything.
-    """
+    This pin used to require the OPPOSITE: the test extra alone, on the ground
+    that with `.[runtime]` installed "every assertion about what imports
+    without the extra would still pass and would stop meaning anything". That
+    no longer holds, and the reason is measured, not assumed.
+    `test_runtime_surface.py` holds the import-weight contract by importing
+    the stdlib-only modules in a FRESH interpreter and reading which extra
+    distributions landed in `sys.modules`. With the extra installed, a leak
+    imports and is named. Without it, the import fails. Either way the case
+    goes red. So installing the extra in the required job costs the contract
+    nothing, and R1Q8 (a) needs it there: half of `tests_runtime/` cannot run
+    without it."""
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     installs = [step.get("run", "") for step in jobs["validate"]["steps"]
                 if "pip install" in step.get("run", "")]
     assert installs, "the required job installs nothing"
     for line in installs:
-        # THE EXTRAS, NOT THE WHOLE COMMAND LINE. This asked whether the word
-        # `runtime` appeared anywhere in the step, which was true of the
-        # dependency LOCK the same step now passes with `-c`
-        # (`…/runtime-and-test-cpython312-linux.txt`) — a name, not an install.
-        # What the job must not do is install the runtime EXTRA, so that is
-        # what is read: every `.[…]` target in the command, by its extras.
+        # THE EXTRAS, NOT THE WHOLE COMMAND LINE: every `.[…]` target in the
+        # command, by its extras. The dependency lock the same step passes
+        # with `-c` is a name, not an install.
         extras = {extra.strip()
                   for target in re.findall(r"\.\[([^]]*)\]", line)
                   for extra in target.split(",")}
@@ -161,10 +262,10 @@ def test_the_required_job_installs_only_the_test_extra() -> None:
             f"the required `validate` job installs {line!r} and no extra of "
             "this package could be read from it; this guard reads the `.[…]` "
             "target, so an install spelled another way has to say so here")
-        assert extras == {"test"}, (
-            f"the required `validate` job installs {sorted(extras)!r}; it must "
-            "install the test extra alone, or the hermetic suites stop "
-            "measuring the import-weight contract they exist for")
+        assert extras == {"runtime", "test"}, (
+            f"the required `validate` job installs {sorted(extras)!r}; the "
+            "whole suite needs the runtime extra and the test extra "
+            "(R1Q8 (a))")
 
 
 # -- the three declarations agree -------------------------------------------
@@ -777,7 +878,8 @@ def _declared_seconds(module: str, constant: str) -> float:
 
     As text because this suite is the hermetic one: `opendox.runtime.db`
     imports `psycopg` and `opendox.runtime.oidc` imports `jwt` and `httpx`, all
-    of which belong to the `runtime` extra the REQUIRED job does not install.
+    of which belong to the `runtime` extra, and this file must run without it.
+    (The REQUIRED job did not install the extra until plan 034 T036.)
     The number still has to come from the declaration rather than from a copy
     of it here, or the relation below is asserted against this file's memory of
     the budgets instead of against the budgets.
@@ -1968,9 +2070,9 @@ def test_the_managed_database_prerequisite_refuses_before_it_provisions(
     this block anyway reached `create role … password %L` with nothing (Copilot
     review of openDox-code#25, round 35, suppressed).
 
-    NOT MEASURED AGAINST A SERVER: no `psql` binary exists in the `validate`
-    job, which installs `.[test]` and nothing else. What is asserted is the
-    ORDER — every guard before the first act — which is the property that was
+    NOT MEASURED AGAINST A SERVER: this case runs no `psql`. What is asserted
+    is the ORDER — every guard before the first act — which is the property that
+    was
     wrong, and `deploy/*/init-runtime-role.sh` carry the same setting in the
     spelling psql takes on its command line.
     """
@@ -2258,7 +2360,7 @@ def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
 
     `pyproject.toml` declares what this package NEEDS and deliberately does not
     pin it — a library that pins its dependents' versions cannot be installed
-    beside anything. The other half was missing: the three places that install
+    beside anything. The other half was missing: the places that install
     this package into an environment somebody depends on resolved whatever the
     index offered on the day they ran, so the same commit tested twice is two
     different programs (SonarCloud `githubactions:S8544` on
@@ -2267,10 +2369,11 @@ def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
     versions is security-sensitive"; advisory on this repository, registered on
     openDox-code#26 and built here).
 
-    ONE FILE FOR THE THREE, so there is no second list of names to drift, and a
-    CONSTRAINTS file rather than a requirements one: it pins what is installed
-    and installs nothing, which is what lets the required job go on installing
-    `.[test]` ALONE while the entries for FastAPI and psycopg sit unused.
+    ONE FILE FOR ALL OF THEM, so there is no second list of names to drift, and
+    a CONSTRAINTS file rather than a requirements one: it pins what is installed
+    and installs nothing, so each install still chooses its own extras. There
+    are TWO since plan 034 T036 folded the DB-backed `runtime` job into the
+    required one: that job's install, and the image's.
 
     AT THE REPOSITORY ROOT, and that is load-bearing: `deploy/` holds the
     git-ignored `.env` that `.dockerignore` exists to keep out of the build
@@ -2280,7 +2383,8 @@ def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
     """
     lock = ROOT / "constraints-cpython312-linux.txt"
     assert lock.exists(), (
-        "the dependency lock is missing; the three installs below name it")
+        "the dependency lock is missing; the required job's install and the "
+        "image's both name it")
     pins = [line.strip() for line in lock.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.strip().startswith("#")]
     assert pins, "the lock pins nothing"
@@ -2301,7 +2405,7 @@ def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
     parsed = yaml.safe_load(workflow)
     installs = [step["run"] for job in parsed["jobs"].values()
                 for step in job["steps"] if "pip install" in step.get("run", "")]
-    assert len(installs) == 2, installs
+    assert len(installs) == 1, installs
     for run in installs:
         assert "-c constraints-cpython312-linux.txt" in run, run
     dockerfile = (COMPOSE / "Dockerfile").read_text(encoding="utf-8")
