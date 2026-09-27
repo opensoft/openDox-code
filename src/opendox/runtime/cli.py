@@ -35,11 +35,16 @@ below builds the `runtime` command; `[project.scripts] opendox-runtime` runs it
 directly and works today; and :class:`RuntimeSubcommand` wraps the SAME
 registration function in an object that structurally conforms to
 `subcommand_extension.SubcommandExtension`, asserted with `isinstance` in
-`tests_runtime/test_runtime_cli.py`. The day the BUILD arc makes `opendox.cli`
-importable, wiring the verbs into the core parser is one line at the assembly
-point — `build_parser(subcommand_extensions=(RuntimeSubcommand(),))` — and no
-verb is re-authored. That is the seam used for what it is for, without
-pretending the runtime is a layer above.
+`tests_runtime/test_runtime_cli.py`. `opendox.cli` is importable now (plan 034
+T011), and the verbs ARE wired into it, through openDox's OWN default profile
+(`opendox.default_profile`, plan 034 T015), which carries `RuntimeSubcommand`
+in its `SUBCOMMAND_EXTENSIONS` and which `opendox.cli.build_parser()` and
+`main()` register automatically wherever no host has (plan 034 T016) — the
+exact assembly-point call this paragraph once said a future act would make,
+`build_parser(subcommand_extensions=(RuntimeSubcommand(),))`, now made for
+every standalone build instead of by a caller. No verb is re-authored either
+way. That is the seam used for what it is for, without pretending the runtime
+is a layer above.
 
 AND THAT IS THE RULED SHAPE, not this act's preference. RULED openxFactory#656
 comment `5701772032` (Brett Heap, 2026-09-16, by interactive multi-choice)
