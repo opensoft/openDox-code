@@ -1351,23 +1351,128 @@ def doxbench_turn_v2_success_body(*, client_turn_id: str, assistant_turn_id: str
 _UNSET_VALIDATOR_FACTORY = object()
 
 
+# ---------------------------------------------------------------------------
+# THE doxBench SCHEMA-VALIDATORS SEAM (plan 034 T027; task 4.3 of
+# `add-neutral-product-standalone-operability`)
+# ---------------------------------------------------------------------------
+#
+# `default_doxbench_validators` used to import openxFactory's
+# `ideation_dashboard.doxbench_contracts` inside its body: a deferred reach,
+# which passed every import test and refused at every request in any tree
+# without openxFactory, which is every tree openDox ships in, with nothing to
+# say which call would have satisfied it. It now resolves the validators
+# factory a host REGISTERED with `register_doxbench_validators(factory)`,
+# once, at process start, as the host registers its profile
+# (`opendox.domain_profile.register`). openDox names no implementation, so
+# nothing here imports the host's package.
+#
+# REFUSAL, NOT A DEFAULT. With nothing registered the factory refuses, naming
+# this seam and the registration call (`DoxbenchValidatorsNotRegistered`,
+# 4.2's discipline), and the two model routes refuse with their fixed codes,
+# because `_doxbench_validators` turns any factory failure into `None`.
+# openDox's own validators for its own copies of the doxBench schemas are a
+# later act (plan 034's T085); until then there is nothing for this seam to
+# fall back to, and "no validator" is never an implicit pass.
+
+#: The ONE call a host makes, quoted verbatim in the refusal so the refusal
+#: names its remedy rather than its symptom.
+DOXBENCH_VALIDATORS_REGISTRATION_CALL = (
+    "opendox.serve_wire.register_doxbench_validators(<the host's validators "
+    "factory>)")
+
+#: What the seam says when nothing is registered. A constant, so a host's own
+#: tests can hold the refusal they expect to the one it gives.
+DOXBENCH_VALIDATORS_NOT_REGISTERED = (
+    "no doxBench schema validators are registered at openDox's "
+    "doxBench-validators seam (opendox.serve_wire), so no model route can "
+    "verify what it would answer, and each refuses. A host registers its "
+    "validators factory at process start with "
+    + DOXBENCH_VALIDATORS_REGISTRATION_CALL + ".")
+
+
+class DoxbenchValidatorsNotRegistered(RuntimeError):
+    """The doxBench-validators seam has no registered factory.
+
+    Raised by `default_doxbench_validators`, and so by every request that
+    reaches `build_server`'s default seam in a process no host registered.
+    `_doxbench_validators` swallows it into `None`, like every other factory
+    failure, so its text never reaches the wire: the routes answer their fixed
+    codes, and a direct caller reads the seam and the call it names."""
+
+
+class DoxbenchValidatorsAlreadyRegistered(RuntimeError):
+    """A second, different factory was registered over a first.
+
+    ONE registration: a process whose model routes verify against two
+    factories, depending on which registration a request happened to reach, is
+    the failure one registration exists to prevent. Registering the SAME
+    factory again is not refused. `unregister_doxbench_validators()` makes a
+    deliberate swap explicit."""
+
+
+_doxbench_validators_factory = None
+
+
+def register_doxbench_validators(factory):
+    """Register the host's doxBench schema-validators factory. Returns it.
+
+    `factory()` takes no argument and answers the released per-kind
+    validators, a `dict` of wire kind to validator, as
+    `ideation_dashboard.doxbench_contracts.validators` does for openxFactory.
+    It is called PER REQUEST, never cached here, so a factory that re-verifies
+    its pin on every call keeps a mid-run repin observable."""
+    global _doxbench_validators_factory
+    if not callable(factory):
+        raise TypeError(
+            "register_doxbench_validators() takes the host's validators "
+            f"factory, a callable, not {type(factory).__name__}. A host with no "
+            "validators does not register one: it leaves the seam empty, and "
+            "the model routes refuse, naming this call.")
+    if (_doxbench_validators_factory is not None
+            and _doxbench_validators_factory is not factory):
+        raise DoxbenchValidatorsAlreadyRegistered(
+            "a validators factory is already registered at openDox's "
+            "doxBench-validators seam, and a different one would replace it. "
+            "Registration happens once, at process start. Call "
+            "opendox.serve_wire.unregister_doxbench_validators() first if the "
+            "swap is deliberate.")
+    _doxbench_validators_factory = factory
+    return factory
+
+
+def unregister_doxbench_validators() -> None:
+    """Drop the registration. For test isolation and for a host tearing down."""
+    global _doxbench_validators_factory
+    _doxbench_validators_factory = None
+
+
+def doxbench_validators_registered() -> bool:
+    """Is a validators factory registered, without calling it or refusing?"""
+    return _doxbench_validators_factory is not None
+
+
 def default_doxbench_validators() -> dict:
-    """Resolve the released doxBench schema validators from the PINNED
-    openxFactory checkout (`doxbench_contracts.validators`).
+    """Resolve the released doxBench schema validators through the REGISTERED
+    factory (the doxBench-validators seam above).
 
     This is `build_server`'s default for the `schema_validator_factory` seam.
     It is a function, not an eager module-level load, so a server can be built
-    on a plane with no checkout and simply refuse the two model routes rather
-    than failing to start — and so the pin is re-verified per request rather
-    than cached at import, which is what makes a mid-run repin observable.
+    on a plane with no registered factory and simply refuse the two model
+    routes rather than failing to start — and so the host's factory runs per
+    request rather than being cached at import, which is what makes a mid-run
+    repin observable.
 
-    Raises whatever `doxbench_contracts` raises (`ContractPinError` on an
-    unreachable checkout, an absent schema, a digest mismatch, a manifest
-    disagreement, or a drifted `stack.yaml` ref). The caller
-    (`_doxbench_validators`) turns any of those into a fail-closed route
-    refusal: "I could not read the contract" is never an implicit pass."""
-    from ideation_dashboard import doxbench_contracts
-    return doxbench_contracts.validators()
+    Refuses with `DoxbenchValidatorsNotRegistered`, naming the seam and its
+    registration call, when nothing is registered. Otherwise raises whatever
+    the factory raises (openxFactory's `ContractPinError` on an unreachable
+    checkout, an absent schema, a digest mismatch, a manifest disagreement, or
+    a drifted `stack.yaml` ref). The caller (`_doxbench_validators`) turns any
+    of those into a fail-closed route refusal: "I could not read the contract"
+    is never an implicit pass."""
+    factory = _doxbench_validators_factory
+    if factory is None:
+        raise DoxbenchValidatorsNotRegistered(DOXBENCH_VALIDATORS_NOT_REGISTERED)
+    return factory()
 
 
 AGENT_INVOCATION_REFUSAL = (
