@@ -81,19 +81,23 @@ def _positional(elements):
 
 def _literal_keywords(mapping):
     """A literal `{...}`'s string keys and their values, with every nested
-    `**{...}` spelled out, and whether every key is known."""
+    `**{...}` spelled out, and whether every key is known.
+
+    An entry that cannot be spelled out, a key that is not a literal string or
+    a `**` of anything else, could overwrite any key before it. So the keys
+    before it are forgotten, and only a literal key after it still counts."""
     found, complete = {}, True
     for key, value in zip(mapping.keys, mapping.values):
-        if key is not None:
-            if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                found[key.value] = value
-            else:
-                complete = False
-        elif isinstance(value, ast.Dict):
+        if key is None and isinstance(value, ast.Dict):
             inner, inner_complete = _literal_keywords(value)
+            if not inner_complete:
+                found.clear()
+                complete = False
             found.update(inner)
-            complete = complete and inner_complete
+        elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+            found[key.value] = value
         else:
+            found.clear()
             complete = False
     return found, complete
 
@@ -143,8 +147,8 @@ def importer_escapes(tree, calls):
     That is any mention of a name in `calls` other than as the callable of a
     call: an assignment (`load = importlib.import_module`), a tuple, a
     container, an argument, a default value, a `:=`, a rebinding. It is also
-    an importer's name as a string outside documentation (`getattr(importlib,
-    "import_module")`). Once the importer is a value, it can travel under any
+    the name of an importer or of an alias of one, as a string outside
+    documentation (`getattr(importlib, "import_module")`, `globals()["load"]`). Once the importer is a value, it can travel under any
     name by any binding, and no source read follows every one. So a module
     where this holds is read strictly, with `names_imported_by(...,
     any_call=True)`.
@@ -159,7 +163,7 @@ def importer_escapes(tree, calls):
                 and id(node) not in callables and _called_name(node) in calls:
             return True
         if isinstance(node, ast.Constant) and isinstance(node.value, str) \
-                and node.value in IMPORTING_CALLS and id(node) not in documentation:
+                and node.value in calls and id(node) not in documentation:
             return True
     return False
 

@@ -284,6 +284,8 @@ def test_the_scanner_classifies_every_position_it_reads():
 #: Arguments spelled out with a literal `*[...]` or `**{...}`, however deep,
 #: count where they land. A spread that hides the name, or the package a
 #: relative name needs, makes the call `UNREADABLE`, which the sweep refuses.
+#: So does one that could overwrite a literal name before it; a literal name
+#: after it still counts.
 _LAZY_SPECIMEN = textwrap.dedent('''
     import importlib
 
@@ -306,6 +308,10 @@ _LAZY_SPECIMEN = textwrap.dedent('''
     HIDDEN = importlib.import_module(**OPTIONS)
     HIDDEN_PACKAGE = importlib.import_module(".corpus", *PACKAGES)
     COMPUTED = importlib.import_module(NAME)
+    OVERRIDDEN = importlib.import_module(**{"name": "safe", **OPTIONS})
+    OVERRIDES = importlib.import_module(**{**OPTIONS, "name": "doc_health"})
+    KEYED = importlib.import_module(**{"name": "safe", KEY: "doc_health"})
+    NESTED_OVER = importlib.import_module(**{"name": "safe", **{**OPTIONS}})
 ''')
 
 
@@ -326,6 +332,10 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (19, "ideation_dashboard", False, "<module>"),
         (20, UNREADABLE, False, "<module>"),
         (21, UNREADABLE, False, "<module>"),
+        (23, UNREADABLE, False, "<module>"),
+        (24, "doc_health", False, "<module>"),
+        (25, UNREADABLE, False, "<module>"),
+        (26, UNREADABLE, False, "<module>"),
     }, sorted(found)
 
 
@@ -367,6 +377,15 @@ _AS_A_VALUE = {
     "a default value": ("def pick(load=importlib.import_module):\n"
                         "    return load\n\n\nload = pick()\n"),
 }
+
+
+def test_an_alias_looked_up_by_its_name_makes_every_literal_call_count():
+    """An alias an import gives is a value too, once the module looks it up by
+    its name, and the lookup's call is then read like any other."""
+    source = ("from importlib import import_module as load\n\n\n"
+              "def verb():\n    globals()['load']('doc_health')\n")
+    assert [(r.name, r.deferred, r.inside) for r in sweep(source, "lookup.py")] \
+        == [("doc_health", True, "verb")]
 
 
 @pytest.mark.parametrize("binding", sorted(_AS_A_VALUE))
