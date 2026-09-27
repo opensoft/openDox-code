@@ -145,17 +145,26 @@ runtime = [
 ]
 
 # THE LIFECYCLE ENTRY POINT — `split-opendox-two-layer-product` § 3.5's "one
-# lifecycle CLI". `opendox/runtime/cli.py`'s header records in full why the
-# verbs are registered here and not in `opendox.cli.build_parser`: `cli.py` is
-# a CARVED file (a line added to it is a declared edit that lands at
-# openxFactory first) and it cannot be imported at this leg at all until the
-# BUILD arc repairs `opendox.serve`'s `ideation_dashboard` reach, which
-# `tests/test_consumer_reach.py::STILL_REACHING` records by name. The same
-# module also exposes `RuntimeSubcommand`, which structurally conforms to
-# `subcommand_extension.SubcommandExtension`, so wiring these verbs into the
-# core parser the day it imports is one line at the assembly point.
+# lifecycle CLI". `opendox/runtime/cli.py`'s header used to record two
+# measured reasons the verbs are registered here and not in
+# `opendox.cli.build_parser`; neither holds any longer, and that header now
+# says so in the past tense (plan 034 T038). `cli.py` is a carved file, but
+# RULED R1Q22 (a) (openxFactory#656 comment `5817152735`: "the carve manifest
+# records arrival only"; release-1 arc edits to carved files need no
+# per-slice declared-edit act) means a line added to it needs none. And
+# `opendox.cli` no longer reaches `opendox.serve`'s `ideation_dashboard`
+# import (plan 034 T011), so it imports standalone.
+#
+# The runtime module also exposes `RuntimeSubcommand`, which structurally
+# conforms to `subcommand_extension.SubcommandExtension` and sits in
+# openDox's own default profile's `SUBCOMMAND_EXTENSIONS` from that profile's
+# first landing (T015), so a build on the default reaches these verbs with no
+# separate wiring here. `opendox` below (T038) is the ONE documented entry
+# point requirement 10 asks for; `opendox-runtime` stays as its own alias
+# (R1Q5 (a)).
 [project.scripts]
 opendox-runtime = "opendox.runtime.cli:main"
+opendox = "opendox.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
