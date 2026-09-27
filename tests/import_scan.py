@@ -276,7 +276,7 @@ def bound_names(source_path, packages):
                 yield node.lineno, ""
 
 
-def string_literals(path):
+def string_literals(path, *, with_bytes=False):
     """Every string literal in a file EXCEPT its documentation, as (value, line).
 
     Docstrings and bare string expression statements are excluded on purpose: a
@@ -285,7 +285,9 @@ def string_literals(path):
     deleting the explanation. Comments never reach the syntax tree at all.
 
     f-strings contribute only their literal segments; an interpolated
-    expression is not a literal.
+    expression is not a literal. With `with_bytes`, bytes literals count too,
+    decoded byte for byte (latin-1), so a name spelled in bytes is read as
+    that name.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     documentation = {
@@ -294,6 +296,9 @@ def string_literals(path):
         and isinstance(node.value.value, str)
     }
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) \
-                and id(node) not in documentation:
+        if not isinstance(node, ast.Constant) or id(node) in documentation:
+            continue
+        if isinstance(node.value, str):
             yield node.value, node.lineno
+        elif with_bytes and isinstance(node.value, bytes):
+            yield node.value.decode("latin-1"), node.lineno

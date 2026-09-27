@@ -44,7 +44,10 @@ and `**{...}` arguments are spelled out, however deep. An importing call whose
 module a spread of anything else hides (`import_module(*names)`) is refused,
 because it could hide a reach into openxFactory. A computed name is not
 refused, because `consumer_reach`'s seam imports one. A name in a comment, a
-docstring or a string is not an import. Relative imports stay
+docstring or a string is not an import. The openxFactory ban goes one step
+further, because an import needs the package's name and openDox can never
+install the package: no code under `src/` spells an openxFactory package's
+name at all, in a string or bytes literal outside documentation either. Relative imports stay
 inside this package and are not read. Each node is read by
 `import_scan.names_imported_by`, the reader the repository's other direction
 checks share, so the sweep is not a second copy of it.
@@ -76,6 +79,7 @@ A CREATED file: no carve-manifest row (RULED OQ-C).
 from __future__ import annotations
 
 import ast
+import re
 import sys
 import textwrap
 from dataclasses import dataclass
@@ -89,7 +93,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(ROOT / "tests"))
 from import_scan import (  # noqa: E402
     UNREADABLE, importer_escapes, importing_calls, names_a_forbidden_package,
-    names_imported_by)
+    names_imported_by, string_literals)
 
 #: The consumer. Its deferred reaches are phase 2's and 3's to route.
 CONSUMER = "openxdox"
@@ -207,6 +211,34 @@ def test_no_module_under_src_reaches_openxfactory_at_all():
         f"{len(into)} reach(es) into openxFactory, which openDox can never "
         "install (#1144 task 4.3's phase-1 cut), or importing calls whose "
         "module a spread hides, which could be: " + "; ".join(into))
+
+
+#: An openxFactory package's name, alone or as part of a dotted name, in any
+#: text: `doc_health`, `doc_health.corpus`, `scripts.doc_health`, `import
+#: doc_health`, but not `doc_health_x` or `mydoc_health`.
+_SPELLS_OPENXFACTORY = re.compile(
+    r"(?<!\w)(?:" + "|".join(map(re.escape, OPENXFACTORY)) + r")(?!\w)")
+
+
+def test_no_code_under_src_spells_an_openxfactory_package():
+    """The openxFactory ban, held however a module might reach one.
+
+    Every import needs the package's NAME. The sweep reads it in each
+    importing position it knows. This reads it anywhere else that code can
+    hold it: every string or bytes literal under `src/` outside documentation
+    (a docstring or a bare string statement; comments never reach the tree).
+    So a name in an import line handed to `exec`, in a constant passed to a
+    call later, or in an argument to an importer the sweep does not know
+    (`importlib.util.find_spec`, `runpy.run_module`), fails here. Prose in
+    documentation may still say which reach a seam replaced. What no source
+    read can see is a name built from pieces at run time."""
+    spelled = [f"{path.relative_to(ROOT).as_posix()}:{line}: {value[:80]!r}"
+               for path in sorted(SRC.rglob("*.py"))
+               for value, line in string_literals(path, with_bytes=True)
+               if _SPELLS_OPENXFACTORY.search(value)]
+    assert not spelled, (
+        f"{len(spelled)} literal(s) under src/ spell an openxFactory package, "
+        "which openDox can never install: " + "; ".join(spelled))
 
 
 def test_every_reach_the_sweep_finds_is_deferred_into_the_consumer():
@@ -431,6 +463,23 @@ def test_an_importing_call_it_cannot_read_is_refused(monkeypatch, tmp_path):
                  test_every_reach_the_sweep_finds_is_deferred_into_the_consumer):
         with pytest.raises(AssertionError, match="spread"):
             test()
+
+
+@pytest.mark.parametrize("source", [
+    "NAME = 'doc_health'\n",
+    "exec('import ideation_dashboard')\n",
+    "SPEC = b'corpus_adapter_openxfactory.home'\n",
+    "ROOT = 'scripts.doc_health'\n",
+], ids=["a constant", "exec", "bytes", "the pre-carve spelling"])
+def test_the_spelling_check_fails_on_a_name_in_a_literal(source, monkeypatch, tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "spelling.py").write_text(
+        '"""Documentation may name doc_health."""\n' + source, encoding="utf-8")
+    this_module = sys.modules[__name__]
+    monkeypatch.setattr(this_module, "SRC", tmp_path / "src")
+    monkeypatch.setattr(this_module, "ROOT", tmp_path)
+    with pytest.raises(AssertionError, match="spelling.py:2"):
+        test_no_code_under_src_spells_an_openxfactory_package()
 
 
 @pytest.mark.parametrize("test", [
