@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import pytest
 
+from opendox import authoring
 from opendox import corpus_adapter as ca
 
 
@@ -157,3 +158,66 @@ def test_register_home_refuses_a_non_callable_factory() -> None:
         ca.register_home("not-a-factory")  # type: ignore[arg-type]
     assert ca.home() is stand_in, (
         "a rejected registration must not clobber a good one already in place")
+
+
+# --------------------------------------------------------------------------
+# 4.1 (authoring.py:318, T021) -- the registered adapter answers, not a name
+# --------------------------------------------------------------------------
+
+class _StandInAdapter:
+    """The two `CorpusAdapter` operations `authoring._classify_proposal` calls
+    -- `resolve`, then `classify` -- and nothing else: a minimal duck-typed
+    stand-in, like `test_health_check_seam.py`'s `_RecordingCheck`, not a full
+    six-method `CorpusAdapter` implementation. `required_fields` is the ONE
+    thing a test varies, so a change in `authoring.required_header_fields()`'s
+    answer can only have come from here -- never from a name this module
+    imports, because none is imported any more (T021)."""
+
+    def __init__(self, required_fields: tuple[str, ...]) -> None:
+        self.required_fields = required_fields
+        self.resolved: list[ca.CorpusRef] = []
+
+    def resolve(self, ref: ca.CorpusRef) -> ca.ResolvedCorpus:
+        self.resolved.append(ref)
+        return ca.ResolvedCorpus(ref=ref, location=ref.location, revision=None,
+                                 scopes=(ca.SCOPE_ALL,), write_path=None,
+                                 write_path_available=False)
+
+    def classify(self, corpus: ca.ResolvedCorpus,
+                document: ca.DocumentId) -> ca.Classification:
+        return ca.Classification(id=document, kind="stand-in",
+                                 required_fields=self.required_fields,
+                                 missing_fields=())
+
+
+def test_required_header_fields_come_from_the_registered_adapter() -> None:
+    """`authoring.py:318` (T021): `authoring.required_header_fields()` used to
+    read `corpus_adapter_openxfactory.home_corpus` by NAME -- one of #1144's
+    F4.1 scan's 27 deferred reaches, and the class design.md § D6 calls more
+    dangerous because it survives any import-based health check. It now
+    resolves through `corpus_adapter.home()`, so this test registers a
+    stand-in adapter TWICE, with two DIFFERENT `required_fields` tuples in
+    turn, and requires the answer to follow each one -- proving the fields
+    come from the registered adapter and not from a name, a cache, or a
+    coincidence of the first tuple chosen.
+
+    `home()` is called through `_classify_proposal`, which stages an empty
+    proposal body under a throwaway temp directory and resolves it as the
+    home corpus's ROOT -- so the stand-in's `resolve()` genuinely runs, over
+    a `CorpusRef` this test never has to build by hand.
+    """
+    first = _StandInAdapter(("Distinctive-Field-One", "Distinctive-Field-Two"))
+    ca.register_home(lambda root: (first, ca.CorpusRef(name="home", location=root)))
+    assert authoring.required_header_fields() == first.required_fields
+    assert first.resolved, "the registered adapter's resolve() was never called"
+
+    second = _StandInAdapter(("A-Third-Field",))
+    ca.register_home(lambda root: (second, ca.CorpusRef(name="home", location=root)))
+    assert authoring.required_header_fields() == second.required_fields
+    assert second.required_fields != first.required_fields, (
+        "the two tuples must be genuinely different, or neither assertion "
+        "above would have been able to fail")
+    assert second.resolved, "the second registration's resolve() was never called"
+    assert first.resolved[0] != second.resolved[0], (
+        "each call staged its own throwaway root; the two resolutions must "
+        "not have collided on one directory")
