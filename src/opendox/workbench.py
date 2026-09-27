@@ -27,8 +27,8 @@ Three responsibilities, all behind the interactivity boundary:
 
   BOUNDED ACTIONS (T027)  `run_readiness` (a recorded NOT-AVAILABLE stub — the
       readiness panel is `add-ideation-cross-reference-readiness`; we never fake
-      a score), `run_scoped_doc_health` (the real in-repo doc-health
-      machinery invoked IN-PROCESS, scoped to the set's docs), and
+      a score), `run_scoped_doc_health` (the check a host REGISTERED at the
+      health-check seam, scoped to the set's docs; else NOT-AVAILABLE), and
       `draft_organize` (a `staging/<topic>/` packet SKELETON pre-filled from the
       set and written OUTSIDE `ideation/staging/` via
       `boundary.permit_draft_skeleton` — moving it into staging stays a human
@@ -1369,21 +1369,128 @@ def run_readiness(wb: Workbench | None = None, *, now: str | None = None) -> Act
     return result
 
 
-# doc-health families safe to scope to a doc SUBSET: pure per-document checks
-# that need neither the full corpus nor git (verified against
-# scripts/doc_health/families.py).
+# The families the scoped action ASKS the registered check for: pure
+# per-document checks, which need neither the full corpus nor git, so a
+# document SUBSET can be checked on its own.
 #
-# `tag-hygiene` reads `ctx.docs` alone. `status-validity` does NOT, since
-# `govern-openspec-corpus-membership` (2026-08-23): it reads
-# `families._lifecycle_scope(ctx)`, which is `ctx.docs` PLUS
-# `ctx.lifecycle_docs`. The scoping below is still exact, and by construction
-# rather than by luck — `run_scoped_doc_health` builds its `Context` without
-# a `lifecycle_docs` argument, so that field defaults to the empty list and
-# the union is the scoped doc list itself. If a caller ever passes a
-# populated `lifecycle_docs` here, `status-validity` would report documents
-# outside `documents`; the defensive filter at the end of the function is the
-# second line against that, not the first.
+# Today the only check anyone registers is the host's, so the names are
+# openxFactory's `doc_health` families. The seam below passes them through
+# and does not read them: a check refuses a family it does not carry (by
+# raising `WorkbenchError`, as this module did before the seam), and openDox's
+# own check, which a later release brings (Group 6 of the
+# standalone-operability change), answers for its own names. What made the
+# scoping EXACT for these two (a `Context` built with no `lifecycle_docs`, so
+# `status-validity`'s lifecycle scope is the scoped list itself) is a property
+# of the check that builds the `Context`, and it travelled with that code. The
+# defensive filter in `run_scoped_doc_health` stayed here, so whatever a check
+# answers, only findings on the scoped documents are reported.
 DEFAULT_SCOPED_FAMILIES = ("status-validity", "tag-hygiene")
+
+
+# --------------------------------------------------------------------------
+# the HEALTH-CHECK SEAM (`add-neutral-product-standalone-operability` task
+# 4.3, three of its eight reaches into the publisher)
+# --------------------------------------------------------------------------
+#
+# `run_scoped_doc_health` used to import openxFactory's `doc_health` package
+# INSIDE its body: three deferred reaches. The module imported cleanly, and the
+# action reached, at the call, for a package only the publisher has. In every
+# tree openDox ships in, that degraded to a not-available naming a missing
+# module rather than a seam a host could fill. A deferred reach resolves
+# through a seam the product declares, and this is that seam (requirement 5,
+# "A deferred reach into the publisher or the consumer resolves through the
+# declared seam").
+#
+# ONE REGISTRATION, MADE BY THE HOST. The host that has a health check
+# registers it once, at process start, with `register_health_check(check)`,
+# as it registers its profile (`opendox.domain_profile.register`). openDox
+# names no implementation, so nothing here imports the host's package.
+#
+# REFUSAL, NOT A DEFAULT. With nothing registered, the action does not run and
+# is not reported clean: it returns and records `not-available`, naming this
+# seam and the registration call, which is 4.2's discipline for the home
+# corpus. It stays that way until openDox's own check over its own documents
+# is registered (Group 6, a later release). An empty findings list from a check
+# that never ran would read exactly like a clean scope.
+
+#: The ONE call a host makes, quoted verbatim in the not-available result so
+#: the result names its remedy rather than its symptom.
+HEALTH_CHECK_REGISTRATION_CALL = (
+    "opendox.workbench.register_health_check(<the host's scoped health check>)")
+
+#: The detail of a scoped action that found no registered check. A constant,
+#: so the host's own tests can hold the refusal they expect to the one it
+#: gives.
+HEALTH_CHECK_NOT_REGISTERED = (
+    "no health check is registered at openDox's health-check seam "
+    "(opendox.workbench), so nothing was checked and nothing is reported as "
+    "clean. A host registers its check at process start with "
+    + HEALTH_CHECK_REGISTRATION_CALL + ".")
+
+#: The `action_history` reference a not-available scoped run records.
+HEALTH_NOT_AVAILABLE_REF = "health/not-available"
+
+
+@dataclass(frozen=True)
+class HealthCheckRun:
+    """What a registered health check answers for one scoped run.
+
+    `findings` are the check's own objects. The seam reads one attribute of
+    each, `path`, the repo-relative document it is about, and keeps only those
+    on the requested documents. `documents_checked` is how many of the
+    requested documents the check found and ran over, which the action's
+    detail reports: a requested path the check could not find is a document it
+    did not check, and the count says so."""
+
+    findings: Sequence[Any] = ()
+    documents_checked: int = 0
+
+
+_health_check: Callable[..., HealthCheckRun] | None = None
+
+
+def register_health_check(check: Callable[..., HealthCheckRun]
+                          ) -> Callable[..., HealthCheckRun]:
+    """Register the host's scoped health check. Returns it.
+
+    `check` is called as `check(repo_root, documents, *, repository, as_of,
+    families)`: `repo_root` a resolved `Path`, `documents` the requested
+    repo-relative paths, `repository` a name, `as_of` a `date` and `families`
+    the requested family names. It answers a `HealthCheckRun`, and it refuses a
+    family it does not carry by raising `WorkbenchError` naming it.
+
+    Registering the SAME object again is a no-op, so an idempotent host start
+    is not punished. A DIFFERENT check is refused: one process whose scoped
+    runs answer from two checks, depending on which registration a caller
+    happened to reach, is the failure one registration exists to prevent. Call
+    `unregister_health_check()` first if the swap is deliberate."""
+    global _health_check
+    if not callable(check):
+        raise TypeError(
+            "register_health_check() takes the host's scoped health check, a "
+            f"callable, not {type(check).__name__}. A host with no check does "
+            "not register one: it leaves the seam empty, and the scoped action "
+            "answers not-available, naming this call.")
+    if _health_check is not None and _health_check is not check:
+        raise WorkbenchError(
+            "a health check is already registered at openDox's health-check "
+            "seam, and a different one would replace it. Registration happens "
+            "once, at process start. Call "
+            "opendox.workbench.unregister_health_check() first if the swap is "
+            "deliberate.")
+    _health_check = check
+    return check
+
+
+def unregister_health_check() -> None:
+    """Drop the registration. For test isolation and for a host tearing down."""
+    global _health_check
+    _health_check = None
+
+
+def health_check_registered() -> bool:
+    """Is a health check registered, without running anything?"""
+    return _health_check is not None
 
 
 def run_scoped_doc_health(
@@ -1393,53 +1500,44 @@ def run_scoped_doc_health(
     wb: Workbench | None = None, reference: str | None = None,
     now: str | None = None,
 ) -> ActionResult:
-    """Run the REAL in-repo doc-health machinery IN-PROCESS, scoped to the
-    set's `documents` (repo-relative posix paths == the snapshot's `document.id`
-    in this repo). Only the pure per-document families run (see
-    DEFAULT_SCOPED_FAMILIES) — subprocess is unnecessary because the suite is
-    importable and these families consume nothing but the doc lists the
-    `Context` carries, so an in-process call with a filtered `ctx.docs` and an
-    empty `ctx.lifecycle_docs` is faithful and cheap.
+    """Run the REGISTERED health check, scoped to the set's `documents`
+    (repo-relative posix paths == the snapshot's `document.id` in this repo),
+    and record the action on `wb` when one is given.
 
-    Degrades gracefully: if the doc-health package is unimportable the action is
-    recorded not-available rather than crashing."""
-    try:
-        from doc_health import DEFAULT_THRESHOLDS, corpus as dh_corpus
-        from doc_health.families import FAMILIES
-        from doc_health.runner import Context, run_suite
-    except Exception as exc:  # noqa: BLE001
+    Resolved through the health-check seam above, and never by importing a
+    package by name. With nothing registered the action is recorded
+    NOT-AVAILABLE, naming the seam and the registration call, and nothing is
+    reported clean. A registered check's own refusal, such as an unknown
+    family, reaches the caller unchanged, and an answer that is not a
+    `HealthCheckRun` is refused rather than read as a result."""
+    check = _health_check
+    if check is None:
         result = ActionResult(ACTION_DOC_HEALTH, "not-available",
-                              detail=f"doc-health machinery unavailable: {exc}")
+                              detail=HEALTH_CHECK_NOT_REGISTERED)
         if wb is not None:
-            wb.record_action(ACTION_DOC_HEALTH, reference="health/not-available", now=now)
+            wb.record_action(ACTION_DOC_HEALTH, reference=HEALTH_NOT_AVAILABLE_REF,
+                             now=now)
         return result
 
     repo_root = Path(repo_root).resolve()
     repository = repository or repo_root.name
     wanted = set(documents)
-    scoped_docs = [d for d in dh_corpus.load_docs(repository, repo_root) if d.path in wanted]
-
-    ctx = Context(
-        repo_paths={repository: repo_root}, docs=scoped_docs, capabilities={},
-        change_ids={}, git=dh_corpus.RealGit(), thresholds=dict(DEFAULT_THRESHOLDS),
-        as_of=as_of or date.today(), agg_root=None,
-    )
-    findings: list = []
-    skips: list = []
-    for fam in families:
-        if fam not in FAMILIES:
-            raise WorkbenchError(f"unknown doc-health family {fam!r}")
-        # only_family != None ⇒ run_suite skips preflight (see runner.run_suite)
-        run = run_suite(ctx, fam, set())
-        findings.extend(run.findings)
-        skips.extend(run.skips)
-    # defensive: keep only findings on the scoped docs
-    findings = [f for f in findings if getattr(f, "path", None) in wanted]
+    families = tuple(families)
+    run = check(repo_root, tuple(documents), repository=repository,
+                as_of=as_of or date.today(), families=families)
+    if not isinstance(run, HealthCheckRun):
+        raise WorkbenchError(
+            "the check registered at openDox's health-check seam answered "
+            f"{type(run).__name__}, not a HealthCheckRun, so there is no result "
+            "to report: an answer the seam cannot read is refused, never taken "
+            "for a clean scope")
+    # defensive: keep only findings on the scoped docs, whatever the check says
+    findings = [f for f in run.findings if getattr(f, "path", None) in wanted]
 
     ref = reference or f"health/scoped/{slug(repository)}-{len(wanted)}docs"
     result = ActionResult(
         ACTION_DOC_HEALTH, "completed", reference=ref, findings=findings,
-        detail=f"{len(findings)} finding(s) over {len(scoped_docs)} scoped doc(s) "
+        detail=f"{len(findings)} finding(s) over {run.documents_checked} scoped doc(s) "
                f"(families: {', '.join(families)})")
     if wb is not None:
         wb.record_action(ACTION_DOC_HEALTH, reference=ref, now=now)
