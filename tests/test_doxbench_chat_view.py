@@ -4165,6 +4165,17 @@ def test_the_browser_ceiling_equals_the_servers_ceiling():
     assert match, "the browser-side ceiling constant moved or was renamed"
     assert int(match.group(1)) == serve_mod.CONTEXT_REDUCED_REASON_MAX_LENGTH
 
+    # AND THE RELEASED NUMBER ITSELF, restated with its source, because the
+    # pair above cannot see both constants move together. This leg cannot read
+    # the schema, so the value is carried: `context_packet.reduced_reason
+    # .maxLength` is 500 in `contracts/schemas/xfactory-workbench-chat-turn
+    # .schema.yaml`, which the carve sent to openDox-spec (read at openDox-spec
+    # `main` `8fe8c4c7`). A release that moves it moves this line in the same
+    # change as both constants. The pin read from the released bytes
+    # themselves is openxFactory's (T047).
+    assert serve_mod.CONTEXT_REDUCED_REASON_MAX_LENGTH == 500, (
+        "the server's ceiling is not the released maxLength, 500")
+
 
 def test_a_snapshot_written_before_this_release_still_restores(posture_results):
     """What makes the snapshot field ADDITIVE rather than a version bump: a

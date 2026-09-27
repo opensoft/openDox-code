@@ -638,9 +638,53 @@ def test_the_rootdir_anchor_is_what_puts_the_hookup_in_scope():
         timeout=300)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert re.search(rf"^rootdir: {re.escape(str(REPO_ROOT))}(,|$)",
-                     proc.stdout, re.MULTILINE), proc.stdout
+    assert _names_rootdir(proc.stdout, REPO_ROOT), proc.stdout
     assert f"configfile: {hermeticity.ROOTDIR_ANCHOR}" in proc.stdout, proc.stdout
+
+
+def _names_rootdir(stdout: str, root: Path) -> bool:
+    """Whether pytest's header names `root` as the rootdir: the WHOLE value,
+    which ends the line or is followed by the header's `, ` separator."""
+    return re.search(rf"^rootdir: {re.escape(str(root))}(,|$)", stdout,
+                     re.MULTILINE) is not None
+
+
+def test_a_nested_rootdir_is_refused_by_the_whole_value_match(tmp_path):
+    """The negative control for the anchor case's match, on a scratch tree, so
+    the case above proves its mechanism and not only an outcome.
+
+    A `tests/pyproject.toml` with a pytest table sits BELOW the tree's own
+    anchor, and pytest's upward search stops at the first file with a table.
+    So a run started in `tests/` makes `tests/` the rootdir, and the header
+    still prints `configfile: pyproject.toml`. The substring match that
+    openxFactory's copy uses accepts that header, and so does the configfile
+    check. The whole-value match must refuse it, and it must accept the tree's
+    own root again once the nested file is gone."""
+    root = tmp_path / "repo"
+    tests = root / "tests"
+    tests.mkdir(parents=True)
+    table = "[tool.pytest.ini_options]\n"
+    (root / "pyproject.toml").write_text(table, encoding="utf-8")
+    (tests / "pyproject.toml").write_text(table, encoding="utf-8")
+    (tests / "test_probe.py").write_text("def test_probe():\n    pass\n",
+                                         encoding="utf-8")
+
+    def header() -> str:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+             "--collect-only", "test_probe.py"],
+            cwd=str(tests), capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        return proc.stdout
+
+    nested = header()
+    assert f"rootdir: {root}" in nested, nested            # the substring: fooled
+    assert "configfile: pyproject.toml" in nested, nested   # the configfile: fooled
+    assert not _names_rootdir(nested, root), nested         # the whole value: not
+
+    (tests / "pyproject.toml").unlink()
+    restored = header()
+    assert _names_rootdir(restored, root), restored
 
 
 # `test_the_gate_runs_its_unittest_fallback_through_the_guarded_runner` stayed
