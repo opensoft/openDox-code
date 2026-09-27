@@ -92,6 +92,17 @@ wherever it would do more:
   * a name the core handler already resolves. Replacing a core method is the
     fork this module exists to prevent. A contributed method that the core
     shadows is worse: its binding would dispatch the core's method, silently;
+  * a name the core handler sets on its INSTANCES (the request path, the
+    output stream, the headers), which no class's `dir()` lists. These names
+    are measured at wiring time from the source of every class in the core's
+    MRO: each `self.<name> = ...`, and each `setattr(self, "<name>", ...)` with
+    a literal name. The instance's own attribute takes precedence over a
+    contributed method, so a binding naming one would pass `resolve_handlers`,
+    which looks on the class, and then dispatch the core's value. Core code
+    that probes such a name before it sets it (`hasattr(self,
+    "_headers_buffer")`) would find the contribution instead. A class whose
+    source cannot be read (`object`, a class built at run time) contributes no
+    measured names;
   * a name another contribution also defines. Which of the two answered would
     be decided by assembly order, the accident `collect_bindings` refuses to
     depend on;
@@ -102,10 +113,9 @@ wherever it would do more:
     reads off `self`;
   * a DATA DESCRIPTOR: a `property`, a named slot, anything whose type defines
     `__set__` or `__delete__`. A data descriptor takes precedence over an
-    instance's own attributes, so a contributed one named like state the core
-    sets on each request (`self.path`, `self.wfile`) would intercept that
-    state. The state is in no class's `dir()`, so no check made at wiring time
-    could compare against it. A contribution holds METHODS;
+    instance's own attributes, so it would intercept the core's per-instance
+    state under its name, including state set in a way the measurement above
+    cannot read. A contribution holds METHODS;
   * a METACLASS other than the core handler's own, or one it derives from. The
     composed class would take it, and a metaclass decides how the class itself
     is called, compared, hashed and asked for a name. A metaclass whose
@@ -582,6 +592,85 @@ def _is_data_descriptor(value) -> bool:
                for kind in type(value).__mro__)
 
 
+def _self_targets(tree) -> set[str]:
+    """The names a syntax tree assigns on `self`: plain, augmented, annotated
+    and unpacked assignment, a `for` or `with` target, and `setattr(self,
+    "<name>", ...)` with a literal name."""
+    import ast   # local, like the measurement's other imports: see below
+
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For,
+                               ast.AsyncFor)):
+            targets = [node.target]
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            targets = [node.optional_vars]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "setattr" and len(node.args) >= 2 \
+                and isinstance(node.args[0], ast.Name) \
+                and node.args[0].id == "self" \
+                and isinstance(node.args[1], ast.Constant) \
+                and isinstance(node.args[1].value, str):
+            names.add(node.args[1].value)
+            continue
+        else:
+            continue
+        while targets:
+            target = targets.pop()
+            if isinstance(target, (ast.Tuple, ast.List)):
+                targets.extend(target.elts)
+            elif isinstance(target, ast.Starred):
+                targets.append(target.value)
+            elif isinstance(target, ast.Attribute) \
+                    and isinstance(target.value, ast.Name) \
+                    and target.value.id == "self":
+                names.add(target.attr)
+    return names
+
+
+#: Each core class measured so far, keyed by `id()` and holding the class, so
+#: the key cannot be reused while the entry lives. A class is measured once
+#: per process, and a build that composes nothing measures nothing.
+_MEASURED: dict[int, tuple[type, frozenset[str]]] = {}
+
+
+def _assigned_on_self(klass: type) -> frozenset[str]:
+    """The names `klass`'s own source assigns on its instances.
+
+    The measurement reads the class's source with `inspect`, so a class whose
+    source cannot be read, such as `object` or a class built at run time,
+    measures as assigning nothing. The imports are local: `inspect` is not
+    small, and only a build that composes a contribution needs it.
+    """
+    held = _MEASURED.get(id(klass))
+    if held is not None and held[0] is klass:
+        return held[1]
+    import ast
+    import inspect
+    import textwrap
+
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(klass)))
+    except (OSError, TypeError, SyntaxError):
+        names = frozenset()
+    else:
+        names = frozenset(_self_targets(tree))
+    _MEASURED[id(klass)] = (klass, names)
+    return names
+
+
+def _instance_state(base: type) -> dict[str, type]:
+    """Each name the classes of `base`'s MRO assign on `self`, mapped to the
+    first of them in MRO order that does, so a refusal can name it."""
+    state: dict[str, type] = {}
+    for klass in base.__mro__:
+        for name in sorted(_assigned_on_self(klass)):
+            state.setdefault(name, klass)
+    return state
+
+
 class _ClassStatementBookkeeping:
     """Never composed. It exists to be asked, once at import, which dunders a
     `class` statement writes into a class namespace BY ITSELF on the running
@@ -706,6 +795,7 @@ def _refuse_an_unsafe_composition(base: type, contributions, *,
     core = base.__mro__
     core_metaclasses = type(base).__mro__
     answered = set(dir(base))
+    instance_state = _instance_state(base) if contributions else {}
     own_attributes = set(namespace)
     owner: dict[str, type] = {}
     for mixin in contributions:
@@ -767,10 +857,10 @@ def _refuse_an_unsafe_composition(base: type, contributions, *,
                 f"{descriptors} as DATA DESCRIPTORS (a property, a named slot, "
                 "anything whose type defines `__set__` or `__delete__`). A data "
                 "descriptor takes precedence over an instance's own "
-                "attributes, so one named like state the core handler sets on "
-                "each request (`self.path`, `self.wfile`) would intercept it, "
-                "and that state is in no class's `dir()` for a wiring-time "
-                "check to compare against. A contribution holds METHODS.")
+                "attributes, so it would intercept the core handler's "
+                "per-instance state under its name, including state set in a "
+                "way no wiring-time measurement can read. A contribution holds "
+                "METHODS.")
         names = {name for klass in chain for name in vars(klass)
                  if not _is_dunder(name)}
         shadowed = sorted(names & answered)
@@ -786,6 +876,19 @@ def _refuse_an_unsafe_composition(base: type, contributions, *,
                 "is the fork this seam exists to prevent. A contributed method "
                 "the core shadows is a binding that silently dispatches the "
                 "core's method instead of its own.")
+        on_instances = sorted(names & set(instance_state))
+        if on_instances:
+            where = ", ".join(f"{name} by {_describe(instance_state[name])}"
+                              for name in on_instances)
+            raise RouteBindingError(
+                f"the handler contribution {_describe(mixin)} defines names "
+                f"the core handler {_describe(base)} sets on each INSTANCE "
+                f"({where}, measured from its source). An instance's own "
+                "attribute takes precedence over a contributed method, so a "
+                "binding naming one would pass `resolve_handlers`, which looks "
+                "on the class, and then dispatch the core's value instead. "
+                "Core code that probes the name before setting it would find "
+                "the contribution. A contribution may only ADD.")
         clashes = sorted(name for name in names if name in owner)
         if clashes:
             first = sorted({_describe(owner[name]) for name in clashes})

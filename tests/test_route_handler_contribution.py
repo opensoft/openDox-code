@@ -20,18 +20,21 @@ WHAT IT ASSERTS
    as a core route does. That is the whole safety argument of the route seam,
    and the facet must not weaken it.
 3. A CONTRIBUTION MAY ONLY ADD. Each refusal the module docstring lists is
-   asserted: a shadowed core name, a clash between contributions, the object
-   protocol, a data descriptor, a metaclass of the contribution's own, shared
-   ancestry, a malformed or doubled declaration, and an MRO `type()` itself
-   cannot compose. Classes are compared by identity, and no refusal raises
-   while it formats what it refuses.
+   asserted: a shadowed core name, a name the core sets on its instances, a
+   clash between contributions, the object protocol, a data descriptor, a
+   metaclass of the contribution's own, shared ancestry, a malformed or
+   doubled declaration, and an MRO `type()` itself cannot compose. Classes are
+   compared by identity, and no refusal raises while it formats what it
+   refuses.
 4. ABSENCE IS NOT A DEFECT. A contributor that declares nothing composes the
    core alone, and the core's MRO stays a prefix of the composed class's.
 5. THE SERVER IS WIRED THROUGH IT. `opendox.serve` cannot be imported until
    T011 lands, because `serve.py:199` still reaches openxFactory's pre-carve
    package. So `build_server`'s body is READ with `ast`, as
    `tests/test_profile_registration.py` reads it (plan 034, tasks.md
-   § Phase 1). T011's PR adds the case through `build_server` itself.
+   § Phase 1). The reading also shows that a name the bound class sets is
+   refused before the build's first side effect. T011's PR adds the case
+   through `build_server` itself.
 
 `--noconftest` SAFE, and it imports neither `opendox.serve` nor `opendox.cli`.
 The stand-in core handler below is built on the same stdlib class the real one
@@ -44,6 +47,7 @@ from __future__ import annotations
 
 import abc
 import ast
+import contextlib
 import functools
 import http.server
 import sys
@@ -268,6 +272,99 @@ def test_a_contribution_that_shadows_the_core_is_refused(name, defined_on):
     message = str(caught.value)
     assert name in message and defined_on in message
     assert "may only ADD" in message
+
+
+@pytest.mark.parametrize("name,assigned_by", (
+    ("path", "BaseHTTPRequestHandler"),
+    ("wfile", "StreamRequestHandler"),
+    ("_headers_buffer", "BaseHTTPRequestHandler"),
+    ("server", "BaseRequestHandler"),
+    ("directory", "SimpleHTTPRequestHandler"),
+))
+def test_a_contribution_named_like_the_cores_instance_state_is_refused(
+        name, assigned_by):
+    """The stdlib handler sets these on each INSTANCE, so no class's `dir()`
+    lists them, and the shadowing refusal alone would pass them (Copilot's
+    review of #40 at `353d418`). They are measured from the core's source, and
+    the refusal names the class that sets each one."""
+    assert name not in dir(_CoreHandler)
+    named = type("_Named", (), {name: lambda self, *args: None})
+    with pytest.raises(RouteBindingError, match="INSTANCE") as caught:
+        route_extension.collect_handler_contributions(
+            (_contributor(named),), base=_CoreHandler)
+    message = str(caught.value)
+    assert name in message and assigned_by in message
+    assert "may only ADD" in message
+
+
+def test_instance_state_is_refused_because_a_binding_would_dispatch_the_cores_value():
+    """Why the refusal above exists. Composed WITHOUT the facet's checks, a
+    contributed method named `path` passes `resolve_handlers`, which looks on
+    the class. But the stdlib handler sets `self.path` to the request path on
+    every request, so the live handler answers the name with a string."""
+    named = type("_Named", (), {"path": lambda self, head_only: None})
+    unchecked = type("Unchecked", (_CoreHandler, named), {})
+    binding = RouteBinding("GET", "/named.json", False, "path")
+    route_extension.resolve_handlers((binding,), unchecked)
+    handler = _instance(unchecked)
+    handler.path = "/named.json"          # what `parse_request` does
+    assert not callable(getattr(handler, binding.handler))
+
+
+class _StatefulCore(_CoreHandler):
+    """A core handler that keeps state of its own on each instance, in every
+    form of assignment the measurement reads."""
+
+    def _begin(self):
+        self._session = object()
+        self._first, (self._second, *self._rest) = 1, (2, 3)
+        self._count: int = 0
+        self._count += 1
+        for self._cursor in ():
+            pass
+        with contextlib.nullcontext() as self._held:
+            pass
+        setattr(self, "_actor", None)
+
+
+@pytest.mark.parametrize("name", ("_session", "_first", "_second", "_rest",
+                                  "_count", "_cursor", "_held", "_actor"))
+def test_the_measurement_reads_every_form_of_assignment_on_self(name):
+    assert route_extension._instance_state(_StatefulCore)[name] is _StatefulCore
+    named = type("_Named", (), {name: lambda self: None})
+    with pytest.raises(RouteBindingError, match="_StatefulCore"):
+        route_extension.collect_handler_contributions(
+            (_contributor(named),), base=_StatefulCore)
+
+
+def test_a_core_class_without_readable_source_measures_as_assigning_nothing():
+    """`object`, and a class built at run time, have no source to read. They
+    add no names, and the rest of the MRO is still measured."""
+    built = type("_Built", (_CoreHandler,), {})
+    assert route_extension._assigned_on_self(object) == frozenset()
+    assert route_extension._assigned_on_self(built) == frozenset()
+    named = type("_Named", (), {"path": lambda self: None})
+    with pytest.raises(RouteBindingError, match="INSTANCE"):
+        route_extension.collect_handler_contributions(
+            (_contributor(named),), base=built)
+
+
+def test_a_build_that_composes_nothing_measures_nothing(monkeypatch):
+    """The measurement reads source, so it runs only for a build that has a
+    contribution to check. That includes the preflight."""
+    measured = []
+
+    def recording(klass):
+        measured.append(klass)
+        return frozenset()
+
+    monkeypatch.setattr(route_extension, "_assigned_on_self", recording)
+    route_extension.collect_handler_contributions((_Bare(),), base=_CoreHandler)
+    route_extension.compose_handler("BoundHandler", _CoreHandler, (), {})
+    assert measured == []
+    route_extension.collect_handler_contributions((_Profile(),),
+                                                  base=_CoreHandler)
+    assert measured[:len(_CoreHandler.__mro__)] == list(_CoreHandler.__mro__)
 
 
 def test_two_contributions_defining_one_name_are_refused():
@@ -684,3 +781,47 @@ def test_build_server_composes_the_class_it_binds_through_the_facet():
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             and node.func.id == "type"]
     assert bare == [], f"a bare type(...) still builds a class at {bare}"
+
+
+def test_a_name_the_bound_class_sets_is_refused_before_build_servers_side_effects():
+    """Read by `ast`, for the reason the test above is. `compose_handler`
+    refuses a contributed name that the bound class sets in its own namespace,
+    but it runs where the class is made, late in the build (Copilot's review
+    of #40 at `353d418`).
+
+    Every name `build_server` hands it, though, is declared in
+    `DashboardHandler`'s own body, so it is in `dir(DashboardHandler)`. The
+    shadowing refusal in `collect_handler_contributions` therefore refuses such
+    a collision first. That call precedes the build's first side effect:
+    `_head_of`, the snapshot source, and its `bootstrap()`."""
+    function = _build_server()
+    tree = ast.parse(SERVE.read_text(encoding="utf-8"))
+    handler = next(node for node in tree.body
+                   if isinstance(node, ast.ClassDef)
+                   and node.name == "DashboardHandler")
+    declared = set()
+    for node in handler.body:
+        if isinstance(node, ast.Assign):
+            declared |= {target.id for target in node.targets
+                         if isinstance(target, ast.Name)}
+        elif isinstance(node, ast.AnnAssign) \
+                and isinstance(node.target, ast.Name):
+            declared.add(node.target.id)
+    calls = _seam_calls(function)
+    (compose,) = calls["compose_handler"]
+    namespace = compose.args[3]
+    assert isinstance(namespace, ast.Dict)
+    keys = [key.value for key in namespace.keys]
+    assert keys, "build_server() hands compose_handler no namespace"
+    assert sorted(set(keys) - declared) == [], (
+        "a name the bound class sets that DashboardHandler does not declare "
+        "is refused only where the class is made, after the side effects")
+    (collect,) = calls["collect_handler_contributions"]
+    effects = [node.lineno for node in ast.walk(function)
+               if isinstance(node, ast.Call) and (
+                   (isinstance(node.func, ast.Name)
+                    and node.func.id == "_head_of")
+                   or (isinstance(node.func, ast.Attribute)
+                       and node.func.attr in ("SnapshotSource", "bootstrap")))]
+    assert len(effects) >= 3, effects
+    assert collect.lineno < min(effects), (collect.lineno, sorted(effects))
