@@ -48,9 +48,11 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import subprocess
 import sys
 import textwrap
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -74,9 +76,13 @@ sys.modules["openxdox"] = None
 """
 
 
-def _import_in_subprocess(module: str, *, consumer_blocked: bool) -> subprocess.CompletedProcess:
-    """`import <module>` in a fresh interpreter, with `openxdox` absent or not."""
-    program = (_BLOCK_CONSUMER if consumer_blocked else "") + f"import {module}\n"
+def _import_in_subprocess(module: str, *, consumer_blocked: bool,
+                          siblings_blocked: bool = False) -> subprocess.CompletedProcess:
+    """`import <module>` in a fresh interpreter, with `openxdox` absent or not,
+    and with all four `SIBLINGS` absent when `siblings_blocked`."""
+    prelude = (_BLOCK_SIBLINGS if siblings_blocked
+               else _BLOCK_CONSUMER if consumer_blocked else "")
+    program = prelude + f"import {module}\n"
     return subprocess.run([sys.executable, "-c", textwrap.dedent(program)],
                           capture_output=True, text=True, cwd=str(ROOT))
 
@@ -174,12 +180,39 @@ STILL_REACHING: dict[str, tuple[str, str]] = {}
 
 #: The four packages a module of this one may not need at import time: the
 #: consumer and publisher columns, and openxFactory's own two. The first is
-#: `CONSUMER_PACKAGE`. A failure naming any of the four is a reach, and a
-#: failure naming anything else (an extra the runner did not install, say) is
-#: not this file's to record. `tests/test_imports_standalone.py` classifies
-#: those.
+#: `CONSUMER_PACKAGE`. A failure naming any of the four is a reach, and the
+#: record's to hold. A failure naming anything else is not a reach, and it is
+#: not let pass either: the derivation below reads past exactly one kind, the
+#: runtime extra's absence inside `opendox.runtime`, and refuses every other.
 SIBLINGS = (CONSUMER_PACKAGE, "ideation_dashboard", "doc_health",
             "corpus_adapter_openxfactory")
+
+#: `_BLOCK_CONSUMER` for all four. The record's two tests import with this,
+#: so a sibling the environment happens to have installed (an openxFactory
+#: checkout on a developer's path, say) cannot let a module that needs it
+#: import, and drop out of the census.
+_BLOCK_SIBLINGS = "import sys\n" + "".join(
+    f"sys.modules[{name!r}] = None\n" for name in SIBLINGS)
+
+#: The `runtime` extra (`pyproject.toml`, `split-opendox` § 3.5): each
+#: distribution it lists, with the top-level modules that installing it puts
+#: on the path and that `opendox.runtime` imports. `pydantic` arrives as
+#: fastapi's own requirement, and `psycopg_pool` as psycopg's `pool` extra.
+#: `validate.yml`'s `.[test]` install leaves the extra out, so there
+#: `opendox.runtime.app` fails on `fastapi`, `db` on `psycopg` and `oidc` on
+#: `httpx`, which are packages that environment was never asked for. That is
+#: the one failure the record's derivation lets pass, and only inside
+#: `opendox.runtime`, only while the package really is absent.
+#: `test_the_runtime_extra_is_the_one_pyproject_declares` holds the keys to
+#: pyproject's own list.
+RUNTIME_EXTRA: dict[str, tuple[str, ...]] = {
+    "fastapi": ("fastapi", "pydantic"),
+    "uvicorn": ("uvicorn",),
+    "psycopg": ("psycopg", "psycopg_pool"),
+    "PyJWT": ("jwt",),
+    "httpx": ("httpx",),
+}
+RUNTIME_PACKAGE = "opendox.runtime"
 
 
 @pytest.mark.parametrize("module", NEUTRAL_MODULES)
@@ -215,10 +248,14 @@ def test_the_reaching_modules_are_recorded_as_reaching() -> None:
 
 
 def _assert_still_reaching(module: str, blocker: str) -> None:
-    """One record entry's claim: the import still fails, for its named blocker."""
-    done = _import_in_subprocess(module, consumer_blocked=True)
+    """One record entry's claim: the import still fails, for its named blocker.
+
+    With all four siblings blocked, as the record's derivation imports, so the
+    two tests read the same failure."""
+    done = _import_in_subprocess(module, consumer_blocked=True,
+                                 siblings_blocked=True)
     assert done.returncode != 0, (
-        f"`import {module}` now SUCCEEDS with no `openxdox` — good, and the "
+        f"`import {module}` now SUCCEEDS with no sibling importable — good, and the "
         f"record in this file is out of date. Move {module!r} from "
         "STILL_REACHING into NEUTRAL_MODULES in the same act, so the claim is "
         "asserted rather than merely no longer contradicted, and lower "
@@ -263,45 +300,74 @@ def _package_module_names() -> list[str]:
     return sorted(names)
 
 
-#: One interpreter, the consumer blocked at the finder, and every module
-#: imported in turn. It prints, for each module that failed, the exception's
-#: type and the module the failure could not import. That is read down the
-#: exception's CHAIN, because a late stand-in resolved at import time raises
-#: `ConsumerReachUnavailable`, and the `ModuleNotFoundError` naming `openxdox`
-#: is its cause.
-_DERIVE_THE_RECORD = _BLOCK_CONSUMER + """
-import importlib, json
+#: One interpreter, all four siblings blocked at the finder, and every module
+#: imported in turn. For each module that failed it prints the exception's
+#: type; the module the failure could not import, with that `ImportError`'s own
+#: type; and whether that module's top-level package is installed here. The
+#: missing module is read down the exception's CHAIN, because a late stand-in
+#: resolved at import time raises `ConsumerReachUnavailable`, and the
+#: `ModuleNotFoundError` naming `openxdox` is its cause.
+_DERIVE_THE_RECORD = _BLOCK_SIBLINGS + """
+import importlib, importlib.util, json
 
 def missing(exc):
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
         if isinstance(exc, ImportError) and exc.name:
-            return exc.name
+            return exc.name, type(exc).__name__
         exc = exc.__cause__ or exc.__context__
-    return ""
+    return "", ""
+
+def installed(name):
+    try:
+        return importlib.util.find_spec(name.split(".")[0]) is not None
+    except (ImportError, ValueError):
+        return False
 
 failed = {}
 for name in json.loads(sys.argv[1]):
     try:
         importlib.import_module(name)
     except Exception as exc:
-        failed[name] = [type(exc).__name__, missing(exc)]
+        module, kind = missing(exc)
+        failed[name] = [type(exc).__name__, module, kind,
+                        bool(module) and installed(module)]
 print(json.dumps(failed))
 """
+
+
+def _an_absent_runtime_extra(module: str, missing: str, kind: str,
+                             installed: bool) -> bool:
+    """The one failure the derivation reads past: a module of the runtime
+    subpackage that cannot find a package of the runtime extra, because this
+    environment did not install the extra."""
+    extra = {name for names in RUNTIME_EXTRA.values() for name in names}
+    return (kind == "ModuleNotFoundError" and not installed
+            and missing.split(".")[0] in extra
+            and (module == RUNTIME_PACKAGE
+                 or module.startswith(RUNTIME_PACKAGE + ".")))
 
 
 def test_the_record_is_the_whole_packages_own() -> None:
     """`STILL_REACHING` is DERIVED over the whole package on every run, not
     kept by hand (plan 034 T034).
 
-    Every module the package's files define is imported, with the consumer
-    blocked. The set that fails on a SIBLING, with the sibling it names, must
-    be exactly the record. `NEUTRAL_MODULES` names nine of the package's
-    modules, and before this a module that was in neither list could start
-    needing `openxdox` at import time and pass this whole file. One that starts needing a sibling
-    now fails here, naming it. One the record carries that imports again
-    fails `test_the_reaching_modules_are_recorded_as_reaching`, as before."""
+    Every module the package's files define is imported, with all four
+    siblings blocked. The set that fails on a SIBLING, with the sibling it
+    names, must be exactly the record. `NEUTRAL_MODULES` names nine of the
+    package's modules, and before this a module that was in neither list could
+    start needing `openxdox` at import time and pass this whole file. One that
+    starts needing a sibling now fails here, naming it. One the record carries
+    that imports again fails `test_the_reaching_modules_are_recorded_as_reaching`,
+    as before.
+
+    EVERY OTHER FAILURE IS CLASSIFIED, NOT DROPPED. A module that fails for
+    any other reason says nothing about its reaches, so the census could pass
+    over it. The one failure read past is `_an_absent_runtime_extra`'s. A
+    syntax error, a broken module of openDox's own, a missing required
+    dependency, or a runtime package a module outside `opendox.runtime` needs,
+    fails here by name."""
     names = _package_module_names()
     assert len(names) > len(NEUTRAL_MODULES), names
     done = subprocess.run(
@@ -310,20 +376,50 @@ def test_the_record_is_the_whole_packages_own() -> None:
         capture_output=True, text=True, cwd=str(ROOT))
     assert done.returncode == 0, done.stderr
     failed = json.loads(done.stdout)
-    derived = {}
-    for module, (_kind, missing) in failed.items():
+    derived, unexplained = {}, {}
+    for module, (raised, missing, kind, installed) in failed.items():
         root = missing.split(".")[0]
         if root in SIBLINGS:
             derived[module] = root
+        elif not _an_absent_runtime_extra(module, missing, kind, installed):
+            unexplained[module] = (f"{raised}; the import it could not make: "
+                                   f"{missing or 'none'} ({kind or 'no ImportError'})")
+    assert not unexplained, (
+        "these modules fail to import for a reason that is not a sibling, so "
+        f"the census cannot say what they reach: {unexplained}. Only a module "
+        f"of {RUNTIME_PACKAGE} missing a package of the runtime extra, where "
+        "the extra is not installed, is read past. Anything else is a defect "
+        "to fix, not a reach to record")
     recorded = {module: blocker
                 for module, (_reason, blocker) in STILL_REACHING.items()}
     assert derived == recorded, (
-        f"with `{CONSUMER_PACKAGE}` blocked, these modules fail on a sibling at "
+        f"with the four siblings blocked, these modules fail on a sibling at "
         f"import time: {derived}; the record says {recorded}. A module that "
         "NEWLY needs a sibling to import is the wrong-direction edge design.md "
         "forbids: remove the reach. If it has to stand for now, record it in "
         "STILL_REACHING with its reason and its blocker, which is the argument "
         "its pull request has to make")
+
+
+def _distribution(requirement: str) -> str:
+    """A requirement's distribution name, normalized as PEP 503 compares them."""
+    name = re.match(r"[A-Za-z0-9._-]+", requirement.strip()).group(0)
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def test_the_runtime_extra_is_the_one_pyproject_declares() -> None:
+    """`RUNTIME_EXTRA` lists exactly the distributions of pyproject's `runtime`
+    extra. So the one failure the derivation reads past cannot grow beyond the
+    packages this package declares, or fall behind them."""
+    project = tomllib.loads(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    declared = {_distribution(requirement)
+                for requirement in project["optional-dependencies"]["runtime"]}
+    tabled = {_distribution(name) for name in RUNTIME_EXTRA}
+    assert tabled == declared, (
+        f"pyproject's runtime extra lists {sorted(declared)}, and this file's "
+        f"RUNTIME_EXTRA lists {sorted(tabled)}. Give each distribution of the "
+        "extra its row, with the modules it puts on the path")
 
 
 # --------------------------------------------------------------------------
@@ -833,8 +929,10 @@ def _import_time_uses(path: Path, names: frozenset[str]) -> list[tuple[int, str]
 
 def _names_bound_to_the_seam(path: Path) -> set[str]:
     """Every name a module binds, at its top level, to a `consumer_reach`
-    stand-in: `from .consumer_reach import X`, or `Y = consumer_reach.X` once
-    `consumer_reach` itself is imported."""
+    stand-in: `from .consumer_reach import X`, or, once `consumer_reach`
+    itself is imported, `Y = consumer_reach.X`, its annotated form
+    `Y: T = consumer_reach.X`, or `Y = consumer_reach.f(...)`, which mints
+    one (`module`, `function`, `constant`)."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     seam_aliases: set[str] = set()
     bound: set[str] = set()
@@ -853,10 +951,13 @@ def _names_bound_to_the_seam(path: Path) -> set[str]:
             seam_aliases |= {a.asname for a in node.names
                              if a.name == "opendox.consumer_reach" and a.asname}
     for node in tree.body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Attribute) \
-                and isinstance(node.value.value, ast.Name) \
-                and node.value.value.id in seam_aliases:
-            bound |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value.func if isinstance(node.value, ast.Call) else node.value
+        if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) \
+                and value.value.id in seam_aliases:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            bound |= {t.id for t in targets if isinstance(t, ast.Name)}
     return bound
 
 

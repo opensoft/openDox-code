@@ -103,7 +103,8 @@ IDENTITY_MODULES: tuple[str, ...] = ("runtime/app.py", "runtime/oidc.py")
 #: anything it prints. A module that lists a credential's name so that it never
 #: accepts or shows one is the opposite of a module that holds one. So the
 #: permit is exactly that needle, in exactly that module, only while that
-#: declared list still names it — and the rest of the provider tier is asserted
+#: declared list still names it, and only INSIDE that list and the module's
+#: prose (`_spelled_in_code`) — and the rest of the provider tier is asserted
 #: absent there, as it is everywhere else.
 #: `module -> (needle, the declared tuple that must name it)`.
 REDACTION_PERMITS: dict[str, tuple[str, str]] = {
@@ -165,18 +166,57 @@ def _name(path: Path) -> str:
     return path.relative_to(PACKAGE).as_posix()
 
 
+def _declaration(tree: ast.Module, constant: str) -> ast.expr | None:
+    """The value a module-level assignment gives `constant`, or None."""
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == constant for t in node.targets):
+            return node.value
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
+                and node.target.id == constant and node.value is not None:
+            return node.value
+    return None
+
+
 def _declared_strings(path: Path, constant: str) -> set[str]:
     """The string elements of one module-level tuple, read with `ast`.
 
     Parsed rather than imported, so the permit's condition holds under the
     `test` extra alone, where the runtime's third-party packages are absent."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == constant for t in node.targets):
-            return {e.value for e in ast.walk(node.value)
-                    if isinstance(e, ast.Constant) and isinstance(e.value, str)}
-    return set()
+    value = _declaration(tree, constant)
+    if value is None:
+        return set()
+    return {e.value for e in ast.walk(value)
+            if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+
+
+def _spelled_in_code(path: Path, needle: str, *, besides: str) -> list[int]:
+    """The lines where a module spells `needle` in CODE, outside the
+    module-level `besides` declaration.
+
+    Read off the syntax tree: every identifier, attribute name and string or
+    bytes literal the module holds, except its documentation (a docstring or a
+    bare string statement; comments never reach the tree) and the declared
+    value's own elements. So the declared refusal list may name the
+    credential, and prose may say why. Any other spelling, in a header, a
+    request field or a log line, is code holding it for use."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    skipped = {id(node.value) for node in ast.walk(tree)
+               if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
+    declared = _declaration(tree, besides)
+    if declared is not None:
+        skipped |= {id(node) for node in ast.walk(declared)}
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if id(node) in skipped:
+            continue
+        for _field, value in ast.iter_fields(node):
+            for item in value if isinstance(value, list) else [value]:
+                if (isinstance(item, str) and needle in item) or (
+                        isinstance(item, bytes) and needle.encode() in item):
+                    lines.add(getattr(node, "lineno", 0))
+    return sorted(lines)
 
 
 def _source(path: Path) -> str:
@@ -192,16 +232,24 @@ def test_exactly_one_module_may_hold_a_provider_endpoint_or_a_minted_token():
     """THE NARROWED BOUNDARY, swept over every module in the package.
 
     The one permit is `REDACTION_PERMITS`' single needle in its single module,
-    which a later case holds to its declared reason."""
+    and it covers only the declared refusal list and the prose that explains
+    it: a spelling anywhere else in that module's code is an offender here. A
+    later case holds the permit to its declared reason."""
     offenders: list[str] = []
     for module in _package_modules():
         if _name(module) == PROVIDER_CLIENT_MODULE:
             continue
         source = _source(module)
-        permitted = REDACTION_PERMITS.get(_name(module), (None, None))[0]
+        permitted, declared = REDACTION_PERMITS.get(_name(module), (None, None))
         for needle in PROVIDER_NEEDLES:
-            if needle in source and needle != permitted:
+            if needle not in source:
+                continue
+            if needle != permitted:
                 offenders.append(f"{_name(module)}: {needle}")
+                continue
+            offenders += [f"{_name(module)}:{line}: {needle}, outside {declared}"
+                          for line in _spelled_in_code(module, needle,
+                                                       besides=declared)]
     assert not offenders, (
         "the provider boundary is exactly one module wide; these modules "
         f"crossed it: {offenders}")
