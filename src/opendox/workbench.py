@@ -165,11 +165,12 @@ _MAX_SESSION_SOURCE_BYTES = 400_000
 # --------------------------------------------------------------------------
 #
 # `_MAX_SESSION_SOURCE_BYTES` bounds ONE document. Nothing bounded the COUNT, and
-# the count is the corpus's: `session_documents` reads every governed document in
-# the session worktree, which on the real openxFactory checkout is 176 documents /
-# 1.83 MB, and `_sync_sources` issues one `nlm source add` subprocess per document,
-# SEQUENTIALLY, from inside the `create-document` gate route — so the HTTP request
-# could not return until the whole projection finished. With `NLM_TIMEOUT` per call
+# the count is the corpus's: `session_documents` reads every document the home
+# corpus lists at the session worktree (176 documents / 1.83 MB on the real
+# openxFactory checkout when this bound was set), and `_sync_sources` issues one
+# `nlm source add` subprocess per document, SEQUENTIALLY, from inside the
+# `create-document` gate route — so the HTTP request could not return until the
+# whole projection finished. With `NLM_TIMEOUT` per call
 # and no aggregate ceiling the arithmetic is 176 x 45s = 2.2 hours of a governed
 # write waiting on an external SaaS: D19 / plan Constraint 8 violated by
 # arithmetic rather than by a bug, since every individual call behaved correctly.
@@ -743,7 +744,8 @@ def managed_notebook_prefix(alias: str) -> str:
 # membership is now the REGISTERED home corpus's: the factory a host (or an
 # entry point standing in for one, 4.1a) registered with
 # `corpus_adapter.register_home(...)` is called on the worktree, and its
-# adapter lists the corpus under one declared scope.
+# adapter lists the corpus under one declared scope and reads each document it
+# lists.
 #
 # THE SCOPE IS REGISTERED TOO, AND openDox's DEFAULT IS `all`. A corpus lists
 # `all` under every conformant adapter, so that is what the notebook takes
@@ -825,16 +827,36 @@ def _document_text(content: bytes) -> str:
 def session_documents(worktree: Path | str, *, repository: str | None = None,
                       max_bytes: int = _MAX_SESSION_SOURCE_BYTES
                       ) -> list[tuple[str, str]]:
-    """The session notebook's source set, read FROM the session WORKTREE
-    (FR-036, FR-039; T073).
+    """The session notebook's source set, as the registered home corpus serves
+    it AT the session WORKTREE (FR-036, FR-039; T073).
 
-    Membership is the REGISTERED home corpus's, never a rule of this module's
-    own: the factory `corpus_adapter.home()` hands back is called on the
-    worktree, and its adapter lists that corpus under
-    `session_notebook_scope()`, the scope a host registered or `all`. Returns
-    (document key, text) pairs in the shape `project_documents` consumes, so
-    create-at-open and the `--session-ref` re-sync project exactly the same
-    set. A document over `max_bytes` is skipped, as before.
+    Membership AND bytes are the REGISTERED home corpus's, never a rule of
+    this module's own. The factory `corpus_adapter.home()` hands back is
+    called on the worktree. Its adapter lists that corpus under
+    `session_notebook_scope()`, the scope a host registered or `all`, and each
+    listed document is read through the same adapter. Returns (document key,
+    text) pairs in the shape `project_documents` consumes, so create-at-open
+    and the `--session-ref` re-sync project exactly the same set. A document
+    over `max_bytes` is skipped, as before.
+
+    THE BYTES COME FROM THE ADAPTER, NEVER FROM `<worktree>/<key>`. A
+    `DocumentId.key` is opaque: a consumer may compare it, sort it and hand it
+    back, and may not parse it. So only the corpus knows where a document's
+    bytes live, and this function takes no snapshot of its own. The notebook
+    carries what the corpus serves at the worktree:
+
+      * HOSTED, openxFactory's adapter reads the checkout it is pointed at,
+        file by file. So the notebook carries the worktree's files as they
+        stand, uncommitted edits included, exactly as the reader this
+        replaced did.
+      * A corpus that serves a REVISION, as openDox's `LocalGitCorpus` does
+        (T022's standalone default), serves the worktree's HEAD: the session
+        branch at its last commit. In openDox's own flow every governed write
+        lands as one commit on that branch
+        (`branch_session.commit_gate_action`), and the notebook is created
+        right after the first one (`attach_session_notebook`), so at
+        create-at-open the two agree. An edit made outside a gate action
+        reaches such a corpus once it is committed.
 
     With no home corpus registered this REFUSES as 4.2 does: `CorpusRefused`
     of kind `ADAPTER_NOT_REGISTERED`, naming the seam and `register_home(...)`.
@@ -848,9 +870,10 @@ def session_documents(worktree: Path | str, *, repository: str | None = None,
     `scripts/sync-notebooklm-books.py`). The registered factory names its own
     corpus, so the argument no longer selects anything.
 
-    Reading the WORKTREE is the whole point: the session's documents live on an
-    unmerged branch, so a scan of the served checkout would show the human
-    `main`'s copies of their own drafts."""
+    The factory is called on the WORKTREE, never on the served checkout, and
+    that is the whole point: the session's documents live on an unmerged
+    branch, so a scan of the served checkout would show the human `main`'s
+    copies of their own drafts."""
     factory = corpus_adapter.home()
     adapter, ref = factory(str(Path(worktree)))
     resolved = adapter.resolve(ref)

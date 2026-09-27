@@ -19,10 +19,14 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE
    register it), the notebook lists `all`. With a scope registered, it lists
    that scope and nothing else. openxFactory registers `documents` (T046).
 3. A SCOPE THE CORPUS DOES NOT DECLARE IS REFUSED, NEVER WIDENED.
-4. THE TEXT IS WHAT IT WAS. Each document is decoded as the reader this
-   replaced read it from disk, which is held against `Path.read_text` itself,
-   and the size bound is measured the same way, so no source's content hash
-   moves under the hosted notebook.
+4. THE BYTES ARE THE CORPUS'S, AND THE TEXT IS WHAT IT WAS. The notebook
+   takes no snapshot of its own: it carries what the registered corpus serves
+   at the worktree, so the host's checkout-reading adapter serves an
+   uncommitted edit, and a key is handed back to the adapter, never opened as
+   a path. Each document is decoded as the reader this replaced read it from
+   disk, which is held against `Path.read_text` itself, and the size bound is
+   measured the same way, so no source's content hash moves under the hosted
+   notebook.
 5. THE REGISTRATION DISCIPLINE for the scope.
 6. AN IMPORTABLE `doc_health` IS NOT REACHED, and the static half: nothing
    in `workbench.py` makes a deferred reach into the publisher or the
@@ -150,6 +154,29 @@ class _TwoScopeCorpus:
     def write_back(self, corpus, document, content, *, actor, basis_revision,
                    reason=""):                     # pragma: no cover - unused
         raise AssertionError("the notebook's membership never writes")
+
+
+class _CheckoutCorpus:
+    """A stand-in with the HOST adapter's read semantics. openxFactory's
+    adapter lists the checkout it is pointed at with a glob and reads each
+    document with `read_bytes`, whatever HEAD says, so this one does too."""
+
+    def resolve(self, ref):
+        return ca.ResolvedCorpus(ref=ref, location=ref.location, revision=None,
+                                 scopes=(ca.SCOPE_ALL,), write_path=None,
+                                 write_path_available=False)
+
+    def list_documents(self, corpus, scope=ca.SCOPE_ALL):
+        root = Path(corpus.location)
+        keys = sorted(path.relative_to(root).as_posix()
+                      for path in root.rglob("*.md")
+                      if ".git" not in path.relative_to(root).parts)
+        return tuple(ca.DocumentId(corpus=corpus.ref.name, key=key) for key in keys)
+
+    def read(self, corpus, document, revision=None):
+        return ca.Document(id=document,
+                           content=(Path(corpus.location) / document.key).read_bytes(),
+                           revision=None)
 
 
 def _register(adapter) -> list[str]:
@@ -325,6 +352,43 @@ def test_documents_are_decoded_as_the_replaced_reader_read_them(tmp_path, conten
 
     _register(_TwoScopeCorpus({"document.md": content}, documents=()))
     assert wb.session_documents(tmp_path / "worktree") == [("document.md", expected)]
+
+
+@needs_git
+def test_the_notebook_carries_what_the_corpus_serves_at_the_worktree(tmp_path):
+    """The notebook takes NO SNAPSHOT OF ITS OWN: it carries what the
+    registered corpus serves at the worktree. A corpus that reads the checkout
+    it is pointed at (the host's) serves an UNCOMMITTED edit and an untracked
+    draft, as the reader this replaced did. A corpus that serves a revision
+    (`LocalGitCorpus`) serves the worktree's HEAD, which is its own answer
+    and not one this function imposes."""
+    worktree = _git_repository(tmp_path / "session", {"notes/a.md": b"committed\n"})
+    (worktree / "notes" / "a.md").write_bytes(b"edited, not committed\n")
+    (worktree / "notes" / "b.md").write_bytes(b"a new draft\n")
+
+    ca.register_home(lambda root: (
+        _CheckoutCorpus(), ca.CorpusRef(name=Path(root).name, location=str(root))))
+    assert wb.session_documents(worktree) == [
+        ("notes/a.md", "edited, not committed\n"),
+        ("notes/b.md", "a new draft\n"),
+    ]
+
+    ca.register_home(_local_git_default)
+    assert wb.session_documents(worktree) == [("notes/a.md", "committed\n")]
+
+
+def test_a_key_is_handed_back_and_never_opened(tmp_path):
+    """A `DocumentId.key` is OPAQUE (a consumer may compare, sort and hand it
+    back, and may not parse it), so every byte comes from the adapter's
+    `read` and none from `<worktree>/<key>`. Row-id keys, over a worktree
+    that holds no file at all, are read in full."""
+    assert list(tmp_path.iterdir()) == []
+    _register(_TwoScopeCorpus({"row-0017": b"Status: draft\n\nfrom a row\n",
+                               "row-0042": b"another row\n"}, documents=()))
+    assert wb.session_documents(tmp_path) == [
+        ("row-0017", "Status: draft\n\nfrom a row\n"),
+        ("row-0042", "another row\n"),
+    ]
 
 
 def test_the_size_bound_is_measured_on_the_text_as_before(tmp_path):
