@@ -345,19 +345,28 @@ def test_the_re_export_covers_every_public_name_the_guard_defines():
     """A name added to the guard and NOT re-exported would break the old import
     path for that name only — the kind of half-move that passes every existing
     test and fails on somebody else's branch. Compared against the guard's own
-    public surface so the shim cannot fall behind silently."""
+    public surface so the shim cannot fall behind silently.
+
+    THE GUARD'S HOME IS READ OFF THE MODULE, NOT SPELLED (plan 034 T034). The
+    scan kept a name whose `__module__` was the literal `"output_boundary"`,
+    the guard's top-level name in openxFactory's `scripts/`. The carve made it
+    `opendox.output_boundary`, so every CLASS the guard defines fell out of the
+    census and only its string constants were left. The headline assertion
+    below caught exactly that. `output_boundary.__name__` is the home under
+    any layout."""
+    home_module = output_boundary.__name__
     public = set()
     for name, value in vars(output_boundary).items():
         if name.startswith("_") or isinstance(value, types.ModuleType):
             continue  # private, or a stdlib module the guard imported
-        home = getattr(value, "__module__", "output_boundary")
-        if home == "output_boundary":  # not a stdlib name re-bound here
+        home = getattr(value, "__module__", home_module)
+        if home == home_module:  # not a stdlib name re-bound here
             public.add(name)
     assert {"OutputBoundary", "HumanGate", "MACHINERY"} <= public, (
         f"the surface scan found {sorted(public)}, which does not even contain "
         f"the guard's own headline names — the scan is broken, not the shim")
     missing = sorted(public - set(boundary.__all__))
     assert missing == [], (
-        f"`output_boundary` defines {missing} but `ideation_dashboard.boundary` "
-        f"does not re-export them, so `from ideation_dashboard.boundary import "
-        f"<name>` is broken for those names")
+        f"`{home_module}` defines {missing} but `{boundary.__name__}` does not "
+        f"re-export them, so `from {boundary.__name__} import <name>` is broken "
+        f"for those names")

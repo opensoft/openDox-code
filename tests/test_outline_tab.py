@@ -41,7 +41,13 @@ import pytest
 
 from conftest import REPO_ROOT
 # The SAME DOM instrument the canvas suite drives, imported rather than copied.
-from test_doxbench_view import _EDITOR_DOM_SHIM
+# …and the SAME contributed workbench gate column its shell harnesses mount
+# with (§ 3.4 slice S5; the `_CONTRIBUTED_GATE` note there says why a harness
+# that mounts the shell is the host, and so contributes the column `app.js`
+# would resolve). Imported for the same reason the shim is.
+from test_doxbench_view import _CONTRIBUTED_GATE, _EDITOR_DOM_SHIM
+
+from opendox.display_profile import NEUTRAL_DISPLAY
 
 NODE = shutil.which("node")
 VIEWS = REPO_ROOT / "src" / "opendox" / "web" / "views"
@@ -95,7 +101,7 @@ Because of a reason.
 <!-- /xspec:candidate -->
 """
 
-_HARNESS = _EDITOR_DOM_SHIM + r"""
+_HARNESS = _EDITOR_DOM_SHIM + _CONTRIBUTED_GATE + r"""
 import { createRequire } from 'node:module';
 
 globalThis.markdownit = createRequire(import.meta.url)('../vendor/markdown-it.min.js');
@@ -203,6 +209,12 @@ async function mount({ topic, files, bytes, gate = true, waitForIndex = true,
   };
   const workbench = mountStagingWorkbench(container, snapshotFor(topic, files), {
     caps,
+    // The harness is the host, so it contributes the workbench gate column
+    // `app.js` resolves (§ 3.4 slice S5). Without one the canvas is withheld
+    // and no outline buffer exists to add a section to. `gate: false` (task
+    // 3.4) still means no gate: the column answers `createGateLive` off the
+    // same `caps`.
+    gate: contributedGate().column,
     onOpenDoc: () => null,
     fetcher: async () => ({ ok: false }),
     active: { repository: 'fixture-repo', ref: 'main' },
@@ -787,8 +799,13 @@ def test_a_pre_template_fragment_renders_what_it_has(tab):
 
 
 def test_a_pre_template_fragment_is_not_reported_as_broken(tab):
+    """The stage word is the registered domain's, read BY ROLE (§ 3.4 slice S7).
+    This harness declares no `DISPLAY` facet, so the shell renders openDox's
+    neutral `selection` word, and the assertion reads it from `NEUTRAL_DISPLAY`
+    rather than retyping it. It pinned openxFactory's "staged" before S7."""
     state = tab["pre"]["state"].lower()
-    assert "staged before the outline template" in state
+    selection = NEUTRAL_DISPLAY["stages"]["selection"]["one"]
+    assert f"a {selection} from before the outline template" in state
     assert "opt-in" in state
     for alarm in ("error", "invalid", "broken", "fail", "must be fixed"):
         assert alarm not in state, state
