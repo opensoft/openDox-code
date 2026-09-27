@@ -275,6 +275,8 @@ def test_the_scanner_classifies_every_position_it_reads():
 #: `__import__` with a nonzero `level` is relative, and names no sibling. A
 #: relative `import_module` names the module its literal `package` resolves it
 #: to, by position or by keyword. Relative to `__package__`, it names none.
+#: Arguments spelled out with a literal `*[...]` or `**{...}` count where they
+#: land; a `*` of a name is not a literal.
 _LAZY_SPECIMEN = textwrap.dedent('''
     import importlib
 
@@ -289,6 +291,9 @@ _LAZY_SPECIMEN = textwrap.dedent('''
     RESOLVED = importlib.import_module(".corpus", package="doc_health")
     BY_POSITION = importlib.import_module(".families", "doc_health")
     LOCAL = importlib.import_module(".corpus", package=__package__)
+    STARRED = importlib.import_module(*["ideation_dashboard.lanes"])
+    SPREAD = importlib.import_module(**{"name": ".runner", "package": "doc_health"})
+    UNKNOWN = importlib.import_module(*NAMES)
 ''')
 
 
@@ -302,6 +307,8 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (10, "corpus_adapter_openxfactory", True, "type Alias"),
         (12, "doc_health.corpus", False, "<module>"),
         (13, "doc_health.families", False, "<module>"),
+        (15, "ideation_dashboard.lanes", False, "<module>"),
+        (16, "doc_health.runner", False, "<module>"),
     }, sorted(found)
 
 

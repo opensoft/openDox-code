@@ -54,6 +54,30 @@ def _called_name(expr):
     return None
 
 
+def _arguments(call):
+    """A call's positional arguments and keywords, with a literal `*[...]`,
+    `*(...)` or `**{...}` spelled out. Past a `*` of anything else, positions
+    are unknown, so nothing after it is read as positional."""
+    positional = []
+    for arg in call.args:
+        if isinstance(arg, ast.Starred):
+            if isinstance(arg.value, (ast.List, ast.Tuple)) and not any(
+                    isinstance(element, ast.Starred) for element in arg.value.elts):
+                positional += arg.value.elts
+                continue
+            break
+        positional.append(arg)
+    keywords = {}
+    for keyword in call.keywords:
+        if keyword.arg is not None:
+            keywords[keyword.arg] = keyword.value
+        elif isinstance(keyword.value, ast.Dict):
+            for key, value in zip(keyword.value.keys, keyword.value.values):
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    keywords[key.value] = value
+    return positional, keywords
+
+
 def importing_calls(tree):
     """`IMPORTING_CALLS`, and each name an import gives one of them:
     `from importlib import import_module as load`, or `from builtins import
@@ -114,8 +138,9 @@ def names_imported_by(node, *, calls=None, any_call=False):
     position or as `name=`. With `any_call`, EVERY call does, whatever it
     calls: the reading for a module where `importer_escapes` holds.
 
-    A relative name is resolved where the call itself says what it is relative
-    to, a literal `package`, by keyword or as the second argument. So
+    Arguments spelled out with a literal `*[...]` or `**{...}` count where
+    they land. A relative name is resolved where the call itself says what it
+    is relative to, a literal `package`, by keyword or as the second argument. So
     `import_module(".corpus", package="doc_health")` names
     `doc_health.corpus`. Otherwise it is relative to the calling module's own
     package, and names nothing here. That covers a `package` that is not a
@@ -132,19 +157,18 @@ def names_imported_by(node, *, calls=None, any_call=False):
     called = (calls or {}).get(_called_name(node.func))
     if called is None and not any_call:
         return []
-    keywords = {keyword.arg: keyword.value for keyword in node.keywords
-                if keyword.arg is not None}
-    name = node.args[0] if node.args else keywords.get("name")
+    args, keywords = _arguments(node)
+    name = args[0] if args else keywords.get("name")
     if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
         return []
     if called == "__import__":
-        level = node.args[4] if len(node.args) > 4 else keywords.get("level")
+        level = args[4] if len(args) > 4 else keywords.get("level")
         if isinstance(level, ast.Constant) and level.value:
             return []
         return [name.value]
     if not name.value.startswith("."):
         return [name.value]
-    package = node.args[1] if len(node.args) > 1 else keywords.get("package")
+    package = args[1] if len(args) > 1 else keywords.get("package")
     if not (isinstance(package, ast.Constant) and isinstance(package.value, str)):
         return []
     try:
