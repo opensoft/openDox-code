@@ -158,13 +158,21 @@ registry_mod = consumer_reach.snapshot_registry  # noqa: E402
 # of 4). The openDox column's routes live in `serve_workbench.py` (the doxBench
 # workbench surface) and `serve_project.py` (projects, the notebook tile action,
 # select-to-edit); openXdox's live in `serve_gate.py` (the gate console's door)
-# and `serve_projection.py` (the snapshot, index and `/source` routes); this
-# repository's OWN lane routes live in `serve_openxfactory_lanes.py` (RULING
-# DQ-1). The wire vocabulary, the body bounds and the hosted-plane confinement
-# this core AND every column read live in `serve_wire.py`. No column imports
-# this module — the graph is a DAG, which is the whole reason the vocabulary
-# moved out rather than staying here — and the columns are composed back onto
-# `DashboardHandler` as MIXINS below.
+# and `serve_projection.py` (the snapshot, index and `/source` routes);
+# openxFactory's OWN lane routes live in its `serve_openxfactory_lanes.py`
+# (RULING DQ-1). The wire vocabulary, the body bounds and the hosted-plane
+# confinement this core AND every column read live in `serve_wire.py`. No
+# column imports this module — the graph is a DAG, which is the whole reason
+# the vocabulary moved out rather than staying here — and the columns are
+# composed back onto `DashboardHandler` as MIXINS below.
+#
+# THE LANE COLUMN IS NO LONGER ONE OF THEM (plan 034 T011, #1144 tasks 2.1 and
+# 2.2). It lives in a package openDox can never import, so naming it as a base
+# made `import opendox.serve` require openxFactory. It now arrives at BUILD
+# time, through the handler-contribution facet (R1Q1 (a), openxFactory#656
+# comment 5817152735). The host that contributes the lane routes declares the
+# mixin as well, and `build_server` composes it into the class it binds
+# (`route_extension.compose_handler`).
 #
 # TWO REGISTRATION MODES, and the difference is the point of PR 3. PR 2's
 # columns are still FIXED CORE ARMS of `_route`/`do_POST`, exactly as they were.
@@ -196,20 +204,22 @@ registry_mod = consumer_reach.snapshot_registry  # noqa: E402
 # resolve for every reader that already had them.
 # That is what the `F401`s below declare: names imported to be RE-EXPORTED,
 # not names this module happens not to use yet.
-from ideation_dashboard import serve_openxfactory_lanes  # noqa: E402
+#
+# THE LANE COLUMN'S FIVE ROUTE NAMES ARE NOT RE-EXPORTED ANY MORE (plan 034
+# T011, #1144 tasks 2.1 and 2.1a). `COMMITTED_INTENTS_ROUTE`,
+# `ACTIONS_REFRESH_ROUTE`, `ACTIONS_APPLY_REGISTER_EDITS_ROUTE`,
+# `ACTIONS_DTN_SEED_ROUTE` and `ACTIONS_STAGING_SEED_ROUTE` are openxFactory's
+# constants, and they are spelled where they live:
+# `ideation_dashboard.serve_openxfactory_lanes`. No reader in this package
+# needs them here. The module is not vendored either, because it imports
+# openXdox itself, so a copy here would re-create the consumer reach BUILD
+# slice 2b removed.
 from opendox import serve_project  # noqa: E402
 from opendox import serve_workbench  # noqa: E402
 # `serve_gate`'s ONE re-exported name (`ACTIONS_GATE_PREFIX`) is no longer bound
 # here (BUILD slice 2b). It named openXdox at import time and nothing in this
 # module read it: the prefix belongs to the binding `GateRoutesExtension.routes()`
 # declares, and `openxdox.serve_gate.ACTIONS_GATE_PREFIX` is where it lives.
-from ideation_dashboard.serve_openxfactory_lanes import (  # noqa: E402,F401
-    ACTIONS_APPLY_REGISTER_EDITS_ROUTE,
-    ACTIONS_DTN_SEED_ROUTE,
-    ACTIONS_REFRESH_ROUTE,
-    ACTIONS_STAGING_SEED_ROUTE,
-    COMMITTED_INTENTS_ROUTE,
-)
 from opendox.serve_project import (  # noqa: E402,F401
     _edit_request_fields,
     _launch_editor,
@@ -731,10 +741,16 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
                        # contributed binding behave exactly as before.
                        consumer_reach.LateGateRoutes,
                        consumer_reach.LateProjectionRoutes,
-                       serve_openxfactory_lanes.LaneRoutes,
+                       # Plan 034 T011 (#1144 task 2.2): openxFactory's
+                       # `serve_openxfactory_lanes.LaneRoutes` stood here.
+                       # It is a descendant's column in a package openDox
+                       # cannot import, so it is composed in at build time,
+                       # through the handler-contribution facet.
                        http.server.SimpleHTTPRequestHandler):
     """Static bundle + snapshot + read-only source pass-through. Bound
-    subclasses set the class attributes below via `build_server`."""
+    subclasses set the class attributes below via `build_server`, and compose
+    in any mixin a profile or extension declares under
+    `route_extension.HANDLER_FACET`."""
 
     # W-5 (wave re-review): one stalled or lying client must never pin a
     # handler thread forever. `StreamRequestHandler.timeout` puts a socket
