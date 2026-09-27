@@ -65,7 +65,8 @@ distinct messages:
   own default first, so a read reached through `cli.build_parser()` or
   `serve.build_server()` resolves the default where no host registered one. The
   refusal is what a process meets when it reads the profile having built
-  nothing through an entry point.
+  nothing through an entry point, or after `unregister()` has dropped the
+  registration.
 * REGISTERED, BUT LACKING THE FACET -> `ProfileFacetMissing`, naming the
   attribute, the profile and the reader. That is a real and reportable gap in a
   host's profile rather than a missing registration, and telling a host to

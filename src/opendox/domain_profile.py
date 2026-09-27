@@ -160,6 +160,11 @@ class ProfileNotRegistered(RuntimeError):
     anything through an entry point. That is the library caller's case, and the
     one `profile_proxy` was written for (R1Q3 (i)). A host registers its own
     profile at process start, before the first build.
+
+    It is also what a process meets after `unregister()`, even one that DID
+    build through an entry point, because the refusal reports what is
+    registered NOW and keeps no history. So its message names both ways to
+    have nothing registered, and asserts neither.
     """
 
 
@@ -356,7 +361,10 @@ def current() -> Any:
     It answers what is registered: a host's profile, or the default an entry
     point registered (R1Q3 (a)). It never falls back to the default itself, so
     a process that built nothing through an entry point meets the refusal
-    below. Asking records nothing, either: only a build is a build.
+    below. So does a process whose registration `unregister()` has since
+    dropped, and the message says so rather than claiming what the process
+    did or did not build. Asking records nothing, either: only a build is a
+    build.
     """
     if _registered is None:
         raise ProfileNotRegistered(
@@ -366,9 +374,11 @@ def current() -> Any:
             "the default is a registration an ENTRY POINT makes and never a "
             "fallback here (R1Q3 (a), openxFactory#656 comment 5817152735): "
             "`cli.build_parser()`, `serve.build_server()` and each `main()` "
-            "register it where no host has, and this process has built nothing "
-            "through one. A host that drives openDox registers its own profile "
-            "at process start with\n\n    " + REGISTRATION_CALL +
+            "register it where no host has. Nothing is registered now, so "
+            "either nothing in this process has been built through one of "
+            "them, or `opendox.domain_profile.unregister()` has dropped the "
+            "registration since. A host that drives openDox registers its own "
+            "profile at process start with\n\n    " + REGISTRATION_CALL +
             "\n\nbefore it calls `cli.build_parser()` or `serve.build_server()` "
             "(RULED ASK-2 option (2), openxFactory#656 comment 5628886636; the "
             "operational contract is docs/profile-registration-runbook.md). "

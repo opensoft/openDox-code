@@ -320,7 +320,7 @@ closes the window in which a host's registration still replaces the default.
 
 | raised | when | what it means |
 | --- | --- | --- |
-| `domain_profile.ProfileNotRegistered` | nothing registered | no host registered, and the process has built nothing through an entry point |
+| `domain_profile.ProfileNotRegistered` | nothing registered | nothing is registered now: no host registered and nothing was built through an entry point, or `unregister()` has dropped the registration since |
 | `domain_profile.AlreadyRegistered` | a different profile over a host's, or over the default once something was built from it | one registration is the contract, and the default is replaceable only before anything is built from it |
 
 **What this section supersedes above.**
@@ -329,17 +329,17 @@ closes the window in which a host's registration still replaces the default.
   and its entry points register it.
 * § What happens when a host does not: an entry point registers openDox's
   default and builds on it. The refusal is what a process meets when it builds
-  nothing, and its text now names the default and says why this process has
-  none. The table in this section replaces that table's
-  `ProfileNotRegistered` and `AlreadyRegistered` rows, and its
-  `ProfileFacetMissing` row stands. A different profile over the entry point's
-  default meets `AlreadyRegistered` only once something has been built from the
-  default. Before that, it replaces the default.
+  nothing, or after `unregister()`. Its text now names the default and both
+  ways a process comes to have nothing registered. The table in this section
+  replaces that table's `ProfileNotRegistered` and `AlreadyRegistered` rows,
+  and its `ProfileFacetMissing` row stands. A different profile over the entry
+  point's default meets `AlreadyRegistered` only once something has been built
+  from the default. Before that, it replaces the default.
 * § What a host that only ever built a server must now do: a host that wants
   ITS routes served still registers before the first build. A server built
   with no host registered builds on openDox's default rather than refusing.
 * § Where this is executed rather than described:
-  `tests/test_profile_registration.py` holds fifty cases. Plan 034's T011
+  `tests/test_profile_registration.py` holds fifty-one cases. Plan 034's T011
   made `opendox.cli` and `opendox.serve` importable, so the parser's entry
   point is built for real there. A server still cannot be built in a lone
   checkout until phase 2, so the server's composition point stays lifted by AST.

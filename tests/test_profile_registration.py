@@ -195,9 +195,8 @@ def test_the_refusal_says_the_default_is_an_entry_points_to_register() -> None:
     not send a reader looking for a fallback that does not exist.
 
     openDox ships `opendox.default_profile`, and the refusal says where it comes
-    from: an ENTRY POINT registers it, and this process built nothing through
-    one. That is what tells a library caller why it, and not a CLI user, meets
-    this refusal.
+    from: an ENTRY POINT registers it, and nothing is registered now. That is
+    what tells a library caller why it, and not a CLI user, meets this refusal.
     """
     with pytest.raises(domain_profile.ProfileNotRegistered) as caught:
         domain_profile.current()
@@ -208,6 +207,29 @@ def test_the_refusal_says_the_default_is_an_entry_points_to_register() -> None:
     assert "ships no profile" not in message, (
         "the refusal still says openDox ships no profile of its own, which "
         "requirement 3's default (plan 034, T015) made false")
+
+
+def test_the_refusal_after_unregister_claims_nothing_about_what_was_built(
+) -> None:
+    """The refusal reports what is registered NOW, and keeps no history.
+
+    (Copilot's review of openDox-code#42 at aee57d5e.) A process that DID build
+    from the default and then called `unregister()` has nothing registered. So
+    the message may not say this process built nothing through an entry point.
+    It names `unregister()` as the other way to have nothing registered.
+    """
+    domain_profile.register_default(default_profile)
+    assert profile_openxfactory.SUBCOMMAND_EXTENSIONS, "the build"
+    domain_profile.unregister()
+    with pytest.raises(domain_profile.ProfileNotRegistered) as caught:
+        domain_profile.current()
+    message = str(caught.value)
+    assert "unregister()" in message, (
+        "the refusal no longer names unregister() as a way to have nothing "
+        "registered")
+    assert "built nothing" not in message, (
+        "the refusal claims this process built nothing, and this one built a "
+        "parser from the default before unregister() dropped it")
 
 
 def test_current_refuses_the_same_way_as_the_proxy() -> None:
