@@ -47,6 +47,7 @@ and is named to the arrival verifier as
 from __future__ import annotations
 
 import ast
+import json
 import subprocess
 import sys
 import textwrap
@@ -160,7 +161,25 @@ NEUTRAL_MODULES = (
 #: and `opendox.serve`, were blocked by `ideation_dashboard` alone, and both
 #: import now, so both moved into `NEUTRAL_MODULES` above in the same act. The
 #: record is kept, empty, for the next module that needs it.
+#:
+#: RE-DERIVED BY PLAN 034 T034, OVER THE WHOLE PACKAGE, where phase 1's lanes
+#: joined (T032's sweep: no import-time reach into any sibling, and every
+#: deferred reach left is into `openxdox`, inside a function body). Every
+#: module the package's files define was imported with the consumer blocked,
+#: and none failed on a sibling. So empty is a MEASUREMENT, not the absence of
+#: one, and `test_the_record_is_the_whole_packages_own` takes it again on
+#: every run. The record is then a census of the whole surface, as the
+#: paragraph above says it is, and not only of the modules somebody listed.
 STILL_REACHING: dict[str, tuple[str, str]] = {}
+
+#: The four packages a module of this one may not need at import time: the
+#: consumer and publisher columns, and openxFactory's own two. The first is
+#: `CONSUMER_PACKAGE`. A failure naming any of the four is a reach, and a
+#: failure naming anything else (an extra the runner did not install, say) is
+#: not this file's to record. `tests/test_imports_standalone.py` classifies
+#: those.
+SIBLINGS = (CONSUMER_PACKAGE, "ideation_dashboard", "doc_health",
+            "corpus_adapter_openxfactory")
 
 
 @pytest.mark.parametrize("module", NEUTRAL_MODULES)
@@ -227,6 +246,84 @@ def _assert_still_reaching(module: str, blocker: str) -> None:
             f"`import {module}` is recorded as blocked by {blocker!r} with its "
             f"consumer reach removed, but the failure names "
             f"{CONSUMER_PACKAGE!r}:\n{done.stderr}")
+
+
+def _package_module_names() -> list[str]:
+    """Every module the package's FILES define, as a dotted name.
+
+    From the files and not from `pkgutil`, which skips the children of a
+    subpackage whose `__init__` fails. Sorted, so a package precedes its own
+    modules."""
+    names = set()
+    for path in PACKAGE.rglob("*.py"):
+        parts = list(path.relative_to(SRC).with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts.pop()
+        names.add(".".join(parts))
+    return sorted(names)
+
+
+#: One interpreter, the consumer blocked at the finder, and every module
+#: imported in turn. It prints, for each module that failed, the exception's
+#: type and the module the failure could not import. That is read down the
+#: exception's CHAIN, because a late stand-in resolved at import time raises
+#: `ConsumerReachUnavailable`, and the `ModuleNotFoundError` naming `openxdox`
+#: is its cause.
+_DERIVE_THE_RECORD = _BLOCK_CONSUMER + """
+import importlib, json
+
+def missing(exc):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ImportError) and exc.name:
+            return exc.name
+        exc = exc.__cause__ or exc.__context__
+    return ""
+
+failed = {}
+for name in json.loads(sys.argv[1]):
+    try:
+        importlib.import_module(name)
+    except Exception as exc:
+        failed[name] = [type(exc).__name__, missing(exc)]
+print(json.dumps(failed))
+"""
+
+
+def test_the_record_is_the_whole_packages_own() -> None:
+    """`STILL_REACHING` is DERIVED over the whole package on every run, not
+    kept by hand (plan 034 T034).
+
+    Every module the package's files define is imported, with the consumer
+    blocked. The set that fails on a SIBLING, with the sibling it names, must
+    be exactly the record. `NEUTRAL_MODULES` names nine of the package's
+    modules, and before this a module that was in neither list could start
+    needing `openxdox` at import time and pass this whole file. One that starts needing a sibling
+    now fails here, naming it. One the record carries that imports again
+    fails `test_the_reaching_modules_are_recorded_as_reaching`, as before."""
+    names = _package_module_names()
+    assert len(names) > len(NEUTRAL_MODULES), names
+    done = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_DERIVE_THE_RECORD),
+         json.dumps(names)],
+        capture_output=True, text=True, cwd=str(ROOT))
+    assert done.returncode == 0, done.stderr
+    failed = json.loads(done.stdout)
+    derived = {}
+    for module, (_kind, missing) in failed.items():
+        root = missing.split(".")[0]
+        if root in SIBLINGS:
+            derived[module] = root
+    recorded = {module: blocker
+                for module, (_reason, blocker) in STILL_REACHING.items()}
+    assert derived == recorded, (
+        f"with `{CONSUMER_PACKAGE}` blocked, these modules fail on a sibling at "
+        f"import time: {derived}; the record says {recorded}. A module that "
+        "NEWLY needs a sibling to import is the wrong-direction edge design.md "
+        "forbids: remove the reach. If it has to stand for now, record it in "
+        "STILL_REACHING with its reason and its blocker, which is the argument "
+        "its pull request has to make")
 
 
 # --------------------------------------------------------------------------
@@ -647,7 +744,23 @@ def test_the_prefix_is_refused_rather_than_doubled() -> None:
 #: decorator or a module-level expression would resolve the consumer at import
 #: time and make the conversion a census trick.
 CONVERTED_SITES = {
-    "cli.py": ("gate_mod", "snapshot_mod"),
+    # RE-DERIVED BY PLAN 034 T034 from the tree, where phase 1's lanes joined:
+    # every module-level name bound to a `consumer_reach` stand-in, which
+    # `test_every_name_bound_to_the_seam_is_guarded` below now derives on every
+    # run. The table had fallen behind by five names in two files, and the
+    # guard never read them:
+    #   * `branch_session.py`'s `gate_console`. This is one of the two reverts
+    #     the guard is named for (the NINE default-argument sites this file's
+    #     docstring gives), and it was the one module the table left out;
+    #   * `cli.py`'s other four aliases, the two late callables BUILD slice 2b
+    #     bound for the generate verbs and the `--generated-at` check, and the
+    #     one late constant. Calling a late callable, or iterating the late
+    #     constant, at import time resolves the consumer as surely as reading
+    #     `gate_mod` does.
+    # None of the five is read at import time, so the tree was already right.
+    "branch_session.py": ("gate_console",),
+    "cli.py": ("gate_mod", "snapshot_mod", "corpus_root_refusal",
+               "generate_snapshot", "is_rfc3339_datetime", "SCANNED_ROOTS"),
     "serve_workbench.py": ("registry_mod",),
     "workbench.py": ("find_validator",),
     # Slice 2b step 4. `consumer_reach` and `defaults` are deliberately NOT
@@ -716,6 +829,56 @@ def _import_time_uses(path: Path, names: frozenset[str]) -> list[tuple[int, str]
 
     walk(ast.parse(path.read_text(encoding="utf-8")).body, True)
     return sorted(set(hits))
+
+
+def _names_bound_to_the_seam(path: Path) -> set[str]:
+    """Every name a module binds, at its top level, to a `consumer_reach`
+    stand-in: `from .consumer_reach import X`, or `Y = consumer_reach.X` once
+    `consumer_reach` itself is imported."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    seam_aliases: set[str] = set()
+    bound: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            package = (node.level == 1 and node.module is None) or \
+                (node.level == 0 and node.module == "opendox")
+            seam = (node.level == 1 and node.module == "consumer_reach") or \
+                (node.level == 0 and node.module == "opendox.consumer_reach")
+            if package:
+                seam_aliases |= {a.asname or a.name for a in node.names
+                                 if a.name == "consumer_reach"}
+            if seam:
+                bound |= {a.asname or a.name for a in node.names}
+        elif isinstance(node, ast.Import):
+            seam_aliases |= {a.asname for a in node.names
+                             if a.name == "opendox.consumer_reach" and a.asname}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Attribute) \
+                and isinstance(node.value.value, ast.Name) \
+                and node.value.value.id in seam_aliases:
+            bound |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    return bound
+
+
+def test_every_name_bound_to_the_seam_is_guarded() -> None:
+    """The guard's table is the tree's, name for name (plan 034 T034).
+
+    A name bound to the seam and missing from `CONVERTED_SITES` is a name the
+    import-time guard never reads. A name the table keeps and no module binds
+    any more is a guard over nothing. The seam's own module is left out: it
+    DEFINES the stand-ins."""
+    derived = {}
+    for path in sorted(PACKAGE.rglob("*.py")):
+        if path.name == "consumer_reach.py":
+            continue
+        bound = _names_bound_to_the_seam(path)
+        if bound:
+            derived[path.relative_to(PACKAGE).as_posix()] = bound
+    declared = {module: set(names) for module, names in CONVERTED_SITES.items()}
+    assert derived == declared, (
+        f"the names each module binds to `consumer_reach` are {derived}, and "
+        f"CONVERTED_SITES guards {declared}. Add a new binding to the table, so "
+        "its import-time uses are refused, and take a retired one out")
 
 
 @pytest.mark.parametrize("module_file", sorted(CONVERTED_SITES))

@@ -659,14 +659,15 @@ def test_exactly_one_blank_line_separates_the_inserted_block():
     assert "\n\n\n" not in result["text"]
 
 
-def test_the_model_and_the_doc_health_family_agree_on_the_contract():
-    """The surface and the checker must mean the same thing by conformance."""
-    import sys
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    from doc_health import families
-
-    js = MODEL_JS.read_text(encoding="utf-8")
-    for _needle, label in families._TEMPLATE_SECTIONS:
-        assert f'label: "{label}"' in js, f"model omits required section {label}"
-    for field in families._QUESTION_SUBFIELDS:
-        assert f'"{field}"' in js, f"model omits sub-field {field}"
+# THE CHECKER-AGREEMENT CASE LEFT THIS FILE (plan 034 T034, R1Q2 (a)).
+# `test_the_model_and_the_doc_health_family_agree_on_the_contract` held this
+# model's `REQUIRED_SECTIONS` and `QUESTION_SUBFIELDS` equal to doc-health's
+# `staged-topic-template` family (`_TEMPLATE_SECTIONS`, `_QUESTION_SUBFIELDS`).
+# The model says the two "must agree about what conformance means". That
+# checker is openxFactory's `doc_health`, which a standalone openDox never has,
+# so the case imported a package this repository cannot install. By
+# requirement 9's definition it is an integration test. It becomes a NAMED
+# openxFactory composition test, where both halves are present: openxFactory's
+# own `doc_health` and openDox's `views/outline-model.js` at its pin. T007's
+# batch E names its openxFactory path in F11.1's set, and T047 lands it.
+# Everything left here is this model's own behaviour.
