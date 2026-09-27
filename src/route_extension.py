@@ -714,13 +714,21 @@ class _ResolvedBookkeeping(_ResolvesToRoot()):
 
 
 #: The dunders a mixin carries because it IS a class, not because it asked for
-#: behaviour: the bookkeeping the two probes measure, plus `__slots__`.
-#: `__slots__` declares a layout rather than a hook. An empty one adds
-#: nothing, and a named slot is a data descriptor, refused as one.
+#: behaviour: the bookkeeping the two probes measure, plus two names no probe
+#: can measure alone.
+#: * `__slots__` declares a layout rather than a hook. An empty one adds
+#:   nothing, and a named slot is a data descriptor, refused as one.
+#: * `__type_params__` is written by the class statement of a class that
+#:   declares type parameters (PEP 695). Such a class always takes
+#:   `typing.Generic` as an implicit base, and a probe built that way would
+#:   also measure the `__parameters__` that `Generic.__init_subclass__` writes,
+#:   which is a hook's work, not bookkeeping. A generic mixin is refused for
+#:   `Generic`'s own `__init_subclass__` and `__class_getitem__`. Exempting
+#:   this one name keeps that refusal naming the hooks.
 _CLASS_BOOKKEEPING = frozenset(
     name for probe in (_ClassStatementBookkeeping, _ResolvedBookkeeping)
     for name in vars(probe) if _is_dunder(name)
-) | {"__slots__"}
+) | {"__slots__", "__type_params__"}
 
 
 def _class_name(obj) -> str:

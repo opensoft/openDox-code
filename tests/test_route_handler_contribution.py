@@ -459,6 +459,33 @@ def test_a_resolved_base_is_class_bookkeeping_not_the_object_protocol():
     assert "__init_subclass__" in str(caught.value)
 
 
+class _TypeParameterised[T]:
+    """A PEP 695 generic mixin. Its class statement writes `__type_params__`
+    by itself, and it takes `typing.Generic` as an implicit base."""
+
+    def _serve_generic(self, head_only: T) -> T:
+        return head_only
+
+
+def test_a_generic_mixin_is_refused_for_the_hooks_generic_brings_not_its_type_params():
+    """`__type_params__` is class bookkeeping, so the refusal does not name it
+    (Copilot's review of #40 at `1bd2087`). A generic mixin is still refused,
+    by design. `typing.Generic`, its implicit base, defines `__init_subclass__`
+    and `__class_getitem__`, so composing it would run `Generic`'s hook on the
+    handler class. The unchecked composition shows the hook writing
+    `__parameters__` there."""
+    assert "__type_params__" in vars(_TypeParameterised)
+    assert typing.Generic in _TypeParameterised.__mro__
+    with pytest.raises(RouteBindingError, match="OBJECT PROTOCOL") as caught:
+        route_extension.collect_handler_contributions(
+            (_contributor(_TypeParameterised),), base=_CoreHandler)
+    message = str(caught.value)
+    assert "__init_subclass__" in message and "__class_getitem__" in message
+    assert "__type_params__" not in message
+    unchecked = type("Unchecked", (_CoreHandler, _TypeParameterised), {})
+    assert vars(unchecked)["__parameters__"] == ()
+
+
 @pytest.mark.parametrize("mixin,because", (
     (_CoreColumn, "already in"),
     (type("_SubCore", (_CoreHandler,), {}), "subclasses the core handler"),
