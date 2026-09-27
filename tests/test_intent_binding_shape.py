@@ -4,9 +4,10 @@ comment 5642758731; split-opendox-two-layer-product § 3.4, slice S2).
 
 Parses the tree and imports nothing — the same idiom `test_leg_shape.py`,
 `test_consumer_reach.py` and `test_profile_registration.py` already use, and
-for the same reason: this suite runs `--noconftest` (`.github/workflows/
-validate.yml`), so a test that needed a fixture or a package import here
-would need the conftest chain this invocation deliberately does not load.
+for the same reason: this suite ran `--noconftest` (`.github/workflows/
+validate.yml`) until plan 034 T036, so a test that needed a fixture or a
+package import here would have needed the conftest chain that invocation
+deliberately did not load.
 
 WHAT THIS PROVES, IN THE ABSENCE OF A JS TEST RUNNER. `views/intent-feed.js`
 is RULED `not_moved` (`docs/opendox-carve-manifest.yaml`:1807-1810) and is
@@ -31,15 +32,16 @@ RETIRED at this leg on 2026-09-13, RULED `openxFactory#656` comment
 5656343213, so the precedent survives in the harness and not in a file you can
 open here).
 
-WHY THAT FILE IS NOT ON THE `--noconftest` LIST AND THIS ONE IS. Stated
-narrowly, because the wide version of the sentence — that no DOM probe of a
-`web/` view is on the list — was false (opensoft/openDox-code#24, Copilot):
-`tests/test_view_registry.py`, `tests/test_split_route_tails.py` and
-`tests/test_gate_loop_contributed.py` are all on it and all drive real `web/`
-modules under node behind a DOM stand-in of their own. The list is an
-allow-list, admitted file by file, and `.github/workflows/validate.yml` records
-the same reason for every entry: the file is the SHAPE assertion RULED Q-L5
-(b′) leaves running while the carved suite waits on the BUILD arc, or without
+WHY THAT FILE WAS NOT ON THE `--noconftest` LIST AND THIS ONE WAS (the list
+ended with plan 034 T036). Stated narrowly, because the wide version of the
+sentence — that no DOM probe of a `web/` view was on the list — was false
+(opensoft/openDox-code#24, Copilot): `tests/test_view_registry.py`,
+`tests/test_split_route_tails.py` and `tests/test_gate_loop_contributed.py`
+were all on it, and all drive real `web/` modules under node behind a DOM
+stand-in of their own. The list was an allow-list, admitted file by file, and
+`.github/workflows/validate.yml` recorded the same reason for every entry: the
+file is the SHAPE assertion RULED Q-L5 (b′) left running while the carved suite
+waited on the BUILD arc, or without
 it the slice's ruled contract would be only DESCRIBED (S3's "the only place
 slice S3's ruled contract is executed rather than described"; S4's and S5's
 "measures the other half"; S6's "the slice's only running proof"). THIS file is

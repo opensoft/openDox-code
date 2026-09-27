@@ -92,8 +92,8 @@ import pytest
 # fixed**: `tests/conftest.py` reads `HERE.parent` today (openDox-code#19,
 # `3954d78`, the RULED Q-L7 (a) `:25` depth fix the carve manifest declares),
 # so `conftest.REPO_ROOT` is this repository. The local computation stays
-# anyway, because this file runs under `--noconftest` in the required check
-# and must not depend on a conftest being imported at all;
+# anyway: this file ran under `--noconftest` in the required check until
+# plan 034 T036, and it still must not depend on a conftest being imported;
 # `tests/test_leg_shape.py`'s own `Path(__file__).resolve().parents[1]` is
 # that same self-contained pattern.
 ROOT = Path(__file__).resolve().parents[1]

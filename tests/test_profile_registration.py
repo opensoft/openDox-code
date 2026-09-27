@@ -55,11 +55,11 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE RATHER THAN IMPLIED
    Re-registering the object already registered stays a no-op, the default
    included, and leaves both as they were.
 
-`--noconftest` SAFE, deliberately: `validate` runs this file alongside
+`--noconftest` SAFE, deliberately: `validate` ran this file alongside
 `test_leg_shape.py` and `test_consumer_reach.py` with conftest collection off
-(RULED Q-L5 (b′)), so nothing here may need a fixture, a path insertion or an
-installed consumer. The package itself is installed by the workflow's
-`pip install -e ".[test]"`.
+(RULED Q-L5 (b′)) until plan 034 T036, so nothing here may need a fixture, a
+path insertion or an installed consumer. The package itself is installed by
+the workflow (`-e ".[runtime,test]"`).
 
 A CREATED file: no carve-manifest row (RULED OQ-C).
 """
@@ -113,10 +113,11 @@ def _empty_registry():
     that has nothing to do with it. Collection order would decide whether the
     suite passed.
 
-    `validate` does not see that failure, which is exactly why it is worth
-    fixing rather than noting: this file runs there under `--noconftest`
-    (RULED Q-L5 (b′)), so there is no conftest registration to destroy and the
-    bug would have waited for the day the ignore list shrinks.
+    `validate` did not see that failure when this was written, which is
+    exactly why it was worth fixing rather than noting: this file ran there
+    under `--noconftest` (RULED Q-L5 (b′)), so there was no conftest
+    registration to destroy, and the bug would have waited for the day the
+    ignore list shrank. That day was plan 034 T035 and T036.
 
     THE RESTORE IS EXACT, AND READS THE REGISTRY'S OWN STATE (plan 034, T016).
     The registry now holds three facts: the registration; whether it is the

@@ -32,7 +32,8 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE
    in `workbench.py` makes a deferred reach into the publisher or the
    consumer any more, read by `ast` the way F4.1's scan reads the package.
 
-`--noconftest` SAFE, like every file `validate` runs today. It imports
+`--noconftest` SAFE, as every file `validate` ran was until plan 034 T036.
+It imports
 `opendox.workbench`, `opendox.corpus_adapter`, `opendox.branch_session` and
 `opendox.runtime.local_git_adapter`, which import with no sibling present,
 and neither `opendox.serve` nor `opendox.cli` (plan 034, tasks.md § Phase 1:

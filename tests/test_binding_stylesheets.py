@@ -252,8 +252,9 @@ def _blank_code_comments(text: str, html: bool = False) -> str:
     string and blanking from there would delete real code — a false GREEN is
     what this whole function is about, and a false RED for the same reason is
     no better. A local copy of `test_web_boundary.py`'s walk rather than an
-    import: these files are collected `--noconftest` as top-level modules and
-    neither may depend on the other being importable.
+    import: these files were collected `--noconftest` as top-level modules
+    until plan 034 T036, and neither may depend on the other being
+    importable.
     """
     out, i, n = [], 0, len(text)
     quote = ""

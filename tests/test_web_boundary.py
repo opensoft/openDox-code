@@ -19,11 +19,11 @@ only `views/explorer.js` actually moves (from "?" to C, Q2) -- the other four
 rulings (Q1, Q3, Q4, Q5) are recorded against slices S2/S4/S6/S7, not this one.
 
 WHY `strict=True`, AND WHY THAT IS THE WHOLE POINT (note § 4.5, last
-paragraph). openDox-code's `validate` runs an explicit file list with
-`--noconftest` (§ 1.2(d) / `.github/workflows/validate.yml`), so a new test
-file is not exercised until the workflow names it -- naming it while three of
-its four assertions are known-red would put the required check red for the
-duration of the whole S2-S7 arc. Marking those three `xfail(strict=True)`
+paragraph). openDox-code's `validate` ran an explicit file list with
+`--noconftest` (§ 1.2(d) / `.github/workflows/validate.yml`) until plan 034
+T036, so a new test file was not exercised until the workflow named it --
+naming it while three of its four assertions were known-red would have put the
+required check red for the duration of the whole S2-S7 arc. Marking those three `xfail(strict=True)`
 instead keeps `validate` GREEN while the defect stands, and flips it RED the
 moment a later slice closes the defect without also removing the marker --
 the measurement cannot rot into a permanently tolerated failure, and a slice
@@ -42,8 +42,9 @@ assertion checks, the marker stays valid (still XFAIL) and the check stays
 green -- CI, not this module, is what makes an author look again before
 removing a marker their slice has not fully earned.
 
-`--noconftest` SAFE, deliberately, like its three neighbours already on the
-explicit list (`test_leg_shape.py`, `test_consumer_reach.py`,
+`--noconftest` SAFE, deliberately, like the three neighbours that were
+already on the explicit list `validate` ran until plan 034 T036
+(`test_leg_shape.py`, `test_consumer_reach.py`,
 `test_profile_registration.py`): this module parses the TREE and the
 declared YAML census; it imports no view module (they are JavaScript, not
 Python) and no `opendox` submodule, so it needs no fixture, no path
