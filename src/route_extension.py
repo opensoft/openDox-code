@@ -120,6 +120,13 @@ wherever it would do more:
     exempt from the dunder rule by name, so their VALUES are checked too: a
     data descriptor under one is refused unless the core answers that name
     itself, ahead of it in the MRO;
+  * a DESCRIPTOR THAT IS NOT A METHOD: anything whose type defines `__get__`
+    and is not exactly a function, a `staticmethod` or a `classmethod`, such
+    as a `functools.cached_property` or a `__get__` of the contribution's own.
+    Python binds those three the same way on the class and on an instance,
+    and `resolve_handlers` checks each binding on the class. Any other
+    descriptor may answer the two differently, so its binding could pass at
+    wiring time and fail at request time;
   * a METACLASS other than the core handler's own, or one it derives from. The
     composed class would take it, and a metaclass decides how the class itself
     is called, compared, hashed and asked for a name. A metaclass whose
@@ -596,6 +603,20 @@ def _is_data_descriptor(value) -> bool:
                for kind in type(value).__mro__)
 
 
+#: The descriptors a contribution may carry. Python binds these three the same
+#: way whether they are looked up on the class or on an instance, so a
+#: binding checked on the class is dispatched as checked. The test is on the
+#: EXACT type, because a subclass may define a `__get__` of its own.
+_METHOD_KINDS = (type(_is_dunder), staticmethod, classmethod)
+
+
+def _is_foreign_descriptor(value) -> bool:
+    """A descriptor other than a method: its type defines `__get__`, and it is
+    not exactly a function, a `staticmethod` or a `classmethod`."""
+    return (not _is_one_of(type(value), _METHOD_KINDS)
+            and any("__get__" in vars(kind) for kind in type(value).__mro__))
+
+
 def _self_targets(tree) -> set[str]:
     """The names a syntax tree assigns on `self`: plain, augmented, annotated
     and unpacked assignment, a `for` or `with` target, and `setattr(self,
@@ -884,12 +905,12 @@ def _refuse_an_unsafe_composition(base: type, contributions, *,
         # checked here. Where the core answers a bookkeeping name itself, as
         # it answers `__dict__`, the core's copy precedes the contribution in
         # the MRO and a contributed one is never reached. Where the core does
-        # not, a data descriptor under that name would answer on every
-        # instance.
-        descriptors = sorted({name for klass in chain
-                              for name, value in vars(klass).items()
-                              if _is_data_descriptor(value)
-                              and not (_is_dunder(name) and name in answered)})
+        # not, a descriptor under that name would answer on every instance.
+        reached = [(name, value) for klass in chain
+                   for name, value in vars(klass).items()
+                   if not (_is_dunder(name) and name in answered)]
+        descriptors = sorted({name for name, value in reached
+                              if _is_data_descriptor(value)})
         if descriptors:
             raise RouteBindingError(
                 f"the handler contribution {_describe(mixin)} defines "
@@ -900,6 +921,18 @@ def _refuse_an_unsafe_composition(base: type, contributions, *,
                 "per-instance state under its name, including state set in a "
                 "way no wiring-time measurement can read. A contribution holds "
                 "METHODS.")
+        foreign = sorted({name for name, value in reached
+                          if _is_foreign_descriptor(value)})
+        if foreign:
+            raise RouteBindingError(
+                f"the handler contribution {_describe(mixin)} defines "
+                f"{foreign} as descriptors that are not methods: each has a "
+                "`__get__` of its own, where a contribution may carry only a "
+                "function, a `staticmethod` or a `classmethod`. Such a "
+                "descriptor may answer the class and an instance differently, "
+                "and `resolve_handlers` checks each binding on the CLASS, so a "
+                "binding naming one could pass at wiring time and fail at "
+                "request time. A contribution holds METHODS.")
         names = {name for klass in chain for name in vars(klass)
                  if not _is_dunder(name)}
         shadowed = sorted(names & answered)

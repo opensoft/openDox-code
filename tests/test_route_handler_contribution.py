@@ -556,14 +556,15 @@ def test_a_bookkeeping_name_may_hold_a_data_descriptor_only_where_the_core_answe
     assert "__annotations__" in str(caught.value)
 
 
-def test_what_is_not_a_data_descriptor_is_contributed():
-    """A method, a `staticmethod`, a `classmethod`, a
-    `functools.cached_property` (the instance's own attribute takes
-    precedence over it, so it intercepts nothing) and a plain constant are
-    what a column of methods carries."""
+def test_methods_and_plain_values_are_what_a_contribution_carries():
+    """A method, a `staticmethod`, a `classmethod` and a plain constant are
+    what a column of methods carries. So is a callable that is not a
+    descriptor, which is looked up unchanged on the class and on an
+    instance."""
 
     class _Column:
         _LANE_LIMIT = 3
+        _lane_sort = sorted
 
         def _serve_column(self, head_only):
             return head_only
@@ -576,16 +577,58 @@ def test_what_is_not_a_data_descriptor_is_contributed():
         def _lane_kind(cls):
             return cls.__name__
 
-        @functools.cached_property
-        def _lane_cache(self):
-            return {}
-
     assert route_extension.collect_handler_contributions(
         (_contributor(_Column),), base=_CoreHandler) == (_Column,)
     bound = route_extension.compose_handler("BoundHandler", _CoreHandler,
                                             (_Column,), {})
     route_extension.resolve_handlers(
         (RouteBinding("GET", "/column.json", False, "_serve_column"),), bound)
+
+
+class _TwoFaced:
+    """A descriptor of a contribution's own that answers the class with a
+    method and an instance with a value."""
+
+    def __get__(self, instance, owner):
+        return (lambda *args: None) if instance is None else 42
+
+
+class _RebindingStaticmethod(staticmethod):
+    """A `staticmethod` subclass whose `__get__` is its own."""
+
+    def __get__(self, instance, owner=None):
+        return 42 if instance is not None else super().__get__(instance, owner)
+
+
+@pytest.mark.parametrize("value", (
+    _TwoFaced(),
+    functools.cached_property(lambda self: {}),
+    functools.partialmethod(lambda self, lane, head_only: None, "lane"),
+    _RebindingStaticmethod(lambda head_only: None),
+), ids=("a __get__ of its own", "a cached_property", "a partialmethod",
+        "a staticmethod subclass"))
+def test_a_contribution_carrying_a_descriptor_that_is_not_a_method_is_refused(value):
+    """Python binds a function, a `staticmethod` and a `classmethod` the same
+    way on the class and on an instance. Any other descriptor may answer the
+    two differently, and `resolve_handlers` checks each binding on the class.
+    The test is on the exact type, so a subclass with a `__get__` of its own
+    is refused too (Copilot's review of #40 at `0084434`)."""
+    carrying = type("_Carrying", (), {"_serve_carried": value})
+    with pytest.raises(RouteBindingError, match="not methods") as caught:
+        route_extension.collect_handler_contributions(
+            (_contributor(carrying),), base=_CoreHandler)
+    assert "_serve_carried" in str(caught.value)
+
+
+def test_a_non_method_descriptor_is_refused_because_its_binding_would_fail_at_request_time():
+    """Why the refusal above exists. Composed WITHOUT the facet's checks, a
+    binding naming `_TwoFaced` passes `resolve_handlers`, which looks on the
+    class, while a live handler answers the name with a value."""
+    carrying = type("_Carrying", (), {"_serve_carried": _TwoFaced()})
+    unchecked = type("Unchecked", (_CoreHandler, carrying), {})
+    binding = RouteBinding("GET", "/carried.json", False, "_serve_carried")
+    route_extension.resolve_handlers((binding,), unchecked)
+    assert not callable(getattr(_instance(unchecked), binding.handler))
 
 
 class _Touchy(type):
