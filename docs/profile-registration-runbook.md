@@ -58,6 +58,16 @@ domain_profile.register(<the host's profile module or object>)
 | --- | --- | --- |
 | `SUBCOMMAND_EXTENSIONS` | `cli.build_parser()` | a tuple of `subcommand_extension.SubcommandExtension` |
 | `ROUTE_EXTENSIONS` | `serve.build_server()` | a tuple of `route_extension.RouteExtension` |
+| `HANDLER_CONTRIBUTIONS` (optional) | `serve.build_server()` | a plain tuple of mixin classes, holding the methods the profile's route bindings name |
+
+`HANDLER_CONTRIBUTIONS` is `route_extension.HANDLER_FACET` (R1Q1 (a),
+openxFactory#656 comment 5817152735). A route extension may declare it too,
+beside its routes. `build_server()` composes every declared mixin into the
+class it binds, after the core handler, so the methods a contributed binding
+names need not be bases of the core handler. The facet is read by PRESENCE: an
+absent facet or `None` contributes nothing, so no refusal names it when it is
+missing. A contribution may only ADD. `src/route_extension.py`'s module
+docstring lists what it refuses and why.
 
 Reads happen at **first attribute access**, never at import time. `import
 opendox.cli` and `import opendox.profile_proxy` touch no registry and cannot
@@ -140,7 +150,8 @@ contract** — renaming `opendox/domain_profile.py` breaks Q5's one registration
 silently, and `tests/test_profile_registration.py` pins it for that reason.
 
 **One object, two readers.** Each reader names only what it reads: openDox
-reaches `SUBCOMMAND_EXTENSIONS` / `ROUTE_EXTENSIONS` and type-checks nothing;
+reaches `SUBCOMMAND_EXTENSIONS` / `ROUTE_EXTENSIONS` (and the optional
+`HANDLER_CONTRIBUTIONS`) and type-checks nothing;
 openXdox type-checks its own `DomainProfile` and treats anything else as "not
 here", leaving its own refusal standing. A host that wants one registration to
 serve both therefore registers a profile that satisfies both readers — for

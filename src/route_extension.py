@@ -100,14 +100,33 @@ wherever it would do more:
     OBJECT PROTOCOL, which is why `RouteBinding` refuses a dunder handler name.
     A contributed `__getattribute__` would sit in front of every gate the core
     reads off `self`;
+  * a DATA DESCRIPTOR: a `property`, a named slot, anything whose type defines
+    `__set__` or `__delete__`. A data descriptor takes precedence over an
+    instance's own attributes, so a contributed one named like state the core
+    sets on each request (`self.path`, `self.wfile`) would intercept that
+    state. The state is in no class's `dir()`, so no check made at wiring time
+    could compare against it. A contribution holds METHODS;
+  * a METACLASS other than the core handler's own, or one it derives from. The
+    composed class would take it, and a metaclass decides how the class itself
+    is called, compared, hashed and asked for a name. A metaclass whose
+    `__getattr__` answered any name would pass `resolve_handlers`, which looks
+    each binding's method up on the class, for a method no instance has;
   * an ancestor it shares with the core handler, other than `object`. So
     composing it can never reorder the core's MRO, which stays a prefix of the
     composed class's own;
-  * a declaration that is not a TUPLE of classes (a set's order would hang on
-    hashing, and a generator would compose nothing on a second build), a class
-    declared twice, or classes `type()` cannot compose at all. That last one
+  * a declaration that is not a plain TUPLE of classes (a set's order would
+    hang on hashing, a generator would compose nothing on a second build, and
+    a tuple subclass may iterate however it likes), a class declared twice, or
+    classes `type()` cannot compose at all. That last one
     `collect_handler_contributions` finds by composing once, before the build
     does its expensive work.
+
+Classes are compared by IDENTITY throughout, never by hash or equality, which
+belong to a class's metaclass. Every refusal names what it refuses through a
+formatter that cannot raise, since a contributor is an object this module
+cannot vet. The checks bound what a contribution does to the composed class.
+They are not a sandbox: a contributor is host code, running in the same
+process.
 
 The facet is OPTIONAL, and its absence is not a defect: a profile or an
 extension that declares none contributes no mixin, and the server binds the
@@ -542,6 +561,27 @@ def _is_dunder(name: str) -> bool:
     return len(name) > 4 and name.startswith("__") and name.endswith("__")
 
 
+def _is_class(obj) -> bool:
+    """Whether `obj` is a class, decided by its REAL type. `isinstance` would
+    also consult the `__class__` the object reports, which an object this
+    module cannot vet may make raise."""
+    return issubclass(type(obj), type)
+
+
+def _is_one_of(obj, candidates) -> bool:
+    """Membership by IDENTITY. A class's hash and equality belong to its
+    metaclass, and a contributed class may have one that refuses both."""
+    return any(candidate is obj for candidate in candidates)
+
+
+def _is_data_descriptor(value) -> bool:
+    """A `property`, a named slot, or anything else whose type defines
+    `__set__` or `__delete__`: an attribute that takes precedence over an
+    instance's own."""
+    return any("__set__" in vars(kind) or "__delete__" in vars(kind)
+               for kind in type(value).__mro__)
+
+
 class _ClassStatementBookkeeping:
     """Never composed. It exists to be asked, once at import, which dunders a
     `class` statement writes into a class namespace BY ITSELF on the running
@@ -562,39 +602,53 @@ class _ClassStatementBookkeeping:
 
 #: The dunders a mixin carries because it IS a class, not because it asked for
 #: behaviour: the bookkeeping measured above, plus `__slots__`. `__slots__`
-#: declares a layout rather than a hook. A layout that cannot be composed is
-#: refused by `compose_handler`, and a slot named like a core attribute is an
-#: ordinary shadowing refusal, because a slot is a name in the class namespace.
+#: declares a layout rather than a hook. An empty one adds nothing, and a
+#: named slot is a data descriptor, refused as one.
 _CLASS_BOOKKEEPING = frozenset(
     name for name in vars(_ClassStatementBookkeeping) if _is_dunder(name)
 ) | {"__slots__"}
 
 
+def _class_name(obj) -> str:
+    if not _is_class(obj):
+        return ""
+    return f"{str.__str__(obj.__module__)}.{str.__str__(obj.__qualname__)}"
+
+
+def _given_name(obj) -> str:
+    return str.__str__(getattr(obj, "__name__", ""))
+
+
+def _short_repr(obj) -> str:
+    text = str.__str__(repr(obj))
+    return text if len(text) <= _NAME_LIMIT else text[:_NAME_LIMIT - 1] + "…"
+
+
 def _describe(obj) -> str:
-    """A contributor's or a contribution's name, for a refusal. NEVER RAISES:
-    a refusal that fails while formatting itself replaces the reader's problem
-    with a worse one, and a contributor is an object this module cannot vet.
+    """A contributor's or a contribution's name, for a refusal. NEVER RAISES
+    an `Exception`: a refusal that fails while formatting itself replaces the
+    reader's problem with a worse one, and a contributor is an object this
+    module cannot vet.
 
     A class says `module.qualname`. Anything else says its `__name__` if it has
-    a string one (a profile MODULE), and otherwise its `repr`, truncated. A
-    lazy profile proxy refuses dunder lookups by design, and its `repr` does
-    not resolve the profile, so the proxy reaches the `repr` branch.
+    a string one (a profile MODULE), and otherwise its `repr`, truncated. Each
+    of those reads runs code the object's own type supplies, so each is tried
+    in turn, and a plain `str` is taken from whichever answers. An object that
+    none of them can name is described by its type. A lazy profile proxy
+    refuses dunder lookups by design, and its `repr` does not resolve the
+    profile, so the proxy reaches the `repr` branch.
     """
-    if isinstance(obj, type):
-        return f"{obj.__module__}.{obj.__qualname__}"
+    for read in (_class_name, _given_name, _short_repr):
+        try:
+            text = read(obj)
+        except Exception:          # noqa: BLE001 — naming must never out-raise
+            continue
+        if text:
+            return text
     try:
-        name = getattr(obj, "__name__", None)
-    except Exception:          # noqa: BLE001 — naming must never out-raise
-        name = None
-    if isinstance(name, str) and name:
-        return name
-    try:
-        text = repr(obj)
-    except Exception:          # noqa: BLE001
-        text = ""
-    if text:
-        return text if len(text) <= _NAME_LIMIT else text[:_NAME_LIMIT - 1] + "…"
-    return f"a {type(obj).__name__}"
+        return f"a {str.__str__(type(obj).__name__)}"
+    except Exception:              # noqa: BLE001
+        return "an object that cannot be named"
 
 
 def declared_handler_contributions(contributor) -> tuple[type, ...]:
@@ -602,7 +656,7 @@ def declared_handler_contributions(contributor) -> tuple[type, ...]:
 
     Returns `()` when the contributor declares nothing, and the classes when it
     declares some. A malformed declaration is refused: the value must be a
-    TUPLE of classes. Every refusal names what it was handed through
+    plain TUPLE of classes. Every refusal names what it was handed through
     `_describe`, so a declaration whose `repr` raises is still refused with
     `RouteBindingError`.
 
@@ -616,16 +670,17 @@ def declared_handler_contributions(contributor) -> tuple[type, ...]:
     declared = getattr(contributor, HANDLER_FACET, None)
     if declared is None:
         return ()
-    if not isinstance(declared, tuple):
+    if type(declared) is not tuple:
         raise RouteBindingError(
             f"{_describe(contributor)} declares {HANDLER_FACET} = "
-            f"{_describe(declared)}, which is not a tuple of classes. Declare "
-            "the mixins as a tuple, even for one: `(Mixin,)`, not `Mixin`. A "
-            "list, a set or a generator is refused too. A set would make the "
-            "composed class's MRO depend on hashing, and a generator would "
-            "compose nothing the second time a server is built.")
+            f"{_describe(declared)}, which is not a plain tuple of classes. "
+            "Declare the mixins as a tuple, even for one: `(Mixin,)`, not "
+            "`Mixin`. A list, a set, a generator or a tuple subclass is "
+            "refused too. A set would make the composed class's MRO depend on "
+            "hashing, a generator would compose nothing the second time a "
+            "server is built, and a subclass may iterate however it likes.")
     for item in declared:
-        if not isinstance(item, type):
+        if not _is_class(item):
             raise RouteBindingError(
                 f"{_describe(contributor)} declares {_describe(item)} under "
                 f"{HANDLER_FACET}, which is not a class. A handler "
@@ -643,31 +698,48 @@ def _refuse_an_unsafe_composition(base: type, contributions, *,
     `namespace` holds the class attributes the composed class will carry
     itself; a contributed name that one of them would shadow is refused as
     well.
+
+    The metaclass is checked FIRST, from `type(mixin)` alone, because every
+    later read of the mixin (its MRO, its namespace, its name) runs through
+    it. Classes are compared by identity throughout (`_is_one_of`).
     """
-    core = set(base.__mro__)
+    core = base.__mro__
+    core_metaclasses = type(base).__mro__
     answered = set(dir(base))
     own_attributes = set(namespace)
     owner: dict[str, type] = {}
     for mixin in contributions:
-        if not isinstance(mixin, type):
+        if not _is_class(mixin):
             raise RouteBindingError(
                 f"{_describe(mixin)} is not a class, so it cannot be composed "
                 f"onto {_describe(base)}: a handler contribution is a mixin "
                 "CLASS.")
-        if mixin in core:
+        if not _is_one_of(type(mixin), core_metaclasses):
+            raise RouteBindingError(
+                f"the handler contribution {_describe(mixin)} is built by the "
+                f"metaclass {_describe(type(mixin))}, which is neither the "
+                f"core handler {_describe(base)}'s metaclass "
+                f"({_describe(type(base))}) nor one it derives from. The "
+                "composed class would take that metaclass, and a metaclass "
+                "decides how the class itself is called, compared, hashed and "
+                "asked for a name: the OBJECT PROTOCOL of the class. One whose "
+                "`__getattr__` answered any name would pass `resolve_handlers`, "
+                "which looks each binding's method up on the class, for a "
+                "method no instance has.")
+        if _is_one_of(mixin, core):
             raise RouteBindingError(
                 f"the handler contribution {_describe(mixin)} is already in "
                 f"{_describe(base)}'s MRO, so declaring it composes nothing. "
                 "A declaration that changes nothing is refused, for the "
                 "reason a binding that never fires is.")
-        if issubclass(mixin, base):
+        chain = [klass for klass in mixin.__mro__ if klass is not object]
+        if _is_one_of(base, chain):
             raise RouteBindingError(
                 f"the handler contribution {_describe(mixin)} subclasses the "
                 f"core handler {_describe(base)}. That makes it a second "
                 "handler, not a mixin, and a second handler is a fork of the "
                 "core rather than a contribution to it.")
-        chain = [klass for klass in mixin.__mro__ if klass is not object]
-        shared = [klass for klass in chain if klass in core]
+        shared = [klass for klass in chain if _is_one_of(klass, core)]
         if shared:
             raise RouteBindingError(
                 f"the handler contribution {_describe(mixin)} shares ancestry "
@@ -685,6 +757,20 @@ def _refuse_an_unsafe_composition(base: type, contributions, *,
                 "handler itself behaves. That is a privileged route, not a "
                 "contributed one, and the reason `RouteBinding` refuses a "
                 "dunder handler name.")
+        descriptors = sorted({name for klass in chain
+                              for name, value in vars(klass).items()
+                              if not _is_dunder(name)
+                              and _is_data_descriptor(value)})
+        if descriptors:
+            raise RouteBindingError(
+                f"the handler contribution {_describe(mixin)} defines "
+                f"{descriptors} as DATA DESCRIPTORS (a property, a named slot, "
+                "anything whose type defines `__set__` or `__delete__`). A data "
+                "descriptor takes precedence over an instance's own "
+                "attributes, so one named like state the core handler sets on "
+                "each request (`self.path`, `self.wfile`) would intercept it, "
+                "and that state is in no class's `dir()` for a wiring-time "
+                "check to compare against. A contribution holds METHODS.")
         names = {name for klass in chain for name in vars(klass)
                  if not _is_dunder(name)}
         shadowed = sorted(names & answered)
@@ -745,24 +831,24 @@ def collect_handler_contributions(contributors, *, base: type) -> tuple[type, ..
 
     The same class declared twice is refused, whether one contributor declared
     it twice or two contributors declared it once each: which declaration
-    composed it would be an accident of assembly.
+    composed it would be an accident of assembly. "The same" is identity,
+    never a hash, which a contributed class's metaclass may refuse.
 
     The composition itself belongs to `compose_handler`, which repeats these
     checks against the class it actually creates.
     """
-    contributions: list[type] = []
-    declared_by: dict[type, object] = {}
+    declared: list[tuple[type, object]] = []
     for contributor in contributors:
         for mixin in declared_handler_contributions(contributor):
-            if mixin in declared_by:
+            earlier = [by for seen, by in declared if seen is mixin]
+            if earlier:
                 raise RouteBindingError(
                     f"the handler contribution {_describe(mixin)} is declared "
-                    f"twice, by {_describe(declared_by[mixin])} and by "
+                    f"twice, by {_describe(earlier[0])} and by "
                     f"{_describe(contributor)}. Declare each mixin once, beside "
                     "the bindings whose methods it holds.")
-            declared_by[mixin] = contributor
-            contributions.append(mixin)
-    collected = tuple(contributions)
+            declared.append((mixin, contributor))
+    collected = tuple(mixin for mixin, _by in declared)
     _refuse_an_unsafe_composition(base, collected)
     if collected:
         _compose("_ComposabilityPreflight", base, collected, {})
@@ -781,17 +867,18 @@ def compose_handler(name: str, base: type, contributions, namespace) -> type:
     this facet existed. A `TypeError` from `type` itself, such as an MRO or
     layout conflict, is converted into the module's one refusal.
 
-    `contributions` is a TUPLE, as `collect_handler_contributions` returns
-    it, for the reason the facet is one: the composition must not depend on
-    iteration state.
+    `contributions` is a plain TUPLE, as `collect_handler_contributions`
+    returns it, for the reason the facet is one: the composition must not
+    depend on iteration state.
     """
-    if not isinstance(contributions, tuple):
+    if type(contributions) is not tuple:
         raise RouteBindingError(
-            f"compose_handler takes the contributions as a tuple, as "
+            f"compose_handler takes the contributions as a plain tuple, as "
             f"collect_handler_contributions returns them, not "
             f"{_describe(contributions)}.")
-    duplicates = sorted({_describe(mixin) for mixin in contributions
-                         if contributions.count(mixin) > 1})
+    duplicates = sorted({_describe(mixin)
+                         for index, mixin in enumerate(contributions)
+                         if _is_one_of(mixin, contributions[:index])})
     if duplicates:
         raise RouteBindingError(
             f"the handler contributions {duplicates} are each listed more "

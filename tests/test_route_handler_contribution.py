@@ -21,8 +21,10 @@ WHAT IT ASSERTS
    and the facet must not weaken it.
 3. A CONTRIBUTION MAY ONLY ADD. Each refusal the module docstring lists is
    asserted: a shadowed core name, a clash between contributions, the object
-   protocol, shared ancestry, a malformed or doubled declaration, and a layout
-   `type()` itself cannot compose.
+   protocol, a data descriptor, a metaclass of the contribution's own, shared
+   ancestry, a malformed or doubled declaration, and an MRO `type()` itself
+   cannot compose. Classes are compared by identity, and no refusal raises
+   while it formats what it refuses.
 4. ABSENCE IS NOT A DEFECT. A contributor that declares nothing composes the
    core alone, and the core's MRO stays a prefix of the composed class's.
 5. THE SERVER IS WIRED THROUGH IT. `opendox.serve` cannot be imported until
@@ -40,7 +42,9 @@ A CREATED file: no carve-manifest row (RULED OQ-C).
 
 from __future__ import annotations
 
+import abc
 import ast
+import functools
 import http.server
 import sys
 from pathlib import Path
@@ -321,21 +325,160 @@ def test_a_contribution_entangled_with_the_core_is_refused(mixin, because):
             (_contributor(mixin),), base=_CoreHandler)
 
 
+class _SetOnly:
+    """A descriptor that defines `__set__` alone."""
+
+    def __set__(self, instance, value):
+        pass
+
+
+class _DeleteOnly:
+    """A descriptor that defines `__delete__` alone."""
+
+    def __delete__(self, instance):
+        pass
+
+
+@pytest.mark.parametrize("mixin", (
+    type("_ReadOnly", (), {"wfile": property(lambda self: None)}),
+    type("_Settable", (), {"wfile": property(lambda self: None,
+                                             lambda self, value: None)}),
+    type("_Slotted", (), {"__slots__": ("wfile",)}),
+    type("_Setter", (), {"wfile": _SetOnly()}),
+    type("_Deleter", (), {"wfile": _DeleteOnly()}),
+), ids=("a read-only property", "a property with a setter", "a named slot",
+        "a __set__ descriptor", "a __delete__ descriptor"))
+def test_a_contribution_carrying_a_data_descriptor_is_refused(mixin):
+    """`wfile` is the stream the stdlib handler sets on each request, so no
+    class's `dir()` lists it and the shadowing refusal cannot see it. A data
+    descriptor of that name would intercept the core's own assignment (a
+    read-only one would make it raise), so any data descriptor is refused."""
+    assert "wfile" not in dir(_CoreHandler)
+    with pytest.raises(RouteBindingError, match="DATA DESCRIPTORS") as caught:
+        route_extension.collect_handler_contributions(
+            (_contributor(mixin),), base=_CoreHandler)
+    assert "wfile" in str(caught.value)
+
+
+def test_what_is_not_a_data_descriptor_is_contributed():
+    """A method, a `staticmethod`, a `classmethod`, a
+    `functools.cached_property` (the instance's own attribute takes
+    precedence over it, so it intercepts nothing) and a plain constant are
+    what a column of methods carries."""
+
+    class _Column:
+        _LANE_LIMIT = 3
+
+        def _serve_column(self, head_only):
+            return head_only
+
+        @staticmethod
+        def _lane_key(name):
+            return name.lower()
+
+        @classmethod
+        def _lane_kind(cls):
+            return cls.__name__
+
+        @functools.cached_property
+        def _lane_cache(self):
+            return {}
+
+    assert route_extension.collect_handler_contributions(
+        (_contributor(_Column),), base=_CoreHandler) == (_Column,)
+    bound = route_extension.compose_handler("BoundHandler", _CoreHandler,
+                                            (_Column,), {})
+    route_extension.resolve_handlers(
+        (RouteBinding("GET", "/column.json", False, "_serve_column"),), bound)
+
+
+class _Touchy(type):
+    """A metaclass whose classes can be neither hashed nor compared. Defining
+    `__eq__` sets `__hash__` to `None`, and this `__eq__` refuses as well."""
+
+    def __eq__(cls, other):
+        raise RuntimeError("this class refuses to be compared")
+
+    __hash__ = None
+
+
+class _Answering(type):
+    """A metaclass that answers ANY name looked up on its classes."""
+
+    def __getattr__(cls, name):
+        return lambda self, *args: None
+
+
+class _Nameless(type):
+    """A metaclass whose classes refuse to say where they live."""
+
+    def __getattribute__(cls, name):
+        if name in ("__module__", "__qualname__"):
+            raise RuntimeError("this class refuses to be named")
+        return super().__getattribute__(name)
+
+
+@pytest.mark.parametrize("mixin", (
+    _Touchy("_TouchyLanes", (), {"_serve_touchy": lambda self, h: None}),
+    _Answering("_AnsweringLanes", (), {"_serve_answering": lambda self, h: None}),
+    _Nameless("_NamelessLanes", (), {"_serve_nameless": lambda self, h: None}),
+    type("_AbstractLanes", (abc.ABC,), {"_serve_abstract": lambda self, h: None}),
+), ids=("unhashable and uncomparable", "answers any name", "refuses to be named",
+        "an ABC"))
+def test_a_contribution_built_by_a_metaclass_of_its_own_is_refused(mixin):
+    """The composed class would take the contribution's metaclass, and with it
+    how the class itself is called, compared, hashed and named. So a metaclass
+    that is not the core's is refused, by both entry points, and the refusal
+    still names the mixin when its metaclass refuses to."""
+    with pytest.raises(RouteBindingError, match="metaclass") as caught:
+        route_extension.collect_handler_contributions(
+            (_contributor(mixin),), base=_CoreHandler)
+    assert mixin.__name__ in str(caught.value)
+    with pytest.raises(RouteBindingError, match="metaclass"):
+        route_extension.compose_handler("BoundHandler", _CoreHandler, (mixin,),
+                                        {})
+
+
+def test_a_metaclass_is_refused_because_it_would_pass_a_binding_no_instance_answers():
+    """Why the refusal above exists. Composed WITHOUT the facet's checks, a
+    mixin built by `_Answering` makes the composed class answer any name. So
+    `resolve_handlers`, which looks each binding's method up on the class,
+    passes a binding whose method no instance has. The request would then fail
+    at dispatch, where the build should have been refused at wiring time."""
+    answering = _Answering("_AnsweringLanes", (), {})
+    unchecked = type("Unchecked", (_CoreHandler, answering), {})
+    stray = RouteBinding("GET", "/nowhere.json", False, "_serve_nowhere")
+    route_extension.resolve_handlers((stray,), unchecked)
+    assert not hasattr(_instance(unchecked), "_serve_nowhere")
+    with pytest.raises(RouteBindingError, match="metaclass"):
+        route_extension.collect_handler_contributions(
+            (_contributor(answering),), base=_CoreHandler)
+
+
+class _IteratesNothing(tuple):
+    """A tuple subclass that holds a mixin and iterates none of it."""
+
+    def __iter__(self):
+        return iter(())
+
+
 @pytest.mark.parametrize("declared,because", (
-    (_Lanes, "not a tuple of classes"),
-    ("_Lanes", "not a tuple of classes"),
-    (7, "not a tuple of classes"),
-    ([_Lanes], "not a tuple of classes"),
-    ({_Lanes}, "not a tuple of classes"),
-    ((mixin for mixin in (_Lanes,)), "not a tuple of classes"),
+    (_Lanes, "not a plain tuple of classes"),
+    ("_Lanes", "not a plain tuple of classes"),
+    (7, "not a plain tuple of classes"),
+    ([_Lanes], "not a plain tuple of classes"),
+    ({_Lanes}, "not a plain tuple of classes"),
+    ((mixin for mixin in (_Lanes,)), "not a plain tuple of classes"),
+    (_IteratesNothing((_Lanes,)), "not a plain tuple of classes"),
     ((_Lanes(),), "is not a class"),
     ((lambda self: None,), "is not a class"),
 ), ids=("a bare class", "a string", "an int", "a list", "a set", "a generator",
-        "an instance", "a function"))
+        "a tuple subclass", "an instance", "a function"))
 def test_a_malformed_declaration_is_refused(declared, because):
-    """A TUPLE of classes, and nothing looser. A set's iteration order would
-    decide the composed MRO, and a generator would declare its mixins once and
-    nothing on the next build."""
+    """A plain TUPLE of classes, and nothing looser. A set's iteration order
+    would decide the composed MRO, a generator would declare its mixins once
+    and nothing on the next build, and a tuple subclass may iterate however
+    it likes: this one holds a mixin and iterates none."""
     contributor = type("_Malformed", (), {
         route_extension.HANDLER_FACET: declared})()
     with pytest.raises(RouteBindingError, match=because):
@@ -362,6 +505,48 @@ def test_a_refusal_never_raises_while_formatting_what_it_refuses(declared):
     with pytest.raises(RouteBindingError, match="a _Unprintable is not a class"):
         route_extension.compose_handler("BoundHandler", _CoreHandler,
                                         (_Unprintable(),), {})
+
+
+def test_classes_are_compared_by_identity_never_by_hash_or_equality():
+    """A class whose metaclass refuses hashing and comparison reaches every
+    refusal as `RouteBindingError`, never as the metaclass's own exception
+    (Copilot's review of #40 at `6b429f7`, "Previously missed")."""
+    one = _Touchy("_One", (), {"_one": lambda self: None})
+    two = _Touchy("_Two", (), {"_two": lambda self: None})
+    for contributors in ((_contributor(one, one),),
+                         (_contributor(one), _contributor(one))):
+        with pytest.raises(RouteBindingError, match="declared twice"):
+            route_extension.collect_handler_contributions(
+                contributors, base=_CoreHandler)
+    with pytest.raises(RouteBindingError, match="more than once"):
+        route_extension.compose_handler("BoundHandler", _CoreHandler,
+                                        (one, one), {})
+    with pytest.raises(RouteBindingError, match="metaclass"):
+        route_extension.compose_handler("BoundHandler", _CoreHandler,
+                                        (one, two), {})
+
+
+class _Disguised:
+    """An object whose reported `__class__` raises. `isinstance` consults the
+    `__class__` an object reports, so an `isinstance` check would raise too."""
+
+    @property
+    def __class__(self):
+        raise RuntimeError("this object refuses to say what it is")
+
+
+def test_an_object_that_misreports_its_class_is_refused_not_raised():
+    """The facet asks an object's REAL type what it is, never its reported
+    `__class__`, so each of these is refused as what it is."""
+    for declared in (_Disguised(), (_Disguised(),)):
+        contributor = type("_Malformed", (), {
+            route_extension.HANDLER_FACET: declared})()
+        with pytest.raises(RouteBindingError, match="_Disguised"):
+            route_extension.declared_handler_contributions(contributor)
+    with pytest.raises(RouteBindingError,
+                       match="_Disguised object at .* is not a class"):
+        route_extension.compose_handler("BoundHandler", _CoreHandler,
+                                        (_Disguised(),), {})
 
 
 def test_a_mixin_declared_twice_is_refused_whoever_declares_it():
@@ -391,14 +576,24 @@ def test_compose_handler_repeats_the_checks_where_it_makes_the_class():
                                         (_Lanes, _Lanes), {})
 
 
+def _declared_ahead_of_its_own_subclass():
+    """Two mixins no MRO can linearize. `_Root` is declared first, so it must
+    precede `_Leaf` among the bases, and `_Leaf` derives from it, so it must
+    follow it. Only `type()` finds that: neither mixin shadows, clashes or
+    carries a hook."""
+    root = type("_Root", (), {})
+    leaf = type("_Leaf", (root,), {"_serve_leaf": lambda self, h: None})
+    return root, leaf
+
+
 def test_classes_type_cannot_compose_are_refused_not_raised_as_typeerror():
-    """Two slotted mixins with slots of their own conflict in layout. `type()`
-    raises `TypeError`, and the build must see the module's one refusal."""
-    left = type("_Left", (), {"__slots__": ("_left",)})
-    right = type("_Right", (), {"__slots__": ("_right",)})
-    with pytest.raises(RouteBindingError, match="cannot be composed"):
+    """`type()` raises `TypeError` for the MRO, and the build must see the
+    module's one refusal, with the `TypeError` as its cause."""
+    with pytest.raises(RouteBindingError, match="cannot be composed") as caught:
         route_extension.compose_handler("BoundHandler", _CoreHandler,
-                                        (left, right), {})
+                                        _declared_ahead_of_its_own_subclass(),
+                                        {})
+    assert isinstance(caught.value.__cause__, TypeError)
 
 
 def test_collect_finds_what_type_cannot_compose_before_the_build_does():
@@ -406,20 +601,18 @@ def test_collect_finds_what_type_cannot_compose_before_the_build_does():
     are collected, before the build does any expensive work, and it composes
     the contributions once itself. So a conflict only `type()` can find refuses
     there, rather than after the snapshot source and the sessions are up."""
-    left = type("_Left", (), {"__slots__": ("_left",)})
-    right = type("_Right", (), {"__slots__": ("_right",)})
     with pytest.raises(RouteBindingError, match="cannot be composed"):
         route_extension.collect_handler_contributions(
-            (_contributor(left, right),), base=_CoreHandler)
+            (_contributor(*_declared_ahead_of_its_own_subclass()),),
+            base=_CoreHandler)
 
 
 def test_compose_handler_takes_the_contributions_as_a_tuple():
-    with pytest.raises(RouteBindingError, match="as a tuple"):
-        route_extension.compose_handler("BoundHandler", _CoreHandler,
-                                        [_Lanes], {})
-    with pytest.raises(RouteBindingError, match="as a tuple"):
-        route_extension.compose_handler("BoundHandler", _CoreHandler,
-                                        (m for m in (_Lanes,)), {})
+    for contributions in ([_Lanes], (m for m in (_Lanes,)),
+                          _IteratesNothing((_Lanes,))):
+        with pytest.raises(RouteBindingError, match="as a plain tuple"):
+            route_extension.compose_handler("BoundHandler", _CoreHandler,
+                                            contributions, {})
 
 
 # ---------------------------------------------------------------------------
