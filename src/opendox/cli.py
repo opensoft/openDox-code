@@ -99,8 +99,11 @@ generate_snapshot = consumer_reach.generate_snapshot  # noqa: E402
 # resolves here, at import time; the FIRST attribute read resolves the profile
 # the host registered at process start
 # (`opendox.domain_profile.register(...)`, docs/profile-registration-runbook.md)
-# and refuses, naming that call, when no host did. The READ at :927 is
-# unchanged — this is a binding, not a rewrite of the composition point.
+# or, where no host did, openDox's own default, which `build_parser()` and
+# `main()` register first (R1Q3 (a), openxFactory#656 comment 5817152735). The
+# read still refuses, naming that call, where nothing is registered at all. The
+# READ at :927 is unchanged — this is a binding, not a rewrite of the
+# composition point.
 #
 # THE `build_parser()` DOCSTRING BELOW STILL DESCRIBES THE IN-TREE PROFILE
 # ("the one line the § 3 carve deletes rather than moves") and is NOT corrected
@@ -110,6 +113,10 @@ generate_snapshot = consumer_reach.generate_snapshot  # noqa: E402
 # an act that declares them lands — the same posture, for the same reason, that
 # BUILD slice 2b took at `serve.py`'s matching docstring.
 from opendox.profile_proxy import profile_openxfactory  # noqa: E402
+# openDox's OWN default profile, and the registry an entry point registers it
+# in (R1Q3 (a)). Importing either registers nothing: `build_parser()` and
+# `main()` below make the registration, and only where no host has made one.
+from opendox import default_profile, domain_profile  # noqa: E402
 is_rfc3339_datetime = consumer_reach.is_rfc3339_datetime  # noqa: E402
 # ...and `SCANNED_ROOTS` keeps its NAME and its behaviour, not just its value:
 # :239 iterates it (`for root in SCANNED_ROOTS`) and that line is not one the
@@ -873,6 +880,12 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     adds on top. It is also the one line the § 3 carve deletes rather than
     moves: afterwards the core names no profile and openXdox declares its own.
     """
+    # THE ENTRY POINT'S DEFAULT (R1Q3 (a), openxFactory#656 comment
+    # 5817152735): where no host has registered a profile, register openDox's
+    # own, so the `SUBCOMMAND_EXTENSIONS` read below builds on it instead of
+    # refusing. A host registered before this line keeps its own; one that
+    # registers after this parser is built is refused (R1Q3 (ii); RN-1 (a)).
+    domain_profile.register_default(default_profile)
     parser = argparse.ArgumentParser(prog="ideation-dashboard", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -966,6 +979,9 @@ def main(argv: list[str] | None = None, *,
     `func` on the same subparsers action every core one does, so `args.func(args)`
     dispatches both by the identical line. That is the point of handing the real
     parser to the extension rather than a wrapper."""
+    # The process entry point registers openDox's own default where no host has
+    # (R1Q3 (a)), exactly where a host would register its own.
+    domain_profile.register_default(default_profile)
     args = build_parser(
         subcommand_extensions=subcommand_extensions).parse_args(argv)
     try:

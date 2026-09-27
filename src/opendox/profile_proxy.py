@@ -30,11 +30,29 @@ number `tests/test_consumer_reach.py` exists to hold.
 WHAT IT RESOLVES, AND WHEN. Nothing at import time. `import
 opendox.profile_proxy` performs no lookup, touches no registry and cannot fail
 for want of a host. The FIRST attribute read — `SUBCOMMAND_EXTENSIONS`,
-`ROUTE_EXTENSIONS`, anything else a composition point comes to need — calls
-`domain_profile.current()` and forwards. The resolved profile is deliberately
-NOT cached here: `domain_profile` holds the one registration, caching a second
-copy would let this module answer with a profile a host had since
-`unregister()`ed, and the lookup is an attribute read on a module global.
+`ROUTE_EXTENSIONS`, anything else a composition point comes to need — resolves
+the registration and forwards. The resolved profile is deliberately NOT cached
+here: `domain_profile` holds the one registration, caching a second copy would
+let this module answer with a profile a host had since `unregister()`ed, and
+the lookup is an attribute read on a module global.
+
+WHICH READ IS A BUILD (R1Q3 (ii); RN-1 (a), `openxFactory#656` comment
+`5850003126`). Only a composition point's read of the facet it composes from:
+`SUBCOMMAND_EXTENSIONS`, which `cli.build_parser()` reads, and
+`ROUTE_EXTENSIONS`, which `serve.build_server()` reads. `_LateProfile.READERS`
+names both. Those two reads go through `domain_profile.current_for_build()`,
+which is `current()` plus one record: where the registration is openDox's own
+default, a parser or a server has now been built from it, so a host's later
+`register()` is refused rather than applied. Every other read goes through
+`domain_profile.current()` and records nothing. That covers `resolve()`, the
+`DISPLAY` and `VIEW_EXTENSIONS` facets and anything else. Diagnostics and
+`canvas_drafts` reach those reads outside any build as readily as inside one
+(`view_extension.host_profile_name()`, `display_profile.host_display()`,
+`view_extension.host_view_facet()`), so none of them may close the window in
+which a host's registration still replaces the default (Copilot review thread
+on openDox-code#42). `HANDLER_CONTRIBUTIONS` (plan 034's T010), which
+`serve.build_server()` also reads, is optional and is not in `READERS`: the
+server's build is recorded at its `ROUTE_EXTENSIONS` read.
 
 HOW IT REFUSES, AND WHY IT NEVER RETURNS `()`. Two distinct failures, two
 distinct messages:
@@ -44,6 +62,13 @@ distinct messages:
   own terms and by the failure mode: a parser whose contributed verbs are
   silently absent is indistinguishable from a working one until someone types
   the missing command, and the same is true of a server's contributed routes.
+  The refusal is KEPT for the case this file was written for (R1Q3 (i),
+  `openxFactory#656` comment `5817152735`). The entry points register openDox's
+  own default first, so a read reached through `cli.build_parser()` or
+  `serve.build_server()` resolves the default where no host registered one. The
+  refusal is what a process meets when it reads the profile having built
+  nothing through an entry point, or after `unregister()` has dropped the
+  registration.
 * REGISTERED, BUT LACKING THE FACET -> `ProfileFacetMissing`, naming the
   attribute, the profile and the reader. That is a real and reportable gap in a
   host's profile rather than a missing registration, and telling a host to
@@ -102,6 +127,11 @@ class _LateProfile:
     #: review thread on openDox-code#11, when `serve` had no read at all). A
     #: facet not listed here falls back to `_reader`, the whole composition
     #: surface, because naming too much is a smaller failure than naming wrong.
+    #:
+    #: THE SAME TABLE SAYS WHICH READ IS A BUILD. Each facet here is read by ONE
+    #: composition point, at the moment it composes, so its read is recorded
+    #: through `domain_profile.current_for_build()`. A facet read anywhere else,
+    #: and every facet not listed, only asks (see the module docstring).
     READERS = {
         "SUBCOMMAND_EXTENSIONS": "cli.build_parser()",
         "ROUTE_EXTENSIONS": "serve.build_server()",
@@ -117,8 +147,15 @@ class _LateProfile:
     def resolve(self) -> Any:
         """The registered profile, or `ProfileNotRegistered` naming the call.
 
-        Every read goes through `domain_profile.current()` — no local cache, so
-        an `unregister()` is seen immediately and one registration stays one.
+        Every read goes through `domain_profile` — no local cache, so an
+        `unregister()` is seen immediately and one registration stays one.
+
+        Resolving is ASKING, never building: this goes through
+        `domain_profile.current()` and records nothing.
+        `view_extension.host_profile_name()` resolves the proxy this way for a
+        diagnostic, and a diagnostic builds nothing. The build is recorded only
+        where a composition point reads the facet it composes from (`READERS`;
+        `__getattr__` below).
         """
         return domain_profile.current()
 
@@ -133,7 +170,10 @@ class _LateProfile:
         # line for the same reason.
         if attr.startswith("__") and attr.endswith("__"):
             raise AttributeError(attr)
-        profile = self.resolve()
+        # A composition point's read of the facet it composes from IS the build
+        # (R1Q3 (ii); RN-1 (a)), and every other read only asks.
+        profile = (domain_profile.current_for_build() if attr in self.READERS
+                   else self.resolve())
         try:
             return getattr(profile, attr)
         except AttributeError:
