@@ -312,7 +312,8 @@ def test_the_scanner_classifies_every_position_it_reads():
 #: spelling. The class body is not lazy, so its reach runs at import time. A
 #: `__import__` with a nonzero `level` is relative, and names no sibling. A
 #: relative `import_module` names the module its literal `package` resolves it
-#: to, by position or by keyword. Relative to `__package__`, it names none.
+#: to, by position or by keyword. Relative to `__package__`, it names none;
+#: relative to any other package that is not a literal, it is `UNREADABLE`.
 #: Arguments spelled out with a literal `*[...]` or `**{...}`, however deep,
 #: count where they land. A spread that hides the name, or the package a
 #: relative name needs, makes the call `UNREADABLE`, which the sweep refuses.
@@ -344,6 +345,7 @@ _LAZY_SPECIMEN = textwrap.dedent('''
     OVERRIDES = importlib.import_module(**{**OPTIONS, "name": "doc_health"})
     KEYED = importlib.import_module(**{"name": "safe", KEY: "doc_health"})
     NESTED_OVER = importlib.import_module(**{"name": "safe", **{**OPTIONS}})
+    BOUND = importlib.import_module(".corpus", package=PKG)
 ''')
 
 
@@ -368,6 +370,7 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (24, "doc_health", False, "<module>"),
         (25, UNREADABLE, False, "<module>"),
         (26, UNREADABLE, False, "<module>"),
+        (27, UNREADABLE, False, "<module>"),
     }, sorted(found)
 
 

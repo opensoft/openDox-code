@@ -186,11 +186,12 @@ def names_imported_by(node, *, calls=None, any_call=False):
     `UNREADABLE`. A relative name is resolved where the call itself says what it
     is relative to, a literal `package`, by keyword or as the second argument. So
     `import_module(".corpus", package="doc_health")` names
-    `doc_health.corpus`. Otherwise it is relative to the calling module's own
-    package, and names nothing here. That covers a `package` that is not a
-    literal (`__package__`, say), and `__import__` with a nonzero literal
-    `level`, whose second argument is `globals`. A name computed at run time
-    cannot be read off the source.
+    `doc_health.corpus`. Relative to the calling module's own package
+    (`package=__package__`), or with no package at all, it names nothing
+    here, and neither does `__import__` with a nonzero literal `level`, whose
+    second argument is `globals`. Any other package that is not a literal
+    could be a sibling, so the call names `UNREADABLE`. A name computed at run
+    time cannot be read off the source.
     """
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
@@ -217,8 +218,11 @@ def names_imported_by(node, *, calls=None, any_call=False):
     package = args[1] if len(args) > 1 else keywords.get("package")
     if package is None and not complete:
         return [UNREADABLE]
-    if not (isinstance(package, ast.Constant) and isinstance(package.value, str)):
+    if package is None or (isinstance(package, ast.Constant) and package.value is None) \
+            or (isinstance(package, ast.Name) and package.id == "__package__"):
         return []
+    if not (isinstance(package, ast.Constant) and isinstance(package.value, str)):
+        return [UNREADABLE]
     try:
         return [importlib.util.resolve_name(name.value, package.value)]
     except ImportError:
