@@ -37,30 +37,78 @@ from __future__ import annotations
 import ast
 
 #: The two calls that import a module named by a STRING, as #1144's F4.1 scan
-#: reads them: `importlib.import_module` and the builtin `__import__`, reached
-#: through a module (`importlib.import_module`) or by a bare name.
-IMPORTING_CALLS = ("import_module", "__import__")
+#: reads them, each mapped to itself: `importlib.import_module` and the
+#: builtin `__import__`, reached through a module (`importlib.import_module`)
+#: or by a bare name. `importing_calls` adds the other names a module gives them.
+IMPORTING_CALLS = {"import_module": "import_module", "__import__": "__import__"}
 
 
-def names_imported_by(node, *, calls=False):
+def _called_name(expr):
+    """The name a call site reaches its callable by: `f` for `f(...)` and for
+    `m.f(...)`, and None for anything else."""
+    if isinstance(expr, ast.Attribute):
+        return expr.attr
+    if isinstance(expr, ast.Name):
+        return expr.id
+    return None
+
+
+def importing_calls(tree):
+    """`IMPORTING_CALLS`, and every other name `tree` gives one of them.
+
+    A module can call the two under a name of its own: `from importlib import
+    import_module as load`, `from builtins import __import__ as imp`, or an
+    assignment, `load = importlib.import_module`, followed as far as it chains
+    (`again = load`). The result maps each such name to the call it is. A
+    callable reached any other way, through `getattr`, a `functools.partial` or
+    a parameter, cannot be read off the source.
+    """
+    calls = dict(IMPORTING_CALLS)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 \
+                and node.module in ("importlib", "builtins"):
+            for alias in node.names:
+                if alias.name in IMPORTING_CALLS and alias.asname:
+                    calls[alias.asname] = alias.name
+    assignments = [node for node in ast.walk(tree)
+                   if isinstance(node, (ast.Assign, ast.AnnAssign))
+                   and node.value is not None]
+    grew = True
+    while grew:
+        grew = False
+        for node in assignments:
+            call = calls.get(_called_name(node.value))
+            if call is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in calls:
+                    calls[target.id] = call
+                    grew = True
+    return calls
+
+
+def names_imported_by(node, *, calls=None):
     """The absolute module names ONE syntax node imports.
 
     `import a.b, c` names `a.b` and `c`; `from a.b import c` names `a.b`; a
     relative import names nothing, for the reason `imported_modules` gives.
 
-    With `calls`, an `IMPORTING_CALLS` call names its module too, when the name
-    is a string LITERAL, passed by position or as `name=`. A literal that starts
-    with a dot is relative, and so is `__import__` with a nonzero literal
-    `level`. A name computed at run time cannot be read off the source.
+    With `calls`, a mapping from callable names to the importing call each is
+    (`IMPORTING_CALLS`, or `importing_calls(tree)` for one module's own names),
+    a call names its module too, when the name is a string LITERAL, passed by
+    position or as `name=`. A literal that starts with a dot is relative, and
+    so is `__import__` with a nonzero literal `level`. A name computed at run
+    time cannot be read off the source.
     """
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
     if isinstance(node, ast.ImportFrom):
         return [node.module] if node.level == 0 and node.module else []
-    if not (calls and isinstance(node, ast.Call)):
+    if not calls or not isinstance(node, ast.Call):
         return []
-    called = getattr(node.func, "attr", getattr(node.func, "id", None))
-    if called not in IMPORTING_CALLS:
+    called = calls.get(_called_name(node.func))
+    if called is None:
         return []
     keywords = {keyword.arg: keyword.value for keyword in node.keywords
                 if keyword.arg is not None}

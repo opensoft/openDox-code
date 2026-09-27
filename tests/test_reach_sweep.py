@@ -33,8 +33,9 @@ PARSED, NOT GREPPED (`tests/import_scan.py`'s rule). These modules name the
 four packages in prose on purpose: a docstring saying which reach a seam
 replaced, or a comment saying why an import is lazy. So the sweep reads import
 statements, and `importlib.import_module(...)` or `__import__(...)` calls with
-a literal name, by position or as `name=`, out of the syntax tree, as #1144's
-F4.1 scan does. A name in a comment, a docstring or a string is not an import.
+a literal name, by position or as `name=`, and under any name the module gives
+those two (`from importlib import import_module as load`, or `load =
+importlib.import_module`), out of the syntax tree, as #1144's F4.1 scan does. A name in a comment, a docstring or a string is not an import.
 Relative imports stay inside this package and are not read. Each node is read
 by `import_scan.names_imported_by`, the reader the repository's other direction
 checks share, so the sweep is not a second copy of it.
@@ -77,7 +78,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 
 sys.path.insert(0, str(ROOT / "tests"))
-from import_scan import names_a_forbidden_package, names_imported_by  # noqa: E402
+from import_scan import (  # noqa: E402
+    importing_calls, names_a_forbidden_package, names_imported_by)
 
 #: The consumer. Its deferred reaches are phase 2's and 3's to route.
 CONSUMER = "openxdox"
@@ -111,6 +113,8 @@ class Reach:
 def sweep(source: str, path: str = "<source>") -> list[Reach]:
     """Every reach of a sibling in `source`, classified by when it runs."""
     found: list[Reach] = []
+    tree = ast.parse(source, filename=path)
+    calls = importing_calls(tree)
 
     def visit(node: ast.AST, deferred: bool, inside: str) -> None:
         lazy: list[ast.AST] = []
@@ -145,14 +149,14 @@ def sweep(source: str, path: str = "<source>") -> list[Reach]:
                 visit(default, deferred, inside)
             visit(node.body, True, f"{inside}.<lambda>")
             return
-        for name in names_imported_by(node, calls=True):
+        for name in names_imported_by(node, calls=calls):
             if names_a_forbidden_package(name, SIBLINGS):
                 found.append(Reach(path, node.lineno, name, deferred, inside))
         for child in ast.iter_child_nodes(node):
             if not any(child is param for param in lazy):
                 visit(child, deferred, inside)
 
-    visit(ast.parse(source, filename=path), False, "<module>")
+    visit(tree, False, "<module>")
     return sorted(found)
 
 
@@ -284,6 +288,38 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (7, "ideation_dashboard", True, "Box[T]"),
         (8, "openxdox.gate_console", False, "<module>"),
         (10, "corpus_adapter_openxfactory", True, "type Alias"),
+    }, sorted(found)
+
+
+#: The two importing calls under names the module gives them: an import alias,
+#: an assignment, and an assignment of an alias. The relative call names no
+#: sibling under an alias either.
+_ALIAS_SPECIMEN = textwrap.dedent('''
+    import importlib
+    import importlib as il
+    from importlib import import_module as load
+    from builtins import __import__ as imp
+
+    again = load
+    fetch: object = importlib.import_module
+
+    def verb():
+        load("doc_health")
+        again("ideation_dashboard.lanes")
+        fetch(name="corpus_adapter_openxfactory")
+        il.import_module("openxdox.kickoff")
+        imp("doc_health", None, None, (), 1)
+''')
+
+
+def test_the_scanner_follows_an_importing_call_under_another_name():
+    found = {(r.line, r.name, r.deferred, r.inside)
+             for r in sweep(_ALIAS_SPECIMEN, "alias.py")}
+    assert found == {
+        (11, "doc_health", True, "verb"),
+        (12, "ideation_dashboard.lanes", True, "verb"),
+        (13, "corpus_adapter_openxfactory", True, "verb"),
+        (14, "openxdox.kickoff", True, "verb"),
     }, sorted(found)
 
 
