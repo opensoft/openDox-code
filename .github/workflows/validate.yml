@@ -236,7 +236,7 @@ jobs:
           PY
           . ./triple.env
           if [ -n "${MISSING:-}" ]; then
-            echo "::error::JUnit report missing: $MISSING — a report that did not appear is a refusal, not a smaller sum. The pytest step did not write it, so there is no triple to pin"
+            echo "::error::JUnit report missing: $MISSING — a report that did not appear is a refusal, not a smaller sum. The test run did not write it, so there is no triple to pin"
             exit 1
           fi
           echo "triple: selected=$SELECTED passed=$PASSED skipped=$SKIPPED failures=$FAILURES errors=$ERRORS"

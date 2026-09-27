@@ -456,12 +456,12 @@ def test_serve_emits_evidence_on_an_ordinary_shutdown(
     import types
 
     # STUBBED, NOT SKIPPED. `uvicorn` and `opendox.runtime.app` belong to the
-    # `runtime` extra, which the REQUIRED `validate` job does not install, and
-    # a test that skips there would leave this contract measured only in the
-    # advisory job — and would make the required job's recorded figure depend
-    # on which extras the measuring environment happened to have, which is the
-    # very mismatch Copilot's review of openDox-code#26 caught in this file's
-    # sibling block. `cmd_serve` imports both INSIDE the function, so two
+    # `runtime` extra, which the REQUIRED `validate` job did not install until
+    # plan 034 T036. A test that skipped without them would leave this
+    # contract unmeasured wherever the extra is absent, and would make a
+    # recorded figure depend on which extras the measuring environment
+    # happened to have, which is the very mismatch Copilot's review of
+    # openDox-code#26 caught in this file's sibling block. `cmd_serve` imports both INSIDE the function, so two
     # entries in `sys.modules` are the whole seam; the subject here is the
     # RETURN path, never a listening socket.
     served: dict[str, object] = {}

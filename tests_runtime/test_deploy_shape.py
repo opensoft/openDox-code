@@ -116,43 +116,65 @@ def test_the_workflow_file_parses_as_yaml() -> None:
 _COMMAND_SEPARATORS = re.compile(
     r"&&|\|\||(?<![<>])&(?![>&])|[;|\n()`]|\$\(")
 
-#: A pytest run in either spelling a step could use: through `-m`, wherever it
-#: sits in its command (`timeout 900 python -m pytest`), or as the command word
-#: itself, after any `NAME=value` assignments.
-_MODULE_RUN = re.compile(r"-m\s+pytest(?![\w.-])")
-_COMMAND_WORD_RUN = re.compile(
-    r"^\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:pytest|py\.test)(?![\w.-])")
+#: A PYTEST RUN, IN ANY SPELLING AND UNDER ANY WRAPPER (Copilot's reviews of
+#: openDox-code#52 at `485e085a` and `b8623bf9`). The word is counted wherever
+#: it stands in a command, not only as its first word: `python -m pytest`, a
+#: bare `pytest`, `env CI=true pytest`, `timeout 900 pytest`, `uv run pytest`,
+#: `xargs pytest`, `.venv/bin/pytest`, `sh -c "pytest …"`, and `pytest.main(` in
+#: a `python -c` program. A second run cannot hide inside a wrapper this list
+#: never heard of. The word inside a longer name is not counted:
+#: `pytest-report.xml`, `pytest.ini`, `test_pytest_x.py`.
+#:
+#: IT ERRS TOWARD COUNTING, and says so. It reads no quotes and strips no
+#: comments, so a comment or an echoed sentence that names the word bare counts
+#: as a run, and so does an `import pytest` in a `-c` program. That is why no
+#: step's script names it that way. A false red here means a message to
+#: reword; a false green would be a second run.
+_PYTEST_RUN = re.compile(
+    r"(?<![\w.-])(?:pytest|py\.test)(?=$|[\s\"'`;|&()]|\.main\b)")
 
 
 def _pytest_runs(script: str) -> list[str]:
-    """Every command in `script` that runs pytest, once per run it makes."""
+    """Every pytest run in `script`, as the command it sits in, once per run."""
     runs: list[str] = []
     for command in _COMMAND_SEPARATORS.split(script):
-        count = len(_MODULE_RUN.findall(command))
-        if _COMMAND_WORD_RUN.match(command):
-            count += 1
-        runs.extend([command] * count)
+        runs.extend([command] * len(_PYTEST_RUN.findall(command)))
     return runs
 
 
 @pytest.mark.parametrize("script, runs", [
+    # the step as it stands, and the controls that must count one
     ("python -m pytest -q --junitxml=pytest-report.xml", 1),
+    ("timeout 900 python -m pytest -q 2>&1 | tee pytest.log", 1),
+    ('echo "the test step" && python -m pytest -q', 1),
+    ("CI=1 pytest -q", 1),
+    (".venv/bin/pytest -q", 1),
+    ("cat pytest.ini tests/test_pytest_x.py", 0),
+    # a second run chained on by every shell separator
     ("python -m pytest -q && python -m pytest tests_runtime", 2),
     ("python -m pytest -q || python -m pytest tests_runtime", 2),
     ("python -m pytest -q; python -m pytest tests_runtime", 2),
     ("python -m pytest -q | python -m pytest tests_runtime", 2),
     ("python -m pytest -q & python -m pytest tests_runtime", 2),
     ("python -m pytest -q\npython -m pytest tests_runtime", 2),
-    ("python -m pytest -q || pytest tests_runtime", 2),
     ("python -m pytest -q $(python -m pytest --co -q)", 2),
-    ("timeout 900 python -m pytest -q 2>&1 | tee pytest.log", 1),
-    ('echo "the pytest step" && python -m pytest -q', 1),
-    ("CI=1 pytest -q", 1),
+    # a second run inside a wrapper
+    ("python -m pytest -q || pytest tests_runtime", 2),
+    ("python -m pytest -q || env CI=true pytest -q tests_runtime", 2),
+    ("python -m pytest -q && timeout 600 pytest tests_runtime", 2),
+    ("python -m pytest -q && uv run pytest tests_runtime", 2),
+    ("python -m pytest -q | xargs pytest", 2),
+    ('python -m pytest -q || sh -c "python -m pytest tests_runtime"', 2),
+    ("python -m pytest -q; bash -c 'pytest -q'", 2),
+    # and the direction it errs in, pinned so it is a decision and not an
+    # accident: a sentence that names the word bare, and an import, count
+    ('echo "the pytest step" && python -m pytest -q', 2),
+    ("python -m pytest -q && python -c 'import pytest; pytest.main()'", 3),
 ])
 def test_the_run_count_sees_every_shell_separator(script: str, runs: int) -> None:
     """The one-run assertion below is worth making only if its count sees
-    every way a second run could be chained onto the first. So the count is
-    driven here, over the chains it must see and the lines it must not
+    every way a second run could be chained onto the first, or wrapped. So the
+    count is driven here, over the chains it must see and the lines it must not
     miscount, rather than trusted."""
     assert len(_pytest_runs(script)) == runs, _pytest_runs(script)
 
@@ -188,10 +210,8 @@ def test_the_workflow_declares_the_required_job_and_its_steps() -> None:
     # it a list again, which is what requirement 9 retired. The reading errs
     # toward refusing: an option's value is joined with `=`
     # (`--junitxml=…`), because a separate word reads as a path here.
-    parts = _MODULE_RUN.split(invocations[0], maxsplit=1)
-    tail = parts[1] if len(parts) == 2 else _COMMAND_WORD_RUN.sub(
-        "", invocations[0], count=1)
-    arguments = shlex.split(tail)
+    command = invocations[0]
+    arguments = shlex.split(command[_PYTEST_RUN.search(command).end():])
     positional = [token for token in arguments if not token.startswith("-")]
     assert positional == [], (
         f"the pytest step names {positional}; the whole suite is what "
