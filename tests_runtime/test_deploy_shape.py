@@ -108,11 +108,12 @@ def test_the_workflow_file_parses_as_yaml() -> None:
 
 #: EVERY WAY A SHELL SCRIPT PUTS ONE COMMAND AFTER ANOTHER: `&&`, `||`, `;`, a
 #: pipe, a background `&`, a newline, a subshell and a command substitution.
-#: The count below split on the first three only, so `python -m pytest -q ||
-#: python -m pytest tests_runtime` read as ONE command, and a failed run
-#: followed by a second, pinned one passed the one-run check (Copilot review
-#: of openDox-code#52 at `83fb977e`). A redirection's `&` (`2>&1`, `&>log`) is
-#: not a separator, so it is excluded.
+#: This split takes all of them. The first version of the count split on `&&`,
+#: `;` and newlines only, so it read `python -m pytest -q || python -m pytest
+#: tests_runtime` as ONE command. A failed run followed by a second, pinned one
+#: would then have passed the one-run check (Copilot review of
+#: openDox-code#52 at `83fb977e`). A redirection's `&` (`2>&1`, `&>log`) is not
+#: a separator, so it is excluded.
 _COMMAND_SEPARATORS = re.compile(
     r"&&|\|\||(?<![<>])&(?![>&])|[;|\n()`]|\$\(")
 
