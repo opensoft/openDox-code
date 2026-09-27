@@ -54,10 +54,12 @@ domain_profile.register(<the host's profile module or object>)
 * A **module** or an **object**. ASK-2's words are "registers the real module";
   § 4.4's form is an object built from a YAML profile (RULED ASK-4 Q1: YAML
   canonical, dataclass the runtime form). Both are accepted.
-* **Nothing is type-checked.** openDox cannot name
+* **The profile itself is not type-checked.** openDox cannot name
   `openxdox.domain_profile.DomainProfile` without recreating the back-import the
   carve removed, and it has never heard of openxFactory. It names only the
-  attributes it reads.
+  attributes it reads, and it checks each VALUE where it reads it: the route
+  bindings as they are collected, and `HANDLER_CONTRIBUTIONS` as a plain tuple
+  of classes that may only add to the core handler.
 
 ### What openDox reads off it
 
@@ -65,6 +67,16 @@ domain_profile.register(<the host's profile module or object>)
 | --- | --- | --- |
 | `SUBCOMMAND_EXTENSIONS` | `cli.build_parser()` | a tuple of `subcommand_extension.SubcommandExtension` |
 | `ROUTE_EXTENSIONS` | `serve.build_server()` | a tuple of `route_extension.RouteExtension` |
+| `HANDLER_CONTRIBUTIONS` (optional) | `serve.build_server()` | a plain tuple of mixin classes, holding the methods the profile's route bindings name |
+
+`HANDLER_CONTRIBUTIONS` is `route_extension.HANDLER_FACET` (R1Q1 (a),
+openxFactory#656 comment 5817152735). A route extension may declare it too,
+beside its routes. `build_server()` composes every declared mixin into the
+class it binds, after the core handler, so the methods a contributed binding
+names need not be bases of the core handler. The facet is read by PRESENCE: an
+absent facet or `None` contributes nothing, so no refusal names it when it is
+missing. A contribution may only ADD. `src/route_extension.py`'s module
+docstring lists what it refuses and why.
 
 Reads happen at **first attribute access**, never at import time. `import
 opendox.cli` and `import opendox.profile_proxy` touch no registry and cannot
@@ -147,7 +159,9 @@ contract** — renaming `opendox/domain_profile.py` breaks Q5's one registration
 silently, and `tests/test_profile_registration.py` pins it for that reason.
 
 **One object, two readers.** Each reader names only what it reads: openDox
-reaches `SUBCOMMAND_EXTENSIONS` / `ROUTE_EXTENSIONS` and type-checks nothing;
+reaches `SUBCOMMAND_EXTENSIONS` / `ROUTE_EXTENSIONS` (and the optional
+`HANDLER_CONTRIBUTIONS`) and never type-checks the profile object, only the
+values it reads off it;
 openXdox type-checks its own `DomainProfile` and treats anything else as "not
 here", leaving its own refusal standing. A host that wants one registration to
 serve both therefore registers a profile that satisfies both readers — for
@@ -238,13 +252,13 @@ told apart; a hostile `repr` that neither raises nor runs long) and which reader
 it names per facet, the duck type openXdox delegates to — module path included
 — and **both composition points, executed**.
 
-That last group has to be got at sideways. **Neither `opendox.cli` nor
-`opendox.serve` can be imported in this repository at all**: `serve.py:181` still
-reaches `ideation_dashboard`, openxFactory's pre-carve package, which exists at
-neither carve destination, and `cli.py` imports `serve` and inherits the block.
-Both are recorded by name, with the blocker named, in
-`tests/test_consumer_reach.py`'s `STILL_REACHING`, and both are owed to a later
-act of the BUILD arc.
+That last group had to be got at sideways. **Until plan 034 T011, neither
+`opendox.cli` nor `opendox.serve` could be imported in this repository**:
+`serve.py` reached `ideation_dashboard`, openxFactory's pre-carve package, which
+exists at neither carve destination, and `cli.py` imports `serve` and inherited
+the block. T011 removed both of `serve.py`'s import-time reaches, and
+`tests/test_consumer_reach.py` now lists both modules in `NEUTRAL_MODULES`,
+where its `STILL_REACHING` had recorded them.
 
 So the suite lifts each composition point out of its own file **by AST** — the
 binding of the proxy, wherever that module puts it, plus the statement that reads
