@@ -102,6 +102,7 @@ import functools
 import http.server
 import json
 import secrets
+import subprocess
 import sys
 import urllib.parse
 from pathlib import Path
@@ -716,12 +717,34 @@ def divergence(source_revision: str | None, head: str | None) -> dict[str, str |
     return {"state": state, "source_revision": source_revision, "head": head}
 
 
+class _CheckoutHead:
+    """openDox's OWN reader of a checkout's HEAD (plan 034 T012, #1144 task
+    4.3). It replaced a deferred reach into openxFactory's
+    `doc_health.corpus.RealGit`, which a standalone openDox never had, so its
+    HEAD was always unknown. The read is the one `RealGit.head_sha` made:
+    `git -C <checkout> rev-parse HEAD`, bounded by the same 30 seconds. Every
+    failure is `None`: no `git`, not a repository, an unborn HEAD, a timeout."""
+
+    TIMEOUT_SECONDS = 30
+
+    def head_sha(self, repo: Path) -> str | None:
+        try:
+            done = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=False,
+                timeout=self.TIMEOUT_SECONDS)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        head = done.stdout.strip() if done.returncode == 0 else ""
+        return head or None
+
+
 def _head_of(checkout_root: Path, git=None) -> str | None:
     """Current git HEAD of the checkout, or None (degrades — never blocks
-    serving)."""
+    serving). `git` is the injectable reader: anything with
+    `head_sha(repo)`, as the suite's `FakeGit` has."""
     try:
-        from doc_health.corpus import RealGit
-        return (git or RealGit()).head_sha(Path(checkout_root))
+        return (git or _CheckoutHead()).head_sha(Path(checkout_root))
     except Exception:
         return None
 
