@@ -51,14 +51,14 @@ def _git(*args: str) -> str:
     return done.stdout.strip()
 
 
-@pytest.fixture()
+@pytest.fixture
 def outside_any_repository(tmp_path, monkeypatch):
     """`tmp_path`, with git forbidden to look above it for a repository."""
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
     return tmp_path
 
 
-@pytest.fixture()
+@pytest.fixture
 def checkout(outside_any_repository):
     repo = outside_any_repository / "checkout"
     repo.mkdir()
@@ -73,8 +73,8 @@ def checkout(outside_any_repository):
 # 1. the HEAD is read, by openDox itself
 # ---------------------------------------------------------------------------
 
-def test_a_checkouts_head_is_read_with_doc_health_unimportable(checkout,
-                                                              monkeypatch):
+def test_the_head_of_a_checkout_is_read_with_doc_health_unimportable(
+        checkout, monkeypatch):
     """`sys.modules[name] = None` makes `import name` raise, so this holds in
     an environment that has openxFactory's package installed as well."""
     monkeypatch.setitem(sys.modules, "doc_health", None)
