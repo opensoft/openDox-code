@@ -464,7 +464,8 @@ def test_the_runtime_extras_modules_are_the_runtimes_own() -> None:
        dependency cannot hide behind the exemption either.
     3. Where a tabled distribution is installed, each of its modules is
        installed by it or by a distribution it requires, as its metadata says.
-       Under `.[test]` alone none is installed, and 1 and 2 hold the table.
+       Where none is installed (a checkout without the `runtime` extra), 1
+       and 2 hold the table.
     """
     imported = _third_party_imports(PACKAGE / "runtime")
     tabled = {name for names in RUNTIME_EXTRA.values() for name in names}

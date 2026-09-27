@@ -573,7 +573,7 @@ def test_the_migrate_preview_runs_the_same_canonical_gate_the_run_does(
     assert evidence["ok"] is False
     assert "planned" not in evidence
     # AND THE GATE IS REACHED WITHOUT THE `runtime` EXTRA. This first asserted
-    # `MigrationError` and went red in the REQUIRED job, which installs
+    # `MigrationError` and went red in the REQUIRED job, which then installed
     # `.[test]` alone: the gate sat behind the deferred `psycopg` import, so
     # the refusal there was `runtime-extra-missing` and the preview's own
     # promise was untestable in the one job that matters. The gate now runs
@@ -1290,12 +1290,13 @@ def _conftest_module():
 def test_the_probe_never_interpolates_the_exception_text(monkeypatch) -> None:
     """THE CONTRACT ITSELF, and it does not depend on psycopg's wording.
 
-    The test below is the live reproducer and needs the driver installed; the
-    `validate` job installs `.[test]` alone and does not have it. This one
-    hands the probe a driver whose `connect` raises an exception carrying the
-    whole DSN — which is the only property of the real failure that matters —
-    and asserts the reason does not carry it. It runs in BOTH jobs, and it is
-    the assertion that would have caught the finding when it was written.
+    The test below is the live reproducer and needs the driver installed.
+    This one needs no driver at all: it hands the probe a driver whose
+    `connect` raises an exception carrying the whole DSN — which is the only
+    property of the real failure that matters — and asserts the reason does
+    not carry it. It runs in every install of this suite, with the `runtime`
+    extra or without it, and it is the assertion that would have caught the
+    finding when it was written.
     """
     conftest = _conftest_module()
     dsn = "postgresql://opendox:hunter2@db.internal:5432/opendox"
@@ -1348,9 +1349,9 @@ def test_an_unparsable_test_dsn_does_not_print_its_password(monkeypatch) -> None
     """
     pytest.importorskip(
         "psycopg",
-        reason="the live reproducer needs the driver; the `validate` job "
-               "installs `.[test]` alone, and the contract itself is measured "
-               "by the hermetic test above")
+        reason="the live reproducer needs the driver, which the `runtime` "
+               "extra installs; the contract itself is measured by the "
+               "hermetic test above")
     conftest = _conftest_module()
     password = "hunter2"                      # NOT a credential: a test string
     monkeypatch.setenv(conftest.TEST_DSN_ENV,

@@ -1,9 +1,10 @@
 """The ordered SQL, measured: order, the pin, and the ledger's two copies.
 
 HERMETIC BY CONSTRUCTION — this module imports the standard library,
-`pytest` and `opendox.runtime.migrations`, and nothing else, so it runs in
-the leg's REQUIRED `validate` job, which installs `.[test]` and not
-`.[runtime]`. (`pytest` was not named until Copilot's tenth review of
+`pytest` and `opendox.runtime.migrations`, and nothing else, so it runs
+without the `runtime` extra installed, as the leg's REQUIRED `validate` job
+ran it until plan 034 T036 gave that job the extra. (`pytest` was not named
+until Copilot's tenth review of
 openDox-code#25 pointed out that a hermeticity claim which omits the runner
 is not a claim a reader can check.) Everything it asserts is a property of
 the files on disk or of a double defined here; nothing needs a database.

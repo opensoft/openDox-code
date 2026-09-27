@@ -119,9 +119,9 @@ def test_the_stdlib_only_modules_name_no_extra_package_at_module_level() -> None
             f"{path.name} imports {sorted(offenders)} at module level. The "
             "package's import-weight contract (see "
             "src/opendox/runtime/__init__.py) is that these modules import "
-            "under `.[test]` alone — which is what the leg's REQUIRED "
-            "`validate` job installs, and what § 3.7's conformance corpus "
-            "will have. Move the import inside the function that needs it.")
+            "without the `runtime` extra — which is what § 3.7's conformance "
+            "corpus will have. Move the import inside the function that "
+            "needs it.")
 
 
 def test_the_stdlib_only_modules_really_import_without_the_extra() -> None:

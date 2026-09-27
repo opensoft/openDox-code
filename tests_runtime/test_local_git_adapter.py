@@ -49,7 +49,7 @@ ACTOR = "Student One"
 #: therefore passed for its author and exited 128 in both jobs, which is the
 #: third instance on this act of one rule: a result measured under an
 #: environment the job does not have is not that job's result (the first was
-#: `importorskip` in a job that installs `.[test]` alone; the second was a
+#: `importorskip` in a job that installed `.[test]` alone; the second was a
 #: hermetic figure measured with the `runtime` extra present).
 #:
 #: So the global and system config files are taken OUT of the picture as well

@@ -81,7 +81,7 @@ dependencies = [
 # The pytest RANGE FROM ROUND 1, unchanged — `pytest>=8,<9`, still the only
 # upper bound in this file, because round 1 chose it deliberately. What moves is
 # its HOME: `validate.yml` used to carry the range as a literal in its install
-# step and now installs `.[test]`, so the range is declared ONCE and the
+# step and now installs the `test` extra, so the range is declared ONCE and the
 # workflow reads it, instead of two copies that can drift apart while both keep
 # passing.
 #
