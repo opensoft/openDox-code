@@ -3051,15 +3051,29 @@ class WorkingTreeCorpus(LocalGitCorpus):
             return super()._read_bound(git, corpus, document, revision)
         self._refuse_if_bare(git, corpus)
         # CONFINE THE KEY BEFORE EVER NAMING IT TO THE FILESYSTEM (Copilot
-        # review of openDox-code#45, "Confine document reads to corpus using
-        # safe descriptors"). An absolute key discards the corpus root
-        # entirely under `Path.__truediv__` (`Path("/a") / "/etc/passwd" ==
-        # Path("/etc/passwd")`, not a join), and a `..` component walks back
-        # out of it under an ordinary join -- both refused by NAME here,
-        # with a message that says what is wrong, rather than reaching the
-        # open call at all.
+        # review of openDox-code#45, three findings). An absolute key
+        # discards the corpus root entirely under `Path.__truediv__`
+        # (`Path("/a") / "/etc/passwd" == Path("/etc/passwd")`, not a
+        # join), and a `..` component walks back out of it under an
+        # ordinary join -- both refused by NAME here, with a message that
+        # says what is wrong, rather than reaching the open call at all.
+        #
+        # A `.git` COMPONENT IS REFUSED THE SAME WAY (Copilot review of
+        # openDox-code#45, "Block direct access to .git paths"): `git
+        # ls-files` never lists a path under the repository's OWN `.git/`
+        # -- that is what makes it a listed WORKING-TREE document's key in
+        # the first place -- so this is not a case `list_documents()`
+        # itself can produce. But `read()` is a public method taking a
+        # `DocumentId` a caller can build directly, unmediated by a prior
+        # listing, and unlike `LocalGitCorpus`'s `cat-file blob <rev>:<key>`
+        # -- which cannot express `.git/config` at all, since git's own
+        # tree object model has no path under its own metadata directory --
+        # this class reads actual filesystem bytes, where `.git/config`
+        # (a remote's embedded credential) and `.git/HEAD` are ordinary,
+        # readable, relative paths with no `..` and no leading `/` to catch
+        # either check above.
         key = PurePosixPath(document.key)
-        if key.is_absolute() or ".." in key.parts:
+        if key.is_absolute() or ".." in key.parts or ".git" in key.parts:
             raise _refuse(DOCUMENT_UNKNOWN, document.key,
                           f"{document.key!r} is not a path inside this corpus")
         # `_open_confined` walks EVERY component -- not only the last --
