@@ -309,6 +309,15 @@ def test_the_identity_surface_holds_nothing_from_the_provider_tier(module_name):
         assert needle not in source, f"{module_name}: {needle}"
 
 
+def test_the_redaction_permit_stays_one_spelling_in_one_module():
+    """`REDACTION_PERMITS` is ONE provider-tier spelling that ONE module may
+    carry, as its comment says. Each entry is one needle in one module, so the
+    count of entries is the count of permits. A second would widen the
+    provider boundary, and it has to be argued on its own pull request, with
+    this number."""
+    assert len(REDACTION_PERMITS) == 1, REDACTION_PERMITS
+
+
 @pytest.mark.parametrize("module_name", sorted(REDACTION_PERMITS))
 def test_a_redaction_permit_names_a_credential_only_to_refuse_it(module_name):
     """The one provider-tier permit is exactly as wide as its reason.

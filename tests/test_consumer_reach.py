@@ -927,6 +927,23 @@ def _import_time_uses(path: Path, names: frozenset[str]) -> list[tuple[int, str]
     return sorted(set(hits))
 
 
+def _module_level_statements(body: list[ast.stmt]):
+    """The statements a module runs when it is imported, in source order: its
+    body, and the bodies of a module-level `if`, `try`, `with`, `for`,
+    `while` or `match`, with their handlers and `else` blocks. A function's
+    body and a class's are not the module's names."""
+    for node in body:
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for _field, value in ast.iter_fields(node):
+            for item in value if isinstance(value, list) else []:
+                if isinstance(item, ast.stmt):
+                    yield from _module_level_statements([item])
+                elif isinstance(item, (ast.ExceptHandler, ast.match_case)):
+                    yield from _module_level_statements(item.body)
+
+
 def _names_bound_to_the_seam(path: Path) -> set[str]:
     """Every name a module binds, at its top level, to a `consumer_reach`
     stand-in.
@@ -939,7 +956,8 @@ def _names_bound_to_the_seam(path: Path) -> set[str]:
     module (`from . import consumer_reach`, `import opendox.consumer_reach as
     cr`, or `cr = consumer_reach` after either), or the package's attribute
     `opendox.consumer_reach`, once `import opendox` or `import
-    opendox.consumer_reach` has bound `opendox`."""
+    opendox.consumer_reach` has bound `opendox`. Each is read wherever the
+    module runs it at import time, a module-level `if` or `try` included."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     # The leading dots from this file to the `opendox` package: one for a
     # module at the top of it, two in a subpackage, and so on.
@@ -947,7 +965,8 @@ def _names_bound_to_the_seam(path: Path) -> set[str]:
     seam_aliases: set[str] = set()
     package_aliases: set[str] = set()
     bound: set[str] = set()
-    for node in tree.body:
+    statements = list(_module_level_statements(tree.body))
+    for node in statements:
         if isinstance(node, ast.ImportFrom):
             package = (node.level == level and node.module is None) or \
                 (node.level == 0 and node.module == "opendox")
@@ -972,7 +991,7 @@ def _names_bound_to_the_seam(path: Path) -> set[str]:
             and isinstance(expr.value, ast.Name)
             and expr.value.id in package_aliases)
 
-    for node in tree.body:
+    for node in statements:
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -1000,6 +1019,11 @@ def test_every_name_bound_to_the_seam_is_guarded() -> None:
         bound = _names_bound_to_the_seam(path)
         if bound:
             derived[path.relative_to(PACKAGE).as_posix()] = bound
+    starred = sorted(module for module, names in derived.items() if "*" in names)
+    assert not starred, (
+        f"{starred} import the seam's stand-ins with a wildcard. The guard "
+        "reads each converted name by name, and a wildcard gives it none to "
+        "read: import each stand-in by its name")
     declared = {module: set(names) for module, names in CONVERTED_SITES.items()}
     assert derived == declared, (
         f"the names each module binds to `consumer_reach` are {derived}, and "
