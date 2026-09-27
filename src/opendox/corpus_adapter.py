@@ -470,3 +470,38 @@ def home() -> Callable[[str], tuple[CorpusAdapter, CorpusRef]]:
                 "before anything resolves the home corpus"),
         ))
     return _home_factory
+
+
+def register_default_home(
+    factory: Callable[[str], tuple[CorpusAdapter, CorpusRef]],
+) -> None:
+    """openDox's OWN default corpus adapter, registered by an ENTRY POINT
+    (4.1a) -- never a fallback inside `home()` itself, which keeps refusing
+    on its own for a process that built nothing (4.2).
+
+    Registers `factory` ONLY where nothing already answers `home()`. Called
+    by `cli.build_parser()`, `cli.main()`, `serve.build_server()` and
+    `serve.main()`, each with openDox's own `LocalGitCorpus`-backed factory,
+    exactly as `domain_profile.register_default()` registers the default
+    profile for the same reason (plan 034, T016): the ENTRY POINT decides
+    when to fall back, and the seam itself never guesses.
+
+    `register_home()` always OVERWRITES the current registration (T020): an
+    unconditional call here would silently replace a host's own adapter --
+    registered before this entry point ran -- with openDox's default. So this
+    checks `home()` FIRST, and registers `factory` only on the ONE refusal
+    kind that means "nothing is registered yet"; any other `CorpusRefused`
+    (there is none today, but a future seam addition must not be swallowed
+    here) is re-raised rather than papered over.
+
+    Unlike `domain_profile.register_default()`, there is no after-build
+    refusal to track here: nothing in requirement 4 or box 4.1a asks a
+    registration made after the home corpus has already been read to be
+    refused, so this stays as simple as `register_home()` itself -- check,
+    then register, and nothing else."""
+    try:
+        home()
+    except CorpusRefused as refused:
+        if refused.refusal.kind != ADAPTER_NOT_REGISTERED:
+            raise
+        register_home(factory)
