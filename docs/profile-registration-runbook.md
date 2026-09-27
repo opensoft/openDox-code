@@ -245,13 +245,13 @@ told apart; a hostile `repr` that neither raises nor runs long) and which reader
 it names per facet, the duck type openXdox delegates to — module path included
 — and **both composition points, executed**.
 
-That last group has to be got at sideways. **Neither `opendox.cli` nor
-`opendox.serve` can be imported in this repository at all**: `serve.py:181` still
-reaches `ideation_dashboard`, openxFactory's pre-carve package, which exists at
-neither carve destination, and `cli.py` imports `serve` and inherits the block.
-Both are recorded by name, with the blocker named, in
-`tests/test_consumer_reach.py`'s `STILL_REACHING`, and both are owed to a later
-act of the BUILD arc.
+That last group had to be got at sideways. **Until plan 034 T011, neither
+`opendox.cli` nor `opendox.serve` could be imported in this repository**:
+`serve.py` reached `ideation_dashboard`, openxFactory's pre-carve package, which
+exists at neither carve destination, and `cli.py` imports `serve` and inherited
+the block. T011 removed both of `serve.py`'s import-time reaches, and
+`tests/test_consumer_reach.py` now lists both modules in `NEUTRAL_MODULES`,
+where its `STILL_REACHING` had recorded them.
 
 So the suite lifts each composition point out of its own file **by AST** — the
 binding of the proxy, wherever that module puts it, plus the statement that reads

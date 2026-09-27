@@ -139,16 +139,17 @@ NEUTRAL_MODULES = (
 #: Modules that still cannot be imported with the consumer blocked — with the
 #: reason, and with the PACKAGE NAME whose absence is what actually stops them.
 #:
-#: THE SECOND FIELD IS SLICE 2b STEP 4's DOING, and it is the whole content of
-#: this record now. Both remaining entries are blocked by `ideation_dashboard`,
-#: NOT by `openxdox`: the consumer reaches that used to stop them are gone, and
-#: what is left is the OTHER cross-column reach — openxFactory's PRE-CARVE
-#: package name, a `stays_openxfactory_adapter` row (RULING DQ-1) present at
-#: neither carve destination, censused two lines down at
-#: `test_no_module_under_src_names_the_pre_carve_package_at_import_time` and
-#: owed to a later act. Recording only "still reaching" would have let that
-#: substitution pass unread: the test would stay green on a nonzero exit while
-#: the thing it was written to measure had actually been fixed.
+#: THE SECOND FIELD IS SLICE 2b STEP 4's DOING, and it was the whole content
+#: of this record until plan 034 T011. Its last two entries were blocked by
+#: `ideation_dashboard`, NOT by `openxdox`: the consumer reaches that used to
+#: stop them were gone, and what was left was the OTHER cross-column reach —
+#: openxFactory's PRE-CARVE package name, a `stays_openxfactory_adapter` row
+#: (RULING DQ-1) present at neither carve destination. Two lines down,
+#: `test_no_module_under_src_names_the_pre_carve_package_at_import_time`
+#: censuses it; it was owed to a later act. Recording only "still reaching"
+#: would have let that substitution pass unread: the test would stay green on
+#: a nonzero exit while the thing it was written to measure had actually been
+#: fixed.
 #:
 #: So the test below now asserts the blocker BY NAME, and — for an entry whose
 #: recorded blocker is not the consumer — asserts that `openxdox` is NOT what
