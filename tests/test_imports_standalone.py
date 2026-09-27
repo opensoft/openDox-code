@@ -13,18 +13,21 @@ stood in for can answer for the package:
 1. It asserts that the four siblings are ABSENT, before anything is imported.
    They are the consumer, the publisher's two packages, and the publisher's
    corpus adapter. A sweep run beside an installed sibling proves nothing.
-2. It imports EVERY module the package's `.py` files define, in sorted order,
-   so a package precedes its own modules. The list is GENERATED from the
-   files, so a module added later is covered with no edit here, and a
-   subpackage whose `__init__` fails is imported, and reported, rather than
-   skipped. `pkgutil.walk_packages` would skip it: it calls `onerror` and
-   never visits the children.
+2. It imports the package itself, then EVERY module the package's `.py` files
+   define, in sorted order, so a package precedes its own modules. The list is
+   GENERATED from the files, so a module added later is covered with no edit
+   here. A package whose `__init__` fails, the root included, is imported and
+   reported rather than skipped. `pkgutil.walk_packages` would skip it: it
+   calls `onerror` and never visits the children. This process only FINDS the
+   package, so its `__init__` runs in the sweep alone.
 3. It fails naming the FIRST module that did not import, and says what it
    needed. A sibling is the finding this test exists for. Any other failure is
-   a finding too, as F2.1 treats it. A missing third-party package means the
-   environment lacks a declared extra: the sweep runs where every extra the
-   package declares is installed, as F2.1's `pip install ".[runtime,test]"`
-   does.
+   a finding too, as F2.1 treats it, and is told apart. A failure inside
+   openDox's own package is a defect of openDox. A missing third-party package
+   means the environment lacks a declared extra: the sweep runs where every
+   extra the package declares is installed, as F2.1's
+   `pip install ".[runtime,test]"` does. A third-party module that lacks a
+   name openDox imports is the wrong version of it.
 4. Once every module imports, it holds the sweep COMPLETE: `pkgutil`'s own
    walk must visit exactly the modules the files define, so a list that
    silently found nothing, or a walk that disagrees with it, fails.
@@ -35,22 +38,24 @@ how F2.1 runs it. A CREATED file: no carve-manifest row (RULED OQ-C).
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
-import opendox
-
 #: The packages openDox must never need, spelled as F2.1 spells them.
 SIBLINGS = ("openxdox", "ideation_dashboard", "doc_health",
             "corpus_adapter_openxfactory")
 
-#: The package directory this test session imports, and the directory above
-#: it, which the fresh interpreter puts first on its path. Both processes then
-#: import the SAME `opendox`, the editable checkout or the installed copy.
-PACKAGE_DIR = Path(opendox.__file__).resolve().parent
+#: The package directory this test session would import, and the directory
+#: above it, which the fresh interpreter puts first on its path. Both processes
+#: then see the SAME `opendox`, the editable checkout or the installed copy.
+#: It is FOUND, not imported, so the package's own `__init__` runs only in the
+#: sweep, where a failure of it is recorded like any other module's.
+PACKAGE_DIR = Path(importlib.util.find_spec("opendox")
+                   .submodule_search_locations[0]).resolve()
 IMPORT_ROOT = PACKAGE_DIR.parent
 
 _SWEEP = """
@@ -61,17 +66,19 @@ present = [name for name in siblings if importlib.util.find_spec(name) is not No
 if present:
     print(json.dumps({{"present": present}}))
     raise SystemExit(0)
-import opendox
 failed = []
-for name in {modules!r}:
+for name in ["opendox", *{modules!r}]:
     try:
         importlib.import_module(name)
     except Exception as exc:  # noqa: BLE001 - every failure is a finding here
         failed.append({{"module": name, "type": type(exc).__name__,
                         "message": str(exc),
                         "missing": getattr(exc, "name", None)}})
-walked = [info.name for info in pkgutil.walk_packages(
-    opendox.__path__, "opendox.", onerror=lambda name: None)]
+walked = []
+if not failed or failed[0]["module"] != "opendox":
+    opendox = sys.modules["opendox"]
+    walked = [info.name for info in pkgutil.walk_packages(
+        opendox.__path__, "opendox.", onerror=lambda name: None)]
 print(json.dumps({{"present": [], "walked": walked, "failed": failed}}))
 """
 
@@ -99,9 +106,32 @@ def _modules_on_disk() -> set[str]:
     return names
 
 
-def _names_a_sibling(missing: str | None) -> bool:
-    return bool(missing) and any(missing == s or missing.startswith(s + ".")
-                                 for s in SIBLINGS)
+def _within(name: str | None, packages) -> bool:
+    return bool(name) and any(name == p or name.startswith(p + ".")
+                              for p in packages)
+
+
+def _why(failure: dict) -> str:
+    """What a failed import says, told apart in the order that matters. A
+    sibling is the finding this test exists for. A failure inside openDox's
+    own package is a defect of openDox. A third-party module that is missing,
+    or lacks a name, is the environment's, not openDox's."""
+    missing = failure["missing"]
+    if _within(missing, SIBLINGS):
+        return f"it still needs the sibling {missing!r}"
+    if _within(missing, ("opendox",)):
+        return (f"it imports {missing!r}, a module of openDox's own that does "
+                "not import, which is a defect in openDox, not a reach")
+    if failure["type"] == "ModuleNotFoundError" and missing:
+        return (f"it needs {missing!r}, which is not a sibling. This "
+                "environment lacks a package openDox declares: run the sweep "
+                "where every extra is installed, as F2.1's "
+                "`pip install \".[runtime,test]\"` does")
+    if failure["type"] == "ImportError" and missing:
+        return (f"the installed {missing!r} lacks what openDox imports from "
+                "it, so this environment's version is not the one openDox "
+                "declares")
+    return "it raised while importing, which is a defect in openDox, not a reach"
 
 
 def test_every_module_imports_with_no_sibling() -> None:
@@ -113,19 +143,10 @@ def test_every_module_imports_with_no_sibling() -> None:
     failed = result["failed"]
     if failed:
         first = failed[0]
-        if _names_a_sibling(first["missing"]):
-            why = f"it still needs the sibling {first['missing']!r}"
-        elif first["type"] in ("ModuleNotFoundError", "ImportError"):
-            why = (f"it needs {first['missing'] or 'a module'!r}, which is not "
-                   "a sibling. This environment lacks a package openDox "
-                   "declares: run the sweep where every extra is installed, as "
-                   "F2.1's `pip install \".[runtime,test]\"` does")
-        else:
-            why = "it raised while importing, which is a defect, not a reach"
         others = ", ".join(f["module"] for f in failed[1:]) or "none"
         raise AssertionError(
             f"{first['module']} does not import with no sibling installed: "
-            f"{why}.\n  {first['type']}: {first['message']}\n"
+            f"{_why(first)}.\n  {first['type']}: {first['message']}\n"
             f"  Every other module that failed: {others}")
     walked = set(result["walked"])
     on_disk = _modules_on_disk()
