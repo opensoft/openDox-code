@@ -185,14 +185,18 @@ jobs:
           # message.
           #
           # RE-PINNED BY plan 034 T036 for the whole suite, which this job now
-          # runs as one invocation. PROVISIONAL at this commit: measured in a
-          # local replica of this job at `main` `71b631bc` plus this change
-          # (python 3.12.3, `.[runtime,test]` under the lock, a `postgres:16`
-          # service, `CI=true`): selected 2170, passed 2157, skipped 13. To be
-          # replaced by CI's own reading at the head this pull request lands
-          # from, once T035 has landed and emptied `collect_ignore`.
-          MIN_SELECTED: "2170"
-          MIN_PASSED: "2157"
+          # runs as one invocation. READ FROM CI, on run 36333569456 (job
+          # 108660020012), over `56d51edc`: `main` `80acead1`, where T035 had
+          # emptied `collect_ignore`, merged into this change. That run printed
+          # `triple: selected=2459 passed=2446 skipped=13 failures=0
+          # errors=0`, and pytest's own line was `2446 passed, 13 skipped`.
+          #
+          # NOT DERIVED. A local replica of this job at `main` `71b631bc` plus
+          # this change read 2170 / 2157 / 13 before T035 landed, and T035's
+          # 289 cases (`tests/` went from 1571 to 1860 passed) account for the
+          # whole difference. That is a check on the reading, not its source.
+          MIN_SELECTED: "2459"
+          MIN_PASSED: "2446"
           # EXACT — the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "13"
         run: |
