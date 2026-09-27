@@ -2891,7 +2891,8 @@ def _open_confined(root_fd: int, key: PurePosixPath) -> int:
     return fd
 
 
-def _tracked_or_not_ignored(git: GitRunner, key: PurePosixPath) -> bool:
+def _tracked_or_not_ignored(git: GitRunner, corpus: ResolvedCorpus,
+                            key: PurePosixPath) -> bool:
     """Whether `git` considers `key` part of the corpus `list_documents()`
     would show: TRACKED (in the index, at any mode -- a gitlink included;
     `_open_confined`'s own `S_ISREG` check excludes THAT case downstream,
@@ -2913,15 +2914,28 @@ def _tracked_or_not_ignored(git: GitRunner, key: PurePosixPath) -> bool:
     that the corpus's own DEFINITION -- tracked, or untracked-and-not-
     ignored -- actually includes it, so a caller naming a `.gitignore`d
     secret directly, unmediated by `list_documents()`, was served it
-    anyway). Any git failure here is treated as "not part of the corpus"
-    rather than a corpus-wide refusal, for the identical reason
-    `_list_documents_bound`'s own per-candidate check is: a fact about ONE
-    key, not about the corpus."""
+    anyway).
+
+    A GIT FAILURE HERE IS A CORPUS-WIDE REFUSAL, NEVER "not part of the
+    corpus" (Copilot review of openDox-code#45, "Propagate Git failures
+    instead of reporting missing documents"): an earlier cut caught
+    `GitCommandFailed` and returned `False`, so a repository or `git`
+    itself going unavailable AFTER `_bound()`'s own root probe reported
+    `DOCUMENT_UNKNOWN` ("not tracked") for what was actually
+    `CORPUS_UNREADABLE` -- hiding a corpus-wide failure as a missing
+    document, the exact confusion `corpus_adapter.py`'s own header warns
+    against. Raises the SAME way `_list_documents_bound`'s own two
+    `ls-files` calls already do, plain `str(failed)` and no additional
+    redaction: `GitCommandFailed` is this package's OWN exception type,
+    not a library's, so the anti-leak walk in
+    `tests_runtime/test_runtime_cli.py` does not scrutinize it the way it
+    does a caught built-in or third-party one."""
     try:
         matched = git.out("ls-files", "-z", "--cached", "--others",
                           "--exclude-standard", "--", str(key))
-    except GitCommandFailed:
-        return False
+    except GitCommandFailed as failed:
+        raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                      str(failed)) from failed
     return matched != b""
 
 
@@ -3148,7 +3162,7 @@ class WorkingTreeCorpus(LocalGitCorpus):
         # `list_documents()`, must not be able to read what the corpus
         # itself excludes just because the bytes happen to sit inside the
         # same directory tree.
-        if not _tracked_or_not_ignored(git, key):
+        if not _tracked_or_not_ignored(git, corpus, key):
             raise _refuse(DOCUMENT_UNKNOWN, document.key,
                           f"{document.key!r} is not tracked and is excluded "
                           "from this corpus (gitignored, or never added)")

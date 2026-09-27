@@ -4939,3 +4939,40 @@ def test_working_tree_corpus_still_reads_a_tracked_file_a_later_gitignore_rule_w
     document = ca.DocumentId(corpus=ordinary_checkout.name,
                              key="already-tracked.env")
     assert adapter.read(resolved, document).content == b"API_KEY=not-a-secret\n"
+
+
+def test_working_tree_corpus_read_propagates_a_git_failure_as_corpus_unreadable(
+        ordinary_checkout: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_tracked_or_not_ignored`'s own git call can fail for a reason that
+    has NOTHING to do with whether the key is tracked -- the repository or
+    `git` itself going unavailable AFTER `_bound()`'s own root probe
+    (Copilot review of openDox-code#45, "Propagate Git failures instead of
+    reporting missing documents"): an earlier cut caught `GitCommandFailed`
+    there and returned `False`, so this surfaced as the misleading
+    `DOCUMENT_UNKNOWN` ("not tracked") instead of `CORPUS_UNREADABLE`,
+    hiding a corpus-wide failure as a missing document. Simulated by
+    monkeypatching `GitRunner.out` to fail ONLY the specific `ls-files`
+    query this helper runs, leaving `_refuse_if_bare`'s own earlier
+    `rev-parse` probe (and everything else) working normally."""
+    _commit(ordinary_checkout, "note.md", "v1\n")
+    adapter = lga.WorkingTreeCorpus()
+    resolved = _resolve(adapter, ordinary_checkout)
+
+    real_out = lga.GitRunner.out
+
+    def _out_fails_for_the_tracked_check(self, *args, **kwargs):
+        if args[:1] == ("ls-files",) and "--exclude-standard" in args:
+            failed = subprocess.CompletedProcess(
+                args=("git", *args), returncode=128,
+                stdout=b"", stderr=b"fatal: simulated failure")
+            raise lga.GitCommandFailed(args, failed)
+        return real_out(self, *args, **kwargs)
+
+    monkeypatch.setattr(lga.GitRunner, "out", _out_fails_for_the_tracked_check)
+
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(resolved, ca.DocumentId(corpus=ordinary_checkout.name,
+                                             key="note.md"))
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE, (
+        "a git failure unrelated to this key's tracked status must not be "
+        "reported as DOCUMENT_UNKNOWN")
