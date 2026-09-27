@@ -94,7 +94,9 @@ PROVIDER_CLIENT_MODULE = provider_mod.PROVIDER_CLIENT_MODULE
 #: provider credential. They replace `snapshot_registry.py`, the snapshot data
 #: source's bearer client, which the carve sent to openXdox-code. Paths are
 #: relative to the package, because the runtime is a SUBPACKAGE and a bare
-#: filename (`app.py`) names no one module.
+#: filename (`app.py`) names no one module. This tuple is an EXEMPTION, so it
+#: is not its own authority: `test_the_identity_surface_is_the_runtimes_two_modules`
+#: holds it to the two modules this comment names.
 IDENTITY_MODULES: tuple[str, ...] = ("runtime/app.py", "runtime/oidc.py")
 
 #: ONE provider-tier spelling that ONE module may carry, and why.
@@ -105,7 +107,8 @@ IDENTITY_MODULES: tuple[str, ...] = ("runtime/app.py", "runtime/oidc.py")
 #: permit is exactly that needle, in exactly that module, only while that
 #: declared list still names it, and only INSIDE that list and the module's
 #: prose (`_spelled_in_code`) — and the rest of the provider tier is asserted
-#: absent there, as it is everywhere else.
+#: absent there, as it is everywhere else. Like `IDENTITY_MODULES`, the table is
+#: held to this one entry by a case below, and not only to its size.
 #: `module -> (needle, the declared tuple that must name it)`.
 REDACTION_PERMITS: dict[str, tuple[str, str]] = {
     "runtime/config.py": ("access_token", "SECRET_PARAMETER_KEYS"),
@@ -291,8 +294,26 @@ def test_the_generic_http_client_has_exactly_its_named_holders():
     assert not offenders, offenders
     # "Exactly" means both halves: no unnamed holder above, and each named
     # holder really holds — an exemption for a module with no needles would be
-    # a stale permit waiting to hide a future offender.
+    # a stale permit waiting to hide a future offender. Which modules are named
+    # is not this case's to trust: the next case holds that.
     assert holders_seen == permitted, holders_seen
+
+
+def test_the_identity_surface_is_the_runtimes_two_modules():
+    """`IDENTITY_MODULES` is held to the surface it names, not trusted as
+    written.
+
+    The case above proves only that each listed module holds a needle. So a
+    third path listed there, with `Authorization` placed in it, passed as an
+    identity holder. The runtime's identity surface is exactly two modules
+    (`split-opendox` § 3.5): `runtime/app.py`, which takes the caller's bearer
+    token, and `runtime/oidc.py`, which verifies it against the broker's keys.
+    A third holder widens the HTTP-client exemption. It has to be argued on its
+    own pull request, with this set."""
+    assert IDENTITY_MODULES == ("runtime/app.py", "runtime/oidc.py"), (
+        f"IDENTITY_MODULES is {IDENTITY_MODULES}; the identity surface is "
+        "runtime/app.py and runtime/oidc.py, and a third holder of the "
+        "HTTP-client needles widens the exemption")
 
 
 @pytest.mark.parametrize("module_name", IDENTITY_MODULES)
@@ -311,11 +332,15 @@ def test_the_identity_surface_holds_nothing_from_the_provider_tier(module_name):
 
 def test_the_redaction_permit_stays_one_spelling_in_one_module():
     """`REDACTION_PERMITS` is ONE provider-tier spelling that ONE module may
-    carry, as its comment says. Each entry is one needle in one module, so the
-    count of entries is the count of permits. A second would widen the
-    provider boundary, and it has to be argued on its own pull request, with
-    this number."""
-    assert len(REDACTION_PERMITS) == 1, REDACTION_PERMITS
+    carry, as its comment says, and it is held to that entry, not only to its
+    size. Each entry is one needle in one module, so a second entry would be a
+    second permit. One moved to another module, or to another needle, would
+    permit what no case here has argued for. Either change widens the provider
+    boundary, and it has to be argued on its own pull request, with this
+    entry."""
+    assert REDACTION_PERMITS == {
+        "runtime/config.py": ("access_token", "SECRET_PARAMETER_KEYS"),
+    }, REDACTION_PERMITS
 
 
 @pytest.mark.parametrize("module_name", sorted(REDACTION_PERMITS))
