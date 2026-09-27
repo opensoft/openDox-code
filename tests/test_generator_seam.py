@@ -29,16 +29,15 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE
    undeclared input is refused before the call. A `None` input is not passed.
    Only a snapshot of the declared contract comes back.
 5. ONE REGISTRATION. The same declaration twice is a no-op, and a second host
-   is refused.
+   is refused. Each registration keeps its own records: a generation that
+   outlives its registration records nothing against the next.
 6. THE ENTRY POINTS' DEFAULT, in R1Q3 (a)'s pattern. openDox's own generator
    writes the neutral kind and takes no input. `register_default()` registers
    it only where nothing is, and holds it to the neutral contract. A host
    replaces it before a generation, and after one that wrote nothing. A host is
-   refused while a generation runs, and after one that wrote a snapshot. Each
-   registration keeps its own records: a generation that outlives its
-   registration records nothing against the next. A generator may register or
-   generate from inside its own call without deadlocking the seam. Until T054
-   lands, the default refuses, naming itself.
+   refused while a generation runs, and after one that wrote a snapshot. A
+   generator may register or generate from inside its own call without
+   deadlocking the seam. Until T054 lands, the default refuses, naming itself.
 7. EACH ENTRY POINT REGISTERS IT. `cli.build_parser()` and `cli.main()` run for
    real. `serve.build_server()` and `serve.main()` still cannot run in a lone
    checkout (research R7), so their registration is executed from their own
