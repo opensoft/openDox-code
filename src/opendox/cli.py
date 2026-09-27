@@ -105,13 +105,15 @@ generate_snapshot = consumer_reach.generate_snapshot  # noqa: E402
 # READ at :927 is unchanged — this is a binding, not a rewrite of the
 # composition point.
 #
-# THE `build_parser()` DOCSTRING BELOW STILL DESCRIBES THE IN-TREE PROFILE
-# ("the one line the § 3 carve deletes rather than moves") and is NOT corrected
-# here: its lines are not ones openxFactory's carve manifest declares for this
-# row, and an edit outside the declared lines is an UNDECLARED MOVEMENT the
-# arrival verifier refuses (RULED OQ-1). This comment is the correction until
-# an act that declares them lands — the same posture, for the same reason, that
-# BUILD slice 2b took at `serve.py`'s matching docstring.
+# THE `build_parser()` DOCSTRING BELOW NOW DESCRIBES THE CURRENT COMPOSITION
+# POINT, not the in-tree profile the § 3 carve inherited. RULED R1Q22 (a)
+# (openxFactory#656 comment `5817152735`) settled that no per-slice
+# declared-edit act precedes an arc edit to a carved file, which is what held
+# this correction back before (RULED OQ-1). Plan 034 T038 makes it: T038 is
+# phase 1's last task to touch this file's own framing (`cli.py`'s
+# single-writer order, tasks.md § "Phase 1 writer slices"), and it needs the
+# docstring to say where the runtime verbs actually reach `opendox`, which is
+# through the default profile below, not through a rewrite of this file.
 from opendox.profile_proxy import profile_openxfactory  # noqa: E402
 # openDox's OWN default profile, and the registry an entry point registers it
 # in (R1Q3 (a)). Importing either registers nothing: `build_parser()` and
@@ -871,14 +873,20 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     `argparse` refuses a duplicate subcommand name outright, and refusing the
     contributed one is the right direction of that refusal.
 
-    The HOST-REGISTERED PROFILE (`profile_openxfactory.SUBCOMMAND_EXTENSIONS`) is
-    registered here too, at the ordinal its column has always occupied, and NOT
-    passed in by `main()`. `build_parser()` names the whole of THIS assembly's
-    command line — which is what every caller, every golden and every existing
-    test already reads it as — so what this repository is built with belongs
-    inside it, and `subcommand_extensions` stays the seam for whatever a caller
-    adds on top. It is also the one line the § 3 carve deletes rather than
-    moves: afterwards the core names no profile and openXdox declares its own.
+    WHICHEVER PROFILE IS CURRENT (`profile_openxfactory.SUBCOMMAND_EXTENSIONS`)
+    is registered here too, at the ordinal its column has always occupied, and
+    NOT passed in by `main()`. That is a host's own profile, where one
+    registered before this call; otherwise it is openDox's OWN default, which
+    THIS function registers first if nothing else has (R1Q3 (a); requirement
+    3, `add-neutral-product-standalone-operability`) — so the composition
+    point stays open for a host, but is never empty. `build_parser()` names
+    the whole of THIS assembly's command line — which is what every caller,
+    every golden and every existing test already reads it as — so what this
+    repository is built with belongs inside it, and `subcommand_extensions`
+    stays the seam for whatever a caller adds on top. The default's own
+    contribution is `RuntimeSubcommand` (`opendox.default_profile`,
+    `opendox/runtime/cli.py`), which is how `[project.scripts] opendox`
+    (plan 034 T038) reaches the runtime verbs with no separate wiring here.
     """
     # THE ENTRY POINT'S DEFAULT (R1Q3 (a), openxFactory#656 comment
     # 5817152735): where no host has registered a profile, register openDox's
