@@ -51,6 +51,7 @@ import contextlib
 import functools
 import http.server
 import sys
+import typing
 from pathlib import Path
 
 import pytest
@@ -406,6 +407,56 @@ def test_class_bookkeeping_is_not_mistaken_for_the_object_protocol():
 
     assert route_extension.collect_handler_contributions(
         (_contributor(_Tidy),), base=_CoreHandler) == (_Tidy,)
+
+
+class _ColumnRoot:
+    """A plain column that a non-class base resolves to."""
+
+    def _serve_rooted(self, head_only):
+        return head_only
+
+
+class _ResolvesToColumnRoot:
+    def __mro_entries__(self, bases):
+        return (_ColumnRoot,)
+
+
+class _Resolved(_ResolvesToColumnRoot()):
+    """A mixin whose base was RESOLVED at class creation, as a generic alias's
+    base is. The class statement records the base as written in
+    `__orig_bases__`."""
+
+    def _serve_resolved(self, head_only):
+        return head_only
+
+
+_T = typing.TypeVar("_T")
+
+
+class _GenericLanes(typing.Generic[_T]):
+    def _serve_generic(self, head_only):
+        return head_only
+
+
+def test_a_resolved_base_is_class_bookkeeping_not_the_object_protocol():
+    """A class statement writes `__orig_bases__` by itself whenever a base
+    resolves through `__mro_entries__` (Copilot's review of #40 at `c450a4a`).
+    It records the bases as written, so it is bookkeeping, and a mixin that
+    carries it composes. A `typing.Generic` mixin is still refused, for the
+    hooks `Generic` itself defines."""
+    assert "__orig_bases__" in vars(_Resolved)
+    assert route_extension.collect_handler_contributions(
+        (_contributor(_Resolved),), base=_CoreHandler) == (_Resolved,)
+    bound = route_extension.compose_handler("BoundHandler", _CoreHandler,
+                                            (_Resolved,), {})
+    route_extension.resolve_handlers((
+        RouteBinding("GET", "/resolved.json", False, "_serve_resolved"),
+        RouteBinding("GET", "/rooted.json", False, "_serve_rooted"),
+    ), bound)
+    with pytest.raises(RouteBindingError, match="OBJECT PROTOCOL") as caught:
+        route_extension.collect_handler_contributions(
+            (_contributor(_GenericLanes),), base=_CoreHandler)
+    assert "__init_subclass__" in str(caught.value)
 
 
 @pytest.mark.parametrize("mixin,because", (

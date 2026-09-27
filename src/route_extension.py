@@ -106,7 +106,8 @@ wherever it would do more:
   * a name another contribution also defines. Which of the two answered would
     be decided by assembly order, the accident `collect_bindings` refuses to
     depend on;
-  * a dunder beyond the ones a `class` statement writes by itself.
+  * a dunder beyond the ones a `class` statement writes by itself, which
+    include `__orig_bases__` where a base resolved through `__mro_entries__`.
     `__getattr__`, `__getattribute__`, `__init__` and their kin reach the
     OBJECT PROTOCOL, which is why `RouteBinding` refuses a dunder handler name.
     A contributed `__getattribute__` would sit in front of every gate the core
@@ -692,12 +693,33 @@ class _ClassStatementBookkeeping:
         self.probe = 0
 
 
+class _ResolvedRoot:
+    """The class `_ResolvedBookkeeping`'s base resolves to."""
+
+
+class _ResolvesToRoot:
+    """A base that is not a class. It resolves to one at class creation
+    through `__mro_entries__`, as a generic alias does."""
+
+    def __mro_entries__(self, bases):
+        return (_ResolvedRoot,)
+
+
+class _ResolvedBookkeeping(_ResolvesToRoot()):
+    """Never composed. It is the second measurement: which dunders a `class`
+    statement writes BY ITSELF when a base was resolved. That is
+    `__orig_bases__`, the record of the bases as written. It is kept apart
+    from the probe above, because a base of its own would move `__dict__` and
+    `__weakref__` off the class being measured."""
+
+
 #: The dunders a mixin carries because it IS a class, not because it asked for
-#: behaviour: the bookkeeping measured above, plus `__slots__`. `__slots__`
-#: declares a layout rather than a hook. An empty one adds nothing, and a
-#: named slot is a data descriptor, refused as one.
+#: behaviour: the bookkeeping the two probes measure, plus `__slots__`.
+#: `__slots__` declares a layout rather than a hook. An empty one adds
+#: nothing, and a named slot is a data descriptor, refused as one.
 _CLASS_BOOKKEEPING = frozenset(
-    name for name in vars(_ClassStatementBookkeeping) if _is_dunder(name)
+    name for probe in (_ClassStatementBookkeeping, _ResolvedBookkeeping)
+    for name in vars(probe) if _is_dunder(name)
 ) | {"__slots__"}
 
 
