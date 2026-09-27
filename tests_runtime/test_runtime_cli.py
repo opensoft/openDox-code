@@ -7,6 +7,7 @@ HERMETIC: standard library plus the package's stdlib-only modules and
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import io
 import json
 import os
@@ -969,6 +970,28 @@ def test_every_printed_invocation_names_the_command_group() -> None:
         "these name the console script followed straight by a verb, which "
         "this parser refuses with exit 2; every verb lives under the "
         "`runtime` command group:\n" + "\n".join(offenders))
+
+
+def test_the_console_scripts_are_the_real_target() -> None:
+    """`pyproject.toml`'s `[project.scripts]` values, not a typo of them.
+
+    Every other case in this file imports `opendox.runtime.cli` directly and
+    calls its functions, which is exactly the class of defect a typo in the
+    ENTRY POINT STRING survives: `pip install .` still succeeds and every
+    test here still passes, while the installed `opendox`/`opendox-runtime`
+    command fails the moment anyone actually runs it (Copilot review of this
+    PR, plan 034 T038). Reads only the installed distribution's OWN declared
+    metadata (`importlib.metadata`, stdlib) and does not load either target,
+    so this stays HERMETIC — it never imports `opendox.cli`, which is a much
+    heavier module than anything else this file touches.
+    """
+    scripts = {ep.name: ep.value
+               for ep in importlib.metadata.entry_points(group="console_scripts")
+               if ep.name in ("opendox", "opendox-runtime")}
+    assert scripts == {
+        "opendox": "opendox.cli:main",
+        "opendox-runtime": "opendox.runtime.cli:main",
+    }, scripts
 
 
 def test_a_credential_holding_a_space_is_not_cut_in_half_by_the_dsn_pattern(
