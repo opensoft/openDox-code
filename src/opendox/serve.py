@@ -1472,18 +1472,34 @@ def _read_source_revision(snapshot_path: Path) -> str | None:
 
 def _default_home_factory(root):
     """`home_corpus`'s shape (`adapter, ref = factory(root)`), over
-    `LocalGitCorpus` at its own bare defaults (`required_fields=()`; phase 2's
-    T054 sets the neutral fields R1Q13 decides). `LocalGitCorpus.__init__`
-    takes no root -- it is root-agnostic, and `resolve(ref)` reads
-    `ref.location` -- so one `CorpusRef` per call carries the root this
-    factory was given, and the adapter itself needs none.
+    `WorkingTreeCorpus` at its own bare defaults (`required_fields=()`; phase
+    2's T054 sets the neutral fields R1Q13 decides). Its `__init__` takes no
+    root -- it is root-agnostic, and `resolve(ref)` reads `ref.location` --
+    so one `CorpusRef` per call carries the root this factory was given, and
+    the adapter itself needs none.
+
+    READS THE WORKING TREE, uncommitted edits included -- RULING, Brett Heap,
+    2026-09-27, via the holder: "Working tree (Recommended)". A standalone
+    user edits files in their own editor, and openxFactory's hosted adapter
+    already shows worktree bytes, so the standalone default matches it rather
+    than reading the session's git HEAD. `WorkingTreeCorpus`
+    (`local_git_adapter.py`) is `LocalGitCorpus` with `list_documents`/`read`
+    aimed at the filesystem instead of a resolved commit; see its own
+    docstring for what stays unchanged (`resolve`, `classify`, `check`,
+    `write_back`) and what does not.
+
+    A FRESH ADAPTER EVERY CALL, ON PURPOSE: nothing here is held onto across
+    calls, so there is no listing cache keyed on whatever HEAD was at an
+    earlier call -- each call gets an instance that reads the CURRENT
+    filesystem state, and `WorkingTreeCorpus` itself caches nothing further
+    within a call either (its own docstring says so).
 
     Kept byte-for-byte identical to `cli.py`'s copy of the same function (one
     home corpus, one default, read by two entry points): neither module may
     import the other, and `corpus_adapter.py` cannot hold this one without
     importing `local_git_adapter` and creating the cycle that module already
     imports `corpus_adapter` the other way (4.1a, T022)."""
-    return (local_git_adapter.LocalGitCorpus(),
+    return (local_git_adapter.WorkingTreeCorpus(),
             corpus_adapter.CorpusRef(name="home", location=str(root)))
 
 

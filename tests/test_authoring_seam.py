@@ -45,6 +45,8 @@ what LEAVES openxFactory, never what a destination assembles).
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from opendox import authoring
@@ -289,7 +291,7 @@ def test_an_entry_point_registers_the_local_git_corpus_when_no_host_has() -> Non
         reason="opendox.cli does not import until T011 lands "
                "(ModuleNotFoundError: No module named 'ideation_dashboard')")
     from opendox import domain_profile
-    from opendox.runtime.local_git_adapter import LocalGitCorpus
+    from opendox.runtime.local_git_adapter import WorkingTreeCorpus
 
     with pytest.raises(ca.CorpusRefused):
         ca.home()  # nothing registered yet -- the autouse fixture's own promise
@@ -307,6 +309,90 @@ def test_an_entry_point_registers_the_local_git_corpus_when_no_host_has() -> Non
 
     factory = ca.home()
     adapter, ref = factory("/some/repository/root")
-    assert isinstance(adapter, LocalGitCorpus), (
-        f"the entry point's default adapter is {adapter!r}, not a LocalGitCorpus")
+    assert isinstance(adapter, WorkingTreeCorpus), (
+        f"the entry point's default adapter is {adapter!r}, not a "
+        "WorkingTreeCorpus (RULING, Brett Heap, 2026-09-27, via the holder: "
+        "\"Working tree (Recommended)\")")
     assert ref.location == "/some/repository/root"
+
+
+def _init_ordinary_checkout(repo, *files: tuple[str, str]) -> None:
+    """A REAL, ORDINARY (non-bare) git repository, made with plain `git`
+    commands -- the shape a standalone user's own repository has, and never
+    the BARE one `local_git_adapter.initialize_repository` makes (RULING C3):
+    a bare repository has no working tree for this ruling to be about.
+    Mirrors `tests_runtime/test_local_git_adapter.py`'s own
+    `_GIT_ENV`/linked-worktree fixture construction, hermetic against a
+    developer's global git config the same way."""
+    import subprocess
+
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+           "GIT_CONFIG_SYSTEM": os.devnull,
+           "GIT_AUTHOR_NAME": "openDox tests",
+           "GIT_AUTHOR_EMAIL": "tests@opendox.invalid",
+           "GIT_COMMITTER_NAME": "openDox tests",
+           "GIT_COMMITTER_EMAIL": "tests@opendox.invalid"}
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(repo), *args], check=True,
+                       capture_output=True, env=env)
+
+    repo.mkdir()
+    git("init", "--initial-branch=main", ".")
+    for relpath, content in files:
+        (repo / relpath).write_text(content, encoding="utf-8")
+        git("add", relpath)
+    git("commit", "-m", "first")
+
+
+def test_an_uncommitted_edit_is_visible_through_the_default(tmp_path) -> None:
+    """RULING (Brett Heap, 2026-09-27, via the holder: "Working tree
+    (Recommended)"): the standalone default reads the WORKING TREE, uncommitted
+    edits included, not the session branch's HEAD. Reason: standalone users
+    edit files in their own editor, and the hosted openxFactory adapter
+    already shows worktree bytes.
+
+    A real, ORDINARY checkout with one committed file, read once through the
+    default, THEN edited on disk with no second commit, and read again through
+    the SAME resolved corpus -- not a fresh `resolve()` -- so this also proves
+    there is no listing or content cache keyed on the revision `resolve()`
+    captured. A new, never-committed file is picked up by `list_documents`
+    too, which only a working-tree listing (never `git ls-tree HEAD`) can do.
+
+    `pytest.importorskip`, for the same reason as the case above: proving
+    this THROUGH THE DEFAULT means calling `cli.build_parser()`."""
+    cli = pytest.importorskip(
+        "opendox.cli",
+        reason="opendox.cli does not import until T011 lands "
+               "(ModuleNotFoundError: No module named 'ideation_dashboard')")
+    from opendox import domain_profile
+    from opendox.runtime import local_git_adapter as lga
+
+    if not lga.git_available():
+        pytest.skip("`git` is not on PATH")
+
+    repo = tmp_path / "notes"
+    _init_ordinary_checkout(repo, ("note.md", "committed\n"))
+
+    try:
+        cli.build_parser()
+    except domain_profile.ProfileNotRegistered:
+        pass
+    factory = ca.home()
+    adapter, ref = factory(str(repo))
+    resolved = adapter.resolve(ref)
+    key = ca.DocumentId(corpus=ref.name, key="note.md")
+
+    committed = adapter.read(resolved, key)
+    assert committed.content == b"committed\n"
+
+    (repo / "note.md").write_text("edited, never committed\n", encoding="utf-8")
+    edited = adapter.read(resolved, key)
+    assert edited.content == b"edited, never committed\n", (
+        "the default served the committed bytes after an uncommitted edit -- "
+        "it is reading git HEAD, not the working tree")
+
+    (repo / "draft.md").write_text("never committed at all\n", encoding="utf-8")
+    keys = {doc.key for doc in adapter.list_documents(resolved)}
+    assert keys == {"note.md", "draft.md"}, (
+        "the default's listing did not pick up the new, uncommitted file")

@@ -2794,3 +2794,120 @@ class LocalGitCorpus:
         body.append(f"Dispatched-By: {actor}")
         body.append(f"Write-Path: {write_path}")
         return "\n".join(body) + "\n"
+
+
+class WorkingTreeCorpus(LocalGitCorpus):
+    """`LocalGitCorpus`, reading the WORKING TREE instead of a resolved commit.
+
+    RULING (Brett Heap, 2026-09-27, via the holder: "Working tree
+    (Recommended)"). openDox's own standalone default (`corpus_adapter
+    .register_default_home`, plan 034 task 4.1a) reads whatever is on disk
+    RIGHT NOW -- an uncommitted edit included -- rather than the session's git
+    HEAD. A standalone user edits files in their own editor, and
+    openxFactory's hosted adapter already shows worktree bytes; this default
+    matches it instead of reading a commit a local session has since edited
+    past.
+
+    `resolve()`, `check()` and `write_back()` are UNCHANGED, inherited from
+    `LocalGitCorpus` exactly. So is `classify()`: its header read
+    (`_header_of`) goes THROUGH `self.read()`, which is why overriding `read`
+    alone is enough to make classification see the same bytes this adapter
+    lists and serves. Only WHERE `list_documents`/`read` get their bytes
+    changes -- never `git ls-tree`/`git cat-file` at `corpus.revision` for the
+    common case (no revision named); an EXPLICIT revision is still honoured
+    by falling back to the parent's commit-based read, because a caller that
+    named one asked for history on purpose.
+
+    A BARE REPOSITORY HAS NO WORKING TREE TO READ. `local_git_adapter`'s own
+    repository-creation act makes one bare (RULING C3), by design: this
+    class's whole reason to exist is the OPPOSITE case, "a checkout somebody
+    edits by hand" (`check`'s own docstring). So `list_documents`/`read`
+    REFUSE `CORPUS_UNREADABLE`, naming the reason, rather than silently
+    answering an empty corpus that a caller could mistake for one genuinely
+    empty -- the one confusion `corpus_adapter.py`'s own header is emphatic
+    about.
+
+    KNOWN, DISCLOSED SCOPE LIMIT: unlike the parent's `ls-tree` reading,
+    listing here does not specially exclude a gitlink (a submodule). `git
+    ls-files` still names its path once, as it does any other tracked entry;
+    reading it then meets `IsADirectoryError`, refused as `DOCUMENT_UNKNOWN`
+    rather than crashing. RULING's own scope is the standalone default's
+    listing and reading of uncommitted edits, not submodule handling, and a
+    "documents and ideas" corpus is not expected to carry one.
+
+    NO CACHE, ANYWHERE, ACROSS OR WITHIN CALLS. `list_documents()` re-asks
+    `git ls-files` every time and `read()` re-opens the path every time: an
+    edit made between two calls -- on the SAME instance or a fresh one -- is
+    visible on the very next one. The factory that registers this default
+    (`cli.py`'s and `serve.py`'s `_default_home_factory`) also constructs a
+    fresh instance on every call, so no state survives across registrations
+    either (plan 034, T022)."""
+
+    def _list_documents_bound(self, git: GitRunner, corpus: ResolvedCorpus,
+                              scope: str) -> tuple[DocumentId, ...]:
+        """Tracked files, plus untracked-but-not-`.gitignore`d ones -- the set
+        a working copy actually shows. NEVER `corpus.revision`."""
+        self._refuse_if_bare(git, corpus)
+        try:
+            # `--cached` (the index's tracked paths) UNION `--others
+            # --exclude-standard` (untracked, minus what `.gitignore`/
+            # `.git/info/exclude`/the global excludes file already hide) --
+            # together the paths a plain `ls` of a working checkout, filtered
+            # by its own ignore rules, would show. `-z`, like the parent's
+            # `ls-tree -z`: a NUL-terminated pathname round-trips any byte
+            # git itself permits.
+            raw = git.out("ls-files", "-z", "--cached", "--others",
+                          "--exclude-standard")
+        except GitCommandFailed as failed:
+            raise _refuse(CORPUS_UNREADABLE, corpus.location, str(failed)) from failed
+        keys = sorted({entry for entry
+                       in raw.decode("utf-8", "surrogateescape").split("\0")
+                       if entry})
+        return tuple(DocumentId(corpus=corpus.ref.name, key=key) for key in keys)
+
+    def _read_bound(self, git: GitRunner, corpus: ResolvedCorpus,
+                    document: DocumentId, revision: str | None) -> Document:
+        """The file's CURRENT bytes on disk, uncommitted edits included."""
+        if revision is not None:
+            return super()._read_bound(git, corpus, document, revision)
+        self._refuse_if_bare(git, corpus)
+        path = Path(corpus.location) / document.key
+        try:
+            content = path.read_bytes()
+        except FileNotFoundError:
+            raise _refuse(DOCUMENT_UNKNOWN, document.key,
+                          f"{document.key!r} is not on disk in the working tree")
+        except IsADirectoryError:
+            raise _refuse(DOCUMENT_UNKNOWN, document.key,
+                          f"{document.key!r} is a directory (a gitlink?), not "
+                          "a document this adapter can read")
+        except OSError as failed:
+            # REDACTED AT THE SOURCE: an OS error reading a working-tree file
+            # can carry the full path in its text (permission/IO failures
+            # quote the operand), so it is cleaned the same way the process
+            # runner already cleans an OS error's text elsewhere in this file
+            # (`redact_credentials(str(exc))`, `_spawn`/`_run`) -- the anti-leak
+            # walk (tests_runtime/test_runtime_cli.py) polices every module in
+            # this package, not only `cli.py`.
+            raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                          redact_credentials(str(failed))) from failed
+        # `revision=None`: this content answers for no single commit -- it may
+        # mix committed and uncommitted bytes -- which is the field's own
+        # legal "no revision notion" value, not a degraded answer.
+        return Document(id=document, content=content, revision=None)
+
+    @staticmethod
+    def _refuse_if_bare(git: GitRunner, corpus: ResolvedCorpus) -> None:
+        try:
+            bare = git.out("rev-parse", "--is-bare-repository").decode().strip()
+        except GitCommandFailed as failed:
+            raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                          f"could not classify the repository ({failed})"
+                          ) from failed
+        if bare == "true":
+            raise _refuse(
+                CORPUS_UNREADABLE, corpus.location,
+                "this repository is bare: it has no working tree for this "
+                "adapter to read. A repository the product's own act "
+                "creates is bare by RULING C3 -- register a host adapter "
+                "instead, or point this default at an ordinary checkout")
