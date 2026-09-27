@@ -20,6 +20,12 @@ catching things, silently, while still passing. `tests/hermeticity.py` and
 `tests/` root; both consumers reach it by inserting `TESTS_ROOT` on `sys.path`,
 which their conftest or their own header already does.
 
+ONE NODE READER, FOR THE CALLERS THAT WALK A TREE THEIR OWN WAY. Plan 034
+T032's sweep (`tests/test_reach_sweep.py`) has to know WHEN each import runs, so
+it cannot take `imported_modules`' flat walk. It reads each node with
+`names_imported_by` instead, which is what `imported_modules` reads with too, so
+the sweep is not a third copy of the extraction.
+
 BOTH SPELLINGS ARE ALWAYS THE CALLER'S JOB. `scripts/__init__.py` exists, so
 every package under `scripts/` is importable BOTH as a top-level name and as
 `scripts.<name>`. A one-spelling forbidden list is a hole, so callers pass both
@@ -29,6 +35,43 @@ every package under `scripts/` is importable BOTH as a top-level name and as
 from __future__ import annotations
 
 import ast
+
+#: The two calls that import a module named by a STRING, as #1144's F4.1 scan
+#: reads them: `importlib.import_module` and the builtin `__import__`, reached
+#: through a module (`importlib.import_module`) or by a bare name.
+IMPORTING_CALLS = ("import_module", "__import__")
+
+
+def names_imported_by(node, *, calls=False):
+    """The absolute module names ONE syntax node imports.
+
+    `import a.b, c` names `a.b` and `c`; `from a.b import c` names `a.b`; a
+    relative import names nothing, for the reason `imported_modules` gives.
+
+    With `calls`, an `IMPORTING_CALLS` call names its module too, when the name
+    is a string LITERAL, passed by position or as `name=`. A literal that starts
+    with a dot is relative, and so is `__import__` with a nonzero literal
+    `level`. A name computed at run time cannot be read off the source.
+    """
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    if isinstance(node, ast.ImportFrom):
+        return [node.module] if node.level == 0 and node.module else []
+    if not (calls and isinstance(node, ast.Call)):
+        return []
+    called = getattr(node.func, "attr", getattr(node.func, "id", None))
+    if called not in IMPORTING_CALLS:
+        return []
+    keywords = {keyword.arg: keyword.value for keyword in node.keywords
+                if keyword.arg is not None}
+    name = node.args[0] if node.args else keywords.get("name")
+    level = node.args[4] if len(node.args) > 4 else keywords.get("level")
+    if called == "__import__" and isinstance(level, ast.Constant) and level.value:
+        return []
+    if isinstance(name, ast.Constant) and isinstance(name.value, str) \
+            and not name.value.startswith("."):
+        return [name.value]
+    return []
 
 
 def imported_modules(path):
@@ -44,14 +87,8 @@ def imported_modules(path):
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                yield alias.name, node.lineno
-        elif isinstance(node, ast.ImportFrom):
-            if node.level:            # relative: confined to this package
-                continue
-            if node.module:
-                yield node.module, node.lineno
+        for name in names_imported_by(node):
+            yield name, node.lineno
 
 
 def names_a_forbidden_package(module: str, forbidden) -> bool:

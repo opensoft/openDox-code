@@ -33,14 +33,30 @@ PARSED, NOT GREPPED (`tests/import_scan.py`'s rule). These modules name the
 four packages in prose on purpose: a docstring saying which reach a seam
 replaced, or a comment saying why an import is lazy. So the sweep reads import
 statements, and `importlib.import_module(...)` or `__import__(...)` calls with
-a literal name, out of the syntax tree, as #1144's F4.1 scan does. A name in a
-comment, a docstring or a string is not an import. Relative imports stay inside
-this package and are not read.
+a literal name, by position or as `name=`, out of the syntax tree, as #1144's
+F4.1 scan does. A name in a comment, a docstring or a string is not an import.
+Relative imports stay inside this package and are not read. Each node is read
+by `import_scan.names_imported_by`, the reader the repository's other direction
+checks share, so the sweep is not a second copy of it.
 
-WHEN A REACH RUNS decides its class. Only a function body defers. A module
-body, a class body, an `if`/`try`/`with` at module level (a `TYPE_CHECKING`
-block among them), and a `def`'s decorators, default values and annotations
-all run when the module is imported.
+WHEN A REACH RUNS decides its class. A function body defers, and so does a
+lambda's. So do the positions PEP 695 evaluates lazily, only when something
+reads them: a type parameter's bound or constraints, and a `type` alias's
+value. Everything else runs when the module is imported: a module body, a
+class body, an `if`/`try`/`with` at module level, and a `def`'s decorators,
+default values and annotations.
+
+WHERE POSITION AND RUN TIME PART, THE SWEEP READS POSITION, which is the
+stricter reading. An import under `if TYPE_CHECKING:` never runs, but it sits
+in import position, and a standalone openDox could not type-check an import it
+cannot resolve. A `def`'s annotations count as import time even where `from
+__future__ import annotations` postpones them. A comprehension or generator
+expression counts as running where it sits, though a generator nobody consumes
+at import time would defer. Each of these can only make the sweep call a reach
+import-time when it is not; none can hide one. What a source read cannot see is
+a CALL: a function body runs at import time if the module calls it there.
+`tests/test_imports_standalone.py` and `tests/test_consumer_reach.py` import
+every module with the siblings blocked, which is the proof for that case.
 
 It reads `src/` whole, so `src/route_extension.py` and
 `src/subcommand_extension.py` are swept with the package. `--noconftest` safe.
@@ -60,6 +76,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 
+sys.path.insert(0, str(ROOT / "tests"))
+from import_scan import names_a_forbidden_package, names_imported_by  # noqa: E402
+
 #: The consumer. Its deferred reaches are phase 2's and 3's to route.
 CONSUMER = "openxdox"
 
@@ -68,9 +87,6 @@ CONSUMER = "openxdox"
 OPENXFACTORY = ("ideation_dashboard", "doc_health", "corpus_adapter_openxfactory")
 
 SIBLINGS = (CONSUMER, *OPENXFACTORY)
-
-#: The two calls that import a module named by a string, as F4.1 reads them.
-IMPORTING_CALLS = ("import_module", "__import__")
 
 
 @dataclass(frozen=True, order=True)
@@ -92,25 +108,23 @@ class Reach:
         return f"{self.path}:{self.line}: {self.name} ({when}, in {self.inside})"
 
 
-def _names(node: ast.AST) -> list[str]:
-    """The module names one node imports, F4.1's way."""
-    if isinstance(node, ast.Import):
-        return [alias.name for alias in node.names]
-    if isinstance(node, ast.ImportFrom):
-        return [node.module] if node.level == 0 and node.module else []
-    if isinstance(node, ast.Call) and node.args \
-            and isinstance(node.args[0], ast.Constant) \
-            and isinstance(node.args[0].value, str) \
-            and getattr(node.func, "attr", getattr(node.func, "id", "")) in IMPORTING_CALLS:
-        return [node.args[0].value]
-    return []
-
-
 def sweep(source: str, path: str = "<source>") -> list[Reach]:
     """Every reach of a sibling in `source`, classified by when it runs."""
     found: list[Reach] = []
 
     def visit(node: ast.AST, deferred: bool, inside: str) -> None:
+        lazy: list[ast.AST] = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef, ast.TypeAlias)):
+            # PEP 695: a type parameter's bound and constraints are evaluated
+            # only when something reads them, and so is an alias's value.
+            owner = node.name.id if isinstance(node, ast.TypeAlias) else node.name
+            for param in node.type_params:
+                visit(param, True, f"{owner}[{param.name}]")
+            lazy = list(node.type_params)
+            if isinstance(node, ast.TypeAlias):
+                visit(node.value, True, f"type {owner}")
+                return
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             # Everything but the BODY is evaluated where the `def` sits.
             args = node.args
@@ -131,11 +145,12 @@ def sweep(source: str, path: str = "<source>") -> list[Reach]:
                 visit(default, deferred, inside)
             visit(node.body, True, f"{inside}.<lambda>")
             return
-        for name in _names(node):
-            if any(name == s or name.startswith(s + ".") for s in SIBLINGS):
+        for name in names_imported_by(node, calls=True):
+            if names_a_forbidden_package(name, SIBLINGS):
                 found.append(Reach(path, node.lineno, name, deferred, inside))
         for child in ast.iter_child_nodes(node):
-            visit(child, deferred, inside)
+            if not any(child is param for param in lazy):
+                visit(child, deferred, inside)
 
     visit(ast.parse(source, filename=path), False, "<module>")
     return sorted(found)
@@ -241,6 +256,34 @@ def test_the_scanner_classifies_every_position_it_reads():
         (24, "doc_health.families", True, "verb"),
         (27, "corpus_adapter_openxfactory", True, "inner"),
         (29, "ideation_dashboard", True, "verb.<lambda>"),
+    }, sorted(found)
+
+
+#: The positions PEP 695 evaluates lazily, and the importing calls' keyword
+#: spelling. The class body is not lazy, so its reach runs at import time. A
+#: `__import__` with a nonzero `level` is relative, and names no sibling.
+_LAZY_SPECIMEN = textwrap.dedent('''
+    import importlib
+
+    def generic[T: __import__("doc_health")](x: T) -> T:
+        return x
+
+    class Box[T: (importlib.import_module(name="ideation_dashboard"), int)]:
+        field = __import__(name="openxdox.gate_console")
+
+    type Alias = __import__("corpus_adapter_openxfactory")
+    RELATIVE = __import__("doc_health", globals(), None, (), 1)
+''')
+
+
+def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
+    found = {(r.line, r.name, r.deferred, r.inside)
+             for r in sweep(_LAZY_SPECIMEN, "lazy.py")}
+    assert found == {
+        (4, "doc_health", True, "generic[T]"),
+        (7, "ideation_dashboard", True, "Box[T]"),
+        (8, "openxdox.gate_console", False, "<module>"),
+        (10, "corpus_adapter_openxfactory", True, "type Alias"),
     }, sorted(found)
 
 
