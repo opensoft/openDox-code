@@ -165,9 +165,10 @@ jobs:
       # `collect_ignore` — which is empty (plan 034 T035) and would LOWER
       # SELECTED, so the floor refuses it. Adding a test raises SELECTED and
       # PASSED; floors permit a rise, and the commit that adds it should raise
-      # them WITH the reason, so the margin stays meaningful. Removing one
-      # lowers them, and the floor will refuse: find the tests, do not lower
-      # the floor.
+      # them by as many, WITH the reason, so the margin stays at its declared
+      # size (below). Removing one lowers them. The margin absorbs up to three,
+      # which is the trade stated below; past that the floor refuses: find the
+      # tests, do not lower the floor.
       #
       # AND SKIPPED IS THE LOAD-BEARING NUMBER, pinned EXACTLY. A file that
       # quietly turns into skips is precisely what an exact pin catches and a
@@ -181,8 +182,9 @@ jobs:
       - name: Pin the triple
         shell: bash
         env:
-          # FLOORS — may only RISE, and only with the reason in the commit
-          # message.
+          # FLOORS — they RISE with the tests. They are lowered only with the
+          # reason in the commit message, as plan 034 T037's move at the end of
+          # this block is.
           #
           # RE-PINNED BY plan 034 T036 for the whole suite, which this job now
           # runs as one invocation. READ FROM CI, on run 36333569456 (job
@@ -210,10 +212,39 @@ jobs:
           # Read from run 36337919108 (job 108672216615) over `db3e8a4f`:
           # `triple: selected=2481 passed=2468 skipped=13 failures=0
           # errors=0`, `margin 10`. 2471 + 10 is a check, not the source.
-          MIN_SELECTED: "2481"
-          MIN_PASSED: "2468"
+          #
+          # MOVED BY plan 034 T037, for two reasons. Requirement 9.4 reads
+          # "Restore the margin, and stop the skips carrying the gap", and
+          # FR-006 reads "The margins SHALL be restored, with no skip carrying
+          # the gap".
+          #
+          # 1. THE TWO SKIPS THAT MIRRORED openXdox's GAP ARE GONE. Both were
+          #    in `tests/test_binding_stylesheets.py`, and both needed
+          #    openXdox's six contributed modules or its sheets, which this leg
+          #    never ships. Their both-legs halves go to the composition
+          #    (openXdox-code's `tests/integration/`, T042). The half this leg
+          #    can prove alone stays, as a passing case. With the two cases
+          #    that served only them, four cases leave and one arrives:
+          #    SELECTED -3, PASSED -1, SKIPPED -2. The file's closing comment
+          #    lists each case with its destination.
+          # 2. THE MARGIN IS RESTORED. The floors sit THREE below CI's reading
+          #    instead of on it. That is the reference implementation's rule,
+          #    openxFactory `pytest-suite.yml`: "three below the lower of the
+          #    two greens". PROVISIONAL at this commit: three below a local
+          #    replica of this job (2478 / 2467 / 11). CI's two readings of
+          #    this change replace it.
+          #
+          #    THE TRADE, stated as the reference states it. A loss of up to
+          #    three collected tests does not red on the floors alone. It still
+          #    reds on the exact SKIPPED pin if the lost tests became skips, and
+          #    on failures or errors if they failed. So the only shape the
+          #    margin lets through is up to three tests that stop being
+          #    COLLECTED at all, and a lost file is dozens of tests, never
+          #    three.
+          MIN_SELECTED: "2475"
+          MIN_PASSED: "2464"
           # EXACT — the load-bearing number. Moves only with its reason.
-          EXPECT_SKIPPED: "13"
+          EXPECT_SKIPPED: "11"
         run: |
           python3 - <<'PY' > triple.env
           import xml.etree.ElementTree as ET, pathlib

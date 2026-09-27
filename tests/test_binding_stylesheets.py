@@ -33,21 +33,31 @@ WHAT IT HOLDS, and why each is here rather than implied:
    panel that refuses to mount because a stylesheet 404'd is deleted.
 6. `styles.css` NO LONGER CARRIES THE GATE LOOP'S SELECTORS, and still carries
    every `--st-*` token and every shared one. MEASURED HERE, against the real
-   file and the real six modules where they are reachable — not asserted from a
-   list this file keeps, which would be the second authority the census exists
-   to avoid.
-7. NO CONTRIBUTED SHEET DECLARES AN `--st-*` TOKEN. Reading `var(--st-…)` is
-   what RULED Q7 calls the one stable styling surface; WRITING one is a second
-   authority for openDox's own design tokens, and `display.applyTokens` is
-   already the first.
+   file and openDox's own bundle — not asserted from a list this file keeps,
+   which would be the second authority the census exists to avoid.
 
-`--noconftest` SAFE, deliberately: `validate` runs this file in the explicit
-list with conftest collection off (RULED Q-L5 (b')), so nothing here may need a
-fixture, a path insertion or an installed consumer. It imports
-`opendox.view_extension` alone, reads bundle files as text, and drives the real
-`views/view_extension.js` under the `node` the runner already has — skipped,
-never failed, where node is absent, exactly as `tests/test_view_registry.py`
-and `tests/test_split_route_tails.py` do.
+WHAT THIS FILE NO LONGER HOLDS, AND WHERE IT WENT (plan 034 T037; requirement
+9.4). Two cases here needed openXdox's six contributed modules or its sheets.
+This leg never ships them, because RULED Q5 places them at assembly, so both
+skipped on every run of this leg's suite. That is the skip 9.4 ends: behaviour
+that needs both legs is an integration test at the declared composition
+(FR-006). The list, with each destination, is at the end of this file:
+
+- the re-derivation of `GATE_EXCLUSIVE` from the six modules goes to
+  openXdox-code's `tests/integration/` (T042), where the six are placed in the
+  pinned openDox's bundle on every run. The half that needs no assembly stays
+  here and asserts for real: openDox's own bundle names none of the 54 classes;
+- NO CONTRIBUTED SHEET DECLARES AN `--st-*` TOKEN is asserted where the sheets
+  are, in openXdox-code's `tests/test_gate_loop_views.py`, over every sheet
+  that leg declares, and beside the same guard's negative control.
+
+`--noconftest` SAFE still, though `validate` no longer runs it that way: the
+explicit list with conftest collection off (RULED Q-L5 (b')) ended with plan
+034 T036. Nothing here needs a fixture, a path insertion or an installed
+consumer. It imports `opendox.view_extension` alone, reads bundle files as
+text, and drives the real `views/view_extension.js` under the `node` the runner
+already has — skipped, never failed, where node is absent, exactly as
+`tests/test_view_registry.py` and `tests/test_split_route_tails.py` do.
 
 A CREATED file: no carve-manifest row (RULED OQ-C).
 """
@@ -58,7 +68,6 @@ import json
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -72,19 +81,25 @@ REGISTRY_JS = WEB / "views" / "view_extension.js"
 NODE = shutil.which("node")
 
 #: The six modules openXdox contributes (RULED Q5's package data). They are NOT
-#: in this repository — slice S5 sent them to openXdox-code — so assertion 6
-#: below reads them where an assembly has placed them and SKIPS where none has,
-#: which is the same posture `tests/test_gate_loop_contributed.py` takes toward
-#: the column it cannot import.
-GATE_MODULES = ("gate.js", "gate-lens.js", "gate-projects.js", "dispose.js",
+#: in this repository — slice S5 sent them to openXdox-code — and no case here
+#: reads them any more: the one that did is an integration test at the
+#: composition now (plan 034 T037 → T042). The names stay because a
+#: developer's assembly may have placed the six in this bundle, and openDox's
+#: own corpus must EXCLUDE them there, or a class only they name would read as
+#: openDox's (`_own_bundle_text()`).
+GATE_MODULES =("gate.js", "gate-lens.js", "gate-projects.js", "dispose.js",
                 "swb-create.js", "swb-session.js")
 
 #: The 54 classes the census measures as the gate loop's own at openDox-code
 #: `0b4e8bbf` / openXdox-code `0a0265f7` — every class named by one of the six
 #: modules and by NO file of openDox's own bundle. Declared here so assertion 6
-#: is a claim about THIS tree even in an install where the six modules are
-#: absent; where they ARE present, the test re-derives the set from them and
-#: refuses a drift, so this tuple can never become the second authority.
+#: is a claim about THIS tree, where the six modules are absent. Two cases read
+#: it: `styles.css` declares none of these classes, and openDox's own bundle
+#: names none of them. That the six modules name every one, and that no class
+#: they alone name is left in `styles.css`, needs both legs, so it is
+#: re-derived at the composition (T042), where a drift in this tuple is refused.
+#: Here the orphan register below is the proof that reads no tuple, so a class
+#: this one never heard of still cannot be left behind unseen.
 GATE_EXCLUSIVE = (
     "dispose-accepted", "dispose-deferred", "dispose-propose", "dispose-rejected",
     "disposetray", "gatebar", "gatebar-actions", "gatebar-cmd", "gatebar-title",
@@ -105,8 +120,9 @@ GATE_EXCLUSIVE = (
 #: that NO file of openDox's own bundle names, MEASURED after the extraction.
 #: This is the tuple-free half of the proof, and it is the one that runs in a
 #: checkout with no assembly (Copilot review, round 1: the re-derivation test
-#: SKIPS here, so a gate-only class this file's `GATE_EXCLUSIVE` never heard of
-#: could be left behind and nothing would say so). A class openDox does not
+#: SKIPPED here, and has since left for the composition, plan 034 T037, so a
+#: gate-only class this file's `GATE_EXCLUSIVE` never heard of could be left
+#: behind and nothing in this leg would say so). A class openDox does not
 #: name is either one of these declared orphans or a rule that belongs at
 #: another leg — there is no third kind — so a NEW one fails, whatever tuple
 #: does or does not mention it.
@@ -283,43 +299,42 @@ def _blank_code_comments(text: str, html: bool = False) -> str:
     return "".join(out)
 
 
-#: A CUSTOM PROPERTY IS DECLARED WHEREVER A DECLARATION MAY START, not only at
-#: the beginning of a line (Copilot review, round 1). This read
-#: `^\s*(--st-…)\s*:` under `re.M`, and every sheet in this bundle is written
-#: one rule per line — `.x { --st-proposed: red; }` declares the token after a
-#: `{`, and a second declaration after a `;`, and the guard saw neither. The
-#: contexts a declaration can follow are the start of the text, `{` and `;`;
-#: `var(--st-…)` is a READ and is bounded by `(`, which is none of them.
-_ST_DECLARATION = re.compile(r"(?:^|[{;])\s*(--st-[A-Za-z0-9_-]+)\s*:")
+def _own_bundle_text() -> str:
+    """openDox's OWN bundle as one corpus, comments blanked: every
+    `views/*.js` but the six contributed modules, then `app.js`, then
+    `index.html`.
 
-
-def _declared_st_tokens(css: str) -> list[str]:
-    """Every `--st-*` this stylesheet WRITES. Comments must already be blanked."""
-    return _ST_DECLARATION.findall(css)
-
-
-def _assembled_views() -> Path | None:
-    """`views/` if an assembly has placed the contributed modules there.
-
-    A PARTIAL ASSEMBLY IS NOT "NO ASSEMBLY" (Copilot review, round 5). This
-    returned `None` unless all six were present, so a bundle carrying five of
-    them skipped the derived ownership check entirely and a packaging error
-    hid behind a pytest skip. Absent is a legitimate state — this leg ships
-    none of the six, and RULED Q5 places them at assembly — but a bundle that
-    has SOME of them has been assembled wrongly, and that is a failure here
-    rather than a silence.
+    THE SIX ARE EXCLUDED BY NAME (Copilot review, round 7). Where an assembly
+    HAS placed them in this bundle, a plain glob sweeps them into openDox's
+    own corpus, and a class only they name would read as named by openDox —
+    hiding exactly the left-behind selector the orphan scan exists to catch.
     """
-    views = WEB / "views"
-    present = [name for name in GATE_MODULES if (views / name).is_file()]
-    if not present:
-        return None
-    assert len(present) == len(GATE_MODULES), (
-        "this bundle carries a PARTIAL contributed column — "
-        f"{sorted(present)} and not {sorted(set(GATE_MODULES) - set(present))}. "
-        "`openxdox.web_assets.install_view_modules` places every declared asset "
-        "or refuses, so a partial set is an assembly that failed halfway and "
-        "must not read as an install that never happened")
-    return views
+    own = "\n".join(_blank_code_comments(p.read_text(encoding="utf-8"))
+                    for p in sorted((WEB / "views").glob("*.js"))
+                    if p.name not in GATE_MODULES)
+    own += _blank_code_comments((WEB / "app.js").read_text(encoding="utf-8"))
+    own += _blank_code_comments((WEB / "index.html").read_text(encoding="utf-8"),
+                                html=True)
+    return own
+
+
+def _class_namer(corpus: str):
+    """`names(token)`: does `corpus` name the class `token`?
+
+    As a whole token, or by a PREFIX the code concatenates onto:
+    `"swb-pane-" + kind` and `` `x-${kind}` `` name a class that no literal
+    search can see, because the name is never written down whole.
+    """
+    prefixes = re.findall(r"[\"\'`\s]([A-Za-z_][A-Za-z0-9_-]*-)(?:[\"\'`]|\$\{)",
+                          corpus)
+
+    def names(token: str) -> bool:
+        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])",
+                     corpus):
+            return True
+        return any(token.startswith(prefix) for prefix in prefixes)
+
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +495,7 @@ def test_the_client_half_validates_and_injects(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6-7. The extraction itself.
+# 6. The extraction itself.
 # ---------------------------------------------------------------------------
 
 def test_styles_css_declares_no_selector_only_the_gate_loop_uses() -> None:
@@ -506,27 +521,9 @@ def test_styles_css_declares_no_selector_only_the_gate_loop_uses() -> None:
     # orphans. A gate-only selector left behind is named by neither — and a
     # tuple that forgot it cannot hide it, because this assertion never reads
     # the tuple.
-    # GATE MODULES ARE EXCLUDED HERE TOO (Copilot review, round 7). Where an
-    # assembly HAS placed the six, this glob swept them into openDox's own
-    # corpus, so a gate-only class left behind would read as "named by
-    # openDox" and the orphan check — the half of this proof that runs with no
-    # tuple at all — would have hidden exactly the defect it exists to catch.
-    # The derived check below already excluded them; this one now does.
-    own = "\n".join(_blank_code_comments(p.read_text(encoding="utf-8"))
-                    for p in sorted((WEB / "views").glob("*.js"))
-                    if p.name not in GATE_MODULES)
-    own += _blank_code_comments((WEB / "app.js").read_text(encoding="utf-8"))
-    own += _blank_code_comments((WEB / "index.html").read_text(encoding="utf-8"),
-                                html=True)
-
-    def named_by_opendox(token: str) -> bool:
-        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])",
-                     own):
-            return True
-        # `"swb-pane-" + kind` and `` `x-${kind}` `` name a class no literal
-        # search can see; a PREFIX the bundle concatenates onto counts.
-        return any(token.startswith(prefix) for prefix in re.findall(
-            r"[\"\'`\s]([A-Za-z_][A-Za-z0-9_-]*-)(?:[\"\'`]|\$\{)", own))
+    # The corpus excludes the six contributed modules by name wherever an
+    # assembly has placed them (Copilot review, round 7): `_own_bundle_text()`.
+    named_by_opendox = _class_namer(_own_bundle_text())
 
     unnamed = sorted(t for t in declared if not named_by_opendox(t))
     assert unnamed == sorted(STYLES_CSS_ORPHANS), (
@@ -579,118 +576,62 @@ def test_the_design_tokens_and_the_shared_selectors_stayed() -> None:
         assert host in declared, host
 
 
-def test_the_gate_exclusive_set_is_re_derived_where_the_modules_are_present() -> None:
-    """Where an assembly has placed the six modules, the declared set above is
-    CHECKED against them rather than trusted: every class in `GATE_EXCLUSIVE` is
-    named by at least one of the six, and none is named by openDox's own
-    bundle."""
-    views = _assembled_views()
-    if views is None:
-        pytest.skip("no assembly has placed openXdox's six contributed modules "
-                    "in this bundle (RULED Q5); the declared set is asserted "
-                    "against `styles.css` alone")
-    # COMMENTS ARE BLANKED ON BOTH CORPORA (Copilot review, round 3). The
-    # no-assembly path already did it; this one read them raw, so a class named
-    # only in a comment counted as ownership on EITHER side — a gate-only
-    # selector excused by openDox prose, or a contributed module credited with
-    # a class it only documents. Same walk, same reason.
-    gate_text = "\n".join(
-        _blank_code_comments((views / name).read_text(encoding="utf-8"))
-        for name in GATE_MODULES)
-    own = [p for p in sorted(views.glob("*.js")) if p.name not in GATE_MODULES]
-    own_text = "\n".join(_blank_code_comments(p.read_text(encoding="utf-8"))
-                         for p in own)
-    own_text += _blank_code_comments((WEB / "app.js").read_text(encoding="utf-8"))
-    own_text += _blank_code_comments(
-        (WEB / "index.html").read_text(encoding="utf-8"), html=True)
+def test_opendox_own_bundle_names_no_gate_exclusive_class() -> None:
+    """THE HALF OF THE RE-DERIVATION THIS LEG PROVES ALONE, asserted on every
+    run (plan 034 T037).
 
-    # THE SET IS DERIVED FROM THE MODULES AND THE STYLESHEET, not read off the
-    # tuple (Copilot review, round 1). Checking only that every DECLARED token
-    # is named by the six answers a question nobody asked: a gate-only class
-    # this tuple forgot would be named by the six, left behind in `styles.css`,
-    # and invisible to both halves of the old assertion. The derivation is the
-    # census tool's own: every class token `styles.css` still declares in a
-    # SELECTOR, classified by which side of the seam names it, with the
-    # concatenation forms (`"disposebtn dispose-" + v.outcome`) counted by
-    # PREFIX because no literal search can see a name never written down.
-    def names(token: str, corpus: str) -> bool:
-        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])",
-                     corpus):
-            return True
-        return any(token.startswith(prefix) for prefix in
-                   re.findall(r"[\"\'`\s]([A-Za-z_][A-Za-z0-9_-]*-)(?:[\"\'`]|\$\{)",
-                              corpus))
+    Each class in `GATE_EXCLUSIVE` could leave `styles.css` only because no
+    file of openDox's own bundle names it. That premise needs no assembly, so
+    it is measured here, over the same comment-blanked corpus the orphan scan
+    reads. An element of openDox's own that started to carry one of these
+    classes would render unstyled wherever the contributed sheet is absent, a
+    lone install included, because the class's only rule is in that sheet now.
 
-    still_declared = _selector_classes(STYLES.read_text(encoding="utf-8"))
-    derived_leftovers = sorted(
-        token for token in still_declared
-        if names(token, gate_text) and not names(token, own_text))
-    assert derived_leftovers == [], (
-        "these classes are named by openXdox's six contributed modules and by "
-        f"no file of openDox's own bundle, yet `styles.css` still declares a "
-        f"selector for them: {derived_leftovers}. RULED Q7 sends them to the "
-        "binding's own sheet — and this set is DERIVED from the modules, so it "
-        "catches a class `GATE_EXCLUSIVE` never heard of")
-
-    # AND THE DECLARED SET IS STILL CHECKED AGAINST THE MODULES, because the
-    # derivation above can only see what `styles.css` still declares: a token in
-    # the tuple that no contributed module names would be a stale entry, and the
-    # tuple is what this suite asserts against in a leg with no assembly.
-    for token in GATE_EXCLUSIVE:
-        assert names(token, gate_text), \
-            f"{token} is named by none of the six contributed modules"
-        assert not names(token, own_text), \
-            f"{token} is named by openDox's own bundle and must not have left"
-
-
-def test_the_design_token_guard_sees_an_inline_declaration() -> None:
-    """The guard above is only worth running if it catches the shape these
-    sheets are actually written in — one rule per line, so a declaration
-    follows a `{` or a `;` and never a newline. Asserted here rather than
-    trusted, because a guard that cannot fail is a comment."""
-    assert _declared_st_tokens(".x { --st-proposed: red; }") == ["--st-proposed"]
-    assert _declared_st_tokens("a{color:red;--st-captured:blue}") == ["--st-captured"]
-    assert _declared_st_tokens("  --st-organized: green;") == ["--st-organized"]
-    # A READ is not a declaration, which is the whole distinction RULED Q7 draws.
-    assert _declared_st_tokens(".x { color: var(--st-proposed); }") == []
-
-
-def test_no_contributed_sheet_declares_a_design_token() -> None:
-    """A contributed sheet READS `var(--st-…)` and never WRITES one.
-
-    RULED Q7 makes the `--st-*` family openDox's one stable styling surface; a
-    contributed sheet that declared one would be a second authority for it, and
-    `views/display.js`'s `applyTokens` is already the first.
+    This loop used to run only inside
+    `test_the_gate_exclusive_set_is_re_derived_where_the_modules_are_present`,
+    which skipped on every run of this leg's suite, because the six modules
+    are never here. The rest of that case needs both legs, and it is an
+    integration test at the composition now (T042; the record is below).
     """
-    views = WEB / "views"
-    # RECURSIVE, because `_SHEET` admits a nested specifier (Copilot review,
-    # round 2): `./views/gate/panel.css` is a lawful `styles` value, and a
-    # direct-child glob would have let a sheet in a subdirectory declare an
-    # `--st-*` token with this guard claiming to cover every contributed sheet.
-    sheets = sorted(views.rglob("*.css"))
-    if not sheets:
-        pytest.skip("no assembly has placed a contributed stylesheet in this "
-                    "bundle (RULED Q5); openDox ships none of its own")
-    for sheet in sheets:
-        css = _blank_css_comments(sheet.read_text(encoding="utf-8"))
-        written = _declared_st_tokens(css)
-        assert written == [], f"{sheet.name} declares {written}"
+    names = _class_namer(_own_bundle_text())
+    named = sorted(token for token in GATE_EXCLUSIVE if names(token))
+    assert named == [], (
+        "openDox's own bundle names these gate-loop classes, whose only rules "
+        f"left `styles.css` for a contributed sheet (RULED Q7): {named}. An "
+        "element that carries one renders unstyled in a lone install")
 
 
-def test_a_partial_assembly_is_a_failure_and_not_a_skip(tmp_path: Path,
-                                                        monkeypatch) -> None:
-    """`_assembled_views()`'s own rule, driven (Copilot review, round 5)."""
-    views = tmp_path / "views"
-    views.mkdir()
-    monkeypatch.setattr(sys.modules[__name__], "WEB", tmp_path)
-    assert _assembled_views() is None          # none of the six: no assembly
-    (views / GATE_MODULES[0]).write_text("// one\n", encoding="utf-8")
-    with pytest.raises(AssertionError) as partial:
-        _assembled_views()
-    assert "PARTIAL" in str(partial.value)
-    for name in GATE_MODULES[1:]:
-        (views / name).write_text("// placed\n", encoding="utf-8")
-    assert _assembled_views() == views          # all six: an assembly
+# ---------------------------------------------------------------------------
+# WHAT LEFT THIS FILE, AND WHERE IT WENT (plan 034 T037; requirement 9.4).
+#
+# Two cases here read openXdox's six contributed modules or its sheets, and so
+# SKIPPED on every run of this leg's suite: this leg never ships them, because
+# RULED Q5 places them at assembly. That is the skip 9.4 ends, and FR-006
+# sends behaviour that needs both legs to an integration test at the declared
+# composition. Two more cases served only those two. The pull request that
+# removed all four lists each one with its destination, and T049 checks that
+# each arrived.
+#
+# - `test_the_gate_exclusive_set_is_re_derived_where_the_modules_are_present`
+#   goes to openXdox-code's `tests/integration/` (T042). There the six are
+#   placed in the pinned openDox's bundle on every run, so its derivation
+#   asserts for real: no class that the six name and no openDox file names is
+#   still declared in `styles.css`, and each of the 54 classes is named by one
+#   of the six. Its openDox-only loop stays above, as
+#   `test_opendox_own_bundle_names_no_gate_exclusive_class`.
+# - `test_a_partial_assembly_is_a_failure_and_not_a_skip`, with its helper
+#   `_assembled_views()`, goes to the same place. Its rule existed so that a
+#   partial assembly could not hide behind the case above's skip.
+# - `test_no_contributed_sheet_declares_a_design_token` is asserted for real
+#   where the sheets are: openXdox-code's `tests/test_gate_loop_views.py`
+#   carries a case of the same name, over every sheet that leg declares (at
+#   openXdox-code `e28930bf`). This leg's version scanned an ASSEMBLED bundle's
+#   `views/**/*.css` recursively, and that scan goes to T042 with the first.
+# - `test_the_design_token_guard_sees_an_inline_declaration`, with its helper
+#   `_declared_st_tokens()`, is the guard's negative control. openXdox-code's
+#   `tests/test_gate_loop_views.py` carries the same case, with the same regex,
+#   beside the case it guards.
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed on this runner")
