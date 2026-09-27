@@ -457,6 +457,27 @@ def test_a_contribution_carrying_a_data_descriptor_is_refused(mixin):
     assert "wfile" in str(caught.value)
 
 
+def test_a_bookkeeping_name_may_hold_a_data_descriptor_only_where_the_core_answers_it():
+    """Class bookkeeping passes the object-protocol refusal by NAME, so its
+    value is checked too. The core answers `__dict__` itself, ahead of the
+    contribution in the MRO, so a contributed `__dict__` is never reached. A
+    core without annotations does not answer `__annotations__`, so a
+    contributed data descriptor under that name would answer on every
+    instance, and it is refused."""
+    smuggled = property(lambda self: {"smuggled": True})
+    shadowed = type("_Shadowed", (), {"__dict__": smuggled,
+                                      "_serve_shadowed": lambda self, h: None})
+    bound = _composed((_contributor(shadowed),))
+    assert _instance(bound).__dict__ == {}
+    plain = type("_PlainCore", (http.server.SimpleHTTPRequestHandler,), {})
+    assert "__annotations__" not in dir(plain)
+    annotating = type("_Annotating", (), {"__annotations__": smuggled})
+    with pytest.raises(RouteBindingError, match="DATA DESCRIPTORS") as caught:
+        route_extension.collect_handler_contributions(
+            (_contributor(annotating),), base=plain)
+    assert "__annotations__" in str(caught.value)
+
+
 def test_what_is_not_a_data_descriptor_is_contributed():
     """A method, a `staticmethod`, a `classmethod`, a
     `functools.cached_property` (the instance's own attribute takes

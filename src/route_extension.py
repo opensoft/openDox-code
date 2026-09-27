@@ -115,7 +115,10 @@ wherever it would do more:
     `__set__` or `__delete__`. A data descriptor takes precedence over an
     instance's own attributes, so it would intercept the core's per-instance
     state under its name, including state set in a way the measurement above
-    cannot read. A contribution holds METHODS;
+    cannot read. A contribution holds METHODS. The bookkeeping names are
+    exempt from the dunder rule by name, so their VALUES are checked too: a
+    data descriptor under one is refused unless the core answers that name
+    itself, ahead of it in the MRO;
   * a METACLASS other than the core handler's own, or one it derives from. The
     composed class would take it, and a metaclass decides how the class itself
     is called, compared, hashed and asked for a name. A metaclass whose
@@ -847,10 +850,16 @@ def _refuse_an_unsafe_composition(base: type, contributions, *,
                 "handler itself behaves. That is a privileged route, not a "
                 "contributed one, and the reason `RouteBinding` refuses a "
                 "dunder handler name.")
+        # Class bookkeeping passes the refusal above by NAME, so its VALUE is
+        # checked here. Where the core answers a bookkeeping name itself, as
+        # it answers `__dict__`, the core's copy precedes the contribution in
+        # the MRO and a contributed one is never reached. Where the core does
+        # not, a data descriptor under that name would answer on every
+        # instance.
         descriptors = sorted({name for klass in chain
                               for name, value in vars(klass).items()
-                              if not _is_dunder(name)
-                              and _is_data_descriptor(value)})
+                              if _is_data_descriptor(value)
+                              and not (_is_dunder(name) and name in answered)})
         if descriptors:
             raise RouteBindingError(
                 f"the handler contribution {_describe(mixin)} defines "

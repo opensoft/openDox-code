@@ -47,10 +47,12 @@ domain_profile.register(<the host's profile module or object>)
 * A **module** or an **object**. ASK-2's words are "registers the real module";
   § 4.4's form is an object built from a YAML profile (RULED ASK-4 Q1: YAML
   canonical, dataclass the runtime form). Both are accepted.
-* **Nothing is type-checked.** openDox cannot name
+* **The profile itself is not type-checked.** openDox cannot name
   `openxdox.domain_profile.DomainProfile` without recreating the back-import the
   carve removed, and it has never heard of openxFactory. It names only the
-  attributes it reads.
+  attributes it reads, and it checks each VALUE where it reads it: the route
+  bindings as they are collected, and `HANDLER_CONTRIBUTIONS` as a plain tuple
+  of classes that may only add to the core handler.
 
 ### What openDox reads off it
 
@@ -151,7 +153,8 @@ silently, and `tests/test_profile_registration.py` pins it for that reason.
 
 **One object, two readers.** Each reader names only what it reads: openDox
 reaches `SUBCOMMAND_EXTENSIONS` / `ROUTE_EXTENSIONS` (and the optional
-`HANDLER_CONTRIBUTIONS`) and type-checks nothing;
+`HANDLER_CONTRIBUTIONS`) and never type-checks the profile object, only the
+values it reads off it;
 openXdox type-checks its own `DomainProfile` and treats anything else as "not
 here", leaving its own refusal standing. A host that wants one registration to
 serve both therefore registers a profile that satisfies both readers — for
