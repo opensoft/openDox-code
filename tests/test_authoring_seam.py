@@ -17,13 +17,27 @@ T020 (this task) adds the two cases below. T021 adds
 `authoring.py:318` is routed through this seam. T022 adds
 `test_an_entry_point_registers_the_local_git_corpus_when_no_host_has`, once
 an entry point registers openDox's own default where no host has. Each lands
-in its own PR, and none of the three needs `opendox.serve` or `opendox.cli`:
+in its own PR.
+
+T020's and T021's own cases need neither `opendox.serve` nor `opendox.cli`:
 both still raise `ModuleNotFoundError: No module named 'ideation_dashboard'`
 until T011 lands (measured at `1e4a57fb`), and any run with the root conftest
 in play fails on the autouse `declared_human_console` fixture, which imports
-`opendox.cli` (`tests/session_fixtures.py:397`). This file imports neither,
-is `--noconftest` safe for exactly that reason, and the PR that adds it
-quotes such a run.
+`opendox.cli` (`tests/session_fixtures.py:397`). Those cases are
+`--noconftest` safe for exactly that reason, and each PR that adds one quotes
+such a run.
+
+**T022's named test is DIFFERENT, and this correction says so plainly rather
+than silently contradicting the paragraph above.** Proving *"an entry point
+registers…"* means calling the entry point -- `cli.build_parser()` --
+which is exactly the thing that does not import today. So that one case
+`pytest.importorskip`s `opendox.cli`: it SKIPS here and under `--noconftest`
+alike until T011 lands, and runs for real once it has (no flag needed by
+then, since `cli.build_parser()` no longer refuses on import). T022's own PR
+verifies it today under the Group 2 simulation shim (research.md's Appendix;
+never committed), which stands in for `ideation_dashboard` exactly as T005's
+and T006's measurements did, and quotes that run plainly as what it is: a
+measurement ahead of T011, not the required check.
 
 A CREATED file: no carve-manifest row (RULED OQ-C -- the manifest declares
 what LEAVES openxFactory, never what a destination assembles).
@@ -221,3 +235,78 @@ def test_required_header_fields_come_from_the_registered_adapter() -> None:
     assert first.resolved[0] != second.resolved[0], (
         "each call staged its own throwaway root; the two resolutions must "
         "not have collided on one directory")
+
+
+# --------------------------------------------------------------------------
+# 4.1a (T022) -- openDox's own default adapter, registered by an entry point
+# --------------------------------------------------------------------------
+
+def test_register_default_home_leaves_an_existing_registration_alone() -> None:
+    """`corpus_adapter.register_default_home()` (T022) is the entry points'
+    seam call, generic over whatever factory it is given -- this case never
+    touches `cli.py`/`serve.py` at all, so it needs neither module and runs
+    unconditionally.
+
+    A host's (or an earlier caller's) registration, made before an entry
+    point runs, must survive: `register_home()` always OVERWRITES, so the
+    entry point's call is only lawful because it checks first."""
+    host_factory = lambda root: ("the host's adapter", root)  # noqa: E731
+    ca.register_home(host_factory)
+
+    default_factory = lambda root: ("openDox's default adapter", root)  # noqa: E731
+    ca.register_default_home(default_factory)
+
+    assert ca.home() is host_factory, (
+        "register_default_home() replaced a registration that was already "
+        "there -- it must check corpus_adapter.home() first, exactly as "
+        "domain_profile.register_default() does for the profile (T016)")
+
+
+def test_register_default_home_registers_where_nothing_has() -> None:
+    """The other half of the same seam call: nothing registered, so it does."""
+    default_factory = lambda root: ("openDox's default adapter", root)  # noqa: E731
+    ca.register_default_home(default_factory)
+    assert ca.home() is default_factory
+
+
+def test_an_entry_point_registers_the_local_git_corpus_when_no_host_has() -> None:
+    """T022's named falsifier. `cli.build_parser()` -- AN ENTRY POINT -- calls
+    `corpus_adapter.register_default_home(...)` over openDox's own
+    `LocalGitCorpus`, where no host has called `register_home(...)` already
+    (4.1a). A bare process that builds nothing still meets 4.2's
+    `ADAPTER_NOT_REGISTERED` refusal (`test_home_refuses_naming_the_seam_...`
+    above); this is the registration that entry point makes instead.
+
+    `pytest.importorskip` -- not a plain `import` -- because proving *"an
+    entry point registers…"* means calling `cli.build_parser()`, and that
+    is exactly what does not import in a lone checkout until T011 lands
+    (see the module docstring's correction). This case SKIPS today, under
+    `--noconftest` and without it alike, and runs for real once T011 has
+    landed -- T022's own PR verifies it now under the Group 2 simulation
+    shim instead, and says so plainly."""
+    cli = pytest.importorskip(
+        "opendox.cli",
+        reason="opendox.cli does not import until T011 lands "
+               "(ModuleNotFoundError: No module named 'ideation_dashboard')")
+    from opendox import domain_profile
+    from opendox.runtime.local_git_adapter import LocalGitCorpus
+
+    with pytest.raises(ca.CorpusRefused):
+        ca.home()  # nothing registered yet -- the autouse fixture's own promise
+
+    # `build_parser()` also reads the (still unregistered, pre-T016) host
+    # profile as its OWN last statement, which refuses `ProfileNotRegistered`
+    # today. This case is about the corpus-adapter registration alone, which
+    # runs first in the function body regardless of that later refusal --
+    # and once T016 lands, `build_parser()` will not raise at all, so this
+    # `except` clause becomes dead code and the assertions below still hold.
+    try:
+        cli.build_parser()
+    except domain_profile.ProfileNotRegistered:
+        pass
+
+    factory = ca.home()
+    adapter, ref = factory("/some/repository/root")
+    assert isinstance(adapter, LocalGitCorpus), (
+        f"the entry point's default adapter is {adapter!r}, not a LocalGitCorpus")
+    assert ref.location == "/some/repository/root"

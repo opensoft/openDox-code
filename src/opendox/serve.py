@@ -152,6 +152,13 @@ from opendox import view_extension  # noqa: E402
 # § 3.4 slice S7: and the DISPLAY FACET beside it, on the same payload and for
 # the same stated reason — § 4.3 step 2, "no new route and no second fetch".
 from opendox import display_profile  # noqa: E402
+# THE HOME-CORPUS SEAM'S DEFAULT (4.1a; plan 034 T022) -- see
+# `_register_default_home_if_unregistered` below, beside `build_server()`.
+# Neither module names `openxdox` or `ideation_dashboard`: `corpus_adapter` is
+# stdlib-only (F4.1's own scan proves it), and `local_git_adapter` names only
+# `opendox.runtime.config` and `opendox.corpus_adapter` besides the stdlib.
+from opendox import corpus_adapter  # noqa: E402
+from opendox.runtime import local_git_adapter  # noqa: E402
 
 registry_mod = consumer_reach.snapshot_registry  # noqa: E402
 # THE BY-FUNCTION SPLIT (`split-opendox-two-layer-product` § 2.4, PRs 2 and 3
@@ -1463,6 +1470,23 @@ def _read_source_revision(snapshot_path: Path) -> str | None:
         return None
 
 
+def _default_home_factory(root):
+    """`home_corpus`'s shape (`adapter, ref = factory(root)`), over
+    `LocalGitCorpus` at its own bare defaults (`required_fields=()`; phase 2's
+    T054 sets the neutral fields R1Q13 decides). `LocalGitCorpus.__init__`
+    takes no root -- it is root-agnostic, and `resolve(ref)` reads
+    `ref.location` -- so one `CorpusRef` per call carries the root this
+    factory was given, and the adapter itself needs none.
+
+    Kept byte-for-byte identical to `cli.py`'s copy of the same function (one
+    home corpus, one default, read by two entry points): neither module may
+    import the other, and `corpus_adapter.py` cannot hold this one without
+    importing `local_git_adapter` and creating the cycle that module already
+    imports `corpus_adapter` the other way (4.1a, T022)."""
+    return (local_git_adapter.LocalGitCorpus(),
+            corpus_adapter.CorpusRef(name="home", location=str(root)))
+
+
 def build_server(
     web_dir: Path | str,
     snapshot_path: Path | str,
@@ -1556,6 +1580,17 @@ def build_server(
     have silently lost `/snapshot-index.json`, `/source/` and every gate verb
     from the servers in the file that tests this very seam. This line is also
     the one the § 3 carve deletes rather than moves."""
+    # FIRST, before the profile read two lines below can refuse (4.1a,
+    # T022): a bare process that only builds a server still needs the home
+    # corpus to resolve for `create`/`edit` (`authoring.py`), and a host that
+    # DID register its own adapter must see it left alone. This call must
+    # not depend on reaching any later line, because `ProfileNotRegistered`
+    # (until T016 lands) is raised at the very next statement that reads a
+    # host profile. `register_default_home` registers ONLY where nothing
+    # already answers `corpus_adapter.home()`, exactly as `domain_profile
+    # .register_default()` does for the profile (T016).
+    corpus_adapter.register_default_home(_default_home_factory)
+
     from opendox import doxbench_turns
     # Imported HERE rather than at module scope, for the reason that is
     # actually true on this branch — narrower than the one this comment gave
@@ -2010,6 +2045,14 @@ def _refuse_impossible_checkout_root(value: Path | str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The process entry point registers openDox's own default home corpus
+    # where no host has (4.1a, T022), exactly where a host would register its
+    # own -- mirrors T016's `domain_profile.register_default(...)` call here.
+    # `build_server()` below makes the identical call as its own first
+    # statement, so this one is a no-op once that runs; kept for the same
+    # reason T016 keeps its match (the OUTERMOST entry point states the
+    # contract on its own).
+    corpus_adapter.register_default_home(_default_home_factory)
     parser = argparse.ArgumentParser(prog="ideation-dashboard-serve", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--web-dir", default=str(Path(__file__).resolve().parent / "web"),

@@ -74,6 +74,14 @@ gate_mod = consumer_reach.gate_console  # noqa: E402
 from opendox import serve as serve_mod  # noqa: E402
 snapshot_mod = consumer_reach.snapshot  # noqa: E402
 from opendox import workbench as workbench_mod  # noqa: E402
+# THE HOME-CORPUS SEAM'S DEFAULT (4.1a; plan 034 T022) -- see
+# `_register_default_home_if_unregistered` below, beside `build_parser()`.
+# Neither module names `openxdox` or `ideation_dashboard`, so this import adds
+# no reach: `corpus_adapter` is stdlib-only (F4.1's own scan proves it), and
+# `local_git_adapter` names only `opendox.runtime.config` and
+# `opendox.corpus_adapter` besides the stdlib.
+from opendox import corpus_adapter  # noqa: E402
+from opendox.runtime import local_git_adapter  # noqa: E402
 from opendox.boundary import (  # noqa: E402
     BoundaryViolation, HumanGate, OutputBoundary,
 )
@@ -849,6 +857,23 @@ def _add_generate_args(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--no-validate", action="store_true", help="skip post-render validation")
 
 
+def _default_home_factory(root):
+    """`home_corpus`'s shape (`adapter, ref = factory(root)`), over
+    `LocalGitCorpus` at its own bare defaults (`required_fields=()`; phase 2's
+    T054 sets the neutral fields R1Q13 decides). `LocalGitCorpus.__init__`
+    takes no root -- it is root-agnostic, and `resolve(ref)` reads
+    `ref.location` -- so one `CorpusRef` per call carries the root this
+    factory was given, and the adapter itself needs none.
+
+    Kept byte-for-byte identical to `serve.py`'s copy of the same function
+    (one home corpus, one default, read by two entry points): neither module
+    may import the other, and `corpus_adapter.py` cannot hold this one
+    without importing `local_git_adapter` and creating the cycle that module
+    already imports `corpus_adapter` the other way (4.1a, T022)."""
+    return (local_git_adapter.LocalGitCorpus(),
+            corpus_adapter.CorpusRef(name="home", location=str(root)))
+
+
 def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParser:
     """The command line, plus whatever this invocation was ASSEMBLED with.
 
@@ -873,6 +898,18 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     adds on top. It is also the one line the § 3 carve deletes rather than
     moves: afterwards the core names no profile and openXdox declares its own.
     """
+    # FIRST, before anything else this function does (4.1a, T022): a bare
+    # process that only builds a parser still needs the home corpus to
+    # resolve for `create`/`edit` (`authoring.py`), and a host that DID
+    # register its own adapter must see it left alone. Placed ahead of the
+    # profile read below on purpose -- that read can still refuse
+    # `ProfileNotRegistered` where no profile is registered either (until
+    # T016 lands), and this registration must not depend on reaching a line
+    # after it. `register_default_home` registers ONLY where nothing already
+    # answers `corpus_adapter.home()`, exactly as `domain_profile
+    # .register_default()` does for the profile (T016).
+    corpus_adapter.register_default_home(_default_home_factory)
+
     parser = argparse.ArgumentParser(prog="ideation-dashboard", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -966,6 +1003,14 @@ def main(argv: list[str] | None = None, *,
     `func` on the same subparsers action every core one does, so `args.func(args)`
     dispatches both by the identical line. That is the point of handing the real
     parser to the extension rather than a wrapper."""
+    # The process entry point registers openDox's own default home corpus
+    # where no host has (4.1a, T022), exactly where a host would register its
+    # own -- mirrors T016's `domain_profile.register_default(...)` call here.
+    # `build_parser()` below makes the identical call as its own first
+    # statement, so this one is a no-op once that runs; it is kept for the
+    # same reason T016 keeps its match: the OUTERMOST entry point states the
+    # contract on its own, independent of what `build_parser()` does inside.
+    corpus_adapter.register_default_home(_default_home_factory)
     args = build_parser(
         subcommand_extensions=subcommand_extensions).parse_args(argv)
     try:
