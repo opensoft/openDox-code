@@ -17,8 +17,8 @@ object reaches a log line the first time somebody debugs a startup failure.
 
 WHY A FROZEN DATACLASS AND NOT `pydantic-settings` (which the Hermes install
 uses). This subpackage's import weight is a contract — see the package
-docstring — and `opendox.runtime.config` has to import under the leg's
-`validate` check, which installs `.[test]` and not `.[runtime]`. A settings
+docstring — and `opendox.runtime.config` has to import without the
+`runtime` extra installed. A settings
 object built out of the standard library costs nothing to import and is the
 only reason `opendox runtime status` can tell a reader that FastAPI is missing
 instead of failing to start with the same ImportError it was about to explain.

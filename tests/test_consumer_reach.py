@@ -202,9 +202,10 @@ _BLOCK_SIBLINGS = "import sys\n" + "".join(
 #: distribution it lists, with the top-level modules that installing it puts
 #: on the path and that `opendox.runtime` imports. `pydantic` arrives as
 #: fastapi's own requirement, and `psycopg_pool` as psycopg's `pool` extra.
-#: `validate.yml`'s `.[test]` install leaves the extra out, so there
-#: `opendox.runtime.app` fails on `fastapi`, `db` on `psycopg` and `oidc` on
-#: `httpx`, which are packages that environment was never asked for. That is
+#: An install without the extra leaves them out (the required job's did,
+#: until plan 034 T036 gave it the extra), so there `opendox.runtime.app`
+#: fails on `fastapi`, `db` on `psycopg` and `oidc` on `httpx`, which are
+#: packages that environment was never asked for. That is
 #: the one failure the record's derivation lets pass, and only inside
 #: `opendox.runtime`, only while the package really is absent.
 #: `test_the_runtime_extra_is_the_one_pyproject_declares` holds the keys to
@@ -464,7 +465,8 @@ def test_the_runtime_extras_modules_are_the_runtimes_own() -> None:
        dependency cannot hide behind the exemption either.
     3. Where a tabled distribution is installed, each of its modules is
        installed by it or by a distribution it requires, as its metadata says.
-       Under `.[test]` alone none is installed, and 1 and 2 hold the table.
+       Where none is installed (a checkout without the `runtime` extra), 1
+       and 2 hold the table.
     """
     imported = _third_party_imports(PACKAGE / "runtime")
     tabled = {name for names in RUNTIME_EXTRA.values() for name in names}

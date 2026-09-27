@@ -34,8 +34,12 @@ kept. Importing `opendox.runtime`, `opendox.runtime.config`,
     `tests_runtime/test_runtime_surface.py` measures whichever of the declared
     modules the tree actually carries rather than assuming all of them
     (Copilot review of openDox-code#25);
-  * the leg's REQUIRED `validate` check, which installs `.[test]` and not
-    `.[runtime]`, so every assertion it runs has to hold without the extra;
+  * any install without the `runtime` extra, where every assertion about
+    these modules has to hold without it. The leg's REQUIRED `validate` check
+    was such an install until plan 034 T036 gave it `.[runtime,test]`; the
+    contract did not move with it, and `tests_runtime/test_runtime_surface.py`
+    measures it in a fresh interpreter, by the leak it looks for, with the
+    extra installed or not;
   * a reader running `opendox runtime status` to find out why the runtime will
     not start, which must not itself fail on the missing dependency it is
     about to report.

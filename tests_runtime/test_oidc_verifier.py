@@ -6,9 +6,10 @@ described. Every case runs the real `TokenVerifier` — the one `build_verifier`
 constructs in production, differing only in where the key set comes from — so a
 property proved here is a property the deployed runtime has.
 
-These suites need `PyJWT[crypto]` and therefore run in the `runtime` CI job;
-the required `validate` job installs `.[test]` alone. See `conftest.py` for the
-in-fixture RSA key pair, the JWKS file and the token minter.
+These suites need `PyJWT[crypto]`, from the `runtime` extra. They ran in the
+separate `runtime` CI job until plan 034 T036 folded that job into the
+required `validate` job, which installs `.[runtime,test]`. See `conftest.py`
+for the in-fixture RSA key pair, the JWKS file and the token minter.
 """
 
 from __future__ import annotations
