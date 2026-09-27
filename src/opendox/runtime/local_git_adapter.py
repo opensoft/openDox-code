@@ -251,6 +251,20 @@ _GIT_ENVIRONMENT_OVERRIDES = frozenset({
     # command instead (Copilot review of openDox-code#26, round 21). It joins
     # the two other command-naming variables on this list.
     "GIT_PROXY_COMMAND",
+    # `GIT_TEMPLATE_DIR` NAMES A DIRECTORY `git init` COPIES FROM, not a
+    # command — a different hazard than the three above, but the same
+    # redirection shape (Copilot review of openDox-code#45, "Sanitize
+    # GIT_TEMPLATE_DIR before repository initialization"). `authoring
+    # ._stage_as_a_repository_if_git_is_available` runs `git init` on a
+    # THROWAWAY staging directory, through this same sanitizer; an ambient
+    # template directory is consulted by `init` BEFORE any of this module's
+    # own hardening runs, and can plant a repository-local `info/exclude`,
+    # `hooks/`, or `config` into that staged tree. A planted `info/exclude`
+    # matching the staged document's own filename would make `ls-files
+    # --others --exclude-standard` -- the exact command `WorkingTreeCorpus
+    # ._list_documents_bound` runs -- silently omit it, so classification
+    # would see nothing staged at all rather than the document just written.
+    "GIT_TEMPLATE_DIR",
 })
 
 
@@ -3072,8 +3086,21 @@ class WorkingTreeCorpus(LocalGitCorpus):
         # (a remote's embedded credential) and `.git/HEAD` are ordinary,
         # readable, relative paths with no `..` and no leading `/` to catch
         # either check above.
+        # A NUL BYTE IS REFUSED THE SAME WAY (Copilot review of
+        # openDox-code#45, "Reject NUL document IDs before confined file
+        # access"): `DocumentId.key` is an opaque caller value, unmediated by
+        # a prior listing, exactly like the `.git`-component case above --
+        # `git ls-files` can never produce one (a NUL terminates its own
+        # `-z`-framed records, so it is not a legal git pathname), but a
+        # caller can still construct `DocumentId(key="...\x00...")` directly.
+        # Left unchecked, that string reaches `_open_confined`'s `os.open`,
+        # which raises `ValueError` (a NUL rejection done by Python itself,
+        # before any syscall) -- a type the surrounding `except OSError`
+        # clauses below do NOT catch, so it would leak out raw instead of
+        # the promised `CorpusRefused(DOCUMENT_UNKNOWN)`.
         key = PurePosixPath(document.key)
-        if key.is_absolute() or ".." in key.parts or ".git" in key.parts:
+        if (key.is_absolute() or ".." in key.parts or ".git" in key.parts
+                or "\x00" in document.key):
             raise _refuse(DOCUMENT_UNKNOWN, document.key,
                           f"{document.key!r} is not a path inside this corpus")
         # `_open_confined` walks EVERY component -- not only the last --

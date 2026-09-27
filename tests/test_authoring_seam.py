@@ -419,10 +419,24 @@ def _init_ordinary_checkout(repo, *files: tuple[str, str]) -> None:
     a bare repository has no working tree for this ruling to be about.
     Mirrors `tests_runtime/test_local_git_adapter.py`'s own
     `_GIT_ENV`/linked-worktree fixture construction, hermetic against a
-    developer's global git config the same way."""
+    developer's global git config the same way.
+
+    THE BASE ENVIRONMENT IS `sanitized_git_environment()`, NOT A RAW
+    `os.environ` COPY (Copilot review of openDox-code#45, "Sanitize Git
+    environment in checkout test"): a plain `{**os.environ, ...}` keeps
+    whatever `GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR` the process this
+    suite runs under already has set -- a wrapping git hook, a CI runner's
+    own checkout step -- so `git init -C <repo> .` below could target or
+    mutate THAT repository instead of the throwaway `repo` this helper was
+    asked to create, silently. The identity/config overrides this helper
+    itself needs are layered on top of the sanitized base, exactly as
+    `authoring._stage_as_a_repository_if_git_is_available` layers its own
+    `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` overrides on top of it."""
     import subprocess
 
-    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+    from opendox.runtime.local_git_adapter import sanitized_git_environment
+
+    env = {**sanitized_git_environment(), "GIT_CONFIG_GLOBAL": os.devnull,
            "GIT_CONFIG_SYSTEM": os.devnull,
            "GIT_AUTHOR_NAME": "openDox tests",
            "GIT_AUTHOR_EMAIL": "tests@opendox.invalid",

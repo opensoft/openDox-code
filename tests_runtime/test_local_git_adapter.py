@@ -3139,6 +3139,59 @@ def test_the_environment_sanitizer_strips_every_command_naming_variable(
     assert "PATH" in variables
 
 
+def test_the_environment_sanitizer_strips_git_template_dir(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GIT_TEMPLATE_DIR` names a DIRECTORY `git init` copies FROM, not a
+    command -- a different hazard than the three variables the test above
+    covers, but the same redirection shape (Copilot review of
+    openDox-code#45, "Sanitize GIT_TEMPLATE_DIR before repository
+    initialization"). `authoring._stage_as_a_repository_if_git_is_available`
+    runs `git init` on a throwaway staging directory through this same
+    sanitizer; an ambient template directory is consulted by `init` itself,
+    before any of this module's own hardening runs, and can plant a
+    repository-local `info/exclude`, `hooks/`, or `config` file into that
+    staged tree.
+
+    A LIVE DEMONSTRATION, not only list membership: a template directory
+    carrying a hostile `info/exclude` really does get copied into a fresh
+    repository when `GIT_TEMPLATE_DIR` reaches `git init` unsanitized, and
+    really does not once `sanitized_git_environment()` has filtered it."""
+    assert "GIT_TEMPLATE_DIR" in lga._GIT_ENVIRONMENT_OVERRIDES
+
+    template = tmp_path / "hostile-template"
+    (template / "info").mkdir(parents=True)
+    (template / "info" / "exclude").write_text(
+        "# PLANTED-BY-HOSTILE-TEMPLATE\nn.md\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(template))
+
+    sanitized_repo = tmp_path / "sanitized"
+    sanitized_repo.mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet", "--initial-branch=main", str(sanitized_repo)],
+        check=True, capture_output=True, env=lga.sanitized_git_environment())
+    planted = (sanitized_repo / ".git" / "info" / "exclude").read_text(
+        encoding="utf-8")
+    assert "PLANTED-BY-HOSTILE-TEMPLATE" not in planted, planted
+
+    # The hazard is real, not hypothetical: the SAME template, reached
+    # through an unfiltered environment, really does plant the file --
+    # proving this is a demonstrated exploit this fix closes, not a
+    # defensive-looking no-op that never fires either way.
+    unsanitized_repo = tmp_path / "unsanitized"
+    unsanitized_repo.mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet", "--initial-branch=main", str(unsanitized_repo)],
+        check=True, capture_output=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull})
+    planted_unsanitized = (unsanitized_repo / ".git" / "info" / "exclude"
+                          ).read_text(encoding="utf-8")
+    assert "PLANTED-BY-HOSTILE-TEMPLATE" in planted_unsanitized, (
+        "the exploit this test demonstrates did not reproduce -- either "
+        "this platform's git does not consult GIT_TEMPLATE_DIR the way the "
+        "finding assumes, or the setup above is not exercising it")
+
+
 def test_a_refusal_raised_while_binding_takes_the_operations_own_kind(
         adapter, tmp_path: Path) -> None:
     """`_repository_root` says CORPUS_UNREADABLE, which `write_back` never declares.
@@ -4608,3 +4661,176 @@ def test_a_metadata_probe_that_fails_is_the_kind_write_back_declares(
     assert "FileNotFoundError" in vanished.value.refusal.detail
     assert _git(worktree, "ls-tree", "-r", "--name-only", "refs/heads/side") \
         == "a.md", "a refused write left the branch alone"
+
+
+# -- WorkingTreeCorpus (plan 034, T022, task 4.1a) ----------------------------
+#
+# `src/opendox/runtime/local_git_adapter.py`'s `WorkingTreeCorpus` is a large
+# new corpus implementation, and until this section, this suite had no DIRECT
+# case for it: the two seam-level tests in `tests/test_authoring_seam.py`
+# cover one ordinary edit and one untracked file, through the entry-point
+# registration, not this class in isolation (Copilot review of
+# openDox-code#45, "Add focused WorkingTreeCorpus runtime coverage"). The
+# four behaviors named there are each their own case below, so a regression
+# in any one of them fails here, hermetically, with a real git checkout --
+# not only through whatever the seam-level suite happens to exercise.
+
+
+@pytest.fixture()
+def ordinary_checkout(tmp_path: Path) -> Path:
+    """A REAL, non-bare checkout -- the shape a standalone user's own
+    repository has, and never the bare one `initialize_repository` (the
+    `repository` fixture above) makes (RULING C3). `WorkingTreeCorpus`
+    exists specifically for THIS shape: a checkout somebody edits by hand."""
+    location = tmp_path / "checkout"
+    location.mkdir()
+    _git(location, "init", "--initial-branch=main", ".")
+    return location
+
+
+def _commit(location: Path, relpath: str, content: str) -> str:
+    (location / relpath).write_text(content, encoding="utf-8")
+    _git(location, "add", relpath)
+    _git(location, "commit", "-m", f"add {relpath}")
+    return _git(location, "rev-parse", "HEAD")
+
+
+def test_working_tree_corpus_reads_uncommitted_edits_but_a_pinned_revision_falls_back_to_history(
+        ordinary_checkout: Path) -> None:
+    """The class's own central claim (RULING, Brett Heap, 2026-09-27, via
+    the holder: "Working tree (Recommended)"), and its documented
+    exception: a PINNED `CorpusRef.revision` still gets the PARENT's
+    commit-based read, because a caller that pinned one asked for history
+    on purpose (Copilot review of openDox-code#45, "Honor pinned revision
+    when reading documents")."""
+    first_commit = _commit(ordinary_checkout, "note.md", "v1 committed\n")
+    (ordinary_checkout / "note.md").write_text("v2 UNCOMMITTED\n",
+                                               encoding="utf-8")
+
+    adapter = lga.WorkingTreeCorpus()
+    document = ca.DocumentId(corpus=ordinary_checkout.name, key="note.md")
+
+    unpinned = _resolve(adapter, ordinary_checkout)
+    assert adapter.read(unpinned, document).content == b"v2 UNCOMMITTED\n"
+
+    pinned = _resolve(adapter, ordinary_checkout, revision=first_commit)
+    assert adapter.read(pinned, document).content == b"v1 committed\n", (
+        "a pinned revision must read history, not the working tree's "
+        "current, uncommitted bytes")
+
+
+def test_working_tree_corpus_refuses_a_bare_repository(repository: Path) -> None:
+    """A BARE repository has no working tree to read -- the product's own
+    repository-creation act makes one bare (RULING C3), by design, which is
+    exactly the OPPOSITE of the shape this class exists for. Both
+    operations that read bytes must refuse, naming the reason, rather than
+    silently answering an empty corpus a caller could mistake for one
+    genuinely empty."""
+    adapter = lga.WorkingTreeCorpus()
+    resolved = _resolve(adapter, repository)
+
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.list_documents(resolved)
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+    assert "bare" in caught.value.refusal.detail
+
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(resolved, ca.DocumentId(corpus=repository.name,
+                                             key="anything.md"))
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE
+    assert "bare" in caught.value.refusal.detail
+
+
+def test_working_tree_corpus_excludes_a_tracked_file_deleted_from_disk(
+        ordinary_checkout: Path) -> None:
+    """`git ls-files --cached` reports the INDEX, not the disk: an unstaged
+    `rm` leaves a path listed there while nothing can be opened for it. A
+    listing entry must always be one `read()` can actually serve (Copilot
+    review of openDox-code#45, "Filter deleted working-tree files from
+    document listings")."""
+    _commit(ordinary_checkout, "note.md", "v1\n")
+    (ordinary_checkout / "note.md").unlink()
+
+    adapter = lga.WorkingTreeCorpus()
+    resolved = _resolve(adapter, ordinary_checkout)
+
+    assert "note.md" not in {d.key for d in adapter.list_documents(resolved)}
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(resolved, ca.DocumentId(corpus=ordinary_checkout.name,
+                                             key="note.md"))
+    assert caught.value.refusal.kind == ca.DOCUMENT_UNKNOWN
+
+
+def test_working_tree_corpus_excludes_a_path_through_a_symlinked_intermediate_component(
+        ordinary_checkout: Path) -> None:
+    """The TOCTOU shape `_open_confined` exists for (Copilot review of
+    openDox-code#45, "Prevent symlinked parent components from escaping the
+    corpus"): `nested/file.md` is committed while `nested` is a real
+    directory, then `nested` is replaced ON DISK by a symlink -- the git
+    INDEX still says `nested/file.md` is tracked, unaware of the swap.
+    `O_NOFOLLOW` on a single final-component `open()` would still follow
+    THIS: the symlink is an intermediate component, never the leaf."""
+    (ordinary_checkout / "nested").mkdir()
+    _commit(ordinary_checkout, "nested/file.md", "v1\n")
+
+    elsewhere = ordinary_checkout.parent / "elsewhere"
+    elsewhere.mkdir()
+    shutil.rmtree(ordinary_checkout / "nested")
+    os.symlink(elsewhere, ordinary_checkout / "nested")
+
+    adapter = lga.WorkingTreeCorpus()
+    resolved = _resolve(adapter, ordinary_checkout)
+
+    assert "nested/file.md" not in {d.key for d in adapter.list_documents(resolved)}
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(resolved, ca.DocumentId(corpus=ordinary_checkout.name,
+                                             key="nested/file.md"))
+    assert caught.value.refusal.kind == ca.CORPUS_UNREADABLE, (
+        "a symlinked intermediate component is an OSError (ELOOP) from "
+        "_open_confined, not FileNotFoundError/IsADirectoryError, so it "
+        "falls to _read_bound's generic OSError handler")
+
+
+def test_working_tree_corpus_excludes_an_untracked_special_file(
+        ordinary_checkout: Path) -> None:
+    """`git ls-files --others` does not distinguish file TYPES -- it lists
+    whatever matches the working tree and is not ignored, a FIFO included.
+    `_open_confined`'s `O_NONBLOCK` + `S_ISREG` check is what actually
+    excludes it (never a hang on the open, never a read of a non-document)."""
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no os.mkfifo on this platform")
+    os.mkfifo(ordinary_checkout / "queue.md")
+
+    adapter = lga.WorkingTreeCorpus()
+    resolved = _resolve(adapter, ordinary_checkout)
+
+    assert "queue.md" not in {d.key for d in adapter.list_documents(resolved)}
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(resolved, ca.DocumentId(corpus=ordinary_checkout.name,
+                                             key="queue.md"))
+    assert caught.value.refusal.kind == ca.DOCUMENT_UNKNOWN
+    assert "special file" in caught.value.refusal.detail
+
+
+def test_working_tree_corpus_confines_reads_to_the_corpus_root(
+        ordinary_checkout: Path) -> None:
+    """Four ways a directly-constructed `DocumentId` (unmediated by a prior
+    listing) can try to name something outside the corpus, each refused by
+    NAME before ever reaching the filesystem: an absolute path (which
+    `Path.__truediv__` would otherwise let discard the corpus root
+    entirely), a `..` component, a `.git` component (git's own internal
+    metadata -- a remote's embedded credential, `HEAD` -- readable as an
+    ordinary relative path once a repository exists to read), and an
+    embedded NUL byte (Copilot review of openDox-code#45, "Reject NUL
+    document IDs before confined file access": left unchecked, this reaches
+    `os.open` and raises a raw `ValueError`, never `CorpusRefused`)."""
+    _commit(ordinary_checkout, "note.md", "v1\n")
+    adapter = lga.WorkingTreeCorpus()
+    resolved = _resolve(adapter, ordinary_checkout)
+
+    bad_keys = ("/etc/passwd", "../escaped.md", ".git/config", "note.md\x00evil")
+    for bad_key in bad_keys:
+        with pytest.raises(ca.CorpusRefused) as caught:
+            adapter.read(resolved, ca.DocumentId(corpus=ordinary_checkout.name,
+                                                 key=bad_key))
+        assert caught.value.refusal.kind == ca.DOCUMENT_UNKNOWN, bad_key
