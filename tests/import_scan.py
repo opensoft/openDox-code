@@ -35,6 +35,7 @@ every package under `scripts/` is importable BOTH as a top-level name and as
 from __future__ import annotations
 
 import ast
+import importlib.util
 
 #: The two calls that import a module named by a STRING, as #1144's F4.1 scan
 #: reads them, each mapped to itself: `importlib.import_module` and the
@@ -97,9 +98,13 @@ def names_imported_by(node, *, calls=None):
     With `calls`, a mapping from callable names to the importing call each is
     (`IMPORTING_CALLS`, or `importing_calls(tree)` for one module's own names),
     a call names its module too, when the name is a string LITERAL, passed by
-    position or as `name=`. A literal that starts with a dot is relative, and
-    so is `__import__` with a nonzero literal `level`. A name computed at run
-    time cannot be read off the source.
+    position or as `name=`. A relative name is resolved where the call itself
+    says what it is relative to: `import_module(".corpus", package="doc_health")`
+    names `doc_health.corpus`. Otherwise it is relative to the calling
+    module's own package, and names nothing here: an `import_module` whose
+    `package` is not a literal (`__package__`, say), and `__import__` with a
+    nonzero literal `level`. A name computed at run time cannot be read off
+    the source.
     """
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
@@ -113,13 +118,22 @@ def names_imported_by(node, *, calls=None):
     keywords = {keyword.arg: keyword.value for keyword in node.keywords
                 if keyword.arg is not None}
     name = node.args[0] if node.args else keywords.get("name")
-    level = node.args[4] if len(node.args) > 4 else keywords.get("level")
-    if called == "__import__" and isinstance(level, ast.Constant) and level.value:
+    if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
         return []
-    if isinstance(name, ast.Constant) and isinstance(name.value, str) \
-            and not name.value.startswith("."):
+    if called == "__import__":
+        level = node.args[4] if len(node.args) > 4 else keywords.get("level")
+        if isinstance(level, ast.Constant) and level.value:
+            return []
         return [name.value]
-    return []
+    if not name.value.startswith("."):
+        return [name.value]
+    package = node.args[1] if len(node.args) > 1 else keywords.get("package")
+    if not (isinstance(package, ast.Constant) and isinstance(package.value, str)):
+        return []
+    try:
+        return [importlib.util.resolve_name(name.value, package.value)]
+    except ImportError:
+        return []
 
 
 def imported_modules(path):

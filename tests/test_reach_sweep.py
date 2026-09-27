@@ -265,7 +265,9 @@ def test_the_scanner_classifies_every_position_it_reads():
 
 #: The positions PEP 695 evaluates lazily, and the importing calls' keyword
 #: spelling. The class body is not lazy, so its reach runs at import time. A
-#: `__import__` with a nonzero `level` is relative, and names no sibling.
+#: `__import__` with a nonzero `level` is relative, and names no sibling. A
+#: relative `import_module` names the module its literal `package` resolves it
+#: to, by position or by keyword. Relative to `__package__`, it names none.
 _LAZY_SPECIMEN = textwrap.dedent('''
     import importlib
 
@@ -277,6 +279,9 @@ _LAZY_SPECIMEN = textwrap.dedent('''
 
     type Alias = __import__("corpus_adapter_openxfactory")
     RELATIVE = __import__("doc_health", globals(), None, (), 1)
+    RESOLVED = importlib.import_module(".corpus", package="doc_health")
+    BY_POSITION = importlib.import_module(".families", "doc_health")
+    LOCAL = importlib.import_module(".corpus", package=__package__)
 ''')
 
 
@@ -288,6 +293,8 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (7, "ideation_dashboard", True, "Box[T]"),
         (8, "openxdox.gate_console", False, "<module>"),
         (10, "corpus_adapter_openxfactory", True, "type Alias"),
+        (12, "doc_health.corpus", False, "<module>"),
+        (13, "doc_health.families", False, "<module>"),
     }, sorted(found)
 
 
