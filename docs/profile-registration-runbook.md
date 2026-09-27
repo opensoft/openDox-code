@@ -306,11 +306,17 @@ and RN-1 (a) on comment
   `ProfileNotRegistered`. That is the case the proxy's refusal was written for
   (R1Q3 (i)), and it is kept: it is never weakened into an empty tuple.
 
-**What counts as a build.** A composition point reading a facet through the
-proxy, which resolves through `domain_profile.current_for_build()`. Asking is
-not building: `is_registered()`, `current()`, `repr` and a dunder probe record
-nothing. So openXdox's `_upstream()` never closes the window in which a host's
-registration still replaces the default.
+**What counts as a build.** Only a composition point's read, through the
+proxy, of the facet it composes from: `SUBCOMMAND_EXTENSIONS` in
+`cli.build_parser()` and `ROUTE_EXTENSIONS` in `serve.build_server()`. Those
+two reads resolve through `domain_profile.current_for_build()`, and every other
+read only asks. `is_registered()`, `current()`, `repr` and a dunder probe
+record nothing. The proxy's own `resolve()` records nothing either, and nor
+do its `DISPLAY` and `VIEW_EXTENSIONS` reads or the profile's name. Those are
+what `view_extension.host_profile_name()`, `display_profile.host_display()`,
+`view_extension.host_view_facet()` and `canvas_drafts` read, outside a build as
+readily as inside one. So neither openXdox's `_upstream()` nor a diagnostic
+closes the window in which a host's registration still replaces the default.
 
 | raised | when | what it means |
 | --- | --- | --- |
@@ -324,12 +330,16 @@ registration still replaces the default.
 * § What happens when a host does not: an entry point registers openDox's
   default and builds on it. The refusal is what a process meets when it builds
   nothing, and its text now names the default and says why this process has
-  none.
+  none. The table in this section replaces that table's
+  `ProfileNotRegistered` and `AlreadyRegistered` rows, and its
+  `ProfileFacetMissing` row stands. A different profile over the entry point's
+  default meets `AlreadyRegistered` only once something has been built from the
+  default. Before that, it replaces the default.
 * § What a host that only ever built a server must now do: a host that wants
   ITS routes served still registers before the first build. A server built
   with no host registered builds on openDox's default rather than refusing.
 * § Where this is executed rather than described:
-  `tests/test_profile_registration.py` holds forty-eight cases. Plan 034's T011
+  `tests/test_profile_registration.py` holds fifty cases. Plan 034's T011
   made `opendox.cli` and `opendox.serve` importable, so the parser's entry
   point is built for real there. A server still cannot be built in a lone
   checkout until phase 2, so the server's composition point stays lifted by AST.

@@ -105,10 +105,15 @@ registers the default only where nothing is registered. So:
   as `AlreadyRegistered`, for ASK-4 Q5's reason (R1Q3 (ii); RN-1 (a), comment
   `5850003126`).
 
-"Built from" is recorded where openDox composes. `profile_proxy` resolves the
-profile through `current_for_build()`, which is `current()` plus that record.
-`current()` itself records nothing, so openXdox's `_upstream()`, and any reader
-that only asks which profile is registered, is never taken for a build.
+"Built from" is recorded where openDox composes, and nowhere else. A
+composition point's read of the facet it composes from goes through
+`current_for_build()`, which is `current()` plus that record:
+`SUBCOMMAND_EXTENSIONS` in `cli.build_parser()` and `ROUTE_EXTENSIONS` in
+`serve.build_server()`, both read through `profile_proxy`. `current()` itself
+records nothing, and nor does any other read through the proxy: its
+`resolve()`, the `DISPLAY` and `VIEW_EXTENSIONS` facets, and the profile's
+name. So openXdox's `_upstream()`, a diagnostic and any reader that only asks
+which profile is registered are never taken for a build.
 
 A CREATED FILE: no row in openxFactory's `docs/opendox-carve-manifest.yaml`,
 because the manifest declares what LEAVES openxFactory and never what a
@@ -190,7 +195,8 @@ _registered: Any = None
 _is_default: bool = False
 
 #: Whether a parser or a server has been built from that default. Recorded by
-#: `current_for_build()`, the accessor the composition points resolve through.
+#: `current_for_build()`, the accessor a composition point's read of the facet
+#: it composes from goes through.
 _built_from_default: bool = False
 
 
@@ -342,7 +348,7 @@ def current() -> Any:
     """The registered profile, or a refusal naming the registration call.
 
     The SECOND half of the duck-typed contract openXdox's `_upstream()`
-    consults. `profile_proxy` resolves through it too, by way of
+    consults. `profile_proxy` resolves through it too, directly or by way of
     `current_for_build()`, so both of Q5's accessors read the same object from
     the same place — which is what makes it ONE registration rather than two
     that happen to agree.
@@ -375,14 +381,19 @@ def current() -> Any:
 def current_for_build() -> Any:
     """`current()`, for a composition point that is BUILDING from the profile.
 
-    The one accessor `profile_proxy` resolves through, so every facet a parser
-    or a server reads comes through here. It refuses exactly as `current()`
-    does, and it records one thing more. Where the registered profile is the
-    default an entry point registered, a parser or a server has now been built
-    from it, and from that moment a host's `register()` is refused rather than
-    applied (R1Q3 (ii); RN-1 (a), `openxFactory#656` comment `5850003126`). A
-    host's own registration needs no record: it is refused against a different
-    profile already.
+    `profile_proxy` resolves through this for exactly two reads, and the two
+    are the builds: `SUBCOMMAND_EXTENSIONS` as `cli.build_parser()` reads it,
+    and `ROUTE_EXTENSIONS` as `serve.build_server()` reads it
+    (`profile_proxy._LateProfile.READERS`). Every other read resolves through
+    `current()`, because a read that only asks must not close the window in
+    which a host's registration still replaces the default.
+
+    It refuses exactly as `current()` does, and it records one thing more.
+    Where the registered profile is the default an entry point registered, a
+    parser or a server has now been built from it, and from that moment a
+    host's `register()` is refused rather than applied (R1Q3 (ii); RN-1 (a),
+    `openxFactory#656` comment `5850003126`). A host's own registration needs
+    no record: it is refused against a different profile already.
     """
     global _built_from_default
     profile = current()

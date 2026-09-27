@@ -48,8 +48,10 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE RATHER THAN IMPLIED
    nothing still meets `ProfileNotRegistered`; a host registration made BEFORE
    anything is built replaces the default; one made AFTER a parser or a server
    was built from the default is refused as `AlreadyRegistered`. So are the
-   seams between them: asking which profile is registered is not a build, a
-   facet read off the default is, and `unregister()` clears both.
+   seams between them. Asking which profile is registered is not a build, and
+   nor is any other read that only asks: the profile's name, and its
+   `DISPLAY` and `VIEW_EXTENSIONS` facets. A composition point's read of the
+   facet it composes from is a build, and `unregister()` clears both.
    Re-registering the object already registered stays a no-op, the default
    included, and leaves both as they were.
 
@@ -1013,12 +1015,43 @@ def test_asking_which_profile_is_registered_is_not_a_build() -> None:
     assert domain_profile.register(host) is host
 
 
-def test_a_facet_read_off_the_default_is_a_build() -> None:
-    """A composition point that reads any facet has built from the default."""
+@pytest.mark.parametrize("facet", sorted(profile_proxy._LateProfile.READERS))
+def test_a_composition_points_read_of_its_facet_is_a_build(facet: str) -> None:
+    """The read `cli.build_parser()` or `serve.build_server()` composes from.
+
+    Each facet in `READERS` is read by ONE composition point, at the moment it
+    composes, so reading it off the default closes the window.
+    """
     domain_profile.register_default(default_profile)
-    assert profile_openxfactory.ROUTE_EXTENSIONS == ()
+    assert getattr(profile_openxfactory, facet) == getattr(default_profile, facet)
     with pytest.raises(domain_profile.AlreadyRegistered):
         domain_profile.register(_HostProfile())
+
+
+def test_a_read_that_only_asks_is_not_a_build() -> None:
+    """The reads a diagnostic and `canvas_drafts` make, outside any build.
+
+    (Copilot review thread on openDox-code#42.) The profile's name, its
+    `DISPLAY` and `VIEW_EXTENSIONS` facets and the proxy's own `resolve()`
+    answer questions. `canvas_drafts` reads the display facet whenever a draft
+    names a stage, and a host's diagnostic may ask for the name before anything
+    is built. None of them composes a parser or a server, so none of them may
+    close the window in which a host's registration replaces the default.
+    """
+    from opendox import canvas_drafts, display_profile, view_extension
+
+    domain_profile.register_default(default_profile)
+    assert view_extension.host_profile_name() == "opendox.default_profile"
+    assert display_profile.host_display() is None
+    assert view_extension.host_view_facet() == ("absent", ())
+    assert canvas_drafts.supersede_reason("P-1").startswith(
+        "Option-set sibling P-1 was chosen at the ")
+    assert profile_openxfactory.resolve() is default_profile
+    assert getattr(profile_openxfactory, "A_FACET_NOTHING_DECLARES", None) is None
+    host = _HostProfile()
+    assert domain_profile.register(host) is host, (
+        "a read that only asks closed the window: a host could no longer "
+        "replace a default nothing was built from (RN-1 (a))")
 
 
 def test_unregister_clears_the_default_and_its_build() -> None:
