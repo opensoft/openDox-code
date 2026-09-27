@@ -84,9 +84,9 @@ two ways: the `opendox-runtime` console script, and
 `opendox.runtime.cli.RuntimeSubcommand`, an object that structurally conforms
 to `subcommand_extension.SubcommandExtension`. The module's own header records
 why they are not (yet) in `opendox.cli.build_parser`: that file is a CARVED
-file whose edits are declared at openxFactory, and it cannot be imported at
-this leg until the BUILD arc repairs `opendox.serve`'s `ideation_dashboard`
-reach.
+file whose edits are declared at openxFactory, and until plan 034 T011 it could
+not be imported at this leg, because `opendox.serve` reached `ideation_dashboard`
+at import time.
 
 ## 5. Migrations
 
@@ -731,9 +731,9 @@ prove without a broker, and it proves it rather than asserting it.
   questions." `drafts` is the draft of a document and is not that scratch
   space. Unresolved, and deliberately.
 * **`validate`'s remaining narrowing** (RULED Q-L5 (b′)). This act lifts none
-  of it. `opendox.serve` still cannot import at this leg —
-  `tests/test_consumer_reach.py::STILL_REACHING` records the line — and the
-  runtime is written so that no part of it depends on that being repaired.
+  of it. `opendox.serve` could not import at this leg until plan 034 T011,
+  which `tests/test_consumer_reach.py::STILL_REACHING` recorded until then, and
+  the runtime was written so that no part of it depended on that repair.
 * **The `runtime` job is not a required check.** Making one required is a
   repository setting (`docs/branch-protection.md`), a separate act.
 * **Not taken from the Hermes install**, and each for a reason: its three-layer
