@@ -38,21 +38,24 @@ F4.1 scan does. That includes a call under a name an import gives one of the
 two (`from importlib import import_module as load`). A module that handles an
 importer as a VALUE (assigns it, passes it, stores it, or looks it up by its
 name as a string) is read strictly: there, every call whose module argument
-is a literal counts, whatever it calls. So the importer can travel under any
-name by any binding, and a literal module name still counts. Literal `*[...]`
-and `**{...}` arguments are spelled out, however deep. An importing call whose
+is a literal counts, whatever it calls, and it is read as either importer,
+since it may be bound to either. So the importer can travel under any name by
+any binding, and a literal module name still counts. Literal `*[...]` and
+`**{...}` arguments are spelled out, however deep. An importing call whose
 module a spread of anything else hides (`import_module(*names)`) is refused,
-because it could hide a reach into openxFactory. A computed name is not
-refused, because `consumer_reach`'s seam imports one. A relative call is read
-against `globals()` or `__package__` as the module's own only where the
-module never rebinds either; where it does, the call is refused too. A name in a comment, a
-docstring or a string is not an import. The openxFactory ban goes one step
+because it could hide a reach into openxFactory. So is a star import from a
+package a sibling lives under (`from scripts import *`), which may import any
+submodule the package's `__all__` lists. A computed name is not refused,
+because `consumer_reach`'s seam imports one. A relative call is read against
+`globals()` or `__package__` as the module's own only where the module never
+rebinds either; where it does, the call is refused too. A name in a comment,
+a docstring or a string is not an import. The openxFactory ban goes one step
 further, because an import needs the package's name and openDox can never
 install the package: no code under `src/` spells an openxFactory package's
-name at all, in a string or bytes literal outside documentation either. Relative imports stay
-inside this package and are not read. Each node is read by
-`import_scan.names_imported_by`, the reader the repository's other direction
-checks share, so the sweep is not a second copy of it.
+name at all, in a string or bytes literal outside documentation either.
+Relative imports stay inside this package and are not read. Each node is read
+by `import_scan.names_imported_by`, the reader the repository's other
+direction checks share, so the sweep is not a second copy of it.
 
 WHEN A REACH RUNS decides its class. A function body defers, and so does a
 lambda's. So do the positions PEP 695 evaluates lazily, only when something
@@ -75,11 +78,11 @@ every module with the siblings blocked, which is the proof for that case.
 
 WHAT THE SWEEP IS FOR. It is a regression guard over the code this repository
 writes, not a sandbox. It reads each form named above literally, and it
-refuses the forms where a spread, a rebinding or an unknown relative context
-hides what a call imports. A module written to evade it, one that builds a
-module's or an importer's name from pieces at run time, is outside what any
-source read can see. Review holds that, and for import time so do the runtime
-sweeps.
+refuses the forms where a spread, a star, a rebinding or an unknown relative
+context hides what an import names. A module written to evade it, one that
+builds a module's or an importer's name from pieces at run time, is outside
+what any source read can see. Review holds that, and for import time so do
+the runtime sweeps.
 
 It reads `src/` whole, so `src/route_extension.py` and
 `src/subcommand_extension.py` are swept with the package. `--noconftest` safe.
@@ -140,6 +143,14 @@ class Reach:
         return f"{self.path}:{self.line}: {self.name} ({when}, in {self.inside})"
 
 
+def _a_star_that_may_hide_a_sibling(name: str) -> bool:
+    """`from a.b import *` may import any submodule that `a.b`'s `__all__`
+    lists, so it hides a sibling wherever one lives under `a.b`:
+    `from scripts import *`, but not `from os import *`."""
+    return name.endswith(".*") and any(
+        sibling.startswith(name[:-1]) for sibling in SIBLINGS)
+
+
 def sweep(source: str, path: str = "<source>") -> list[Reach]:
     """Every reach of a sibling in `source`, classified by when it runs."""
     found: list[Reach] = []
@@ -181,9 +192,11 @@ def sweep(source: str, path: str = "<source>") -> list[Reach]:
                 visit(default, deferred, inside)
             visit(node.body, True, f"{inside}.<lambda>")
             return
-        named = [name for name in names_imported_by(
+        named = [UNREADABLE if _a_star_that_may_hide_a_sibling(name) else name
+                 for name in names_imported_by(
                      node, calls=calls, any_call=any_call, trusted=trusted,
-                     members=True)
+                     members=True)]
+        named = [name for name in named
                  if name == UNREADABLE or names_a_forbidden_package(name, SIBLINGS)]
         if isinstance(node, (ast.ImportFrom, ast.Call)):
             # One reach per statement or call: its module, or, where the
@@ -347,7 +360,8 @@ def test_the_scanner_classifies_every_position_it_reads():
 #: `UNREADABLE`. The pre-carve `scripts.` spelling is openxFactory's too,
 #: and `from scripts import doc_health` imports `scripts.doc_health`, as does
 #: `__import__("scripts", ..., ("doc_health",))`. A `fromlist` that is not a
-#: literal is `UNREADABLE`.
+#: literal is `UNREADABLE`, and so is a star from `scripts`, in either form,
+#: which may import any of its submodules. A star from `os` hides none.
 #: Arguments spelled out with a literal `*[...]` or `**{...}`, however deep,
 #: count where they land. A spread that hides the name, or the package a
 #: relative name needs, makes the call `UNREADABLE`, which the sweep refuses.
@@ -388,6 +402,9 @@ _LAZY_SPECIMEN = textwrap.dedent('''
     FROMLIST = __import__("scripts", globals(), None, ("doc_health",), 0)
     UNKNOWN_FROM = __import__("scripts", globals(), None, NAMES, 0)
     CONSUMER_FROM = __import__("openxdox", globals(), None, ("gate_console",), 0)
+    from scripts import *
+    from os import *
+    STAR_FROM = __import__("scripts", globals(), None, ("*",), 0)
 ''')
 
 
@@ -420,6 +437,8 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (33, "scripts.doc_health", False, "<module>"),
         (34, UNREADABLE, False, "<module>"),
         (35, "openxdox", False, "<module>"),
+        (36, UNREADABLE, False, "<module>"),
+        (38, UNREADABLE, False, "<module>"),
     }, sorted(found)
 
 
@@ -436,7 +455,7 @@ def test_a_literal_globals_mapping_resolves_a_relative_dunder_import():
 #: The two importing calls under the names an import gives them. The module
 #: never handles either as a value, so it is read call by call: the relative
 #: call names no sibling under its alias either, and a call that is not an
-#: importer names nothing, whatever its argument says.
+#: importer names nothing, whatever its arguments say or a spread hides.
 _ALIAS_SPECIMEN = textwrap.dedent('''
     import importlib as il
     from importlib import import_module as load
@@ -447,6 +466,7 @@ _ALIAS_SPECIMEN = textwrap.dedent('''
         il.import_module("openxdox.kickoff")
         imp("doc_health", None, None, (), 1)
         print("ideation_dashboard")
+        print(*NAMES)
 ''')
 
 
@@ -518,6 +538,29 @@ def test_an_importer_held_as_a_value_makes_every_literal_call_count(binding):
               + "\n\ndef verb():\n    load('doc_health')\n")
     assert [(r.name, r.deferred, r.inside) for r in sweep(source, "value.py")] \
         == [("doc_health", True, "verb")], binding
+
+
+#: A module that holds an importer as a value, and three calls that only one
+#: importer's reading finds: `__import__`'s `fromlist` member under the name
+#: `import_module`, a star member under a name neither importer has, and a
+#: relative `import_module` under the name `__import__`.
+_EITHER_IMPORTER = textwrap.dedent('''
+    import_module = __import__
+
+    def verb():
+        import_module("scripts", None, None, ("doc_health",))
+        load("scripts", fromlist=["*"])
+        __import__(".corpus", "doc_health")
+''')
+
+
+def test_a_strict_module_reads_each_call_as_either_importer():
+    """Where an importer is a value, a callable may be bound to either
+    importer, whatever it is spelled, so each call counts under both
+    readings."""
+    found = [(r.line, r.name) for r in sweep(_EITHER_IMPORTER, "either.py")]
+    assert found == [(5, "scripts.doc_health"), (6, UNREADABLE),
+                     (7, "doc_health.corpus")], found
 
 
 def test_a_deferred_reach_into_the_consumer_passes_all_three(monkeypatch, tmp_path):

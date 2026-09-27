@@ -181,8 +181,8 @@ def _dunder_import(name, args, keywords, complete, trusted, members):
     be relative to a sibling, so the call names `UNREADABLE`. With
     `members`, a literal `fromlist` names its members after the module, as a
     `from` statement's do (`__import__("scripts", ..., ("doc_health",))`
-    imports `scripts.doc_health`), and a `fromlist` that is not a literal
-    adds `UNREADABLE`."""
+    imports `scripts.doc_health`, and a `"*"` member is named `scripts.*`),
+    and a `fromlist` that is not a literal adds `UNREADABLE`."""
     level = args[4] if len(args) > 4 else keywords.get("level")
     context = args[1] if len(args) > 1 else keywords.get("globals")
     if (level is None or context is None) and not complete:
@@ -211,8 +211,28 @@ def _dunder_import(name, args, keywords, complete, trusted, members):
         return [module]
     if isinstance(fromlist, (ast.Tuple, ast.List, ast.Set)) and all(
             isinstance(e, ast.Constant) and isinstance(e.value, str) for e in fromlist.elts):
-        return [module, *(f"{module}.{e.value}" for e in fromlist.elts if e.value != "*")]
+        return [module, *(f"{module}.{e.value}" for e in fromlist.elts)]
     return [module, UNREADABLE]
+
+
+def _import_module(name, args, keywords, complete, trusted):
+    """What `import_module(name, package)` names, by the rule
+    `names_imported_by` gives: an absolute `name` itself, and a relative one
+    resolved against a literal `package`."""
+    if not name.startswith("."):
+        return [name]
+    package = args[1] if len(args) > 1 else keywords.get("package")
+    if package is None and not complete:
+        return [UNREADABLE]
+    if package is None or (isinstance(package, ast.Constant) and package.value is None) \
+            or (trusted and isinstance(package, ast.Name) and package.id == "__package__"):
+        return []
+    if not (isinstance(package, ast.Constant) and isinstance(package.value, str)):
+        return [UNREADABLE]
+    try:
+        return [importlib.util.resolve_name(name, package.value)]
+    except ImportError:
+        return []
 
 
 def importing_calls(tree):
@@ -243,9 +263,10 @@ def importer_escapes(tree, calls):
     call: an assignment (`load = importlib.import_module`), a tuple, a
     container, an argument, a default value, a `:=`, a rebinding. It is also
     the name of an importer or of an alias of one, as a string outside
-    documentation (`getattr(importlib, "import_module")`, `globals()["load"]`). Once the importer is a value, it can travel under any
-    name by any binding, and no source read follows every one. So a module
-    where this holds is read strictly, with `names_imported_by(...,
+    documentation (`getattr(importlib, "import_module")`,
+    `globals()["load"]`). Once the importer is a value, it can travel under
+    any name by any binding, and no source read follows every one. So a
+    module where this holds is read strictly, with `names_imported_by(...,
     any_call=True)`.
     """
     callables = {id(node.func) for node in ast.walk(tree)
@@ -271,15 +292,19 @@ def names_imported_by(node, *, calls=None, any_call=False, trusted=True,
     relative import names nothing, for the reason `imported_modules` gives.
     With `members`, `from a.b import c` also names `a.b.c`, after `a.b`,
     because a name imported from a package may be its submodule:
-    `from scripts import doc_health` imports `scripts.doc_health`.
+    `from scripts import doc_health` imports `scripts.doc_health`. A star
+    member is named `a.b.*`: it may import any submodule that `a.b`'s
+    `__all__` lists, and the caller says which of those it forbids.
 
     With `calls`, a mapping from callable names to the importing call each is
     (`IMPORTING_CALLS`, or `importing_calls(tree)`), a call to one of them
     names its module too, when the name is a string LITERAL, passed by
     position or as `name=`. With `any_call`, EVERY call does, whatever it
-    calls: the reading for a module where `importer_escapes` holds. Without
-    `trusted`, the reading for a module that `rebinds` `CONTEXT_NAMES`,
-    `globals()` and `__package__` are not taken to be the module's own.
+    calls: the reading for a module where `importer_escapes` holds. There a
+    callable may be bound to either importer, so a call names what either
+    reading of it names, its own spelling's first. Without `trusted`, the
+    reading for a module that `rebinds` `CONTEXT_NAMES`, `globals()` and
+    `__package__` are not taken to be the module's own.
 
     Arguments spelled out with a literal `*[...]` or `**{...}`, however
     deep, count where they land. Where a `*` or `**` of anything else hides
@@ -300,7 +325,7 @@ def names_imported_by(node, *, calls=None, any_call=False, trusted=True,
         if node.level or not node.module:
             return []
         return [node.module, *(f"{node.module}.{alias.name}" for alias in node.names
-                               if members and alias.name != "*")]
+                               if members)]
     if not isinstance(node, ast.Call) or not (calls or any_call):
         return []
     called = (calls or {}).get(_called_name(node.func))
@@ -312,23 +337,18 @@ def names_imported_by(node, *, calls=None, any_call=False, trusted=True,
         return [UNREADABLE]
     if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
         return []
-    if called == "__import__":
-        return _dunder_import(name.value, args, keywords, complete, trusted,
-                              members)
-    if not name.value.startswith("."):
-        return [name.value]
-    package = args[1] if len(args) > 1 else keywords.get("package")
-    if package is None and not complete:
-        return [UNREADABLE]
-    if package is None or (isinstance(package, ast.Constant) and package.value is None) \
-            or (trusted and isinstance(package, ast.Name) and package.id == "__package__"):
-        return []
-    if not (isinstance(package, ast.Constant) and isinstance(package.value, str)):
-        return [UNREADABLE]
-    try:
-        return [importlib.util.resolve_name(name.value, package.value)]
-    except ImportError:
-        return []
+    readings = [called] if called else []
+    if any_call:
+        # The callable may be bound to either importer (`importer_escapes`).
+        readings += [each for each in IMPORTING_CALLS.values() if each != called]
+    named = []
+    for reading in readings:
+        if reading == "__import__":
+            named += _dunder_import(name.value, args, keywords, complete,
+                                    trusted, members)
+        else:
+            named += _import_module(name.value, args, keywords, complete, trusted)
+    return named
 
 
 def imported_modules(path):
