@@ -237,6 +237,14 @@ jobs:
           #    three below the lower of the two is 2475 / 2464. A local
           #    replica read the same, which is a check, not the source.
           #
+          #    RAISED BY ONE for the case Copilot's review of #55 asked for,
+          #    which drives the own-bundle exclusion over an assembled bundle.
+          #    Read the same way, from two runs of `3dd66679`: run 36340595113
+          #    (job 108679779797) and its re-run (job 108680366270). Both
+          #    printed `triple: selected=2479 passed=2468 skipped=11
+          #    failures=0 errors=0`, so three below the lower of the two is
+          #    2476 / 2465.
+          #
           #    THE TRADE, stated as the reference states it. A loss of up to
           #    three collected tests does not red on the floors alone. It still
           #    reds on the exact SKIPPED pin if the lost tests became skips, and
@@ -244,8 +252,8 @@ jobs:
           #    margin lets through is up to three tests that stop being
           #    COLLECTED at all, and a lost file is dozens of tests, never
           #    three.
-          MIN_SELECTED: "2475"
-          MIN_PASSED: "2464"
+          MIN_SELECTED: "2476"
+          MIN_PASSED: "2465"
           # EXACT — the load-bearing number. Moves only with its reason.
           EXPECT_SKIPPED: "11"
         run: |
