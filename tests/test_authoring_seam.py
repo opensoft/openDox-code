@@ -489,3 +489,39 @@ def test_an_uncommitted_edit_is_visible_through_the_default(tmp_path) -> None:
     keys = {doc.key for doc in adapter.list_documents(resolved)}
     assert keys == {"note.md", "draft.md"}, (
         "the default's listing did not pick up the new, uncommitted file")
+
+
+def test_the_default_can_actually_classify_a_proposal() -> None:
+    """The end-to-end falsifier asked for directly (Copilot review of
+    openDox-code#45, "Make default factory classify proposals in temporary
+    directories"): `required_header_fields()`/`missing_required_headers()`
+    go through `authoring._classify_proposal()`, which stages the body in a
+    plain `tempfile.TemporaryDirectory()` and hands it to whatever `home()`
+    returns. Once an entry point registers the REAL default (not a stand-in
+    -- every OTHER case in this file uses one, on purpose, to isolate the
+    seam from the adapter), that staged tree was never a git repository, so
+    `WorkingTreeCorpus.resolve()` always refused `CORPUS_UNCLASSIFIABLE`
+    before `authoring.py`'s own fix
+    (`_stage_as_a_repository_if_git_is_available`). This proves the fix
+    through the REGISTERED default, not a mock of it.
+
+    Deliberately NOT asserting the exact `required_fields` tuple: T054
+    (phase 2) sets the neutral fields; today's bare default is `()`, and
+    hard-coding that would make this test wrong the day T054 lands rather
+    than testing what it actually claims to -- that the call SUCCEEDS."""
+    cli = _import_opendox_cli_or_skip()
+    from opendox import domain_profile
+
+    try:
+        cli.build_parser()
+    except domain_profile.ProfileNotRegistered:
+        pass
+
+    fields = authoring.required_header_fields()
+    assert isinstance(fields, tuple), (
+        f"required_header_fields() returned {fields!r}, not a tuple -- "
+        "did it raise and get swallowed somewhere upstream?")
+
+    missing = authoring.missing_required_headers("Status: draft\n")
+    assert isinstance(missing, list), (
+        f"missing_required_headers() returned {missing!r}, not a list")
