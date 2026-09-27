@@ -68,6 +68,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -600,6 +601,40 @@ def test_opendox_own_bundle_names_no_gate_exclusive_class() -> None:
         "openDox's own bundle names these gate-loop classes, whose only rules "
         f"left `styles.css` for a contributed sheet (RULED Q7): {named}. An "
         "element that carries one renders unstyled in a lone install")
+
+
+def test_the_own_bundle_corpus_leaves_out_an_assembled_contributed_module(
+        tmp_path: Path, monkeypatch) -> None:
+    """THE EXCLUSION, DRIVEN (Copilot review of openDox-code#55 at `7f98b46f`).
+
+    No run of this leg's suite has the six in its bundle, so the real
+    `_own_bundle_text()` never has anything to leave out, and dropping its
+    `if p.name not in GATE_MODULES` would leave every case above green. That
+    line is load-bearing wherever an assembly HAS placed the six: without it a
+    class only they name reads as openDox's own, which is the false ownership
+    the orphan scan and the case above would then accept. So a throwaway
+    bundle is assembled here. It has one view of openDox's own, `app.js`,
+    `index.html`, and all six contributed modules, each naming a gate-only
+    class. The corpus reads openDox's view and none of the six.
+    """
+    views = tmp_path / "views"
+    views.mkdir()
+    (views / "docs.js").write_text('export const own = "docpanel";\n',
+                                   encoding="utf-8")
+    placed = dict(zip(GATE_MODULES, GATE_EXCLUSIVE))
+    for module, cls in placed.items():
+        (views / module).write_text(f'export const cls = "{cls}";\n',
+                                    encoding="utf-8")
+    (tmp_path / "app.js").write_text("// the shell\n", encoding="utf-8")
+    (tmp_path / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "WEB", tmp_path)
+
+    names = _class_namer(_own_bundle_text())
+    assert names("docpanel"), "openDox's own view must be read"
+    leaked = sorted(cls for cls in placed.values() if names(cls))
+    assert leaked == [], (
+        f"the own-bundle corpus read {leaked} from the contributed modules; "
+        "they must be left out by name wherever an assembly placed them")
 
 
 # ---------------------------------------------------------------------------
