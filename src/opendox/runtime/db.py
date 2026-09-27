@@ -2,8 +2,8 @@
 
 THE ONLY MODULE IN THIS PACKAGE THAT IMPORTS A DATABASE DRIVER, on purpose.
 `opendox.runtime.migrations` and `opendox.runtime.identity` take a connection
-and a connection-provider respectively, so both import under the leg's
-`validate` check (which installs `.[test]`, not `.[runtime]`); this module is
+and a connection-provider respectively, so both import without the
+`runtime` extra; this module is
 where `psycopg` is finally required, and it is imported at CALL time by
 `app.py` and `cli.py` rather than at their import. See the import-weight
 contract in `opendox/runtime/__init__.py`.

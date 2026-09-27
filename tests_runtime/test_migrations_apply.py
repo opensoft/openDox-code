@@ -1,7 +1,9 @@
 """The runner against a real Postgres: order, the ledger, and the two refusals.
 
-DB-BACKED — runs in the `runtime` CI job. Skipped, with the reason printed,
-where no `OPENDOX_TEST_DATABASE_URL` is reachable (see `conftest.py`).
+DB-BACKED — runs in the required `validate` job since plan 034 T036 folded
+the `runtime` job into it. Skipped, with the reason printed, where no
+`OPENDOX_TEST_DATABASE_URL` is reachable, and failed instead under `CI` (see
+`conftest.py`).
 """
 
 from __future__ import annotations

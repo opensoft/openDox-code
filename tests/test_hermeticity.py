@@ -51,6 +51,7 @@ from session_fixtures import build_scratch_repo
 
 from opendox import branch_session as bs
 from opendox import cli as cli_mod
+from opendox import corpus_adapter as ca
 from opendox import session_pr as session_pr_mod
 from opendox import workbench as wb
 
@@ -214,30 +215,54 @@ def test_the_violation_survives_the_adapters_own_degradation_clause():
         adapter.create_session(SESSION_ALIAS)
 
 
-def test_the_violation_survives_open_session_notebooks_degradation_clause():
+def test_the_violation_survives_open_session_notebooks_degradation_clause(
+        monkeypatch, tmp_path):
     """`branch_session.open_session_notebook` catches `Exception` and turns EVERY
-    failure into an FR-042 notice — the outermost swallow on the create path."""
+    failure into an FR-042 notice — the outermost swallow on the create path.
+
+    A HOME CORPUS IS REGISTERED FIRST (plan 034 T035; the P1-E hand-off). The
+    open lists the worktree's documents through `corpus_adapter.home()` BEFORE
+    it reaches the adapter's runner, and with nothing registered that listing
+    refuses `ADAPTER_NOT_REGISTERED`, an ordinary `Exception` the same clause
+    turns into a notice. The case would then stop short of the runner and prove
+    nothing about the guard. Whether a registration was already present
+    depended on test order, because `cli.build_parser()` registers openDox's
+    default process-wide and there is no unregister. So this case registers
+    that same default itself, over a one-document scratch worktree rather than
+    this checkout, and `monkeypatch` puts the previous registration back.
+
+    The listing is asserted on its own first, so the raise below can only be
+    the runner's."""
+    # Handing monkeypatch the CURRENT value records it for teardown. The
+    # registration below then replaces it, and teardown puts the recorded
+    # value back, whether that was a registration or none at all.
+    monkeypatch.setattr(ca, "_home_factory", ca._home_factory)
+    ca.register_home(cli_mod._default_home_factory)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "note.md").write_text("# a note\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True,
+                   capture_output=True, text=True)
+    assert wb.session_documents(worktree, repository="openxFactory"), (
+        "the scratch worktree listed no document, so the open would stop "
+        "before the runner")
+
     with pytest.raises(hermeticity.HermeticityViolation):
         bs.open_session_notebook(wb.NotebookAdapter(), alias=SESSION_ALIAS,
-                                 branch="draft/demo-topic", worktree=REPO_ROOT,
+                                 branch="draft/demo-topic", worktree=worktree,
                                  repository="openxFactory")
 
 
-def test_an_unguarded_cli_scoped_create_is_refused(scratch_repo):
-    """Finding 17's own reproduction, inverted into a regression.
-
-    This is the exact invocation that ran `nlm notebook create` against the
-    shared account: a scoped `gate create-document` with NOTHING injected at
-    `cli._notebook_port`. It must now REFUSE. If the guard is removed this test
-    does not merely fail — it creates a real notebook, which is what makes it the
-    right regression to keep."""
-    with pytest.raises(hermeticity.HermeticityViolation):
-        cli_mod.main([
-            "gate", "create-document", "--repo-root", str(scratch_repo.root),
-            "--actor", "brett", "--title", "Unguarded", "--summary", "No fake.",
-            "--topics", "alpha", "--repository-context", scratch_repo.repository,
-            "--area", "ideation/staging/demo-topic/",
-            "--scope-kind", bs.STAGED_TOPIC, "--scope-id", scratch_repo.topic_id])
+# `test_an_unguarded_cli_scoped_create_is_refused` and
+# `test_the_cli_seam_with_a_fake_port_reaches_no_binary` LEFT THIS FILE for
+# openXdox-code (plan 034 T035). Both drive `gate create-document`, and `gate`
+# is not an openDox verb since the carve: the host profile contributes it
+# (openXdox's `cli_gate.GateSubcommands`, plan 034 research R8), so this suite's
+# own empty profile has no `gate` to parse. openXdox's gate verbs import
+# `doc_health` at module level (`cli_gate` imports `gate_console`, which does
+# `from doc_health import corpus`), so the two cases join T041's declared
+# `doc_health` exclusion there. The guard itself is still proved here, through
+# the default adapter above and through `open_session_notebook`.
 
 
 # --------------------------------------------------------------------------
@@ -259,22 +284,6 @@ def test_an_explicitly_injected_runner_is_untouched_by_the_guard():
     assert calls == [("notebook", "create", SESSION_ALIAS)]
 
 
-def test_the_cli_seam_with_a_fake_port_reaches_no_binary(scratch_repo, capsys,
-                                                         fake_cli_notebook):
-    """The seam `cli._notebook_port`'s docstring already promised, exercised
-    through the harness fixture the three repaired CLI tests now request: with a
-    fake injected the same scoped create succeeds AND the notebook is created on
-    the fake, so the guard costs the suite no coverage."""
-    code = cli_mod.main([
-        "gate", "create-document", "--repo-root", str(scratch_repo.root),
-        "--actor", "brett", "--title", "Guarded", "--summary", "With a fake.",
-        "--topics", "alpha", "--repository-context", scratch_repo.repository,
-        "--area", "ideation/staging/demo-topic/",
-        "--scope-kind", bs.STAGED_TOPIC, "--scope-id", scratch_repo.topic_id])
-    assert code == 0, capsys.readouterr().err
-    assert fake_cli_notebook.live_aliases() == (SESSION_ALIAS,)
-
-
 # --------------------------------------------------------------------------
 # the hookup set — the guard cannot be silently dropped from a directory
 # --------------------------------------------------------------------------
@@ -283,11 +292,11 @@ def test_every_conftest_under_tests_registers_the_guard():
     """Every `conftest.py` under `tests/` registers the guard, and this pin fails
     when a new directory's conftest forgets. The reason is `confcutdir`: a conftest
     is only loaded if it sits between the rootdir and the argument, so a hookup can
-    go out of scope without anything changing in the file itself. (Wave 2 anchored
-    the rootdir at the repository with `pytest.ini`, which is what keeps
-    `tests/conftest.py` in scope for the majority of directories that have no
-    conftest of their own — see `test_the_rootdir_anchor_is_what_puts_the_hookup_in_scope`.
-    This pin covers the directories that DO have one.)
+    go out of scope without anything changing in the file itself. (At this leg
+    `tests/` is one flat directory with one conftest, and `pyproject.toml`
+    anchors the rootdir at the repository — see
+    `test_the_rootdir_anchor_is_what_puts_the_hookup_in_scope`. openxFactory's
+    copy of this pin covers five conftests and anchors on `pytest.ini`.)
 
     It also pins the SET, because adding a conftest.py is not free: `conftest` is
     an ambient module name, so an UNCLAIMING one hijacks it for siblings whose
@@ -451,28 +460,29 @@ def test_without_the_claim_the_same_tree_reproduces_the_slot_collision(tmp_path)
 def test_every_flat_conftest_claims_the_slot_and_the_suite_wide_one_does_not():
     """The shipped hookups, pinned. Every directory conftest in
     `CONFTEST_HOOKUPS` is rootless and therefore contends for the slot, so every
-    one of them claims it — including `tests/avatar_runtime/`, whose tests import
-    nothing from conftest today: it claims so it cannot POISON a sibling's
-    collection when it is the last argument, and so the invariant holds for the
-    first test there that does import through it.
+    one of them claims it.
 
-    `tests/conftest.py` MUST NOT claim, and that is the load-bearing exception.
-    pluggy calls hook implementations in LIFO registration order and the
-    suite-wide conftest registers FIRST, so its claim would run LAST and clobber
-    every directory's — measured on a scratch tree: adding the call to the root
-    conftest turns the green run above straight back into two collection errors.
+    AT THIS LEG THE ROLES SIT ONE LEVEL UP (plan 034 T035). `tests/conftest.py`
+    is the one DIRECTORY conftest, the replica of openxFactory's
+    `tests/ideation-dashboard/conftest.py`, so it claims. The SUITE-WIDE conftest
+    is the repository-root `conftest.py`, and it MUST NOT claim, which is the
+    load-bearing exception. pluggy calls hook implementations in LIFO
+    registration order and the suite-wide conftest registers FIRST, so its claim
+    would run LAST and clobber the directory's. Measured at this leg: with the
+    call added to the root conftest, this very module stops collecting, with
+    `cannot import name 'REPO_ROOT' from 'conftest'` naming the root conftest.
+    (openxFactory measured the same on a scratch tree: two collection errors.)
 
-    The `hermes_runtime_contracts` conftests (`CONFTEST_EXEMPT_HOOKUPS`) need
-    nothing: their directories carry `__init__.py`, so pytest imports them as
-    `hermes_runtime_contracts.conftest` and they never touch the flat slot."""
+    `CONFTEST_EXEMPT_HOOKUPS` is empty here. openxFactory's two exempt conftests
+    need nothing, because their directories carry `__init__.py`, and the check
+    below keeps that reason attached to any entry this leg ever adds."""
     tests_root = REPO_ROOT / "tests"
+    suite_wide = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
+    assert "claim_conftest_slot" not in suite_wide, (
+        "the suite-wide (repository-root) conftest must not claim the slot; its "
+        "hook would run last and clobber the directory conftest's")
     for relative in hermeticity.CONFTEST_HOOKUPS:
         text = (tests_root / relative).read_text(encoding="utf-8")
-        if relative == "conftest.py":
-            assert "claim_conftest_slot" not in text, (
-                "the suite-wide conftest must not claim the slot; its hook would "
-                "run last and clobber every directory's")
-            continue
         assert "claim_conftest_slot(globals())" in text, relative
         # The define-it-AFTER-the-call direction, which the helper cannot catch:
         # a plain `def pytest_collectstart` later in the file replaces the claim
@@ -562,116 +572,138 @@ def test_the_real_two_directory_invocation_collects_the_same_in_either_order():
     because the absolute number moves with every test added; at f9457d6f the two
     orders read 184-with-27-errors and 993-clean.
 
-    Two PAIRS, because a directory's claim is only observable when that directory
-    is not the one already holding the slot: `doc-health avatar_runtime` reds when
-    `tests/doc-health/conftest.py` stops claiming, and `ideation-dashboard
-    doc-health` reds when `tests/ideation-dashboard/conftest.py` does (both
-    measured). `tests/avatar_runtime/`'s own claim is NOT observable here — no
-    test in that directory imports through `conftest`, so dropping it changes no
-    collection — and stays covered by the source pin above. Measured ~11.6 s for
-    the four child collections."""
-    for left, right in (("tests/doc-health", "tests/avatar_runtime"),
-                        ("tests/ideation-dashboard", "tests/doc-health")):
-        counts = []
-        for args in ((left, right), (right, left)):
-            proc = _repo_collect(*args)
-            assert proc.returncode == 0, f"{args}: {proc.stdout[-4000:]}{proc.stderr}"
-            assert " error" not in proc.stdout, f"{args}: {proc.stdout[-4000:]}"
-            match = re.search(r"(\d+) tests collected", proc.stdout)
-            assert match, proc.stdout[-2000:]
-            counts.append(int(match.group(1)))
+    AT THIS LEG THE PAIR IS `tests` AND `tests_runtime`, the two suite
+    directories it carries (plan 034 T035). A directory's claim is only
+    observable when that directory is not the one already holding the slot, and
+    in the order `tests tests_runtime` it is not: `tests_runtime/conftest.py`
+    loads last, so without `tests/conftest.py`'s claim every
+    `from conftest import ...` in `tests/` reads the runtime suite's conftest.
+    `tests_runtime/` imports nothing through `conftest`, so the other order
+    holds either way. (openxFactory's copy runs two pairs of its own
+    directories.)
 
-        assert counts[0] == counts[1] > 0, (left, right, counts)
+    WHAT IS COMPARED IS THE WHOLE COLLECTION OUTCOME, the count and the files
+    that failed to collect, and not only whether collection was clean. A file
+    that needs a package the environment lacks fails to collect the same way
+    in both orders, so it is not a slot defect. Before T036 gave the `test`
+    extra the runtime packages, `tests_runtime/test_oidc_verifier.py` did that
+    in a `.[test]`-only venv, for want of `httpx`. The whole suite reports such
+    an error on its own, and `Pin the triple` refuses any error at all. What
+    only this case can see is a DIFFERENCE between the two orders, so that is
+    what it asserts."""
+    for left, right in (("tests", "tests_runtime"),):
+        outcomes = [_collection_outcome(_repo_collect(*args))
+                    for args in ((left, right), (right, left))]
+        assert outcomes[0] == outcomes[1], (
+            f"`pytest --co {left} {right}` and `pytest --co {right} {left}` "
+            f"disagree: {outcomes}. A directory's conftest no longer owns the "
+            "ambient `conftest` slot for its own subtree")
+        assert outcomes[0][0] > 0, outcomes
+
+
+def _collection_outcome(proc: subprocess.CompletedProcess) -> tuple[int, tuple[str, ...]]:
+    """`(tests collected, the files that failed to collect)`, read off a
+    `--co -q` run's summary."""
+    match = re.search(r"(\d+) tests? collected", proc.stdout)
+    assert match, proc.stdout[-2000:] + proc.stderr
+    errored = sorted(set(re.findall(r"^ERROR (\S+)", proc.stdout, re.MULTILINE)))
+    return int(match.group(1)), tuple(errored)
 
 
 # --------------------------------------------------------------------------
-# finding 17, wave 2 — the two routes that ran with the guard switched OFF
+# finding 17, wave 2 — the rootdir anchor
 # --------------------------------------------------------------------------
 
-PROBE = "tests/notebooklm/test_hermeticity_guard.py"
-PROBE_DIR = "tests/notebooklm"
-
-
-def _probe_run(args, *, cwd) -> subprocess.CompletedProcess:
-    """Run a child interpreter over the conftest-less-directory probe.
-
-    `-p no:cacheprovider` because this writes nothing into the real checkout, and
-    the probe itself only READS `PATH` and two module attributes."""
-    return subprocess.run([sys.executable, *args], cwd=str(cwd),
-                          capture_output=True, text=True, timeout=300)
-
-
-def test_a_pytest_run_started_inside_a_conftestless_directory_is_guarded():
-    """Residue (1) of finding 17, closed. `tests/notebooklm/` has no conftest.py of
-    its own, and with no inifile anywhere a run started THERE made that directory
-    the rootdir — so `confcutdir` excluded `tests/conftest.py` and neither layer of
-    the guard was installed. Measured: `which nlm` resolved to a real-binary
-    stand-in, three invocations landed, and the refusal ledger stayed empty.
-
-    The repo-root `pytest.ini` anchors rootdir at the repository instead, so the
-    hookup is always in the conftest chain. The oracle is the probe TestCase living
-    in that directory: it asserts both layers, and it fails when the anchor is
-    removed (measured in a scratch copy with a stand-in `nlm` on PATH — the
-    stand-in's own text is what the assertion reports)."""
-    proc = _probe_run(["-m", "pytest", "-q", "-p", "no:cacheprovider",
-                       "test_hermeticity_guard.py"],
-                      cwd=REPO_ROOT / PROBE_DIR)
-
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "2 passed" in proc.stdout
+# THREE CASES OF THIS SECTION STAYED WITH openxFactory'S TREE (plan 034 T035):
+# `test_a_pytest_run_started_inside_a_conftestless_directory_is_guarded`,
+# `test_the_unittest_fallback_route_installs_the_same_guard` and
+# `test_the_bare_unittest_route_is_detected_as_unguarded`. Each one drives
+# openxFactory's own files: the probe `tests/notebooklm/test_hermeticity_guard.py`
+# in a conftest-less directory, its `pytest.ini`, and its guarded
+# `tests/hermetic_unittest.py`. The carve moved none of those (all three are
+# `not_moved` rows), so the three cases go back to openxFactory as named tests
+# (T047). This leg has no conftest-less test directory and no unittest runner,
+# so nothing here is left for them to test.
 
 
 def test_the_rootdir_anchor_is_what_puts_the_hookup_in_scope():
-    """The mechanism, asserted rather than assumed: a run started inside the
-    conftest-less directory resolves its rootdir to the REPOSITORY and names the
-    anchor as its configfile. Without that, `tests/conftest.py` is out of scope
-    however correct the conftest itself is."""
+    """The mechanism, asserted rather than assumed: a run started INSIDE
+    `tests/` resolves its rootdir to the REPOSITORY and names the anchor as its
+    configfile.
+
+    At this leg the anchor is `pyproject.toml` (plan 034 T035). With no anchor,
+    that run's rootdir would be `tests/` itself, and the repository-root
+    `conftest.py` (this suite's `src/` path and its host profile) would fall out
+    of the conftest chain, however correct that conftest is. The table is
+    checked too: without it pytest 8 uses the file only as a fallback, when no
+    configuration file is found anywhere above, so a `pytest.ini` in an
+    enclosing directory would take the rootdir (see `ROOTDIR_ANCHOR`).
+
+    The rootdir is matched as the WHOLE value. openxFactory's copy matches a
+    substring, which also accepts `<repository>/tests`. A `tests/pyproject.toml`
+    with a pytest table produces exactly that rootdir, and it still prints
+    `configfile: pyproject.toml`, so a substring match and the configfile check
+    would both pass while the root conftest was cut out."""
     anchor = REPO_ROOT / hermeticity.ROOTDIR_ANCHOR
     assert anchor.is_file(), f"{hermeticity.ROOTDIR_ANCHOR} is the rootdir anchor"
+    assert "[tool.pytest.ini_options]" in anchor.read_text(encoding="utf-8"), (
+        f"{hermeticity.ROOTDIR_ANCHOR} is an inifile only while it carries a "
+        "[tool.pytest.ini_options] table")
 
-    proc = _probe_run(["-m", "pytest", "-p", "no:cacheprovider", "--collect-only",
-                       "test_hermeticity_guard.py"], cwd=REPO_ROOT / PROBE_DIR)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+         "--collect-only", "test_hermeticity.py"],
+        cwd=str(REPO_ROOT / "tests"), capture_output=True, text=True,
+        timeout=300)
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert f"rootdir: {REPO_ROOT}" in proc.stdout, proc.stdout
+    assert _names_rootdir(proc.stdout, REPO_ROOT), proc.stdout
     assert f"configfile: {hermeticity.ROOTDIR_ANCHOR}" in proc.stdout, proc.stdout
 
 
-def test_the_unittest_fallback_route_installs_the_same_guard():
-    """Residue (2), closed. Before PR #49 finding 17's fix (2026-07-27),
-    codexFactory's `scripts/validate-docs.sh` fell back to bare `unittest
-    discover` on these tests when they lived in codexFactory and pytest was
-    unavailable — a conftest fixture cannot apply to a runner that loads no
-    conftests: a unittest-style probe in `tests/notebooklm/` reached the
-    real-binary stand-in TWICE with no ledger entry. The fix replaced that bare
-    fallback with codexFactory's own guarded runner — the original
-    `tests/hermetic_unittest.py` was later copied from; the doc-health
-    relocation (adopt-neutral-tooling-home, 2026-08-03) then copied it here and
-    moved these tests, after which codexFactory's script stopped running them
-    at all — but this tree still needs the same guarantee for any pytest-less
-    host that runs it directly.
-
-    `tests/hermetic_unittest.py` installs the same two layers from the SAME
-    declarations (`install_binary_shim`, `runner_seams`), so the routes cannot
-    guard different seams, and runs the identical discovery."""
-    proc = _probe_run(["tests/hermetic_unittest.py", PROBE_DIR], cwd=REPO_ROOT)
-
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "OK" in proc.stderr, proc.stderr        # unittest reports on stderr
+def _names_rootdir(stdout: str, root: Path) -> bool:
+    """Whether pytest's header names `root` as the rootdir: the WHOLE value,
+    which ends the line or is followed by the header's `, ` separator."""
+    return re.search(rf"^rootdir: {re.escape(str(root))}(,|$)", stdout,
+                     re.MULTILINE) is not None
 
 
-def test_the_bare_unittest_route_is_detected_as_unguarded():
-    """The negative control that makes the test above mean something: the SAME
-    probe, run through bare `python3 -m unittest`, FAILS — which is what the gate's
-    old fallback was doing silently. If this ever starts passing, either the probe
-    stopped asserting anything or the guard became ambient (and then the assertion
-    above proves nothing)."""
-    proc = _probe_run(["-m", "unittest", "discover", "-s", PROBE_DIR,
-                       "-t", PROBE_DIR, "-p", "test_hermeticity_guard.py"],
-                      cwd=REPO_ROOT)
+def test_a_nested_rootdir_is_refused_by_the_whole_value_match(tmp_path):
+    """The negative control for the anchor case's match, on a scratch tree, so
+    the case above proves its mechanism and not only an outcome.
 
-    assert proc.returncode != 0
-    assert "FAILED" in proc.stderr, proc.stderr
+    A `tests/pyproject.toml` with a pytest table sits BELOW the tree's own
+    anchor, and pytest's upward search stops at the first file with a table.
+    So a run started in `tests/` makes `tests/` the rootdir, and the header
+    still prints `configfile: pyproject.toml`. The substring match that
+    openxFactory's copy uses accepts that header, and so does the configfile
+    check. The whole-value match must refuse it, and it must accept the tree's
+    own root again once the nested file is gone."""
+    root = tmp_path / "repo"
+    tests = root / "tests"
+    tests.mkdir(parents=True)
+    table = "[tool.pytest.ini_options]\n"
+    (root / "pyproject.toml").write_text(table, encoding="utf-8")
+    (tests / "pyproject.toml").write_text(table, encoding="utf-8")
+    (tests / "test_probe.py").write_text("def test_probe():\n    pass\n",
+                                         encoding="utf-8")
+
+    def header() -> str:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+             "--collect-only", "test_probe.py"],
+            cwd=str(tests), capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        return proc.stdout
+
+    nested = header()
+    assert f"rootdir: {root}" in nested, nested            # the substring: fooled
+    assert "configfile: pyproject.toml" in nested, nested   # the configfile: fooled
+    assert not _names_rootdir(nested, root), nested         # the whole value: not
+
+    (tests / "pyproject.toml").unlink()
+    restored = header()
+    assert _names_rootdir(restored, root), restored
 
 
 # `test_the_gate_runs_its_unittest_fallback_through_the_guarded_runner` stayed
@@ -697,12 +729,20 @@ def test_no_production_handler_swallows_a_baseexception():
 
     So: every `except BaseException` (and every bare `except:`) in the package must
     contain a `raise`. Parsed, not grepped, so a handler nested in a helper counts
-    the same as a top-level one."""
+    the same as a top-level one.
+
+    AT THIS LEG THE PACKAGE IS `src/opendox/` (plan 034 T035). The scan still
+    named `scripts/ideation_dashboard/`, a directory this leg does not have, so
+    it read no file and passed on nothing. It now reads the package, the
+    `opendox.runtime` subpackage included, and it fails if it reads no module at
+    all."""
     import ast
 
     offenders = []
-    package = REPO_ROOT / "scripts" / "ideation_dashboard"
+    scanned = 0
+    package = REPO_ROOT / "src" / "opendox"
     for path in sorted(package.rglob("*.py")):
+        scanned += 1
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.ExceptHandler):
@@ -721,6 +761,7 @@ def test_no_production_handler_swallows_a_baseexception():
             if not reraises:
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
 
+    assert scanned, f"the scan read no module under {package}, so it proved nothing"
     assert offenders == [], (
         "these handlers catch BaseException (or bare) WITHOUT re-raising, so they "
         "would swallow HermeticityViolation and silently disable the FR-043 "
@@ -756,8 +797,7 @@ def test_the_scratch_harness_does_not_depend_on_the_ambient_conftest_name(tmp_pa
 def test_the_harness_imports_its_shapes_from_the_plainly_named_module():
     """The source pin behind the behaviour above: `session_fixtures` names
     `staging_shapes`, never the ambient `conftest`."""
-    text = (REPO_ROOT / "tests" / "ideation-dashboard"
-            / "session_fixtures.py").read_text(encoding="utf-8")
+    text = (REPO_ROOT / "tests" / "session_fixtures.py").read_text(encoding="utf-8")
     assert "from staging_shapes import staging_fragment" in text
     ambient = [line for line in text.splitlines()
                if line.strip().startswith("from conftest import")]

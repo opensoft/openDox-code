@@ -9,21 +9,33 @@ finding stops being true:
   * the fakes cannot reach a network or a real notebook, and the
     `PullRequestPort` fake has NO merge/approve/review/bypass operation at all
     (T002, FR-030, FR-043);
-  * the worktree container `<repo>-worktrees/` is gitignored AND excluded from
-    the NotebookLM book scan (T004, FR-005) — research R7's "no new ignore entry
-    is needed" finding, encoded so it cannot silently stop being true.
+  * the worktree container `<repo>-worktrees/` is covered by the `*-worktrees/`
+    ignore pattern research R7 found (T004, FR-005), proved on a synthetic
+    repository so it cannot silently stop being true.
+
+THREE T004 CASES LEFT THIS FILE FOR openxFactory (plan 034 T035), because each
+one tests an openxFactory tree, not openDox:
+
+  * `test_worktree_container_is_gitignored_in_the_aggregation_repo` read the
+    xFactory aggregation checkout's own ignore file, found by a parent walk that
+    finds nothing in a lone checkout, so here it only ever skipped;
+  * `test_session_worktrees_never_reach_a_lifecycle_book` and
+    `test_pinned_factory_paths_never_admits_a_worktree_container` drove
+    openxFactory's `scripts/sync-notebooklm-books.py`, which this file loaded at
+    import time from a `scripts/` directory this leg does not have, so the whole
+    module failed to collect.
+
+All three become named openxFactory composition tests (T047), beside the book
+scan and inside the aggregation they read.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from conftest import REPO_ROOT
 from session_fixtures import (
     FakeNotebookAdapter,
     FakePullRequests,
@@ -33,17 +45,6 @@ from session_fixtures import (
     build_scratch_repo,
     filter_declared_paths,
 )
-
-# The sync script is a hyphenated path, so it loads by spec like it does in
-# tests/notebooklm — under its OWN module name here, so neither suite clobbers
-# the other's copy in sys.modules.
-_SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync-notebooklm-books.py"
-_spec = importlib.util.spec_from_file_location("sync_books_session_scan", _SYNC_SCRIPT)
-sync = importlib.util.module_from_spec(_spec)
-assert _spec.loader is not None
-sys.modules[_spec.name] = sync
-_spec.loader.exec_module(sync)
-
 
 # --------------------------------------------------------------------------
 # T001 — the scratch world and the immovability fingerprint
@@ -223,41 +224,15 @@ def test_fake_notebook_adapter_can_exhaust_the_quota():
 
 
 # --------------------------------------------------------------------------
-# T004 — the container is gitignored and unscannable (FR-005; research R7)
+# T004 — the container's ignore pattern (FR-005; research R7). The real-tree
+# half and the book-scan half are openxFactory's: see the module docstring.
 # --------------------------------------------------------------------------
-
-def find_aggregation_root(start: Path | None = None) -> Path | None:
-    """The xFactory aggregation checkout: the ancestor carrying `.gitmodules`
-    and an `openxFactory/` directory. None when unreachable (a bare clone of
-    this repo alone), in which case the real-tree half of the regression skips
-    and the synthetic half still runs."""
-    base = (start or REPO_ROOT).resolve()
-    for d in [base, *base.parents]:
-        if (d / ".gitmodules").is_file() and (d / "openxFactory").is_dir():
-            return d
-    return None
-
 
 def _check_ignore(root: Path, relpath: str) -> str | None:
     done = subprocess.run(["git", "check-ignore", "-v", relpath],
                           cwd=str(root), text=True, capture_output=True,
                           check=False)
     return done.stdout.strip() or None
-
-
-def test_worktree_container_is_gitignored_in_the_aggregation_repo():
-    agg = find_aggregation_root()
-    if agg is None:
-        pytest.skip("no aggregation checkout reachable from this tree")
-    for rel in ("xFactories/codexFactory-worktrees/",
-                "xFactories/codexFactory-worktrees/sessions/draft__demo-topic/",
-                "xFactories/codexFactory-worktrees/sessions/draft__demo-topic/a.md",
-                "openxFactory-worktrees/sessions/draft__demo-topic/"):
-        matched = _check_ignore(agg, rel)
-        assert matched is not None, f"{rel} is NOT gitignored — FR-005 broke"
-        # the finding is specifically that the EXISTING `*-worktrees/` pattern
-        # covers it, so no new ignore entry is owed (research R7)
-        assert matched.endswith("*-worktrees/\t" + rel) or "*-worktrees/" in matched
 
 
 def test_the_worktrees_pattern_covers_the_sessions_sub_path(tmp_path):
@@ -274,74 +249,3 @@ def test_the_worktrees_pattern_covers_the_sessions_sub_path(tmp_path):
         root, "xFactories/codexFactory-worktrees/sessions/draft__t/doc.md") is not None
     # and it does NOT over-reach into the governed repo itself
     assert _check_ignore(root, "xFactories/codexFactory/docs/doc.md") is None
-
-
-def test_session_worktrees_never_reach_a_lifecycle_book(tmp_path):
-    """FR-039 / research R7's second half: the book scan excludes the worktree
-    container by name AND anything under a nested `.git`, so a session worktree
-    contributes NO source, title, or repository to any of the lifecycle books."""
-    doc = "Status: staged\n"
-    root = tmp_path / "workspace"
-    (root / "openxFactory/ideation/staging/real").mkdir(parents=True)
-    (root / "openxFactory/ideation/staging/real/README.md").write_text(
-        "# Real\n\n" + doc, encoding="utf-8")
-    governed = root / "xFactories/codexFactory"
-    (governed / "docs").mkdir(parents=True)
-    (governed / ".git").mkdir()
-    (governed / "docs/real-doc.md").write_text("# Governed\n\n" + doc, encoding="utf-8")
-    (root / ".gitmodules").write_text(
-        '[submodule "codexFactory"]\n\tpath = xFactories/codexFactory\n'
-        "\turl = https://example.invalid/codexFactory.git\n", encoding="utf-8")
-
-    # a SESSION worktree, exactly where FR-005 puts it
-    session = root / "xFactories/codexFactory-worktrees/sessions/draft__demo-topic"
-    (session / "ideation/staging/demo-topic").mkdir(parents=True)
-    (session / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
-    (session / "ideation/staging/demo-topic/README.md").write_text(
-        "# Session draft\n\n" + doc, encoding="utf-8")
-
-    # `scan` returns (desired, specs) since split-ideation-book-per-repo
-    # (2026-08-10) — this test still unpacked the pre-split dict and failed with
-    # `'tuple' object has no attribute 'items'` on every run. Repaired here
-    # rather than left red; the CLAIM being tested is untouched.
-    desired, _specs = sync.scan(root)
-
-    assert desired  # the scan produced books
-    for book, entries in desired.items():
-        for relpath, title in entries.items():
-            assert "-worktrees" not in relpath, (
-                f"book {book} projected a worktree source: {relpath}")
-            assert "Session draft" not in title
-            assert "sessions/" not in relpath
-    # the control: the governed and openxFactory documents DID project, so the
-    # assertion above is not passing on an empty scan. The ideation family is
-    # PER-REPOSITORY since split-ideation-book-per-repo, so the control looks
-    # across the whole family instead of one shared `ideation` key — which keeps
-    # it proving what it always proved (the scan was not empty) without this
-    # test taking a position on how that family is keyed.
-    ideation = {relpath
-                for key, entries in desired.items()
-                if key.startswith(sync.IDEATION_KEY_PREFIX)
-                for relpath in entries}
-    assert any(r.endswith("openxFactory/ideation/staging/real/README.md")
-               for r in ideation), sorted(ideation)
-    assert any(r.endswith("xFactories/codexFactory/docs/real-doc.md")
-               for r in ideation), sorted(ideation)
-
-
-def test_pinned_factory_paths_never_admits_a_worktree_container(tmp_path):
-    """The other exclusion research R7 names: `pinned_factory_paths` is
-    pin-state driven, and its no-.gitmodules fallback drops `*-worktrees` by
-    suffix. Both halves asserted, so removing either is a test failure."""
-    root = tmp_path / "workspace"
-    (root / "xFactories/codexFactory").mkdir(parents=True)
-    (root / "xFactories/codexFactory-worktrees/sessions").mkdir(parents=True)
-
-    # fallback (no .gitmodules): suffix heuristic
-    assert sync.pinned_factory_paths(root) == ["xFactories/codexFactory"]
-
-    # pin-state (with .gitmodules): only pinned paths
-    (root / ".gitmodules").write_text(
-        '[submodule "codexFactory"]\n\tpath = xFactories/codexFactory\n'
-        "\turl = https://example.invalid/codexFactory.git\n", encoding="utf-8")
-    assert sync.pinned_factory_paths(root) == ["xFactories/codexFactory"]

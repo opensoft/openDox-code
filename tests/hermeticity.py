@@ -55,12 +55,13 @@ own double explicitly — `NotebookAdapter(runner=..., available=...)`,
 `GhPullRequests(runner=...)`, `FakePullRequests`. Only the DEFAULTS are poisoned,
 so no existing assertion is weakened and no test needs editing to stay hermetic.
 
-Registered from EVERY `conftest.py` under `tests/`, not just the suite-wide one,
-and — since wave 2 — from every pytest invocation whatever directory it starts in:
-a run started inside a test directory used to make that directory the rootdir,
-which cut `tests/conftest.py` out of conftest collection. The repo-root
-`pytest.ini` anchors `rootdir` instead, which is why the answer is NOT "add a
-conftest.py to every directory" (see `CONFTEST_HOOKUPS`).
+Registered from EVERY `conftest.py` under `tests/`. At this leg that is one
+file, `tests/conftest.py`, because `tests/` is one flat directory here (see
+`CONFTEST_HOOKUPS`). The rootdir is anchored at the repository by
+`pyproject.toml` and its `[tool.pytest.ini_options]` table (openxFactory's copy
+of this module anchors on its `pytest.ini`). A run started inside `tests/`
+therefore still has the repository as its rootdir, and the repository-root
+`conftest.py` stays in its conftest chain (see `ROOTDIR_ANCHOR`).
 
 THE THIRD ROUTE IS NOT PYTEST AT ALL. A `python3 -m unittest discover` run
 reaches no conftest at all, and a fixture cannot reach it. PR #49 review finding
@@ -68,21 +69,20 @@ reaches no conftest at all, and a fixture cannot reach it. PR #49 review finding
 ledger, in codexFactory's `scripts/validate-docs.sh`, which ran the doc-health
 and notebooklm suites when they lived in codexFactory — before the fix
 (2026-07-27) replaced that bare fallback with codexFactory's own guarded
-runner (the original `tests/hermetic_unittest.py` was later copied from), and
-before the doc-health relocation (adopt-neutral-tooling-home, ratified
-2026-08-03; archived 2026-08-05) copied it here and moved the tests, after
-which codexFactory's script stopped running them at all. So the two layers are
-installable WITHOUT pytest — `install_binary_shim` and `runner_seams`, used by
-the fixtures below and by `tests/hermetic_unittest.py`, retained as the
-guarded runner for any pytest-less host. No gate in this repository currently
-takes that route. `import pytest` is optional in this module BECAUSE the world
-it must also guard is by definition a world without pytest.
+runner. openxFactory's `tests/hermetic_unittest.py` was later copied from that
+runner, and it stayed in openxFactory at the carve, so THIS LEG HAS NO
+UNITTEST RUNNER and no gate here takes that route. The two layers stay
+installable WITHOUT pytest all the same — `install_binary_shim` and
+`runner_seams`, which the fixtures below use — and `import pytest` stays
+optional, because the world this module must also be able to guard is by
+definition a world without pytest.
 
-`tests/ideation-dashboard/test_hermeticity.py` proves the guard: it asserts an
-unguarded real-binary invocation is refused, pins the hookup set, and drives
-`tests/notebooklm/test_hermeticity_guard.py` — a `TestCase` living in a
-conftest-less directory — through both the pytest and the unittest route. Delete
-the guard, the anchor or the runner and those tests fail.
+`tests/test_hermeticity.py` proves the guard at this leg: it asserts an
+unguarded real-binary invocation is refused at both layers, pins the hookup set
+and the rootdir anchor, and collects `tests` and `tests_runtime` in both
+argument orders. Delete the guard or the anchor and those tests fail. The
+proofs that drive openxFactory's own conftest-less directory and its unittest
+runner live in openxFactory with the tree they test (plan 034 T035).
 """
 
 from __future__ import annotations
@@ -278,6 +278,17 @@ def claim_conftest_slot(namespace: dict) -> dict:
 # The hookups this guard must be registered from (pinned by test_hermeticity):
 # EVERY conftest.py under tests/, so no directory is guarded only by luck.
 #
+# AT THIS LEG THAT IS ONE FILE (plan 034 T035), and the rest of this block is
+# openxFactory's history, carried with the module. `tests/` is one flat
+# directory here, and its `conftest.py` is the replica of openxFactory's
+# `tests/ideation-dashboard/conftest.py`: a DIRECTORY conftest, so it registers
+# the guard AND claims the ambient `conftest` slot. The suite-wide conftest at
+# this leg is the repository-root `conftest.py`, above `tests/`. It registers
+# nothing here and must not claim, for the LIFO reason `claim_conftest_slot`'s
+# docstring gives for openxFactory's `tests/conftest.py`.
+# `tests_runtime/conftest.py` is not under `tests/` and does not register the
+# guard.
+#
 # Not one per directory, deliberately. `conftest` is an ambient top-level module
 # name and pytest keeps exactly one of them in `sys.modules`, so ADDING an
 # UNCLAIMING conftest.py to a directory hijacks that name for its siblings: a
@@ -309,10 +320,7 @@ def claim_conftest_slot(namespace: dict) -> dict:
 # test_hermeticity — but a collision with the siblings is no longer its cost.
 # `tests/conftest.py` is the one entry that must NOT claim (LIFO hook order
 # would make its claim the last one to run); see the docstring above.
-CONFTEST_HOOKUPS = ("avatar_runtime/conftest.py", "clearing/conftest.py",
-                    "conftest.py",
-                    "doc-health/conftest.py",
-                    "ideation-dashboard/conftest.py")
+CONFTEST_HOOKUPS = ("conftest.py",)
 
 # Conftests under `tests/` that exist but CANNOT register the guard themselves
 # (adopt-neutral-tooling-home tranche B, 2026-08-03). The Hermes
@@ -324,13 +332,24 @@ CONFTEST_HOOKUPS = ("avatar_runtime/conftest.py", "clearing/conftest.py",
 # collection (measured, 2026-08-03). Those directories are still guarded
 # through `tests/conftest.py` whenever the conftest chain reaches `tests/`,
 # which the `pytest.ini` rootdir anchor guarantees for in-repo invocations.
-CONFTEST_EXEMPT_HOOKUPS = ("hermes_runtime_contracts/conftest.py",
-                           "hermes_runtime_contracts/postgres/conftest.py")
+#
+# This leg carries no such suite, so nothing is exempt (plan 034 T035).
+CONFTEST_EXEMPT_HOOKUPS: tuple[str, ...] = ()
 
 # The rootdir anchor's filename, pinned by test_hermeticity: without an inifile
 # somewhere at or above the invocation, rootdir falls back to the arguments' common
 # ancestor and the hookup above goes out of scope.
-ROOTDIR_ANCHOR = "pytest.ini"
+#
+# At this leg the anchor is `pyproject.toml` (plan 034 T035), and its
+# `[tool.pytest.ini_options]` table is what makes it a firm one. With the table,
+# pytest's upward search takes this file as the configfile as soon as it reaches
+# it. Without the table, pytest 8 still falls back to it, but only when it finds
+# no other configuration file anywhere above, so a `pytest.ini` in an enclosing
+# directory would take the rootdir away. The anchor's test checks the table as
+# well. With no anchor at all, a run started inside `tests/` makes `tests/` the
+# rootdir, and the repository-root `conftest.py` (the `src/` path and the
+# suite's host profile) falls out of its chain.
+ROOTDIR_ANCHOR = "pyproject.toml"
 
 # Both layers APPEND every refusal here, so a run leaves a complete inventory of
 # what tried to escape and which test tried it — the measurement the review had to
@@ -452,32 +471,22 @@ def runner_seams():
     seams. Imported inside the function so the patch targets are the modules the
     tests themselves hold.
 
-    TRANCHE NOTE (adopt-neutral-tooling-home tranche A): both seams live in the
-    `ideation_dashboard` package, which arrives with tranche B. Until it lands
-    in this repo there is nothing in-process that can speak `nlm` or `gh`, so a
-    missing package yields NO seams (layer 1's PATH shim still refuses the
-    binaries) rather than an import error in every test. The probe is
-    `find_spec`, not try/except ImportError, because this repo's own
-    `tests/ideation_dashboard/` suite directory forms a NAMESPACE package of
-    the same name once `tests/` is on `sys.path` — the failure mode is then
-    "cannot import name ... (unknown location)", not ModuleNotFoundError.
-    Self-healing: a regular package always beats a namespace portion, so the
-    moment tranche B lands `scripts/ideation_dashboard/`, `find_spec` resolves
-    its submodules and both seams are guarded again with no further edit —
-    and a landed package that fails to IMPORT still raises loudly."""
-    from importlib.util import find_spec
-
-    try:
-        dashboard_ready = all(
-            find_spec(f"ideation_dashboard.{name}") is not None
-            for name in ("session_pr", "workbench"))
-    except ModuleNotFoundError:
-        dashboard_ready = False
-    if not dashboard_ready:
-        return ()
-
-    from ideation_dashboard import session_pr as session_pr_mod
-    from ideation_dashboard import workbench as workbench_mod
+    AT THIS LEG BOTH SEAMS ARE `opendox`'s OWN, and they are imported with no
+    probe (plan 034 T035). openxFactory's copy probes `ideation_dashboard.*`
+    with `find_spec` and returns NO seams while that package is absent, a guard
+    from before the package reached openxFactory (adopt-neutral-tooling-home
+    tranche A). Carried here unchanged, the probe named a package this leg does
+    not have, so it always answered "absent" and LAYER 2 WAS OFF in this suite:
+    the carve manifest's row for this file records both reaches as resolving
+    "to nothing at a destination that lacks them". Layer 1 was still on, and a
+    non-zero exit is the very degradation the notebook adapter swallows, so an
+    escape through the default runner would have passed. Turning the layer on
+    here left the whole `tests/` directory green, so no test was escaping.
+    Both modules belong to this leg, so a probe could only hide a breakage: a
+    seam module that fails to import now fails every test, loudly, instead of
+    switching the layer off in silence."""
+    from opendox import session_pr as session_pr_mod
+    from opendox import workbench as workbench_mod
 
     return (
         (workbench_mod, "_default_runner", refuse_nlm),

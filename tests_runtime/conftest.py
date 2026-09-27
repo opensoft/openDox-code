@@ -1,12 +1,13 @@
 """Fixtures for the DB-backed half of `tests_runtime/`.
 
-WHY THIS FILE IS NOT READ BY THE REQUIRED CHECK. The leg's `validate` job runs
-its pytest step with `--noconftest` — the root `conftest.py`'s `collect_ignore`
-and `tests/conftest.py`'s autouse fixtures are both written for a tree that can
-import `opendox.serve`, and until the BUILD arc repairs that, a file named in
-that job has to stand on its own. The `runtime` job runs WITHOUT `--noconftest`
-and is the only reader of this file, so the hermetic modules never depend on a
-fixture and the DB-backed ones never repeat the harness.
+THE REQUIRED CHECK READS THIS FILE, since plan 034 T036. The leg's `validate`
+job used to run a named list of hermetic modules with no conftest loaded, and a
+separate, advisory `runtime` job was the only reader of this file. RULED R1Q8
+(a) (openxFactory#656 comment 5817152735) put `tests_runtime/` into the whole
+suite with PostgreSQL in the required job, so that job was folded into
+`validate`, which now runs every module here with the conftest chain in play
+and a `postgres:16` service. The hermetic modules still depend on no fixture
+from this file, and the DB-backed ones still never repeat the harness.
 
 SKIPPED, NEVER FAILED, WHERE THERE IS NO POSTGRES — and the skip SAYS SO. A
 suite that silently passed without a database would advertise coverage that is
@@ -51,7 +52,8 @@ _SKIP_REASON = (
     "postgres:16\n"
     f"  export {TEST_DSN_ENV}="
     "'postgresql://opendox:opendox@127.0.0.1:55432/opendox'\n"
-    "CI runs them in the `runtime` job, which supplies a `postgres:16` service."
+    "CI runs them in the required `validate` job, which supplies a "
+    "`postgres:16` service."
 )
 
 
@@ -104,17 +106,18 @@ def _skip_or_fail(reason: str) -> None:
     """A developer's skip is CI's FAILURE, and that asymmetry is the point.
 
     Skipping where there is no Postgres is right for a developer and wrong for
-    the `runtime` job: pytest exits 0 when every collected case is skipped, so
-    a job whose `postgres:16` service failed to start went GREEN while running
-    no database-backed assertion at all — reporting the opposite of what the
+    CI: pytest exits 0 when every collected case is skipped, so a job whose
+    `postgres:16` service failed to start went GREEN while running no
+    database-backed assertion at all — reporting the opposite of what the
     workflow's own comment claims about it (Copilot review of openDox-code#25).
-    The job exists to supply that service, so its absence there is a defect in
-    the job and is reported as one.
+    That was the advisory `runtime` job then; since plan 034 T036 it is the
+    required `validate` job, which exists to supply that service, so its
+    absence there is a defect in the job and is reported as one.
     """
     if in_ci():
         pytest.fail(
             "CI is set, so the DB-backed runtime suites must RUN and not skip: "
-            "the `runtime` job supplies a `postgres:16` service and this is "
+            "the `validate` job supplies a `postgres:16` service and this is "
             "what its absence looks like. " + reason, pytrace=False)
     pytest.skip(reason)
 

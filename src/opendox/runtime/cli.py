@@ -496,9 +496,10 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     # an operator could be shown a plan for a tree the very next command
     # refuses (Copilot review of openDox-code#25, round 7). Asking about the
     # TREE needs no driver and no server, so it is asked where the answer
-    # costs nothing and is the same in every environment: the required
-    # `validate` job installs `.[test]` alone, and a gate behind the `runtime`
-    # extra would have been a gate that job could not reach.
+    # costs nothing and is the same in every environment. An install without
+    # the `runtime` extra reaches it too, as the required `validate` job did
+    # until plan 034 T036, and a gate behind the extra would have been a gate
+    # such an install could not reach.
     try:
         migrations.verify_canonical_digest(settings.migrations_dir)
     except migrations.MigrationError as exc:
