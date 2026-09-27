@@ -49,9 +49,8 @@ review of openDox-code#25, round 10). `tests_runtime/test_migration_shape.py`
 drives a whole `apply()` through a double that implements exactly the four,
 which is what keeps the paragraph and the code the same thing.
 
-So discovery, checksums, the ledger DDL and the plan can all be read under the
-leg's `validate` check, which installs `.[test]` and not `.[runtime]`. `opendox.runtime.db` supplies the real
-one. That is the package's import-weight contract, stated in
+So discovery, checksums, the ledger DDL and the plan can all be read without
+the `runtime` extra installed. `opendox.runtime.db` supplies the real one. That is the package's import-weight contract, stated in
 `opendox/runtime/__init__.py` and asserted by
 `tests_runtime/test_runtime_surface.py`.
 """
@@ -140,7 +139,7 @@ _MIGRATION_FILENAME_RE = re.compile(
 
 #: See `MigrationRunner.protect_ledger`. Mirrors `config._ROLE_NAME`, and is
 #: duplicated rather than imported for the same reason every other closure in
-#: this package is: `migrations` must import under `.[test]` alone, and it
+#: this package is: `migrations` must import without the `runtime` extra, and it
 #: imports `config` nowhere.
 _PLAIN_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 

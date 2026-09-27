@@ -41,7 +41,8 @@ WHAT IT ASSERTS, FOR EACH SEAM
    publisher or the consumer, read by `ast` the way F4.1's scan reads the
    whole package.
 
-`--noconftest` SAFE, like every file `validate` runs today. It imports
+`--noconftest` SAFE, as every file `validate` ran was until plan 034 T036.
+It imports
 `opendox.serve_wire`, `opendox.serve_workbench` and `opendox.doxbench_packet`,
 which import with no sibling present, and neither `opendox.serve` nor
 `opendox.cli` (plan 034, tasks.md § Phase 1: those two modules do not import

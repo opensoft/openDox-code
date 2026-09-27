@@ -36,10 +36,15 @@ and
 in `opensoft/openDox`. Security reports for this repository go through
 [SECURITY.md](SECURITY.md). The `validate` check is a required status check
 on `main`, enforced by a repository ruleset — see
-[docs/branch-protection.md](docs/branch-protection.md). Until the BUILD arc
-(`split-opendox` § 3.5/3.6) inverts the openDox → openXdox dependency,
-`validate` runs only the scaffold's shape assertions (RULED Q-L5 (b′),
-`opensoft/openxFactory#656`, 2026-09-10).
+[docs/branch-protection.md](docs/branch-protection.md). It runs the whole
+suite, `tests/` and `tests_runtime/`, with the conftest chain in play and a
+PostgreSQL service, and it declares no exclusion (plan 034 T036;
+`add-neutral-product-standalone-operability` requirement 9). Until then it ran
+a narrowed set of suites (RULED Q-L5 (b′), `opensoft/openxFactory#656`,
+2026-09-10). That ruling gave the openDox → openXdox dependency as the reason,
+but the dependency was inverted at import time first. The live cause of the
+narrowing was the carved code's reaches into `ideation_dashboard`,
+openxFactory's own package, and plan 034's phase 1 removed them.
 
 ## Documentation
 

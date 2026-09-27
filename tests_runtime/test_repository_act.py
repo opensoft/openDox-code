@@ -6,8 +6,9 @@ measured here is the PAIR: the map row and the repository, together or not at
 all, and then the two successors RULING C3 names — a remote attached later, and
 a move that is a push.
 
-DB-BACKED — runs in the `runtime` CI job. The adapter's own conformance is
-proved hermetically in `test_local_git_adapter.py`, in the REQUIRED job.
+DB-BACKED — runs in the required `validate` job since plan 034 T036 folded
+the `runtime` job into it. The adapter's own conformance is proved
+hermetically, with no database, in `test_local_git_adapter.py`.
 """
 
 from __future__ import annotations

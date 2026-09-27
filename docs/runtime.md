@@ -43,7 +43,7 @@ deploy/compose/      docker-compose.yaml, Dockerfile, init-runtime-role.sh, .env
 deploy/kubernetes/   base/ + overlays/dev/
 src/opendox/runtime/ config, migrations, identity, db, oidc, app, cli,
                      local_git_adapter, repository_act
-tests_runtime/       the hermetic half (required check) and the DB-backed half
+tests_runtime/       the hermetic half and the DB-backed half, both in the required check
 ```
 
 § 3.5's own sentence is "**all at the root of `openDox-code`, not of the
@@ -629,18 +629,23 @@ deletes the `opendox-project-repositories` claim.
 
 ## 8. Tests
 
-| suite | where it runs | what it needs |
-|---|---|---|
-| `test_migration_shape.py` | `validate` (required) | `.[test]` |
-| `test_schema_shape.py` | `validate` (required) | `.[test]` |
-| `test_runtime_surface.py` | `validate` (required) | `.[test]` |
-| `test_runtime_cli.py` | `validate` (required) | `.[test]` |
-| `test_deploy_shape.py` | `validate` (required) | `.[test]` |
-| `test_local_git_adapter.py` | `validate` (required) | `.[test]` + `git` |
-| `test_migrations_apply.py` | `runtime` | `.[runtime,test]` + Postgres |
-| `test_oidc_verifier.py` | `runtime` | `.[runtime,test]` |
-| `test_api_endpoints.py` | `runtime` | `.[runtime,test]` + Postgres |
-| `test_repository_act.py` | `runtime` | `.[runtime,test]` + Postgres + `git` |
+| suite | what it needs |
+|---|---|
+| `test_migration_shape.py` | the base package |
+| `test_schema_shape.py` | the base package |
+| `test_runtime_surface.py` | the base package |
+| `test_runtime_cli.py` | the base package |
+| `test_deploy_shape.py` | the base package |
+| `test_local_git_adapter.py` | the base package + `git` |
+| `test_migrations_apply.py` | the `runtime` extra + Postgres |
+| `test_oidc_verifier.py` | the `runtime` extra |
+| `test_api_endpoints.py` | the `runtime` extra + Postgres |
+| `test_repository_act.py` | the `runtime` extra + Postgres + `git` |
+
+All ten run in the required `validate` job, since plan 034 T036 (RULED R1Q8
+(a)): it installs `.[runtime,test]`, supplies a `postgres:16` service, and runs
+the whole suite. The `test` extra names the `runtime` extra, so
+`pip install -e '.[test]'` is enough for every row.
 
 The split is the package's import-weight contract
 (`src/opendox/runtime/__init__.py`), and `test_runtime_surface.py` measures it
@@ -730,12 +735,15 @@ prove without a broker, and it proves it rather than asserting it.
   is NOT 'a draft of a document' is a real residual, it is not one of the open
   questions." `drafts` is the draft of a document and is not that scratch
   space. Unresolved, and deliberately.
-* **`validate`'s remaining narrowing** (RULED Q-L5 (b′)). This act lifts none
-  of it. `opendox.serve` could not import at this leg until plan 034 T011,
-  which `tests/test_consumer_reach.py::STILL_REACHING` recorded until then, and
-  the runtime was written so that no part of it depended on that repair.
-* **The `runtime` job is not a required check.** Making one required is a
-  repository setting (`docs/branch-protection.md`), a separate act.
+* **`validate`'s narrowing** (RULED Q-L5 (b′)) — CLOSED by plan 034 T036,
+  which runs the whole suite in the required check. This act lifted none of
+  it: `opendox.serve` could not import at this leg until plan 034 T011, which
+  `tests/test_consumer_reach.py::STILL_REACHING` recorded until then, and the
+  runtime was written so that no part of it depended on that repair.
+* **The DB-backed suites in a required check** — CLOSED by plan 034 T036
+  (RULED R1Q8 (a)). The advisory `runtime` job is folded into `validate`,
+  which supplies the `postgres:16` service itself. No repository setting
+  changed: `validate` was already the required check.
 * **Not taken from the Hermes install**, and each for a reason: its three-layer
   Subject/Tenant/Domain topology (openDox is single-layer, so a `layer` claim
   would be a shape without a meaning), its worker-readiness surface, its

@@ -456,12 +456,12 @@ def test_serve_emits_evidence_on_an_ordinary_shutdown(
     import types
 
     # STUBBED, NOT SKIPPED. `uvicorn` and `opendox.runtime.app` belong to the
-    # `runtime` extra, which the REQUIRED `validate` job does not install, and
-    # a test that skips there would leave this contract measured only in the
-    # advisory job — and would make the required job's recorded figure depend
-    # on which extras the measuring environment happened to have, which is the
-    # very mismatch Copilot's review of openDox-code#26 caught in this file's
-    # sibling block. `cmd_serve` imports both INSIDE the function, so two
+    # `runtime` extra, which the REQUIRED `validate` job did not install until
+    # plan 034 T036. A test that skipped without them would leave this
+    # contract unmeasured wherever the extra is absent, and would make a
+    # recorded figure depend on which extras the measuring environment
+    # happened to have, which is the very mismatch Copilot's review of
+    # openDox-code#26 caught in this file's sibling block. `cmd_serve` imports both INSIDE the function, so two
     # entries in `sys.modules` are the whole seam; the subject here is the
     # RETURN path, never a listening socket.
     served: dict[str, object] = {}
@@ -573,7 +573,7 @@ def test_the_migrate_preview_runs_the_same_canonical_gate_the_run_does(
     assert evidence["ok"] is False
     assert "planned" not in evidence
     # AND THE GATE IS REACHED WITHOUT THE `runtime` EXTRA. This first asserted
-    # `MigrationError` and went red in the REQUIRED job, which installs
+    # `MigrationError` and went red in the REQUIRED job, which then installed
     # `.[test]` alone: the gate sat behind the deferred `psycopg` import, so
     # the refusal there was `runtime-extra-missing` and the preview's own
     # promise was untestable in the one job that matters. The gate now runs
@@ -1271,10 +1271,11 @@ def test_the_broker_url_must_be_https_because_it_is_the_trust_anchor() -> None:
 def _conftest_module():
     """`tests_runtime/conftest.py`, loaded BY PATH.
 
-    The `validate` job runs pytest with `--noconftest`, so this file cannot
-    reach that module as a fixture provider and must not depend on it being on
-    `sys.path` either. Loading it by path is the one form that works in both
-    jobs — and the module is definitions only, so importing it starts nothing.
+    This file was written for a job that loaded no conftest, so it could not
+    reach that module as a fixture provider, and it must not depend on it being
+    on `sys.path` either. Loading it by path works with the conftest chain in
+    play, as the required job runs it since plan 034 T036, and without it. The
+    module is definitions only, so importing it starts nothing.
     """
     import importlib.util
 
@@ -1289,12 +1290,13 @@ def _conftest_module():
 def test_the_probe_never_interpolates_the_exception_text(monkeypatch) -> None:
     """THE CONTRACT ITSELF, and it does not depend on psycopg's wording.
 
-    The test below is the live reproducer and needs the driver installed; the
-    `validate` job installs `.[test]` alone and does not have it. This one
-    hands the probe a driver whose `connect` raises an exception carrying the
-    whole DSN — which is the only property of the real failure that matters —
-    and asserts the reason does not carry it. It runs in BOTH jobs, and it is
-    the assertion that would have caught the finding when it was written.
+    The test below is the live reproducer and needs the driver installed.
+    This one needs no driver at all: it hands the probe a driver whose
+    `connect` raises an exception carrying the whole DSN — which is the only
+    property of the real failure that matters — and asserts the reason does
+    not carry it. It runs in every install of this suite, with the `runtime`
+    extra or without it, and it is the assertion that would have caught the
+    finding when it was written.
     """
     conftest = _conftest_module()
     dsn = "postgresql://opendox:hunter2@db.internal:5432/opendox"
@@ -1347,9 +1349,9 @@ def test_an_unparsable_test_dsn_does_not_print_its_password(monkeypatch) -> None
     """
     pytest.importorskip(
         "psycopg",
-        reason="the live reproducer needs the driver; the `validate` job "
-               "installs `.[test]` alone, and the contract itself is measured "
-               "by the hermetic test above")
+        reason="the live reproducer needs the driver, which the `runtime` "
+               "extra installs; the contract itself is measured by the "
+               "hermetic test above")
     conftest = _conftest_module()
     password = "hunter2"                      # NOT a credential: a test string
     monkeypatch.setenv(conftest.TEST_DSN_ENV,

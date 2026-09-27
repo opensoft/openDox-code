@@ -81,11 +81,21 @@ dependencies = [
 # The pytest RANGE FROM ROUND 1, unchanged — `pytest>=8,<9`, still the only
 # upper bound in this file, because round 1 chose it deliberately. What moves is
 # its HOME: `validate.yml` used to carry the range as a literal in its install
-# step and now installs `.[test]`, so the range is declared ONCE and the
+# step and now installs the `test` extra, so the range is declared ONCE and the
 # workflow reads it, instead of two copies that can drift apart while both keep
 # passing.
+#
+# AND THE RUNTIME EXTRA, BY NAME (plan 034 T036; RULED R1Q8 (a),
+# openxFactory#656 comment 5817152735). The whole suite is `tests` AND
+# `tests_runtime` (`testpaths` below), and half of `tests_runtime` needs
+# FastAPI, psycopg, PyJWT and httpx. #1144's falsifier F9.1 installs `.[test]`
+# alone, so without these that half would FAIL under `CI` and SKIP elsewhere
+# (`tests_runtime/conftest.py`), and a skipped case does not make a whole
+# suite. `opendox[runtime]` names the extra below instead of copying its five
+# lines, so the runtime's dependency list is still declared once.
 test = [
     "pytest>=8,<9",
+    "opendox[runtime]",
 ]
 
 # THE RUNTIME EXTRA — `split-opendox-two-layer-product` § 3.5, RULED Q2
@@ -93,14 +103,16 @@ test = [
 # Hermes install pattern — FastAPI + Postgres … OIDC through the Keycloak
 # broker").
 #
-# WHY A SEPARATE EXTRA AND NOT `dependencies` ABOVE. The leg's required
-# `validate` check installs `.[test]`, and `opendox.serve` — the stdlib
-# document surface a student runs from a checkout — needs none of this. Putting
-# five packages and their transitive trees into the base install would make
-# every consumer of `pip install opendox` pay for a runtime it may never start,
-# and would put the required check's green light at the mercy of a web
-# framework's release. `.[runtime,test]` is what the new `runtime` CI job
-# installs; the existing `validate` job's install line is untouched.
+# WHY A SEPARATE EXTRA AND NOT `dependencies` ABOVE. `opendox.serve` — the
+# stdlib document surface a student runs from a checkout — needs none of this.
+# Putting five packages and their transitive trees into the base install would
+# make every consumer of `pip install opendox` pay for a runtime it may never
+# start. The required `validate` check DOES install it, since plan 034 T036:
+# RULED R1Q8 (a) makes `tests_runtime/` part of the whole suite, with
+# PostgreSQL in the required job, so that job installs `.[runtime,test]` (and
+# the `test` extra above names this one). The import-weight contract still
+# holds there, because `tests_runtime/test_runtime_surface.py` measures it in a
+# fresh interpreter by what lands in `sys.modules`, not by what is installed.
 #
 # LOWER BOUNDS ONLY, EACH WITH ITS REASON, and each floor is one this package
 # has actually been exercised against (measured 2026-09-16, python 3.12.3:
@@ -234,7 +246,13 @@ opendox = ["web/**"]
 # applies. Anchoring it here is what makes the conftest chain a guarantee
 # rather than an accident of the command line.
 minversion = "8.0"
-testpaths = ["tests"]
+# THE WHOLE SUITE (plan 034 T036; #1144 requirement 9; RULED R1Q8 (a)): a bare
+# `python -m pytest -q` runs both suite directories, and the required
+# `validate` job runs exactly that, with no file list. The order carries no
+# meaning: `tests/conftest.py` claims the ambient `conftest` slot for its own
+# subtree, so the two directories collect the same either way round
+# (`tests/test_hermeticity.py` collects both orders to prove it).
+testpaths = ["tests", "tests_runtime"]
 # `pythonpath` (pytest >= 7) puts `src/` on sys.path for the whole session.
 # The repository-root `conftest.py` does the same thing by hand, so the leg
 # still imports correctly under a runner that does not read this table.

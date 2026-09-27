@@ -119,9 +119,9 @@ def test_the_stdlib_only_modules_name_no_extra_package_at_module_level() -> None
             f"{path.name} imports {sorted(offenders)} at module level. The "
             "package's import-weight contract (see "
             "src/opendox/runtime/__init__.py) is that these modules import "
-            "under `.[test]` alone — which is what the leg's REQUIRED "
-            "`validate` job installs, and what § 3.7's conformance corpus "
-            "will have. Move the import inside the function that needs it.")
+            "without the `runtime` extra — which is what § 3.7's conformance "
+            "corpus will have. Move the import inside the function that "
+            "needs it.")
 
 
 def test_the_stdlib_only_modules_really_import_without_the_extra() -> None:
@@ -165,7 +165,8 @@ def test_the_collection_set_is_closed_and_is_what_the_app_mounts() -> None:
     """`COLLECTIONS` and `app.build_v1_router`'s routers are one list.
 
     Read by PARSING `app.py` rather than by importing it, because this test
-    runs in the job that does not install FastAPI. What it reads is the
+    is one of the hermetic ones and must run without the `runtime` extra,
+    which is where FastAPI comes from. What it reads is the
     `include_router` call list of `build_v1_router`, which is the function
     that decides the surface.
     """
@@ -278,7 +279,9 @@ def test_only_asymmetric_algorithms_can_be_configured_and_they_keep_pyjwts_spell
 
 def test_ci_turns_the_db_backed_skip_into_a_failure() -> None:
     """A skipped suite exits 0, so "skip where there is no Postgres" made the
-    `runtime` job green while running no database-backed assertion.
+    DB-backed job green while running no database-backed assertion (the
+    advisory `runtime` job then; the required `validate` job since plan 034
+    T036 folded it in).
 
     The job exists to supply a `postgres:16` service; its absence there is the
     job's defect and is reported as one (Copilot review of openDox-code#25,
@@ -289,8 +292,8 @@ def test_ci_turns_the_db_backed_skip_into_a_failure() -> None:
     source = (ROOT / "tests_runtime" / "conftest.py").read_text(encoding="utf-8")
     assert "def _skip_or_fail(" in source
     assert "pytest.fail(" in source, (
-        "conftest still only skips; a `runtime` job whose Postgres service "
-        "failed to start would report green")
+        "conftest still only skips; a CI job whose Postgres service failed to "
+        "start would report green")
     # Every exit from the probe goes through the asymmetry, not around it.
     assert "pytest.skip(_SKIP_REASON)" not in source
     assert source.count("_skip_or_fail(") >= 3
