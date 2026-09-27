@@ -140,9 +140,11 @@ MAX_REMOTE_OUTPUT_BYTES = 4 * 1024 * 1024
 DEFAULT_BRANCH = "main"
 
 #: What this corpus can say about a document's SHAPE, which is all a plain git
-#: repository knows. Every kind obliges NO fields: obligations are governance,
-#: and a pre-governed repository has none — that is the whole of what makes
-#: this the trivial implementation rather than a small governed one.
+#: repository knows. By default every kind obliges NO fields: obligations are
+#: governance, and a pre-governed repository has none — that is the whole of
+#: what makes this the trivial implementation rather than a small governed one.
+#: A corpus constructed with `required_fields` obliges those; openDox's own
+#: standalone default obliges `NEUTRAL_FIELDS` below, and nothing more.
 KINDS_BY_SUFFIX: dict[str, str] = {
     ".md": "text",
     ".markdown": "text",
@@ -159,6 +161,16 @@ KINDS_BY_SUFFIX: dict[str, str] = {
 #: blank line — this is only the bound for a document that has no blank line
 #: near its top, so classifying one is never a scan of its whole body.
 MAX_HEADER_LINES = 64
+
+#: THE SMALL NEUTRAL FIELD SET (RULED R1Q13 (a), openxFactory#656 comment
+#: `5850003126`, in the answer's own example; plan 034 T054): what openDox's own
+#: standalone default adapter, `WorkingTreeCorpus`, obliges of a document it
+#: recognizes, so `authoring.required_header_fields()` answers it. They are
+#: the `title` and `summary` of T053's neutral snapshot, which openDox's own
+#: projection copies from the same header (`leading_header`). A document
+#: without them is still listed and read, as a source: a missing field is
+#: reported, never a reason to refuse or drop the document.
+NEUTRAL_FIELDS: tuple[str, ...] = ("title", "summary")
 
 #: The corpus's ONE verdict of its own, and it is a fact about git rather than
 #: a rule about documents: RULING C3 says "documents are always git-backed", so
@@ -200,6 +212,30 @@ def _leading_lines(text: str, limit: int) -> Iterator[str]:
             return
         yield text[start:boundary.start()]
         start = boundary.end()
+
+
+def leading_header(text: str) -> dict[str, str]:
+    """The leading `Name: value` block of `text`: this corpus's one header
+    convention, as a mapping from each name to its stripped value.
+
+    The block is the run of lines up to the first blank one, and at most
+    `MAX_HEADER_LINES` lines are looked at. A line with no colon is passed
+    over, a later line repeating a name wins, and a name given with nothing
+    after its colon maps to the empty string. So a key that is present with
+    no value is still told apart from one that is absent.
+
+    PUBLIC because openDox's own neutral projection reads the same block
+    (`opendox.neutral_projection`, plan 034 T054). The fields it copies are
+    the ones `classify` below reports as missing, so the two cannot disagree
+    about what a document gives: both call this function."""
+    header: dict[str, str] = {}
+    for line in _leading_lines(text, MAX_HEADER_LINES):
+        if not line.strip():
+            break
+        name, separator, value = line.partition(":")
+        if separator:
+            header[name.strip()] = value.strip()
+    return header
 
 
 #: Environment variables that SELECT A REPOSITORY or inject configuration, and
@@ -1906,10 +1942,17 @@ class LocalGitCorpus:
         (RULED openxFactory#656 comment 5714365086, Q-F2 (a) — see `__init__`).
 
         WITHOUT `kind_field` — the default, and what this class has always done
-        — the shape is the file SUFFIX and `required_fields` is empty for every
-        kind. That is the honest answer for a plain local git repository rather
-        than an unfinished one: obligations are governance, and a pre-governed
-        repository has none.
+        — the shape is the file SUFFIX, and with the default `required_fields`
+        of `()` no kind obliges any field. That is the honest answer for a
+        plain local git repository rather than an unfinished one: obligations
+        are governance, and a pre-governed repository has none. A corpus built
+        WITH `required_fields` obliges those of every kind it recognizes, and
+        reports as missing each one the document's header does not give, or
+        gives with nothing after its colon (an empty value is no field, as
+        `authoring.missing_required_headers` has it). openDox's own standalone
+        default, `WorkingTreeCorpus`, is built with `NEUTRAL_FIELDS` (plan 034
+        T054, R1Q13 (a)). A missing field is reported and nothing more: the
+        document is still listed, still readable, and still classified.
 
         WITH `kind_field` the corpus declares its own shape in a document
         HEADER, which is how the neutral conformance corpus is written
@@ -1923,7 +1966,6 @@ class LocalGitCorpus:
         """
         if self._kind_field is not None:
             return self._classify_by_header(corpus, document)
-        del corpus
         suffix = Path(document.key).suffix.lower()
         kind = KINDS_BY_SUFFIX.get(suffix)
         if kind is None:
@@ -1933,8 +1975,16 @@ class LocalGitCorpus:
                     f"{document.key!r} has no shape this corpus recognizes "
                     f"(suffix {suffix or '(none)'!r}); it is still listed and "
                     "still readable"))
-        return Classification(id=document, kind=kind, required_fields=(),
-                              missing_fields=())
+        if not self._required_fields:
+            # NOTHING OBLIGED, NOTHING READ: the bare default answers from the
+            # suffix alone, exactly as it always has.
+            return Classification(id=document, kind=kind, required_fields=(),
+                                  missing_fields=())
+        header = self._header_of(corpus, document)
+        return Classification(
+            id=document, kind=kind, required_fields=self._required_fields,
+            missing_fields=tuple(field for field in self._required_fields
+                                 if not header.get(field)))
 
     def _classify_by_header(self, corpus: ResolvedCorpus,
                             document: DocumentId) -> Classification:
@@ -1975,14 +2025,7 @@ class LocalGitCorpus:
         yields the same lines and stops.
         """
         text = self.read(corpus, document).content.decode("utf-8", "replace")
-        header: dict[str, str] = {}
-        for line in _leading_lines(text, MAX_HEADER_LINES):
-            if not line.strip():
-                break
-            name, separator, value = line.partition(":")
-            if separator:
-                header[name.strip()] = value.strip()
-        return header
+        return leading_header(text)
 
     # -- check ------------------------------------------------------------
 
@@ -3010,7 +3053,24 @@ class WorkingTreeCorpus(LocalGitCorpus):
     visible on the very next one. The factory that registers this default
     (`cli.py`'s and `serve.py`'s `_default_home_factory`) also constructs a
     fresh instance on every call, so no state survives across registrations
-    either (plan 034, T022)."""
+    either (plan 034, T022).
+
+    THE SMALL NEUTRAL FIELD SET IS THIS CLASS'S DEFAULT (plan 034 T054; RULED
+    R1Q13 (a), openxFactory#656 comment `5850003126`). `required_fields`
+    defaults to `NEUTRAL_FIELDS`, `title` and `summary`, where
+    `LocalGitCorpus` defaults to `()`. So the factory above, which builds
+    `WorkingTreeCorpus()`, hands every standalone caller an adapter whose
+    `classify` obliges them, and `authoring.required_header_fields()` answers
+    them. Nothing else about the class changes: a document without them is
+    still listed and read, and `classify` reports what is missing."""
+
+    def __init__(self, *, executable: str = "git",
+                 write_path: str | None = WRITE_PATH,
+                 kind_field: str | None = None,
+                 required_fields: tuple[str, ...] = NEUTRAL_FIELDS) -> None:
+        super().__init__(executable=executable, write_path=write_path,
+                         kind_field=kind_field,
+                         required_fields=required_fields)
 
     def _list_documents_bound(self, git: GitRunner, corpus: ResolvedCorpus,
                               scope: str) -> tuple[DocumentId, ...]:

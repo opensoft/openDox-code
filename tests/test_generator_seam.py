@@ -36,7 +36,8 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE
    replaces it before a generation, and after one that wrote nothing. A host is
    refused while a generation runs, and after one that wrote a snapshot. A
    generator may register or generate from inside its own call without
-   deadlocking the seam. Until T054 lands, the default refuses, naming itself.
+   deadlocking the seam. What the default generates is T054's neutral
+   projection, and `tests/test_neutral_projection.py` holds it.
 7. EACH ENTRY POINT REGISTERS IT. `cli.build_parser()` and `cli.main()` run for
    real. `serve.build_server()` and `serve.main()` still cannot run in a lone
    checkout (research R7), so their registration is executed from their own
@@ -728,27 +729,6 @@ def test_a_host_that_registers_the_default_itself_holds_a_hosts_registration() -
     with pytest.raises(gs.GeneratorAlreadyRegistered) as caught:
         gs.register(host)
     assert "a host's generator is already registered" in str(caught.value)
-
-
-def test_openDoxs_own_generator_refuses_until_its_projection_lands(tmp_path) -> None:
-    """Plan 034 orders the seam (T052) before the projection (T054). So the
-    default refuses, naming itself and T054, and generates nothing. It never
-    answers an empty snapshot. Because it wrote nothing, its refusal shuts no
-    host out: a host's generator still replaces it afterwards. T054 replaces
-    this case with its own tests."""
-    with pytest.raises(default_generator.NeutralProjectionNotBuilt) as caught:
-        default_generator.generate(tmp_path, "fixture")
-    message = str(caught.value)
-    for expected in (gs.NEUTRAL_SNAPSHOT_KIND, "T054", gs.REGISTRATION_CALL):
-        assert expected in message, f"the refusal no longer says {expected!r}"
-    assert isinstance(caught.value, gs.GeneratorSeamError)
-    gs.register_default(default_generator.GENERATOR)
-    with pytest.raises(default_generator.NeutralProjectionNotBuilt):
-        gs.generate(tmp_path, "fixture")
-    host, _ = _declared("host-snapshot")
-    assert gs.register(host) is host, (
-        "a refused generation from openDox's own generator wrote nothing, so "
-        "a host still replaces it")
 
 
 # --------------------------------------------------------------------------

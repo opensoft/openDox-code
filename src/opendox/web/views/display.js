@@ -220,29 +220,29 @@ export const SESSION_BRANCH_NAMESPACES = {
   [SCOPE_KINDS.candidate]: "possible",
 };
 
-// REGISTER_STATES — the candidate register's own four-state enum, by status
-// role. The fifth SEAM KEY table on § 2.2 rule 3's footing: these are VALUES
-// the snapshot carries on a candidate (`possibles[].state`), written by the
-// generator and compared against here, never rendered — what a human reads is
-// `display.status(VOCABULARY.CANDIDATE, role)`. openxFactory's own profile
-// declares the same four against the same roles
-// (`contracts/domain-profiles/openxfactory-engineering.yaml`:294-297), which is
-// what makes the role the right key and the word the wrong one.
-// THE SNAPSHOT'S CLOSED ENUM VALUES, by role — the rest of § 2.2 rule 3's
-// schema half, mirrored from `display_profile.SNAPSHOT_VALUES` and carried on
-// the payload (`values`) so a host may override them.
-//
-// `documents[].stage` and `possibles[].state` are values the renderer MATCHES —
+// THE SNAPSHOT'S CLOSED ENUM VALUES, by role — the fifth SEAM KEY table on
+// § 2.2 rule 3's footing and the rest of its schema half, mirrored from
+// `display_profile.SNAPSHOT_VALUES` and carried on the payload (`values`) so a
+// host may override them. `documents[].stage` and `possibles[].state`, the
+// candidate register's four-state enum, are values the renderer MATCHES —
 // which column a card belongs in, which dot a candidate wears — and never
-// values it RENDERS: every word a human reads comes from `display.status(...)`.
-// That is § 2.2 rule 3 read over a closed enum rather than over a field name,
-// and it is what keeps the product working: every profile in the estate today
-// registers WITHOUT a `DISPLAY` facet, so a board that filtered on the facet's
-// neutral word would show an empty column against the very snapshot it renders.
+// values it RENDERS: every word a human reads comes from `display.status(...)`,
+// by role. That is § 2.2 rule 3 read over a closed enum rather than over a
+// field name, and it is what keeps the product working: a board that filtered
+// on a facet's word would show an empty column against the snapshot it renders.
+//
+// The defaults are openDox's own neutral snapshot's values (R1Q11 (a); plan
+// 034 T054), exactly as `display_profile.SNAPSHOT_VALUES` declares them: a
+// source document's stage is `source` and a gathering one's is `grouping`, and
+// a candidate is `unselected`, `selected`, `declined` or `replaced`, which are
+// the candidate words NEUTRAL_DISPLAY renders, role for role. A host whose
+// generator writes other values into the same schema declares them on its
+// facet's `values` block, as openXdox's facet does for the governed snapshot
+// (T060).
 export const SNAPSHOT_VALUES = {
-  document_stage: { captured: "brainstorm", organized: "staged" },
-  register_state: { captured: "latent", proposed: "picked",
-                    retired: "rejected", superseded: "superseded" },
+  document_stage: { captured: "source", organized: "grouping" },
+  register_state: { captured: "unselected", proposed: "selected",
+                    retired: "declined", superseded: "replaced" },
 };
 
 // DRILL_KINDS — the explorer's own tile-kind keys, by stage role. The sixth and
