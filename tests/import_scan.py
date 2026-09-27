@@ -60,9 +60,16 @@ def importing_calls(tree):
     A module can call the two under a name of its own: `from importlib import
     import_module as load`, `from builtins import __import__ as imp`, or an
     assignment, `load = importlib.import_module`, followed as far as it chains
-    (`again = load`). The result maps each such name to the call it is. A
-    callable reached any other way, through `getattr`, a `functools.partial` or
-    a parameter, cannot be read off the source.
+    (`again = load`). The result maps each such name to the call it is.
+
+    A call is matched by the name it SPELLS, not by what that name is bound
+    to when it runs. So a parameter, a local or another object's attribute
+    that happens to be spelled `import_module` is read as the importer too.
+    That is the stricter reading, which the sweep takes wherever it cannot
+    tell (`tests/test_reach_sweep.py`), and it can only refuse a module,
+    never pass one. What cannot be read at all is the importer under a name
+    the module never gives it by an import or an assignment: through
+    `getattr`, a `functools.partial`, or an argument a caller passes in.
     """
     calls = dict(IMPORTING_CALLS)
     for node in ast.walk(tree):
