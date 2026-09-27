@@ -249,8 +249,9 @@ def test_no_module_under_src_reaches_openxfactory_at_all():
             or r.name == UNREADABLE]
     assert not into, (
         f"{len(into)} reach(es) into openxFactory, which openDox can never "
-        "install (#1144 task 4.3's phase-1 cut), or importing calls whose "
-        "module a spread hides, which could be: " + "; ".join(into))
+        "install (#1144 task 4.3's phase-1 cut), or imports the source does "
+        "not spell out (behind a spread, a star, or a context that is not a "
+        "literal), which could be: " + "; ".join(into))
 
 
 #: An openxFactory package's name, alone or as part of a dotted name, in any

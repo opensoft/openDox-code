@@ -54,11 +54,14 @@ def _called_name(expr):
     return None
 
 
-#: What `names_imported_by` names for an importing call whose module it cannot
-#: locate, because a `*` or `**` it cannot spell out stands where the name, or
-#: the package a relative name needs, would be. No module is spelled this way,
-#: so a caller that forbids packages refuses it as a reach it cannot read.
-UNREADABLE = "<an importing call's spread arguments>"
+#: What `names_imported_by` names for an importing call it cannot read off the
+#: source: where a `*` or `**` it cannot spell out hides the module's name, or
+#: the `package`, `globals`, `level` or `fromlist` that says what the call
+#: imports, or where one of those four is not a literal and the reading needs
+#: one. The sweep names a star import this way too, where the package may hold
+#: a sibling (`tests/test_reach_sweep.py`). No module is spelled this way, so
+#: a caller that forbids packages refuses it as a reach it cannot read.
+UNREADABLE = "<an import the source does not spell out>"
 
 
 def _positional(elements):
