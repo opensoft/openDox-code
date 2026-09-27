@@ -2891,6 +2891,40 @@ def _open_confined(root_fd: int, key: PurePosixPath) -> int:
     return fd
 
 
+def _tracked_or_not_ignored(git: GitRunner, key: PurePosixPath) -> bool:
+    """Whether `git` considers `key` part of the corpus `list_documents()`
+    would show: TRACKED (in the index, at any mode -- a gitlink included;
+    `_open_confined`'s own `S_ISREG` check excludes THAT case downstream,
+    the identical way a listed gitlink already is), or UNTRACKED and not
+    excluded by `.gitignore`/`.git/info/exclude`/the global excludes file.
+
+    A SINGLE-PATHSPEC QUERY, not a re-run of the full listing: `key` is
+    passed as a BARE pathspec, matched as the exact literal path it is,
+    never expanded as a glob, because `GitRunner` already puts
+    `--literal-pathspecs` ahead of every argument it runs (this class's own
+    docstring) -- a `:(literal)` prefix here would be not merely redundant
+    but WRONG, since `--literal-pathspecs` disables pathspec magic
+    entirely, `:(literal)` included, so that prefix would itself become
+    part of the literal filename git looks for instead of magic git
+    interprets (measured: it made this check silently exclude every real
+    key, including a tracked one, until removed) (Copilot review of
+    openDox-code#45, "read() exposes ignored files omitted from the
+    corpus": `read()` confined a key to the corpus ROOT, but never checked
+    that the corpus's own DEFINITION -- tracked, or untracked-and-not-
+    ignored -- actually includes it, so a caller naming a `.gitignore`d
+    secret directly, unmediated by `list_documents()`, was served it
+    anyway). Any git failure here is treated as "not part of the corpus"
+    rather than a corpus-wide refusal, for the identical reason
+    `_list_documents_bound`'s own per-candidate check is: a fact about ONE
+    key, not about the corpus."""
+    try:
+        matched = git.out("ls-files", "-z", "--cached", "--others",
+                          "--exclude-standard", "--", str(key))
+    except GitCommandFailed:
+        return False
+    return matched != b""
+
+
 class WorkingTreeCorpus(LocalGitCorpus):
     """`LocalGitCorpus`, reading the WORKING TREE instead of a resolved commit.
 
@@ -3103,6 +3137,21 @@ class WorkingTreeCorpus(LocalGitCorpus):
                 or "\x00" in document.key):
             raise _refuse(DOCUMENT_UNKNOWN, document.key,
                           f"{document.key!r} is not a path inside this corpus")
+        # A KEY INSIDE THE CORPUS ROOT IS NOT NECESSARILY A KEY INSIDE THE
+        # CORPUS (Copilot review of openDox-code#45, "read() exposes ignored
+        # files omitted from the corpus"): the checks above confine `key` to
+        # the ROOT, but a `.gitignore`d file -- a `.env`, a credential --
+        # lives there too, on disk, without being part of the document set
+        # this corpus DEFINES itself as ("tracked files, plus
+        # untracked-but-not-ignored ones", this class's own docstring). A
+        # caller building a `DocumentId` directly, unmediated by
+        # `list_documents()`, must not be able to read what the corpus
+        # itself excludes just because the bytes happen to sit inside the
+        # same directory tree.
+        if not _tracked_or_not_ignored(git, key):
+            raise _refuse(DOCUMENT_UNKNOWN, document.key,
+                          f"{document.key!r} is not tracked and is excluded "
+                          "from this corpus (gitignored, or never added)")
         # `_open_confined` walks EVERY component -- not only the last --
         # relative to `git.inherit_fd`, the SAME already-verified, no-follow
         # directory descriptor `_bound` secured for this whole operation

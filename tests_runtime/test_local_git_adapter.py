@@ -4814,10 +4814,18 @@ def test_working_tree_corpus_excludes_a_path_through_a_symlinked_intermediate_co
 
 def test_working_tree_corpus_excludes_an_untracked_special_file(
         ordinary_checkout: Path) -> None:
-    """`git ls-files --others` does not distinguish file TYPES -- it lists
-    whatever matches the working tree and is not ignored, a FIFO included.
-    `_open_confined`'s `O_NONBLOCK` + `S_ISREG` check is what actually
-    excludes it (never a hang on the open, never a read of a non-document)."""
+    """MEASURED, not assumed: `git ls-files --others --exclude-standard`
+    does NOT surface an untracked FIFO at all (checked directly against
+    git 2.43.0 -- an earlier version of this docstring assumed it did, and
+    was wrong). So this case is excluded twice over, and both are exercised
+    here: `list_documents()` never shows it (it is not in git's own
+    untracked scan to begin with), and `read()` refuses it through
+    `_tracked_or_not_ignored` -- the SAME general "not part of the corpus"
+    path a `.gitignore`d file takes -- before `_open_confined`'s own
+    `O_NONBLOCK` + `S_ISREG` special-file detection ever gets a chance to
+    run. The companion case below covers the scenario where that detection
+    DOES still matter: a path git considers TRACKED, replaced on disk by a
+    special file."""
     if not hasattr(os, "mkfifo"):
         pytest.skip("no os.mkfifo on this platform")
     os.mkfifo(ordinary_checkout / "queue.md")
@@ -4829,6 +4837,35 @@ def test_working_tree_corpus_excludes_an_untracked_special_file(
     with pytest.raises(ca.CorpusRefused) as caught:
         adapter.read(resolved, ca.DocumentId(corpus=ordinary_checkout.name,
                                              key="queue.md"))
+    assert caught.value.refusal.kind == ca.DOCUMENT_UNKNOWN
+
+
+def test_working_tree_corpus_refuses_a_tracked_file_replaced_by_a_special_file(
+        ordinary_checkout: Path) -> None:
+    """`_tracked_or_not_ignored` says a TRACKED path is part of the corpus
+    regardless of what currently sits on disk at that path (tracked always
+    wins, the same rule the gitignore case above tests) -- so a tracked
+    `note.md` later replaced on disk by a FIFO is NOT excluded by that
+    check, and `_open_confined`'s own `O_NONBLOCK` + `S_ISREG` detection is
+    what refuses it instead, with the more specific "special file"
+    message. This is the case `_open_confined`'s special-file handling
+    still exists for, now that an UNTRACKED special file is excluded
+    earlier (the case above)."""
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no os.mkfifo on this platform")
+    _commit(ordinary_checkout, "note.md", "v1\n")
+    (ordinary_checkout / "note.md").unlink()
+    os.mkfifo(ordinary_checkout / "note.md")
+
+    adapter = lga.WorkingTreeCorpus()
+    resolved = _resolve(adapter, ordinary_checkout)
+
+    assert "note.md" not in {d.key for d in adapter.list_documents(resolved)}, (
+        "the LISTING's own per-candidate _open_confined check still "
+        "excludes a tracked-but-now-special-file path")
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(resolved, ca.DocumentId(corpus=ordinary_checkout.name,
+                                             key="note.md"))
     assert caught.value.refusal.kind == ca.DOCUMENT_UNKNOWN
     assert "special file" in caught.value.refusal.detail
 
@@ -4855,3 +4892,50 @@ def test_working_tree_corpus_confines_reads_to_the_corpus_root(
             adapter.read(resolved, ca.DocumentId(corpus=ordinary_checkout.name,
                                                  key=bad_key))
         assert caught.value.refusal.kind == ca.DOCUMENT_UNKNOWN, bad_key
+
+
+def test_working_tree_corpus_refuses_a_gitignored_file_named_directly(
+        ordinary_checkout: Path) -> None:
+    """`read()` confines a key to the corpus ROOT, but the corpus is
+    DEFINED as tracked files plus untracked-but-not-ignored ones (Copilot
+    review of openDox-code#45, "read() exposes ignored files omitted from
+    the corpus"): a `.gitignore`d file sits inside that same root without
+    being part of the document set `list_documents()` shows. A caller
+    building a `DocumentId` directly, unmediated by that listing, must be
+    refused the file the same way."""
+    (ordinary_checkout / ".gitignore").write_text("secret.env\n", encoding="utf-8")
+    _git(ordinary_checkout, "add", ".gitignore")
+    _git(ordinary_checkout, "commit", "-m", "ignore secret.env")
+    (ordinary_checkout / "secret.env").write_text("API_KEY=hunter2\n",
+                                                  encoding="utf-8")
+
+    adapter = lga.WorkingTreeCorpus()
+    resolved = _resolve(adapter, ordinary_checkout)
+
+    assert "secret.env" not in {d.key for d in adapter.list_documents(resolved)}
+    with pytest.raises(ca.CorpusRefused) as caught:
+        adapter.read(resolved, ca.DocumentId(corpus=ordinary_checkout.name,
+                                             key="secret.env"))
+    assert caught.value.refusal.kind == ca.DOCUMENT_UNKNOWN
+
+
+def test_working_tree_corpus_still_reads_a_tracked_file_a_later_gitignore_rule_would_match(
+        ordinary_checkout: Path) -> None:
+    """TRACKED ALWAYS WINS: this class's own definition is "tracked files,
+    PLUS untracked-but-not-ignored ones" -- ignore rules only ever narrow
+    the UNTRACKED half of that union. A file added before a `.gitignore`
+    rule that would now match it stays fully readable; the fix above must
+    not treat "matches an ignore pattern" as disqualifying on its own, only
+    "neither tracked nor allowed through as untracked."""
+    _commit(ordinary_checkout, "already-tracked.env", "API_KEY=not-a-secret\n")
+    (ordinary_checkout / ".gitignore").write_text("*.env\n", encoding="utf-8")
+    _git(ordinary_checkout, "add", ".gitignore")
+    _git(ordinary_checkout, "commit", "-m", "ignore *.env from now on")
+
+    adapter = lga.WorkingTreeCorpus()
+    resolved = _resolve(adapter, ordinary_checkout)
+
+    assert "already-tracked.env" in {d.key for d in adapter.list_documents(resolved)}
+    document = ca.DocumentId(corpus=ordinary_checkout.name,
+                             key="already-tracked.env")
+    assert adapter.read(resolved, document).content == b"API_KEY=not-a-secret\n"
