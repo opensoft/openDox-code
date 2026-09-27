@@ -56,8 +56,20 @@ ACTOR = "Student One"
 #: as an identity put in: with `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` pointed
 #: at nothing, a workstation and a runner see the same git, and a case that
 #: depends on ambient configuration fails in both places instead of one.
+#:
+#: THE BASE IS `sanitized_git_environment()`, NOT A RAW `os.environ` COPY
+#: (Copilot review of openDox-code#45, "Use sanitized Git environment in
+#: fixture to avoid ambient repository changes"): every `_git()` call below
+#: names its target with `-C <root>`, always a location this suite itself
+#: just created, so an ambient `GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR` the
+#: process this suite runs under happens to have set has no legitimate
+#: target here at all -- it can only ever redirect a call meant for `root`
+#: onto an unrelated repository instead, silently. Found through
+#: `ordinary_checkout`, the first fixture in this file to run `git init` on
+#: a location that was not already made by the product's own act; the
+#: hazard was in this base dict from the start, unexercised until then.
 _GIT_ENV = {
-    **os.environ,
+    **lga.sanitized_git_environment(),
     "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_CONFIG_SYSTEM": os.devnull,
     "GIT_AUTHOR_NAME": "openDox tests",
