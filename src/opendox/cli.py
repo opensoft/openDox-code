@@ -75,7 +75,8 @@ from opendox import serve as serve_mod  # noqa: E402
 snapshot_mod = consumer_reach.snapshot  # noqa: E402
 from opendox import workbench as workbench_mod  # noqa: E402
 # THE HOME-CORPUS SEAM'S DEFAULT (4.1a; plan 034 T022) -- see
-# `_register_default_home_if_unregistered` below, beside `build_parser()`.
+# `_default_home_factory` and `corpus_adapter.register_default_home(...)`
+# below, beside `build_parser()`.
 # Neither module names `openxdox` or `ideation_dashboard`, so this import adds
 # no reach: `corpus_adapter` is stdlib-only (F4.1's own scan proves it), and
 # `local_git_adapter` names only `opendox.runtime.config` and

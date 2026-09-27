@@ -94,7 +94,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO
 
 from opendox.runtime import config
@@ -2814,9 +2814,13 @@ class WorkingTreeCorpus(LocalGitCorpus):
     alone is enough to make classification see the same bytes this adapter
     lists and serves. Only WHERE `list_documents`/`read` get their bytes
     changes -- never `git ls-tree`/`git cat-file` at `corpus.revision` for the
-    common case (no revision named); an EXPLICIT revision is still honoured
-    by falling back to the parent's commit-based read, because a caller that
-    named one asked for history on purpose.
+    common case; a PINNED `CorpusRef.revision` -- decided at `resolve()`, not
+    at read time -- is still honoured by falling back to the parent's
+    commit-based read for BOTH operations, because a caller that pinned one
+    asked for history on purpose (Copilot review of openDox-code#45, "Honor
+    pinned revision when reading documents": the per-call `revision`
+    argument alone was checked before this fix, so a pinned `CorpusRef` was
+    silently served current disk bytes instead).
 
     A BARE REPOSITORY HAS NO WORKING TREE TO READ. `local_git_adapter`'s own
     repository-creation act makes one bare (RULING C3), by design: this
@@ -2827,13 +2831,27 @@ class WorkingTreeCorpus(LocalGitCorpus):
     empty -- the one confusion `corpus_adapter.py`'s own header is emphatic
     about.
 
-    KNOWN, DISCLOSED SCOPE LIMIT: unlike the parent's `ls-tree` reading,
-    listing here does not specially exclude a gitlink (a submodule). `git
-    ls-files` still names its path once, as it does any other tracked entry;
-    reading it then meets `IsADirectoryError`, refused as `DOCUMENT_UNKNOWN`
-    rather than crashing. RULING's own scope is the standalone default's
-    listing and reading of uncommitted edits, not submodule handling, and a
-    "documents and ideas" corpus is not expected to carry one.
+    THE LISTING NEVER ADVERTISES WHAT `read` CANNOT SERVE (Copilot review of
+    openDox-code#45, two findings). A gitlink (a submodule) is EXCLUDED, by
+    its recorded mode `160000` -- the same filter `LocalGitCorpus.ls-tree`
+    reading already applies (`tests_runtime/test_local_git_adapter.py`) -- an
+    UNTRACKED nested checkout is excluded the same way `git` itself reports
+    it, as a bare directory path (a trailing `/`, never descended into); and
+    a TRACKED path whose working-tree file has since been deleted, without
+    staging the deletion, is excluded by an existence check, so a listing
+    entry is always one `read()` can actually serve.
+
+    THE READ IS CONFINED TO THE CORPUS, NOT TO WHATEVER `document.key`
+    NAMES (Copilot review of openDox-code#45, "Confine document reads to
+    corpus using safe descriptors"). Unlike the parent's `cat-file
+    blob <rev>:<key>` -- safe by construction, since git resolves a key
+    inside its TREE OBJECT model, never the filesystem -- this class reads
+    actual filesystem bytes, so an absolute key or one carrying `..` is
+    refused outright, and the open itself is `O_NOFOLLOW` AND relative to
+    the same already-verified, no-follow directory descriptor `_bound`
+    secured for this whole operation (`git.inherit_fd`) -- never a second,
+    by-name `Path(corpus.location) / key` open that could resolve somewhere
+    a concurrent replacement or a tracked symlink redirected it to.
 
     NO CACHE, ANYWHERE, ACROSS OR WITHIN CALLS. `list_documents()` re-asks
     `git ls-files` every time and `read()` re-opens the path every time: an
@@ -2846,49 +2864,130 @@ class WorkingTreeCorpus(LocalGitCorpus):
     def _list_documents_bound(self, git: GitRunner, corpus: ResolvedCorpus,
                               scope: str) -> tuple[DocumentId, ...]:
         """Tracked files, plus untracked-but-not-`.gitignore`d ones -- the set
-        a working copy actually shows. NEVER `corpus.revision`."""
+        a working copy actually shows. NEVER `corpus.revision`, UNLESS the
+        `CorpusRef` itself pinned one, in which case this defers to the
+        parent's own (commit-based, gitlink-excluding already) listing."""
+        if corpus.ref.revision is not None:
+            return super()._list_documents_bound(git, corpus, scope)
         self._refuse_if_bare(git, corpus)
         try:
-            # `--cached` (the index's tracked paths) UNION `--others
-            # --exclude-standard` (untracked, minus what `.gitignore`/
-            # `.git/info/exclude`/the global excludes file already hide) --
-            # together the paths a plain `ls` of a working checkout, filtered
-            # by its own ignore rules, would show. `-z`, like the parent's
-            # `ls-tree -z`: a NUL-terminated pathname round-trips any byte
-            # git itself permits.
-            raw = git.out("ls-files", "-z", "--cached", "--others",
+            # `-s` (STAGE format, `<mode> SP <object> SP <stage> TAB <path>`)
+            # on the `--cached` half ONLY -- `--others` entries carry no mode
+            # at all, since they are not in the index, and are told apart by
+            # the absence of a TAB. `--cached` (the index's tracked paths)
+            # UNION `--others --exclude-standard` (untracked, minus what
+            # `.gitignore`/`.git/info/exclude`/the global excludes file
+            # already hide) -- together the paths a plain `ls` of a working
+            # checkout, filtered by its own ignore rules, would show. `-z`,
+            # like the parent's `ls-tree -z`: a NUL-terminated pathname
+            # round-trips any byte git itself permits.
+            raw = git.out("ls-files", "-z", "-s", "--cached", "--others",
                           "--exclude-standard")
         except GitCommandFailed as failed:
             raise _refuse(CORPUS_UNREADABLE, corpus.location, str(failed)) from failed
-        keys = sorted({entry for entry
-                       in raw.decode("utf-8", "surrogateescape").split("\0")
-                       if entry})
-        return tuple(DocumentId(corpus=corpus.ref.name, key=key) for key in keys)
+        candidates: set[str] = set()
+        for entry in raw.decode("utf-8", "surrogateescape").split("\0"):
+            if not entry:
+                continue
+            if "\t" in entry:
+                # A CACHED (INDEXED) ENTRY: `<mode> <object> <stage>\t<path>`.
+                # Mode `160000` is a gitlink -- a submodule's own commit
+                # pointer, never a blob this adapter (or the parent) reads --
+                # excluded here exactly as `LocalGitCorpus._list_documents_bound`
+                # excludes it from `ls-tree`.
+                meta, path = entry.split("\t", 1)
+                mode = meta.split(" ", 1)[0]
+                if mode == "160000":
+                    continue
+                candidates.add(path)
+            else:
+                # AN UNTRACKED ENTRY: bare path, no mode. `git` itself never
+                # descends into an untracked directory that is ITSELF a git
+                # checkout (an un-added nested repository) -- it reports the
+                # directory's own path, WITH a trailing `/`, and nothing
+                # inside it. That trailing slash is the same signal `git`
+                # gives a caller at the terminal, so it is the signal this
+                # adapter acts on too, rather than re-deriving "is this a
+                # nested repository" itself.
+                if entry.endswith("/"):
+                    continue
+                candidates.add(entry)
+        # A TRACKED PATH CAN STILL BE GONE FROM THE WORKING TREE: `git
+        # ls-files --cached` reports the INDEX, not the disk, so an unstaged
+        # `rm` leaves the path listed here and `_read_bound` refusing
+        # `DOCUMENT_UNKNOWN` for it -- advertising what `read` cannot serve
+        # (Copilot review of openDox-code#45, "Filter deleted working-tree
+        # files from document listings"). Checked with `lstat`, relative to
+        # the SAME secured, no-follow directory descriptor `_read_bound`
+        # reads through (`git.inherit_fd`) -- a broken symlink still COUNTS
+        # as present (this is existence, not readability; `_read_bound`
+        # refuses a symlink on its own), and a real filesystem error other
+        # than "gone" is not swallowed into a false exclusion.
+        keys: list[str] = []
+        for path in candidates:
+            try:
+                os.stat(path, dir_fd=git.inherit_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as failed:
+                raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                              redact_credentials(str(failed))) from failed
+            keys.append(path)
+        return tuple(DocumentId(corpus=corpus.ref.name, key=key)
+                    for key in sorted(keys))
 
     def _read_bound(self, git: GitRunner, corpus: ResolvedCorpus,
                     document: DocumentId, revision: str | None) -> Document:
-        """The file's CURRENT bytes on disk, uncommitted edits included."""
-        if revision is not None:
+        """The file's CURRENT bytes on disk, uncommitted edits included --
+        UNLESS this call names a revision, or the corpus itself was resolved
+        against a PINNED one, in which case this defers to the parent's own
+        commit-based (and traversal-safe-by-construction) read."""
+        if revision is not None or corpus.ref.revision is not None:
             return super()._read_bound(git, corpus, document, revision)
         self._refuse_if_bare(git, corpus)
-        path = Path(corpus.location) / document.key
+        # CONFINE THE KEY BEFORE EVER NAMING IT TO THE FILESYSTEM (Copilot
+        # review of openDox-code#45, "Confine document reads to corpus using
+        # safe descriptors"). An absolute key discards the corpus root
+        # entirely under `Path.__truediv__` (`Path("/a") / "/etc/passwd" ==
+        # Path("/etc/passwd")`, not a join), and a `..` component walks back
+        # out of it under an ordinary join -- both refused by NAME here,
+        # with a message that says what is wrong, rather than reaching the
+        # open call at all.
+        key = PurePosixPath(document.key)
+        if key.is_absolute() or ".." in key.parts:
+            raise _refuse(DOCUMENT_UNKNOWN, document.key,
+                          f"{document.key!r} is not a path inside this corpus")
+        # A DESCRIPTOR-RELATIVE, NO-FOLLOW OPEN, never a second `Path(
+        # corpus.location) / key` resolved BY NAME: `git.inherit_fd` is the
+        # SAME already-verified, `O_NOFOLLOW`-opened directory descriptor
+        # `_bound` secured for this whole operation, so this read cannot be
+        # redirected by a concurrent rename/replace of `corpus.location`
+        # after that verification, and `O_NOFOLLOW` on the leaf itself
+        # refuses a tracked symlink that points outside the corpus rather
+        # than following it there.
         try:
-            content = path.read_bytes()
+            fd = os.open(str(key), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=git.inherit_fd)
         except FileNotFoundError:
             raise _refuse(DOCUMENT_UNKNOWN, document.key,
                           f"{document.key!r} is not on disk in the working tree")
+        except OSError as failed:
+            # COVERS BOTH a symlink `O_NOFOLLOW` refused (`ELOOP`) and any
+            # other OS-level failure opening the descriptor -- the text can
+            # carry the key or the corpus path, so it is redacted the same
+            # way every other OS error in this file is (`redact_credentials
+            # (str(exc))`; the anti-leak walk in `tests_runtime
+            # /test_runtime_cli.py` polices every module in this package).
+            raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                          redact_credentials(str(failed))) from failed
+        try:
+            with os.fdopen(fd, "rb") as opened:
+                content = opened.read()
         except IsADirectoryError:
             raise _refuse(DOCUMENT_UNKNOWN, document.key,
                           f"{document.key!r} is a directory (a gitlink?), not "
                           "a document this adapter can read")
         except OSError as failed:
-            # REDACTED AT THE SOURCE: an OS error reading a working-tree file
-            # can carry the full path in its text (permission/IO failures
-            # quote the operand), so it is cleaned the same way the process
-            # runner already cleans an OS error's text elsewhere in this file
-            # (`redact_credentials(str(exc))`, `_spawn`/`_run`) -- the anti-leak
-            # walk (tests_runtime/test_runtime_cli.py) polices every module in
-            # this package, not only `cli.py`.
             raise _refuse(CORPUS_UNREADABLE, corpus.location,
                           redact_credentials(str(failed))) from failed
         # `revision=None`: this content answers for no single commit -- it may

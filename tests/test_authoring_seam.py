@@ -45,12 +45,18 @@ what LEAVES openxFactory, never what a destination assembles).
 
 from __future__ import annotations
 
+import ast
 import os
+from pathlib import Path
 
 import pytest
 
 from opendox import authoring
 from opendox import corpus_adapter as ca
+
+#: `serve.py`'s own path, for the AST-lifted `build_server()` case below --
+#: same constant shape as `test_profile_registration.py`'s `SERVE`.
+_SERVE_PY = Path(__file__).resolve().parent.parent / "src" / "opendox" / "serve.py"
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +77,29 @@ def _empty_home_registry():
     ca._home_factory = ca._UNSET
     yield
     ca._home_factory = previous
+
+
+def _import_opendox_cli_or_skip():
+    """`opendox.cli` imports cleanly once T011 has landed; before that, it
+    fails at `serve.py`'s `from ideation_dashboard import
+    serve_openxfactory_lanes` (`cli.py` imports `serve.py`).
+
+    Skipping on EXACTLY that one `ModuleNotFoundError` -- never any
+    `ModuleNotFoundError` raised while importing the module -- is the whole
+    point (Copilot review of openDox-code#45, "importorskip masks unrelated
+    CLI import failures"): `pytest.importorskip` catches ANY import-time
+    `ModuleNotFoundError`, so an unrelated broken or missing import inside
+    `opendox.cli`, discovered after T011 has already landed, would report
+    SKIP here instead of FAILING -- masking the very entry-point regression
+    this falsifier exists to catch."""
+    try:
+        import opendox.cli as cli
+    except ModuleNotFoundError as exc:
+        if exc.name != "ideation_dashboard":
+            raise
+        pytest.skip("opendox.cli does not import until T011 lands "
+                   "(ModuleNotFoundError: No module named 'ideation_dashboard')")
+    return cli
 
 
 # --------------------------------------------------------------------------
@@ -279,17 +308,15 @@ def test_an_entry_point_registers_the_local_git_corpus_when_no_host_has() -> Non
     `ADAPTER_NOT_REGISTERED` refusal (`test_home_refuses_naming_the_seam_...`
     above); this is the registration that entry point makes instead.
 
-    `pytest.importorskip` -- not a plain `import` -- because proving *"an
-    entry point registers…"* means calling `cli.build_parser()`, and that
-    is exactly what does not import in a lone checkout until T011 lands
-    (see the module docstring's correction). This case SKIPS today, under
+    An explicit skip-on-import-failure, not a plain `import` -- because
+    proving *"an entry point registers…"* means calling `cli.build_parser()`,
+    and that is exactly what does not import in a lone checkout until T011
+    lands (see the module docstring's correction, and
+    `_import_opendox_cli_or_skip`'s own). This case SKIPS today, under
     `--noconftest` and without it alike, and runs for real once T011 has
     landed -- T022's own PR verifies it now under the Group 2 simulation
     shim instead, and says so plainly."""
-    cli = pytest.importorskip(
-        "opendox.cli",
-        reason="opendox.cli does not import until T011 lands "
-               "(ModuleNotFoundError: No module named 'ideation_dashboard')")
+    cli = _import_opendox_cli_or_skip()
     from opendox import domain_profile
     from opendox.runtime.local_git_adapter import WorkingTreeCorpus
 
@@ -313,6 +340,75 @@ def test_an_entry_point_registers_the_local_git_corpus_when_no_host_has() -> Non
         f"the entry point's default adapter is {adapter!r}, not a "
         "WorkingTreeCorpus (RULING, Brett Heap, 2026-09-27, via the holder: "
         "\"Working tree (Recommended)\")")
+    assert ref.location == "/some/repository/root"
+
+
+def test_build_server_registers_the_default_where_no_host_has() -> None:
+    """`serve.build_server()`'s half of 4.1a, run from its own source lines.
+
+    `serve.build_server()` cannot be called directly today, unlike
+    `cli.build_parser()`: T011 only made `opendox.serve` IMPORTABLE, and
+    `build_server()`'s own body still reaches `openxdox.snapshot_registry`/
+    `openxdox.corpus_root` (unrelated, later tasks; plan 034 research R7), so
+    calling it whole fails for a reason that has nothing to do with this
+    registration (Copilot review of openDox-code#45, "Missing test coverage
+    for server default registration": the entry-point falsifier above
+    exercises only `cli.build_parser()`, so a regression removing `serve
+    .build_server()`'s own registration line would leave this suite green).
+
+    Lifted by AST instead, mirroring `test_profile_registration.py`'s own
+    technique for the identical problem with `ROUTE_EXTENSIONS`: the module-
+    level `_default_home_factory` definition, and the ONE statement in
+    `build_server()`'s body that calls `corpus_adapter
+    .register_default_home(_default_home_factory)`, executed together
+    against the REAL `corpus_adapter`/`local_git_adapter` (both import
+    cleanly and touch no registry on import) -- running the actual source
+    line, not a paraphrase of it."""
+    tree = ast.parse(_SERVE_PY.read_text(encoding="utf-8"))
+    factory_def = None
+    build_server_body = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.FunctionDef)
+                and node.name == "_default_home_factory"):
+            factory_def = node
+        if isinstance(node, ast.FunctionDef) and node.name == "build_server":
+            build_server_body = node.body
+    assert factory_def is not None, (
+        "serve.py no longer defines _default_home_factory()")
+    assert build_server_body is not None, (
+        "serve.py no longer defines build_server()")
+
+    def _is_the_registration(stmt: ast.stmt) -> bool:
+        call = stmt.value if isinstance(stmt, ast.Expr) else None
+        return (isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "register_default_home"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "corpus_adapter"
+                and [ast.unparse(a) for a in call.args] == ["_default_home_factory"]
+                and not call.keywords)
+
+    registrations = [n for n in build_server_body if _is_the_registration(n)]
+    assert len(registrations) == 1, (
+        f"serve.py:build_server() makes {len(registrations)} statements "
+        "shaped like `corpus_adapter.register_default_home"
+        "(_default_home_factory)`, where 4.1a asks for exactly one")
+
+    from opendox import corpus_adapter
+    from opendox.runtime import local_git_adapter
+    from opendox.runtime.local_git_adapter import WorkingTreeCorpus
+
+    namespace = {"corpus_adapter": corpus_adapter,
+                "local_git_adapter": local_git_adapter}
+    module = ast.Module(body=[factory_def, registrations[0]], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), str(_SERVE_PY), "exec"),  # noqa: S102
+        namespace)
+
+    factory = ca.home()
+    adapter, ref = factory("/some/repository/root")
+    assert isinstance(adapter, WorkingTreeCorpus), (
+        f"serve.build_server()'s default adapter is {adapter!r}, not a "
+        "WorkingTreeCorpus")
     assert ref.location == "/some/repository/root"
 
 
@@ -359,12 +455,9 @@ def test_an_uncommitted_edit_is_visible_through_the_default(tmp_path) -> None:
     captured. A new, never-committed file is picked up by `list_documents`
     too, which only a working-tree listing (never `git ls-tree HEAD`) can do.
 
-    `pytest.importorskip`, for the same reason as the case above: proving
-    this THROUGH THE DEFAULT means calling `cli.build_parser()`."""
-    cli = pytest.importorskip(
-        "opendox.cli",
-        reason="opendox.cli does not import until T011 lands "
-               "(ModuleNotFoundError: No module named 'ideation_dashboard')")
+    `_import_opendox_cli_or_skip`, for the same reason as the case above:
+    proving this THROUGH THE DEFAULT means calling `cli.build_parser()`."""
+    cli = _import_opendox_cli_or_skip()
     from opendox import domain_profile
     from opendox.runtime import local_git_adapter as lga
 

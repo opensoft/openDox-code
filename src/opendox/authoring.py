@@ -327,6 +327,18 @@ def _classify_proposal(text: str):
     corpus loader uses on the way back, so a body that survives a round trip is
     read exactly as it was written and one that cannot be encoded is read the
     way this corpus would read it rather than raising inside a gate.
+
+    THE STAGED TREE IS ALSO MADE A GIT REPOSITORY, best-effort (T022 follow-up;
+    Copilot review of openDox-code#45, "Make default factory classify proposals
+    in temporary directories"): openDox's own default adapter
+    (`LocalGitCorpus`/`WorkingTreeCorpus`, plan 034 4.1a) requires the location
+    it is given to already be one -- `resolve()` refuses
+    `CORPUS_UNCLASSIFIABLE` otherwise -- so once that default is registered
+    (T022), a staged tree that was never `git init`ed could never be
+    classified through it, only through a HOST's own adapter. See
+    `_stage_as_a_repository_if_git_is_available`'s own docstring for why this
+    is safe for a host that does not use git at all, and why it stays a
+    best-effort step rather than this function's own failure.
     """
     from .corpus_adapter import DocumentId, home
 
@@ -334,10 +346,53 @@ def _classify_proposal(text: str):
         document = Path(staged) / PROPOSAL_KEY
         document.parent.mkdir(parents=True, exist_ok=True)
         document.write_bytes(text.encode("utf-8", errors="replace"))
+        _stage_as_a_repository_if_git_is_available(staged)
         adapter, ref = home()(staged)
         resolved = adapter.resolve(ref)
         return adapter.classify(resolved,
                                 DocumentId(corpus=ref.name, key=PROPOSAL_KEY))
+
+
+def _stage_as_a_repository_if_git_is_available(staged: str) -> None:
+    """Best-effort, and silent either way -- never this function's failure.
+
+    WHY THIS IS SAFE FOR A HOST THAT DOES NOT USE GIT AT ALL. The corpus-
+    adapter interface is adapter-agnostic by design (`_classify_proposal`'s
+    own "no privileged direct call" rule), so this step must not assume
+    which adapter is registered. `git init` alone -- never followed by a
+    commit here -- adds only a `.git/` directory, and git itself never lists
+    `.git/` among tracked or untracked files (`ls-tree`, `ls-files`), so a
+    host adapter that does its own, non-git listing of this location sees
+    the identical set of files whether this step ran or not. `git init`
+    needs no author identity (only `git commit` does), so there is nothing
+    here for a host's environment to be missing.
+
+    WHY IT IS NEEDED AT ALL. openDox's own default adapter
+    (`LocalGitCorpus`/`WorkingTreeCorpus`) resolves a location by running
+    `git rev-parse --git-dir` first; a plain, never-`git init`ed directory
+    refuses `CORPUS_UNCLASSIFIABLE` there, before ever reaching a read. Once
+    `git init` has run, the seam's own working-tree reader serves the
+    UNCOMMITTED bytes already staged -- which is the whole point of RULING
+    (Brett Heap, 2026-09-27, via the holder: "Working tree (Recommended)"):
+    a standalone default reads what is on disk, committed or not.
+
+    WHY SWALLOWED, NOT RAISED. Where `git` is missing from `PATH`, or
+    refuses for some other reason, this staging step leaves the tree exactly
+    as it would have been before this fix -- no worse than today for
+    whichever adapter is actually registered, and no new hard dependency on
+    `git` for a host that was never reading git plumbing in the first
+    place."""
+    import os
+    import subprocess
+
+    try:
+        subprocess.run(
+            ["git", "init", "--quiet", "--initial-branch=main", staged],
+            check=True, capture_output=True,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+                 "GIT_CONFIG_SYSTEM": os.devnull})
+    except (OSError, subprocess.CalledProcessError):
+        pass
 
 
 def required_header_fields() -> tuple[str, ...]:

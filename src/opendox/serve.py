@@ -154,7 +154,8 @@ from opendox import view_extension  # noqa: E402
 # the same stated reason — § 4.3 step 2, "no new route and no second fetch".
 from opendox import display_profile  # noqa: E402
 # THE HOME-CORPUS SEAM'S DEFAULT (4.1a; plan 034 T022) -- see
-# `_register_default_home_if_unregistered` below, beside `build_server()`.
+# `_default_home_factory` and `corpus_adapter.register_default_home(...)`
+# below, beside `build_server()`.
 # Neither module names `openxdox` or `ideation_dashboard`: `corpus_adapter` is
 # stdlib-only (F4.1's own scan proves it), and `local_git_adapter` names only
 # `opendox.runtime.config` and `opendox.corpus_adapter` besides the stdlib.
