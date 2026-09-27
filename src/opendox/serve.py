@@ -1635,15 +1635,18 @@ def build_server(
     have silently lost `/snapshot-index.json`, `/source/` and every gate verb
     from the servers in the file that tests this very seam. This line is also
     the one the § 3 carve deletes rather than moves."""
-    # FIRST, before the profile read two lines below can refuse (4.1a,
-    # T022): a bare process that only builds a server still needs the home
-    # corpus to resolve for `create`/`edit` (`authoring.py`), and a host that
-    # DID register its own adapter must see it left alone. This call must
-    # not depend on reaching any later line, because `ProfileNotRegistered`
-    # (until T016 lands) is raised at the very next statement that reads a
-    # host profile. `register_default_home` registers ONLY where nothing
-    # already answers `corpus_adapter.home()`, exactly as `domain_profile
-    # .register_default()` does for the profile (T016).
+    # FIRST, before anything else this function does (4.1a, T022, R1Q3 (a)
+    # -- "the default profile and the default adapter are both entry-point
+    # registrations"): a bare process that only builds a server still needs
+    # the home corpus to resolve for `create`/`edit` (`authoring.py`), and a
+    # host that DID register its own adapter must see it left alone. This
+    # registration has no downstream read of its own inside THIS function --
+    # unlike the profile's, read further below beside `profile_proxy`, where
+    # a wiring input read once per build belongs beside the composition it
+    # feeds -- so it stays here, as early as possible, on the same footing
+    # T016 gives its own call in `cli.build_parser()`. `register_default_home`
+    # registers ONLY where nothing already answers `corpus_adapter.home()`,
+    # exactly as `domain_profile.register_default()` does for the profile.
     corpus_adapter.register_default_home(_default_home_factory)
 
     from opendox import doxbench_turns
@@ -1684,6 +1687,12 @@ def build_server(
     # import to this body rather than to the module, so the posture is
     # asserted and not merely intended.
     from opendox.profile_proxy import profile_openxfactory
+    # THE ENTRY POINT'S DEFAULT (R1Q3 (a), openxFactory#656 comment
+    # 5817152735), a wiring input like the proxy, so it is imported beside it:
+    # where no host has registered a profile, register openDox's own, so the
+    # `ROUTE_EXTENSIONS` read below builds on it instead of refusing.
+    from opendox import default_profile, domain_profile
+    domain_profile.register_default(default_profile)
 
     # FIRST, before a socket, a checkout read or a session bootstrap: a
     # malformed, duplicated, overlapping or non-conforming binding refuses the
@@ -1710,14 +1719,16 @@ def build_server(
     # the SOURCE of the name is different: an in-tree module became a host
     # registration resolved at first access.
     #
-    # A SERVER BUILT WITH NO HOST REGISTERED REFUSES HERE, naming
-    # `opendox.domain_profile.register(<the host's profile>)` — exactly as
-    # `build_parser()` refuses at its own read of `SUBCOMMAND_EXTENSIONS`. That
-    # is ASK-2's "REFUSAL, NOT A DEFAULT" ("a server missing its contributed
-    # routes looks exactly like a working one"), and it is what makes
-    # `domain_profile.current()`'s message — which already tells a host to
-    # register "before it calls `cli.build_parser()` or `serve.build_server()`"
-    # — true of this function instead of merely aspirational.
+    # A SERVER BUILT WITH NO HOST REGISTERED BUILDS ON openDox's OWN DEFAULT,
+    # which the entry-point registration above put in place (R1Q3 (a)), exactly
+    # as `build_parser()` does before its own read of `SUBCOMMAND_EXTENSIONS`.
+    # It is never an EMPTY profile, which ASK-2's "REFUSAL, NOT A DEFAULT"
+    # still refuses ("a server missing its contributed routes looks exactly
+    # like a working one"): the default contributes openDox's own verbs. This
+    # read is the build, so from here a host's `register()` over the default is
+    # refused rather than applied (R1Q3 (ii); RN-1 (a), comment 5850003126),
+    # which is why `domain_profile.current()`'s message tells a host to
+    # register "before it calls `cli.build_parser()` or `serve.build_server()`".
     #
     # THE DOCSTRING ABOVE STILL DESCRIBES THE IN-TREE PROFILE and is NOT
     # corrected here: its lines are not ones openxFactory's carve manifest
@@ -2123,13 +2134,17 @@ def _refuse_impossible_checkout_root(value: Path | str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # The process entry point registers openDox's own default home corpus
-    # where no host has (4.1a, T022), exactly where a host would register its
-    # own -- mirrors T016's `domain_profile.register_default(...)` call here.
-    # `build_server()` below makes the identical call as its own first
-    # statement, so this one is a no-op once that runs; kept for the same
-    # reason T016 keeps its match (the OUTERMOST entry point states the
-    # contract on its own).
+    # The process entry point registers openDox's own default where no host has
+    # (R1Q3 (a)), exactly where a host would register its own. Nothing is BUILT
+    # from it until `build_server()` reads it, so until then a host's
+    # registration still replaces it (R1Q3 (ii); RN-1 (a)).
+    from opendox import default_profile, domain_profile
+    domain_profile.register_default(default_profile)
+    # AND its own default home corpus (4.1a, T022, same ruling), exactly
+    # where a host would register its own adapter. `build_server()` below
+    # makes the identical call as its own first statement, so this one is a
+    # no-op once that runs; kept for the same reason T016 keeps its own
+    # match here: the OUTERMOST entry point states the contract on its own.
     corpus_adapter.register_default_home(_default_home_factory)
     parser = argparse.ArgumentParser(prog="ideation-dashboard-serve", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)

@@ -50,6 +50,7 @@ from pathlib import Path
 
 import pytest
 
+import route_extension
 import subcommand_extension
 from opendox import default_profile, display_profile, domain_profile, view_extension
 from opendox.display_profile import NEUTRAL_DISPLAY
@@ -318,14 +319,17 @@ def test_the_default_declares_the_two_facets_the_composition_points_read() -> No
     `build_parser()` reads `SUBCOMMAND_EXTENSIONS` and `build_server()` reads
     `ROUTE_EXTENSIONS`, and a registered profile without either is refused
     (`profile_proxy.ProfileFacetMissing`), so both are declared. `DISPLAY` and
-    `VIEW_EXTENSIONS` are read with a named absence, and the default declares
-    neither (the module docstring gives why).
+    `VIEW_EXTENSIONS` are read with a named absence, and T010's
+    `HANDLER_CONTRIBUTIONS` by presence. The default declares none of those
+    three (the module docstring gives why).
     """
     assert isinstance(default_profile.SUBCOMMAND_EXTENSIONS, tuple)
     assert isinstance(default_profile.ROUTE_EXTENSIONS, tuple)
     assert not hasattr(default_profile, display_profile.PROFILE_FACET)
     assert not hasattr(default_profile, view_extension.PROFILE_FACET)
     assert view_extension.host_view_facet(default_profile) == ("absent", ())
+    assert not hasattr(default_profile, route_extension.HANDLER_FACET)
+    assert route_extension.declared_handler_contributions(default_profile) == ()
 
 
 def test_the_default_is_named_by_its_module_path() -> None:
