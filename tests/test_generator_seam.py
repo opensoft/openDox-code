@@ -34,9 +34,11 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE
    writes the neutral kind and takes no input. `register_default()` registers
    it only where nothing is, and holds it to the neutral contract. A host
    replaces it before a generation, and after one that wrote nothing. A host is
-   refused while a generation runs, and after one that wrote a snapshot. A
-   generator may register or generate from inside its own call without
-   deadlocking the seam. Until T054 lands, the default refuses, naming itself.
+   refused while a generation runs, and after one that wrote a snapshot. Each
+   registration keeps its own records: a generation that outlives its
+   registration records nothing against the next. A generator may register or
+   generate from inside its own call without deadlocking the seam. Until T054
+   lands, the default refuses, naming itself.
 7. EACH ENTRY POINT REGISTERS IT. `cli.build_parser()` and `cli.main()` run for
    real. `serve.build_server()` and `serve.main()` still cannot run in a lone
    checkout (research R7), so their registration is executed from their own
@@ -98,14 +100,14 @@ def _isolated_registries():
     point's default back as a host's.
     """
     seam = (gs._registered, gs._is_default, gs._generated_from_default,
-            gs._default_generations_under_way)
+            gs._default_generations_under_way, gs._registration_serial)
     profile = (domain_profile._registered, domain_profile._is_default,
                domain_profile._built_from_default)
     home = corpus_adapter._home_factory
     gs.unregister()
     yield
     (gs._registered, gs._is_default, gs._generated_from_default,
-     gs._default_generations_under_way) = seam
+     gs._default_generations_under_way, gs._registration_serial) = seam
     (domain_profile._registered, domain_profile._is_default,
      domain_profile._built_from_default) = profile
     corpus_adapter._home_factory = home
@@ -543,10 +545,13 @@ def test_asking_or_being_refused_is_not_a_generation(tmp_path) -> None:
 
 
 def test_unregister_clears_the_default_and_its_generation(tmp_path) -> None:
+    """The record goes with the registration. So the same default, registered
+    afresh, has a window of its own, and a host still replaces it."""
     stand_in_default, _ = _declared(gs.NEUTRAL_SNAPSHOT_KIND)
     gs.register_default(stand_in_default)
     gs.generate(tmp_path, "fixture")
     gs.unregister()
+    assert gs.register_default(stand_in_default) is stand_in_default
     host, _ = _declared("host-snapshot")
     assert gs.register(host) is host
 
@@ -717,6 +722,78 @@ def test_a_generator_may_register_or_generate_from_inside_its_own_call() -> None
     assert done.stdout.split() == ["refused-inside", "inner", "outer",
                                    "refused-after",
                                    "host-registered-over-the-replacement"]
+
+
+#: A program for a fresh process. A generation from one registration of the
+#: default is still under way when `unregister()` drops that registration, and
+#: a default is registered after it. `FOLLOWING` says which default: another,
+#: or the same declaration again. `WHEN` says when a host then registers: while
+#: that generation still runs, or after it has answered.
+_OUTLIVED = """
+    import threading
+    from opendox import generator_seam as gs
+    FOLLOWING, WHEN = FOLLOWING_VALUE, WHEN_VALUE
+    KIND = gs.NEUTRAL_SNAPSHOT_KIND
+    started, release = threading.Event(), threading.Event()
+
+    def slow(repo_root, repository, *, source_revision=None, generated_at=None):
+        started.set()
+        release.wait(30)
+        return {"schema_version": 1, "kind": KIND, "repository": repository}
+
+    def quick(repo_root, repository, *, source_revision=None, generated_at=None):
+        return {"schema_version": 1, "kind": KIND, "repository": repository}
+
+    def host_operation(repo_root, repository, *, source_revision=None,
+                       generated_at=None):
+        return {"schema_version": 1, "kind": "host-snapshot"}
+
+    dropped = gs.SnapshotGenerator(contract=KIND, generate=slow)
+    host = gs.SnapshotGenerator(contract="host-snapshot", generate=host_operation)
+    answers = []
+    gs.register_default(dropped)
+    worker = threading.Thread(
+        target=lambda: answers.append(gs.generate(".", "outlived")["repository"]))
+    worker.start()
+    assert started.wait(30), "the generation never started"
+    gs.unregister()
+    gs.register_default(dropped if FOLLOWING == "the same declaration"
+                        else gs.SnapshotGenerator(contract=KIND, generate=quick))
+
+    def try_the_host():
+        try:
+            return "registered" if gs.register(host) is host else "not-registered"
+        except gs.GeneratorAlreadyRegistered:
+            return "refused"
+
+    if WHEN == "while it runs":
+        result = try_the_host()
+    release.set()
+    worker.join(30)
+    assert not worker.is_alive(), "the generation never ended"
+    if WHEN == "after it answers":
+        result = try_the_host()
+    print(result, answers[0] if answers else "no-answer",
+          gs._default_generations_under_way)
+"""
+
+
+@pytest.mark.parametrize("following", ("another default", "the same declaration"))
+@pytest.mark.parametrize("when", ("while it runs", "after it answers"))
+def test_a_generation_that_outlives_its_registration_touches_no_later_one(
+        following: str, when: str) -> None:
+    """Each registration keeps its own records. A generation still under way
+    when `unregister()` drops its registration neither holds shut, nor closes,
+    the window of the registration that follows. That holds whether the
+    follower is another default or the same declaration registered again, and
+    whether a host registers while that generation still runs or after it has
+    answered. The generation is not stopped, and its caller still gets its
+    snapshot. The case runs in a process of its own (see `_fresh_process`)."""
+    program = (_OUTLIVED.replace("FOLLOWING_VALUE", repr(following))
+               .replace("WHEN_VALUE", repr(when)))
+    done = _fresh_process(program)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ["registered", "outlived", "0"]
 
 
 def test_a_host_that_registers_the_default_itself_holds_a_hosts_registration() -> None:

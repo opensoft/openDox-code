@@ -110,6 +110,12 @@ idempotent host start is not punished. A different declaration over a host's
 is refused as `GeneratorAlreadyRegistered`. `unregister()` makes a deliberate
 swap explicit.
 
+EACH REGISTRATION KEEPS ITS OWN RECORDS. A generation belongs to the
+registration it began under. So a generation still under way when
+`unregister()` drops that registration neither holds shut, nor closes, the
+window of the registration that follows. That holds even for a later
+registration of the same declaration.
+
 ONE LOCK. The registration and its records are kept under one lock. `serve.py`
 answers each request on a thread of its own (a `ThreadingHTTPServer`), so a
 generation can run beside a registration. `generate()` holds the lock only for
@@ -337,22 +343,43 @@ _registered: SnapshotGenerator | None = None
 #: (`register_default()`), rather than a host's own `register()`.
 _is_default: bool = False
 
-#: Whether a snapshot has been generated from that default, meaning that its
-#: operation has answered a snapshot the seam handed back. `generate()` sets it
-#: once that snapshot has come back. A generation that failed, or whose answer
-#: the seam refused, wrote nothing, and so records nothing.
+#: Whether a snapshot has been generated from THIS registration of that
+#: default, meaning that its operation has answered a snapshot the seam handed
+#: back. `generate()` sets it once that snapshot has come back. A generation
+#: that failed, or whose answer the seam refused, wrote nothing, and so records
+#: nothing.
 _generated_from_default: bool = False
 
-#: How many generations from that default are under way: begun, and not yet
-#: answered or failed. While one is, a host's registration is refused, as it is
-#: after one, because the snapshot being generated would come back after the
-#: swap. `unregister()` leaves it alone: it counts calls that are still
-#: running, and each one takes itself off when it ends.
+#: How many generations from THIS registration of that default are under way:
+#: begun, and not yet answered or failed. While one is, a host's registration
+#: is refused, as it is after one, because the snapshot being generated would
+#: come back after the swap.
 _default_generations_under_way: int = 0
 
-#: Guards the four above. It is held only for bookkeeping, and never across a
+#: Which registration is current. Every change of registration moves it on:
+#: `register()`, `register_default()` where it registers, and `unregister()`.
+#: A generation carries the serial it began under, and when it ends it touches
+#: the two records above only if that registration is still the current one.
+#: So a change of registration starts both records afresh, and a generation
+#: that outlived its registration records nothing against the next.
+_registration_serial: int = 0
+
+#: Guards the five above. It is held only for bookkeeping, and never across a
 #: generator's own call.
 _lock = threading.Lock()
+
+
+def _begin_a_registration(generator: SnapshotGenerator | None,
+                          is_default: bool) -> None:
+    """Make `generator` the registration (or none), with records of its own.
+    The one place the registration changes. The caller holds `_lock`."""
+    global _registered, _is_default, _generated_from_default
+    global _default_generations_under_way, _registration_serial
+    _registration_serial += 1
+    _registered = generator
+    _is_default = is_default
+    _generated_from_default = False
+    _default_generations_under_way = 0
 
 
 def name_of(generator: Any) -> str:
@@ -389,7 +416,6 @@ def register(generator: SnapshotGenerator) -> SnapshotGenerator:
     generated from it and none is being generated. It is refused once one has
     been, or while one is. Either way the host ends up holding the one
     registration, or knows why it does not."""
-    global _registered, _is_default, _generated_from_default
     _require_a_declaration(generator, "register()")
     with _lock:
         held = _registered
@@ -404,9 +430,7 @@ def register(generator: SnapshotGenerator) -> SnapshotGenerator:
             elif _generated_from_default:
                 why = "a snapshot has already been generated from it"
         if not over_a_host and not why:
-            _registered = generator
-            _is_default = False
-            _generated_from_default = False
+            _begin_a_registration(generator, is_default=False)
             return generator
     # Named outside the lock: naming a generator can run its own code.
     if over_a_host:
@@ -447,7 +471,6 @@ def register_default(generator: SnapshotGenerator) -> SnapshotGenerator:
     openDox's own generator to the neutral contract, so a declaration that
     writes another contract is refused as `GeneratorNotConformant`, whether or
     not anything is registered."""
-    global _registered, _is_default, _generated_from_default
     _require_a_declaration(generator, "register_default()")
     if generator.contract != NEUTRAL_SNAPSHOT_KIND:
         raise GeneratorNotConformant(
@@ -457,24 +480,22 @@ def register_default(generator: SnapshotGenerator) -> SnapshotGenerator:
             f"registered with {REGISTRATION_CALL}.")
     with _lock:
         if _registered is None:
-            _registered = generator
-            _is_default = True
-            _generated_from_default = False
+            _begin_a_registration(generator, is_default=True)
         return _registered
 
 
 def unregister() -> None:
     """Drop the registration, a host's or the entry point's default.
 
-    For test isolation and for a host tearing down. The record of a generation
-    from the default goes with it. A generation still under way is not stopped.
-    When it answers, it records its snapshot only if the same default is
-    registered at that moment."""
-    global _registered, _is_default, _generated_from_default
+    For test isolation and for a host tearing down. The registration's records
+    go with it: whether a snapshot was generated from the default, and how many
+    generations from it are under way. A generation still under way is not
+    stopped, and its caller still gets its snapshot. But it belongs to the
+    registration that was dropped, so when it ends it records nothing against
+    whatever is registered next, even a later registration of the same
+    declaration."""
     with _lock:
-        _registered = None
-        _is_default = False
-        _generated_from_default = False
+        _begin_a_registration(None, is_default=False)
 
 
 def is_registered() -> bool:
@@ -534,6 +555,7 @@ def generate(repo_root: Path | str, repository: str, *,
         generator = current()
         undeclared = sorted(set(given) - set(generator.inputs))
         from_default = _is_default and not undeclared
+        serial = _registration_serial
         if from_default:
             _default_generations_under_way += 1
     if undeclared:
@@ -553,20 +575,23 @@ def generate(repo_root: Path | str, repository: str, *,
         answered = True
     finally:
         if from_default:
-            _end_a_generation_from_the_default(generator, answered)
+            _end_a_generation_from_the_default(serial, answered)
     return snapshot
 
 
-def _end_a_generation_from_the_default(generator: SnapshotGenerator,
-                                       answered: bool) -> None:
+def _end_a_generation_from_the_default(serial: int, answered: bool) -> None:
     """Take a generation from the default off the count of those under way. If
     it answered a snapshot the seam handed back, record that one was generated.
-    The record is made only while the default it came from is still the one
-    registered, so after `unregister()` it records nothing against a host."""
+    Both happen only while the registration it began under (`serial`) is still
+    the current one. A registration dropped since took its records with it. So
+    a generation that outlived its registration touches nothing, and records
+    nothing against what was registered after it."""
     global _default_generations_under_way, _generated_from_default
     with _lock:
+        if serial != _registration_serial:
+            return
         _default_generations_under_way -= 1
-        if answered and _registered is generator and _is_default:
+        if answered:
             _generated_from_default = True
 
 
