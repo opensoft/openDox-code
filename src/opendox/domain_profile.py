@@ -220,6 +220,17 @@ def register(profile: Any) -> Any:
     REPLACES it while nothing has been built from it, and is refused as
     `AlreadyRegistered` once a parser or a server has been. Either way the host
     ends up holding the one registration, or knows why it does not.
+
+    THE NO-OP HOLDS FOR THE DEFAULT TOO (Copilot review thread on
+    openDox-code#42). `register(opendox.default_profile)` while an entry point's
+    default is registered changes nothing at all. The registration stays the
+    entry point's default, so a host's different profile still replaces it
+    until something is built from it. A build from it stays on record, so a
+    different profile after the build is still refused, with the message that
+    names the default. Nothing is swapped, so there is nothing for ASK-4 Q5's
+    refusal to prevent. Which kind a registration is, a host's or the entry
+    point's default, is set by the call that MADE it: a host that registers the
+    default itself, before any entry point has, holds a host's registration.
     """
     global _registered, _is_default, _built_from_default
     if profile is None:
@@ -229,7 +240,12 @@ def register(profile: Any) -> Any:
             "the registry empty, and the composition points refuse with the "
             "registration call named (ProfileNotRegistered), which is the "
             "state RULED ASK-2 asks for rather than a silent empty profile.")
-    if _registered is not None and _registered is not profile:
+    if _registered is profile:
+        # The same object again: a no-op, before any bookkeeping is touched.
+        # Falling through would clear `_is_default` and `_built_from_default`
+        # and quietly turn an entry point's default into a host's registration.
+        return profile
+    if _registered is not None:
         if not _is_default:
             raise AlreadyRegistered(
                 f"a host profile is already registered "

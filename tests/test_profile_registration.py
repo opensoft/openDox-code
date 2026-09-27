@@ -50,6 +50,8 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE RATHER THAN IMPLIED
    was built from the default is refused as `AlreadyRegistered`. So are the
    seams between them: asking which profile is registered is not a build, a
    facet read off the default is, and `unregister()` clears both.
+   Re-registering the object already registered stays a no-op, the default
+   included, and leaves both as they were.
 
 `--noconftest` SAFE, deliberately: `validate` runs this file alongside
 `test_leg_shape.py` and `test_consumer_reach.py` with conftest collection off
@@ -1027,6 +1029,59 @@ def test_unregister_clears_the_default_and_its_build() -> None:
     assert domain_profile.is_registered() is False
     host = _HostProfile()
     assert domain_profile.register(host) is host
+
+
+def test_re_registering_the_default_changes_nothing_before_a_build() -> None:
+    """The same object again is a no-op for the default too.
+
+    (Copilot review thread on openDox-code#42.) `register(default_profile)`
+    over the entry point's own registration of it must not turn the default
+    into a host's registration. Nothing has been built, so a host's different
+    profile still replaces it (RN-1 (a)).
+    """
+    domain_profile.register_default(default_profile)
+    assert domain_profile.register(default_profile) is default_profile
+    assert domain_profile.current() is default_profile
+    host = _HostProfile()
+    assert domain_profile.register(host) is host, (
+        "re-registering the default claimed it as a host's registration, so a "
+        "host could no longer replace a default nothing was built from")
+    assert domain_profile.current() is host
+
+
+def test_re_registering_the_default_after_a_build_keeps_the_build_on_record(
+) -> None:
+    """After a build it neither raises nor forgets the build.
+
+    Nothing is swapped, so there is nothing to refuse. A different profile
+    afterwards is still refused, and the refusal still says that the
+    registration it met is the default.
+    """
+    domain_profile.register_default(default_profile)
+    assert profile_openxfactory.SUBCOMMAND_EXTENSIONS, "the build"
+    assert domain_profile.register(default_profile) is default_profile
+    with pytest.raises(domain_profile.AlreadyRegistered) as caught:
+        domain_profile.register(_HostProfile())
+    assert "openDox's own default profile" in str(caught.value), (
+        "re-registering the default cleared the record of the build: the "
+        "refusal no longer names the default it met")
+    assert domain_profile.current() is default_profile
+
+
+def test_a_host_that_registers_the_default_itself_holds_a_hosts_registration(
+) -> None:
+    """Which kind a registration is, is set by the call that MADE it.
+
+    A host that registers openDox's default itself, before any entry point
+    has, holds a host's registration. An entry point's `register_default()`
+    leaves it alone, and a different profile is refused as a second host's.
+    """
+    domain_profile.register(default_profile)
+    assert domain_profile.register_default(default_profile) is default_profile
+    with pytest.raises(domain_profile.AlreadyRegistered) as caught:
+        domain_profile.register(_HostProfile())
+    assert "a host profile is already registered" in str(caught.value)
+    assert domain_profile.current() is default_profile
 
 
 def test_register_default_leaves_any_registration_as_it_found_it() -> None:

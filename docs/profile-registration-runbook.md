@@ -294,6 +294,12 @@ and RN-1 (a) on comment
   (R1Q3 (ii); RN-1 (a)). The reason is ASK-4 Q5's: the built parser or server
   would keep the default's contributions while every later reader saw the
   host's. A deliberate swap calls `unregister()` first.
+* **Registering the profile already registered is a no-op, the default
+  included.** A `register(opendox.default_profile)` while an entry point's
+  default is registered changes nothing. The registration stays the entry
+  point's, so a host's different profile still replaces it until something is
+  built from it, and a build from it stays on record. Which kind a registration
+  is, a host's or the entry point's default, is set by the call that made it.
 * **A process that builds nothing still meets the refusal.** A library caller
   that asks for the profile without building anything through an entry point
   finds nothing registered, and `current()` and the proxy both raise
@@ -323,7 +329,7 @@ registration still replaces the default.
   ITS routes served still registers before the first build. A server built
   with no host registered builds on openDox's default rather than refusing.
 * § Where this is executed rather than described:
-  `tests/test_profile_registration.py` holds forty-five cases. Plan 034's T011
+  `tests/test_profile_registration.py` holds forty-eight cases. Plan 034's T011
   made `opendox.cli` and `opendox.serve` importable, so the parser's entry
   point is built for real there. A server still cannot be built in a lone
   checkout until phase 2, so the server's composition point stays lifted by AST.
