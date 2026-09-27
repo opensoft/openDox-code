@@ -122,6 +122,14 @@ NEUTRAL_MODULES = (
     # that CONTRIBUTES a view imports this module, not the other way round,
     # which is the lawful direction because openXdox pins openDox.
     "opendox.view_extension",
+    # Plan 034 T011 (#1144 tasks 2.1 and 2.2). These two were the last entries
+    # of `STILL_REACHING` below, blocked by `ideation_dashboard` alone.
+    # `serve.py` no longer imports openxFactory's lane column, and composes it
+    # at build time through the handler-contribution facet instead (R1Q1 (a),
+    # openxFactory#656 comment 5817152735). `cli.py` imports `serve`, so it
+    # moves with it. They move here IN THE SAME ACT, as the record test asks.
+    "opendox.cli",
+    "opendox.serve",
 )
 
 #: Modules that STILL require the consumer at import time, with the reason. They
@@ -131,36 +139,28 @@ NEUTRAL_MODULES = (
 #: Modules that still cannot be imported with the consumer blocked — with the
 #: reason, and with the PACKAGE NAME whose absence is what actually stops them.
 #:
-#: THE SECOND FIELD IS SLICE 2b STEP 4's DOING, and it is the whole content of
-#: this record now. Both remaining entries are blocked by `ideation_dashboard`,
-#: NOT by `openxdox`: the consumer reaches that used to stop them are gone, and
-#: what is left is the OTHER cross-column reach — openxFactory's PRE-CARVE
-#: package name, a `stays_openxfactory_adapter` row (RULING DQ-1) present at
-#: neither carve destination, censused two lines down at
-#: `test_no_module_under_src_names_the_pre_carve_package_at_import_time` and
-#: owed to a later act. Recording only "still reaching" would have let that
-#: substitution pass unread: the test would stay green on a nonzero exit while
-#: the thing it was written to measure had actually been fixed.
+#: THE SECOND FIELD IS SLICE 2b STEP 4's DOING, and it was the whole content
+#: of this record until plan 034 T011. Its last two entries were blocked by
+#: `ideation_dashboard`, NOT by `openxdox`: the consumer reaches that used to
+#: stop them were gone, and what was left was the OTHER cross-column reach —
+#: openxFactory's PRE-CARVE package name, a `stays_openxfactory_adapter` row
+#: (RULING DQ-1) present at neither carve destination. Two lines down,
+#: `test_no_module_under_src_names_the_pre_carve_package_at_import_time`
+#: censuses it; it was owed to a later act. Recording only "still reaching"
+#: would have let that substitution pass unread: the test would stay green on
+#: a nonzero exit while the thing it was written to measure had actually been
+#: fixed.
 #:
 #: So the test below now asserts the blocker BY NAME, and — for an entry whose
 #: recorded blocker is not the consumer — asserts that `openxdox` is NOT what
 #: the failure names. That turns each of these two rows from a placeholder into
 #: a claim: *this module's consumer reach is gone; it waits on something else.*
-STILL_REACHING = {
-    "opendox.cli": ("cli.py itself no longer names the consumer at import time "
-                    "(step 3), and opendox.serve no longer does either (step "
-                    "4); it imports serve, and so inherits serve's remaining "
-                    "pre-carve reach",
-                    "ideation_dashboard"),
-    "opendox.serve": ("serve.py's consumer reaches are gone (step 4): the two "
-                      "mixin bases are late columns, the two build_server "
-                      "defaults read opendox.defaults, and the registry and "
-                      "re-export blocks are late bindings. What remains is "
-                      "`from ideation_dashboard import serve_openxfactory_"
-                      "lanes` at :181 and :199, whose rewrite target exists at "
-                      "neither carve destination",
-                      "ideation_dashboard"),
-}
+#:
+#: EMPTY SINCE PLAN 034 T011 (#1144 task 2.1). Its two entries, `opendox.cli`
+#: and `opendox.serve`, were blocked by `ideation_dashboard` alone, and both
+#: import now, so both moved into `NEUTRAL_MODULES` above in the same act. The
+#: record is kept, empty, for the next module that needs it.
+STILL_REACHING: dict[str, tuple[str, str]] = {}
 
 
 @pytest.mark.parametrize("module", NEUTRAL_MODULES)
@@ -176,16 +176,27 @@ def test_the_neutral_modules_import_with_no_consumer_installed(module: str) -> N
         "cannot make, because a default-argument reach is not an Import node")
 
 
-@pytest.mark.parametrize("module", sorted(STILL_REACHING))
-def test_the_reaching_modules_are_recorded_as_reaching(module: str) -> None:
-    """The other half, recorded rather than asserted away — and it MUST fail.
+def test_the_reaching_modules_are_recorded_as_reaching() -> None:
+    """The other half, recorded rather than asserted away — and each entry
+    MUST fail.
 
     A module that starts importing is not a failure of this repository, it is
     a slice landing; the test then tells the author to move it into
     `NEUTRAL_MODULES`, which is where the claim is made. Recording it this way
     is what stops the list above from silently becoming a list of two.
+
+    ONE TEST THAT WALKS THE RECORD, not one case per entry. The record has been
+    empty since plan 034 T011, and a parametrization over an empty record is
+    not a passing case: pytest reports it as an "empty parameter set" SKIP.
+    `validate.yml`'s `Pin the triple` pins SKIPPED exactly, so that would be a
+    new skip standing for no test at all.
     """
-    _reason, blocker = STILL_REACHING[module]
+    for module, (_reason, blocker) in sorted(STILL_REACHING.items()):
+        _assert_still_reaching(module, blocker)
+
+
+def _assert_still_reaching(module: str, blocker: str) -> None:
+    """One record entry's claim: the import still fails, for its named blocker."""
     done = _import_in_subprocess(module, consumer_blocked=True)
     assert done.returncode != 0, (
         f"`import {module}` now SUCCEEDS with no `openxdox` — good, and the "
@@ -724,15 +735,15 @@ def test_a_converted_name_is_never_used_at_import_time(module_file: str) -> None
 def test_no_module_under_src_names_the_pre_carve_package_at_import_time() -> None:
     """`ideation_dashboard` is openxFactory's PRE-CARVE name, not a dependency.
 
-    Recorded, not yet zero: `serve.py` reaches
-    `ideation_dashboard.serve_openxfactory_lanes` twice at import time — a
-    `stays_openxfactory_adapter` row (RULING DQ-1) present at NEITHER carve
+    ZERO SINCE PLAN 034 T011 (#1144 task 2.1). `serve.py` reached
+    `ideation_dashboard.serve_openxfactory_lanes` twice at import time. That is
+    a `stays_openxfactory_adapter` row (RULING DQ-1) present at NEITHER carve
     destination, so the carve's `import rewrites` class had nothing lawful to
-    rewrite it to. It is the same defect class § 4.1 fixed on the openXdox
-    side, and it is blocked here by the same undeclared lines as serve.py's
-    `openxdox` reaches.
+    rewrite it to. Both statements are gone: the lane column now arrives at
+    build time through the handler-contribution facet (R1Q1 (a)). A new one is
+    a regression.
     """
-    known = {"src/opendox/serve.py": 2}
+    known: dict[str, int] = {}
     seen: dict[str, int] = {}
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))

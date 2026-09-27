@@ -36,12 +36,13 @@ So this module is the RUNNABLE half, in the shape its four neighbours on
 `validate`'s explicit list already use (`test_leg_shape.py`,
 `test_consumer_reach.py`, `test_web_boundary.py`, `test_view_registry.py`): it
 PARSES `src/opendox/serve.py` and reads the live `opendox.consumer_reach`, and
-it imports `opendox.serve` nowhere, because `opendox.serve` cannot be imported
-at either leg — `from ideation_dashboard import serve_openxfactory_lanes` names
-openxFactory's PRE-CARVE package, a `stays_openxfactory_adapter` row (RULING
-DQ-1) present at neither destination, and `tests/test_consumer_reach.py`'s
-`STILL_REACHING` records exactly that. A source-level assertion is what is
-available until the BUILD arc (§ 3.5/3.6) closes it, and it is not nothing: a
+it imports `opendox.serve` nowhere. It was written while `opendox.serve` could
+not be imported at either leg: `from ideation_dashboard import
+serve_openxfactory_lanes` named openxFactory's PRE-CARVE package, a
+`stays_openxfactory_adapter` row (RULING DQ-1) present at neither destination,
+as `tests/test_consumer_reach.py`'s `STILL_REACHING` recorded until plan 034
+T011 removed the reach. A source-level assertion was what was available, and it
+is not nothing: a
 route's ownership, its dispatch order, its containment authority, its content
 types and its refusal shapes are all properties of the text.
 

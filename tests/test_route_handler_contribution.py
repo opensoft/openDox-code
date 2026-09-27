@@ -28,15 +28,21 @@ WHAT IT ASSERTS
    refuses.
 4. ABSENCE IS NOT A DEFECT. A contributor that declares nothing composes the
    core alone, and the core's MRO stays a prefix of the composed class's.
-5. THE SERVER IS WIRED THROUGH IT. `opendox.serve` cannot be imported until
-   T011 lands, because `serve.py:199` still reaches openxFactory's pre-carve
-   package. So `build_server`'s body is READ with `ast`, as
-   `tests/test_profile_registration.py` reads it (plan 034, tasks.md
-   § Phase 1). The reading also shows that a name the bound class sets is
-   refused before the build's first side effect. T011's PR adds the case
-   through `build_server` itself.
+5. THE SERVER IS WIRED THROUGH IT. `build_server`'s body is READ with `ast`,
+   as `tests/test_profile_registration.py` reads it, for what no single build
+   shows. That is the order of the seam calls, and the fact that a name the
+   bound class sets is refused before the build's first side effect.
+6. AND IT SERVES. Since T011 removed `serve.py`'s two import-time reaches,
+   `opendox.serve` imports in a lone checkout, so section 6 drives
+   `build_server` itself. A contributed route is served against the live
+   handler. A contribution that cannot be composed is refused beside the
+   bindings, BEFORE the snapshot source is bootstrapped. A binding that no
+   class answers is refused at the END of the build, by `resolve_handlers`.
+   That refusal checks the class that will dispatch the route, and the build
+   composes that class last, from values its own work computes.
 
-`--noconftest` SAFE, and it imports neither `opendox.serve` nor `opendox.cli`.
+`--noconftest` SAFE. Sections 1 to 5 import neither `opendox.serve` nor
+`opendox.cli`; section 6 imports `opendox.serve` inside its fixture.
 The stand-in core handler below is built on the same stdlib class the real one
 is, so the names a contribution could shadow are the real stdlib's.
 
@@ -1016,3 +1022,234 @@ def test_a_name_the_bound_class_sets_is_refused_before_build_servers_side_effect
                        and node.func.attr in ("SnapshotSource", "bootstrap")))]
     assert len(effects) >= 3, effects
     assert collect.lineno < min(effects), (collect.lineno, sorted(effects))
+
+
+# ---------------------------------------------------------------------------
+# 6. THE CASE THROUGH `build_server` (T011). `opendox.serve` imports now.
+# ---------------------------------------------------------------------------
+#
+# THE PHASE-1 LIMIT, as measured (plan 034 plan.md, "Phase-1 limit"; research
+# R7). A standalone `build_server` still meets three reaches that phase 2
+# routes, and each case below stands in for exactly those three, no more:
+#   * the snapshot source, `serve.py`'s `registry_mod.SnapshotSource(...)`,
+#     through `build_server`'s own `snapshot_source=` seam;
+#   * `_checkout_real`, whose body imports `openxdox.corpus_root`;
+#   * `compute_capabilities`' two reads of `registry_mod.BINDING_*`, the late
+#     `openxdox.snapshot_registry` constants.
+# Everything else `build_server` does runs for real, the composition first
+# among it.
+
+class _StandInSource:
+    """The snapshot source phase 1 injects: nothing registered, nothing baked.
+    It records whether `bootstrap()` ran, so a refusal can be shown to come
+    BEFORE the expensive work does."""
+
+    refresh_binding = None
+    baked_repository = None
+
+    class registry:
+        active = None
+
+    def __init__(self):
+        self.bootstrapped = False
+
+    def bootstrap(self):
+        self.bootstrapped = True
+
+
+class _ServedLanes:
+    """A contributed column over the REAL core handler."""
+
+    def _serve_lane_probe(self, head_only):
+        self._send_json(200, {"lane": "contributed", "loopback": self.loopback})
+
+
+class _ServedLaneRoutes:
+    def routes(self):
+        return (RouteBinding("GET", "/lane-probe.json", False,
+                             "_serve_lane_probe"),)
+
+
+class _ServedExtra:
+    def _serve_extra_probe(self, head_only):
+        self._send_json(200, {"extra": "contributed"})
+
+
+class _ExtraRoutes:
+    """A caller's extension that declares its own mixin."""
+
+    HANDLER_CONTRIBUTIONS = (_ServedExtra,)
+
+    def routes(self):
+        return (RouteBinding("GET", "/extra-probe.json", False,
+                             "_serve_extra_probe"),)
+
+
+class _HostProfile:
+    SUBCOMMAND_EXTENSIONS: tuple = ()
+    ROUTE_EXTENSIONS = (_ServedLaneRoutes(),)
+    HANDLER_CONTRIBUTIONS = (_ServedLanes,)
+
+
+@pytest.fixture()
+def standalone(monkeypatch, tmp_path):
+    """`build_server` with a stand-in host profile, the three phase-1 stand-ins
+    above, and the registry put back afterwards. The root conftest registers
+    its own empty profile at process start, and it must find it again."""
+    import types
+
+    from opendox import domain_profile, serve
+
+    previous = domain_profile.current() if domain_profile.is_registered() else None
+    domain_profile.unregister()
+    monkeypatch.setattr(serve, "_checkout_real", lambda root: False)
+    monkeypatch.setattr(serve, "registry_mod", types.SimpleNamespace(
+        BINDING_REGENERATE="regenerate", BINDING_REFETCH="refetch"))
+    (tmp_path / "web").mkdir()
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "snapshot.json").write_text("{}", encoding="utf-8")
+    source = _StandInSource()
+
+    def build(profile, **kwargs):
+        domain_profile.register(profile)
+        return serve.build_server(
+            tmp_path / "web", tmp_path / "snapshot.json", tmp_path / "repo",
+            port=0, head="0" * 40, snapshot_source=source, **kwargs)
+
+    build.source = source
+    try:
+        yield build
+    finally:
+        domain_profile.unregister()
+        if previous is not None:
+            domain_profile.register(previous)
+
+
+def _get(httpd, path):
+    import http.client
+    import json
+    import threading
+
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    try:
+        host, port = httpd.server_address[:2]
+        connection = http.client.HTTPConnection(host, port, timeout=10)
+        connection.request("GET", path)
+        response = connection.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join(timeout=10)
+
+
+def test_build_server_composes_the_declared_mixins_into_the_class_it_binds(
+        standalone):
+    """The profile's mixin and a caller extension's own, composed after the
+    core handler, and a live request dispatched to each against the live
+    handler. `self.loopback` is the bound server's own verdict."""
+    from opendox import serve
+
+    httpd = standalone(_HostProfile(), route_extensions=(_ExtraRoutes(),))
+    bound = httpd.RequestHandlerClass.func
+    core = serve.DashboardHandler.__mro__
+    assert bound.__name__ == "BoundDashboardHandler"
+    assert bound.__mro__[1:len(core)] == core[:-1]
+    assert bound.__mro__[len(core):] == (_ServedLanes, _ServedExtra, object)
+    assert _get(httpd, "/lane-probe.json") == (
+        200, {"lane": "contributed", "loopback": True})
+
+
+def test_a_caller_extensions_own_mixin_is_served(standalone):
+    httpd = standalone(_HostProfile(), route_extensions=(_ExtraRoutes(),))
+    assert _get(httpd, "/extra-probe.json") == (200, {"extra": "contributed"})
+
+
+def test_build_server_refuses_a_binding_no_class_answers(standalone):
+    """Without the mixin, the lane binding names a method no class has, and the
+    server refuses to start. That is `resolve_handlers`' refusal, reached.
+
+    It is the one refusal raised AFTER the snapshot source is bootstrapped, as
+    the last assertion pins. `resolve_handlers` checks the class that will
+    dispatch the route, and `build_server` composes that class last, because
+    its namespace carries values the build computes. A check against an
+    earlier class would be a check against a class that never dispatches."""
+
+    class _Undeclared(_HostProfile):
+        HANDLER_CONTRIBUTIONS = ()
+
+    with pytest.raises(RouteBindingError, match="_serve_lane_probe"):
+        standalone(_Undeclared())
+    assert standalone.source.bootstrapped is True
+
+
+def test_build_server_refuses_a_shadowing_contribution_before_its_work(
+        standalone):
+    """A contribution that would replace a core method refuses the build
+    BEFORE the snapshot source is bootstrapped, beside the bindings."""
+
+    class _Shadowing:
+        def _send_json(self, status, obj):
+            return None
+
+    class _Shadower(_HostProfile):
+        HANDLER_CONTRIBUTIONS = (_Shadowing,)
+
+    with pytest.raises(RouteBindingError, match="may only ADD"):
+        standalone(_Shadower())
+    assert standalone.source.bootstrapped is False
+
+
+def test_a_profile_that_declares_nothing_binds_the_core_alone(standalone):
+    """The root conftest's empty profile, or any host with no column of its
+    own, composes nothing. The core handler names no descendant's column, and
+    no module of the package that openDox cannot import sits in its MRO."""
+    from opendox import serve
+
+    class _Empty:
+        SUBCOMMAND_EXTENSIONS: tuple = ()
+        ROUTE_EXTENSIONS: tuple = ()
+
+    httpd = standalone(_Empty())
+    try:
+        bound = httpd.RequestHandlerClass.func
+        assert bound.__mro__ == (bound,) + serve.DashboardHandler.__mro__
+        assert not [klass for klass in serve.DashboardHandler.__mro__
+                    if klass.__module__.split(".")[0] == "ideation_dashboard"]
+    finally:
+        httpd.server_close()
+
+
+def test_build_server_refuses_what_type_cannot_compose_before_its_work(
+        standalone):
+    """The preflight, through the real core. An MRO no class can take is
+    refused beside the bindings, before the snapshot source is bootstrapped,
+    rather than at the end of the build."""
+    root, leaf = _declared_ahead_of_its_own_subclass()
+
+    class _Unlinearizable(_HostProfile):
+        HANDLER_CONTRIBUTIONS = (_ServedLanes, root, leaf)
+
+    with pytest.raises(RouteBindingError, match="cannot be composed"):
+        standalone(_Unlinearizable())
+    assert standalone.source.bootstrapped is False
+
+
+def test_build_server_refuses_a_name_the_core_sets_on_instances_before_its_work(
+        standalone):
+    """Through the real core, `path` is what `BaseHTTPRequestHandler` sets on
+    every request. The measurement reads it from the real MRO's source, and
+    the build is refused before the snapshot source is bootstrapped."""
+
+    class _NamedLikeState:
+        def path(self, head_only):
+            return None
+
+    class _Stateful(_HostProfile):
+        HANDLER_CONTRIBUTIONS = (_ServedLanes, _NamedLikeState)
+
+    with pytest.raises(RouteBindingError, match="INSTANCE") as caught:
+        standalone(_Stateful())
+    assert "http.server.BaseHTTPRequestHandler" in str(caught.value)
+    assert standalone.source.bootstrapped is False
