@@ -95,8 +95,11 @@ wherever it would do more:
   * a name the core handler sets on its INSTANCES (the request path, the
     output stream, the headers), which no class's `dir()` lists. These names
     are measured at wiring time from the source of every class in the core's
-    MRO: each `self.<name> = ...`, and each `setattr(self, "<name>", ...)` with
-    a literal name. The instance's own attribute takes precedence over a
+    MRO. Each method's assignments are read through ITS receiver, the first
+    positional parameter, whatever it is called: `self.<name> = ...`, and
+    `setattr(self, "<name>", ...)` with a literal name. A `staticmethod` has no
+    receiver, and a nested class's methods receive that class's instances, so
+    neither is read. The instance's own attribute takes precedence over a
     contributed method, so a binding naming one would pass `resolve_handlers`,
     which looks on the class, and then dispatch the core's value. Core code
     that probes such a name before it sets it (`hasattr(self,
@@ -617,14 +620,14 @@ def _is_foreign_descriptor(value) -> bool:
             and any("__get__" in vars(kind) for kind in type(value).__mro__))
 
 
-def _self_targets(tree) -> set[str]:
-    """The names a syntax tree assigns on `self`: plain, augmented, annotated
-    and unpacked assignment, a `for` or `with` target, and `setattr(self,
-    "<name>", ...)` with a literal name."""
+def _receiver_targets(node, receiver: str) -> set[str]:
+    """The names a syntax tree assigns on `receiver`: plain, augmented,
+    annotated and unpacked assignment, a `for` or `with` target, and
+    `setattr(<receiver>, "<name>", ...)` with a literal name."""
     import ast   # local, like the measurement's other imports: see below
 
     names: set[str] = set()
-    for node in ast.walk(tree):
+    for node in ast.walk(node):
         if isinstance(node, ast.Assign):
             targets = list(node.targets)
         elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For,
@@ -635,7 +638,7 @@ def _self_targets(tree) -> set[str]:
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                 and node.func.id == "setattr" and len(node.args) >= 2 \
                 and isinstance(node.args[0], ast.Name) \
-                and node.args[0].id == "self" \
+                and node.args[0].id == receiver \
                 and isinstance(node.args[1], ast.Constant) \
                 and isinstance(node.args[1].value, str):
             names.add(node.args[1].value)
@@ -650,8 +653,64 @@ def _self_targets(tree) -> set[str]:
                 targets.append(target.value)
             elif isinstance(target, ast.Attribute) \
                     and isinstance(target.value, ast.Name) \
-                    and target.value.id == "self":
+                    and target.value.id == receiver:
                 names.add(target.attr)
+    return names
+
+
+def _methods(class_node):
+    """Each function a class body defines, however conditionally: a `def`
+    under an `if` or a `try`, or a `lambda` in a class-level expression. It
+    does not descend into a nested class, whose methods receive that class's
+    instances, or into a method's own body."""
+    import ast
+
+    pending = list(class_node.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            yield node
+        elif not isinstance(node, ast.ClassDef):
+            pending.extend(ast.iter_child_nodes(node))
+
+
+def _decorator_name(decorator) -> str:
+    import ast
+
+    while isinstance(decorator, ast.Call):
+        decorator = decorator.func
+    if isinstance(decorator, ast.Attribute):
+        return decorator.attr
+    return decorator.id if isinstance(decorator, ast.Name) else ""
+
+
+def _receiver(method) -> str | None:
+    """The name a method's receiver goes by: its first positional parameter,
+    WHATEVER it is called. A `staticmethod` has none. A `classmethod`'s is
+    the class, and what it assigns there is state as well: a name the core
+    sets on its class at run time would replace a contributed one."""
+    import ast
+
+    if not isinstance(method, ast.Lambda) and any(
+            _decorator_name(decorator) == "staticmethod"
+            for decorator in method.decorator_list):
+        return None
+    params = [*method.args.posonlyargs, *method.args.args]
+    return params[0].arg if params else None
+
+
+def _assigned_by_methods(tree) -> set[str]:
+    """The names the methods of the class a source tree defines assign on
+    their receivers."""
+    import ast
+
+    names: set[str] = set()
+    for class_node in (node for node in tree.body
+                       if isinstance(node, ast.ClassDef)):
+        for method in _methods(class_node):
+            receiver = _receiver(method)
+            if receiver is not None:
+                names |= _receiver_targets(method, receiver)
     return names
 
 
@@ -664,10 +723,12 @@ _MEASURED: dict[int, tuple[type, frozenset[str]]] = {}
 def _assigned_on_self(klass: type) -> frozenset[str]:
     """The names `klass`'s own source assigns on its instances.
 
-    The measurement reads the class's source with `inspect`, so a class whose
-    source cannot be read, such as `object` or a class built at run time,
-    measures as assigning nothing. The imports are local: `inspect` is not
-    small, and only a build that composes a contribution needs it.
+    Each method's assignments are read through ITS receiver, the first
+    positional parameter, whatever it is called. The measurement reads the
+    class's source with `inspect`, so a class whose source cannot be read,
+    such as `object` or a class built at run time, measures as assigning
+    nothing. The imports are local: `inspect` is not small, and only a build
+    that composes a contribution needs it.
     """
     held = _MEASURED.get(id(klass))
     if held is not None and held[0] is klass:
@@ -681,14 +742,15 @@ def _assigned_on_self(klass: type) -> frozenset[str]:
     except (OSError, TypeError, SyntaxError):
         names = frozenset()
     else:
-        names = frozenset(_self_targets(tree))
+        names = frozenset(_assigned_by_methods(tree))
     _MEASURED[id(klass)] = (klass, names)
     return names
 
 
 def _instance_state(base: type) -> dict[str, type]:
-    """Each name the classes of `base`'s MRO assign on `self`, mapped to the
-    first of them in MRO order that does, so a refusal can name it."""
+    """Each name the classes of `base`'s MRO assign on their instances,
+    mapped to the first of them in MRO order that does, so a refusal can name
+    it."""
     state: dict[str, type] = {}
     for klass in base.__mro__:
         for name in sorted(_assigned_on_self(klass)):

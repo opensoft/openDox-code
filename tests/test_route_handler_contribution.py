@@ -338,6 +338,55 @@ def test_the_measurement_reads_every_form_of_assignment_on_self(name):
             (_contributor(named),), base=_StatefulCore)
 
 
+class _ReceiverCore(_CoreHandler):
+    """A core handler whose methods name their receivers otherwise, in each
+    kind of method the measurement reads and in the two kinds it must not."""
+
+    def _begin(handler):
+        handler._via_handler = object()
+
+    if True:
+        def _conditional(request):
+            setattr(request, "_via_request", None)
+
+    _labelled = (lambda this: setattr(this, "_via_lambda", 1))
+
+    @classmethod
+    def _register(klass):
+        klass._registry = {}
+
+    @staticmethod
+    def _helper(other):
+        other._on_another_object = True
+
+    class _Nested:
+        def _own(self):
+            self._nested_only = True
+
+
+@pytest.mark.parametrize("name", ("_via_handler", "_via_request", "_via_lambda",
+                                  "_registry"))
+def test_the_measurement_reads_each_method_through_its_own_receiver(name):
+    """A receiver need not be called `self` (Copilot's review of #40 at
+    `1abb631`). Each method is read through its first positional parameter:
+    a method, one defined under an `if`, and a class-level `lambda`. A
+    `classmethod`'s receiver is the class, and a name the core sets on its
+    class at run time would replace a contributed one there."""
+    assert route_extension._instance_state(_ReceiverCore)[name] is _ReceiverCore
+    named = type("_Named", (), {name: lambda self: None})
+    with pytest.raises(RouteBindingError, match="_ReceiverCore"):
+        route_extension.collect_handler_contributions(
+            (_contributor(named),), base=_ReceiverCore)
+
+
+def test_the_measurement_does_not_read_what_is_not_the_receiver():
+    """A `staticmethod` has no receiver, so what it assigns lands on some
+    other object. A nested class's methods receive that class's instances."""
+    state = route_extension._instance_state(_ReceiverCore)
+    assert "_on_another_object" not in state
+    assert "_nested_only" not in state
+
+
 def test_a_core_class_without_readable_source_measures_as_assigning_nothing():
     """`object`, and a class built at run time, have no source to read. They
     add no names, and the rest of the MRO is still measured."""
