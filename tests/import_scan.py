@@ -54,28 +54,66 @@ def _called_name(expr):
     return None
 
 
+#: What `names_imported_by` names for an importing call whose module it cannot
+#: locate, because a `*` or `**` it cannot spell out stands where the name, or
+#: the package a relative name needs, would be. No module is spelled this way,
+#: so a caller that forbids packages refuses it as a reach it cannot read.
+UNREADABLE = "<an importing call's spread arguments>"
+
+
+def _positional(elements):
+    """The positions a run of arguments fills, with every literal `*[...]` or
+    `*(...)` spelled out, however deep, and whether every position is known.
+    Past a `*` of anything else, positions are unknown."""
+    known = []
+    for element in elements:
+        if not isinstance(element, ast.Starred):
+            known.append(element)
+            continue
+        if not isinstance(element.value, (ast.List, ast.Tuple)):
+            return known, False
+        inner, complete = _positional(element.value.elts)
+        known += inner
+        if not complete:
+            return known, False
+    return known, True
+
+
+def _literal_keywords(mapping):
+    """A literal `{...}`'s string keys and their values, with every nested
+    `**{...}` spelled out, and whether every key is known."""
+    found, complete = {}, True
+    for key, value in zip(mapping.keys, mapping.values):
+        if key is not None:
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                found[key.value] = value
+            else:
+                complete = False
+        elif isinstance(value, ast.Dict):
+            inner, inner_complete = _literal_keywords(value)
+            found.update(inner)
+            complete = complete and inner_complete
+        else:
+            complete = False
+    return found, complete
+
+
 def _arguments(call):
-    """A call's positional arguments and keywords, with a literal `*[...]`,
-    `*(...)` or `**{...}` spelled out. Past a `*` of anything else, positions
-    are unknown, so nothing after it is read as positional."""
-    positional = []
-    for arg in call.args:
-        if isinstance(arg, ast.Starred):
-            if isinstance(arg.value, (ast.List, ast.Tuple)) and not any(
-                    isinstance(element, ast.Starred) for element in arg.value.elts):
-                positional += arg.value.elts
-                continue
-            break
-        positional.append(arg)
+    """A call's positional arguments and keywords, with every literal `*[...]`,
+    `*(...)` and `**{...}` spelled out, however deep, and whether all of them
+    are known. Past a `*` of anything else, positions are unknown."""
+    positional, complete = _positional(call.args)
     keywords = {}
     for keyword in call.keywords:
         if keyword.arg is not None:
             keywords[keyword.arg] = keyword.value
         elif isinstance(keyword.value, ast.Dict):
-            for key, value in zip(keyword.value.keys, keyword.value.values):
-                if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                    keywords[key.value] = value
-    return positional, keywords
+            inner, inner_complete = _literal_keywords(keyword.value)
+            keywords.update(inner)
+            complete = complete and inner_complete
+        else:
+            complete = False
+    return positional, keywords, complete
 
 
 def importing_calls(tree):
@@ -138,8 +176,10 @@ def names_imported_by(node, *, calls=None, any_call=False):
     position or as `name=`. With `any_call`, EVERY call does, whatever it
     calls: the reading for a module where `importer_escapes` holds.
 
-    Arguments spelled out with a literal `*[...]` or `**{...}` count where
-    they land. A relative name is resolved where the call itself says what it
+    Arguments spelled out with a literal `*[...]` or `**{...}`, however
+    deep, count where they land. Where a `*` or `**` of anything else hides
+    the name, or the package a relative name needs, the call names
+    `UNREADABLE`. A relative name is resolved where the call itself says what it
     is relative to, a literal `package`, by keyword or as the second argument. So
     `import_module(".corpus", package="doc_health")` names
     `doc_health.corpus`. Otherwise it is relative to the calling module's own
@@ -157,8 +197,10 @@ def names_imported_by(node, *, calls=None, any_call=False):
     called = (calls or {}).get(_called_name(node.func))
     if called is None and not any_call:
         return []
-    args, keywords = _arguments(node)
+    args, keywords, complete = _arguments(node)
     name = args[0] if args else keywords.get("name")
+    if name is None and not complete:
+        return [UNREADABLE]
     if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
         return []
     if called == "__import__":
@@ -169,6 +211,8 @@ def names_imported_by(node, *, calls=None, any_call=False):
     if not name.value.startswith("."):
         return [name.value]
     package = args[1] if len(args) > 1 else keywords.get("package")
+    if package is None and not complete:
+        return [UNREADABLE]
     if not (isinstance(package, ast.Constant) and isinstance(package.value, str)):
         return []
     try:

@@ -39,8 +39,12 @@ two (`from importlib import import_module as load`). A module that handles an
 importer as a VALUE (assigns it, passes it, stores it, or looks it up by its
 name as a string) is read strictly: there, every call whose module argument
 is a literal counts, whatever it calls. So the importer can travel under any
-name by any binding, and a literal module name still counts. A name in a
-comment, a docstring or a string is not an import. Relative imports stay
+name by any binding, and a literal module name still counts. Literal `*[...]`
+and `**{...}` arguments are spelled out, however deep. An importing call whose
+module a spread of anything else hides (`import_module(*names)`) is refused,
+because it could hide a reach into openxFactory. A computed name is not
+refused, because `consumer_reach`'s seam imports one. A name in a comment, a
+docstring or a string is not an import. Relative imports stay
 inside this package and are not read. Each node is read by
 `import_scan.names_imported_by`, the reader the repository's other direction
 checks share, so the sweep is not a second copy of it.
@@ -84,7 +88,7 @@ SRC = ROOT / "src"
 
 sys.path.insert(0, str(ROOT / "tests"))
 from import_scan import (  # noqa: E402
-    importer_escapes, importing_calls, names_a_forbidden_package,
+    UNREADABLE, importer_escapes, importing_calls, names_a_forbidden_package,
     names_imported_by)
 
 #: The consumer. Its deferred reaches are phase 2's and 3's to route.
@@ -157,7 +161,7 @@ def sweep(source: str, path: str = "<source>") -> list[Reach]:
             visit(node.body, True, f"{inside}.<lambda>")
             return
         for name in names_imported_by(node, calls=calls, any_call=any_call):
-            if names_a_forbidden_package(name, SIBLINGS):
+            if name == UNREADABLE or names_a_forbidden_package(name, SIBLINGS):
                 found.append(Reach(path, node.lineno, name, deferred, inside))
         for child in ast.iter_child_nodes(node):
             if not any(child is param for param in lazy):
@@ -197,10 +201,12 @@ def test_no_module_under_src_reaches_openxfactory_at_all():
     seam openDox declares. A new one is openDox needing, at the moment a verb
     runs, a package it can never install. Route it through a seam the product
     declares, as 4.2 does, and do not add it here."""
-    into = [str(r) for r in _sweep_src() if r.target in OPENXFACTORY]
+    into = [str(r) for r in _sweep_src()
+            if r.target in OPENXFACTORY or r.name == UNREADABLE]
     assert not into, (
         f"{len(into)} reach(es) into openxFactory, which openDox can never "
-        "install (#1144 task 4.3's phase-1 cut): " + "; ".join(into))
+        "install (#1144 task 4.3's phase-1 cut), or importing calls whose "
+        "module a spread hides, which could be: " + "; ".join(into))
 
 
 def test_every_reach_the_sweep_finds_is_deferred_into_the_consumer():
@@ -275,8 +281,9 @@ def test_the_scanner_classifies_every_position_it_reads():
 #: `__import__` with a nonzero `level` is relative, and names no sibling. A
 #: relative `import_module` names the module its literal `package` resolves it
 #: to, by position or by keyword. Relative to `__package__`, it names none.
-#: Arguments spelled out with a literal `*[...]` or `**{...}` count where they
-#: land; a `*` of a name is not a literal.
+#: Arguments spelled out with a literal `*[...]` or `**{...}`, however deep,
+#: count where they land. A spread that hides the name, or the package a
+#: relative name needs, makes the call `UNREADABLE`, which the sweep refuses.
 _LAZY_SPECIMEN = textwrap.dedent('''
     import importlib
 
@@ -294,6 +301,11 @@ _LAZY_SPECIMEN = textwrap.dedent('''
     STARRED = importlib.import_module(*["ideation_dashboard.lanes"])
     SPREAD = importlib.import_module(**{"name": ".runner", "package": "doc_health"})
     UNKNOWN = importlib.import_module(*NAMES)
+    NESTED = importlib.import_module(*[*["doc_health.corpus"]])
+    DEEP = importlib.import_module(**{**{"name": "ideation_dashboard"}})
+    HIDDEN = importlib.import_module(**OPTIONS)
+    HIDDEN_PACKAGE = importlib.import_module(".corpus", *PACKAGES)
+    COMPUTED = importlib.import_module(NAME)
 ''')
 
 
@@ -309,6 +321,11 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (13, "doc_health.families", False, "<module>"),
         (15, "ideation_dashboard.lanes", False, "<module>"),
         (16, "doc_health.runner", False, "<module>"),
+        (17, UNREADABLE, False, "<module>"),
+        (18, "doc_health.corpus", False, "<module>"),
+        (19, "ideation_dashboard", False, "<module>"),
+        (20, UNREADABLE, False, "<module>"),
+        (21, UNREADABLE, False, "<module>"),
     }, sorted(found)
 
 
@@ -377,6 +394,24 @@ def test_a_deferred_reach_into_the_consumer_passes_all_three(monkeypatch, tmp_pa
     test_no_module_under_src_reaches_a_sibling_at_import_time()
     test_no_module_under_src_reaches_openxfactory_at_all()
     test_every_reach_the_sweep_finds_is_deferred_into_the_consumer()
+
+
+def test_an_importing_call_it_cannot_read_is_refused(monkeypatch, tmp_path):
+    """A spread that hides an importing call's module could hide a reach
+    into openxFactory, so the sweep refuses it. A computed name is another
+    matter (`consumer_reach`'s seam imports one), and is not refused."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "spreading.py").write_text(
+        "import importlib\n\n\ndef verb(names):\n"
+        "    return importlib.import_module(*names)\n", encoding="utf-8")
+    this_module = sys.modules[__name__]
+    monkeypatch.setattr(this_module, "SRC", tmp_path / "src")
+    monkeypatch.setattr(this_module, "ROOT", tmp_path)
+    test_no_module_under_src_reaches_a_sibling_at_import_time()
+    for test in (test_no_module_under_src_reaches_openxfactory_at_all,
+                 test_every_reach_the_sweep_finds_is_deferred_into_the_consumer):
+        with pytest.raises(AssertionError, match="spread"):
+            test()
 
 
 @pytest.mark.parametrize("test", [
