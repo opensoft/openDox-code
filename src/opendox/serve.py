@@ -153,6 +153,14 @@ from opendox import view_extension  # noqa: E402
 # § 3.4 slice S7: and the DISPLAY FACET beside it, on the same payload and for
 # the same stated reason — § 4.3 step 2, "no new route and no second fetch".
 from opendox import display_profile  # noqa: E402
+# THE HOME-CORPUS SEAM'S DEFAULT (4.1a; plan 034 T022) -- see
+# `_default_home_factory` and `corpus_adapter.register_default_home(...)`
+# below, beside `build_server()`.
+# Neither module names `openxdox` or `ideation_dashboard`: `corpus_adapter` is
+# stdlib-only (F4.1's own scan proves it), and `local_git_adapter` names only
+# `opendox.runtime.config` and `opendox.corpus_adapter` besides the stdlib.
+from opendox import corpus_adapter  # noqa: E402
+from opendox.runtime import local_git_adapter  # noqa: E402
 
 registry_mod = consumer_reach.snapshot_registry  # noqa: E402
 # THE BY-FUNCTION SPLIT (`split-opendox-two-layer-product` § 2.4, PRs 2 and 3
@@ -1502,6 +1510,39 @@ def _read_source_revision(snapshot_path: Path) -> str | None:
         return None
 
 
+def _default_home_factory(root):
+    """`home_corpus`'s shape (`adapter, ref = factory(root)`), over
+    `WorkingTreeCorpus` at its own bare defaults (`required_fields=()`; phase
+    2's T054 sets the neutral fields R1Q13 decides). Its `__init__` takes no
+    root -- it is root-agnostic, and `resolve(ref)` reads `ref.location` --
+    so one `CorpusRef` per call carries the root this factory was given, and
+    the adapter itself needs none.
+
+    READS THE WORKING TREE, uncommitted edits included -- RULING, Brett Heap,
+    2026-09-27, via the holder: "Working tree (Recommended)". A standalone
+    user edits files in their own editor, and openxFactory's hosted adapter
+    already shows worktree bytes, so the standalone default matches it rather
+    than reading the session's git HEAD. `WorkingTreeCorpus`
+    (`local_git_adapter.py`) is `LocalGitCorpus` with `list_documents`/`read`
+    aimed at the filesystem instead of a resolved commit; see its own
+    docstring for what stays unchanged (`resolve`, `classify`, `check`,
+    `write_back`) and what does not.
+
+    A FRESH ADAPTER EVERY CALL, ON PURPOSE: nothing here is held onto across
+    calls, so there is no listing cache keyed on whatever HEAD was at an
+    earlier call -- each call gets an instance that reads the CURRENT
+    filesystem state, and `WorkingTreeCorpus` itself caches nothing further
+    within a call either (its own docstring says so).
+
+    Kept byte-for-byte identical to `cli.py`'s copy of the same function (one
+    home corpus, one default, read by two entry points): neither module may
+    import the other, and `corpus_adapter.py` cannot hold this one without
+    importing `local_git_adapter` and creating the cycle that module already
+    imports `corpus_adapter` the other way (4.1a, T022)."""
+    return (local_git_adapter.WorkingTreeCorpus(),
+            corpus_adapter.CorpusRef(name="home", location=str(root)))
+
+
 def build_server(
     web_dir: Path | str,
     snapshot_path: Path | str,
@@ -1595,6 +1636,20 @@ def build_server(
     have silently lost `/snapshot-index.json`, `/source/` and every gate verb
     from the servers in the file that tests this very seam. This line is also
     the one the § 3 carve deletes rather than moves."""
+    # FIRST, before anything else this function does (4.1a, T022, R1Q3 (a)
+    # -- "the default profile and the default adapter are both entry-point
+    # registrations"): a bare process that only builds a server still needs
+    # the home corpus to resolve for `create`/`edit` (`authoring.py`), and a
+    # host that DID register its own adapter must see it left alone. This
+    # registration has no downstream read of its own inside THIS function --
+    # unlike the profile's, read further below beside `profile_proxy`, where
+    # a wiring input read once per build belongs beside the composition it
+    # feeds -- so it stays here, as early as possible, on the same footing
+    # T016 gives its own call in `cli.build_parser()`. `register_default_home`
+    # registers ONLY where nothing already answers `corpus_adapter.home()`,
+    # exactly as `domain_profile.register_default()` does for the profile.
+    corpus_adapter.register_default_home(_default_home_factory)
+
     from opendox import doxbench_turns
     # Imported HERE rather than at module scope, for the reason that is
     # actually true on this branch — narrower than the one this comment gave
@@ -2086,6 +2141,12 @@ def main(argv: list[str] | None = None) -> int:
     # registration still replaces it (R1Q3 (ii); RN-1 (a)).
     from opendox import default_profile, domain_profile
     domain_profile.register_default(default_profile)
+    # AND its own default home corpus (4.1a, T022, same ruling), exactly
+    # where a host would register its own adapter. `build_server()` below
+    # makes the identical call as its own first statement, so this one is a
+    # no-op once that runs; kept for the same reason T016 keeps its own
+    # match here: the OUTERMOST entry point states the contract on its own.
+    corpus_adapter.register_default_home(_default_home_factory)
     parser = argparse.ArgumentParser(prog="ideation-dashboard-serve", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--web-dir", default=str(Path(__file__).resolve().parent / "web"),
