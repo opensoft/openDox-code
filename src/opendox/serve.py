@@ -161,6 +161,10 @@ from opendox import display_profile  # noqa: E402
 # `opendox.runtime.config` and `opendox.corpus_adapter` besides the stdlib.
 from opendox import corpus_adapter  # noqa: E402
 from opendox.runtime import local_git_adapter  # noqa: E402
+# THE GENERATOR SEAM'S DEFAULT (5.4; plan 034 T052): openDox's own snapshot
+# generator, which `build_server()` and `main()` register where no host has.
+# Both modules are stdlib-only and name no sibling, so this adds no reach.
+from opendox import default_generator, generator_seam  # noqa: E402
 
 registry_mod = consumer_reach.snapshot_registry  # noqa: E402
 # THE BY-FUNCTION SPLIT (`split-opendox-two-layer-product` § 2.4, PRs 2 and 3
@@ -1649,6 +1653,9 @@ def build_server(
     # registers ONLY where nothing already answers `corpus_adapter.home()`,
     # exactly as `domain_profile.register_default()` does for the profile.
     corpus_adapter.register_default_home(_default_home_factory)
+    # AND openDox's OWN snapshot generator (5.4, T052; R1Q10 (a), in the same
+    # R1Q3 (a) pattern), registered only where no host has contributed one.
+    generator_seam.register_default(default_generator.GENERATOR)
 
     from opendox import doxbench_turns
     # Imported HERE rather than at module scope, for the reason that is
@@ -2147,6 +2154,8 @@ def main(argv: list[str] | None = None) -> int:
     # no-op once that runs; kept for the same reason T016 keeps its own
     # match here: the OUTERMOST entry point states the contract on its own.
     corpus_adapter.register_default_home(_default_home_factory)
+    # AND openDox's own snapshot generator (5.4, T052), the same way.
+    generator_seam.register_default(default_generator.GENERATOR)
     parser = argparse.ArgumentParser(prog="ideation-dashboard-serve", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--web-dir", default=str(Path(__file__).resolve().parent / "web"),
