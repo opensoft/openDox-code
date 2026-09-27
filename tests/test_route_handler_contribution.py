@@ -35,8 +35,11 @@ WHAT IT ASSERTS
 6. AND IT SERVES. Since T011 removed `serve.py`'s two import-time reaches,
    `opendox.serve` imports in a lone checkout, so section 6 drives
    `build_server` itself. A contributed route is served against the live
-   handler, and each refusal is raised before the snapshot source is
-   bootstrapped.
+   handler. A contribution that cannot be composed is refused beside the
+   bindings, BEFORE the snapshot source is bootstrapped. A binding that no
+   class answers is refused at the END of the build, by `resolve_handlers`.
+   That refusal checks the class that will dispatch the route, and the build
+   composes that class last, from values its own work computes.
 
 `--noconftest` SAFE. Sections 1 to 5 import neither `opendox.serve` nor
 `opendox.cli`; section 6 imports `opendox.serve` inside its fixture.
@@ -1165,13 +1168,20 @@ def test_a_caller_extensions_own_mixin_is_served(standalone):
 
 def test_build_server_refuses_a_binding_no_class_answers(standalone):
     """Without the mixin, the lane binding names a method no class has, and the
-    server refuses to start. That is `resolve_handlers`' refusal, reached."""
+    server refuses to start. That is `resolve_handlers`' refusal, reached.
+
+    It is the one refusal raised AFTER the snapshot source is bootstrapped, as
+    the last assertion pins. `resolve_handlers` checks the class that will
+    dispatch the route, and `build_server` composes that class last, because
+    its namespace carries values the build computes. A check against an
+    earlier class would be a check against a class that never dispatches."""
 
     class _Undeclared(_HostProfile):
         HANDLER_CONTRIBUTIONS = ()
 
     with pytest.raises(RouteBindingError, match="_serve_lane_probe"):
         standalone(_Undeclared())
+    assert standalone.source.bootstrapped is True
 
 
 def test_build_server_refuses_a_shadowing_contribution_before_its_work(
