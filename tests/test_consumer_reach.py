@@ -47,6 +47,7 @@ and is named to the arrival verifier as
 from __future__ import annotations
 
 import ast
+import importlib.metadata
 import json
 import re
 import subprocess
@@ -65,6 +66,9 @@ CONSUMER_PACKAGE = "openxdox"
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 PACKAGE = SRC / "opendox"
+
+sys.path.insert(0, str(ROOT / "tests"))
+from import_scan import imported_modules  # noqa: E402
 
 #: Blocks `openxdox` at the finder, whatever the environment has installed, so
 #: the proof holds on a developer machine with openXdox-code on the path and in
@@ -204,7 +208,9 @@ _BLOCK_SIBLINGS = "import sys\n" + "".join(
 #: the one failure the record's derivation lets pass, and only inside
 #: `opendox.runtime`, only while the package really is absent.
 #: `test_the_runtime_extra_is_the_one_pyproject_declares` holds the keys to
-#: pyproject's own list.
+#: pyproject's own list. `test_the_runtime_extras_modules_are_the_runtimes_own`
+#: holds the modules to what `opendox.runtime` imports, and, where the extra
+#: is installed, to the installed metadata.
 RUNTIME_EXTRA: dict[str, tuple[str, ...]] = {
     "fastapi": ("fastapi", "pydantic"),
     "uvicorn": ("uvicorn",),
@@ -420,6 +426,73 @@ def test_the_runtime_extra_is_the_one_pyproject_declares() -> None:
         f"pyproject's runtime extra lists {sorted(declared)}, and this file's "
         f"RUNTIME_EXTRA lists {sorted(tabled)}. Give each distribution of the "
         "extra its row, with the modules it puts on the path")
+
+
+def _third_party_imports(directory: Path) -> set[str]:
+    """The top-level packages the modules under `directory` import, other than
+    the standard library's and openDox's own, read with the shared scanner."""
+    names = {name.split(".")[0] for path in directory.rglob("*.py")
+             for name, _line in imported_modules(path)}
+    return names - set(sys.stdlib_module_names) - {"opendox"}
+
+
+def _requirement_tree(distribution: str) -> set[str]:
+    """`distribution` and every distribution its requirements name, however
+    deep, among those installed here (PEP 503 names)."""
+    seen: set[str] = set()
+    queue = [distribution]
+    while queue:
+        name = _distribution(queue.pop())
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            queue += importlib.metadata.requires(name) or []
+        except importlib.metadata.PackageNotFoundError:
+            pass
+    return seen
+
+
+def test_the_runtime_extras_modules_are_the_runtimes_own() -> None:
+    """The modules `RUNTIME_EXTRA` exempts are exactly what `opendox.runtime`
+    needs from the extra.
+
+    1. Each is imported by a module of `opendox.runtime`, so an invented entry
+       exempts nothing.
+    2. Every third-party package `opendox.runtime` imports is tabled, or comes
+       from one of the package's REQUIRED dependencies, so an undeclared
+       dependency cannot hide behind the exemption either.
+    3. Where a tabled distribution is installed, each of its modules is
+       installed by it or by a distribution it requires, as its metadata says.
+       Under `.[test]` alone none is installed, and 1 and 2 hold the table.
+    """
+    imported = _third_party_imports(PACKAGE / "runtime")
+    tabled = {name for names in RUNTIME_EXTRA.values() for name in names}
+    provided = importlib.metadata.packages_distributions()
+    required = {_distribution(requirement)
+                for requirement in importlib.metadata.requires("opendox") or []
+                if "extra ==" not in requirement}
+    from_requirements = {name for name, sources in provided.items()
+                         if any(_distribution(s) in required for s in sources)}
+    assert tabled <= imported, (
+        f"RUNTIME_EXTRA exempts {sorted(tabled - imported)}, which no module "
+        f"of {RUNTIME_PACKAGE} imports")
+    assert imported <= tabled | from_requirements, (
+        f"{RUNTIME_PACKAGE} imports {sorted(imported - tabled - from_requirements)}, "
+        "which neither the runtime extra nor the package's own requirements "
+        "provide. Declare it, and give it its row")
+    for distribution, names in RUNTIME_EXTRA.items():
+        try:
+            importlib.metadata.distribution(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        tree = _requirement_tree(distribution)
+        for name in names:
+            sources = {_distribution(s) for s in provided.get(name, [])}
+            assert sources & tree, (
+                f"{name!r} is tabled under {distribution}, and here it is "
+                f"installed by {sorted(sources)}, which is neither "
+                f"{distribution} nor anything it requires")
 
 
 # --------------------------------------------------------------------------
