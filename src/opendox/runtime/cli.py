@@ -13,18 +13,22 @@ ways, so the decision is written down rather than implied.
     project cluster in the openDox column … so these verbs are registered by
     `build_parser` directly". By that rule the runtime verbs belong in
     `opendox.cli.build_parser`.
-  * And they cannot go there in THIS act, for two measured reasons.
-    `src/opendox/cli.py` is a CARVED file with a row in openxFactory's
-    `docs/opendox-carve-manifest.yaml`, so a line added to it is a DECLARED
-    EDIT that has to land as a row annotation at openxFactory first — a
-    different act with a different claim. And `opendox.cli` cannot be imported
-    at this leg at all: it reaches `opendox.serve`, whose line 192
-    (`from ideation_dashboard import serve_openxfactory_lanes`) exists at
-    neither carve destination — `tests/test_consumer_reach.py`'s
-    `STILL_REACHING` records exactly that, and RULED Q-L5 (b′) says the
-    remaining narrowing lifts with the BUILD arc. A lifecycle CLI that could
-    only be invoked once an unrelated import was repaired would be a runtime
-    nobody could operate.
+  * And they could not go there in THAT act, for two measured reasons, and
+    NEITHER holds any longer (RULED R1Q22 (a), openxFactory#656 comment
+    `5817152735`; plan 034 T011). `src/opendox/cli.py` is a CARVED file with a
+    row in openxFactory's `docs/opendox-carve-manifest.yaml`; at the time, a
+    line added to it needed a DECLARED EDIT landed as a row annotation at
+    openxFactory first, and R1Q22 (a) has since settled that no per-slice
+    declared-edit act precedes an arc edit to a carved file. And `opendox.cli`
+    could not be imported at this leg at all: it reached `opendox.serve`,
+    whose line 192 (`from ideation_dashboard import serve_openxfactory_lanes`)
+    existed at neither carve destination — `tests/test_consumer_reach.py`'s
+    `STILL_REACHING` recorded exactly that, and RULED Q-L5 (b′) said the
+    remaining narrowing would lift with the BUILD arc. Plan 034 T011 was that
+    act: the reach is gone, and `opendox.cli` imports standalone. A lifecycle
+    CLI that could only be invoked once an unrelated import was repaired would
+    have been a runtime nobody could operate, which is why this act shipped
+    both spellings rather than wait for that repair.
 
 SO THIS ACT SHIPS BOTH SPELLINGS AND NEITHER IS A FORK. :func:`build_parser`
 below builds the `runtime` command; `[project.scripts] opendox-runtime` runs it
@@ -37,11 +41,19 @@ point — `build_parser(subcommand_extensions=(RuntimeSubcommand(),))` — and n
 verb is re-authored. That is the seam used for what it is for, without
 pretending the runtime is a layer above.
 
-AND THAT IS THE RULED SHAPE, not this act's preference. RULED openxFactory#656 comment 5701772032 (Brett Heap, 2026-09-16, by interactive multi-choice)
-answers Q-R4: the verbs are wired into `opendox.cli` in the BUILD-arc act that
-repairs `opendox.serve`, and `opendox-runtime` is the spelling until then. So
-the seam above stays a seam and the console script stays the way a reader
-invokes the runtime today; neither is provisional and neither is a fork.
+AND THAT IS THE RULED SHAPE, not this act's preference. RULED openxFactory#656
+comment `5701772032` (Brett Heap, 2026-09-16, by interactive multi-choice)
+answered Q-R4: the verbs would be wired into `opendox.cli` once the BUILD arc
+repaired `opendox.serve`, and `opendox-runtime` would be the spelling until
+then. Plan 034 carried that out, though not by editing `opendox.cli` itself:
+`opendox.default_profile` (T015) puts `RuntimeSubcommand` in its own
+`SUBCOMMAND_EXTENSIONS`, `opendox.cli.build_parser()` and `main()` register
+that default wherever no host has registered its own (T016), and `opendox`
+(T038, the `[project.scripts]` entry in `pyproject.toml`) is the console
+script that reaches it. So the seam above stays a seam, and both spellings now
+start the runtime — `opendox runtime …` through the default profile, and
+`opendox-runtime` directly and unconditionally, exactly as it always has;
+neither is provisional and neither is a fork.
 
 EVERY VERB PRINTS MACHINE-READABLE, REDACTED EVIDENCE and exits nonzero on a
 refusal, which is the Hermes install's lifecycle contract ("Each verb prints
