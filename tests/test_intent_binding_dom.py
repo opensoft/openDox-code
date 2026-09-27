@@ -42,21 +42,23 @@ actually loading the module graph and, where useful, mounting and inspecting
 the resulting tree — so a passing test means the behaviour exists, not that the
 code looks right.
 
-IN `.github/workflows/validate.yml`'s explicit list SINCE SLICE S8, and that
-is a change from what this header said at S2. It was written narrowed out of
-the required check with its two siblings, `test_intent_tray_dom.py` and
-`test_wheel_verbs_dom.py`, under RULED Q-L5 (b′) — and NOT because every DOM
+IN `.github/workflows/validate.yml`'s explicit list FROM SLICE S8 until plan
+034 T036 ended the list, and that was a change from what this header said at
+S2. Since T036 the required check runs the whole suite, this file included.
+It was written narrowed out of the required check with its two siblings,
+`test_intent_tray_dom.py` and `test_wheel_verbs_dom.py`, under RULED Q-L5
+(b′) — and NOT because every DOM
 probe of `web/` was narrowed out, a broader claim this header used to make and
 which is false: `test_view_registry.py`, `test_split_route_tails.py` and
 `test_gate_loop_contributed.py` were already ON the allow-list and all three
 drive real `web/` modules under node behind a DOM stand-in of their own
 (Copilot review of openDox-code#24, which caught the broad claim being
 reintroduced here after the workflow's own comment had withdrawn it). What was
-narrowed out was these three files, for the reason S2 gave: the list is an
+narrowed out was these three files, for the reason S2 gave: the list was an
 allow-list admitted file by file. S2 said *"un-narrowing that class of test is
-slice S8's job, not S2's."* **S8 has
-done that job for this file** (Copilot review of openDox-code#23): it is named
-in the workflow's list and the required check runs it.
+slice S8's job, not S2's."* **S8 did that job for this file** (Copilot
+review of openDox-code#23): it was named in the workflow's list, and the
+required check ran it.
 
 **THE TWO SIBLINGS ARE NOT OMITTED ANY MORE, THEY ARE RETIRED**, and the
 deletion is in this commit. RULED `openxFactory#656` comment 5656343213 (Brett
@@ -92,8 +94,8 @@ import pytest
 # fixed**: `tests/conftest.py` reads `HERE.parent` today (openDox-code#19,
 # `3954d78`, the RULED Q-L7 (a) `:25` depth fix the carve manifest declares),
 # so `conftest.REPO_ROOT` is this repository. The local computation stays
-# anyway, because this file runs under `--noconftest` in the required check
-# and must not depend on a conftest being imported at all;
+# anyway: this file ran under `--noconftest` in the required check until
+# plan 034 T036, and it still must not depend on a conftest being imported;
 # `tests/test_leg_shape.py`'s own `Path(__file__).resolve().parents[1]` is
 # that same self-contained pattern.
 ROOT = Path(__file__).resolve().parents[1]

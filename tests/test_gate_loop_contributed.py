@@ -27,7 +27,8 @@ dispose tray, no session verbs, no 404. Each is proven against the real bundle
 every gate binding id, no gate route literal anywhere to be requested, and the
 shell's own null columns making each affordance unoffered.
 
-`--noconftest` SAFE, like its seven neighbours on `validate`'s explicit list: it
+`--noconftest` SAFE, like its seven neighbours on the explicit list `validate`
+ran until plan 034 T036: it
 imports `opendox.view_extension` alone, reads bundle files as text, and drives
 the real `views/view_extension.js` under the `node` the runner already has
 (skipped, never failed, where node is absent).

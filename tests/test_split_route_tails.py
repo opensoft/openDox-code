@@ -40,7 +40,8 @@ files -- that the three new modules still DO what the code that moved out of
 `lens.js` and `repo-selector.js` did. A move that passed the census and broke
 the verb would be the worst possible outcome of this slice.
 
-`--noconftest` SAFE, like its five neighbours on `validate`'s explicit list: it
+`--noconftest` SAFE, like its five neighbours on the explicit list `validate`
+ran until plan 034 T036: it
 reads bundle files as text and drives the real ones under the `node` the runner
 already has (skipped, never failed, where node is absent). It imports no
 `opendox` submodule and needs no installed consumer. The bundle's own
