@@ -19,25 +19,32 @@ T020 (this task) adds the two cases below. T021 adds
 an entry point registers openDox's own default where no host has. Each lands
 in its own PR.
 
-T020's and T021's own cases need neither `opendox.serve` nor `opendox.cli`:
-both still raise `ModuleNotFoundError: No module named 'ideation_dashboard'`
-until T011 lands (measured at `1e4a57fb`), and any run with the root conftest
-in play fails on the autouse `declared_human_console` fixture, which imports
-`opendox.cli` (`tests/session_fixtures.py:397`). Those cases are
-`--noconftest` safe for exactly that reason, and each PR that adds one quotes
-such a run.
+T020's and T021's own cases needed neither `opendox.serve` nor `opendox.cli`
+WHEN THEY WERE WRITTEN: both raised `ModuleNotFoundError: No module named
+'ideation_dashboard'` before T011 landed (measured at `1e4a57fb`), and any
+run with the root conftest in play failed on the autouse
+`declared_human_console` fixture, which imports `opendox.cli`
+(`tests/session_fixtures.py:397`). Those cases were `--noconftest` safe for
+exactly that reason. **THIS IS HISTORY, NOT CURRENT COVERAGE** (Copilot
+review of openDox-code#45, "Update outdated T011 coverage note"): T011 has
+since landed (`#46` -> `0e88454a`), `opendox.cli`/`opendox.serve` import
+cleanly, and every case in this file -- this one included -- now runs under
+the plain root conftest; `--noconftest` is no longer required for any of
+them, only still harmless where a case never depended on it either way.
 
-**T022's named test is DIFFERENT, and this correction says so plainly rather
-than silently contradicting the paragraph above.** Proving *"an entry point
-registers…"* means calling the entry point -- `cli.build_parser()` --
-which is exactly the thing that does not import today. So that one case
-`pytest.importorskip`s `opendox.cli`: it SKIPS here and under `--noconftest`
-alike until T011 lands, and runs for real once it has (no flag needed by
-then, since `cli.build_parser()` no longer refuses on import). T022's own PR
-verifies it today under the Group 2 simulation shim (research.md's Appendix;
-never committed), which stands in for `ideation_dashboard` exactly as T005's
-and T006's measurements did, and quotes that run plainly as what it is: a
-measurement ahead of T011, not the required check.
+**T022's named test was DIFFERENT WHILE T011 WAS STILL OPEN, and this
+correction said so plainly rather than silently contradicting the
+paragraph above.** Proving *"an entry point registers…"* means calling the
+entry point -- `cli.build_parser()` -- which did not import before T011
+landed. So that one case `pytest.importorskip`s `opendox.cli`, which SKIPPED
+here and under `--noconftest` alike before T011 landed. T022's own PR
+verified it, ahead of T011, under the Group 2 simulation shim (research.md's
+Appendix; never committed), which stood in for `ideation_dashboard` exactly
+as T005's and T006's measurements did. T011 has SINCE landed (`#46` ->
+`0e88454a`): `cli.build_parser()` no longer refuses on import, this case now
+runs for real like every other one in this file, and the `importorskip`
+above is retained only as a harmless guard against some future, narrower
+invocation of this file alone -- not because it is expected to trigger.
 
 A CREATED file: no carve-manifest row (RULED OQ-C -- the manifest declares
 what LEAVES openxFactory, never what a destination assembles).
