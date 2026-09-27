@@ -102,7 +102,13 @@ CONSUMER = "openxdox"
 #: never install one, so no reach of any kind may name them.
 OPENXFACTORY = ("ideation_dashboard", "doc_health", "corpus_adapter_openxfactory")
 
-SIBLINGS = (CONSUMER, *OPENXFACTORY)
+#: Both spellings of each, for the reason `tests/import_scan.py`'s header
+#: gives: in openxFactory, `scripts/__init__.py` makes every package under
+#: `scripts/` importable as `scripts.<name>` too, and a one-spelling
+#: forbidden list is a hole (`tests/test_subcommand_extension.py` holds both).
+OPENXFACTORY_SPELLINGS = (*OPENXFACTORY, *(f"scripts.{name}" for name in OPENXFACTORY))
+
+SIBLINGS = (CONSUMER, *OPENXFACTORY_SPELLINGS)
 
 
 @dataclass(frozen=True, order=True)
@@ -206,7 +212,8 @@ def test_no_module_under_src_reaches_openxfactory_at_all():
     runs, a package it can never install. Route it through a seam the product
     declares, as 4.2 does, and do not add it here."""
     into = [str(r) for r in _sweep_src()
-            if r.target in OPENXFACTORY or r.name == UNREADABLE]
+            if names_a_forbidden_package(r.name, OPENXFACTORY_SPELLINGS)
+            or r.name == UNREADABLE]
     assert not into, (
         f"{len(into)} reach(es) into openxFactory, which openDox can never "
         "install (#1144 task 4.3's phase-1 cut), or importing calls whose "
@@ -314,6 +321,10 @@ def test_the_scanner_classifies_every_position_it_reads():
 #: relative `import_module` names the module its literal `package` resolves it
 #: to, by position or by keyword. Relative to `__package__`, it names none;
 #: relative to any other package that is not a literal, it is `UNREADABLE`.
+#: `__import__` reads its relative context off its `globals`: `globals()` is
+#: the module's own, a literal `{"__package__": ...}` resolves, and anything
+#: else, or a level that is not a literal, is `UNREADABLE`. The pre-carve
+#: `scripts.` spelling is openxFactory's too.
 #: Arguments spelled out with a literal `*[...]` or `**{...}`, however deep,
 #: count where they land. A spread that hides the name, or the package a
 #: relative name needs, makes the call `UNREADABLE`, which the sweep refuses.
@@ -346,6 +357,11 @@ _LAZY_SPECIMEN = textwrap.dedent('''
     KEYED = importlib.import_module(**{"name": "safe", KEY: "doc_health"})
     NESTED_OVER = importlib.import_module(**{"name": "safe", **{**OPTIONS}})
     BOUND = importlib.import_module(".corpus", package=PKG)
+    import scripts.doc_health.corpus
+    OWN = __import__("corpus", globals(), None, (), 1)
+    DECLARED = __import__("corpus", {"__package__": "doc_health"}, None, (), 1)
+    CONTEXT = __import__("corpus", CONTEXT, None, (), 1)
+    LEVELLED = __import__("corpus", globals(), None, (), LEVEL)
 ''')
 
 
@@ -371,6 +387,10 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (25, UNREADABLE, False, "<module>"),
         (26, UNREADABLE, False, "<module>"),
         (27, UNREADABLE, False, "<module>"),
+        (28, "scripts.doc_health.corpus", False, "<module>"),
+        (30, "doc_health.corpus", False, "<module>"),
+        (31, UNREADABLE, False, "<module>"),
+        (32, UNREADABLE, False, "<module>"),
     }, sorted(found)
 
 
@@ -473,7 +493,11 @@ def test_an_importing_call_it_cannot_read_is_refused(monkeypatch, tmp_path):
     "exec('import ideation_dashboard')\n",
     "SPEC = b'corpus_adapter_openxfactory.home'\n",
     "ROOT = 'scripts.doc_health'\n",
-], ids=["a constant", "exec", "bytes", "the pre-carve spelling"])
+    "from importlib import import_module as load; "
+    "globals()['lo' + 'ad']('doc_health')\n",
+    "__import__('corpus', {'__package__': 'doc_health'}, None, (), 1)\n",
+], ids=["a constant", "exec", "bytes", "the pre-carve spelling",
+        "a lookup key built from pieces", "a globals mapping"])
 def test_the_spelling_check_fails_on_a_name_in_a_literal(source, monkeypatch, tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "spelling.py").write_text(
@@ -485,18 +509,20 @@ def test_the_spelling_check_fails_on_a_name_in_a_literal(source, monkeypatch, tm
         test_no_code_under_src_spells_an_openxfactory_package()
 
 
+@pytest.mark.parametrize("reach", ["doc_health", "scripts.doc_health.corpus"])
 @pytest.mark.parametrize("test", [
     test_no_module_under_src_reaches_a_sibling_at_import_time,
     test_no_module_under_src_reaches_openxfactory_at_all,
     test_every_reach_the_sweep_finds_is_deferred_into_the_consumer,
 ], ids=lambda t: t.__name__)
-def test_each_assertion_fails_on_the_reach_it_forbids(test, monkeypatch, tmp_path):
+def test_each_assertion_fails_on_the_reach_it_forbids(test, reach, monkeypatch,
+                                                      tmp_path):
     """Each sweep assertion, run over a `src/` that holds one reach it
-    forbids, fails. So a green run of it is a finding about the tree, and not
-    a scan that reads nothing."""
+    forbids, fails, in either spelling of the package. So a green run of it
+    is a finding about the tree, and not a scan that reads nothing."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "reaching.py").write_text(
-        "import doc_health\n", encoding="utf-8")
+        f"import {reach}\n", encoding="utf-8")
     this_module = sys.modules[__name__]
     monkeypatch.setattr(this_module, "SRC", tmp_path / "src")
     monkeypatch.setattr(this_module, "ROOT", tmp_path)

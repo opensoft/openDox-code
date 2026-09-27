@@ -120,6 +120,42 @@ def _arguments(call):
     return positional, keywords, complete
 
 
+def _own_namespace(context):
+    """Whether an `__import__` call's `globals` is the calling module's own:
+    absent, `None`, or `globals()`."""
+    return context is None or (isinstance(context, ast.Constant) and context.value is None) \
+        or (isinstance(context, ast.Call) and isinstance(context.func, ast.Name)
+            and context.func.id == "globals" and not context.args and not context.keywords)
+
+
+def _dunder_import(name, args, keywords, complete):
+    """What `__import__(name, globals, locals, fromlist, level)` names.
+
+    A zero `level`, or none, is absolute. A nonzero one is relative to the
+    package its `globals` declares: its own module's for `globals()`, which
+    names nothing here, or a literal `{"__package__": ...}`'s, which is
+    resolved. Any other `globals`, or a `level` that is not a literal, could
+    be relative to a sibling, so the call names `UNREADABLE`."""
+    level = args[4] if len(args) > 4 else keywords.get("level")
+    context = args[1] if len(args) > 1 else keywords.get("globals")
+    if (level is None or context is None) and not complete:
+        return [UNREADABLE]
+    if level is None or (isinstance(level, ast.Constant) and level.value == 0):
+        return [name]
+    if not (isinstance(level, ast.Constant) and isinstance(level.value, int)):
+        return [UNREADABLE]
+    if _own_namespace(context):
+        return []
+    declared = _literal_keywords(context)[0].get("__package__") \
+        if isinstance(context, ast.Dict) else None
+    if not (isinstance(declared, ast.Constant) and isinstance(declared.value, str)):
+        return [UNREADABLE]
+    try:
+        return [importlib.util.resolve_name("." * level.value + name, declared.value)]
+    except ImportError:
+        return []
+
+
 def importing_calls(tree):
     """`IMPORTING_CALLS`, and each name an import gives one of them:
     `from importlib import import_module as load`, or `from builtins import
@@ -188,9 +224,9 @@ def names_imported_by(node, *, calls=None, any_call=False):
     `import_module(".corpus", package="doc_health")` names
     `doc_health.corpus`. Relative to the calling module's own package
     (`package=__package__`), or with no package at all, it names nothing
-    here, and neither does `__import__` with a nonzero literal `level`, whose
-    second argument is `globals`. Any other package that is not a literal
-    could be a sibling, so the call names `UNREADABLE`. A name computed at run
+    here. Any other package that is not a literal could be a sibling, so the
+    call names `UNREADABLE`. `__import__` reads its relative context off its
+    `globals` instead (`_dunder_import`). A name computed at run
     time cannot be read off the source.
     """
     if isinstance(node, ast.Import):
@@ -209,10 +245,7 @@ def names_imported_by(node, *, calls=None, any_call=False):
     if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
         return []
     if called == "__import__":
-        level = args[4] if len(args) > 4 else keywords.get("level")
-        if isinstance(level, ast.Constant) and level.value:
-            return []
-        return [name.value]
+        return _dunder_import(name.value, args, keywords, complete)
     if not name.value.startswith("."):
         return [name.value]
     package = args[1] if len(args) > 1 else keywords.get("package")
