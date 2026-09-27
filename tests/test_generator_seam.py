@@ -20,9 +20,10 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE
 2. NOTHING REGISTERED REFUSES, NAMING THE SEAM AND THE CALL (4.2's
    discipline). It never falls back to openDox's own generator.
 3. THE DECLARATION IS CHECKED WHEN IT IS MADE. A contract that is not a name,
-   an operation that is not callable or cannot take the seam's call, and an
-   input that is not a name beyond the operation's own four are refused before
-   anything is registered.
+   an operation that is not callable or cannot take the seam's call (with its
+   declared inputs given, or with none of them given), and an input that is not
+   a name beyond the operation's own four are refused before anything is
+   registered.
 4. THE OPERATION IS HANDED OVER AND ITS ANSWER CHECKED. The registered
    generator receives the four arguments and its declared inputs. An
    undeclared input is refused before the call. A `None` input is not passed.
@@ -32,8 +33,10 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE
 6. THE ENTRY POINTS' DEFAULT, in R1Q3 (a)'s pattern. openDox's own generator
    writes the neutral kind and takes no input. `register_default()` registers
    it only where nothing is, and holds it to the neutral contract. A host
-   replaces it before a generation, and is refused after one. Until T054 lands,
-   the default refuses, naming itself.
+   replaces it before a generation, and after one that wrote nothing. A host is
+   refused while a generation runs, and after one that wrote a snapshot. A
+   generator may register or generate from inside its own call without
+   deadlocking the seam. Until T054 lands, the default refuses, naming itself.
 7. EACH ENTRY POINT REGISTERS IT. `cli.build_parser()` and `cli.main()` run for
    real. `serve.build_server()` and `serve.main()` still cannot run in a lone
    checkout (research R7), so their registration is executed from their own
@@ -90,17 +93,19 @@ def _isolated_registries():
     The three registries an entry point writes are process-global by design:
     the generator seam, the profile and the home corpus. Each is saved whole,
     because each keeps more than its registration (whether it is the entry
-    point's default, and whether anything was generated or built from it), and
-    a restore through `register()` would hand an entry point's default back as
-    a host's.
+    point's default, and whether anything was generated or built from it, or
+    is being generated), and a restore through `register()` would hand an entry
+    point's default back as a host's.
     """
-    seam = (gs._registered, gs._is_default, gs._generated_from_default)
+    seam = (gs._registered, gs._is_default, gs._generated_from_default,
+            gs._default_generations_under_way)
     profile = (domain_profile._registered, domain_profile._is_default,
                domain_profile._built_from_default)
     home = corpus_adapter._home_factory
     gs.unregister()
     yield
-    (gs._registered, gs._is_default, gs._generated_from_default) = seam
+    (gs._registered, gs._is_default, gs._generated_from_default,
+     gs._default_generations_under_way) = seam
     (domain_profile._registered, domain_profile._is_default,
      domain_profile._built_from_default) = profile
     corpus_adapter._home_factory = home
@@ -130,11 +135,12 @@ def _declared(contract: str = "stand-in-snapshot", *, inputs: tuple = (),
 def _fresh_process(program: str) -> subprocess.CompletedProcess:
     """`program` in a fresh interpreter, with this checkout's `src` first. The
     registry is process-global, so a case about what a PROCESS meets runs in
-    one of its own."""
+    one of its own. So does a case that could deadlock the seam's lock: the
+    time limit then fails it, where in this process it would hang the suite."""
     return subprocess.run(
         [sys.executable, "-c", f"import sys; sys.path.insert(0, {str(SRC)!r})\n"
          + textwrap.dedent(program)],
-        capture_output=True, text=True, cwd=str(ROOT))
+        capture_output=True, text=True, cwd=str(ROOT), timeout=120)
 
 
 # --------------------------------------------------------------------------
@@ -281,23 +287,66 @@ def test_an_operation_that_cannot_take_the_seams_call_is_refused() -> None:
                              inputs=("project_register_source",))
 
 
-def test_a_governed_generators_shape_is_declarable() -> None:
+def test_a_declared_input_the_operation_cannot_do_without_is_refused() -> None:
+    """Conformance clause 2: each declared input is optional. The seam passes a
+    declared input only when its caller has a value for it. So an operation
+    that REQUIRES one would take the call while the option is set, and fail
+    with a raw `TypeError` the first time it is not. Such an operation is
+    refused when it is declared, whether it requires the input by keyword or by
+    position."""
+    def requires_it_by_keyword(repo_root, repository, *, project_register_source,
+                               source_revision=None, generated_at=None):
+        return {}
+
+    def requires_it_by_position(repo_root, repository, project_register_source,
+                                *, source_revision=None, generated_at=None):
+        return {}
+
+    for operation in (requires_it_by_keyword, requires_it_by_position):
+        with pytest.raises(TypeError) as caught:
+            gs.SnapshotGenerator(contract="stand-in-snapshot", generate=operation,
+                                 inputs=("project_register_source",))
+        message = str(caught.value)
+        for expected in ("with none of its declared inputs given",
+                         "project_register_source", "optional"):
+            assert expected in message, (
+                f"{operation.__name__}: the refusal no longer says {expected!r}")
+
+    def takes_it_optionally(repo_root, repository, project_register_source=None,
+                            *, source_revision=None, generated_at=None):
+        return {}
+
+    gs.SnapshotGenerator(contract="stand-in-snapshot", generate=takes_it_optionally,
+                         inputs=("project_register_source",))
+
+
+def test_a_governed_generators_shape_is_declarable(tmp_path) -> None:
     """A consumer's generator keeps its own signature and declares its extras.
 
     This is the call shape of openXdox's `generator.generate_snapshot`, as T059
     will declare it, restated here because openDox may not import it. Its
     keyword-only test hooks stay undeclared, and so the seam never passes them.
+    It generates with its declared inputs unset and with one of them set.
     """
     def generate_snapshot(repo_root, repository, *, source_revision=None,
                           generated_at=None, git=None, generator_version="v",
                           project_register_source=None, possibles_source=None,
                           excluded_documents=None):
-        return {}
+        return {"schema_version": 1, "kind": "governed-stand-in",
+                "register": project_register_source,
+                "possibles": possibles_source, "git": git}
 
     declared = gs.SnapshotGenerator(
         contract="governed-stand-in", generate=generate_snapshot,
         inputs=("project_register_source", "possibles_source"))
     assert declared.inputs == ("project_register_source", "possibles_source")
+    gs.register(declared)
+    unset = gs.generate(tmp_path, "fixture", project_register_source=None,
+                        possibles_source=None)
+    assert (unset["register"], unset["possibles"], unset["git"]) == (None, None, None)
+    one_set = gs.generate(tmp_path, "fixture",
+                          project_register_source=Path("register.yaml"))
+    assert (one_set["register"], one_set["possibles"]) == (Path("register.yaml"), None)
 
 
 @pytest.mark.parametrize("candidate", (None, "a generator", default_generator.generate))
@@ -502,6 +551,174 @@ def test_unregister_clears_the_default_and_its_generation(tmp_path) -> None:
     assert gs.register(host) is host
 
 
+@pytest.mark.parametrize("failure", ("raises", "answers another kind"))
+def test_a_generation_from_the_default_that_wrote_nothing_is_not_a_generation(
+        failure: str, tmp_path) -> None:
+    """A generation that fails, or whose answer the seam refuses, wrote no
+    snapshot, so it leaves the default's window open. A host still replaces the
+    default after it, and nothing is left counted as under way."""
+    if failure == "raises":
+        def operation(repo_root, repository, *, source_revision=None,
+                      generated_at=None):
+            raise OSError("the checkout is not there")
+
+        stand_in_default = gs.SnapshotGenerator(
+            contract=gs.NEUTRAL_SNAPSHOT_KIND, generate=operation)
+        expected = OSError
+    else:
+        stand_in_default, _ = _declared(
+            gs.NEUTRAL_SNAPSHOT_KIND,
+            answer={"schema_version": 1, "kind": "another-snapshot"})
+        expected = gs.GeneratorNotConformant
+    gs.register_default(stand_in_default)
+    with pytest.raises(expected):
+        gs.generate(tmp_path, "fixture")
+    assert gs._default_generations_under_way == 0
+    host, _ = _declared("host-snapshot")
+    assert gs.register(host) is host
+
+
+#: A program for a fresh process. A generation from the default runs on a
+#: thread of its own, as a request does in `serve.py`'s `ThreadingHTTPServer`.
+#: A host's registration is tried while it runs and again once it has ended.
+#: `OUTCOME` is how the generation ends.
+_UNDER_WAY = """
+    import threading
+    from opendox import generator_seam as gs
+    OUTCOME = OUTCOME_VALUE
+    started, release = threading.Event(), threading.Event()
+
+    def operation(repo_root, repository, *, source_revision=None, generated_at=None):
+        started.set()
+        release.wait(30)
+        if OUTCOME == "raises":
+            raise RuntimeError("the checkout went away mid-generation")
+        kind = gs.NEUTRAL_SNAPSHOT_KIND if OUTCOME == "answers" else "another-snapshot"
+        return {"schema_version": 1, "kind": kind}
+
+    def host_operation(repo_root, repository, *, source_revision=None, generated_at=None):
+        return {"schema_version": 1, "kind": "host-snapshot"}
+
+    host = gs.SnapshotGenerator(contract="host-snapshot", generate=host_operation)
+    gs.register_default(gs.SnapshotGenerator(contract=gs.NEUTRAL_SNAPSHOT_KIND,
+                                             generate=operation))
+    ended = []
+
+    def request():
+        try:
+            gs.generate(".", "fixture")
+            ended.append("answered")
+        except Exception as exc:
+            ended.append(type(exc).__name__)
+
+    def try_the_host():
+        try:
+            gs.register(host)
+            return "registered"
+        except gs.GeneratorAlreadyRegistered as exc:
+            if "a snapshot is being generated from it now" in str(exc):
+                return "refused-under-way"
+            if "a snapshot has already been generated from it" in str(exc):
+                return "refused-generated"
+            return "refused-otherwise"
+
+    worker = threading.Thread(target=request)
+    worker.start()
+    assert started.wait(30), "the generation never started"
+    during = try_the_host()
+    release.set()
+    worker.join(30)
+    assert not worker.is_alive(), "the generation never ended"
+    assert gs._default_generations_under_way == 0, gs._default_generations_under_way
+    print(during, ended[0], try_the_host())
+"""
+
+
+@pytest.mark.parametrize("outcome,ends,host_after", (
+    ("answers", "answered", "refused-generated"),
+    ("raises", "RuntimeError", "registered"),
+    ("answers another kind", "GeneratorNotConformant", "registered")))
+def test_a_host_is_refused_while_a_generation_from_the_default_is_under_way(
+        outcome: str, ends: str, host_after: str) -> None:
+    """While a snapshot is being generated from the default, a host's
+    registration is refused, because that snapshot would come back after the
+    swap. Whether the window stays shut afterwards depends on whether the
+    generation WROTE a snapshot. A conformant answer shuts it for good. A
+    failure, or an answer the seam refuses, reopens it. The case runs in a
+    process of its own (see `_fresh_process`)."""
+    done = _fresh_process(_UNDER_WAY.replace("OUTCOME_VALUE", repr(outcome)))
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ["refused-under-way", ends, host_after]
+
+
+def test_a_generator_may_register_or_generate_from_inside_its_own_call() -> None:
+    """The seam's lock is held only for its bookkeeping, and never across a
+    generator's call. So a generator that registers, unregisters or generates
+    from inside its own call cannot deadlock the seam, and the seam's records
+    stay true. A default swapped out from inside its own call records nothing
+    against the default that replaced it. The case runs in a process of its own
+    (see `_fresh_process`)."""
+    done = _fresh_process("""
+        from opendox import generator_seam as gs
+        KIND = gs.NEUTRAL_SNAPSHOT_KIND
+        seen = []
+
+        def snapshot(repository):
+            return {"schema_version": 1, "kind": KIND, "repository": repository}
+
+        def host_operation(repo_root, repository, *, source_revision=None,
+                           generated_at=None):
+            return {"schema_version": 1, "kind": "host-snapshot"}
+
+        host = gs.SnapshotGenerator(contract="host-snapshot", generate=host_operation)
+
+        def nesting(repo_root, repository, *, source_revision=None, generated_at=None):
+            if repository == "outer":
+                try:
+                    gs.register(host)
+                    seen.append("host-registered-inside")
+                except gs.GeneratorAlreadyRegistered as exc:
+                    seen.append("refused-inside"
+                                if "is being generated from it now" in str(exc)
+                                else "refused-otherwise")
+                seen.append(gs.generate(repo_root, "inner")["repository"])
+            return snapshot(repository)
+
+        gs.register_default(gs.SnapshotGenerator(contract=KIND, generate=nesting))
+        seen.append(gs.generate(".", "outer")["repository"])
+        try:
+            gs.register(host)
+            seen.append("host-registered-after")
+        except gs.GeneratorAlreadyRegistered:
+            seen.append("refused-after")
+
+        def replacing(repo_root, repository, *, source_revision=None,
+                      generated_at=None):
+            return snapshot(repository)
+
+        replacement = gs.SnapshotGenerator(contract=KIND, generate=replacing)
+
+        def swapping(repo_root, repository, *, source_revision=None,
+                     generated_at=None):
+            gs.unregister()
+            gs.register_default(replacement)
+            return snapshot(repository)
+
+        gs.unregister()
+        gs.register_default(gs.SnapshotGenerator(contract=KIND, generate=swapping))
+        gs.generate(".", "swapped")
+        assert gs.current() is replacement
+        seen.append("host-registered-over-the-replacement"
+                    if gs.register(host) is host else "not-registered")
+        assert gs._default_generations_under_way == 0
+        print(" ".join(seen))
+    """)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ["refused-inside", "inner", "outer",
+                                   "refused-after",
+                                   "host-registered-over-the-replacement"]
+
+
 def test_a_host_that_registers_the_default_itself_holds_a_hosts_registration() -> None:
     """Which kind a registration is, is set by the call that MADE it."""
     gs.register(default_generator.GENERATOR)
@@ -516,7 +733,9 @@ def test_a_host_that_registers_the_default_itself_holds_a_hosts_registration() -
 def test_openDoxs_own_generator_refuses_until_its_projection_lands(tmp_path) -> None:
     """Plan 034 orders the seam (T052) before the projection (T054). So the
     default refuses, naming itself and T054, and generates nothing. It never
-    answers an empty snapshot. T054 replaces this case with its own tests."""
+    answers an empty snapshot. Because it wrote nothing, its refusal shuts no
+    host out: a host's generator still replaces it afterwards. T054 replaces
+    this case with its own tests."""
     with pytest.raises(default_generator.NeutralProjectionNotBuilt) as caught:
         default_generator.generate(tmp_path, "fixture")
     message = str(caught.value)
@@ -526,6 +745,10 @@ def test_openDoxs_own_generator_refuses_until_its_projection_lands(tmp_path) -> 
     gs.register_default(default_generator.GENERATOR)
     with pytest.raises(default_generator.NeutralProjectionNotBuilt):
         gs.generate(tmp_path, "fixture")
+    host, _ = _declared("host-snapshot")
+    assert gs.register(host) is host, (
+        "a refused generation from openDox's own generator wrote nothing, so "
+        "a host still replaces it")
 
 
 # --------------------------------------------------------------------------

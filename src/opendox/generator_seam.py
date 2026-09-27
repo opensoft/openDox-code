@@ -64,8 +64,11 @@ it, and `generate()` enforces it.
    contracts can never both claim to be the one conformant implementation,
    which is the failure 5.4 was raised against.
 2. Its operation TAKES THE SEAM'S CALL: the four arguments, and every input it
-   declares. This is checked when the declaration is made, wherever the
-   callable's signature can be read.
+   declares, EACH ONE OPTIONAL, because the seam passes a declared input only
+   when its caller has a value for it. This is checked when the declaration is
+   made, wherever the callable's signature can be read. The call is bound once
+   with every declared input given and once with none given, and between them
+   the two binds cover every call the seam can make.
 3. It DECLARES EVERY FURTHER INPUT it reads. An input that it does not declare
    is refused before the generator is called, and never dropped.
 4. It ANSWERS A SNAPSHOT OF ITS DECLARED CONTRACT: a `dict` whose `kind` is
@@ -96,12 +99,23 @@ the profile:
   is refused as `GeneratorAlreadyRegistered`. One process would otherwise
   write two contracts, and a reader could not tell which snapshot was which.
   This is the same reason `domain_profile` refuses a swap after a build
-  (R1Q3 (ii); RN-1 (a), comment `5850003126`).
+  (R1Q3 (ii); RN-1 (a), comment `5850003126`);
+* WHILE a snapshot is being generated from the default, a host's registration
+  is refused too, because that snapshot would come back after the swap;
+* a generation that fails, or whose answer the seam refuses, wrote nothing,
+  so it records nothing, and a host still replaces the default after it.
 
 ONE REGISTRATION. Registering the same declaration again is a no-op, so an
 idempotent host start is not punished. A different declaration over a host's
 is refused as `GeneratorAlreadyRegistered`. `unregister()` makes a deliberate
 swap explicit.
+
+ONE LOCK. The registration and its records are kept under one lock. `serve.py`
+answers each request on a thread of its own (a `ThreadingHTTPServer`), so a
+generation can run beside a registration. `generate()` holds the lock only for
+its bookkeeping, and never across the generator's own call. So a slow
+generator holds up nobody else, and a generator that itself registers or
+generates cannot deadlock the seam.
 
 RESOLVE PER CALL. A caller generates through `generate()`, and does not hold
 `current()`'s answer across calls. So every caller in a process answers from
@@ -119,6 +133,7 @@ from __future__ import annotations
 
 import inspect
 import keyword
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -190,7 +205,8 @@ class GeneratorAlreadyRegistered(GeneratorSeamError):
     ONE registration is the contract, as it is for the profile. A process whose
     snapshots came from two generators would write two contracts under one
     name. The entry point's default is replaceable only until a snapshot has
-    been generated from it. `unregister()` makes a deliberate swap explicit."""
+    been generated from it, and not while one is being generated.
+    `unregister()` makes a deliberate swap explicit."""
 
 
 class GeneratorInputRefused(GeneratorSeamError):
@@ -244,8 +260,8 @@ class SnapshotGenerator:
     that is not a non-empty string, an operation that is not callable, an input
     name that is not an identifier (or is a keyword, a duplicate, or one of the
     operation's own four), and an operation whose signature cannot take the
-    seam's call. Frozen, and compared by identity, as `register()` compares
-    registrations."""
+    seam's call, whether its declared inputs are given or not. Frozen, and
+    compared by identity, as `register()` compares registrations."""
 
     contract: str
     generate: Callable[..., dict]
@@ -291,17 +307,27 @@ class SnapshotGenerator:
             # The signature cannot be read (some builtins). The seam's call is
             # then checked when it is first made, and not here.
             return
-        try:
-            signature.bind(Path("."), "repository", source_revision=None,
-                           generated_at=None,
-                           **{name: None for name in self.inputs})
-        except TypeError as exc:
-            raise TypeError(
-                f"{_qualified(self.generate)} cannot take the generator seam's "
-                "call, generate(repo_root, repository, *, source_revision=, "
-                "generated_at=" + "".join(f", {name}=" for name in self.inputs)
-                + f"): {exc}. A contributed generator takes the operation's own "
-                "four arguments and every input it declares") from None
+        # `generate()` passes a declared input only when its caller has a value
+        # for it. So the call is bound with every declared input given, which
+        # proves that each is taken, and with none given, which proves that
+        # each is optional. Every call the seam can make lies between the two.
+        calls = [("", dict.fromkeys(self.inputs))]
+        if self.inputs:
+            calls.append((" with none of its declared inputs given", {}))
+        for when, given in calls:
+            try:
+                signature.bind(Path("."), "repository", source_revision=None,
+                               generated_at=None, **given)
+            except TypeError as exc:
+                raise TypeError(
+                    f"{_qualified(self.generate)} cannot take the generator "
+                    f"seam's call{when}, generate(repo_root, repository, *, "
+                    "source_revision=, generated_at="
+                    + "".join(f", {name}=" for name in given)
+                    + f"): {exc}. A contributed generator takes the operation's "
+                    "own four arguments and every input it declares, and each "
+                    "declared input is optional, because the seam passes one "
+                    "only when its caller has a value for it") from None
 
 
 #: THE one registration, a host's or the entry point's default, or `None`.
@@ -311,9 +337,22 @@ _registered: SnapshotGenerator | None = None
 #: (`register_default()`), rather than a host's own `register()`.
 _is_default: bool = False
 
-#: Whether a snapshot has been generated from that default. Set by
-#: `generate()`, before the default's operation is called.
+#: Whether a snapshot has been generated from that default, meaning that its
+#: operation has answered a snapshot the seam handed back. `generate()` sets it
+#: once that snapshot has come back. A generation that failed, or whose answer
+#: the seam refused, wrote nothing, and so records nothing.
 _generated_from_default: bool = False
+
+#: How many generations from that default are under way: begun, and not yet
+#: answered or failed. While one is, a host's registration is refused, as it is
+#: after one, because the snapshot being generated would come back after the
+#: swap. `unregister()` leaves it alone: it counts calls that are still
+#: running, and each one takes itself off when it ends.
+_default_generations_under_way: int = 0
+
+#: Guards the four above. It is held only for bookkeeping, and never across a
+#: generator's own call.
+_lock = threading.Lock()
 
 
 def name_of(generator: Any) -> str:
@@ -346,43 +385,53 @@ def register(generator: SnapshotGenerator) -> SnapshotGenerator:
 
     Registering the SAME declaration again is a no-op. A DIFFERENT one over a
     host's registration raises `GeneratorAlreadyRegistered`. Over the entry
-    point's default it REPLACES the default while nothing has been generated
-    from it, and is refused once something has. Either way the host ends up
-    holding the one registration, or knows why it does not."""
+    point's default it REPLACES the default while no snapshot has been
+    generated from it and none is being generated. It is refused once one has
+    been, or while one is. Either way the host ends up holding the one
+    registration, or knows why it does not."""
     global _registered, _is_default, _generated_from_default
     _require_a_declaration(generator, "register()")
-    if _registered is generator:
-        # The same object again: a no-op, before any bookkeeping is touched.
-        return generator
-    if _registered is not None:
-        if not _is_default:
-            raise GeneratorAlreadyRegistered(
-                f"a host's generator is already registered at openDox's "
-                f"generator seam ({name_of(_registered)}), and "
-                f"{name_of(generator)} would replace it. Registration happens "
-                "ONCE, at process start: one process generating through two "
-                "generators would write two contracts, and a reader could not "
-                "tell which snapshot was which. Call "
-                "opendox.generator_seam.unregister() first if the swap is "
-                "deliberate.")
-        if _generated_from_default:
-            raise GeneratorAlreadyRegistered(
-                f"openDox's own default generator ({name_of(_registered)}) is "
-                "registered, because an entry point registered it where no host "
-                "had, and a snapshot has already been generated from it, so "
-                f"{name_of(generator)} cannot replace it now. A swap would leave "
-                "one process writing two contracts. A host's generator replaces "
-                "the default only BEFORE anything is generated from it, as a "
-                "host's profile replaces the default profile only before a build "
-                "(R1Q3 (ii), openxFactory#656 comment 5817152735; RN-1 (a), "
-                "comment 5850003126). So register the host's generator at "
-                "process start, ahead of the first generation. Call "
-                "opendox.generator_seam.unregister() first if the swap is "
-                "deliberate.")
-    _registered = generator
-    _is_default = False
-    _generated_from_default = False
-    return generator
+    with _lock:
+        held = _registered
+        if held is generator:
+            # The same object again: a no-op, before any bookkeeping is touched.
+            return generator
+        over_a_host = held is not None and not _is_default
+        why = ""
+        if held is not None and _is_default:
+            if _default_generations_under_way:
+                why = "a snapshot is being generated from it now"
+            elif _generated_from_default:
+                why = "a snapshot has already been generated from it"
+        if not over_a_host and not why:
+            _registered = generator
+            _is_default = False
+            _generated_from_default = False
+            return generator
+    # Named outside the lock: naming a generator can run its own code.
+    if over_a_host:
+        raise GeneratorAlreadyRegistered(
+            f"a host's generator is already registered at openDox's "
+            f"generator seam ({name_of(held)}), and "
+            f"{name_of(generator)} would replace it. Registration happens "
+            "ONCE, at process start: one process generating through two "
+            "generators would write two contracts, and a reader could not "
+            "tell which snapshot was which. Call "
+            "opendox.generator_seam.unregister() first if the swap is "
+            "deliberate.")
+    raise GeneratorAlreadyRegistered(
+        f"openDox's own default generator ({name_of(held)}) is "
+        "registered, because an entry point registered it where no host "
+        f"had, and {why}, so "
+        f"{name_of(generator)} cannot replace it now. A swap would leave "
+        "one process writing two contracts. A host's generator replaces "
+        "the default only BEFORE anything is generated from it, as a "
+        "host's profile replaces the default profile only before a build "
+        "(R1Q3 (ii), openxFactory#656 comment 5817152735; RN-1 (a), "
+        "comment 5850003126). So register the host's generator at "
+        "process start, ahead of the first generation. Call "
+        "opendox.generator_seam.unregister() first if the swap is "
+        "deliberate.")
 
 
 def register_default(generator: SnapshotGenerator) -> SnapshotGenerator:
@@ -406,22 +455,26 @@ def register_default(generator: SnapshotGenerator) -> SnapshotGenerator:
             f"the neutral snapshot contract {NEUTRAL_SNAPSHOT_KIND!r}, and "
             f"{name_of(generator)} declares another. A host's generator is "
             f"registered with {REGISTRATION_CALL}.")
-    if _registered is None:
-        _registered = generator
-        _is_default = True
-        _generated_from_default = False
-    return _registered
+    with _lock:
+        if _registered is None:
+            _registered = generator
+            _is_default = True
+            _generated_from_default = False
+        return _registered
 
 
 def unregister() -> None:
     """Drop the registration, a host's or the entry point's default.
 
     For test isolation and for a host tearing down. The record of a generation
-    from the default goes with it."""
+    from the default goes with it. A generation still under way is not stopped.
+    When it answers, it records its snapshot only if the same default is
+    registered at that moment."""
     global _registered, _is_default, _generated_from_default
-    _registered = None
-    _is_default = False
-    _generated_from_default = False
+    with _lock:
+        _registered = None
+        _is_default = False
+        _generated_from_default = False
 
 
 def is_registered() -> bool:
@@ -434,7 +487,8 @@ def current() -> SnapshotGenerator:
 
     It answers what is registered: a host's generator, or the default an entry
     point registered. It never falls back to the default itself, and asking
-    records nothing: only a generation closes the default's window."""
+    records nothing. Only a generation closes the default's window, while it
+    runs and once it has answered."""
     if _registered is None:
         raise GeneratorNotRegistered(
             "no snapshot generator is registered at openDox's generator seam "
@@ -466,11 +520,22 @@ def generate(repo_root: Path | str, repository: str, *,
     called (`GeneratorInputRefused`). What the generator answers is handed back
     only if it is a snapshot of the contract the generator declared
     (`GeneratorNotConformant`). With nothing registered this refuses as
-    `current()` does."""
-    global _generated_from_default
-    generator = current()
+    `current()` does.
+
+    A generation from the entry point's default holds the default's window shut
+    while it runs. Once its snapshot has come back, it closes the window for
+    good (see `register()`). A generation that fails, or whose answer is
+    refused, reopens it."""
+    global _default_generations_under_way
     given = {name: value for name, value in inputs.items() if value is not None}
-    undeclared = sorted(set(given) - set(generator.inputs))
+    with _lock:
+        # One hold for the resolve and the mark, so that no registration can
+        # land between the generator this call resolves and its call.
+        generator = current()
+        undeclared = sorted(set(given) - set(generator.inputs))
+        from_default = _is_default and not undeclared
+        if from_default:
+            _default_generations_under_way += 1
     if undeclared:
         declared = ", ".join(generator.inputs) or "none"
         raise GeneratorInputRefused(
@@ -479,15 +544,30 @@ def generate(repo_root: Path | str, repository: str, *,
             "input a generator does not declare is refused rather than dropped: "
             "a generator that silently ignored it would write a snapshot that "
             "looks as though the input had been read.")
-    if _is_default:
-        # Before the call, so a registration racing a first generation cannot
-        # slip in between them.
-        _generated_from_default = True
-    snapshot = generator.generate(
-        Path(repo_root), repository, source_revision=source_revision,
-        generated_at=generated_at, **given)
-    _refuse_a_snapshot_that_does_not_conform(generator, snapshot)
+    answered = False
+    try:
+        snapshot = generator.generate(
+            Path(repo_root), repository, source_revision=source_revision,
+            generated_at=generated_at, **given)
+        _refuse_a_snapshot_that_does_not_conform(generator, snapshot)
+        answered = True
+    finally:
+        if from_default:
+            _end_a_generation_from_the_default(generator, answered)
     return snapshot
+
+
+def _end_a_generation_from_the_default(generator: SnapshotGenerator,
+                                       answered: bool) -> None:
+    """Take a generation from the default off the count of those under way. If
+    it answered a snapshot the seam handed back, record that one was generated.
+    The record is made only while the default it came from is still the one
+    registered, so after `unregister()` it records nothing against a host."""
+    global _default_generations_under_way, _generated_from_default
+    with _lock:
+        _default_generations_under_way -= 1
+        if answered and _registered is generator and _is_default:
+            _generated_from_default = True
 
 
 def _refuse_a_snapshot_that_does_not_conform(generator: SnapshotGenerator,
