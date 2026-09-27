@@ -74,6 +74,15 @@ gate_mod = consumer_reach.gate_console  # noqa: E402
 from opendox import serve as serve_mod  # noqa: E402
 snapshot_mod = consumer_reach.snapshot  # noqa: E402
 from opendox import workbench as workbench_mod  # noqa: E402
+# THE HOME-CORPUS SEAM'S DEFAULT (4.1a; plan 034 T022) -- see
+# `_default_home_factory` and `corpus_adapter.register_default_home(...)`
+# below, beside `build_parser()`.
+# Neither module names `openxdox` or `ideation_dashboard`, so this import adds
+# no reach: `corpus_adapter` is stdlib-only (F4.1's own scan proves it), and
+# `local_git_adapter` names only `opendox.runtime.config` and
+# `opendox.corpus_adapter` besides the stdlib.
+from opendox import corpus_adapter  # noqa: E402
+from opendox.runtime import local_git_adapter  # noqa: E402
 from opendox.boundary import (  # noqa: E402
     BoundaryViolation, HumanGate, OutputBoundary,
 )
@@ -856,6 +865,39 @@ def _add_generate_args(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--no-validate", action="store_true", help="skip post-render validation")
 
 
+def _default_home_factory(root):
+    """`home_corpus`'s shape (`adapter, ref = factory(root)`), over
+    `WorkingTreeCorpus` at its own bare defaults (`required_fields=()`; phase
+    2's T054 sets the neutral fields R1Q13 decides). Its `__init__` takes no
+    root -- it is root-agnostic, and `resolve(ref)` reads `ref.location` --
+    so one `CorpusRef` per call carries the root this factory was given, and
+    the adapter itself needs none.
+
+    READS THE WORKING TREE, uncommitted edits included -- RULING, Brett Heap,
+    2026-09-27, via the holder: "Working tree (Recommended)". A standalone
+    user edits files in their own editor, and openxFactory's hosted adapter
+    already shows worktree bytes, so the standalone default matches it rather
+    than reading the session's git HEAD. `WorkingTreeCorpus`
+    (`local_git_adapter.py`) is `LocalGitCorpus` with `list_documents`/`read`
+    aimed at the filesystem instead of a resolved commit; see its own
+    docstring for what stays unchanged (`resolve`, `classify`, `check`,
+    `write_back`) and what does not.
+
+    A FRESH ADAPTER EVERY CALL, ON PURPOSE: nothing here is held onto across
+    calls, so there is no listing cache keyed on whatever HEAD was at an
+    earlier call -- each call gets an instance that reads the CURRENT
+    filesystem state, and `WorkingTreeCorpus` itself caches nothing further
+    within a call either (its own docstring says so).
+
+    Kept byte-for-byte identical to `serve.py`'s copy of the same function
+    (one home corpus, one default, read by two entry points): neither module
+    may import the other, and `corpus_adapter.py` cannot hold this one
+    without importing `local_git_adapter` and creating the cycle that module
+    already imports `corpus_adapter` the other way (4.1a, T022)."""
+    return (local_git_adapter.WorkingTreeCorpus(),
+            corpus_adapter.CorpusRef(name="home", location=str(root)))
+
+
 def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParser:
     """The command line, plus whatever this invocation was ASSEMBLED with.
 
@@ -886,6 +928,21 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     # refusing. A host registered before this line keeps its own; one that
     # registers after this parser is built is refused (R1Q3 (ii); RN-1 (a)).
     domain_profile.register_default(default_profile)
+    # AND THE HOME CORPUS'S OWN DEFAULT (4.1a, T022, the SAME R1Q3 (a)
+    # ruling -- "the default profile and the default adapter are both
+    # entry-point registrations"): a bare process that only builds a parser
+    # still needs the home corpus to resolve for `create`/`edit`
+    # (`authoring.py`), and a host that DID register its own adapter must
+    # see it left alone. `register_default_home` registers ONLY where
+    # nothing already answers `corpus_adapter.home()`, exactly as
+    # `domain_profile.register_default()` does for the profile, immediately
+    # above. The two registries are independent -- neither call reads the
+    # other's state -- so the order between them carries no meaning; this
+    # one is placed second because, unlike the profile call, it has no
+    # downstream read of its own inside THIS function (the profile's
+    # `SUBCOMMAND_EXTENSIONS` is read a few lines below; the corpus
+    # adapter's registration is read later, from `authoring.py`).
+    corpus_adapter.register_default_home(_default_home_factory)
     parser = argparse.ArgumentParser(prog="ideation-dashboard", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -982,6 +1039,13 @@ def main(argv: list[str] | None = None, *,
     # The process entry point registers openDox's own default where no host has
     # (R1Q3 (a)), exactly where a host would register its own.
     domain_profile.register_default(default_profile)
+    # AND its own default home corpus (4.1a, T022, same ruling), exactly
+    # where a host would register its own adapter. `build_parser()` below
+    # makes the identical call as its own first statement, so this one is a
+    # no-op once that runs; it is kept for the same reason T016 keeps its
+    # own match here: the OUTERMOST entry point states the contract on its
+    # own, independent of what `build_parser()` does inside.
+    corpus_adapter.register_default_home(_default_home_factory)
     args = build_parser(
         subcommand_extensions=subcommand_extensions).parse_args(argv)
     try:

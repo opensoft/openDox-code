@@ -327,6 +327,26 @@ def _classify_proposal(text: str):
     corpus loader uses on the way back, so a body that survives a round trip is
     read exactly as it was written and one that cannot be encoded is read the
     way this corpus would read it rather than raising inside a gate.
+
+    THE STAGED TREE IS ALSO MADE A GIT REPOSITORY, best-effort, WHERE THE
+    SELECTED ADAPTER NEEDS ONE (T022 follow-up; Copilot review of
+    openDox-code#45, two findings, "Make default factory classify proposals
+    in temporary directories" and "Initialize Git staging only for the
+    selected Git adapter"): openDox's own default adapter
+    (`LocalGitCorpus`/`WorkingTreeCorpus`, plan 034 4.1a) requires the
+    location it is given to already be one -- `resolve()` refuses
+    `CORPUS_UNCLASSIFIABLE` otherwise -- so a staged tree that was never
+    `git init`ed could never be classified through that default. Doing this
+    UNCONDITIONALLY was tried first and was itself the defect the second
+    finding names: the interface does not require a non-git host adapter to
+    hide dot-directories, so an unconditional `git init` could add `.git/`
+    to a HOST's temporary corpus and be listed or classified as part of the
+    proposal by a host that does its own, non-git filesystem walk. So the
+    factory is asked for FIRST, and staging is prepared only when the
+    answer IS this module's own git-based adapter -- see
+    `_stage_as_a_repository_if_git_is_available`'s own docstring for how
+    that is asked without importing it, and why the step stays best-effort
+    (never this function's own failure) even then.
     """
     from .corpus_adapter import DocumentId, home
 
@@ -335,9 +355,84 @@ def _classify_proposal(text: str):
         document.parent.mkdir(parents=True, exist_ok=True)
         document.write_bytes(text.encode("utf-8", errors="replace"))
         adapter, ref = home()(staged)
+        _stage_as_a_repository_if_git_is_available(adapter, staged)
         resolved = adapter.resolve(ref)
         return adapter.classify(resolved,
                                 DocumentId(corpus=ref.name, key=PROPOSAL_KEY))
+
+
+#: The one module `WorkingTreeCorpus`/`LocalGitCorpus` are ever defined in.
+#: Matched by NAME, not by `isinstance`, so this stays a name comparison
+#: rather than an import of a concrete adapter class: `_classify_proposal`'s
+#: own "no privileged direct call" rule is about not REACHING INTO a
+#: specific adapter's implementation to bypass the six-operation interface,
+#: not about never being able to name which module answered `home()` --
+#: the distinction Copilot's finding draws between "prepare a repository
+#: unconditionally" and "prepare one only for the openDox git default".
+_GIT_ADAPTER_MODULE = "opendox.runtime.local_git_adapter"
+
+
+def _stage_as_a_repository_if_git_is_available(adapter, staged: str) -> None:
+    """Best-effort, and silent either way -- never this function's failure.
+    A NO-OP for any adapter that is not this module's own git-based one.
+
+    WHY ONLY FOR THIS MODULE'S OWN ADAPTER (Copilot review of
+    openDox-code#45, "Initialize Git staging only for the selected Git
+    adapter"): an earlier cut ran `git init` unconditionally, reasoning that
+    git never lists its own `.git/` among tracked or untracked files -- true
+    for THIS module's own readers, but not a promise the corpus-adapter
+    interface makes for a HOST's adapter, which may do its own, non-git
+    filesystem walk and see `.git/` as part of the proposal. Checked by the
+    factory's MODULE NAME, never an `isinstance` needing an import of
+    `local_git_adapter` here: this stays a name comparison, not a reach into
+    a specific adapter's implementation.
+
+    WHY IT IS NEEDED AT ALL, for the adapter it DOES apply to. openDox's own
+    default adapter (`LocalGitCorpus`/`WorkingTreeCorpus`) resolves a
+    location by running `git rev-parse --git-dir` first; a plain,
+    never-`git init`ed directory refuses `CORPUS_UNCLASSIFIABLE` there,
+    before ever reaching a read. Once `git init` has run, the seam's own
+    working-tree reader serves the UNCOMMITTED bytes already staged --
+    which is the whole point of RULING (Brett Heap, 2026-09-27, via the
+    holder: "Working tree (Recommended)"): a standalone default reads what
+    is on disk, committed or not.
+
+    WHY SWALLOWED, NOT RAISED. Where `git` is missing from `PATH`, or
+    refuses for some other reason, this staging step leaves the tree
+    exactly as it would have been before this fix -- no worse than today,
+    and no new hard dependency on `git` for anything else registered.
+
+    THE ENVIRONMENT IS SANITIZED THE SAME WAY EVERY OTHER `git` CALL IN
+    THIS PRODUCT IS (Copilot review of openDox-code#45, "Sanitize Git
+    environment before repository initialization"): a bare `git init`
+    inherits `GIT_DIR`/`GIT_WORK_TREE` (and their relatives) from the
+    process, so a caller started with one of them set -- a unit file that
+    inherited it, a process started from inside a git hook -- would have
+    initialized or MUTATED THAT REPOSITORY instead of the throwaway
+    `staged` tree, silently, and the later sanitized `resolve()` would then
+    refuse the temporary tree it never actually touched. `local_git_adapter
+    .sanitized_git_environment()` is the same stripped base every
+    `GitRunner` call already runs on; `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`
+    are layered to `/dev/null` on top of it here, since THIS call (unlike a
+    `GitRunner`'s) has no legitimate use for an operator's own git
+    configuration -- it never leaves this throwaway tree or touches a
+    remote."""
+    if type(adapter).__module__ != _GIT_ADAPTER_MODULE:
+        return
+    import os
+    import subprocess
+
+    from opendox.runtime.local_git_adapter import sanitized_git_environment
+
+    try:
+        subprocess.run(
+            ["git", "init", "--quiet", "--initial-branch=main", staged],
+            check=True, capture_output=True,
+            env={**sanitized_git_environment(),
+                 "GIT_CONFIG_GLOBAL": os.devnull,
+                 "GIT_CONFIG_SYSTEM": os.devnull})
+    except (OSError, subprocess.CalledProcessError):
+        pass
 
 
 def required_header_fields() -> tuple[str, ...]:

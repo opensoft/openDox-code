@@ -86,6 +86,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import unicodedata
@@ -94,7 +95,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO
 
 from opendox.runtime import config
@@ -250,6 +251,20 @@ _GIT_ENVIRONMENT_OVERRIDES = frozenset({
     # command instead (Copilot review of openDox-code#26, round 21). It joins
     # the two other command-naming variables on this list.
     "GIT_PROXY_COMMAND",
+    # `GIT_TEMPLATE_DIR` NAMES A DIRECTORY `git init` COPIES FROM, not a
+    # command — a different hazard than the three above, but the same
+    # redirection shape (Copilot review of openDox-code#45, "Sanitize
+    # GIT_TEMPLATE_DIR before repository initialization"). `authoring
+    # ._stage_as_a_repository_if_git_is_available` runs `git init` on a
+    # THROWAWAY staging directory, through this same sanitizer; an ambient
+    # template directory is consulted by `init` BEFORE any of this module's
+    # own hardening runs, and can plant a repository-local `info/exclude`,
+    # `hooks/`, or `config` into that staged tree. A planted `info/exclude`
+    # matching the staged document's own filename would make `ls-files
+    # --others --exclude-standard` -- the exact command `WorkingTreeCorpus
+    # ._list_documents_bound` runs -- silently omit it, so classification
+    # would see nothing staged at all rather than the document just written.
+    "GIT_TEMPLATE_DIR",
 })
 
 
@@ -319,8 +334,20 @@ def decoded_ref_name(stdout: bytes) -> str:
     return stdout.decode("utf-8", "surrogateescape").rstrip("\r\n")
 
 
-def _sanitized_git_environment() -> dict[str, str]:
-    """`os.environ` without the repository-selection and config overrides."""
+def sanitized_git_environment() -> dict[str, str]:
+    """`os.environ` without the repository-selection and config overrides.
+
+    PUBLIC (no leading underscore) because `opendox.authoring` is a second
+    caller (Copilot review of openDox-code#45, "Sanitize Git environment
+    before repository initialization"): a staging helper there runs its own
+    `git init` of a throwaway tree, and that call inherited
+    `GIT_DIR`/`GIT_WORK_TREE` (and their relatives) from the process,
+    exactly the hazard this function exists to strip for every OTHER `git`
+    this package runs -- a caller started with one of them set would have
+    initialized or mutated THAT repository instead of the throwaway tree,
+    silently. Same reasoning `GitRunner`'s own class docstring gives for
+    staying public: a second module reaching into this one's underscore
+    names would be a seam nobody declared."""
     return {name: value for name, value in os.environ.items()
             if name not in _GIT_ENVIRONMENT_OVERRIDES
             and not name.startswith("GIT_CONFIG_KEY_")
@@ -627,7 +654,7 @@ class GitRunner:
             env: dict[str, str] | None = None,
             timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
         argv = self._argv(args)          # see `_argv` for the two options
-        merged = {**_sanitized_git_environment(),
+        merged = {**sanitized_git_environment(),
                   **dict(self.held_environment), **(env or {})}
         try:
             return subprocess.run(argv, input=stdin, capture_output=True,
@@ -863,7 +890,7 @@ class GitRunner:
             # openDox-code#26, round 18, and it is a regression this round's
             # own output cap introduced).
             completed = self._run_bounded(
-                args, {**_sanitized_git_environment(), **merged}, timeout)
+                args, {**sanitized_git_environment(), **merged}, timeout)
         except subprocess.TimeoutExpired as expired:
             raise GitCommandFailed(
                 args, subprocess.CompletedProcess(
@@ -2029,7 +2056,7 @@ class LocalGitCorpus:
             # which is the same class as the `pre-push` hook and the `ext::`
             # transport and was covered by neither (Copilot review of
             # openDox-code#26, round 17). The environment channel
-            # `GIT_EXTERNAL_DIFF` is stripped by `_sanitized_git_environment`
+            # `GIT_EXTERNAL_DIFF` is stripped by `sanitized_git_environment`
             # for the same reason.
             # AND EVERY CLEAN/SMUDGE FILTER THE REPOSITORY DEFINES IS
             # EMPTIED. `--no-ext-diff` and `--no-textconv` cover the two
@@ -2794,3 +2821,420 @@ class LocalGitCorpus:
         body.append(f"Dispatched-By: {actor}")
         body.append(f"Write-Path: {write_path}")
         return "\n".join(body) + "\n"
+
+
+def _open_confined(root_fd: int, key: PurePosixPath) -> int:
+    """A file descriptor for `key`, opened component by component from
+    `root_fd`, `O_NOFOLLOW` at EVERY step (Copilot review of
+    openDox-code#45, "Prevent symlinked parent components from escaping the
+    corpus"). `O_NOFOLLOW` on a single `os.open(key, ..., dir_fd=root_fd)`
+    protects only the FINAL component, so a symlinked INTERMEDIATE one
+    (`nested` in `nested/file.md`) was still followed by the kernel's
+    ordinary path resolution -- the same class of escape
+    `open_no_follow_chain` (above) already closes for a directory
+    descriptor, adapted here to end in a FILE open. That helper is not
+    reused directly: it always starts from the filesystem ROOT, resolved by
+    PATHNAME, which is exactly the reopen-by-name `WorkingTreeCorpus`'s read
+    path exists to avoid; this walks forward from an ALREADY-VERIFIED
+    descriptor instead.
+
+    `key` must already be a relative path with no `..` component -- this
+    function does not check, `WorkingTreeCorpus`'s own callers do, before a
+    key ever reaches a filesystem call at all.
+
+    Every intermediate handle THIS WALK ITSELF opened is closed before
+    returning, whether it returns a descriptor or raises; `root_fd` is the
+    caller's, and is never closed here.
+
+    ONLY A REGULAR FILE IS EVER RETURNED (Copilot review of
+    openDox-code#45, "Prevent blocking opens of tracked special files"):
+    git accepts a FIFO, a socket or a device into the index exactly as it
+    would any other blob, and a plain BLOCKING open of a FIFO for reading
+    hangs until a writer opens the other end -- possibly forever, taking
+    `list_documents()`'s own existence check down with it, not only a
+    direct `read()`. The leaf is opened `O_NONBLOCK` (which POSIX defines
+    as making a FIFO's open return immediately instead of blocking; a
+    regular file's open and later read are unaffected by the flag either
+    way), and its MODE is checked before this function ever hands the
+    descriptor back: a directory raises `IsADirectoryError` (unchanged, the
+    gitlink/nested-checkout case callers already translate), anything else
+    that is not a plain regular file -- a FIFO, a socket, a character or
+    block device -- raises it too, under the same name, since neither
+    caller draws a finer distinction than "not a document this adapter can
+    read"."""
+    parts = key.parts
+    if not parts:
+        raise FileNotFoundError(str(key))
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    leaf_flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    handle = root_fd
+    opened: list[int] = []
+    try:
+        for component in parts[:-1]:
+            handle = os.open(component, directory_flags, dir_fd=handle)
+            opened.append(handle)
+        fd = os.open(parts[-1], leaf_flags, dir_fd=handle)
+    finally:
+        for opened_handle in opened:
+            os.close(opened_handle)
+    try:
+        mode = os.fstat(fd).st_mode
+    except OSError:
+        os.close(fd)
+        raise
+    if not stat.S_ISREG(mode):
+        os.close(fd)
+        raise IsADirectoryError(
+            f"{str(key)!r} is a directory, a gitlink, or a special file "
+            "(a FIFO, a socket or a device) -- not a document this "
+            "adapter can read")
+    return fd
+
+
+def _tracked_or_not_ignored(git: GitRunner, corpus: ResolvedCorpus,
+                            key: PurePosixPath) -> bool:
+    """Whether `git` considers `key` part of the corpus `list_documents()`
+    would show: TRACKED (in the index, at any mode -- a gitlink included;
+    `_open_confined`'s own `S_ISREG` check excludes THAT case downstream,
+    the identical way a listed gitlink already is), or UNTRACKED and not
+    excluded by `.gitignore`/`.git/info/exclude`/the global excludes file.
+
+    A SINGLE-PATHSPEC QUERY, not a re-run of the full listing: `key` is
+    passed as a BARE pathspec, matched as the exact literal path it is,
+    never expanded as a glob, because `GitRunner` already puts
+    `--literal-pathspecs` ahead of every argument it runs (this class's own
+    docstring) -- a `:(literal)` prefix here would be not merely redundant
+    but WRONG, since `--literal-pathspecs` disables pathspec magic
+    entirely, `:(literal)` included, so that prefix would itself become
+    part of the literal filename git looks for instead of magic git
+    interprets (measured: it made this check silently exclude every real
+    key, including a tracked one, until removed) (Copilot review of
+    openDox-code#45, "read() exposes ignored files omitted from the
+    corpus": `read()` confined a key to the corpus ROOT, but never checked
+    that the corpus's own DEFINITION -- tracked, or untracked-and-not-
+    ignored -- actually includes it, so a caller naming a `.gitignore`d
+    secret directly, unmediated by `list_documents()`, was served it
+    anyway).
+
+    A GIT FAILURE HERE IS A CORPUS-WIDE REFUSAL, NEVER "not part of the
+    corpus" (Copilot review of openDox-code#45, "Propagate Git failures
+    instead of reporting missing documents"): an earlier cut caught
+    `GitCommandFailed` and returned `False`, so a repository or `git`
+    itself going unavailable AFTER `_bound()`'s own root probe reported
+    `DOCUMENT_UNKNOWN` ("not tracked") for what was actually
+    `CORPUS_UNREADABLE` -- hiding a corpus-wide failure as a missing
+    document, the exact confusion `corpus_adapter.py`'s own header warns
+    against. Raises the SAME way `_list_documents_bound`'s own two
+    `ls-files` calls already do, plain `str(failed)` and no additional
+    redaction: `GitCommandFailed` is this package's OWN exception type,
+    not a library's, so the anti-leak walk in
+    `tests_runtime/test_runtime_cli.py` does not scrutinize it the way it
+    does a caught built-in or third-party one."""
+    try:
+        matched = git.out("ls-files", "-z", "--cached", "--others",
+                          "--exclude-standard", "--", str(key))
+    except GitCommandFailed as failed:
+        raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                      str(failed)) from failed
+    return matched != b""
+
+
+class WorkingTreeCorpus(LocalGitCorpus):
+    """`LocalGitCorpus`, reading the WORKING TREE instead of a resolved commit.
+
+    RULING (Brett Heap, 2026-09-27, via the holder: "Working tree
+    (Recommended)"). openDox's own standalone default (`corpus_adapter
+    .register_default_home`, plan 034 task 4.1a) reads whatever is on disk
+    RIGHT NOW -- an uncommitted edit included -- rather than the session's git
+    HEAD. A standalone user edits files in their own editor, and
+    openxFactory's hosted adapter already shows worktree bytes; this default
+    matches it instead of reading a commit a local session has since edited
+    past.
+
+    `resolve()`, `check()` and `write_back()` are UNCHANGED, inherited from
+    `LocalGitCorpus` exactly. So is `classify()`: its header read
+    (`_header_of`) goes THROUGH `self.read()`, which is why overriding `read`
+    alone is enough to make classification see the same bytes this adapter
+    lists and serves. Only WHERE `list_documents`/`read` get their bytes
+    changes -- never `git ls-tree`/`git cat-file` at `corpus.revision` for the
+    common case; a PINNED `CorpusRef.revision` -- decided at `resolve()`, not
+    at read time -- is still honoured by falling back to the parent's
+    commit-based read for BOTH operations, because a caller that pinned one
+    asked for history on purpose (Copilot review of openDox-code#45, "Honor
+    pinned revision when reading documents": the per-call `revision`
+    argument alone was checked before this fix, so a pinned `CorpusRef` was
+    silently served current disk bytes instead).
+
+    A BARE REPOSITORY HAS NO WORKING TREE TO READ. `local_git_adapter`'s own
+    repository-creation act makes one bare (RULING C3), by design: this
+    class's whole reason to exist is the OPPOSITE case, "a checkout somebody
+    edits by hand" (`check`'s own docstring). So `list_documents`/`read`
+    REFUSE `CORPUS_UNREADABLE`, naming the reason, rather than silently
+    answering an empty corpus that a caller could mistake for one genuinely
+    empty -- the one confusion `corpus_adapter.py`'s own header is emphatic
+    about.
+
+    THE LISTING NEVER ADVERTISES WHAT `read` CANNOT SERVE (Copilot review of
+    openDox-code#45, several findings). A gitlink (a submodule) is
+    EXCLUDED, by its recorded mode `160000` -- the same filter
+    `LocalGitCorpus.ls-tree` reading already applies
+    (`tests_runtime/test_local_git_adapter.py`) -- read from a SEPARATE
+    `--cached`-only command, never one `--cached --others` union split on
+    the presence of a TAB (an untracked pathname may legally hold one,
+    which misread as `<mode> <object> <stage>` metadata and truncated the
+    key). An UNTRACKED nested checkout is excluded the same way `git`
+    itself reports it, as a bare directory path (a trailing `/`, never
+    descended into). A path this listing cannot then OPEN through the same
+    confined walk `read` uses -- deleted from the working tree without
+    staging the deletion, or reachable only through a symlinked
+    intermediate component -- is excluded too, so a listing entry is always
+    one `read()` can actually serve.
+
+    THE READ IS CONFINED TO THE CORPUS, NOT TO WHATEVER `document.key`
+    NAMES (Copilot review of openDox-code#45, two findings). Unlike the
+    parent's `cat-file blob <rev>:<key>` -- safe by construction, since git
+    resolves a key inside its TREE OBJECT model, never the filesystem --
+    this class reads actual filesystem bytes, so an absolute key or one
+    carrying `..` is refused outright, and the open itself walks EVERY
+    component with `O_NOFOLLOW` (`_open_confined`, not a single `os.open`
+    call, which protects only its own final component and still follows a
+    symlinked INTERMEDIATE one), relative to the same already-verified,
+    no-follow directory descriptor `_bound` secured for this whole
+    operation (`git.inherit_fd`) -- never a second, by-name `Path(corpus
+    .location) / key` open that could resolve somewhere a concurrent
+    replacement redirected it to.
+
+    NO CACHE, ANYWHERE, ACROSS OR WITHIN CALLS. `list_documents()` re-asks
+    `git ls-files` every time and `read()` re-opens the path every time: an
+    edit made between two calls -- on the SAME instance or a fresh one -- is
+    visible on the very next one. The factory that registers this default
+    (`cli.py`'s and `serve.py`'s `_default_home_factory`) also constructs a
+    fresh instance on every call, so no state survives across registrations
+    either (plan 034, T022)."""
+
+    def _list_documents_bound(self, git: GitRunner, corpus: ResolvedCorpus,
+                              scope: str) -> tuple[DocumentId, ...]:
+        """Tracked files, plus untracked-but-not-`.gitignore`d ones -- the set
+        a working copy actually shows. NEVER `corpus.revision`, UNLESS the
+        `CorpusRef` itself pinned one, in which case this defers to the
+        parent's own (commit-based, gitlink-excluding already) listing."""
+        if corpus.ref.revision is not None:
+            return super()._list_documents_bound(git, corpus, scope)
+        self._refuse_if_bare(git, corpus)
+        # TWO SEPARATE COMMANDS, not one `--cached --others` union split by
+        # the presence of a TAB (Copilot review of openDox-code#45, "Parse
+        # tab-containing untracked pathnames correctly"): an UNTRACKED
+        # pathname may legally contain a literal tab, which a tab-based
+        # split misread as `<mode> <object> <stage>` metadata and silently
+        # truncated the key. Each command's own output is homogeneous --
+        # `-s` (STAGE format, `<mode> SP <object> SP <stage> TAB <path>`)
+        # for `--cached`, a bare path for `--others` -- so there is nothing
+        # to disambiguate.
+        try:
+            cached_raw = git.out("ls-files", "-z", "-s", "--cached")
+        except GitCommandFailed as failed:
+            raise _refuse(CORPUS_UNREADABLE, corpus.location, str(failed)) from failed
+        candidates: set[str] = set()
+        for entry in cached_raw.decode("utf-8", "surrogateescape").split("\0"):
+            if not entry:
+                continue
+            # `<mode> <object> <stage>\t<path>`. Mode `160000` is a gitlink --
+            # a submodule's own commit pointer, never a blob this adapter (or
+            # the parent) reads -- excluded here exactly as `LocalGitCorpus
+            # ._list_documents_bound` excludes it from `ls-tree`.
+            meta, path = entry.split("\t", 1)
+            mode = meta.split(" ", 1)[0]
+            if mode == "160000":
+                continue
+            candidates.add(path)
+        try:
+            # `--exclude-standard`: minus what `.gitignore`/`.git/info
+            # /exclude`/the global excludes file already hide -- the paths a
+            # plain `ls` of a working checkout, filtered by its own ignore
+            # rules, would ALSO show beyond what is tracked.
+            untracked_raw = git.out("ls-files", "-z", "--others",
+                                    "--exclude-standard")
+        except GitCommandFailed as failed:
+            raise _refuse(CORPUS_UNREADABLE, corpus.location, str(failed)) from failed
+        for entry in untracked_raw.decode("utf-8", "surrogateescape").split("\0"):
+            if not entry:
+                continue
+            # `git` itself never descends into an untracked directory that
+            # is ITSELF a git checkout (an un-added nested repository) -- it
+            # reports the directory's own path, WITH a trailing `/`, and
+            # nothing inside it. That trailing slash is the same signal
+            # `git` gives a caller at the terminal, so it is the signal this
+            # adapter acts on too, rather than re-deriving "is this a nested
+            # repository" itself.
+            if entry.endswith("/"):
+                continue
+            candidates.add(entry)
+        # A TRACKED PATH CAN STILL BE GONE FROM THE WORKING TREE, OR REACHED
+        # ONLY THROUGH A SYMLINKED INTERMEDIATE COMPONENT: `git ls-files
+        # --cached` reports the INDEX, not the disk, so an unstaged `rm`
+        # leaves the path listed here and `_read_bound` refusing
+        # `DOCUMENT_UNKNOWN` for it -- advertising what `read` cannot serve
+        # (Copilot review of openDox-code#45, "Filter deleted working-tree
+        # files from document listings"). Checked by the SAME confined,
+        # component-by-component open `_read_bound` itself uses
+        # (`_open_confined`, relative to `git.inherit_fd`) -- opened and
+        # immediately closed, existence and reachability only.
+        #
+        # ANY `OSError` here EXCLUDES the ONE candidate, and none is raised
+        # as a corpus-wide refusal: `git.inherit_fd` (the corpus ROOT) is
+        # already verified by the time this runs (`_bound`/`_refuse_if_bare`
+        # own that check), so every error `_open_confined` can raise for a
+        # SPECIFIC candidate -- gone (`FileNotFoundError`), a component that
+        # is no longer a directory (`NotADirectoryError`, the shape a
+        # replaced-by-symlink intermediate takes here), a component
+        # `O_NOFOLLOW` refused (`OSError`/`ELOOP`) -- is a fact about THAT
+        # path, not about the corpus, and each is the identical reason
+        # `_read_bound` would refuse that one document if it were named
+        # directly. A listing that raised on the first such candidate would
+        # make an attacker's dangling symlink deny the WHOLE listing rather
+        # than just its own entry.
+        keys: list[str] = []
+        for path in candidates:
+            try:
+                os.close(_open_confined(git.inherit_fd, PurePosixPath(path)))
+            except OSError:
+                continue
+            keys.append(path)
+        return tuple(DocumentId(corpus=corpus.ref.name, key=key)
+                    for key in sorted(keys))
+
+    def _read_bound(self, git: GitRunner, corpus: ResolvedCorpus,
+                    document: DocumentId, revision: str | None) -> Document:
+        """The file's CURRENT bytes on disk, uncommitted edits included --
+        UNLESS this call names a revision, or the corpus itself was resolved
+        against a PINNED one, in which case this defers to the parent's own
+        commit-based (and traversal-safe-by-construction) read."""
+        if revision is not None or corpus.ref.revision is not None:
+            return super()._read_bound(git, corpus, document, revision)
+        self._refuse_if_bare(git, corpus)
+        # CONFINE THE KEY BEFORE EVER NAMING IT TO THE FILESYSTEM (Copilot
+        # review of openDox-code#45, three findings). An absolute key
+        # discards the corpus root entirely under `Path.__truediv__`
+        # (`Path("/a") / "/etc/passwd" == Path("/etc/passwd")`, not a
+        # join), and a `..` component walks back out of it under an
+        # ordinary join -- both refused by NAME here, with a message that
+        # says what is wrong, rather than reaching the open call at all.
+        #
+        # A `.git` COMPONENT IS REFUSED THE SAME WAY (Copilot review of
+        # openDox-code#45, "Block direct access to .git paths"): `git
+        # ls-files` never lists a path under the repository's OWN `.git/`
+        # -- that is what makes it a listed WORKING-TREE document's key in
+        # the first place -- so this is not a case `list_documents()`
+        # itself can produce. But `read()` is a public method taking a
+        # `DocumentId` a caller can build directly, unmediated by a prior
+        # listing, and unlike `LocalGitCorpus`'s `cat-file blob <rev>:<key>`
+        # -- which cannot express `.git/config` at all, since git's own
+        # tree object model has no path under its own metadata directory --
+        # this class reads actual filesystem bytes, where `.git/config`
+        # (a remote's embedded credential) and `.git/HEAD` are ordinary,
+        # readable, relative paths with no `..` and no leading `/` to catch
+        # either check above.
+        # A NUL BYTE IS REFUSED THE SAME WAY (Copilot review of
+        # openDox-code#45, "Reject NUL document IDs before confined file
+        # access"): `DocumentId.key` is an opaque caller value, unmediated by
+        # a prior listing, exactly like the `.git`-component case above --
+        # `git ls-files` can never produce one (a NUL terminates its own
+        # `-z`-framed records, so it is not a legal git pathname), but a
+        # caller can still construct `DocumentId(key="...\x00...")` directly.
+        # Left unchecked, that string reaches `_open_confined`'s `os.open`,
+        # which raises `ValueError` (a NUL rejection done by Python itself,
+        # before any syscall) -- a type the surrounding `except OSError`
+        # clauses below do NOT catch, so it would leak out raw instead of
+        # the promised `CorpusRefused(DOCUMENT_UNKNOWN)`.
+        key = PurePosixPath(document.key)
+        if (key.is_absolute() or ".." in key.parts or ".git" in key.parts
+                or "\x00" in document.key):
+            raise _refuse(DOCUMENT_UNKNOWN, document.key,
+                          f"{document.key!r} is not a path inside this corpus")
+        # A KEY INSIDE THE CORPUS ROOT IS NOT NECESSARILY A KEY INSIDE THE
+        # CORPUS (Copilot review of openDox-code#45, "read() exposes ignored
+        # files omitted from the corpus"): the checks above confine `key` to
+        # the ROOT, but a `.gitignore`d file -- a `.env`, a credential --
+        # lives there too, on disk, without being part of the document set
+        # this corpus DEFINES itself as ("tracked files, plus
+        # untracked-but-not-ignored ones", this class's own docstring). A
+        # caller building a `DocumentId` directly, unmediated by
+        # `list_documents()`, must not be able to read what the corpus
+        # itself excludes just because the bytes happen to sit inside the
+        # same directory tree.
+        if not _tracked_or_not_ignored(git, corpus, key):
+            raise _refuse(DOCUMENT_UNKNOWN, document.key,
+                          f"{document.key!r} is not tracked and is excluded "
+                          "from this corpus (gitignored, or never added)")
+        # `_open_confined` walks EVERY component -- not only the last --
+        # relative to `git.inherit_fd`, the SAME already-verified, no-follow
+        # directory descriptor `_bound` secured for this whole operation
+        # (Copilot review of openDox-code#45, "Prevent symlinked parent
+        # components from escaping the corpus": `O_NOFOLLOW` on a single
+        # `open()` call protects only its OWN final component, so a
+        # symlinked INTERMEDIATE one -- `nested` in `nested/file.md` -- was
+        # still followed by the kernel's ordinary resolution before this
+        # fix). Never a second, by-name `Path(corpus.location) / key` open
+        # that could resolve somewhere a concurrent replacement redirected
+        # it to.
+        try:
+            fd = _open_confined(git.inherit_fd, key)
+        except FileNotFoundError:
+            raise _refuse(DOCUMENT_UNKNOWN, document.key,
+                          f"{document.key!r} is not on disk in the working tree")
+        except IsADirectoryError as not_a_document:
+            # `_open_confined` ITSELF raises this -- a directory, a gitlink,
+            # or a special file (FIFO/socket/device) it refused to hand back
+            # a descriptor for -- so this is DOCUMENT_UNKNOWN, never a
+            # corpus-wide `CORPUS_UNREADABLE`: the corpus is fine, this one
+            # entry is not a document. A FRESH message, not `str(exc)`: this
+            # handler catches a BUILT-IN exception type, so the anti-leak
+            # walk (`tests_runtime/test_runtime_cli.py`) scrutinizes it the
+            # same as any other non-package one, even though every byte of
+            # `_open_confined`'s own message is this file's own text, never
+            # a library's.
+            raise _refuse(
+                DOCUMENT_UNKNOWN, document.key,
+                f"{document.key!r} is a directory, a gitlink, or a special "
+                "file (a FIFO, a socket or a device) -- not a document this "
+                "adapter can read") from not_a_document
+        except OSError as failed:
+            # COVERS BOTH a symlink `O_NOFOLLOW` refused (`ELOOP`) at any
+            # component and any other OS-level failure opening the
+            # descriptor -- the text can carry the key or the corpus path,
+            # so it is redacted the same way every other OS error in this
+            # file is (`redact_credentials(str(exc))`; the anti-leak walk in
+            # `tests_runtime/test_runtime_cli.py` polices every module in
+            # this package).
+            raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                          redact_credentials(str(failed))) from failed
+        # `_open_confined` already guarantees a REGULAR file by the time it
+        # returns a descriptor, so nothing left to read here can raise
+        # `IsADirectoryError` -- only a genuine I/O failure partway through
+        # the read itself (a disk error, the file removed after the open).
+        try:
+            with os.fdopen(fd, "rb") as opened:
+                content = opened.read()
+        except OSError as failed:
+            raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                          redact_credentials(str(failed))) from failed
+        # `revision=None`: this content answers for no single commit -- it may
+        # mix committed and uncommitted bytes -- which is the field's own
+        # legal "no revision notion" value, not a degraded answer.
+        return Document(id=document, content=content, revision=None)
+
+    @staticmethod
+    def _refuse_if_bare(git: GitRunner, corpus: ResolvedCorpus) -> None:
+        try:
+            bare = git.out("rev-parse", "--is-bare-repository").decode().strip()
+        except GitCommandFailed as failed:
+            raise _refuse(CORPUS_UNREADABLE, corpus.location,
+                          f"could not classify the repository ({failed})"
+                          ) from failed
+        if bare == "true":
+            raise _refuse(
+                CORPUS_UNREADABLE, corpus.location,
+                "this repository is bare: it has no working tree for this "
+                "adapter to read. A repository the product's own act "
+                "creates is bare by RULING C3 -- register a host adapter "
+                "instead, or point this default at an ordinary checkout")
