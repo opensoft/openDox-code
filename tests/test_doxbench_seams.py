@@ -33,9 +33,10 @@ WHAT IT ASSERTS, FOR EACH SEAM
    never cached; the rail's names as the rail's own objects, and the packet's
    sources marked by the rail's own verdicts.
 5. THE REGISTRATION DISCIPLINE: one registration, idempotent for the same
-   object, refused for a different one, and a rail that could not mark a
-   source is refused when it is registered, with the seam's own `TypeError`,
-   including a lazy one whose names fail to resolve.
+   object (answered by identity, so a registered rail is never re-probed),
+   refused for a different one, and a rail that could not mark a source is
+   refused when it is registered, with the seam's own `TypeError`, including
+   a lazy one whose names fail to resolve.
 6. THE STATIC HALF: the seams' functions make no deferred reach into the
    publisher or the consumer, read by `ast` the way F4.1's scan reads the
    whole package.
@@ -491,6 +492,30 @@ def test_one_rail_registration():
     assert pk.status_exemption_registered() is False
     with pytest.raises(pk.StatusExemptionNotRegistered):
         pk.exemption_rail((_evidence(),))
+
+
+def test_the_same_rail_again_is_not_probed_a_second_time():
+    """Idempotent means idempotent for a LAZY rail too. The repeat is
+    answered by identity, before any probe, so a lookup that fails the second
+    time cannot turn a host's repeated start into a refusal."""
+    class _OnceRail(_StandInRail):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lookups = 0
+
+        @property
+        def is_compression_exempt(self):
+            self.lookups += 1
+            if self.lookups > 1:
+                raise ModuleNotFoundError("No module named 'a_hosts_exemptions'")
+            return lambda text: False
+
+    rail = _OnceRail()
+    assert pk.register_status_exemption(rail) is rail
+    assert rail.lookups == 1
+    assert pk.register_status_exemption(rail) is rail
+    assert rail.lookups == 1, "the repeat re-probed the registered rail"
+    assert pk.status_exemption_registered() is True
 
 
 # ==========================================================================

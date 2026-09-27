@@ -238,8 +238,15 @@ def register_status_exemption(rail: object) -> object:
     lookup of a required name raises (a `ModuleNotFoundError` from what it
     loads on first use, say) is a rail that lacks that name. Its failure is
     chained to the refusal, so the reason stays readable, and it never escapes
-    the registration as a failure of some other kind."""
+    the registration as a failure of some other kind.
+
+    The SAME rail again is a no-op, and it is not probed a second time: it
+    was validated when it was registered, and a lazy rail whose later lookup
+    fails must not turn an idempotent host start into a refusal. Only a NEW
+    registration is validated."""
     global _status_exemption_rail
+    if rail is not None and rail is _status_exemption_rail:
+        return rail
     missing: list[str] = []
     probe_failure: Exception | None = None
     for name in STATUS_EXEMPTION_REQUIRED:
