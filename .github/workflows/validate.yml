@@ -230,9 +230,12 @@ jobs:
           # 2. THE MARGIN IS RESTORED. The floors sit THREE below CI's reading
           #    instead of on it. That is the reference implementation's rule,
           #    openxFactory `pytest-suite.yml`: "three below the lower of the
-          #    two greens". PROVISIONAL at this commit: three below a local
-          #    replica of this job (2478 / 2467 / 11). CI's two readings of
-          #    this change replace it.
+          #    two greens". Read from two runs of one tree, `8c03966a`: run
+          #    36339183129 (job 108675776512) and its re-run (job
+          #    108676424965). Both printed `triple: selected=2478 passed=2467
+          #    skipped=11 failures=0 errors=0`, so no jitter was measured, and
+          #    three below the lower of the two is 2475 / 2464. A local
+          #    replica read the same, which is a check, not the source.
           #
           #    THE TRADE, stated as the reference states it. A loss of up to
           #    three collected tests does not red on the floors alone. It still
