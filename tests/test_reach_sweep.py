@@ -43,7 +43,9 @@ name by any binding, and a literal module name still counts. Literal `*[...]`
 and `**{...}` arguments are spelled out, however deep. An importing call whose
 module a spread of anything else hides (`import_module(*names)`) is refused,
 because it could hide a reach into openxFactory. A computed name is not
-refused, because `consumer_reach`'s seam imports one. A name in a comment, a
+refused, because `consumer_reach`'s seam imports one. A relative call is read
+against `globals()` or `__package__` as the module's own only where the
+module never rebinds either; where it does, the call is refused too. A name in a comment, a
 docstring or a string is not an import. The openxFactory ban goes one step
 further, because an import needs the package's name and openDox can never
 install the package: no code under `src/` spells an openxFactory package's
@@ -71,6 +73,14 @@ a CALL: a function body runs at import time if the module calls it there.
 `tests/test_imports_standalone.py` and `tests/test_consumer_reach.py` import
 every module with the siblings blocked, which is the proof for that case.
 
+WHAT THE SWEEP IS FOR. It is a regression guard over the code this repository
+writes, not a sandbox. It reads each form named above literally, and it
+refuses the forms where a spread, a rebinding or an unknown relative context
+hides what a call imports. A module written to evade it, one that builds a
+module's or an importer's name from pieces at run time, is outside what any
+source read can see. Review holds that, and for import time so do the runtime
+sweeps.
+
 It reads `src/` whole, so `src/route_extension.py` and
 `src/subcommand_extension.py` are swept with the package. `--noconftest` safe.
 A CREATED file: no carve-manifest row (RULED OQ-C).
@@ -92,8 +102,8 @@ SRC = ROOT / "src"
 
 sys.path.insert(0, str(ROOT / "tests"))
 from import_scan import (  # noqa: E402
-    UNREADABLE, importer_escapes, importing_calls, names_a_forbidden_package,
-    names_imported_by, string_literals)
+    CONTEXT_NAMES, UNREADABLE, importer_escapes, importing_calls,
+    names_a_forbidden_package, names_imported_by, rebinds, string_literals)
 
 #: The consumer. Its deferred reaches are phase 2's and 3's to route.
 CONSUMER = "openxdox"
@@ -136,6 +146,7 @@ def sweep(source: str, path: str = "<source>") -> list[Reach]:
     tree = ast.parse(source, filename=path)
     calls = importing_calls(tree)
     any_call = importer_escapes(tree, calls)
+    trusted = not rebinds(tree, CONTEXT_NAMES)
 
     def visit(node: ast.AST, deferred: bool, inside: str) -> None:
         lazy: list[ast.AST] = []
@@ -170,7 +181,8 @@ def sweep(source: str, path: str = "<source>") -> list[Reach]:
                 visit(default, deferred, inside)
             visit(node.body, True, f"{inside}.<lambda>")
             return
-        for name in names_imported_by(node, calls=calls, any_call=any_call):
+        for name in names_imported_by(node, calls=calls, any_call=any_call,
+                                      trusted=trusted):
             if name == UNREADABLE or names_a_forbidden_package(name, SIBLINGS):
                 found.append(Reach(path, node.lineno, name, deferred, inside))
         for child in ast.iter_child_nodes(node):
@@ -322,8 +334,9 @@ def test_the_scanner_classifies_every_position_it_reads():
 #: to, by position or by keyword. Relative to `__package__`, it names none;
 #: relative to any other package that is not a literal, it is `UNREADABLE`.
 #: `__import__` reads its relative context off its `globals`: `globals()` is
-#: the module's own, a literal `{"__package__": ...}` resolves, and anything
-#: else, or a level that is not a literal, is `UNREADABLE`. The pre-carve
+#: the module's own, a literal `{"__package__": ...}` resolves (its own case,
+#: below), and anything else, or a level that is not a literal, is
+#: `UNREADABLE`. The pre-carve
 #: `scripts.` spelling is openxFactory's too.
 #: Arguments spelled out with a literal `*[...]` or `**{...}`, however deep,
 #: count where they land. A spread that hides the name, or the package a
@@ -359,7 +372,6 @@ _LAZY_SPECIMEN = textwrap.dedent('''
     BOUND = importlib.import_module(".corpus", package=PKG)
     import scripts.doc_health.corpus
     OWN = __import__("corpus", globals(), None, (), 1)
-    DECLARED = __import__("corpus", {"__package__": "doc_health"}, None, (), 1)
     CONTEXT = __import__("corpus", CONTEXT, None, (), 1)
     LEVELLED = __import__("corpus", globals(), None, (), LEVEL)
 ''')
@@ -388,10 +400,19 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (26, UNREADABLE, False, "<module>"),
         (27, UNREADABLE, False, "<module>"),
         (28, "scripts.doc_health.corpus", False, "<module>"),
-        (30, "doc_health.corpus", False, "<module>"),
+        (30, UNREADABLE, False, "<module>"),
         (31, UNREADABLE, False, "<module>"),
-        (32, UNREADABLE, False, "<module>"),
     }, sorted(found)
+
+
+def test_a_literal_globals_mapping_resolves_a_relative_dunder_import():
+    """A literal `{"__package__": ...}` says what a relative `__import__` is
+    relative to, so it resolves. The mapping spells `__package__`, so its
+    module is not trusted with `globals()`, and the resolution does not need
+    that trust. It is its own specimen for that reason."""
+    source = 'X = __import__("corpus", {"__package__": "doc_health"}, None, (), 1)\n'
+    assert [(r.name, r.deferred) for r in sweep(source, "declared.py")] \
+        == [("doc_health.corpus", False)]
 
 
 #: The two importing calls under the names an import gives them. The module
@@ -441,6 +462,36 @@ def test_an_alias_looked_up_by_its_name_makes_every_literal_call_count():
               "def verb():\n    globals()['load']('doc_health')\n")
     assert [(r.name, r.deferred, r.inside) for r in sweep(source, "lookup.py")] \
         == [("doc_health", True, "verb")]
+
+
+#: A module that gives the namespace or the package a meaning of its own,
+#: each followed by a relative call that would trust it.
+_REBOUND = {
+    "a rebound __package__": (
+        "__package__ = 'openxdox'\n"
+        "X = importlib.import_module('.gate_console', package=__package__)\n"),
+    "a shadowed globals": (
+        "globals = lambda: {'__package__': 'openxdox'}\n"
+        "X = __import__('gate_console', globals(), None, (), 1)\n"),
+    "__package__ set through the namespace": (
+        "globals()['__package__'] = 'openxdox'\n"
+        "X = importlib.import_module('.gate_console', package=__package__)\n"),
+    "a def named globals": (
+        "def globals():\n    return {'__package__': 'openxdox'}\n\n\n"
+        "X = __import__('gate_console', globals(), None, (), 1)\n"),
+    "an attribute store": (
+        "import sys\nsys.modules[__name__].__package__ = 'openxdox'\n"
+        "X = importlib.import_module('.gate_console', package=__package__)\n"),
+}
+
+
+@pytest.mark.parametrize("rebinding", sorted(_REBOUND))
+def test_a_module_that_rebinds_its_context_is_not_trusted(rebinding):
+    """`globals()` and `__package__` are read as the module's own only where
+    the module never rebinds them. Where it does, a relative call that leans
+    on them is `UNREADABLE`, and the sweep refuses it."""
+    reaches = sweep("import importlib\n" + _REBOUND[rebinding], "rebound.py")
+    assert [(r.name, r.deferred) for r in reaches] == [(UNREADABLE, False)], rebinding
 
 
 @pytest.mark.parametrize("binding", sorted(_AS_A_VALUE))

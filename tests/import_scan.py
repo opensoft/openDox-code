@@ -120,15 +120,58 @@ def _arguments(call):
     return positional, keywords, complete
 
 
-def _own_namespace(context):
+#: The names the reader trusts to mean what Python binds them to: the calling
+#: module's namespace and its package. It trusts them only in a module that
+#: never rebinds them (`rebinds`).
+CONTEXT_NAMES = ("globals", "__package__")
+
+
+def rebinds(tree, names):
+    """Whether `tree` gives any of `names` a meaning of its own.
+
+    That is a binding anywhere: an assignment or deletion, a `def` or `class`,
+    an import, a parameter, a loop or `with` target, an `except ... as`, a
+    pattern capture, a type parameter, or a `global` or `nonlocal` statement.
+    It is also an attribute store (`module.__package__ = ...`), and a name as
+    a string outside documentation, the way `globals()["__package__"] = ...`
+    or `setattr(module, "__package__", ...)` spell it."""
+    documentation = {id(node.value) for node in ast.walk(tree)
+                     if isinstance(node, ast.Expr)
+                     and isinstance(node.value, ast.Constant)}
+    for node in ast.walk(tree):
+        bound = ()
+        if isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
+            bound = (_called_name(node),)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                               ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple,
+                               ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            bound = (node.name,)
+        elif isinstance(node, ast.alias):
+            bound = (node.asname or node.name.split(".")[0],)
+        elif isinstance(node, ast.arg):
+            bound = (node.arg,)
+        elif isinstance(node, ast.MatchMapping):
+            bound = (node.rest,)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound = tuple(node.names)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and id(node) not in documentation:
+            bound = (node.value,)
+        if any(name in names for name in bound if name):
+            return True
+    return False
+
+
+def _own_namespace(context, trusted):
     """Whether an `__import__` call's `globals` is the calling module's own:
-    absent, `None`, or `globals()`."""
+    absent or `None`, which leaves no package to be relative to, or
+    `globals()` in a module that is `trusted` not to rebind it."""
     return context is None or (isinstance(context, ast.Constant) and context.value is None) \
-        or (isinstance(context, ast.Call) and isinstance(context.func, ast.Name)
+        or (trusted and isinstance(context, ast.Call) and isinstance(context.func, ast.Name)
             and context.func.id == "globals" and not context.args and not context.keywords)
 
 
-def _dunder_import(name, args, keywords, complete):
+def _dunder_import(name, args, keywords, complete, trusted):
     """What `__import__(name, globals, locals, fromlist, level)` names.
 
     A zero `level`, or none, is absolute. A nonzero one is relative to the
@@ -144,7 +187,7 @@ def _dunder_import(name, args, keywords, complete):
         return [name]
     if not (isinstance(level, ast.Constant) and isinstance(level.value, int)):
         return [UNREADABLE]
-    if _own_namespace(context):
+    if _own_namespace(context, trusted):
         return []
     declared = _literal_keywords(context)[0].get("__package__") \
         if isinstance(context, ast.Dict) else None
@@ -204,7 +247,7 @@ def importer_escapes(tree, calls):
     return False
 
 
-def names_imported_by(node, *, calls=None, any_call=False):
+def names_imported_by(node, *, calls=None, any_call=False, trusted=True):
     """The absolute module names ONE syntax node imports.
 
     `import a.b, c` names `a.b` and `c`; `from a.b import c` names `a.b`; a
@@ -214,7 +257,9 @@ def names_imported_by(node, *, calls=None, any_call=False):
     (`IMPORTING_CALLS`, or `importing_calls(tree)`), a call to one of them
     names its module too, when the name is a string LITERAL, passed by
     position or as `name=`. With `any_call`, EVERY call does, whatever it
-    calls: the reading for a module where `importer_escapes` holds.
+    calls: the reading for a module where `importer_escapes` holds. Without
+    `trusted`, the reading for a module that `rebinds` `CONTEXT_NAMES`,
+    `globals()` and `__package__` are not taken to be the module's own.
 
     Arguments spelled out with a literal `*[...]` or `**{...}`, however
     deep, count where they land. Where a `*` or `**` of anything else hides
@@ -245,14 +290,14 @@ def names_imported_by(node, *, calls=None, any_call=False):
     if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
         return []
     if called == "__import__":
-        return _dunder_import(name.value, args, keywords, complete)
+        return _dunder_import(name.value, args, keywords, complete, trusted)
     if not name.value.startswith("."):
         return [name.value]
     package = args[1] if len(args) > 1 else keywords.get("package")
     if package is None and not complete:
         return [UNREADABLE]
     if package is None or (isinstance(package, ast.Constant) and package.value is None) \
-            or (isinstance(package, ast.Name) and package.id == "__package__"):
+            or (trusted and isinstance(package, ast.Name) and package.id == "__package__"):
         return []
     if not (isinstance(package, ast.Constant) and isinstance(package.value, str)):
         return [UNREADABLE]
