@@ -580,18 +580,34 @@ def test_the_real_two_directory_invocation_collects_the_same_in_either_order():
     `from conftest import ...` in `tests/` reads the runtime suite's conftest.
     `tests_runtime/` imports nothing through `conftest`, so the other order
     holds either way. (openxFactory's copy runs two pairs of its own
-    directories.)"""
-    for left, right in (("tests", "tests_runtime"),):
-        counts = []
-        for args in ((left, right), (right, left)):
-            proc = _repo_collect(*args)
-            assert proc.returncode == 0, f"{args}: {proc.stdout[-4000:]}{proc.stderr}"
-            assert " error" not in proc.stdout, f"{args}: {proc.stdout[-4000:]}"
-            match = re.search(r"(\d+) tests collected", proc.stdout)
-            assert match, proc.stdout[-2000:]
-            counts.append(int(match.group(1)))
+    directories.)
 
-        assert counts[0] == counts[1] > 0, (left, right, counts)
+    WHAT IS COMPARED IS THE WHOLE COLLECTION OUTCOME, the count and the files
+    that failed to collect, and not only whether collection was clean. A file
+    that needs a package the environment lacks fails to collect the same way
+    in both orders, so it is not a slot defect. Before T036 gave the `test`
+    extra the runtime packages, `tests_runtime/test_oidc_verifier.py` did that
+    in a `.[test]`-only venv, for want of `httpx`. The whole suite reports such
+    an error on its own, and `Pin the triple` refuses any error at all. What
+    only this case can see is a DIFFERENCE between the two orders, so that is
+    what it asserts."""
+    for left, right in (("tests", "tests_runtime"),):
+        outcomes = [_collection_outcome(_repo_collect(*args))
+                    for args in ((left, right), (right, left))]
+        assert outcomes[0] == outcomes[1], (
+            f"`pytest --co {left} {right}` and `pytest --co {right} {left}` "
+            f"disagree: {outcomes}. A directory's conftest no longer owns the "
+            "ambient `conftest` slot for its own subtree")
+        assert outcomes[0][0] > 0, outcomes
+
+
+def _collection_outcome(proc: subprocess.CompletedProcess) -> tuple[int, tuple[str, ...]]:
+    """`(tests collected, the files that failed to collect)`, read off a
+    `--co -q` run's summary."""
+    match = re.search(r"(\d+) tests? collected", proc.stdout)
+    assert match, proc.stdout[-2000:] + proc.stderr
+    errored = sorted(set(re.findall(r"^ERROR (\S+)", proc.stdout, re.MULTILINE)))
+    return int(match.group(1)), tuple(errored)
 
 
 # --------------------------------------------------------------------------
