@@ -317,12 +317,14 @@ def test_an_entry_point_registers_the_local_git_corpus_when_no_host_has() -> Non
 
     An explicit skip-on-import-failure, not a plain `import` -- because
     proving *"an entry point registers…"* means calling `cli.build_parser()`,
-    and that is exactly what does not import in a lone checkout until T011
-    lands (see the module docstring's correction, and
-    `_import_opendox_cli_or_skip`'s own). This case SKIPS today, under
-    `--noconftest` and without it alike, and runs for real once T011 has
-    landed -- T022's own PR verifies it now under the Group 2 simulation
-    shim instead, and says so plainly."""
+    which did not import in a lone checkout before T011 landed (see the
+    module docstring's correction, and `_import_opendox_cli_or_skip`'s own).
+    T011 HAS SINCE LANDED (Copilot review of openDox-code#45, "Update stale
+    test docstring about skip behavior"): this case now runs for real, under
+    the plain root conftest and `--noconftest` alike, and the skip guard
+    above is retained only as a compatibility fallback for some future,
+    narrower invocation of this file alone -- not because this run is
+    expected to skip."""
     cli = _import_opendox_cli_or_skip()
     from opendox import domain_profile
     from opendox.runtime.local_git_adapter import WorkingTreeCorpus
@@ -330,12 +332,14 @@ def test_an_entry_point_registers_the_local_git_corpus_when_no_host_has() -> Non
     with pytest.raises(ca.CorpusRefused):
         ca.home()  # nothing registered yet -- the autouse fixture's own promise
 
-    # `build_parser()` also reads the (still unregistered, pre-T016) host
-    # profile as its OWN last statement, which refuses `ProfileNotRegistered`
-    # today. This case is about the corpus-adapter registration alone, which
-    # runs first in the function body regardless of that later refusal --
-    # and once T016 lands, `build_parser()` will not raise at all, so this
-    # `except` clause becomes dead code and the assertions below still hold.
+    # `build_parser()` also reads the host profile as its OWN last
+    # statement, which used to refuse `ProfileNotRegistered` before T016
+    # landed (this case is about the corpus-adapter registration alone,
+    # which runs FIRST in the function body regardless of that later
+    # refusal). T016 has SINCE landed: `build_parser()` no longer raises at
+    # all, so this `except` clause is now dead code, kept only as a
+    # compatibility fallback for some future, narrower invocation -- the
+    # assertions below hold either way.
     try:
         cli.build_parser()
     except domain_profile.ProfileNotRegistered:
