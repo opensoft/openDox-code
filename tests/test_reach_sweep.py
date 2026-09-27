@@ -181,10 +181,17 @@ def sweep(source: str, path: str = "<source>") -> list[Reach]:
                 visit(default, deferred, inside)
             visit(node.body, True, f"{inside}.<lambda>")
             return
-        for name in names_imported_by(node, calls=calls, any_call=any_call,
-                                      trusted=trusted):
-            if name == UNREADABLE or names_a_forbidden_package(name, SIBLINGS):
-                found.append(Reach(path, node.lineno, name, deferred, inside))
+        named = [name for name in names_imported_by(
+                     node, calls=calls, any_call=any_call, trusted=trusted,
+                     members=True)
+                 if name == UNREADABLE or names_a_forbidden_package(name, SIBLINGS)]
+        if isinstance(node, ast.ImportFrom):
+            # One reach per statement: its module, or, where the module is not
+            # a sibling's (`from scripts import doc_health`), the first member
+            # that is.
+            named = named[:1]
+        for name in named:
+            found.append(Reach(path, node.lineno, name, deferred, inside))
         for child in ast.iter_child_nodes(node):
             if not any(child is param for param in lazy):
                 visit(child, deferred, inside)
@@ -336,8 +343,8 @@ def test_the_scanner_classifies_every_position_it_reads():
 #: `__import__` reads its relative context off its `globals`: `globals()` is
 #: the module's own, a literal `{"__package__": ...}` resolves (its own case,
 #: below), and anything else, or a level that is not a literal, is
-#: `UNREADABLE`. The pre-carve
-#: `scripts.` spelling is openxFactory's too.
+#: `UNREADABLE`. The pre-carve `scripts.` spelling is openxFactory's too,
+#: and `from scripts import doc_health` imports `scripts.doc_health`.
 #: Arguments spelled out with a literal `*[...]` or `**{...}`, however deep,
 #: count where they land. A spread that hides the name, or the package a
 #: relative name needs, makes the call `UNREADABLE`, which the sweep refuses.
@@ -371,6 +378,7 @@ _LAZY_SPECIMEN = textwrap.dedent('''
     NESTED_OVER = importlib.import_module(**{"name": "safe", **{**OPTIONS}})
     BOUND = importlib.import_module(".corpus", package=PKG)
     import scripts.doc_health.corpus
+    from scripts import ideation_dashboard, doc_health
     OWN = __import__("corpus", globals(), None, (), 1)
     CONTEXT = __import__("corpus", CONTEXT, None, (), 1)
     LEVELLED = __import__("corpus", globals(), None, (), LEVEL)
@@ -400,8 +408,9 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
         (26, UNREADABLE, False, "<module>"),
         (27, UNREADABLE, False, "<module>"),
         (28, "scripts.doc_health.corpus", False, "<module>"),
-        (30, UNREADABLE, False, "<module>"),
+        (29, "scripts.ideation_dashboard", False, "<module>"),
         (31, UNREADABLE, False, "<module>"),
+        (32, UNREADABLE, False, "<module>"),
     }, sorted(found)
 
 

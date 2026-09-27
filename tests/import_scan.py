@@ -247,11 +247,15 @@ def importer_escapes(tree, calls):
     return False
 
 
-def names_imported_by(node, *, calls=None, any_call=False, trusted=True):
+def names_imported_by(node, *, calls=None, any_call=False, trusted=True,
+                      members=False):
     """The absolute module names ONE syntax node imports.
 
     `import a.b, c` names `a.b` and `c`; `from a.b import c` names `a.b`; a
     relative import names nothing, for the reason `imported_modules` gives.
+    With `members`, `from a.b import c` also names `a.b.c`, after `a.b`,
+    because a name imported from a package may be its submodule:
+    `from scripts import doc_health` imports `scripts.doc_health`.
 
     With `calls`, a mapping from callable names to the importing call each is
     (`IMPORTING_CALLS`, or `importing_calls(tree)`), a call to one of them
@@ -277,7 +281,10 @@ def names_imported_by(node, *, calls=None, any_call=False, trusted=True):
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
     if isinstance(node, ast.ImportFrom):
-        return [node.module] if node.level == 0 and node.module else []
+        if node.level or not node.module:
+            return []
+        return [node.module, *(f"{node.module}.{alias.name}" for alias in node.names
+                               if members and alias.name != "*")]
     if not isinstance(node, ast.Call) or not (calls or any_call):
         return []
     called = (calls or {}).get(_called_name(node.func))
