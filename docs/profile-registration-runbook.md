@@ -331,6 +331,9 @@ what `view_extension.host_profile_name()`, `display_profile.host_display()`,
 `view_extension.host_view_facet()` and `canvas_drafts` read, outside a build as
 readily as inside one. So neither openXdox's `_upstream()` nor a diagnostic
 closes the window in which a host's registration still replaces the default.
+`HANDLER_CONTRIBUTIONS`, which `build_server()` also reads, is optional and is
+not one of the two: the server's build is recorded at its `ROUTE_EXTENSIONS`
+read.
 
 | raised | when | what it means |
 | --- | --- | --- |

@@ -50,7 +50,9 @@ default, a parser or a server has now been built from it, so a host's later
 (`view_extension.host_profile_name()`, `display_profile.host_display()`,
 `view_extension.host_view_facet()`), so none of them may close the window in
 which a host's registration still replaces the default (Copilot review thread
-on openDox-code#42).
+on openDox-code#42). `HANDLER_CONTRIBUTIONS` (plan 034's T010), which
+`serve.build_server()` also reads, is optional and is not in `READERS`: the
+server's build is recorded at its `ROUTE_EXTENSIONS` read.
 
 HOW IT REFUSES, AND WHY IT NEVER RETURNS `()`. Two distinct failures, two
 distinct messages:
