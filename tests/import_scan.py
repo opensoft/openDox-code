@@ -40,7 +40,7 @@ import importlib.util
 #: The two calls that import a module named by a STRING, as #1144's F4.1 scan
 #: reads them, each mapped to itself: `importlib.import_module` and the
 #: builtin `__import__`, reached through a module (`importlib.import_module`)
-#: or by a bare name. `importing_calls` adds the other names a module gives them.
+#: or by a bare name. `importing_calls` adds the names an import gives them.
 IMPORTING_CALLS = {"import_module": "import_module", "__import__": "__import__"}
 
 
@@ -55,21 +55,15 @@ def _called_name(expr):
 
 
 def importing_calls(tree):
-    """`IMPORTING_CALLS`, and every other name `tree` gives one of them.
+    """`IMPORTING_CALLS`, and each name an import gives one of them:
+    `from importlib import import_module as load`, or `from builtins import
+    __import__ as imp`. The result maps each name to the call it is.
 
-    A module can call the two under a name of its own: `from importlib import
-    import_module as load`, `from builtins import __import__ as imp`, or an
-    assignment, `load = importlib.import_module`, followed as far as it chains
-    (`again = load`). The result maps each such name to the call it is.
-
-    A call is matched by the name it SPELLS, not by what that name is bound
-    to when it runs. So a parameter, a local or another object's attribute
-    that happens to be spelled `import_module` is read as the importer too.
-    That is the stricter reading, which the sweep takes wherever it cannot
-    tell (`tests/test_reach_sweep.py`), and it can only refuse a module,
-    never pass one. What cannot be read at all is the importer under a name
-    the module never gives it by an import or an assignment: through
-    `getattr`, a `functools.partial`, or an argument a caller passes in.
+    A call is matched by the name it SPELLS, not by what the name is bound to
+    when it runs, so a parameter or another object's attribute spelled
+    `import_module` is read as the importer too. That is the stricter reading,
+    the one the sweep takes wherever it cannot tell (`tests/test_reach_sweep.py`):
+    it can only refuse a module, never pass one.
     """
     calls = dict(IMPORTING_CALLS)
     for node in ast.walk(tree):
@@ -78,49 +72,65 @@ def importing_calls(tree):
             for alias in node.names:
                 if alias.name in IMPORTING_CALLS and alias.asname:
                     calls[alias.asname] = alias.name
-    assignments = [node for node in ast.walk(tree)
-                   if isinstance(node, (ast.Assign, ast.AnnAssign))
-                   and node.value is not None]
-    grew = True
-    while grew:
-        grew = False
-        for node in assignments:
-            call = calls.get(_called_name(node.value))
-            if call is None:
-                continue
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                if isinstance(target, ast.Name) and target.id not in calls:
-                    calls[target.id] = call
-                    grew = True
     return calls
 
 
-def names_imported_by(node, *, calls=None):
+def importer_escapes(tree, calls):
+    """Whether `tree` handles an importer as a VALUE, not only by calling it.
+
+    That is any mention of a name in `calls` other than as the callable of a
+    call: an assignment (`load = importlib.import_module`), a tuple, a
+    container, an argument, a default value, a `:=`, a rebinding. It is also
+    an importer's name as a string outside documentation (`getattr(importlib,
+    "import_module")`). Once the importer is a value, it can travel under any
+    name by any binding, and no source read follows every one. So a module
+    where this holds is read strictly, with `names_imported_by(...,
+    any_call=True)`.
+    """
+    callables = {id(node.func) for node in ast.walk(tree)
+                 if isinstance(node, ast.Call)}
+    documentation = {id(node.value) for node in ast.walk(tree)
+                     if isinstance(node, ast.Expr)
+                     and isinstance(node.value, ast.Constant)}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Name, ast.Attribute)) \
+                and id(node) not in callables and _called_name(node) in calls:
+            return True
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and node.value in IMPORTING_CALLS and id(node) not in documentation:
+            return True
+    return False
+
+
+def names_imported_by(node, *, calls=None, any_call=False):
     """The absolute module names ONE syntax node imports.
 
     `import a.b, c` names `a.b` and `c`; `from a.b import c` names `a.b`; a
     relative import names nothing, for the reason `imported_modules` gives.
 
     With `calls`, a mapping from callable names to the importing call each is
-    (`IMPORTING_CALLS`, or `importing_calls(tree)` for one module's own names),
-    a call names its module too, when the name is a string LITERAL, passed by
-    position or as `name=`. A relative name is resolved where the call itself
-    says what it is relative to: `import_module(".corpus", package="doc_health")`
-    names `doc_health.corpus`. Otherwise it is relative to the calling
-    module's own package, and names nothing here: an `import_module` whose
-    `package` is not a literal (`__package__`, say), and `__import__` with a
-    nonzero literal `level`. A name computed at run time cannot be read off
-    the source.
+    (`IMPORTING_CALLS`, or `importing_calls(tree)`), a call to one of them
+    names its module too, when the name is a string LITERAL, passed by
+    position or as `name=`. With `any_call`, EVERY call does, whatever it
+    calls: the reading for a module where `importer_escapes` holds.
+
+    A relative name is resolved where the call itself says what it is relative
+    to, a literal `package`, by keyword or as the second argument. So
+    `import_module(".corpus", package="doc_health")` names
+    `doc_health.corpus`. Otherwise it is relative to the calling module's own
+    package, and names nothing here. That covers a `package` that is not a
+    literal (`__package__`, say), and `__import__` with a nonzero literal
+    `level`, whose second argument is `globals`. A name computed at run time
+    cannot be read off the source.
     """
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
     if isinstance(node, ast.ImportFrom):
         return [node.module] if node.level == 0 and node.module else []
-    if not calls or not isinstance(node, ast.Call):
+    if not isinstance(node, ast.Call) or not (calls or any_call):
         return []
-    called = calls.get(_called_name(node.func))
-    if called is None:
+    called = (calls or {}).get(_called_name(node.func))
+    if called is None and not any_call:
         return []
     keywords = {keyword.arg: keyword.value for keyword in node.keywords
                 if keyword.arg is not None}

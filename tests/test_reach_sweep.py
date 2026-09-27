@@ -33,11 +33,16 @@ PARSED, NOT GREPPED (`tests/import_scan.py`'s rule). These modules name the
 four packages in prose on purpose: a docstring saying which reach a seam
 replaced, or a comment saying why an import is lazy. So the sweep reads import
 statements, and `importlib.import_module(...)` or `__import__(...)` calls with
-a literal name, by position or as `name=`, and under any name the module gives
-those two (`from importlib import import_module as load`, or `load =
-importlib.import_module`), out of the syntax tree, as #1144's F4.1 scan does. A name in a comment, a docstring or a string is not an import.
-Relative imports stay inside this package and are not read. Each node is read
-by `import_scan.names_imported_by`, the reader the repository's other direction
+a literal name, by position or as `name=`, out of the syntax tree, as #1144's
+F4.1 scan does. That includes a call under a name an import gives one of the
+two (`from importlib import import_module as load`). A module that handles an
+importer as a VALUE (assigns it, passes it, stores it, or looks it up by its
+name as a string) is read strictly: there, every call whose module argument
+is a literal counts, whatever it calls. So the importer can travel under any
+name by any binding, and a literal module name still counts. A name in a
+comment, a docstring or a string is not an import. Relative imports stay
+inside this package and are not read. Each node is read by
+`import_scan.names_imported_by`, the reader the repository's other direction
 checks share, so the sweep is not a second copy of it.
 
 WHEN A REACH RUNS decides its class. A function body defers, and so does a
@@ -79,7 +84,8 @@ SRC = ROOT / "src"
 
 sys.path.insert(0, str(ROOT / "tests"))
 from import_scan import (  # noqa: E402
-    importing_calls, names_a_forbidden_package, names_imported_by)
+    importer_escapes, importing_calls, names_a_forbidden_package,
+    names_imported_by)
 
 #: The consumer. Its deferred reaches are phase 2's and 3's to route.
 CONSUMER = "openxdox"
@@ -115,6 +121,7 @@ def sweep(source: str, path: str = "<source>") -> list[Reach]:
     found: list[Reach] = []
     tree = ast.parse(source, filename=path)
     calls = importing_calls(tree)
+    any_call = importer_escapes(tree, calls)
 
     def visit(node: ast.AST, deferred: bool, inside: str) -> None:
         lazy: list[ast.AST] = []
@@ -149,7 +156,7 @@ def sweep(source: str, path: str = "<source>") -> list[Reach]:
                 visit(default, deferred, inside)
             visit(node.body, True, f"{inside}.<lambda>")
             return
-        for name in names_imported_by(node, calls=calls):
+        for name in names_imported_by(node, calls=calls, any_call=any_call):
             if names_a_forbidden_package(name, SIBLINGS):
                 found.append(Reach(path, node.lineno, name, deferred, inside))
         for child in ast.iter_child_nodes(node):
@@ -298,24 +305,20 @@ def test_the_scanner_reads_the_lazy_positions_and_the_keyword_spelling():
     }, sorted(found)
 
 
-#: The two importing calls under names the module gives them: an import alias,
-#: an assignment, and an assignment of an alias. The relative call names no
-#: sibling under an alias either.
+#: The two importing calls under the names an import gives them. The module
+#: never handles either as a value, so it is read call by call: the relative
+#: call names no sibling under its alias either, and a call that is not an
+#: importer names nothing, whatever its argument says.
 _ALIAS_SPECIMEN = textwrap.dedent('''
-    import importlib
     import importlib as il
     from importlib import import_module as load
     from builtins import __import__ as imp
 
-    again = load
-    fetch: object = importlib.import_module
-
     def verb():
         load("doc_health")
-        again("ideation_dashboard.lanes")
-        fetch(name="corpus_adapter_openxfactory")
         il.import_module("openxdox.kickoff")
         imp("doc_health", None, None, (), 1)
+        print("ideation_dashboard")
 ''')
 
 
@@ -323,11 +326,50 @@ def test_the_scanner_follows_an_importing_call_under_another_name():
     found = {(r.line, r.name, r.deferred, r.inside)
              for r in sweep(_ALIAS_SPECIMEN, "alias.py")}
     assert found == {
-        (11, "doc_health", True, "verb"),
-        (12, "ideation_dashboard.lanes", True, "verb"),
-        (13, "corpus_adapter_openxfactory", True, "verb"),
-        (14, "openxdox.kickoff", True, "verb"),
+        (7, "doc_health", True, "verb"),
+        (8, "openxdox.kickoff", True, "verb"),
     }, sorted(found)
+
+
+#: Each way a module can hold an importer as a value, with a later call through
+#: it. None of them is followed binding by binding. Each makes the module read
+#: strictly, so the literal module name counts, whatever the call is spelled.
+_AS_A_VALUE = {
+    "an assignment": "load = importlib.import_module\n",
+    "a destructuring assignment": "load, _ = (importlib.import_module, object)\n",
+    "an assignment expression": "(load := importlib.import_module)\n",
+    "a container": "load = [importlib.import_module][0]\n",
+    "its name as a string": "load = getattr(importlib, 'import_module')\n",
+    "a default value": ("def pick(load=importlib.import_module):\n"
+                        "    return load\n\n\nload = pick()\n"),
+}
+
+
+@pytest.mark.parametrize("binding", sorted(_AS_A_VALUE))
+def test_an_importer_held_as_a_value_makes_every_literal_call_count(binding):
+    source = ("import importlib\n" + _AS_A_VALUE[binding]
+              + "\n\ndef verb():\n    load('doc_health')\n")
+    assert [(r.name, r.deferred, r.inside) for r in sweep(source, "value.py")] \
+        == [("doc_health", True, "verb")], binding
+
+
+def test_a_deferred_reach_into_the_consumer_passes_all_three(monkeypatch, tmp_path):
+    """The lawful case, planted: a function body that imports `openxdox`
+    passes every assertion. So the three draw the line where release 1 draws
+    it, and keep passing the consumer's deferred reaches after the last of
+    the real ones is routed away."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "deferring.py").write_text(
+        "def verb():\n    from openxdox import gate_console\n    return gate_console\n",
+        encoding="utf-8")
+    this_module = sys.modules[__name__]
+    monkeypatch.setattr(this_module, "SRC", tmp_path / "src")
+    monkeypatch.setattr(this_module, "ROOT", tmp_path)
+    assert [str(r) for r in _sweep_src()] == [
+        "src/deferring.py:2: openxdox (deferred, in verb)"]
+    test_no_module_under_src_reaches_a_sibling_at_import_time()
+    test_no_module_under_src_reaches_openxfactory_at_all()
+    test_every_reach_the_sweep_finds_is_deferred_into_the_consumer()
 
 
 @pytest.mark.parametrize("test", [
