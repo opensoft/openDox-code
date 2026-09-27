@@ -4145,25 +4145,36 @@ def test_an_oversized_reason_from_the_WIRE_is_not_adopted(posture_results):
     assert w["astralAdopted"] is True
 
 
-def test_the_browser_ceiling_is_pinned_to_the_RELEASED_maxLength():
-    """The JS constant cannot read the schema, so it is pinned to the released
-    bytes here — the same discipline `serve.CONTEXT_REDUCED_REASON_MAX_LENGTH`
-    gets. Three restatements of one bound, and a test for each pair, so they
-    cannot drift into three ceilings."""
-    import re
-    import yaml
+def test_the_browser_ceiling_equals_the_servers_ceiling():
+    """The browser and the server restate ONE bound, and both restatements are
+    this package's own, so this leg pins them equal to each other (plan 034
+    T035). Three restatements of one bound, and a test for each pair, so they
+    cannot drift into three ceilings: this is the browser-and-server pair.
 
-    schema = yaml.safe_load(
-        (REPO_ROOT / "contracts" / "schemas"
-         / "xfactory-workbench-chat-turn.schema.yaml").read_text(
-             encoding="utf-8"))
-    released = schema["$defs"]["context_packet"]["properties"][
-        "reduced_reason"]["maxLength"]
+    The pair with the RELEASED `maxLength` left this file.
+    `test_the_browser_ceiling_is_pinned_to_the_RELEASED_maxLength` read
+    `contracts/schemas/xfactory-workbench-chat-turn.schema.yaml`, a released
+    openxFactory contract that the carve did not move, so it failed here with
+    `FileNotFoundError`. It becomes a named openxFactory composition test
+    (T047), beside the schema it reads."""
+    import re
+
     source = CHAT_MODEL_JS.read_text(encoding="utf-8")
     match = re.search(
         r"export const CONTEXT_REDUCED_REASON_MAX_LENGTH = (\d+);", source)
     assert match, "the browser-side ceiling constant moved or was renamed"
-    assert int(match.group(1)) == released
+    assert int(match.group(1)) == serve_mod.CONTEXT_REDUCED_REASON_MAX_LENGTH
+
+    # AND THE RELEASED NUMBER ITSELF, restated with its source, because the
+    # pair above cannot see both constants move together. This leg cannot read
+    # the schema, so the value is carried: `context_packet.reduced_reason
+    # .maxLength` is 500 in `contracts/schemas/xfactory-workbench-chat-turn
+    # .schema.yaml`, which the carve sent to openDox-spec (read at openDox-spec
+    # `main` `8fe8c4c7`). A release that moves it moves this line in the same
+    # change as both constants. The pin read from the released bytes
+    # themselves is openxFactory's (T047).
+    assert serve_mod.CONTEXT_REDUCED_REASON_MAX_LENGTH == 500, (
+        "the server's ceiling is not the released maxLength, 500")
 
 
 def test_a_snapshot_written_before_this_release_still_restores(posture_results):
