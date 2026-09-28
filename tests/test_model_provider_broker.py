@@ -22,8 +22,10 @@ Five layers, each proving a different thing about the same machinery:
       UNCONFIGURED posture is byte-for-byte what it was before this change.
 
 A SIXTH LAYER, (f), holds #1144 Group 16's binding and provider boxes (plan
-034 phase 3, slice P3-B). 16.1 is the OpenAI-compatible dialect (T078), and
-16.2 is the model name the provider receives (T079).
+034 phase 3, slice P3-B). 16.1 is the OpenAI-compatible dialect (T078), 16.2
+is the model name the provider receives (T079), and 16.3 is the credential
+staying a reference: a key in the URL or an extra field refused, the built-in
+`env:` and keyring resolver, and the auth kind `none` (T080).
 
 THE FAKE BROKER SPEAKS THE DECLARED CONTRACT (task 2.6). It was this
 repository's own invented stdin/stdout protocol until the reconciliation, which
@@ -137,9 +139,14 @@ def test_no_secret_field_exists_in_the_shape_to_populate(secret_field):
 
 
 def test_the_auth_kind_vocabulary_is_closed():
-    assert binding_mod.AUTH_KINDS == ("api_key", "oauth")
-    for kind in binding_mod.AUTH_KINDS:
+    """THREE KINDS since #1144 box 16.3 (RULED R1Q18 (a)), in a pinned order:
+    `none` joins after the two that take a credential. A `none` binding names
+    no reference and no broker, which is why it is built apart here."""
+    assert binding_mod.AUTH_KINDS == ("api_key", "oauth", "none")
+    for kind in (binding_mod.AUTH_KIND_API_KEY, binding_mod.AUTH_KIND_OAUTH):
         assert _binding(auth_kind=kind).auth_kind == kind
+    assert _binding(auth_kind=binding_mod.AUTH_KIND_NONE, credential_ref=None,
+                    broker_argv=()).auth_kind == "none"
     with pytest.raises(binding_mod.BindingRefused):
         _binding(auth_kind="whatever_the_broker_likes")
 
@@ -1123,8 +1130,12 @@ def test_a_refusal_cannot_be_composed_from_what_a_broker_said():
 def test_the_fixed_diagnostics_are_all_reachable_and_no_more():
     """The closed set shed the dialect sentence when the dialect became a
     declaration-time refusal; keeping an unraisable sentence would be a refusal
-    nobody can trigger."""
-    assert len(provider_mod.FIXED_DIAGNOSTICS) == 8
+    nobody can trigger. TEN since #1144 box 16.3: the built-in resolver's two
+    joined, and section (f) below reaches each of them."""
+    assert len(provider_mod.FIXED_DIAGNOSTICS) == 10
+    assert {provider_mod.DIAG_REFERENCE_UNRESOLVED,
+            provider_mod.DIAG_KEYRING_UNAVAILABLE} <= \
+        provider_mod.FIXED_DIAGNOSTICS
     assert not hasattr(provider_mod, "DIAG_DIALECT_UNKNOWN")
 
 
@@ -1775,3 +1786,613 @@ def test_a_stand_in_chat_server_receives_the_declared_model(tmp_path):
     assert _ChatCompletionsHandler.seen["body"] == {
         "model": DECLARED_MODEL,
         "messages": [{"role": "user", "content": "assembled prompt"}]}
+
+
+# 16.3, the credential stays a reference (T080).
+#
+#   * A key in the endpoint URL or in an extra field is refused when the
+#     binding is declared. The URL check is the product's own detector,
+#     `runtime/local_git_adapter.carries_a_credential`.
+#   * The built-in resolver takes `env:NAME` and OS-keyring references, at call
+#     time and inside `doxbench_provider` only (RULED R1Q17 (b)). Such a record
+#     needs no broker, and one given beside it is refused. That refusal is the
+#     plan's fail-closed reading (analyze round 2, V2-21), which no answer
+#     rules. The tests below hold both halves.
+#   * An endpoint that takes no credential declares the auth kind `none`,
+#     under which `broker_argv` and `credential_ref` are forbidden (RULED
+#     R1Q18 (a)). It joins after the two kinds that exist.
+#
+# Every key here is an obvious fake.
+
+KEY_SENTINEL = "sk-stand-in-7c1e5a90d3b24f68-NOT-A-KEY"
+ENV_NAME = "STAND_IN_PROVIDER_KEY"
+KEYRING_SERVICE = "https://api.example.invalid"
+KEYRING_USER = "brett"
+
+
+def _f16_1_record():
+    """F16.1's clean control record, built as #1144's falsifier builds it."""
+    rec = {f: "stand-in" for f in binding_mod.BINDING_FIELDS}
+    rec.update(auth_kind=binding_mod.AUTH_KINDS[0], dialect="openai-chat-v1",
+               endpoint="http://127.0.0.1:9/v1/chat/completions")
+    if "broker_argv" in rec:
+        rec["broker_argv"] = ["stand-in-broker"]
+    return rec
+
+
+def test_f16_1_a_raw_key_is_refused_in_a_field_and_in_the_url():
+    """F16.1's refusal block, as #1144 writes it: the clean control record is
+    accepted, and each of its three raw keys is refused."""
+    rec = _f16_1_record()
+    binding_mod.ModelProviderBinding.from_record(rec)   # the control
+    for bad in (dict(rec, endpoint="https://user:sk-stand-in@api.example.invalid/v1"),
+                dict(rec, endpoint="https://api.example.invalid/v1?api_key=sk-stand-in"),
+                dict(rec, api_key="sk-stand-in")):
+        with pytest.raises(binding_mod.BindingRefused):
+            binding_mod.ModelProviderBinding.from_record(bad)
+
+
+def test_f16_1_the_first_auth_kind_still_takes_a_credential():
+    """`none` joined AFTER the two kinds that exist (R1Q18 (a)), so the
+    `AUTH_KINDS[0]` F16.1 builds its control from is unchanged."""
+    assert binding_mod.AUTH_KINDS[0] == binding_mod.AUTH_KIND_API_KEY
+    assert binding_mod.AUTH_KINDS[-1] == binding_mod.AUTH_KIND_NONE == "none"
+
+
+@pytest.mark.parametrize("endpoint", [
+    f"https://user:{KEY_SENTINEL}@api.example.invalid/v1",
+    f"https://{KEY_SENTINEL}@api.example.invalid/v1",
+    f"https://api.example.invalid/v1?api_key={KEY_SENTINEL}",
+    f"https://api.example.invalid/v1?key={KEY_SENTINEL}",
+    f"https://api.example.invalid/v1?token={KEY_SENTINEL}",
+    f"https://api.example.invalid/v1?%61pi_key={KEY_SENTINEL}",
+    f"https://api.example.invalid/v1#token={KEY_SENTINEL}",
+    f"ftp://user:{KEY_SENTINEL}@api.example.invalid/v1",
+], ids=["userinfo", "bare-userinfo", "query-api-key", "query-key",
+        "query-token", "percent-encoded-name", "fragment", "keyed-bad-scheme"])
+def test_a_key_in_the_endpoint_is_refused_and_never_repeated(endpoint):
+    """The refusal is FIXED, so the URL it refused is repeated nowhere. The
+    detector runs before the scheme check, which would have echoed it."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=endpoint)
+    assert str(caught.value) == binding_mod.ENDPOINT_CARRIES_A_CREDENTIAL
+    assert KEY_SENTINEL not in str(caught.value)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://127.0.0.1:9/v1/chat/completions",
+    "http://localhost:11434/v1/chat/completions",
+    "https://api.example.invalid/v1/chat/completions",
+    "https://api.example.invalid/v1?model=stand-in&stream=false",
+])
+def test_a_clean_endpoint_is_accepted(endpoint):
+    assert _binding(endpoint=endpoint, dialect=OPENAI_CHAT).endpoint == endpoint
+
+
+def test_a_key_in_an_extra_field_is_refused_as_it_always_was():
+    for field in ("api_key", "secret", "token", "password", "key"):
+        record = dict(_binding().as_record(), **{field: KEY_SENTINEL})
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            binding_mod.ModelProviderBinding.from_record(record)
+        assert KEY_SENTINEL not in str(caught.value)
+
+
+def test_a_stored_document_whose_endpoint_carries_a_key_does_not_read(
+        tmp_path):
+    """A record written before 16.3 with a key in its URL no longer reads,
+    and the entry point's fallback still resolves the harness declaration.
+    The key is not in the refusal it prints."""
+    record = _binding().as_record()
+    record["endpoint"] = f"https://user:{KEY_SENTINEL}@api.example.invalid/v1"
+    path = tmp_path / "bindings.yaml"
+    path.write_text(json.dumps({"schema_version": 1,
+                                "kind": binding_mod.BINDINGS_KIND,
+                                "bindings": [record]}), encoding="utf-8")
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        binding_mod.BindingStore(path).list()
+    assert KEY_SENTINEL not in str(caught.value)
+
+
+# --- one resolver per record ---------------------------------------------
+
+
+def _none_binding(**overrides):
+    fields = dict(auth_kind=binding_mod.AUTH_KIND_NONE, credential_ref=None,
+                  broker_argv=(), endpoint="http://127.0.0.1:9/v1/chat/completions",
+                  dialect=OPENAI_CHAT, model=DECLARED_MODEL)
+    fields.update(overrides)
+    return _binding(**fields)
+
+
+def _built_in_binding(credential_ref=f"env:{ENV_NAME}", **overrides):
+    fields = dict(credential_ref=credential_ref, broker_argv=(),
+                  dialect=OPENAI_CHAT, model=DECLARED_MODEL)
+    fields.update(overrides)
+    return _binding(**fields)
+
+
+def test_the_none_kind_forbids_the_reference_and_the_broker():
+    """R1Q18 (a), both halves: declared explicitly, and both fields
+    forbidden under it. A blank reference is still a reference given."""
+    binding = _none_binding()
+    assert binding.credential_ref is None and binding.broker_argv == ()
+    assert binding.credential_source() == binding_mod.NO_CREDENTIAL
+    for given in (FAKE_REFERENCE, f"env:{ENV_NAME}", ""):
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            _none_binding(credential_ref=given)
+        assert "credential_ref is forbidden" in str(caught.value)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _none_binding(broker_argv=("openprofiler-broker",))
+    assert "broker_argv is forbidden" in str(caught.value)
+
+
+@pytest.mark.parametrize("kind", [binding_mod.AUTH_KIND_API_KEY,
+                                  binding_mod.AUTH_KIND_OAUTH])
+def test_a_kind_that_takes_a_credential_must_name_its_reference(kind):
+    """Never "no credential" by a field left out: the kind says it."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(auth_kind=kind, credential_ref=None)
+    assert "'none'" in str(caught.value)
+
+
+@pytest.mark.parametrize("reference", [
+    f"env:{ENV_NAME}", f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"])
+def test_a_built_in_reference_needs_no_broker_and_refuses_one_beside_it(
+        reference):
+    """BOTH HALVES, in one test, as T080's text asks. R1Q17 (b): a record
+    whose reference the built-in resolver takes needs no broker. The plan's
+    fail-closed reading: a broker given beside it is refused, so the record
+    has one resolver."""
+    binding = _built_in_binding(reference)
+    assert binding.broker_argv == ()
+    assert binding.credential_source() == \
+        binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _built_in_binding(reference, broker_argv=("openprofiler-broker",))
+    assert "two resolvers" in str(caught.value)
+
+
+def test_a_brokers_reference_still_needs_its_broker():
+    binding = _binding()
+    assert binding.credential_source() == binding_mod.CREDENTIAL_FROM_BROKER
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(broker_argv=())
+    assert "must name the broker command" in str(caught.value)
+
+
+def test_the_reference_forms_are_parsed_once():
+    parts = binding_mod.built_in_reference_parts
+    assert parts(f"env:{ENV_NAME}") == ("env:", ENV_NAME)
+    # the split is at the LAST `/`, so a service may carry one
+    assert parts(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}") == (
+        "keyring:", KEYRING_SERVICE, KEYRING_USER)
+    assert parts(FAKE_REFERENCE) is None
+    assert binding_mod.BUILT_IN_REFERENCE_FORMS == ("env:", "keyring:")
+
+
+@pytest.mark.parametrize("reference", [
+    "env:", "env:1BAD", "env:A-B", "env: SPACED", "env:NAME\n",
+    f"env:{KEY_SENTINEL}",
+    "keyring:", "keyring:service-only", "keyring:/user", "keyring:service/",
+    "keyring: /user", f"keyring:{KEY_SENTINEL}",
+])
+def test_a_malformed_built_in_reference_is_refused_and_never_repeated(
+        reference):
+    """Refused at declaration, and the refusal names the FORM, not the value:
+    a key pasted where its reference belongs is not printed back."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _built_in_binding(reference)
+    message = str(caught.value)
+    after_the_form = reference.split(":", 1)[1]
+    if after_the_form.strip():
+        assert after_the_form not in message
+    assert KEY_SENTINEL not in message
+
+
+def test_a_none_record_round_trips_and_may_leave_its_forbidden_fields_out():
+    binding = _none_binding()
+    record = binding.as_record()
+    assert list(record) == ["kind", *binding_mod.BINDING_FIELDS]
+    assert record["credential_ref"] is None and record["broker_argv"] == []
+    assert binding_mod.ModelProviderBinding.from_record(record) == binding
+    del record["credential_ref"], record["broker_argv"]
+    assert binding_mod.ModelProviderBinding.from_record(record) == binding
+    for key, given in (("credential_ref", FAKE_REFERENCE),
+                       ("broker_argv", ["openprofiler-broker"])):
+        with pytest.raises(binding_mod.BindingRefused):
+            binding_mod.ModelProviderBinding.from_record(
+                dict(record, **{key: given}))
+
+
+def test_a_built_in_record_may_leave_out_its_broker_argv():
+    binding = _built_in_binding()
+    record = binding.as_record()
+    assert record["broker_argv"] == []
+    for absent in ("deleted", None):
+        candidate = dict(record)
+        if absent == "deleted":
+            del candidate["broker_argv"]
+        else:
+            candidate["broker_argv"] = None
+        assert binding_mod.ModelProviderBinding.from_record(candidate) == \
+            binding
+    with pytest.raises(binding_mod.BindingRefused):
+        binding_mod.ModelProviderBinding.from_record(
+            dict(record, broker_argv=["openprofiler-broker"]))
+
+
+def test_each_read_back_states_the_custody_that_is_true_of_it(tmp_path):
+    store = _store(tmp_path)
+    store.add(_binding())
+    store.add(_built_in_binding(id="env-bound", label="Env"))
+    store.add(_none_binding(id="local", label="Local"))
+    custody = {record["id"]: record["credential_custody"]
+               for record in store.read_back()["bindings"]}
+    assert custody == {
+        "openprofiler-demo": binding_mod.CUSTODY_NOTICE,
+        "env-bound": binding_mod.BUILT_IN_CUSTODY_NOTICE,
+        "local": binding_mod.NO_CREDENTIAL_NOTICE,
+    }
+    assert [store.get(i).removal_notice()
+            for i in ("openprofiler-demo", "env-bound", "local")] == [
+        binding_mod.REMOVAL_NOTICE, binding_mod.BUILT_IN_REMOVAL_NOTICE,
+        binding_mod.NO_CREDENTIAL_REMOVAL_NOTICE]
+
+
+def test_the_consoles_intake_shaped_binding_still_builds():
+    """`serve_workbench`'s intake route builds its binding by keyword, with a
+    placeholder reference and the declared broker. That construction is
+    unchanged and still valid. A `none` binding cannot be enrolled that way,
+    because the placeholder is a reference and `none` forbids one."""
+    shaped = dict(id="enrolled", label="Enrolled", provider="p",
+                  credential_ref="pending-broker-intake",
+                  approved_by="brett", endpoint=ENDPOINT,
+                  dialect=binding_mod.DIALECT_XFACTORY_PROMPT_V1,
+                  broker_argv=("openprofiler-broker",))
+    for kind in (binding_mod.AUTH_KIND_API_KEY, binding_mod.AUTH_KIND_OAUTH):
+        assert binding_mod.ModelProviderBinding(auth_kind=kind, **shaped)
+    with pytest.raises(binding_mod.BindingRefused):
+        binding_mod.ModelProviderBinding(auth_kind=binding_mod.AUTH_KIND_NONE,
+                                         **shaped)
+
+
+def test_a_binding_no_broker_answers_has_no_broker_operation():
+    for binding in (_none_binding(), _built_in_binding()):
+        for operation in provider_mod.OPERATIONS:
+            with pytest.raises(AssertionError):
+                provider_mod.broker_operation_argv(binding, operation)
+        with pytest.raises(AssertionError):
+            provider_mod.hand_off_credential(binding, io.StringIO("x"))
+
+
+# --- the built-in resolver, at call time ---------------------------------
+
+
+class _FakeKeyring:
+    """A stand-in for the `keyring` package: the one call the resolver makes,
+    recorded."""
+
+    def __init__(self, entries=None, error=None):
+        self.entries = dict(entries or {})
+        self.error = error
+        self.asked: list[tuple[str, str]] = []
+
+    def get_password(self, service, username):
+        self.asked.append((service, username))
+        if self.error is not None:
+            raise self.error
+        return self.entries.get((service, username))
+
+
+def _refusing_runner(argv, **_kwargs):
+    raise AssertionError(f"a binding no broker answers spawned {argv!r}")
+
+
+def _unbrokered_port(binding, *outcomes, environ=None, keyring_backend=None,
+                     notice=None):
+    opener = _Opener(*outcomes)
+    port = provider_mod.BrokeredProviderPort(
+        binding, install_mod.brokered_catalog(binding),
+        runner=_refusing_runner, opener=opener,
+        notice=notice if notice is not None else (lambda _text: None),
+        environ=environ, keyring_backend=keyring_backend)
+    return port, opener
+
+
+def test_an_env_reference_is_read_at_call_time_and_presented_as_the_bearer():
+    """R1Q17 (b): no broker, no mint, and the value read for each request, so
+    a rotated value is the one the next request presents."""
+    environ = {ENV_NAME: KEY_SENTINEL}
+    port, opener = _unbrokered_port(_built_in_binding(),
+                                    _chat_completion("a"),
+                                    _chat_completion("b"), environ=environ)
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    environ[ENV_NAME] = "sk-rotated-stand-in-NOT-A-KEY"
+    assert port.dispatch(_Envelope())["assistant_prose"] == "b"
+    assert [request.get_header("Authorization")
+            for request in opener.requests] == [
+        f"Bearer {KEY_SENTINEL}", "Bearer sk-rotated-stand-in-NOT-A-KEY"]
+    for request in opener.requests:
+        assert KEY_SENTINEL not in request.get_full_url()
+        assert KEY_SENTINEL not in request.data.decode("utf-8")
+    assert port.ledger == [], "nothing was minted"
+
+
+def test_production_reads_this_processs_own_environment(monkeypatch):
+    monkeypatch.setenv(ENV_NAME, KEY_SENTINEL)
+    port, opener = _unbrokered_port(_built_in_binding(),
+                                    _chat_completion("a"))
+    port.dispatch(_Envelope())
+    assert opener.requests[0].get_header("Authorization") == \
+        f"Bearer {KEY_SENTINEL}"
+
+
+@pytest.mark.parametrize("environ", [
+    {}, {ENV_NAME: ""}, {ENV_NAME: "   "}, {ENV_NAME: "sk-stand-in\nX-Other: 1"},
+    {ENV_NAME: "sk-stand-in\x00"}],
+    ids=["unset", "empty", "blank", "line-break", "nul"])
+def test_an_unusable_env_value_refuses_before_any_request(environ):
+    port, opener = _unbrokered_port(_built_in_binding(), _chat_completion(),
+                                    environ=environ)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(_Envelope())
+    assert caught.value.diagnostic == provider_mod.DIAG_REFERENCE_UNRESOLVED
+    assert opener.requests == [], "no provider was contacted"
+    assert port.catalog().entries[0].available is False
+
+
+def test_a_reference_that_resolves_again_makes_the_entry_available_again():
+    environ: dict[str, str] = {}
+    port, _opener = _unbrokered_port(_built_in_binding(),
+                                     _chat_completion("a"), environ=environ)
+    with pytest.raises(provider_mod.BrokerRefused):
+        port.dispatch(_Envelope())
+    assert port.catalog().entries[0].available is False
+    environ[ENV_NAME] = KEY_SENTINEL
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    assert port.catalog().entries[0].available is True
+
+
+def test_a_keyring_reference_reads_the_os_keyring_at_call_time():
+    backend = _FakeKeyring({(KEYRING_SERVICE, KEYRING_USER): KEY_SENTINEL})
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion("a"), _chat_completion("b"), keyring_backend=backend)
+    port.dispatch(_Envelope())
+    port.dispatch(_Envelope())
+    assert backend.asked == [(KEYRING_SERVICE, KEYRING_USER)] * 2, \
+        "read for each request, and nothing cached"
+    assert opener.requests[0].get_header("Authorization") == \
+        f"Bearer {KEY_SENTINEL}"
+
+
+def test_an_absent_keyring_entry_refuses_unresolved():
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion(), keyring_backend=_FakeKeyring())
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(_Envelope())
+    assert caught.value.diagnostic == provider_mod.DIAG_REFERENCE_UNRESOLVED
+    assert opener.requests == []
+
+
+def test_a_keyring_that_cannot_be_read_refuses_and_says_nothing_of_its_own():
+    backend = _FakeKeyring(error=RuntimeError("backend detail that leaks"))
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion(), keyring_backend=backend)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(_Envelope())
+    assert caught.value.diagnostic == provider_mod.DIAG_KEYRING_UNAVAILABLE
+    assert "leaks" not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert opener.requests == []
+
+
+def test_without_the_keyring_package_a_keyring_reference_refuses(monkeypatch):
+    """`keyring` is not a dependency of this package. Without it, the
+    production path refuses with the fixed sentence, not an import error."""
+    monkeypatch.setitem(sys.modules, "keyring", None)
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion())
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(_Envelope())
+    assert caught.value.diagnostic == provider_mod.DIAG_KEYRING_UNAVAILABLE
+    assert opener.requests == []
+
+
+def test_the_production_keyring_path_imports_the_package_at_call_time(
+        monkeypatch):
+    backend = _FakeKeyring({(KEYRING_SERVICE, KEYRING_USER): KEY_SENTINEL})
+    monkeypatch.setitem(sys.modules, "keyring", backend)
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion("a"))
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    assert backend.asked == [(KEYRING_SERVICE, KEYRING_USER)]
+
+
+def test_a_none_binding_presents_no_credential_and_spawns_no_broker():
+    port, opener = _unbrokered_port(_none_binding(), _chat_completion("a"))
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    request = opener.requests[0]
+    assert not request.has_header("Authorization")
+    assert json.loads(request.data.decode("utf-8"))["model"] == DECLARED_MODEL
+    assert port.ledger == []
+
+
+@pytest.mark.parametrize("which", ["built-in", "none"])
+def test_a_401_without_a_broker_is_a_refusal_not_a_retry(which):
+    """The 2026-08-26 retry ruling is about a MINTED token. Here there is
+    nothing to re-mint, so a retry would buy a second paid call for the same
+    refusal."""
+    binding = _built_in_binding() if which == "built-in" else _none_binding()
+    port, opener = _unbrokered_port(binding, _expired_error(),
+                                    _chat_completion("never reached"),
+                                    environ={ENV_NAME: KEY_SENTINEL})
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(_Envelope())
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_REFUSED
+    assert len(opener.requests) == 1, "no second paid call"
+    assert port.ledger == []
+
+
+def test_the_resolved_credential_reaches_no_response_log_repr_or_disk(
+        tmp_path):
+    printed: list[str] = []
+    port, _opener = _unbrokered_port(_built_in_binding(),
+                                     _chat_completion("the answer"),
+                                     environ={ENV_NAME: KEY_SENTINEL},
+                                     notice=printed.append)
+    answer = port.dispatch(_Envelope())
+    assert KEY_SENTINEL not in json.dumps(answer)
+    assert KEY_SENTINEL not in repr(port)
+    assert KEY_SENTINEL not in "".join(printed)
+    assert KEY_SENTINEL not in repr(port.ledger)
+    port_state = {name: getattr(port, name) for name in dir(port)
+                  if name.startswith("_") and not name.startswith("__")
+                  and name != "_environ"}
+    assert KEY_SENTINEL not in repr(port_state), \
+        "the port keeps no credential between turns"
+    assert not [path for path in tmp_path.rglob("*") if path.is_file()
+                and KEY_SENTINEL in path.read_text(encoding="utf-8",
+                                                   errors="replace")]
+
+
+def test_an_unresolved_reference_maps_onto_the_seams_fixed_model_failed():
+    port, _opener = _unbrokered_port(_built_in_binding(), environ={})
+    entry = port.catalog().entries[0]
+    ticks = iter([0.0, 0.1])
+    outcome = model_mod.dispatch_turn(port, _Envelope(), entry=entry,
+                                      clock=lambda: next(ticks))
+    assert isinstance(outcome, model_mod.TurnDispatchFailure)
+    assert outcome.error == model_mod.DISPATCH_ERR_MODEL_FAILED
+    assert KEY_SENTINEL not in json.dumps(str(outcome))
+
+
+@pytest.mark.parametrize("which,expected", [
+    ("built-in", f"Bearer {KEY_SENTINEL}"), ("none", None)])
+def test_a_stand_in_server_sees_the_resolved_bearer_or_no_header(which,
+                                                                 expected):
+    with _stand_in_provider(_ChatCompletionsHandler) as base:
+        endpoint = f"{base}/v1/chat/completions"
+        binding = (_built_in_binding(endpoint=endpoint) if which == "built-in"
+                   else _none_binding(endpoint=endpoint))
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None,
+            environ={ENV_NAME: KEY_SENTINEL})
+        assert port.dispatch(_Envelope())["assistant_prose"] == \
+            "answered in the chat grammar"
+    assert _ChatCompletionsHandler.seen["authorization"] == expected
+    assert _ChatCompletionsHandler.seen["body"]["model"] == DECLARED_MODEL
+
+
+def test_the_resolver_lives_in_the_provider_module_alone():
+    """R1Q17 (b): "inside `doxbench_provider.py` only". The record parses a
+    reference's FORM and reads no environment and no keyring. No other module
+    of the package reads the OS keyring."""
+    package = REPO_ROOT / "src" / "opendox"
+    binding_source = (package / "doxbench_binding.py").read_text(
+        encoding="utf-8")
+    for reach in ("os.environ", "getenv", "get_password", "import keyring",
+                  "import os"):
+        assert reach not in binding_source, reach
+    holders = sorted(path.relative_to(package).as_posix()
+                     for path in package.rglob("*.py")
+                     if "get_password" in path.read_text(encoding="utf-8")
+                     or "import keyring" in path.read_text(encoding="utf-8"))
+    assert holders == [provider_mod.PROVIDER_CLIENT_MODULE], holders
+
+
+# --- the operator door ----------------------------------------------------
+
+
+def test_the_cli_declares_a_binding_for_each_resolver(tmp_path, capsys):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    parser = cli_mod.build_parser()
+
+    def run(*argv) -> int:
+        args = parser.parse_args(list(argv))
+        return args.func(args)
+
+    root = ["--repo-root", str(checkout)]
+    route = ["--label", "L", "--provider", "local",
+             "--credential-approver", "brett@opensoft.one",
+             "--endpoint", "http://127.0.0.1:9/v1/chat/completions",
+             "--dialect", OPENAI_CHAT, "--model", DECLARED_MODEL]
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+
+    # an endpoint that takes no credential: no reference, and no broker
+    assert run("model-binding", "add", *root, "--id", "local", *route,
+               "--auth-kind", "none") == 0
+    assert binding_mod.NO_CREDENTIAL_NOTICE in capsys.readouterr().out
+    assert store.get("local").credential_source() == binding_mod.NO_CREDENTIAL
+
+    # a reference the built-in resolver takes: no broker
+    assert run("model-binding", "add", *root, "--id", "env-bound", *route,
+               "--auth-kind", "api_key",
+               "--credential-ref", f"env:{ENV_NAME}") == 0
+    assert binding_mod.BUILT_IN_CUSTODY_NOTICE in capsys.readouterr().out
+
+    # ...and one given a broker beside it is refused, through the verb
+    assert run("model-binding", "add", *root, "--id", "two-resolvers", *route,
+               "--auth-kind", "api_key", "--credential-ref", f"env:{ENV_NAME}",
+               "--", "openprofiler-broker") == 1
+    assert "two resolvers" in capsys.readouterr().err
+
+    # a kind that takes a credential, with no reference, is refused
+    assert run("model-binding", "add", *root, "--id", "no-ref", *route,
+               "--auth-kind", "api_key") == 1
+    assert "'none'" in capsys.readouterr().err
+
+    # a key inside the URL is refused, and the refusal does not repeat it
+    keyed = list(route)
+    keyed[keyed.index("--endpoint") + 1] = (
+        f"https://user:{KEY_SENTINEL}@api.example.invalid/v1")
+    assert run("model-binding", "add", *root, "--id", "keyed", *keyed,
+               "--auth-kind", "none") == 1
+    captured = capsys.readouterr()
+    assert binding_mod.ENDPOINT_CARRIES_A_CREDENTIAL in captured.err
+    assert KEY_SENTINEL not in captured.err + captured.out
+    assert store.get("keyed") is None, "nothing is stored"
+
+    assert run("model-binding", "list", *root) == 0
+    listed = capsys.readouterr().out
+    from opendox import cli_model_binding as cmb
+    assert f"credential ref   {cmb.NOT_DECLARED}" in listed
+    assert f"broker argv      {cmb.NOT_DECLARED}" in listed
+    assert f"credential ref   env:{ENV_NAME}" in listed
+
+    assert run("model-binding", "remove", *root, "--id", "env-bound") == 0
+    assert binding_mod.BUILT_IN_REMOVAL_NOTICE in capsys.readouterr().out
+
+
+class _UnreadableSource:
+    """A standard input that must never be read."""
+
+    def read(self, *_args):
+        raise AssertionError("set-credential read a credential it had no "
+                             "custodian for")
+
+    readline = read
+
+
+@pytest.mark.parametrize("binding_factory", [_none_binding, _built_in_binding],
+                         ids=["none", "built-in"])
+def test_set_credential_refuses_a_binding_no_broker_answers(tmp_path, capsys,
+                                                            binding_factory):
+    checkout = tmp_path / "checkout"
+    (checkout / "ideation" / "dashboard").mkdir(parents=True)
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+    binding = binding_factory()
+    store.add(binding)
+    args = cli_mod.build_parser().parse_args([
+        "model-binding", "set-credential", "--repo-root", str(checkout),
+        "--id", binding.id])
+    assert cli_mod.cmd_model_binding_set_credential(
+        args, source=_UnreadableSource()) == 1
+    assert "names no broker" in capsys.readouterr().err
+    assert store.get(binding.id) == binding, "nothing changed"
