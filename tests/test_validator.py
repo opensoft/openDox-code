@@ -402,6 +402,19 @@ def test_a_reference_applies_beside_its_siblings_and_names_its_own_rule() -> Non
         ("inner", "type"), ("outer", "maximum")}
 
 
+def test_an_instance_whose_keys_are_not_text_is_judged_never_crashed_on() -> None:
+    """YAML can give an instance a key that is not text: a number or null. It
+    is judged like any other key, and reporting it never orders unlike keys
+    against each other. An instance fuzz found that ordering raising TypeError
+    under `additionalProperties: false`."""
+    odd = {1: "a number", None: "null", 2.5: "a float", "b": 2}
+    assert _found({"additionalProperties": False}, odd) == {("additionalProperties", "")}
+    judged = _built({"properties": {"b": {"type": "integer"}}, "additionalProperties": False,
+                     "propertyNames": {"type": "string"}}).violations(odd)
+    assert {(v.keyword, v.where) for v in judged} == {("additionalProperties", ""), ("type", "")}
+    assert "unexpected properties [1, 2.5, None]" in V.report(judged)[0]
+
+
 def test_a_boolean_schema() -> None:
     assert not _found({"properties": {"a": True}}, {"a": object()})
     assert _found({"properties": {"a": False}}, {"a": 1}) == {("false", "/a")}

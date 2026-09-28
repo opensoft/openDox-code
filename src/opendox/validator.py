@@ -879,7 +879,8 @@ class KindValidator:
             if extra_schema is False:
                 if extra:
                     yield broken("additionalProperties",
-                                 f"unexpected properties {_brief(sorted(extra))}")
+                                 f"unexpected properties "
+                                 f"{_brief(sorted(extra, key=repr))}")
             else:
                 for key in extra:
                     yield from self._evaluate(value[key], extra_schema, path + (key,))
@@ -1007,7 +1008,7 @@ def validator_for(kind: str) -> KindValidator:
 
     try:
         document = yaml.safe_load(data)
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, RecursionError) as exc:
         raise ValidatorUnavailable(
             f"the packaged copy of {copy_id} matches its digest but is not YAML "
             f"({exc.__class__.__name__})") from exc

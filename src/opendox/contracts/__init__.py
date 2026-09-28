@@ -159,13 +159,16 @@ def record() -> Record:
 
     try:
         data = yaml.safe_load(_read_package_file(RECORD_NAME))
-    except yaml.YAMLError as exc:
-        raise _refuse(f"it is not YAML ({exc.__class__.__name__})") from exc
+    except (yaml.YAMLError, RecursionError) as exc:
+        # RecursionError: YAML nested past Python's limit, which no read ends.
+        raise _refuse(f"it is not YAML this module can read "
+                      f"({exc.__class__.__name__})") from exc
     if not isinstance(data, dict):
         raise _refuse(f"it is a {type(data).__name__}, not a mapping")
     expected = {"schema_version", "kind", "spec_leg", "commit", "copies"}
     if set(data) != expected:
-        raise _refuse(f"its keys are {sorted(data)}, not {sorted(expected)}")
+        # A YAML key need not be text, so the keys are ordered by their repr.
+        raise _refuse(f"its keys are {sorted(data, key=repr)}, not {sorted(expected)}")
     if data["schema_version"] != 1 or isinstance(data["schema_version"], bool):
         raise _refuse(f"schema_version is {data['schema_version']!r}, not 1")
     if data["kind"] != COPY_KIND:
@@ -229,7 +232,7 @@ def load(copy_id: str) -> Any:
     data = verified_bytes(copy_id)
     try:
         return yaml.safe_load(data)
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, RecursionError) as exc:
         raise CopyRefused(
             f"the packaged copy of {copy_id} matches its digest but is not "
             f"YAML ({exc.__class__.__name__})") from exc

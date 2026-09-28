@@ -305,6 +305,50 @@ def test_a_record_that_cannot_hold_every_copy_is_refused(
         validator.validator_for("opendox-snapshot")
 
 
+def test_a_record_whose_keys_are_not_all_text_is_refused(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A YAML key need not be text. The refusal names such a key rather than
+    failing to order it against the others."""
+    data = yaml.safe_load((PACKAGE / "copies.yaml").read_text(encoding="utf-8"))
+    data[1] = "a number as a key"
+    _serve(monkeypatch, {contracts.RECORD_NAME: yaml.safe_dump(data, sort_keys=False).encode()})
+    with pytest.raises(contracts.CopyRefused) as refused:
+        contracts.record()
+    assert "its keys are ['commit', 'copies', 'kind', 'schema_version', 'spec_leg', 1]" in (
+        str(refused.value))
+    with pytest.raises(validator.ValidatorUnavailable):
+        validator.validator_for("opendox-snapshot")
+
+
+#: YAML nested past Python's recursion limit, which no read of it ends.
+_TOO_DEEP = b"[" * 5000 + b"]" * 5000
+
+
+def test_a_record_nested_past_the_limit_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _serve(monkeypatch, {contracts.RECORD_NAME: _TOO_DEEP})
+    with pytest.raises(contracts.CopyRefused) as refused:
+        contracts.record()
+    assert "not YAML this module can read (RecursionError)" in str(refused.value)
+
+
+def test_a_copy_nested_past_the_limit_is_refused_under_its_own_digest(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recorded under its own digest, so it passes the identity check, the copy
+    is still refused as unreadable, never a RecursionError to the caller."""
+    entries = [dict(entry) for entry in _SHIPPED]
+    for entry in entries:
+        if entry["id"] == "opendox-snapshot":
+            entry["sha256"] = hashlib.sha256(_TOO_DEEP).hexdigest()
+    _serve(monkeypatch, {contracts.RECORD_NAME: _record_with(copies=entries),
+                         "schemas/opendox-snapshot.schema.yaml": _TOO_DEEP})
+    with pytest.raises(contracts.CopyRefused) as refused:
+        contracts.load("opendox-snapshot")
+    assert "(RecursionError)" in str(refused.value)
+    with pytest.raises(validator.ValidatorUnavailable) as unavailable:
+        validator.validator_for("opendox-snapshot")
+    assert "(RecursionError)" in str(unavailable.value)
+
+
 def test_the_record_as_shipped_is_accepted() -> None:
     """The negative cases above change one field each of the shipped record,
     so this is their control."""
