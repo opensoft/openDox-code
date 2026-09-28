@@ -2042,7 +2042,7 @@ def test_the_reference_forms_are_parsed_once():
     "env:", "env:1BAD", "env:A-B", "env: SPACED", "env:NAME\n",
     # `\w` is held to ASCII: a letter or a digit of another script is not a
     # portable variable name
-    "env:NAMÉ", "env:KEY١",
+    "env:NAM\u00c9", "env:KEY\u0661",
     f"env:{KEY_SENTINEL}",
     "keyring:", "keyring:service-only", "keyring:/user", "keyring:service/",
     "keyring: /user", f"keyring:{KEY_SENTINEL}",
@@ -2205,7 +2205,7 @@ def test_production_reads_this_processs_own_environment(monkeypatch):
     {ENV_NAME: "sk-stand-in\x00"},
     # a bearer credential is printable ASCII with no whitespace (Copilot's
     # overview of openDox-code#63), so nothing else is presented
-    {ENV_NAME: f"{KEY_SENTINEL}€"}, {ENV_NAME: f"{KEY_SENTINEL}é"},
+    {ENV_NAME: f"{KEY_SENTINEL}\u20ac"}, {ENV_NAME: f"{KEY_SENTINEL}\u00e9"},
     {ENV_NAME: "sk-stand-in NOT-A-KEY"}, {ENV_NAME: "sk-stand-in\tNOT-A-KEY"},
     {ENV_NAME: f"{KEY_SENTINEL} "}, {ENV_NAME: f"{KEY_SENTINEL}\x7f"}],
     ids=["unset", "empty", "blank", "line-break", "nul", "outside-latin-1",
@@ -2222,20 +2222,21 @@ def test_an_unusable_env_value_refuses_before_any_request(environ):
     assert port.catalog().entries[0].available is False
 
 
-def test_a_value_outside_latin_1_is_refused_before_any_header_is_built():
+def test_a_value_outside_latin_1_is_refused_before_any_header_is_built(
+        monkeypatch):
     """Over a real socket, because the failure was `urllib`'s. Before the
     check, such a value failed while the header was encoded: the refusal read
     `DIAG_PROVIDER_UNREACHABLE`, and it chained a `UnicodeEncodeError` whose
     `object` held the whole header, credential included (measured). Now it is
     the resolver's own fixed refusal, nothing is chained, and no request is
     sent."""
-    _ChatCompletionsHandler.seen = {}
+    monkeypatch.setattr(_ChatCompletionsHandler, "seen", {})
     with _stand_in_provider(_ChatCompletionsHandler) as base:
         binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
             runner=_refusing_runner, notice=lambda _text: None,
-            environ={ENV_NAME: f"{KEY_SENTINEL}€"})
+            environ={ENV_NAME: f"{KEY_SENTINEL}\u20ac"})
         envelope = _Envelope()
         with pytest.raises(provider_mod.BrokerRefused) as caught:
             port.dispatch(envelope)
@@ -2283,7 +2284,7 @@ def test_a_keyring_reference_reads_the_os_keyring_at_call_time():
 
 
 @pytest.mark.parametrize("stored", [
-    None, b"sk-stand-in-NOT-A-KEY", "", f"{KEY_SENTINEL}€"],
+    None, b"sk-stand-in-NOT-A-KEY", "", f"{KEY_SENTINEL}\u20ac"],
     ids=["absent", "not-text", "empty", "outside-latin-1"])
 def test_an_absent_or_unusable_keyring_entry_refuses_unresolved(stored):
     entries = ({} if stored is None
