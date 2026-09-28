@@ -29,6 +29,9 @@ WHAT ELSE IT HOLDS.
    its entry declares, and `generator_seam.NEUTRAL_SNAPSHOT_KIND`, the
    contract openDox's own generator declares (T052), is the packaged neutral
    contract's `kind` (the holder's note to T057).
+4. AN INSTALL CARRIES THEM: `pyproject.toml`'s package-data table ships,
+   under `opendox.contracts`, exactly the record and every copy the record
+   pins, and the bundle's own line beside it is unchanged.
 
 A CREATED file: no carve-manifest row (RULED OQ-C).
 """
@@ -294,3 +297,29 @@ def test_the_record_as_shipped_is_accepted() -> None:
     so this is their control."""
     record = contracts.record()
     assert (record.commit, record.ids) == (SPEC_COMMIT, THE_FOUR)
+
+
+# ---------------------------------------------------------------------------
+# package data (7.1): an install carries the copies
+# ---------------------------------------------------------------------------
+
+def test_the_package_data_ships_the_record_and_every_copy() -> None:
+    """7.1 settles that the copies travel as PACKAGE DATA, so an install has
+    them beside the validator. The package-data table names, under
+    `opendox.contracts`, exactly the record and every schema copy the record
+    pins, and the bundle's own line is unchanged. (A wheel built without it
+    carries `opendox/contracts/__init__.py` alone, and its validator refuses,
+    naming the absent record.)"""
+    import fnmatch
+    import tomllib
+
+    table = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    data = table["tool"]["setuptools"]["package-data"]
+    assert data["opendox"] == ["web/**"]
+    patterns = data["opendox.contracts"]
+    shipped = sorted(
+        relative for relative in (p.relative_to(PACKAGE).as_posix()
+                                  for p in PACKAGE.rglob("*") if p.is_file())
+        if any(fnmatch.fnmatchcase(relative, pattern) for pattern in patterns))
+    assert shipped == sorted([contracts.RECORD_NAME]
+                             + [copy.resource for copy in contracts.record().copies])
