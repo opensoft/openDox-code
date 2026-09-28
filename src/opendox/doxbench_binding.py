@@ -521,19 +521,7 @@ class ModelProviderBinding:
                 f"dialect {self.dialect!r} is outside the closed vocabulary "
                 f"{DIALECTS}; an unknown request grammar is refused at "
                 "DECLARATION rather than guessed at on a paid call")
-        # A KEY INSIDE THE URL IS REFUSED FIRST (#1144 box 16.3), so no later
-        # refusal, the scheme's among them, can repeat a URL that carries one.
-        # The length is checked before that, because the detector's work grows
-        # with the square of what it is given.
-        if len(self.endpoint) > _endpoint_bound():
-            raise BindingRefused(ENDPOINT_TOO_LONG.format(
-                bound=_endpoint_bound()))
-        if _carries_a_credential(self.endpoint):
-            raise BindingRefused(ENDPOINT_CARRIES_A_CREDENTIAL)
-        if not self.endpoint.startswith(ENDPOINT_SCHEMES):
-            raise BindingRefused(
-                f"endpoint {self.endpoint!r} does not name one of "
-                f"{ENDPOINT_SCHEMES}")
+        self._require_a_declarable_endpoint()
         if isinstance(self.broker_argv, (str, bytes)):
             raise BindingRefused(
                 "broker_argv must be a sequence of argv members, not a single "
@@ -554,9 +542,31 @@ class ModelProviderBinding:
                         f"broker_argv names the placeholder {{{name}}}, which "
                         f"is outside the closed vocabulary {ARGV_PLACEHOLDERS}")
         self._require_one_resolver(argv)
-        # A CREDENTIAL THE BUILT-IN RESOLVER READS TRAVELS ONLY BY A PRIVATE
-        # ROUTE (the 2026-09-28 ruling). A broker's minted token and the auth
-        # kind `none` keep the route they had.
+        self._require_a_private_route()
+
+    def _require_a_declarable_endpoint(self) -> None:
+        """The endpoint's own checks, in the order that keeps a key out of
+        every refusal (#1144 box 16.3).
+
+        The length is checked first, because the detector's work grows with
+        the square of what it is given. A KEY INSIDE THE URL IS REFUSED NEXT,
+        so no later refusal, the scheme's among them, can repeat a URL that
+        carries one."""
+        if len(self.endpoint) > _endpoint_bound():
+            raise BindingRefused(ENDPOINT_TOO_LONG.format(
+                bound=_endpoint_bound()))
+        if _carries_a_credential(self.endpoint):
+            raise BindingRefused(ENDPOINT_CARRIES_A_CREDENTIAL)
+        if not self.endpoint.startswith(ENDPOINT_SCHEMES):
+            raise BindingRefused(
+                f"endpoint {self.endpoint!r} does not name one of "
+                f"{ENDPOINT_SCHEMES}")
+
+    def _require_a_private_route(self) -> None:
+        """A CREDENTIAL THE BUILT-IN RESOLVER READS TRAVELS ONLY BY A PRIVATE
+        ROUTE (Brett Heap's ruling of 2026-09-28, "Refuse unless loopback";
+        `is_a_private_route`). A broker's minted token and the auth kind
+        `none` keep the route they had, as the ruling leaves them."""
         if (self.credential_source() == CREDENTIAL_FROM_BUILT_IN_RESOLVER
                 and not is_a_private_route(self.endpoint)):
             raise BindingRefused(ENDPOINT_NOT_PRIVATE)
