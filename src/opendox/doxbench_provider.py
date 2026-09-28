@@ -755,6 +755,10 @@ def resolve_credential_reference(binding, *, environ=None,
         except Exception:  # noqa: BLE001
             raise BrokerRefused(DIAG_KEYRING_UNAVAILABLE) from None
     if not _presentable(value):
+        # The refusal's traceback keeps this frame, so what was read leaves
+        # it first: a value that cannot be presented can still be most of a
+        # key.
+        del value
         raise BrokerRefused(DIAG_REFERENCE_UNRESOLVED)
     return value
 
@@ -847,6 +851,32 @@ _DIALECT_ARMS: dict[str, tuple] = {
 }
 
 
+class _PresentedCredential:
+    """A credential on its way into ONE request's authorization header.
+
+    Its repr and its str say nothing, as `MintedToken`'s do (Copilot's review
+    of openDox-code#63 at `d240fd50`). A traceback keeps the frames it passes
+    through, and an error reporter that records a frame's locals records them
+    by their repr. So in this module a raw credential is a local of no frame
+    except the one that reads it: `resolve_credential_reference`, until it
+    returns. Every frame that carries a credential to the provider carries
+    this wrapper instead."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def __repr__(self) -> str:
+        return "_PresentedCredential(<withheld>)"
+
+    __str__ = __repr__
+
+    def authorization(self) -> str:
+        """The authorization header's value, built as the header is set."""
+        return f"Bearer {self._value}"
+
+
 class _Redirected(Exception):
     """A provider answered a request carrying a built-in credential with a
     redirect, and the redirect was declined.
@@ -881,7 +911,8 @@ def _open_without_redirects(request, *, timeout):
         request, timeout=timeout)
 
 
-def _post_to_provider(*, endpoint: str, dialect: str, credential: str | None,
+def _post_to_provider(*, endpoint: str, dialect: str,
+                      credential: _PresentedCredential | None,
                       model: str, prompt: str, timeout: float, opener) -> str:
     """The ONE place a provider is contacted. Returns the assistant prose.
 
@@ -891,7 +922,9 @@ def _post_to_provider(*, endpoint: str, dialect: str, credential: str | None,
     `credential` is what this request presents (#1144 box 16.3): the token a
     broker minted (a `MintedToken`'s), the value the built-in resolver read for
     this call, or None under the auth kind `none`. With None the request
-    carries no authorization header at all.
+    carries no authorization header at all. A credential arrives wrapped in a
+    `_PresentedCredential`, so this frame holds no raw value for a traceback
+    to keep.
 
     The credential travels in the request's authorization header and nowhere
     else; it is not in the URL (which a proxy logs), not in the body (which an
@@ -921,7 +954,7 @@ def _post_to_provider(*, endpoint: str, dialect: str, credential: str | None,
         endpoint, data=body, method="POST")
     request.add_header("Content-Type", "application/json")
     if credential is not None:
-        request.add_header("Authorization", f"Bearer {credential}")
+        request.add_header("Authorization", credential.authorization())
     try:
         with opener(request, timeout=timeout) as response:
             payload = response.read(MAX_PROVIDER_ANSWER_BYTES + 1)
@@ -1133,8 +1166,9 @@ class BrokeredProviderPort:
         try:
             prose = _post_to_provider(
                 endpoint=token.endpoint, dialect=token.dialect,
-                credential=token.token, model=model, prompt=prompt,
-                timeout=self._timeout_seconds, opener=self._opener)
+                credential=_PresentedCredential(token.token), model=model,
+                prompt=prompt, timeout=self._timeout_seconds,
+                opener=self._opener)
         except _TokenExpired:
             # PER-TURN STATE, and no longer than the turn: the expired mint's
             # own audit reference, read before the token is dropped, so the
@@ -1148,8 +1182,9 @@ class BrokeredProviderPort:
             try:
                 prose = _post_to_provider(
                     endpoint=token.endpoint, dialect=token.dialect,
-                    credential=token.token, model=model, prompt=prompt,
-                    timeout=self._timeout_seconds, opener=self._opener)
+                    credential=_PresentedCredential(token.token), model=model,
+                    prompt=prompt, timeout=self._timeout_seconds,
+                    opener=self._opener)
             except _TokenExpired:
                 self._forget_token()
                 raise BrokerRefused(DIAG_TOKEN_EXPIRED_TWICE) from None
@@ -1176,14 +1211,20 @@ class BrokeredProviderPort:
         `_open_without_redirects`. An opener a caller injected is that
         caller's own seam and is used as given. The auth kind `none` sends no
         credential, and a broker's minted token keeps the default opener, as
-        the 2026-09-28 ruling leaves that path."""
+        the 2026-09-28 ruling leaves that path.
+
+        A REFUSAL OF A REQUEST THAT CARRIED A BUILT-IN CREDENTIAL CHAINS
+        NOTHING. The credential stays wrapped in a `_PresentedCredential` in
+        every frame here, and the refusal is raised afresh, with no cause and
+        no context, so no traceback it carries reaches a frame inside
+        `urllib` whose locals hold the request's headers."""
         credential = None
         if (self._binding.credential_source()
                 == binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER):
             try:
-                credential = resolve_credential_reference(
+                credential = _PresentedCredential(resolve_credential_reference(
                     self._binding, environ=self._environ,
-                    keyring_backend=self._keyring_backend)
+                    keyring_backend=self._keyring_backend))
             except BrokerRefused:
                 with self._lock:
                     self._available = False
@@ -1193,15 +1234,25 @@ class BrokeredProviderPort:
         opener = self._opener
         if credential is not None and opener is urllib.request.urlopen:
             opener = _open_without_redirects
+        failure = None
         try:
             return _post_to_provider(
                 endpoint=self._binding.endpoint, dialect=self._binding.dialect,
                 credential=credential, model=model, prompt=prompt,
                 timeout=self._timeout_seconds, opener=opener)
         except _TokenExpired:
-            raise BrokerRefused(DIAG_PROVIDER_REFUSED) from None
+            failure = DIAG_PROVIDER_REFUSED
         except _Redirected:
-            raise BrokerRefused(DIAG_PROVIDER_REDIRECTED) from None
+            failure = DIAG_PROVIDER_REDIRECTED
+        except BrokerRefused as refusal:
+            if credential is None:
+                raise
+            failure = refusal.diagnostic
+        # RAISED HERE, OUTSIDE EVERY HANDLER, so the refusal chains nothing
+        # (Copilot's review of openDox-code#63 at `d240fd50`). A cause chained
+        # from inside `urllib` keeps frames whose locals hold the request's
+        # headers, and so the credential.
+        raise BrokerRefused(failure)
 
     # -- token custody ------------------------------------------------------
 

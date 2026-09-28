@@ -51,6 +51,7 @@ import dataclasses
 import http.server
 import io
 import json
+import socket
 import subprocess
 import sys
 import threading
@@ -2630,6 +2631,100 @@ def test_a_built_in_credential_follows_no_redirect(monkeypatch, code):
             port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_REDIRECTED
     assert _ElsewhereHandler.seen == [], "the credential went nowhere else"
+
+
+def _safe_repr(value) -> str:
+    try:
+        return repr(value)
+    # A repr that fails discloses nothing, whatever it raised.
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _frames_kept_by(exception):
+    """Every frame a refusal's tracebacks keep, through its causes and its
+    contexts, suppressed or not, except this test file's own frames."""
+    seen: set[int] = set()
+    pending = [exception]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        traceback = current.__traceback__
+        while traceback is not None:
+            if traceback.tb_frame.f_code.co_filename != __file__:
+                yield traceback.tb_frame
+            traceback = traceback.tb_next
+        pending.extend((current.__cause__, current.__context__))
+
+
+def _locals_holding(exception, secret: str) -> list[str]:
+    """The frame locals, by their repr, that disclose `secret`, which is what
+    an error reporter that records locals would send on."""
+    return sorted({f"{frame.f_code.co_name}.{name}"
+                   for frame in _frames_kept_by(exception)
+                   for name, value in list(frame.f_locals.items())
+                   if secret in _safe_repr(value)})
+
+
+@contextlib.contextmanager
+def _a_closed_loopback_port():
+    """A loopback port that nothing listens on. It is held for the test, so
+    no other process can take it."""
+    holder = socket.socket()
+    try:
+        holder.bind(("127.0.0.1", 0))
+        yield holder.getsockname()[1]
+    finally:
+        holder.close()
+
+
+def test_a_refused_connection_keeps_no_frame_that_holds_the_key(monkeypatch):
+    """Copilot's review of openDox-code#63 at `d240fd50`, over the real
+    transport. A cause chained from inside `urllib` keeps frames whose locals
+    hold the request's headers, and so the key. The refusal chains nothing,
+    and no frame it keeps holds the key."""
+    monkeypatch.setenv(ENV_NAME, KEY_SENTINEL)
+    with _a_closed_loopback_port() as closed:
+        binding = _built_in_binding(
+            endpoint=f"http://127.0.0.1:{closed}/v1/chat/completions")
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None)
+        envelope = _Envelope()
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert _locals_holding(caught.value, KEY_SENTINEL) == []
+
+
+def test_an_unpresentable_value_leaves_no_frame_that_holds_it(monkeypatch):
+    """A value refused as unpresentable can still be most of a key, such as
+    a key with a line break after it. The frame that read it lets it go
+    before the refusal is raised."""
+    monkeypatch.setenv(ENV_NAME, KEY_SENTINEL + "\n")
+    port, opener = _unbrokered_port(_built_in_binding(), _chat_completion())
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_REFERENCE_UNRESOLVED
+    assert opener.requests == []
+    assert _locals_holding(caught.value, KEY_SENTINEL) == []
+
+
+def test_a_broker_refusal_keeps_no_frame_that_holds_the_token(tmp_path):
+    """The minted token travels as the same wrapper, so the provider-call
+    frame holds no raw token, as it held none when that frame took a
+    `MintedToken`."""
+    port, _opener = _port(tmp_path, OSError("unreachable"))
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
+    assert _locals_holding(caught.value, SENTINEL_TOKEN) == []
 
 
 def test_the_resolver_lives_in_the_provider_module_alone():
