@@ -654,10 +654,25 @@ def list_references(binding, *, runner=subprocess_broker_runner) -> list:
 # the built-in resolver (#1144 box 16.3; RULED R1Q17 (b), `5850003126`)
 # ---------------------------------------------------------------------------
 
-#: What a resolved value may not carry. A line break or a NUL cannot travel in
-#: a request header as it is, and trimming one out would present a credential
-#: other than the one the reference names, so such a value is refused.
-_UNPRESENTABLE_CHARACTERS = ("\r", "\n", "\x00")
+def _presentable(value: object) -> bool:
+    """Whether a resolved value can be presented AS IT IS, as the bearer
+    credential of the request's Authorization header.
+
+    It must be a non-empty string of printable ASCII with no whitespace, which
+    a bearer credential is by its grammar (RFC 6750's `b64token` is narrower
+    still). Any other value is refused, before any provider is contacted
+    (Copilot's overview of openDox-code#63). Measured against `urllib`:
+      * a line break or a NUL cannot travel in a header at all;
+      * a character outside latin-1 fails while the header is encoded. The
+        refusal from there would read `DIAG_PROVIDER_UNREACHABLE`, which names
+        the wrong party, and the `UnicodeEncodeError` it chains holds the
+        whole header, credential included;
+      * any other non-ASCII character, and an embedded space, is SENT, as a
+        credential the grammar does not allow.
+    Trimming or re-encoding the value would present a credential other than
+    the one the reference names, so the value is refused instead."""
+    return (isinstance(value, str) and value != ""
+            and all("!" <= character <= "~" for character in value))
 
 
 def _os_keyring():
@@ -692,28 +707,28 @@ def resolve_credential_reference(binding, *, environ=None,
     neither, and so reads this process's own environment and the OS keyring.
 
     Every failure is a FIXED refusal, raised before any provider is contacted.
-    An unset or blank variable, an absent keyring entry, or a value that could
-    not travel in a header is `DIAG_REFERENCE_UNRESOLVED`. A keyring that
-    cannot be read is `DIAG_KEYRING_UNAVAILABLE`. A keyring backend's own error
-    is dropped unread, like a broker's or a provider's."""
-    parts = binding_mod.built_in_reference_parts(binding.credential_ref)
-    if parts is None:
+    An unset variable, an absent keyring entry, or a value that cannot be
+    presented as it is (`_presentable`) is `DIAG_REFERENCE_UNRESOLVED`. A
+    keyring that cannot be read is `DIAG_KEYRING_UNAVAILABLE`. A keyring
+    backend's own error is dropped unread, like a broker's or a provider's."""
+    reference = binding_mod.built_in_reference_parts(binding.credential_ref)
+    if reference is None:
         raise AssertionError(
             f"binding {binding.id!r} names a broker's reference, which the "
             "broker resolves; the built-in resolver takes only the "
             f"{binding_mod.BUILT_IN_REFERENCE_FORMS} forms")
-    if parts[0] == binding_mod.CREDENTIAL_REF_ENV:
-        value = (os.environ if environ is None else environ).get(parts[1])
+    if reference.form == binding_mod.CREDENTIAL_REF_ENV:
+        value = (os.environ if environ is None else environ).get(
+            reference.name)
     else:
         backend = (keyring_backend if keyring_backend is not None
                    else _os_keyring())
         try:
-            value = backend.get_password(parts[1], parts[2])
-        except Exception:  # noqa: BLE001 - a keyring backend's own error, of any class, never reaches a caller
+            value = backend.get_password(reference.name, reference.user)
+        # A keyring backend's own error, of any class, never reaches a caller.
+        except Exception:  # noqa: BLE001
             raise BrokerRefused(DIAG_KEYRING_UNAVAILABLE) from None
-    if (not isinstance(value, str) or not value.strip()
-            or any(character in value
-                   for character in _UNPRESENTABLE_CHARACTERS)):
+    if not _presentable(value):
         raise BrokerRefused(DIAG_REFERENCE_UNRESOLVED)
     return value
 

@@ -68,6 +68,8 @@ from opendox import doxbench_binding as binding_mod
 from opendox import doxbench_install as install_mod
 from opendox import doxbench_model as model_mod
 from opendox import doxbench_provider as provider_mod
+from opendox.runtime import config as runtime_config
+from opendox.runtime import local_git_adapter as git_adapter_mod
 
 # The credential a human types. A SENTINEL: long, unique, and impossible to
 # produce by accident, so a sweep that finds it has found the real thing.
@@ -1874,6 +1876,58 @@ def test_a_clean_endpoint_is_accepted(endpoint):
     assert _binding(endpoint=endpoint, dialect=OPENAI_CHAT).endpoint == endpoint
 
 
+def _endpoint_of_length(length: int, head: str) -> str:
+    endpoint = head + "a" * (length - len(head))
+    assert len(endpoint) == length
+    return endpoint
+
+
+def test_an_endpoint_past_the_url_bound_is_refused_before_the_detector(
+        monkeypatch):
+    """Copilot's overview of openDox-code#63. The detector is quadratic in a
+    parameter name's length, so the endpoint's length is checked first,
+    against the product's own bound, and the detector is not asked. The
+    refusal repeats nothing of the endpoint, and so nothing of a key in it."""
+    bound = runtime_config.MAX_REMOTE_URL_CHARS
+    endpoint = _endpoint_of_length(
+        bound + 1,
+        f"https://api.example.invalid/v1?api_key={KEY_SENTINEL}&pad=")
+
+    def _not_asked(_text):
+        raise AssertionError("the detector was asked about an endpoint past "
+                             "the bound")
+
+    monkeypatch.setattr(git_adapter_mod, "carries_a_credential", _not_asked)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=endpoint)
+    message = str(caught.value)
+    assert message == binding_mod.ENDPOINT_TOO_LONG.format(bound=bound)
+    assert KEY_SENTINEL not in message
+    assert "api.example.invalid" not in message
+
+
+def test_an_endpoint_at_the_url_bound_is_declared():
+    bound = runtime_config.MAX_REMOTE_URL_CHARS
+    endpoint = _endpoint_of_length(
+        bound, "https://api.example.invalid/v1/chat/completions?pad=")
+    binding = _binding(endpoint=endpoint, dialect=OPENAI_CHAT)
+    assert binding.endpoint == endpoint
+
+
+def test_the_url_bound_is_the_products_own_read_when_it_is_asked(
+        monkeypatch):
+    """The number is `runtime/config`'s, read at declaration, so the record
+    and the repository act cannot come to hold different bounds."""
+    monkeypatch.setattr(runtime_config, "MAX_REMOTE_URL_CHARS", 40)
+    head = "https://api.example.invalid/"
+    at_the_bound = _endpoint_of_length(40, head)
+    past_the_bound = _endpoint_of_length(41, head)
+    assert _binding(endpoint=at_the_bound).endpoint == at_the_bound
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=past_the_bound)
+    assert str(caught.value) == binding_mod.ENDPOINT_TOO_LONG.format(bound=40)
+
+
 def test_a_key_in_an_extra_field_is_refused_as_it_always_was():
     for field in ("api_key", "secret", "token", "password", "key"):
         record = dict(_binding().as_record(), **{field: KEY_SENTINEL})
@@ -1893,8 +1947,9 @@ def test_a_stored_document_whose_endpoint_carries_a_key_does_not_read(
     path.write_text(json.dumps({"schema_version": 1,
                                 "kind": binding_mod.BINDINGS_KIND,
                                 "bindings": [record]}), encoding="utf-8")
+    store = binding_mod.BindingStore(path)
     with pytest.raises(binding_mod.BindingRefused) as caught:
-        binding_mod.BindingStore(path).list()
+        store.list()
     assert KEY_SENTINEL not in str(caught.value)
 
 
@@ -1920,7 +1975,8 @@ def test_the_none_kind_forbids_the_reference_and_the_broker():
     """R1Q18 (a), both halves: declared explicitly, and both fields
     forbidden under it. A blank reference is still a reference given."""
     binding = _none_binding()
-    assert binding.credential_ref is None and binding.broker_argv == ()
+    assert binding.credential_ref is None
+    assert binding.broker_argv == ()
     assert binding.credential_source() == binding_mod.NO_CREDENTIAL
     for given in (FAKE_REFERENCE, f"env:{ENV_NAME}", ""):
         with pytest.raises(binding_mod.BindingRefused) as caught:
@@ -1966,17 +2022,27 @@ def test_a_brokers_reference_still_needs_its_broker():
 
 
 def test_the_reference_forms_are_parsed_once():
+    """One parser and ONE SHAPE for both forms, so no caller has to count
+    what it was given before it reads it."""
     parts = binding_mod.built_in_reference_parts
-    assert parts(f"env:{ENV_NAME}") == ("env:", ENV_NAME)
+    env = parts(f"env:{ENV_NAME}")
+    assert env == binding_mod.BuiltInReference("env:", ENV_NAME, None)
+    keyring = parts(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}")
     # the split is at the LAST `/`, so a service may carry one
-    assert parts(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}") == (
+    assert keyring == binding_mod.BuiltInReference(
         "keyring:", KEYRING_SERVICE, KEYRING_USER)
+    assert (keyring.form, keyring.name, keyring.user) == (
+        "keyring:", KEYRING_SERVICE, KEYRING_USER)
+    assert len(env) == len(keyring)
     assert parts(FAKE_REFERENCE) is None
     assert binding_mod.BUILT_IN_REFERENCE_FORMS == ("env:", "keyring:")
 
 
 @pytest.mark.parametrize("reference", [
     "env:", "env:1BAD", "env:A-B", "env: SPACED", "env:NAME\n",
+    # `\w` is held to ASCII: a letter or a digit of another script is not a
+    # portable variable name
+    "env:NAMÉ", "env:KEY١",
     f"env:{KEY_SENTINEL}",
     "keyring:", "keyring:service-only", "keyring:/user", "keyring:service/",
     "keyring: /user", f"keyring:{KEY_SENTINEL}",
@@ -1998,7 +2064,8 @@ def test_a_none_record_round_trips_and_may_leave_its_forbidden_fields_out():
     binding = _none_binding()
     record = binding.as_record()
     assert list(record) == ["kind", *binding_mod.BINDING_FIELDS]
-    assert record["credential_ref"] is None and record["broker_argv"] == []
+    assert record["credential_ref"] is None
+    assert record["broker_argv"] == []
     assert binding_mod.ModelProviderBinding.from_record(record) == binding
     del record["credential_ref"], record["broker_argv"]
     assert binding_mod.ModelProviderBinding.from_record(record) == binding
@@ -2066,8 +2133,9 @@ def test_a_binding_no_broker_answers_has_no_broker_operation():
         for operation in provider_mod.OPERATIONS:
             with pytest.raises(AssertionError):
                 provider_mod.broker_operation_argv(binding, operation)
+        stdin = io.StringIO("x")
         with pytest.raises(AssertionError):
-            provider_mod.hand_off_credential(binding, io.StringIO("x"))
+            provider_mod.hand_off_credential(binding, stdin)
 
 
 # --- the built-in resolver, at call time ---------------------------------
@@ -2134,24 +2202,67 @@ def test_production_reads_this_processs_own_environment(monkeypatch):
 
 @pytest.mark.parametrize("environ", [
     {}, {ENV_NAME: ""}, {ENV_NAME: "   "}, {ENV_NAME: "sk-stand-in\nX-Other: 1"},
-    {ENV_NAME: "sk-stand-in\x00"}],
-    ids=["unset", "empty", "blank", "line-break", "nul"])
+    {ENV_NAME: "sk-stand-in\x00"},
+    # a bearer credential is printable ASCII with no whitespace (Copilot's
+    # overview of openDox-code#63), so nothing else is presented
+    {ENV_NAME: f"{KEY_SENTINEL}€"}, {ENV_NAME: f"{KEY_SENTINEL}é"},
+    {ENV_NAME: "sk-stand-in NOT-A-KEY"}, {ENV_NAME: "sk-stand-in\tNOT-A-KEY"},
+    {ENV_NAME: f"{KEY_SENTINEL} "}, {ENV_NAME: f"{KEY_SENTINEL}\x7f"}],
+    ids=["unset", "empty", "blank", "line-break", "nul", "outside-latin-1",
+         "latin-1-not-ascii", "embedded-space", "tab", "trailing-space",
+         "delete"])
 def test_an_unusable_env_value_refuses_before_any_request(environ):
     port, opener = _unbrokered_port(_built_in_binding(), _chat_completion(),
                                     environ=environ)
+    envelope = _Envelope()
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        port.dispatch(_Envelope())
+        port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_REFERENCE_UNRESOLVED
     assert opener.requests == [], "no provider was contacted"
     assert port.catalog().entries[0].available is False
+
+
+def test_a_value_outside_latin_1_is_refused_before_any_header_is_built():
+    """Over a real socket, because the failure was `urllib`'s. Before the
+    check, such a value failed while the header was encoded: the refusal read
+    `DIAG_PROVIDER_UNREACHABLE`, and it chained a `UnicodeEncodeError` whose
+    `object` held the whole header, credential included (measured). Now it is
+    the resolver's own fixed refusal, nothing is chained, and no request is
+    sent."""
+    _ChatCompletionsHandler.seen = {}
+    with _stand_in_provider(_ChatCompletionsHandler) as base:
+        binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None,
+            environ={ENV_NAME: f"{KEY_SENTINEL}€"})
+        envelope = _Envelope()
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_REFERENCE_UNRESOLVED
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert _ChatCompletionsHandler.seen == {}, "no request reached the server"
+
+
+def test_a_value_of_printable_ascii_is_presented_as_it_is():
+    """The check refuses what a bearer credential cannot be and nothing more:
+    every printable ASCII character but the space is presented unchanged."""
+    value = "sk-" + "".join(chr(code) for code in range(0x21, 0x7F))
+    port, opener = _unbrokered_port(_built_in_binding(),
+                                    _chat_completion("a"),
+                                    environ={ENV_NAME: value})
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    assert opener.requests[0].get_header("Authorization") == f"Bearer {value}"
 
 
 def test_a_reference_that_resolves_again_makes_the_entry_available_again():
     environ: dict[str, str] = {}
     port, _opener = _unbrokered_port(_built_in_binding(),
                                      _chat_completion("a"), environ=environ)
+    envelope = _Envelope()
     with pytest.raises(provider_mod.BrokerRefused):
-        port.dispatch(_Envelope())
+        port.dispatch(envelope)
     assert port.catalog().entries[0].available is False
     environ[ENV_NAME] = KEY_SENTINEL
     assert port.dispatch(_Envelope())["assistant_prose"] == "a"
@@ -2171,12 +2282,18 @@ def test_a_keyring_reference_reads_the_os_keyring_at_call_time():
         f"Bearer {KEY_SENTINEL}"
 
 
-def test_an_absent_keyring_entry_refuses_unresolved():
+@pytest.mark.parametrize("stored", [
+    None, b"sk-stand-in-NOT-A-KEY", "", f"{KEY_SENTINEL}€"],
+    ids=["absent", "not-text", "empty", "outside-latin-1"])
+def test_an_absent_or_unusable_keyring_entry_refuses_unresolved(stored):
+    entries = ({} if stored is None
+               else {(KEYRING_SERVICE, KEYRING_USER): stored})
     port, opener = _unbrokered_port(
         _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
-        _chat_completion(), keyring_backend=_FakeKeyring())
+        _chat_completion(), keyring_backend=_FakeKeyring(entries))
+    envelope = _Envelope()
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        port.dispatch(_Envelope())
+        port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_REFERENCE_UNRESOLVED
     assert opener.requests == []
 
@@ -2186,8 +2303,9 @@ def test_a_keyring_that_cannot_be_read_refuses_and_says_nothing_of_its_own():
     port, opener = _unbrokered_port(
         _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
         _chat_completion(), keyring_backend=backend)
+    envelope = _Envelope()
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        port.dispatch(_Envelope())
+        port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_KEYRING_UNAVAILABLE
     assert "leaks" not in str(caught.value)
     assert caught.value.__cause__ is None
@@ -2201,8 +2319,9 @@ def test_without_the_keyring_package_a_keyring_reference_refuses(monkeypatch):
     port, opener = _unbrokered_port(
         _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
         _chat_completion())
+    envelope = _Envelope()
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        port.dispatch(_Envelope())
+        port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_KEYRING_UNAVAILABLE
     assert opener.requests == []
 
@@ -2236,8 +2355,9 @@ def test_a_401_without_a_broker_is_a_refusal_not_a_retry(which):
     port, opener = _unbrokered_port(binding, _expired_error(),
                                     _chat_completion("never reached"),
                                     environ={ENV_NAME: KEY_SENTINEL})
+    envelope = _Envelope()
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        port.dispatch(_Envelope())
+        port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_REFUSED
     assert len(opener.requests) == 1, "no second paid call"
     assert port.ledger == []

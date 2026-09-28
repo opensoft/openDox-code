@@ -27,9 +27,11 @@ and never sees a credential.
 THE CREDENTIAL STAYS A REFERENCE, AND A KEY IS REFUSED WHEN IT IS DECLARED
 (#1144 box 16.3; plan 034 T080). A key inside the endpoint URL is refused by the
 product's own detector, `runtime/local_git_adapter.carries_a_credential`, and
-the refusal never repeats the URL it refused. A key in an extra field is
-refused as an unknown key, as it always was. EACH RECORD HAS ONE RESOLVER, and
-the record says which:
+the refusal never repeats the URL it refused. An endpoint longer than the
+product's URL bound is refused before the detector is asked. A key in an extra
+field is refused as an unknown key, as it always was.
+
+EACH RECORD HAS ONE RESOLVER, and the record says which:
 
   * the BROKER the record names, for any other reference (as before);
   * the BUILT-IN RESOLVER, for an `env:NAME` or `keyring:SERVICE/USERNAME`
@@ -82,6 +84,7 @@ import dataclasses
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 # ---------------------------------------------------------------------------
 # the record's identity (the workspace rule: every YAML carries both)
@@ -149,7 +152,23 @@ CREDENTIAL_REF_KEYRING = "keyring:"
 BUILT_IN_REFERENCE_FORMS: tuple[str, ...] = (CREDENTIAL_REF_ENV,
                                              CREDENTIAL_REF_KEYRING)
 
-_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: A portable variable name. `re.ASCII` keeps `\w` to letters, digits and `_`
+#: of ASCII alone, so a name no other shell could export is refused.
+_ENV_NAME = re.compile(r"[A-Za-z_]\w*", re.ASCII)
+
+
+class BuiltInReference(NamedTuple):
+    """A reference the built-in resolver takes, split into what it looks up.
+
+    One shape for both forms. `form` is one of `BUILT_IN_REFERENCE_FORMS`.
+    For `env:NAME`, `name` is the variable and `user` is None. For
+    `keyring:SERVICE/USERNAME`, `name` is the service and `user` is the user
+    name."""
+
+    form: str
+    name: str
+    user: str | None
+
 
 #: The three answers to "what resolves this record's credential", one per
 #: record (see the module docstring). `ModelProviderBinding.credential_source`
@@ -205,6 +224,30 @@ ENDPOINT_CARRIES_A_CREDENTIAL = (
     "a credential-shaped query or fragment parameter), and a binding is safe to "
     "commit only because it holds none; declare the endpoint without it, and "
     "name the credential by its reference in credential_ref")
+
+#: The refusal an endpoint longer than the product's URL bound earns (#1144 box
+#: 16.3; Copilot's overview of openDox-code#63). The detector below is
+#: quadratic in a parameter name's length, and an endpoint reaches it from an
+#: operator's command line or from the console's intake route, so the
+#: endpoint's length is checked before the detector is asked. The bound is the
+#: product's own, `runtime/config.MAX_REMOTE_URL_CHARS`, which the repository
+#: act applies to a remote for the same reason. Like the refusal above, this
+#: one never repeats the endpoint. The only number in it is the product's
+#: bound.
+ENDPOINT_TOO_LONG = (
+    "the endpoint is longer than {bound} characters and is refused unread: "
+    "the credential check is quadratic in what it is given, and no provider "
+    "endpoint is this long")
+
+
+def _endpoint_bound() -> int:
+    """`runtime/config.MAX_REMOTE_URL_CHARS`, read where it is asked. It is
+    imported there for the same reason as the detector below, so this module
+    stays light at import time. `runtime/config` is stdlib-only by the runtime
+    package's import-weight contract."""
+    from opendox.runtime import config
+
+    return config.MAX_REMOTE_URL_CHARS
 
 
 def _carries_a_credential(text: str) -> bool:
@@ -325,9 +368,10 @@ def names_a_built_in_form(credential_ref: object) -> bool:
             and credential_ref.startswith(BUILT_IN_REFERENCE_FORMS))
 
 
-def built_in_reference_parts(credential_ref: str) -> tuple[str, ...] | None:
+def built_in_reference_parts(credential_ref: str) -> BuiltInReference | None:
     """A reference the built-in resolver takes, split into what it looks up:
-    `("env:", NAME)` or `("keyring:", SERVICE, USERNAME)`. None for a broker's
+    `BuiltInReference("env:", NAME, None)` or
+    `BuiltInReference("keyring:", SERVICE, USERNAME)`. None for a broker's
     reference.
 
     ONE PARSER, which the record calls when a binding is declared and
@@ -343,7 +387,7 @@ def built_in_reference_parts(credential_ref: str) -> tuple[str, ...] | None:
                 "credential_ref uses the env: form, and what follows env: is "
                 "not an environment variable name (a letter or _, then "
                 "letters, digits or _)")
-        return (CREDENTIAL_REF_ENV, name)
+        return BuiltInReference(CREDENTIAL_REF_ENV, name, None)
     if credential_ref.startswith(CREDENTIAL_REF_KEYRING):
         service, separator, username = (
             credential_ref[len(CREDENTIAL_REF_KEYRING):].rpartition("/"))
@@ -351,7 +395,7 @@ def built_in_reference_parts(credential_ref: str) -> tuple[str, ...] | None:
             raise BindingRefused(
                 "credential_ref uses the keyring: form, and it does not read "
                 "keyring:SERVICE/USERNAME with both parts present")
-        return (CREDENTIAL_REF_KEYRING, service, username)
+        return BuiltInReference(CREDENTIAL_REF_KEYRING, service, username)
     return None
 
 
@@ -425,6 +469,11 @@ class ModelProviderBinding:
                 "DECLARATION rather than guessed at on a paid call")
         # A KEY INSIDE THE URL IS REFUSED FIRST (#1144 box 16.3), so no later
         # refusal, the scheme's among them, can repeat a URL that carries one.
+        # The length is checked before that, because the detector's work grows
+        # with the square of what it is given.
+        if len(self.endpoint) > _endpoint_bound():
+            raise BindingRefused(ENDPOINT_TOO_LONG.format(
+                bound=_endpoint_bound()))
         if _carries_a_credential(self.endpoint):
             raise BindingRefused(ENDPOINT_CARRIES_A_CREDENTIAL)
         if not self.endpoint.startswith(ENDPOINT_SCHEMES):
