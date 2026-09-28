@@ -553,6 +553,52 @@ def test_a_subschema_that_contains_itself_is_refused() -> None:
     assert "/properties/b/properties/a contains itself" in str(refused.value)
 
 
+@pytest.mark.parametrize("schema, cycle", [
+    ({"$ref": "#"}, "<root> -> <root>"),
+    ({"$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}},
+      "$ref": "#/$defs/a"}, "/$defs/a -> /$defs/b -> /$defs/a"),
+    ({"allOf": [{"$ref": "#"}]}, "<root> -> /allOf/0 -> <root>"),
+    ({"anyOf": [{"type": "string"}, {"$ref": "#"}]}, "<root> -> /anyOf/1 -> <root>"),
+    ({"oneOf": [{"$ref": "#"}]}, "<root> -> /oneOf/0 -> <root>"),
+    ({"not": {"$ref": "#"}}, "<root> -> /not -> <root>"),
+    ({"if": {"$ref": "#"}, "then": {}}, "<root> -> /if -> <root>"),
+], ids=["itself", "two $defs", "allOf", "anyOf", "oneOf", "not", "if"])
+def test_a_reference_cycle_that_never_moves_into_the_instance_is_refused(
+        schema: dict, cycle: str) -> None:
+    """Each of these is a valid draft 2020-12 schema that no evaluation ends:
+    jsonschema recurses on it until Python's limit, whatever the instance.
+    Here each is refused when its validator is built, naming the cycle."""
+    with pytest.raises(V.SchemaNotEvaluable) as refused:
+        _built(schema)
+    assert f"{cycle} is a cycle of subschemas" in str(refused.value)
+
+
+def test_a_recursive_schema_that_moves_into_the_instance_is_evaluated() -> None:
+    """A tree whose children are items of the node recurs through `items`, so
+    each step moves into the instance and every evaluation ends. And an `if`
+    without a `then` is never read, so a reference back from it is no cycle."""
+    tree = {"$defs": {"node": {"type": "object", "required": ["name"], "properties": {
+                "name": {"type": "string"},
+                "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}}}},
+            "$ref": "#/$defs/node"}
+    deep = {"name": "a", "children": [{"name": "b", "children": [{"name": "c"}]}]}
+    assert _found(tree, deep) == set()
+    deep["children"][0]["children"][0] = {}
+    assert _found(tree, deep) == {("required", "/children/0/children/0")}
+    assert _found({"if": {"$ref": "#"}, "type": "string"}, 5) == {("type", "")}
+
+
+def test_a_copy_nested_deeper_than_the_walk_is_refused() -> None:
+    """Python's recursion limit bounds the walk. A copy nested past it is
+    refused as unavailable, never a RecursionError out of the build."""
+    deep: dict[str, Any] = {}
+    for _ in range(5000):
+        deep = {"not": deep}
+    with pytest.raises(V.SchemaNotEvaluable) as refused:
+        _built(deep)
+    assert "nests deeper than this module walks" in str(refused.value)
+
+
 def test_another_dialect_is_refused() -> None:
     with pytest.raises(V.SchemaNotEvaluable) as refused:
         V.KindValidator("k", "c", "", {"$schema": "http://json-schema.org/draft-07/schema#"},

@@ -72,10 +72,13 @@ never evaluated with that keyword left out, which would pass whatever the
 keyword refuses. So is a copy that gives an evaluated keyword a value of
 another shape (`_SHAPES`: `uniqueItems: "yes"`, `type: {}`, a negative
 `maxLength`), an embedded resource (`$id` or `$schema` below the root, which
-would move where its references resolve), or a subschema that contains itself.
-The build walks every subschema and every reference's target, so nothing the
-evaluator can reach escapes those checks, and a malformed copy is reported as
-unavailable instead of crashing the build or misjudging an instance.
+would move where its references resolve), a subschema that contains itself,
+and a cycle of references that never moves into the instance (`$ref: "#"`),
+which no evaluation ends. A recursive schema that moves into the instance
+before it recurs (a tree's children, as items) is evaluated. The build walks
+every subschema and every reference's target, so nothing the evaluator can
+reach escapes those checks, and a malformed copy is reported as unavailable
+instead of crashing the build or an evaluation, or misjudging an instance.
 
 RULE IDENTIFIERS. Every violation names the rule it broke. The neutral snapshot
 contract gives each rule an id, carried as `x-rule` by the subschema that
@@ -640,20 +643,29 @@ class KindValidator:
         if not _is_schema(entry):
             raise self._not_evaluable(f"its {pointer!r} for {self.kind} is a "
                                       f"{type(entry).__name__}, not a schema")
-        walked: set[int] = set()
+        nodes: dict[int, tuple[str, dict[str, Any]]] = {}
         pending: list[tuple[str, Any]] = [("", document), (pointer, entry)]
-        while pending:
-            start, subtree = pending.pop()
-            try:
+        try:
+            while pending:
+                start, subtree = pending.pop()
                 for at, node in _subschemas(subtree, start):
-                    if id(node) not in walked:
-                        walked.add(id(node))
+                    if id(node) not in nodes:
+                        nodes[id(node)] = (at, node)
                         pending.extend(self._refuse_node(document, at, node))
-            except _ContainsItself as exc:
-                raise self._not_evaluable(
-                    f"{exc.args[0] or '<root>'} contains itself; this module evaluates a "
-                    "schema that is a tree, and a copy repeats itself only by "
-                    "reference") from None
+        except _ContainsItself as exc:
+            raise self._not_evaluable(
+                f"{exc.args[0] or '<root>'} contains itself; this module evaluates a "
+                "schema that is a tree, and a copy repeats itself only by "
+                "reference") from None
+        except RecursionError:
+            raise self._not_evaluable("it nests deeper than this module walks") from None
+        cycle = _cycle_in_place(nodes, document)
+        if cycle:
+            raise self._not_evaluable(
+                f"{' -> '.join(cycle)} is a cycle of subschemas that apply one another "
+                "at one place in the instance, so no evaluation of it ends; a "
+                "recursive schema moves into the instance (a property, an item) "
+                "before it recurs")
 
     def _refuse_node(self, document: dict[str, Any], at: str,
                      node: dict[str, Any]) -> list[tuple[str, Any]]:
@@ -895,6 +907,61 @@ def _subschemas(node: Any, at: str = "", _above: frozenset[int] = frozenset()
 def _escape(token: Any) -> str:
     """A JSON pointer's reference token for a key."""
     return str(token).replace("~", "~0").replace("/", "~1")
+
+
+def _in_place(node: dict[str, Any], document: dict[str, Any]) -> Iterator[Any]:
+    """The subschemas `node` applies at the same place in the instance as
+    itself: its reference's target, its `allOf`, `anyOf` and `oneOf` branches,
+    its `not`, and its `if` and `then` when it has both (the evaluator reads
+    neither alone). Every other applicator moves into the instance: to a
+    property, an item, or a property's name."""
+    if "$ref" in node:
+        yield _at_pointer(document, node["$ref"][1:])
+    for key in ("allOf", "anyOf", "oneOf"):
+        yield from node.get(key, ())
+    if "not" in node:
+        yield node["not"]
+    if "if" in node and "then" in node:
+        yield node["if"]
+        yield node["then"]
+
+
+def _in_place_ids(node: dict[str, Any], nodes: Mapping[int, Any],
+                  document: dict[str, Any]) -> Iterator[int]:
+    return (id(sub) for sub in _in_place(node, document) if id(sub) in nodes)
+
+
+def _cycle_in_place(nodes: Mapping[int, tuple[str, dict[str, Any]]],
+                    document: dict[str, Any]) -> list[str]:
+    """The locations around a cycle of subschemas that apply one another at
+    one place in the instance, or [] when the copy has none. Evaluating such a
+    cycle never moves into the instance, so it never ends, whatever the
+    instance. (jsonschema recurses until Python's limit.)"""
+    done: set[int] = set()
+    for start in nodes:
+        loop = [] if start in done else _cycle_from(start, nodes, document, done)
+        if loop:
+            return [nodes[node_id][0] or "<root>" for node_id in loop]
+    return []
+
+
+def _cycle_from(start: int, nodes: Mapping[int, tuple[str, dict[str, Any]]],
+                document: dict[str, Any], done: set[int]) -> list[int]:
+    """Depth first from `start`, without recursing: the first cycle met, as
+    the ids around it, or [] once every node reached is marked done."""
+    trail = [start]
+    branches = [_in_place_ids(nodes[start][1], nodes, document)]
+    while branches:
+        step = next(branches[-1], None)
+        if step is None:
+            done.add(trail.pop())
+            branches.pop()
+        elif step in trail:
+            return trail[trail.index(step):] + [step]
+        elif step not in done:
+            trail.append(step)
+            branches.append(_in_place_ids(nodes[step][1], nodes, document))
+    return []
 
 
 # ---------------------------------------------------------------------------
