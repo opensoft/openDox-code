@@ -6,10 +6,15 @@ holds HOW it judges an instance against them.
 
 THE CORPUS. `tests/fixtures/spec-examples/` is openDox-spec's own examples,
 copied byte for byte from openDox-spec#16 at `cd49eb25`
-(`examples/ideation-dashboard/`, T053). They are every positive example of the
-four kinds, and the neutral snapshot contract's 32 negatives, one per rule.
-Each negative's `# expected_failure:` line names the rule it breaks, so the
-corpus asks the validator for the rule itself, not for a wording it guesses at.
+(`examples/ideation-dashboard/`, T053). They are the positive examples of the
+neutral snapshot, chat-turn and model-catalog kinds, and the neutral snapshot
+contract's 32 negatives, one per rule. Each negative's `# expected_failure:`
+line names the rule it breaks, so the corpus asks the validator for the rule
+itself, not for a wording it guesses at. openDox-spec's two `ideation-workbench`
+examples are not carried: this leg's committed-manifest guard
+(`workbench.committed_manifests`) refuses a workbench manifest tracked outside
+`examples/`, and rightly, so that kind is held over the manifests openDox's
+own workbench writes instead.
 
 WHAT IT HOLDS.
 
@@ -19,9 +24,10 @@ WHAT IT HOLDS.
    and this module's reference rules name the same seven, and every
    subschema that can fail names a catalogued shape rule, so no refusal of
    the neutral kind is left without an identifier.
-2. THE OTHER THREE KINDS, STRUCTURALLY. Every positive example of theirs
-   validates, and each chat-turn wire kind is judged against its own
-   envelope.
+2. THE OTHER THREE KINDS, STRUCTURALLY. Every positive example of the
+   chat-turn and model-catalog kinds validates, each chat-turn wire kind is
+   judged against its own envelope, and every manifest openDox's own
+   workbench writes validates as an `ideation-workbench`.
 3. THE EVALUATOR'S SEMANTICS, keyword by keyword, over small schemas of its
    own: JSON equality, the date-time format, the applicators, and where a
    violation is reported.
@@ -213,6 +219,42 @@ def test_every_positive_example_of_the_other_kinds_validates(path: Path) -> None
     instance = _read(path)
     assert instance["kind"] in V.KIND_ENTRIES
     assert V.validate(instance) == [], V.report(V.validate(instance))
+
+
+def test_every_manifest_openDox_own_workbench_writes_validates() -> None:
+    """The `ideation-workbench` manifests this validator is asked about are the
+    ones openDox's own `workbench.Workbench` writes (T055 routes
+    `workbench.validate_manifest` here). One of each seed kind, carrying every
+    member route, an exclusion, every action and a notebook binding,
+    validates against the packaged copy. A human override with no recorded
+    reason, which the writer itself refuses, is refused by the contract too."""
+    from opendox import workbench as wb
+
+    now = "2026-09-27T12:00:00Z"
+    made = [
+        wb.Workbench.create("fixture", "an ad-hoc set", now=now),
+        wb.Workbench.create("fixture", "a cluster set", seed=wb.SEED_CLUSTER,
+                            cluster_id="compost", now=now),
+        wb.Workbench.create("fixture", "a recipe set", seed=wb.SEED_RECIPE,
+                            recipe={"checked": ["compost", "soil"], "pinned": ["soil"]},
+                            now=now),
+    ]
+    assert {w.data["seed"]["kind"] for w in made} == set(wb.SEED_KINDS)
+    for w in made:
+        for via in sorted(wb.VIA_VALUES):
+            w.add_member(f"notes/{via}.md", via, now=now,
+                         reason="a human chose it" if via == wb.VIA_MANUAL_INCLUDE else None)
+        w.exclude("notes/left-out.md", "not about the shed", now=now)
+        for action in sorted(wb.ACTION_VALUES):
+            w.record_action(action, now=now)
+        w.bind_notebook(now=now)
+        manifest = yaml.safe_load(w.render())
+        assert V.validate(manifest) == [], V.report(V.validate(manifest))
+    silent = yaml.safe_load(made[0].render())
+    index = len(silent["members"])
+    silent["members"].append({"document": "notes/silent.md", "via": wb.VIA_MANUAL_INCLUDE})
+    assert V.report(V.validate(silent)) == [
+        f"[required] /members/{index}: 'reason' is required"]
 
 
 def test_each_chat_turn_kind_is_judged_against_its_own_envelope() -> None:
