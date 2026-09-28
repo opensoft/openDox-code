@@ -32,7 +32,9 @@ WHAT IT HOLDS.
    own: JSON equality, the date-time format, the applicators, and where a
    violation is reported.
 4. FAIL CLOSED. A copy that uses what this module does not evaluate is refused
-   when its validator is built, never evaluated with a keyword left out.
+   when its validator is built, never evaluated with a keyword left out. So
+   is a keyword holding a value of another shape, wherever the evaluator could
+   reach it, and a copy's malformation is refused as unavailable, never a crash.
 5. jsonschema's SHAPE, FOR THE doxBench SEAM. `serve_workbench`'s two readers
    of the seam, run over `validators()`, judge the chat turn as they judge it
    over openxFactory's jsonschema validators, so plan 034's T085 can register
@@ -417,19 +419,138 @@ def test_a_boolean_schema() -> None:
     ({"$ref": "#/$defs/missing"}, "names nothing in the copy"),
     ({"$ref": "#/title", "title": "t"}, "not a schema"),
     ({"pattern": "("}, "does not compile"),
-    ({"type": "text"}, "names the type"),
+    ({"type": "text"}, "evaluates type only as one of"),
     ({"x-rules": [{"id": "r", "class": "reference", "says": "?"}]},
      "implements []"),
     ({"x-rules": ["not a rule"]}, "each carry an id"),
+    # Each of these once crashed the build itself instead of refusing it.
+    ({"format": {}}, "does not assert"),
+    ({"pattern": "a{4294967296}"}, "does not compile"),
+    ({1: "a number as a key", "zz": "text"}, "does not evaluate"),
+    # An embedded resource would move where its references resolve.
+    ({"properties": {"a": {"$id": "https://example.test/a"}}}, "embedded resource"),
+    ({"properties": {"a": {"$schema": V.DIALECT}}}, "embedded resource"),
+    # A JSON pointer's index is a plain decimal, never Python's reading of it.
+    ({"$ref": "#/allOf/-1", "allOf": [{}]}, "names nothing in the copy"),
+    ({"$ref": "#/allOf/01", "allOf": [{}, {}]}, "names nothing in the copy"),
 ], ids=["patternProperties", "else", "a format", "a remote reference",
         "a dangling reference", "a reference to text", "a bad pattern",
-        "an unknown type", "an unimplemented reference rule", "a malformed catalog"])
+        "an unknown type", "an unimplemented reference rule", "a malformed catalog",
+        "a format of another shape", "an unbounded repetition", "mixed keys",
+        "an embedded $id", "an embedded $schema", "a negative index",
+        "a zero-padded index"])
 def test_what_is_not_evaluated_is_refused_when_the_validator_is_built(
         schema: dict, says: str) -> None:
     with pytest.raises(V.SchemaNotEvaluable) as refused:
         _built(schema)
     assert says in str(refused.value)
     assert isinstance(refused.value, V.ValidatorUnavailable)
+
+
+@pytest.mark.parametrize("schema, keyword", [
+    ({"type": {}}, "type"),
+    ({"type": [["string"]]}, "type"),
+    ({"type": ["string", "string"]}, "type"),
+    ({"type": []}, "type"),
+    ({"enum": 5}, "enum"),
+    ({"required": 5}, "required"),
+    ({"required": [1]}, "required"),
+    ({"required": ["a", "a"]}, "required"),
+    ({"dependentRequired": []}, "dependentRequired"),
+    ({"dependentRequired": {"a": 5}}, "dependentRequired"),
+    ({"dependentRequired": {1: ["a"]}}, "dependentRequired"),
+    ({"minLength": "3"}, "minLength"),
+    ({"maxLength": -1}, "maxLength"),
+    ({"minItems": True}, "minItems"),
+    ({"maxItems": 1.5}, "maxItems"),
+    ({"minProperties": None}, "minProperties"),
+    ({"maxProperties": "2"}, "maxProperties"),
+    ({"minimum": "5"}, "minimum"),
+    ({"maximum": float("nan")}, "maximum"),
+    ({"uniqueItems": "yes"}, "uniqueItems"),
+    ({"pattern": b"^a"}, "pattern"),
+    ({"properties": []}, "properties"),
+    ({"properties": {"a": 5}}, "properties"),
+    ({"properties": {1: {}}}, "properties"),
+    ({"$defs": []}, "$defs"),
+    ({"items": [{}]}, "items"),
+    ({"additionalProperties": "no"}, "additionalProperties"),
+    ({"contains": []}, "contains"),
+    ({"propertyNames": 5}, "propertyNames"),
+    ({"not": []}, "not"),
+    ({"if": 5, "then": {}}, "if"),
+    ({"if": {}, "then": 5}, "then"),
+    ({"allOf": 5}, "allOf"),
+    ({"allOf": []}, "allOf"),
+    ({"anyOf": "ab"}, "anyOf"),
+    ({"oneOf": [5]}, "oneOf"),
+    ({"x-rule": {}}, "x-rule"),
+    ({"x-rule": ""}, "x-rule"),
+], ids=lambda case: repr(case) if isinstance(case, dict) else case)
+def test_a_keyword_holding_a_value_of_another_shape_is_refused_when_built(
+        schema: dict, keyword: str) -> None:
+    """The evaluator reads each keyword's value as draft 2020-12 shapes it.
+    Before `_SHAPES`, `type: {}` and `allOf: 5` crashed the build with a
+    TypeError. Every other case here built, and then crashed on an instance
+    or judged it wrongly: `uniqueItems: "yes"` read as true, and a negative
+    `maxLength` refused every string. Each is now refused as unavailable, at
+    the place it is written."""
+    with pytest.raises(V.SchemaNotEvaluable) as refused:
+        _built({"properties": {"a": schema}})
+    assert f"/properties/a's {keyword} is " in str(refused.value)
+    assert isinstance(refused.value, V.ValidatorUnavailable)
+
+
+def test_every_keyword_this_module_evaluates_has_a_shape_or_its_own_check() -> None:
+    """A keyword added to `KEYWORDS` without a shape would be read unchecked.
+    `$ref` and `format` have their own refusals, `const` holds any value, and
+    the rest are annotations the evaluator never reads (`x-rules` is checked
+    as the snapshot contract's catalog)."""
+    own_check = {"$ref", "format", "const"}
+    annotations = {"$id", "$schema", "title", "description", "contract_schema_version",
+                   "x-rules"}
+    assert set(V._SHAPES) == V.KEYWORDS - own_check - annotations
+    assert annotations | {"$defs", "x-rule"} == set(V._ANNOTATING)
+
+
+def test_a_references_target_is_checked_where_no_walk_of_the_subschemas_reaches() -> None:
+    """A reference can name a node inside an `enum`, which no walk of the
+    subschemas passes, and the evaluator reads that node all the same. So
+    the build walks every reference's target. A malformed target is refused,
+    and a target's pattern is compiled when the validator is built."""
+    malformed = {"$defs": {"x": {"enum": [{"uniqueItems": "yes"}]}},
+                 "properties": {"a": {"$ref": "#/$defs/x/enum/0"}}}
+    with pytest.raises(V.SchemaNotEvaluable) as refused:
+        _built(malformed)
+    assert "/$defs/x/enum/0's uniqueItems is 'yes'" in str(refused.value)
+    patterned = {"$defs": {"x": {"enum": [{"pattern": "^a"}]}},
+                 "properties": {"a": {"$ref": "#/$defs/x/enum/0"}}}
+    assert _found(patterned, {"a": "abc"}) == set()
+    assert _found(patterned, {"a": "b"}) == {("pattern", "/a")}
+
+
+def test_the_kinds_entry_is_a_schema_and_is_checked_wherever_it_is() -> None:
+    """The kind's entry is where evaluation starts, so it is checked like
+    every subschema, even where no walk of the document reaches."""
+    with pytest.raises(V.SchemaNotEvaluable) as refused:
+        _built({"$defs": {"x": "text"}}, pointer="/$defs/x")
+    assert "'/$defs/x' for a-test-kind is a str, not a schema" in str(refused.value)
+    with pytest.raises(V.SchemaNotEvaluable) as refused:
+        _built({}, pointer="/$defs/missing")
+    assert "it has no '/$defs/missing'" in str(refused.value)
+    with pytest.raises(V.SchemaNotEvaluable) as refused:
+        _built({"$defs": {"x": {"enum": [{"uniqueItems": "yes"}]}}},
+               pointer="/$defs/x/enum/0")
+    assert "/$defs/x/enum/0's uniqueItems is 'yes'" in str(refused.value)
+
+
+def test_a_subschema_that_contains_itself_is_refused() -> None:
+    """A YAML alias can build a mapping that holds itself, and no walk of it
+    ends. It is refused where it loops, and never recursed into."""
+    looped = yaml.safe_load("&s {properties: {a: *s}}")
+    with pytest.raises(V.SchemaNotEvaluable) as refused:
+        _built({"properties": {"b": looped}})
+    assert "/properties/b/properties/a contains itself" in str(refused.value)
 
 
 def test_another_dialect_is_refused() -> None:

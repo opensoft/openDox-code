@@ -69,7 +69,13 @@ format checker, and `date-time` is the one format the four use. A copy that
 uses a keyword, a format, a dialect or a reference this module does not
 evaluate is REFUSED when its validator is built (`SchemaNotEvaluable`). It is
 never evaluated with that keyword left out, which would pass whatever the
-keyword refuses.
+keyword refuses. So is a copy that gives an evaluated keyword a value of
+another shape (`_SHAPES`: `uniqueItems: "yes"`, `type: {}`, a negative
+`maxLength`), an embedded resource (`$id` or `$schema` below the root, which
+would move where its references resolve), or a subschema that contains itself.
+The build walks every subschema and every reference's target, so nothing the
+evaluator can reach escapes those checks, and a malformed copy is reported as
+unavailable instead of crashing the build or misjudging an instance.
 
 RULE IDENTIFIERS. Every violation names the rule it broke. The neutral snapshot
 contract gives each rule an id, carried as `x-rule` by the subschema that
@@ -114,6 +120,7 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+import math
 import re
 import threading
 from dataclasses import dataclass
@@ -196,8 +203,9 @@ class ValidatorUnavailable(RuntimeError):
 
 class SchemaNotEvaluable(ValidatorUnavailable):
     """A packaged copy uses a keyword, format, dialect or reference this
-    module does not evaluate, or declares reference rules it does not
-    implement. It is refused when its validator is built."""
+    module does not evaluate, gives a keyword a value of a shape it does not
+    evaluate, or declares reference rules it does not implement. It is
+    refused when its validator is built."""
 
 
 class UnknownKind(ValueError):
@@ -485,10 +493,106 @@ def _at_pointer(document: Any, pointer: str) -> Any:
         if isinstance(node, dict):
             node = node[token]
         elif isinstance(node, list):
+            # A JSON pointer's array index is a plain decimal: never "-1" and
+            # never "01", which Python's int() would read as other elements.
+            if not _INDEX.fullmatch(token):
+                raise KeyError(pointer)
             node = node[int(token)]
         else:
             raise KeyError(pointer)
     return node
+
+
+_INDEX = re.compile(r"0|[1-9][0-9]*")
+
+
+# ---------------------------------------------------------------------------
+# the shapes the evaluator reads
+# ---------------------------------------------------------------------------
+
+def _is_schema(value: Any) -> bool:
+    return isinstance(value, (dict, bool))
+
+
+def _is_count(value: Any) -> bool:
+    """A non-negative integer, as JSON counts one: `2.0` is 2, `true` is not 1."""
+    return _is_type(value, "integer") and value >= 0
+
+
+def _is_bound(value: Any) -> bool:
+    return _is_number(value) and math.isfinite(value)
+
+
+def _are_names(value: Any) -> bool:
+    """A list of distinct property names."""
+    return (isinstance(value, list) and all(isinstance(name, str) for name in value)
+            and len(set(value)) == len(value))
+
+
+def _are_schemas(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(map(_is_schema, value))
+
+
+def _names_schemas(value: Any) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(name, str) and _is_schema(sub) for name, sub in value.items())
+
+
+def _names_names(value: Any) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(name, str) and _are_names(needed) for name, needed in value.items())
+
+
+def _names_types(value: Any) -> bool:
+    names = value if isinstance(value, list) else [value]
+    return (bool(names) and all(isinstance(name, str) and name in _TYPES for name in names)
+            and len(set(names)) == len(names))
+
+
+#: The shape each evaluated keyword's value must have, as draft 2020-12 gives
+#: it, and how a refusal names that shape. The evaluator reads every value as
+#: shaped here, so a copy whose keyword holds anything else is refused when its
+#: validator is built. It is never evaluated, where it would crash on an
+#: instance or judge it wrongly: a `uniqueItems: "yes"` read as true, or a
+#: negative `maxLength` that no string meets. `format` and `$ref` are checked
+#: beside it, with their own refusals.
+_SHAPES: Mapping[str, tuple[Callable[[Any], bool], str]] = {
+    "$defs": (_names_schemas, "an object of schemas"),
+    "additionalProperties": (_is_schema, "a schema"),
+    "allOf": (_are_schemas, "a non-empty list of schemas"),
+    "anyOf": (_are_schemas, "a non-empty list of schemas"),
+    "contains": (_is_schema, "a schema"),
+    "dependentRequired": (_names_names,
+                          "an object of lists of distinct property names"),
+    "enum": (lambda value: isinstance(value, list), "a list"),
+    "if": (_is_schema, "a schema"),
+    "items": (_is_schema, "a schema"),
+    "maxItems": (_is_count, "a non-negative integer"),
+    "maxLength": (_is_count, "a non-negative integer"),
+    "maxProperties": (_is_count, "a non-negative integer"),
+    "maximum": (_is_bound, "a finite number"),
+    "minItems": (_is_count, "a non-negative integer"),
+    "minLength": (_is_count, "a non-negative integer"),
+    "minProperties": (_is_count, "a non-negative integer"),
+    "minimum": (_is_bound, "a finite number"),
+    "not": (_is_schema, "a schema"),
+    "oneOf": (_are_schemas, "a non-empty list of schemas"),
+    "pattern": (lambda value: isinstance(value, str), "text"),
+    "properties": (_names_schemas, "an object of schemas"),
+    "propertyNames": (_is_schema, "a schema"),
+    "required": (_are_names, "a list of distinct property names"),
+    "then": (_is_schema, "a schema"),
+    "type": (_names_types,
+             f"one of {sorted(_TYPES)}, or a non-empty list of distinct ones"),
+    "uniqueItems": (lambda value: isinstance(value, bool), "a boolean"),
+    "x-rule": (lambda value: isinstance(value, str) and bool(value),
+               "a rule's identifier"),
+}
+
+
+class _ContainsItself(ValueError):
+    """A subschema is its own ancestor: a YAML alias can build one, and no walk
+    of it ends."""
 
 
 class KindValidator:
@@ -507,11 +611,8 @@ class KindValidator:
         self.digest = digest
         self._document = document
         self._patterns: dict[str, re.Pattern[str]] = {}
-        self._refuse_what_is_not_evaluated(document)
-        try:
-            self._entry = _at_pointer(document, pointer)
-        except (KeyError, IndexError, ValueError) as exc:
-            raise self._not_evaluable(f"it has no {pointer!r} for {kind}") from exc
+        self._refuse_what_is_not_evaluated(document, pointer)
+        self._entry = _at_pointer(document, pointer)    # resolved, and a schema
         self._reference = self._reference_rules(document)
 
     # -- building -----------------------------------------------------------
@@ -521,45 +622,91 @@ class KindValidator:
             f"openDox's validator cannot evaluate its packaged copy of "
             f"{self.copy_id} for {self.kind}: {detail}")
 
-    def _refuse_what_is_not_evaluated(self, document: Any) -> None:
+    def _refuse_what_is_not_evaluated(self, document: Any, pointer: str) -> None:
+        """Refuse the copy unless the evaluator would read all of it as it
+        stands: the whole document, the kind's entry, and every reference's
+        target. A reference can reach a node that no walk of the document's
+        subschemas passes (one inside an `enum`, say), and the evaluator would
+        read that node all the same."""
         if not isinstance(document, dict):
             raise self._not_evaluable(f"it is a {type(document).__name__}, not a schema")
         if document.get("$schema") != DIALECT:
             raise self._not_evaluable(
                 f"its dialect is {document.get('$schema')!r}, not {DIALECT!r}")
-        for at, node in _subschemas(document):
-            unknown = sorted(set(node) - KEYWORDS)
-            if unknown:
-                raise self._not_evaluable(f"{at or '<root>'} uses {unknown}, which "
-                                          "this module does not evaluate")
-            if "type" in node:
-                names = node["type"] if isinstance(node["type"], list) else [node["type"]]
-                if not names or not set(names) <= _TYPES:
-                    raise self._not_evaluable(f"{at} names the type(s) {names}")
-            if "format" in node and node["format"] not in FORMATS:
+        try:
+            entry = _at_pointer(document, pointer)
+        except (KeyError, IndexError, ValueError) as exc:
+            raise self._not_evaluable(f"it has no {pointer!r} for {self.kind}") from exc
+        if not _is_schema(entry):
+            raise self._not_evaluable(f"its {pointer!r} for {self.kind} is a "
+                                      f"{type(entry).__name__}, not a schema")
+        walked: set[int] = set()
+        pending: list[tuple[str, Any]] = [("", document), (pointer, entry)]
+        while pending:
+            start, subtree = pending.pop()
+            try:
+                for at, node in _subschemas(subtree, start):
+                    if id(node) not in walked:
+                        walked.add(id(node))
+                        pending.extend(self._refuse_node(document, at, node))
+            except _ContainsItself as exc:
                 raise self._not_evaluable(
-                    f"{at} names the format {node['format']!r}, which this module "
-                    f"does not assert (it asserts {sorted(FORMATS)})")
-            if "pattern" in node:
-                try:
-                    self._patterns[node["pattern"]] = re.compile(node["pattern"])
-                except (re.error, TypeError) as exc:
-                    raise self._not_evaluable(
-                        f"{at}'s pattern does not compile ({exc})") from exc
-            if "$ref" in node:
-                ref = node["$ref"]
-                if not isinstance(ref, str) or not (ref == "#" or ref.startswith("#/")):
-                    raise self._not_evaluable(
-                        f"{at} refers to {ref!r}; only a reference inside the copy "
-                        "is evaluated")
-                try:
-                    target = _at_pointer(document, ref[1:])
-                except (KeyError, IndexError, ValueError) as exc:
-                    raise self._not_evaluable(f"{at}'s reference {ref!r} names "
-                                              "nothing in the copy") from exc
-                if not isinstance(target, (dict, bool)):
-                    raise self._not_evaluable(f"{at}'s reference {ref!r} names a "
-                                              f"{type(target).__name__}, not a schema")
+                    f"{exc.args[0] or '<root>'} contains itself; this module evaluates a "
+                    "schema that is a tree, and a copy repeats itself only by "
+                    "reference") from None
+
+    def _refuse_node(self, document: dict[str, Any], at: str,
+                     node: dict[str, Any]) -> list[tuple[str, Any]]:
+        """Refuse `node` unless this module evaluates it as it stands, and
+        answer its reference's target, for the walk to check in its turn."""
+        where = at or "<root>"
+        unknown = sorted((key for key in node if key not in KEYWORDS), key=repr)
+        if unknown:
+            raise self._not_evaluable(f"{where} uses {unknown}, which "
+                                      "this module does not evaluate")
+        if at and ("$id" in node or "$schema" in node):
+            raise self._not_evaluable(
+                f"{where} is an embedded resource (it carries its own "
+                f"{'$id' if '$id' in node else '$schema'}), which would move where "
+                "its references resolve; this module resolves every reference "
+                "against the copy's root")
+        for keyword, value in node.items():
+            shape = _SHAPES.get(keyword)
+            if shape is not None and not shape[0](value):
+                raise self._not_evaluable(
+                    f"{where}'s {keyword} is {_brief(value)}, and this module "
+                    f"evaluates {keyword} only as {shape[1]}")
+        if "format" in node and not (isinstance(node["format"], str)
+                                     and node["format"] in FORMATS):
+            raise self._not_evaluable(
+                f"{where} names the format {_brief(node['format'])}, which this module "
+                f"does not assert (it asserts {sorted(FORMATS)})")
+        if "pattern" in node:
+            try:
+                self._patterns[node["pattern"]] = re.compile(node["pattern"])
+            except (re.error, OverflowError, RecursionError) as exc:
+                raise self._not_evaluable(
+                    f"{where}'s pattern does not compile ({exc})") from exc
+        return self._reference_target(document, where, node) if "$ref" in node else []
+
+    def _reference_target(self, document: dict[str, Any], where: str,
+                          node: dict[str, Any]) -> list[tuple[str, Any]]:
+        """What `node`'s reference names, as (pointer, target), for the walk.
+        Refused unless the target is a schema inside the copy itself."""
+        ref = node["$ref"]
+        if not isinstance(ref, str) or not (ref == "#" or ref.startswith("#/")):
+            raise self._not_evaluable(
+                f"{where} refers to {_brief(ref)}; only a reference inside the copy "
+                "is evaluated")
+        try:
+            target = _at_pointer(document, ref[1:])
+        except (KeyError, IndexError, ValueError) as exc:
+            raise self._not_evaluable(f"{where}'s reference {ref!r} names "
+                                      "nothing in the copy") from exc
+        if not _is_schema(target):
+            raise self._not_evaluable(f"{where}'s reference {ref!r} names a "
+                                      f"{type(target).__name__}, not a schema")
+        return [(ref[1:], target)]
 
     def _reference_rules(self, document: dict[str, Any]
                          ) -> tuple[Callable[[Any], Iterator[Violation]], ...]:
@@ -595,16 +742,10 @@ class KindValidator:
         return next(self._evaluate(value, schema, path), None) is None
 
     def _pattern(self, pattern: str) -> re.Pattern[str]:
-        """The compiled pattern. Every pattern in the copy compiled when this
-        validator was built, so one is compiled here only if it is reached
-        through a reference the build's walk did not pass."""
-        compiled = self._patterns.get(pattern)
-        if compiled is None:
-            try:
-                compiled = self._patterns[pattern] = re.compile(pattern)
-            except re.error as exc:
-                raise self._not_evaluable(f"a pattern does not compile ({exc})") from exc
-        return compiled
+        """The compiled pattern. The build walks every subschema the evaluator
+        can reach, references' targets included, and compiles each pattern it
+        meets, so this reads what the build compiled."""
+        return self._patterns[pattern]
 
     def _evaluate(self, value: Any, schema: Any,
                   path: tuple[str | int, ...]) -> Iterator[Violation]:
@@ -727,21 +868,33 @@ class KindValidator:
                                     f"the property name {_brief(key)}: {found.detail}")
 
 
-def _subschemas(node: Any, at: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
-    """Every subschema of `node` that is an object, with its location."""
+def _subschemas(node: Any, at: str = "", _above: frozenset[int] = frozenset()
+                ) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Every subschema of `node` that is an object, with its location as a JSON
+    pointer. A node is yielded before its subschemas are walked, so a caller
+    that refuses a malformed node stops the walk before it reads what the node
+    holds. Raises `_ContainsItself` at a subschema that is its own ancestor."""
     if not isinstance(node, dict):
         return
+    if id(node) in _above:
+        raise _ContainsItself(at)
     yield at, node
+    above = _above | {id(node)}
     for key in ("properties", "$defs"):
         for name, sub in node.get(key, {}).items() if isinstance(node.get(key), dict) else ():
-            yield from _subschemas(sub, f"{at}/{key}/{name}")
+            yield from _subschemas(sub, f"{at}/{key}/{_escape(name)}", above)
     for key in ("additionalProperties", "items", "contains", "propertyNames", "not",
                 "if", "then"):
         if key in node:
-            yield from _subschemas(node[key], f"{at}/{key}")
+            yield from _subschemas(node[key], f"{at}/{key}", above)
     for key in ("allOf", "anyOf", "oneOf"):
         for i, sub in enumerate(node.get(key, ())):
-            yield from _subschemas(sub, f"{at}/{key}/{i}")
+            yield from _subschemas(sub, f"{at}/{key}/{i}", above)
+
+
+def _escape(token: Any) -> str:
+    """A JSON pointer's reference token for a key."""
+    return str(token).replace("~", "~0").replace("/", "~1")
 
 
 # ---------------------------------------------------------------------------
