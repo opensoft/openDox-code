@@ -1134,11 +1134,13 @@ def test_a_refusal_cannot_be_composed_from_what_a_broker_said():
 def test_the_fixed_diagnostics_are_all_reachable_and_no_more():
     """The closed set shed the dialect sentence when the dialect became a
     declaration-time refusal; keeping an unraisable sentence would be a refusal
-    nobody can trigger. TEN since #1144 box 16.3: the built-in resolver's two
-    joined, and section (f) below reaches each of them."""
-    assert len(provider_mod.FIXED_DIAGNOSTICS) == 10
+    nobody can trigger. ELEVEN since #1144 box 16.3: the built-in resolver's
+    two joined, and so did the redirect a built-in credential declines.
+    Section (f) below reaches each of the three."""
+    assert len(provider_mod.FIXED_DIAGNOSTICS) == 11
     assert {provider_mod.DIAG_REFERENCE_UNRESOLVED,
-            provider_mod.DIAG_KEYRING_UNAVAILABLE} <= \
+            provider_mod.DIAG_KEYRING_UNAVAILABLE,
+            provider_mod.DIAG_PROVIDER_REDIRECTED} <= \
         provider_mod.FIXED_DIAGNOSTICS
     assert not hasattr(provider_mod, "DIAG_DIALECT_UNKNOWN")
 
@@ -2565,6 +2567,69 @@ def test_a_stand_in_server_sees_the_resolved_bearer_or_no_header(which,
             "answered in the chat grammar"
     assert _ChatCompletionsHandler.seen["authorization"] == expected
     assert _ChatCompletionsHandler.seen["body"]["model"] == DECLARED_MODEL
+
+
+class _ElsewhereHandler(http.server.BaseHTTPRequestHandler):
+    """A second stand-in, where a redirect would lead. It records every
+    request it is sent, of any method."""
+
+    seen: list = []
+
+    def _record(self):
+        _ElsewhereHandler.seen.append(
+            (self.command, self.headers.get("Authorization")))
+        _answer_json(self, _chat_completion("followed a redirect"))
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+        self._record()
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+        self._record()
+
+    def log_message(self, *_args):
+        return
+
+
+class _RedirectingHandler(http.server.BaseHTTPRequestHandler):
+    """A stand-in provider that answers every request with a redirect."""
+
+    code = 302
+    location = ""
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.send_response(_RedirectingHandler.code)
+        self.send_header("Location", _RedirectingHandler.location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *_args):
+        return
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_a_built_in_credential_follows_no_redirect(monkeypatch, code):
+    """Copilot's review of openDox-code#63 at `4abc6d4d`, over real sockets.
+    `urllib`'s default opener answers a POST's 301, 302 or 303 by sending a
+    GET to the `Location`, with the credential header still on it (measured).
+    A request that carries a built-in credential declines the redirect, and
+    the second server hears nothing at all."""
+    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
+    monkeypatch.setattr(_RedirectingHandler, "code", code)
+    with _stand_in_provider(_ElsewhereHandler) as elsewhere, \
+            _stand_in_provider(_RedirectingHandler) as base:
+        monkeypatch.setattr(_RedirectingHandler, "location",
+                            f"{elsewhere}/v1/chat/completions")
+        binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None,
+            environ={ENV_NAME: KEY_SENTINEL})
+        envelope = _Envelope()
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_REDIRECTED
+    assert _ElsewhereHandler.seen == [], "the credential went nowhere else"
 
 
 def test_the_resolver_lives_in_the_provider_module_alone():

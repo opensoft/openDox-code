@@ -251,9 +251,19 @@ DIAG_KEYRING_UNAVAILABLE = (
     "the OS keyring could not be read by this process, so the keyring "
     "reference could not be resolved")
 
+#: The answer to a redirect of a request that carried a credential the
+#: built-in resolver read. That request follows no redirect (see
+#: `_DeclineRedirects`), so the credential went to the declared endpoint and
+#: nowhere else, and the sentence says what to declare instead.
+DIAG_PROVIDER_REDIRECTED = (
+    "the provider answered with a redirect, which a credential the built-in "
+    "resolver reads does not follow, so it was sent nowhere else; declare "
+    "the endpoint the provider redirects to")
+
 #: The closed set, so a test can assert no other sentence can be raised.
-#: TEN: the eight the reconciliation left, and the built-in resolver's two
-#: (#1144 box 16.3). `DIAG_DIALECT_UNKNOWN` is gone because the fact it guarded
+#: ELEVEN: the eight the reconciliation left, the built-in resolver's two
+#: (#1144 box 16.3), and the redirect a request carrying a built-in
+#: credential declines. `DIAG_DIALECT_UNKNOWN` is gone because the fact it guarded
 #: moved: the dialect is the BINDING's, validated against the closed vocabulary
 #: when the operator declares it
 #: (`doxbench_binding.ModelProviderBinding.__post_init__`), so an unknown
@@ -265,6 +275,7 @@ FIXED_DIAGNOSTICS: frozenset[str] = frozenset({
     DIAG_BROKER_TIMEOUT, DIAG_PROVIDER_UNREACHABLE,
     DIAG_PROVIDER_REFUSED, DIAG_PROVIDER_MALFORMED, DIAG_TOKEN_EXPIRED_TWICE,
     DIAG_REFERENCE_UNRESOLVED, DIAG_KEYRING_UNAVAILABLE,
+    DIAG_PROVIDER_REDIRECTED,
 })
 
 
@@ -836,6 +847,40 @@ _DIALECT_ARMS: dict[str, tuple] = {
 }
 
 
+class _Redirected(Exception):
+    """A provider answered a request carrying a built-in credential with a
+    redirect, and the redirect was declined.
+
+    PRIVATE and never raised out of this module: the port answers it with
+    `DIAG_PROVIDER_REDIRECTED` before any caller sees anything."""
+
+
+class _DeclineRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that follows NO redirect (Copilot's review of
+    openDox-code#63 at `4abc6d4d`).
+
+    `urllib`'s own handler re-sends a request's headers, all but the content
+    ones, to whatever `Location` the provider names, whatever its host and
+    scheme. Measured: a POST answered 301, 302 or 303 reaches the redirect's
+    target as a GET that still carries `Authorization: Bearer ...`. The
+    loopback ruling of 2026-09-28 sends a credential the built-in resolver
+    reads only by a private route, and a followed redirect would send it by
+    any route. So a request that carries one declines every redirect, with
+    the redirect's answer closed unread."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise _Redirected
+
+
+def _open_without_redirects(request, *, timeout):
+    """`urllib.request.urlopen`, but every redirect is declined. The opener
+    is built per call, as `urlopen` builds its own on first use, so the
+    proxy environment is read when a request is made."""
+    return urllib.request.build_opener(_DeclineRedirects).open(
+        request, timeout=timeout)
+
+
 def _post_to_provider(*, endpoint: str, dialect: str, credential: str | None,
                       model: str, prompt: str, timeout: float, opener) -> str:
     """The ONE place a provider is contacted. Returns the assistant prose.
@@ -1123,7 +1168,15 @@ class BrokeredProviderPort:
         A 401 HERE IS A REFUSAL, NOT AN EXPIRY. The 2026-08-26 retry ruling is
         about a MINTED token outliving its turn, and here there is no mint to
         repeat: the reference names the same value on a second read, so a
-        retry would buy a second paid call for the same refusal."""
+        retry would buy a second paid call for the same refusal.
+
+        A REQUEST CARRYING A BUILT-IN CREDENTIAL FOLLOWS NO REDIRECT. The
+        default opener follows redirects and re-sends the credential header
+        (see `_DeclineRedirects`), so such a request swaps it for
+        `_open_without_redirects`. An opener a caller injected is that
+        caller's own seam and is used as given. The auth kind `none` sends no
+        credential, and a broker's minted token keeps the default opener, as
+        the 2026-09-28 ruling leaves that path."""
         credential = None
         if (self._binding.credential_source()
                 == binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER):
@@ -1137,13 +1190,18 @@ class BrokeredProviderPort:
                 raise
             with self._lock:
                 self._available = True
+        opener = self._opener
+        if credential is not None and opener is urllib.request.urlopen:
+            opener = _open_without_redirects
         try:
             return _post_to_provider(
                 endpoint=self._binding.endpoint, dialect=self._binding.dialect,
                 credential=credential, model=model, prompt=prompt,
-                timeout=self._timeout_seconds, opener=self._opener)
+                timeout=self._timeout_seconds, opener=opener)
         except _TokenExpired:
             raise BrokerRefused(DIAG_PROVIDER_REFUSED) from None
+        except _Redirected:
+            raise BrokerRefused(DIAG_PROVIDER_REDIRECTED) from None
 
     # -- token custody ------------------------------------------------------
 
