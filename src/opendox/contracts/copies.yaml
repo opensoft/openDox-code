@@ -1,0 +1,44 @@
+# THE RECORD of openDox's packaged contract copies (plan 034 T057; #1144 7.1,
+# as T007's batch G amends it; R1Q12 (a), opensoft/openxFactory#656 comment
+# 5850003126).
+#
+# WHAT IT SAYS. Each schema under `schemas/` beside this file is, byte for byte,
+# the file its `path` names in `spec_leg` at `commit`, and `sha256` is that
+# file's digest. `opendox.contracts.verified_bytes` recomputes the digest before
+# a copy is read, and refuses a copy that differs, a copy that is absent, and a
+# copy whose digest is left empty.
+#
+# WHERE THE VALUES CAME FROM, read with `git show <commit>:<path> | sha256sum`
+# in opensoft/openDox-spec.
+#
+# * `commit` is the head of openDox-spec#16 (T053), which is still open. It is
+#   the one commit that carries all four files.
+# * Three of the four files are unchanged there from the blobs the openDox root
+#   pins today (its `contracts/spec-pin.yaml`, 8fe8c4c7). Their digests are the
+#   ones the root's `contracts/manifest.yaml` records for them.
+# * The fourth is T053's `opendox-snapshot`. Its digest is the one T053's root
+#   step records.
+#
+# When T053 lands and the root's spec pin moves to its commit, `commit` moves
+# here in lockstep. A digest moves only when its file changes.
+#
+# NEVER EDIT A COPY OR A DIGEST IN PLACE. A copy changes in the spec leg. It
+# arrives here when the spec leg's file is copied at the pinned commit and its
+# digest recorded, in one commit.
+schema_version: 1
+kind: packaged-contract-copies
+spec_leg: opensoft/openDox-spec
+commit: "cd49eb253a431202b67de70b2c9ed941a72d0aa4"
+copies:
+  - id: ideation-workbench
+    path: contracts/schemas/ideation-workbench.schema.yaml
+    sha256: "d30438491119c20928fbe4e85088fc33682829eeb6558d87dafce651000faafc"
+  - id: opendox-snapshot
+    path: contracts/schemas/opendox-snapshot.schema.yaml
+    sha256: "f9e3e111af1d4bd4c377c933027d81b582ae2b0a395b66f4e4621992454a584a"
+  - id: xfactory-workbench-chat-turn
+    path: contracts/schemas/xfactory-workbench-chat-turn.schema.yaml
+    sha256: "350bfedc02696e7281a42c0bdc9a25059bf7af14d16d89d9f07018d3e691dc1d"
+  - id: xfactory-workbench-model-catalog
+    path: contracts/schemas/xfactory-workbench-model-catalog.schema.yaml
+    sha256: "e563cc9fc6ede03dfd62537935d0ae0842617d7de46702aee6ad9026aa021635"
