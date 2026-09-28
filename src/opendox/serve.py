@@ -646,8 +646,8 @@ def resolve_source_path(checkout_root: Path, url_tail: str) -> Path | None:
     ARRIVED HERE AT § 3.4 SLICE S6 (RULED Q4) with the route it confines, from
     `openxdox/serve_projection.py`:66. The body is unchanged: the RULE is the
     registry's `resolve_within`, it is the same rule per registry entry, and
-    it is reached through the registry SEAM (plan 034 T055) that
-    `serve_workbench.py` reaches it by too, so a process has one rule: the
+    it is reached through the registry SEAM (plan 034 T055), as
+    `serve_workbench.py` reaches it too, so a process has one rule: the
     registered registry's. What moved is the ENTRY POINT, to the module that
     now declares the route and to the module `notebook_action.py`:52 already
     imported it from. A second copy of the containment rule here would be the

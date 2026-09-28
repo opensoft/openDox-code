@@ -69,8 +69,8 @@ WHAT IT HOLDS, and why each is here rather than implied:
    can no longer take the route back by arriving first.
 5. THE CONTAINMENT AUTHORITY IS SINGLE AND UNMOVED. `resolve_source_path` is a
    real `def` here now, and its body is one call to the registry's
-   `resolve_within` — the SAME rule, reached through the registry seam
-   `serve_workbench.py` reaches it by too (a late `consumer_reach` stand-in
+   `resolve_within` — the SAME rule, reached through the registry seam, as
+   `serve_workbench.py` reaches it too (a late `consumer_reach` stand-in
    until plan 034 T055, the registry seam's proxy since). A second copy of the
    check beside it is the fork
    `route_extension.py`:89 names; that is what this asserts against, and it is
@@ -290,8 +290,8 @@ def test_the_containment_rule_is_the_one_authority_and_is_not_re_implemented():
     assert "registry_mod.resolve_within(" in body, (
         "the containment rule is the snapshot registry's resolve_within and it "
         "did NOT move: it is the same rule applied per registry entry (task "
-        "2.2), and openDox reaches it through the registry seam "
-        "serve_workbench.py reaches it by too")
+        "2.2), and openDox reaches it through the registry seam, as "
+        "serve_workbench.py does")
     assert len([s for s in statements if s.startswith("    return ")]) == 1, (
         "resolve_source_path is a delegation and must stay one. A second copy "
         "of the containment rule here is the fork route_extension.py:89 names "

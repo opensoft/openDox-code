@@ -543,6 +543,13 @@ def tree(tmp_path) -> Path:
     outside = tmp_path / "outside.md"
     outside.write_text("secret\n", encoding="utf-8")
     (root / "escape.md").symlink_to(outside)
+    # Symlinks that stay INSIDE the root: two lead to what no URL may name
+    # (a dot-directory, an undocumented dot-file), and two to what it may.
+    (root / "link").symlink_to(".git", target_is_directory=True)
+    (root / "docs" / "hidden").symlink_to("../.git", target_is_directory=True)
+    (root / "alias.md").symlink_to(".env")
+    (root / "same.md").symlink_to("docs/a.md")
+    (root / "spec.yaml").symlink_to("changes/.openspec.yaml")
     return root
 
 
@@ -561,8 +568,17 @@ def tree(tmp_path) -> Path:
     ("docs", False),
     ("escape.md", False),
     ("docs/missing.md", False),
+    ("link/config", False),
+    ("docs/hidden/config", False),
+    ("alias.md", False),
+    ("same.md", True),
+    ("spec.yaml", True),
 ])
 def test_resolve_within_is_the_containment_source_has_always_had(tree, tail, served) -> None:
+    """The rule `/source` has always been confined by, and one place where
+    openDox's statement of it is stricter: a symlink inside the root that
+    leads into a dot-directory or at an undocumented dot-file is refused as
+    its target would be, so `link -> .git` cannot serve `.git/config`."""
     resolved = default_registry.resolve_within(tree, tail)
     if served:
         assert resolved is not None and resolved.is_file()
@@ -616,9 +632,15 @@ def test_the_source_refuses_what_only_a_hosts_registry_reads(tmp_path) -> None:
         assert ps.registry.registration_call in str(caught.value)
         assert isinstance(caught.value, ps.ProjectionSeamError)
     assert default_registry.data_source_from_options() is None
-    for kwargs in ({"directory": tmp_path}, {"url": "https://example.invalid/x"}):
-        with pytest.raises(default_registry.NeutralRegistryRefused):
+    for kwargs, flag in (({"directory": tmp_path}, "--data-source-dir"),
+                         ({"directory": ""}, "--data-source-dir"),
+                         ({"url": "https://example.invalid/x"}, "--data-source-url"),
+                         ({"token_env": "SECRET_ENV"}, "--data-source-token-env"),
+                         ({"token_env": ""}, "--data-source-token-env")):
+        with pytest.raises(default_registry.NeutralRegistryRefused) as caught:
             default_registry.data_source_from_options(**kwargs)
+        assert flag in str(caught.value), (
+            "a declared option is refused by name, never dropped in silence")
     assert default_registry.github_raw_base_url("o/r") == \
         "https://raw.githubusercontent.com/o/r/main/"
     assert default_registry.github_raw_base_url("o/r", ref="x", path="a/b") == \
@@ -632,11 +654,13 @@ def test_serve_main_refuses_a_data_source_openDoxs_registry_cannot_read(
     reached = []
     monkeypatch.setattr(serve, "serve", lambda *a, **k: reached.append(a))
     repo = _repository(tmp_path)
-    rc = serve.main(["--snapshot", str(tmp_path / "s.json"), "--checkout-root",
-                     str(repo), "--data-source-dir", str(tmp_path)])
-    assert rc == 1 and not reached
-    err = capsys.readouterr().err
-    assert "serve refused:" in err and "--data-source-dir" in err
+    for flag, value in (("--data-source-dir", str(tmp_path)),
+                        ("--data-source-token-env", "SECRET_ENV")):
+        rc = serve.main(["--snapshot", str(tmp_path / "s.json"), "--checkout-root",
+                         str(repo), flag, value])
+        assert rc == 1 and not reached, flag
+        err = capsys.readouterr().err
+        assert "serve refused:" in err and flag in err
 
 
 def test_the_registry_keeps_a_sessions_owner_and_base_and_confines_each_entry(tmp_path) -> None:

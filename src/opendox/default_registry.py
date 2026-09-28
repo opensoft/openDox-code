@@ -34,7 +34,9 @@ confined by, as openDox states it: no absolute path, no NUL, no escape of the
 root (`..`, percent-encoded `..`, a symlink), no dot-directory ever, and a
 dot-file only with an extension a document carries. The dot-directory half is
 where credentials live (`.git/config` carries a remote's token, T092's defect
-10), so nothing below a dot-directory is ever served.
+10), so nothing below a dot-directory is ever served. openDox's statement is
+stricter in one place: the hidden-name half reads the CANONICAL path too, so a
+symlink inside the root cannot lead to what the URL could not name.
 
 IMPORT WEIGHT. `opendox.boundary`, `opendox.defaults`, `opendox.generator_seam`,
 `opendox.projection_seams` and the standard library. So this module imports
@@ -282,6 +284,18 @@ def entry_from_snapshot_file(
 
 # --------------------------- containment (pure) ---------------------------
 
+def _names_something_hidden(parts: list[str] | tuple[str, ...]) -> bool:
+    """Whether a relative path's components name what `/source` never serves:
+    a dot-directory anywhere but the last component, or a last component that
+    is a dot-file without a document's extension. `..` is not a name, and the
+    escape check decides it."""
+    if any(part.startswith(".") and part != ".." for part in parts[:-1]):
+        return True
+    last = parts[-1] if parts else ""
+    return (last.startswith(".") and last != ".."
+            and PurePosixPath(last).suffix not in SERVED_DOTFILE_SUFFIXES)
+
+
 def resolve_within(root: Path | str, url_tail: str) -> Path | None:
     """`url_tail` as an absolute FILE under `root`, or None to refuse it.
 
@@ -290,24 +304,30 @@ def resolve_within(root: Path | str, url_tail: str) -> Path | None:
     absolute one and a NUL; any component but the last that is a dot-directory;
     a last component that is a dot-file without a document's extension; any
     path that resolves outside `root`, whether by `..` or by a symlink; and
-    anything that is not a regular file."""
+    anything that is not a regular file.
+
+    THE HIDDEN-NAME RULE IS APPLIED TWICE: to the path as the URL spells it,
+    and to the CANONICAL path, relative to `root`, once symlinks are resolved.
+    The second is what refuses a symlink inside the root that leads to what the
+    first refuses by name. `link -> .git` would otherwise serve
+    `/source/link/config`, which is `.git/config`, and `notes.md -> .env` would
+    serve `.env`: both resolve inside the root, to a regular file."""
     rel = urllib.parse.unquote(str(url_tail))
     rel = rel.split("?", 1)[0].split("#", 1)[0]
     if not rel or rel.startswith("/") or "\x00" in rel:
         return None
     parts = [part for part in rel.replace("\\", "/").split("/")
              if part not in ("", ".")]
-    if any(part.startswith(".") and part != ".." for part in parts[:-1]):
+    if _names_something_hidden(parts):
         return None
-    if parts and parts[-1].startswith(".") and parts[-1] != "..":
-        if PurePosixPath(parts[-1]).suffix not in SERVED_DOTFILE_SUFFIXES:
-            return None
     try:
         base = Path(root).resolve()
         resolved = (base / rel).resolve()
     except (OSError, RuntimeError, ValueError):
         return None
     if resolved != base and not resolved.is_relative_to(base):
+        return None
+    if _names_something_hidden(resolved.relative_to(base).parts):
         return None
     if not resolved.is_file():
         return None
@@ -412,12 +432,22 @@ def data_source_from_options(*, directory: Path | str | None = None,
                              token_env: str | None = None,
                              opener: Callable[..., Any] | None = None):
     """None when no data source is declared, which is the only plane this
-    registry serves. A declared one is REFUSED, never ignored."""
-    if directory or url:
+    registry serves. A declared one is REFUSED, never ignored, and so is any
+    one of its options given alone: a token variable named with no source is
+    still a declaration this registry would otherwise drop in silence. A value
+    counts as declared when it is given at all, so an explicitly empty one is
+    refused too. `opener` is how a source's URL is fetched, a caller's
+    injection rather than an operator's declaration, and with no URL there is
+    nothing for it to fetch."""
+    declared = [flag for flag, value in (
+        ("--data-source-dir", directory),
+        ("--data-source-url (or --data-source-github, which composes one)", url),
+        ("--data-source-token-env", token_env),
+    ) if value is not None]
+    if declared:
         raise NeutralRegistryRefused(
-            "a runtime data source was declared "
-            f"({'--data-source-dir' if directory else '--data-source-url'}), "
-            "and openDox's own snapshot registry reads none: a published "
+            f"a runtime data source was declared ({', '.join(declared)}), and "
+            "openDox's own snapshot registry reads none: a published "
             "snapshot tree is located by a snapshot index, which is a governed "
             "contract, and openDox has no index kind of its own. Serve the "
             "snapshot this checkout generates, or register a host registry "
