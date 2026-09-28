@@ -120,10 +120,13 @@ def test_gate_intent_and_the_possibles_register_are_not_in_the_set() -> None:
     packaged copy, neither is on disk, and no validator can be asked for
     either."""
     for name in ("gate-intent", "ideation-possibles-register"):
-        assert name not in validator.KIND_ENTRIES
-        assert name not in {copy for copy, _pointer in validator.KIND_ENTRIES.values()}
-        assert name not in contracts.record().ids
-        assert not (PACKAGE / "schemas" / f"{name}.schema.yaml").exists()
+        assert name not in validator.KIND_ENTRIES, f"{name} is a kind openDox validates"
+        assert name not in {copy for copy, _pointer in validator.KIND_ENTRIES.values()}, (
+            f"a kind is validated against a copy of {name}")
+        assert name not in contracts.record().ids, f"the record pins a copy of {name}"
+        assert not (PACKAGE / "schemas" / f"{name}.schema.yaml").exists(), (
+            f"a copy of {name} is carried under src/opendox/contracts/schemas/, "
+            "which 7.1b refuses: requirement 1 keeps it with openxFactory")
         with pytest.raises(validator.UnknownKind):
             validator.validator_for(name)
         with pytest.raises(contracts.CopyRefused):
