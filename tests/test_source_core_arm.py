@@ -305,11 +305,16 @@ def test_the_arm_resolves_through_that_entry_point_and_the_registry_only():
     body = _source_of(_method("_serve_source"))
     assert "resolve_source_path(Path(self.checkout_root), rest)" in body, (
         "the no-registry path resolves through the single-root entry point")
-    assert "self.source.registry.resolve_source(repository, ref, rest)" in body, (
+    assert "self.source.registry.resolve_source(" in body and \
+        "entry.repository, entry.ref, rest)" in body, (
         "the registry path resolves through the entry's OWN root (per-entry "
         "confinement, task 2.2) — not through the served checkout with a key "
         "stripped off, which is the silent-wrong-data failure the seam exists "
         "to prevent")
+    assert body.count("self.source.registry.resolve(") == 1, (
+        "ONE resolution of the entry, whose own pair the path is then asked "
+        "for (plan 034 T055, FR-048): resolved a second time, the active "
+        "entry could change between the refusal and the path")
     assert "resolve_within(" not in body, (
         "the arm must not call the containment rule directly: one entry point, "
         "so a change to the rule cannot reach the route by one path and miss "

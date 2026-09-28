@@ -1292,12 +1292,21 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             return
         entry = None
         if self.source is not None:
-            target = self.source.registry.resolve_source(repository, ref, rest)
+            # ONE RESOLUTION of the entry, for the refusal, the confined path
+            # and the headers alike. The UNKEYED form resolves to the ACTIVE
+            # entry, which the query never named, the same ref-less hole
+            # `_serve_snapshot` closes. Resolved twice, once for the path and
+            # once for the refusal, a refresh that changed the active entry
+            # between the two could serve one entry's file under another's
+            # refusal and headers (FR-048). So the entry is resolved once, and
+            # the path is asked for by THAT entry's own pair, which is the pair
+            # the refusal checked, never "the active entry" a second time.
             entry = self.source.registry.resolve(repository, ref)
-            # the UNKEYED form resolves to the ACTIVE entry, which the query never
-            # named — the same ref-less hole `_serve_snapshot` closes
             if self._hosted_entry_refused(entry):
                 return
+            target = (None if entry is None else
+                      self.source.registry.resolve_source(
+                          entry.repository, entry.ref, rest))
         else:
             target = resolve_source_path(Path(self.checkout_root), rest)
         if target is None:

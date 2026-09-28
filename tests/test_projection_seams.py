@@ -855,6 +855,43 @@ def test_one_request_serves_the_entry_its_refusal_checked(tmp_path, monkeypatch)
     assert headers["X-Snapshot-Ref"] == "main"
 
 
+def test_the_source_arm_confines_to_the_entry_its_refusal_checked(tmp_path) -> None:
+    """FR-048 on `/source/`, against a concurrent refresh. The unkeyed form
+    resolves the ACTIVE entry once, and asks for the path by that entry's own
+    pair. Here the active entry is a session until the first path lookup and
+    `main` after it. Read twice, the path came from the session's worktree and
+    the refusal passed `main`, so a hosted plane served the session's file."""
+    _repo, _out, httpd = _served(tmp_path)
+    bound = httpd.RequestHandlerClass.func
+    bound.loopback = False
+    main = bound.source.registry.active
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "secret.md").write_text("SESSION-ONLY BYTES\n", encoding="utf-8")
+    session = default_registry.SnapshotEntry("garden", "draft/t", source_root=worktree)
+
+    class _Registry(default_registry.SnapshotRegistry):
+        looked_up = False
+
+        @property
+        def active(self):
+            return main if self.looked_up else session
+
+        def resolve_source(self, repository, ref, tail):
+            try:
+                return super().resolve_source(repository, ref, tail)
+            finally:
+                self.looked_up = True
+
+    registry = _Registry()
+    registry.register(main)
+    registry.register(session)
+    bound.source.registry = registry
+    status, _headers, body = _get(httpd, "/source/secret.md")
+    assert b"SESSION-ONLY" not in body, "a hosted plane served a session's file"
+    assert status == 403 and json.loads(body)["error"] == "session_unavailable"
+
+
 def test_hosted_ref_refused_asks_the_registered_registry() -> None:
     ps.register_defaults()
     assert serve.hosted_ref_refused(True, "draft/t") is False
