@@ -376,8 +376,14 @@ class SnapshotRegistry:
             return entry
 
     def drop(self, repository: str, ref: str | None = None) -> None:
+        """Remove an entry. Dropping the ACTIVE entry clears the active key,
+        so no ref-less request meets a key with nothing behind it, and the
+        next entry registered becomes active, as the first one did."""
         with self._lock:
-            self._entries.pop(snapshot_key(repository, ref), None)
+            key = snapshot_key(repository, ref)
+            self._entries.pop(key, None)
+            if self._active == key:
+                self._active = None
 
     def get(self, repository: str, ref: str | None = None) -> SnapshotEntry | None:
         """A ref-less lookup means `main`."""

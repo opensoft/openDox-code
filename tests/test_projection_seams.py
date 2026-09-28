@@ -654,13 +654,37 @@ def test_serve_main_refuses_a_data_source_openDoxs_registry_cannot_read(
     reached = []
     monkeypatch.setattr(serve, "serve", lambda *a, **k: reached.append(a))
     repo = _repository(tmp_path)
-    for flag, value in (("--data-source-dir", str(tmp_path)),
-                        ("--data-source-token-env", "SECRET_ENV")):
+    for flags, named in (
+            (["--data-source-dir", str(tmp_path)], "--data-source-dir"),
+            (["--data-source-token-env", "SECRET_ENV"], "--data-source-token-env"),
+            # An explicitly EMPTY option is a declaration too: `serve.main()`
+            # hands it over as given, and never drops it for being falsy.
+            (["--data-source-url", ""], "--data-source-url"),
+            (["--data-source-github", "o/r"],
+             "--data-source-github, which composes one"),
+            (["--data-source-github", ""],
+             "serve refused: --data-source-github: expected OWNER/REPO")):
         rc = serve.main(["--snapshot", str(tmp_path / "s.json"), "--checkout-root",
-                         str(repo), flag, value])
-        assert rc == 1 and not reached, flag
+                         str(repo), *flags])
+        assert rc == 1 and not reached, flags
         err = capsys.readouterr().err
-        assert "serve refused:" in err and flag in err
+        assert "serve refused:" in err and named in err, (flags, err)
+
+
+def test_dropping_the_active_entry_clears_the_active_key(tmp_path) -> None:
+    """No ref-less request meets a key with nothing behind it, and the next
+    entry registered becomes active, as the first one did."""
+    reg = default_registry
+    registry = reg.SnapshotRegistry()
+    first = registry.register(reg.SnapshotEntry("garden", source_root=tmp_path))
+    assert registry.active is first
+    registry.drop("garden")
+    assert registry.active is None and registry.resolve(None) is None
+    second = registry.register(reg.SnapshotEntry("orchard", source_root=tmp_path))
+    assert registry.active is second
+    registry.register(reg.SnapshotEntry("orchard", "draft/t"))
+    registry.drop("orchard", "draft/t")
+    assert registry.active is second, "dropping another entry leaves the active one"
 
 
 def test_the_registry_keeps_a_sessions_owner_and_base_and_confines_each_entry(tmp_path) -> None:

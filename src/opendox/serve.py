@@ -2350,11 +2350,26 @@ def main(argv: list[str] | None = None) -> int:
     if rc:
         return rc
     try:
+        # EVERY DATA-SOURCE OPTION IS HANDED OVER AS GIVEN (plan 034 T055).
+        # `None` means "not given", and anything else, an explicitly empty
+        # value included, is a declaration the REGISTERED registry decides
+        # about: openDox's own refuses each one by name, and a host's reads
+        # it. So each option is tested against None, never for truth. A
+        # GitHub source is composed into the URL only where no URL was given,
+        # and a slug that cannot be composed is refused like any other.
+        url = args.data_source_url
+        if url is None and args.data_source_github is not None:
+            try:
+                url = registry_mod.github_raw_base_url(
+                    args.data_source_github, ref=args.data_source_github_ref,
+                    path=args.data_source_path)
+            except ValueError as exc:
+                print(f"serve refused: --data-source-github: {exc}",
+                      file=sys.stderr)
+                return 1
         data_source = registry_mod.data_source_from_options(
             directory=args.data_source_dir,
-            url=args.data_source_url or (registry_mod.github_raw_base_url(
-                args.data_source_github, ref=args.data_source_github_ref,
-                path=args.data_source_path) if args.data_source_github else None),
+            url=url,
             token_env=args.data_source_token_env,
         )
         serve(args.web_dir, args.snapshot, args.checkout_root, host=args.host,
