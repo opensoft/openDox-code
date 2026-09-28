@@ -386,6 +386,29 @@ def test_migrate_and_reset_need_no_served_identity_and_no_broker(
     assert evidence["ok"] is False
 
 
+def test_migrate_refuses_a_non_postgresql_migration_dsn_at_configuration(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """13.2 covers `load_migration_settings` too, not only `load_settings`.
+
+    The test above shows an unreachable but VALID-dialect migration DSN
+    getting past configuration; this is its dialect-refused twin (Copilot
+    review of this PR): `load_migration_settings` read the DSN and handed it
+    straight to `Database` with no dialect check of its own, so a
+    non-PostgreSQL migration DSN reached the driver instead of being refused
+    by name here — the same un-named failure 13.2 exists to prevent for the
+    served loader.
+    """
+    for name in ("DATABASE_URL", "OIDC_ISSUER", "OIDC_AUDIENCE"):
+        monkeypatch.delenv(PREFIX + name, raising=False)
+    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL", "sqlite:///x.db")
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "migrate", "--connect-timeout", "0.2"]))
+    assert code == 1, evidence
+    assert evidence["refusal"] == "configuration", evidence
+    assert "postgres" in evidence["message"].lower(), evidence
+    assert PREFIX + "MIGRATION_DATABASE_URL" in evidence["message"]
+
+
 def test_the_entrypoint_turns_an_escaped_exception_into_evidence(
         monkeypatch: pytest.MonkeyPatch) -> None:
     """Every outcome is one redacted JSON object; none is a traceback."""

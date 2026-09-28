@@ -1590,6 +1590,14 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
             f"{PREFIX}MIGRATION_DATABASE_URL is required to apply migrations; "
             f"{PREFIX}DATABASE_URL is the served runtime's least-privileged "
             "identity and is deliberately not used for schema changes")
+    # THE SAME DIALECT GATE `load_settings` ASKS, asked here too (Copilot
+    # review of this PR): this loader is the one path 13.2's own falsifier
+    # does not reach, and without this call a non-PostgreSQL migration DSN
+    # sailed past configuration entirely and reached `Database` instead,
+    # which is exactly the un-named, un-refused failure 13.2 exists to
+    # prevent for `load_settings`. `database_url` is set to this same `dsn`
+    # immediately below, so one call here covers both fields.
+    _refuse_non_postgresql_dsn(PREFIX + "MIGRATION_DATABASE_URL", dsn)
     return RuntimeSettings(
         database_url=dsn,
         migration_database_url=dsn,
