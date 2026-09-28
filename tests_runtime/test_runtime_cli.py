@@ -206,13 +206,66 @@ def test_migrate_refuses_rather_than_borrowing_the_served_identity(
     assert PREFIX + "MIGRATION_DATABASE_URL" in evidence["message"]
 
 
+def test_serve_and_status_load_with_no_migration_dsn_configured(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Brett's ruling on #1144 13.3 ("Required only for migrate
+    (Recommended)"): `OPENDOX_MIGRATION_DATABASE_URL` stays OPTIONAL for the
+    served workload — `serve` and `status` both go through `load_settings`,
+    and this is the CLI-level proof that neither refuses at configuration
+    when only the served DSN is set. This is the shape
+    `deploy/compose/docker-compose.yaml`'s `opendox` service and
+    `docs/runtime.md` § 3 already document: the migration credential lives
+    only in the separate `migrate` service/profile.
+    """
+    monkeypatch.delenv(PREFIX + "MIGRATION_DATABASE_URL", raising=False)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                       "postgresql://nobody@127.0.0.1:1/none")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "status", "--probe-timeout", "0.2"]))
+    assert evidence.get("refusal") != "configuration", evidence
+    assert "settings" in evidence, evidence
+    assert evidence["settings"][PREFIX + "MIGRATION_DATABASE_URL"] is None
+
+    def _ok(self) -> None:
+        self.started = True
+
+    _stub_uvicorn(monkeypatch, _ok)
+    monkeypatch.delenv(PREFIX + "MIGRATION_DATABASE_URL", raising=False)
+    code, evidence = _run_serve()
+    assert code == 0, evidence
+    assert evidence["ok"] is True, evidence
+
+
+def test_the_collapse_is_refused_through_the_served_workload_too(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """13.3's collapse refusal is `load_settings`'s own, not the falsifier's
+    special case: it fires for `status` (and every other served verb) too,
+    the moment an operator gives BOTH DSNs and they happen to be the exact
+    same value — even though migration is optional here (Brett's ruling,
+    above).
+    """
+    same = "postgresql://opendox:hunter2@127.0.0.1:1/none"
+    monkeypatch.setenv(PREFIX + "DATABASE_URL", same)
+    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL", same)
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "status", "--probe-timeout", "0.2"]))
+    assert code == 1, evidence
+    assert evidence["refusal"] == "configuration", evidence
+    assert PREFIX + "MIGRATION_DATABASE_URL" in evidence["message"]
+    assert "hunter2" not in evidence["message"], evidence["message"]
+
+
 def test_init_creates_the_project_repository_root_and_touches_no_database(
         monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     root = tmp_path / "projects"
     monkeypatch.setenv(PREFIX + "DATABASE_URL",
                        "postgresql://nobody@127.0.0.1:1/none")
-    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                       "postgresql://migrate@127.0.0.1:1/none")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
     monkeypatch.setenv(PREFIX + "PROJECT_REPOSITORY_ROOT", str(root))
@@ -364,8 +417,6 @@ def test_status_reports_every_declared_setting_and_none_as_null(
     from opendox.runtime.config import SETTING_NAMES
 
     monkeypatch.setenv(PREFIX + "DATABASE_URL", "postgresql://u:pw@127.0.0.1:1/x")
-    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                       "postgresql://m:pw@127.0.0.1:1/x")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
     monkeypatch.setenv(PREFIX + "RUNTIME_PG_ROLE", "opendox_runtime")
@@ -436,8 +487,6 @@ def test_init_refuses_a_repository_root_that_is_not_a_directory(
     root.write_text("not a directory", encoding="utf-8")
     monkeypatch.setenv(PREFIX + "DATABASE_URL",
                        "postgresql://nobody@127.0.0.1:1/none")
-    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                       "postgresql://migrate@127.0.0.1:1/none")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
     monkeypatch.setenv(PREFIX + "PROJECT_REPOSITORY_ROOT", str(root))
@@ -502,8 +551,6 @@ def test_serve_emits_evidence_on_an_ordinary_shutdown(
     monkeypatch.setitem(sys.modules, "opendox.runtime.app", app_stub)
     monkeypatch.setenv(PREFIX + "DATABASE_URL",
                        "postgresql://nobody@127.0.0.1:1/none")
-    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                       "postgresql://migrate@127.0.0.1:1/none")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
     code, evidence = _run(cli.build_parser().parse_args(["runtime", "serve"]))
@@ -549,8 +596,6 @@ def test_serve_refuses_when_the_applications_startup_never_completed(
     monkeypatch.setitem(sys.modules, "opendox.runtime.app", app_stub)
     monkeypatch.setenv(PREFIX + "DATABASE_URL",
                        "postgresql://nobody@127.0.0.1:1/none")
-    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                       "postgresql://migrate@127.0.0.1:1/none")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
     code, evidence = _run(cli.build_parser().parse_args(["runtime", "serve"]))
@@ -634,8 +679,6 @@ def test_a_project_verb_never_prints_a_dsn_it_caught_itself(
     db_stub.Database = _Exploding                      # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "opendox.runtime.db", db_stub)
     monkeypatch.setenv(PREFIX + "DATABASE_URL", dsn)
-    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                       "postgresql://migrate@db.internal:5432/opendox")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
 
@@ -689,8 +732,6 @@ def _stub_uvicorn(monkeypatch: pytest.MonkeyPatch, run) -> None:
     monkeypatch.setitem(sys.modules, "opendox.runtime.app", app_stub)
     monkeypatch.setenv(PREFIX + "DATABASE_URL",
                        "postgresql://nobody:hunter2@127.0.0.1:1/none")
-    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                       "postgresql://migrate@127.0.0.1:1/none")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
 
@@ -808,8 +849,6 @@ def test_status_keeps_the_connectivity_answer_when_a_later_query_fails(
     monkeypatch.setitem(sys.modules, "opendox.runtime.db", db_stub)
     monkeypatch.setenv(PREFIX + "DATABASE_URL",
                        "postgresql://runtime:hunter2@127.0.0.1:5432/opendox")
-    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                       "postgresql://migrate@127.0.0.1:5432/opendox")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
     monkeypatch.setenv(PREFIX + "MIGRATIONS_DIR",
@@ -878,8 +917,6 @@ def test_a_repository_refusal_is_redacted_like_every_other_message(
     monkeypatch.setitem(sys.modules, "opendox.runtime.db", db_stub)
     monkeypatch.setenv(PREFIX + "DATABASE_URL",
                        "postgresql://runtime@127.0.0.1:5432/opendox")
-    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                       "postgresql://migrate@127.0.0.1:5432/opendox")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
     monkeypatch.setenv(PREFIX + "PROJECT_REPOSITORY_ROOT", str(tmp_path))
@@ -1166,7 +1203,6 @@ def test_no_broker_url_this_runtime_prints_can_carry_a_credential() -> None:
                                         redacted_url)
 
     base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
-            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:p@h/db",
             PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
     for name in ("OIDC_ISSUER", "OIDC_JWKS_URL"):
         env = dict(base, **{PREFIX + "OIDC_ISSUER": "https://broker/realms/x"})
@@ -1214,7 +1250,6 @@ def test_a_credential_in_a_broker_urls_query_is_refused_like_one_in_its_userinfo
                                         redacted_url)
 
     base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
-            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:p@h/db",
             PREFIX + "OIDC_AUDIENCE": "opendox-runtime",
             PREFIX + "OIDC_ISSUER": "https://broker/realms/x"}
     for name, value, why in (
@@ -1263,7 +1298,6 @@ def test_the_broker_url_must_be_https_because_it_is_the_trust_anchor() -> None:
     from opendox.runtime.config import ConfigurationError, load_settings
 
     base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
-            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:p@h/db",
             PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
     for issuer in ("https://broker/realms/x", "http://localhost:8080/realms/x",
                    "http://127.0.0.1:8080/realms/x", "http://[::1]:8080/x"):
@@ -1445,7 +1479,6 @@ def test_a_broker_url_that_names_no_host_is_refused_at_the_door() -> None:
     from opendox.runtime.config import ConfigurationError, load_settings
 
     base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
-            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:p@h/db",
             PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
     for issuer in ("https:///realms/x", "https://", "https:///",
                    "broker/realms/x", "https://user:hunter2@/realms/x"):
@@ -1531,7 +1564,6 @@ def test_a_broker_url_whose_port_is_not_a_number_is_refused_at_the_door(
     from opendox.runtime.config import ConfigurationError, load_settings
 
     base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
-            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:p@h/db",
             PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
     for issuer in ("https://broker:not-a-port/realm",
                    "https://broker:99999/realm",
@@ -1577,7 +1609,6 @@ def test_the_issuer_carries_no_query_or_fragment_because_paths_are_appended(
     from opendox.runtime.config import ConfigurationError, load_settings
 
     base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
-            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:p@h/db",
             PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
     for issuer, component in (("https://broker/realms/x?tenant=a", "query"),
                               ("https://broker/realms/x#frag", "fragment"),
@@ -1623,7 +1654,6 @@ def test_the_loopback_exception_is_for_http_and_not_for_every_other_scheme(
     from opendox.runtime.config import ConfigurationError, load_settings
 
     base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
-            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:p@h/db",
             PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
     for issuer in ("ftp://localhost/realms/x", "file://127.0.0.1/realms/x",
                    "ws://localhost:8080/realms/x", "ftp://[::1]/realms/x"):
@@ -1935,7 +1965,6 @@ def test_a_malformed_broker_url_never_prints_its_own_password() -> None:
 
     issuer = "https://svc:hunter2@broker\u2100evil.example/realms/x"
     env = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
-           PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:p@h/db",
            PREFIX + "OIDC_AUDIENCE": "opendox",
            PREFIX + "OIDC_ISSUER": issuer}
 
@@ -2152,16 +2181,11 @@ def test_two_dsns_that_select_different_schemas_are_refused() -> None:
                           PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
                           PREFIX + "MIGRATION_DATABASE_URL":
                               "postgresql://m:p@h/db"})
-    # AND A MIGRATION DSN THAT IS SIMPLY ABSENT is refused NOW (plan 034,
-    # 13.3), where it used to be accepted as "the documented single-role
-    # deployment, not a mismatch": that reading is exactly what `load_settings`
-    # reading the setting as OPTIONAL bought, and the setting stopped being
-    # optional. A single-role install still names both DSNs, distinctly —
-    # `test_a_dsn_that_names_no_database_still_reaches_one`'s "two different
-    # secrets for one role" is what single-role now looks like.
-    with pytest.raises(ConfigurationError) as absent:
-        load_settings({**base, PREFIX + "DATABASE_URL": served})
-    assert PREFIX + "MIGRATION_DATABASE_URL" in str(absent.value)
+    # AND A MIGRATION DSN THAT IS SIMPLY ABSENT is the documented single-role
+    # deployment, not a mismatch (RULED "required only for migrate",
+    # openxFactory#656, on the claim thread for plan 034's T071, 2026-09-28 —
+    # this assertion was briefly the opposite of itself, reverted here).
+    assert load_settings({**base, PREFIX + "DATABASE_URL": served})
 
     # THE OTHER DIRECTION IS REFUSED TOO: a served DSN that names no schema
     # beside a migration DSN that names one is the same split, and the
@@ -2501,7 +2525,6 @@ def test_a_credential_shaped_parameter_name_is_a_WORD_and_not_a_substring() -> N
     assert redacted_url("https://broker/certs?token=x"
                         ) == "https://broker/certs?token=<redacted>"
     base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
-            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:p@h/db",
             PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
             PREFIX + "OIDC_AUDIENCE": "opendox"}
     settings = load_settings({**base,
@@ -2702,8 +2725,6 @@ def test_init_creates_the_repository_root_private_whatever_the_umask_is(
         root = tmp_path / "projects"
         monkeypatch.setenv(PREFIX + "DATABASE_URL",
                            "postgresql://nobody@127.0.0.1:1/none")
-        monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                           "postgresql://migrate@127.0.0.1:1/none")
         monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
         monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
         monkeypatch.setenv(PREFIX + "PROJECT_REPOSITORY_ROOT", str(root))
@@ -2740,8 +2761,6 @@ def test_init_reports_an_existing_root_s_mode_and_does_not_change_it(
     os.chmod(root, 0o755)
     monkeypatch.setenv(PREFIX + "DATABASE_URL",
                        "postgresql://nobody@127.0.0.1:1/none")
-    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
-                       "postgresql://migrate@127.0.0.1:1/none")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
     monkeypatch.setenv(PREFIX + "PROJECT_REPOSITORY_ROOT", str(root))

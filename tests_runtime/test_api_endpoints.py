@@ -425,7 +425,7 @@ def test_the_unauthenticated_surface_is_exactly_the_two_probes(
 
 
 def test_the_schema_viewers_appear_only_when_the_install_says_so(
-        database, postgres_dsn: str, migration_dsn: str, verifier) -> None:
+        database, postgres_dsn: str, verifier) -> None:
     from fastapi.testclient import TestClient
 
     from opendox.runtime.app import create_app
@@ -435,7 +435,6 @@ def test_the_schema_viewers_appear_only_when_the_install_says_so(
 
     settings = load_settings({
         PREFIX + "DATABASE_URL": postgres_dsn,
-        PREFIX + "MIGRATION_DATABASE_URL": migration_dsn,
         PREFIX + "OIDC_ISSUER": TEST_ISSUER,
         PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
         PREFIX + "PUBLISH_OPENAPI": "true",
@@ -449,7 +448,7 @@ def test_the_schema_viewers_appear_only_when_the_install_says_so(
 
 
 def test_readiness_refuses_an_unmigrated_database_by_name(
-        postgres_dsn: str, migration_dsn: str, verifier) -> None:
+        postgres_dsn: str, verifier) -> None:
     """`select 1` succeeds against a schema with no tables in it at all.
 
     Readiness without a migration check therefore turns a fresh install READY
@@ -472,7 +471,6 @@ def test_readiness_refuses_an_unmigrated_database_by_name(
         try:
             settings = load_settings({
                 PREFIX + "DATABASE_URL": postgres_dsn,
-                PREFIX + "MIGRATION_DATABASE_URL": migration_dsn,
                 PREFIX + "OIDC_ISSUER": TEST_ISSUER,
                 PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
             })
@@ -590,8 +588,7 @@ def test_draft_pagination_returns_the_principals_drafts_not_an_empty_page(
 
 
 def test_readiness_refuses_a_database_whose_migration_file_has_changed(
-        database, postgres_dsn: str, migration_dsn: str, verifier,
-        tmp_path) -> None:
+        database, postgres_dsn: str, verifier, tmp_path) -> None:
     """Nothing pending is not the same as matching this tree."""
     import shutil
 
@@ -612,7 +609,6 @@ def test_readiness_refuses_a_database_whose_migration_file_has_changed(
 
     settings = load_settings({
         PREFIX + "DATABASE_URL": postgres_dsn,
-        PREFIX + "MIGRATION_DATABASE_URL": migration_dsn,
         PREFIX + "OIDC_ISSUER": TEST_ISSUER,
         PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
         PREFIX + "MIGRATIONS_DIR": str(tmp_path),
@@ -856,8 +852,7 @@ def test_a_hidden_user_and_a_missing_one_answer_byte_for_byte_the_same(
 
 
 def test_readiness_refuses_a_migrations_directory_without_the_pinned_0001(
-        database, postgres_dsn: str, migration_dsn: str, verifier,
-        tmp_path) -> None:
+        database, postgres_dsn: str, verifier, tmp_path) -> None:
     """An EMPTY directory made `plan()` and `drift()` both empty.
 
     `discover()` returns `[]` for a directory that exists and holds no
@@ -879,7 +874,6 @@ def test_readiness_refuses_a_migrations_directory_without_the_pinned_0001(
     empty.mkdir()
     settings = load_settings({
         PREFIX + "DATABASE_URL": postgres_dsn,
-        PREFIX + "MIGRATION_DATABASE_URL": migration_dsn,
         PREFIX + "OIDC_ISSUER": TEST_ISSUER,
         PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
         PREFIX + "MIGRATIONS_DIR": str(empty),
@@ -1558,8 +1552,7 @@ def test_a_failed_pool_checkout_is_not_masked_by_the_stores_teardown() -> None:
 
 
 def test_an_anonymous_token_naming_a_key_of_the_wrong_type_is_401_not_500(
-        database, postgres_dsn: str, migration_dsn: str, rsa_key_pair,
-        tmp_path: Path) -> None:
+        database, postgres_dsn: str, rsa_key_pair, tmp_path: Path) -> None:
     """The end of A25-2, measured where it was reported: at the HTTP boundary.
 
     A realm publishing an RSA and an EC signing key — Keycloak, the moment a
@@ -1600,7 +1593,6 @@ def test_an_anonymous_token_naming_a_key_of_the_wrong_type_is_401_not_500(
 
     settings = load_settings({
         PREFIX + "DATABASE_URL": postgres_dsn,
-        PREFIX + "MIGRATION_DATABASE_URL": migration_dsn,
         PREFIX + "OIDC_ISSUER": TEST_ISSUER,
         PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
     })

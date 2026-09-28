@@ -258,7 +258,6 @@ def test_only_asymmetric_algorithms_can_be_configured_and_they_keep_pyjwts_spell
     )
 
     base = {PREFIX + "DATABASE_URL": "postgresql://x/y",
-            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m@x/y",
             PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
             PREFIX + "OIDC_AUDIENCE": "opendox-runtime"}
     for name in ASYMMETRIC_ALGORITHMS:
@@ -319,7 +318,6 @@ def test_every_integer_setting_is_bounded_above_as_well_as_below() -> None:
     )
 
     base = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
-            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:p@h/db",
             PREFIX + "OIDC_AUDIENCE": "opendox",
             PREFIX + "OIDC_ISSUER": "https://broker/realms/x"}
 

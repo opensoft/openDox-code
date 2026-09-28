@@ -81,7 +81,7 @@ SETTINGS: tuple[Setting, ...] = (
         "it must not be the identity migrations run as",
     ),
     Setting(
-        PREFIX + "MIGRATION_DATABASE_URL", None, True, True,
+        PREFIX + "MIGRATION_DATABASE_URL", None, False, True,
         "the PRIVILEGED DSN ordered-SQL migrations are applied with, used by "
         "`opendox runtime migrate` alone and never by the served application",
     ),
@@ -181,13 +181,17 @@ class RuntimeSettings:
 
     Construct with :func:`load_settings`; the fields are in `SETTINGS` order.
 
-    `migration_database_url` is never `None` from either loader (plan 034,
-    13.3): `load_settings` requires it exactly as it requires `database_url`,
-    and `load_migration_settings` already refused to load without one.
+    `migration_database_url` is `None` from `load_settings` whenever
+    `OPENDOX_MIGRATION_DATABASE_URL` is unset — RULED "required only for
+    migrate" (openxFactory#656, on the claim thread for plan 034's T071,
+    2026-09-28): the served workload never needs it, `deploy/compose/
+    docker-compose.yaml`'s `opendox` service and `docs/runtime.md` § 3 never
+    supply it, and `load_migration_settings` is the loader that actually
+    requires one (unaffected by this: it already refused to load without one).
     """
 
     database_url: str
-    migration_database_url: str
+    migration_database_url: str | None
     oidc_issuer: str
     oidc_audience: str
     oidc_jwks_url: str | None
@@ -1304,8 +1308,15 @@ def effective_schema(dsn: str) -> str | None:
 POSTGRESQL_SCHEMES = frozenset({"postgresql", "postgres"})
 
 
-def _refuse_non_postgresql_dsn(name: str, dsn: str) -> None:
+def _refuse_non_postgresql_dsn(name: str, dsn: str | None) -> None:
     """`name`'s DSN is refused unless it selects a PostgreSQL scheme.
+
+    `None` OR EMPTY IS A NO-OP, not a refusal: `OPENDOX_MIGRATION_DATABASE_URL`
+    is optional for `load_settings` (RULED "required only for migrate",
+    openxFactory#656, on the claim thread for plan 034's T071, 2026-09-28),
+    so an absent migration DSN has no dialect to check — the same shape
+    `_refuse_two_dsns_that_select_different_schemas` below already reads as
+    "nothing to compare" rather than as a fault.
 
     A DSN in the keyword/value form (`host=h dbname=d …`) names NO DIALECT AT
     ALL — that syntax is libpq's own conninfo grammar, and no other driver
@@ -1322,6 +1333,8 @@ def _refuse_non_postgresql_dsn(name: str, dsn: str) -> None:
     round 24); this is its DSN-flavoured twin; a bad `OPENDOX_DATABASE_URL`
     is not "set it to the broker endpoint", so it is not reused verbatim.
     """
+    if not dsn:
+        return
     try:
         scheme = urllib.parse.urlsplit(dsn).scheme
     except ValueError as exc:
@@ -1339,8 +1352,17 @@ def _refuse_non_postgresql_dsn(name: str, dsn: str) -> None:
             "document (RULING Q1)")
 
 
-def _refuse_the_same_dsn_in_both_settings(served: str, migration: str) -> None:
+def _refuse_the_same_dsn_in_both_settings(
+        served: str, migration: str | None) -> None:
     """One credential pasted into both settings is refused (plan 034, 13.3).
+
+    A NO-OP WHEN MIGRATION IS ABSENT, exactly like
+    `_refuse_two_dsns_that_select_different_schemas` below: with nothing to
+    compare, there is nothing to have collapsed. `OPENDOX_MIGRATION_DATABASE_
+    URL` is optional (RULED "required only for migrate", openxFactory#656, on
+    the claim thread for plan 034's T071, 2026-09-28) — but WHEN BOTH ARE
+    GIVEN, this refusal still applies, on every path `load_settings` serves,
+    not only the falsifier's.
 
     `OPENDOX_DATABASE_URL` is the least-privileged identity the API serves
     with; `OPENDOX_MIGRATION_DATABASE_URL` is the privileged one ordered-SQL
@@ -1354,6 +1376,8 @@ def _refuse_the_same_dsn_in_both_settings(served: str, migration: str) -> None:
     credentials, not one pasted twice, and this checks the value actually
     given, not the identity it happens to resolve to.
     """
+    if not migration:
+        return
     if served == migration:
         raise ConfigurationError(
             f"{PREFIX}MIGRATION_DATABASE_URL is the same value as "
@@ -1477,21 +1501,26 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
     fetch from the broker's JWKS, and discovering that on the first request
     means it is already serving.
 
-    BOTH DSNs ARE REQUIRED (plan 034, 13.3): `OPENDOX_MIGRATION_DATABASE_URL`
-    used to default to `None`, so the collapsed, single-role shape this
-    refuses (below) was reachable only by accident, through a caller who
-    happened to set both to the same value — an install that left the
-    migration credential unset was never asked the question at all. Naming it
-    explicitly, even at the same database a served DSN already names, is what
-    keeps the two identities two DECISIONS rather than one remembered twice.
+    `OPENDOX_MIGRATION_DATABASE_URL` STAYS OPTIONAL HERE (RULED "required only
+    for migrate", openxFactory#656, on the claim thread for plan 034's T071,
+    2026-09-28): the served workload never needs it —
+    `deploy/compose/docker-compose.yaml`'s `opendox` service and
+    `docs/runtime.md` § 3 never supply it, keeping the two identities in
+    different containers — and `load_migration_settings` below is the loader
+    that actually requires one. It is never DEFAULTED from
+    `OPENDOX_DATABASE_URL` either way. WHEN BOTH ARE GIVEN, though, the two
+    checks below still apply: a non-PostgreSQL migration DSN is refused
+    (13.2), and the two being the exact same value is refused (13.3) —
+    optional does not mean unchecked.
     """
     env = os.environ if env is None else env
 
     algorithms = _algorithms(env)
     served = _require(env, _by_name(PREFIX + "DATABASE_URL"))
-    migration = _require(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL"))
+    migration = _optional(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL"))
     # THE DIALECT FIRST: a scheme this module cannot parse as PostgreSQL is not
-    # yet a DSN worth comparing at all.
+    # yet a DSN worth comparing at all. A no-op on an ABSENT migration DSN —
+    # see `_refuse_non_postgresql_dsn`.
     _refuse_non_postgresql_dsn(PREFIX + "DATABASE_URL", served)
     _refuse_non_postgresql_dsn(PREFIX + "MIGRATION_DATABASE_URL", migration)
     # THEN WHETHER THEY DISAGREE. See `_refuse_two_dsns_that_select_different_
