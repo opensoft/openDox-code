@@ -233,7 +233,11 @@ def auth_kind_disclosure() -> list[dict]:
     """The authentication kinds this flow offers, as a surface may disclose them.
 
     READ FROM `doxbench_binding.AUTH_KINDS`, never respelled, so the flow and the
-    record it writes cannot drift into two vocabularies. `accepts_secret` is the
+    record it writes cannot drift into two vocabularies. The flow offers the
+    kinds a broker enrols, which is every member but `none` (#1144 box 16.3). A
+    `none` binding holds no credential, so this flow, which exists to hand one
+    to a broker, has nothing to collect for it; the operator declares it with
+    `model-binding add --auth-kind none` instead. `accepts_secret` is the
     fact a renderer actually needs: it is what decides whether a field that would
     take a credential is presented at all, and it is stated here — on the server,
     beside the vocabulary — rather than inferred in a browser from the kind's

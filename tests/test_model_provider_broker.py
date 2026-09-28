@@ -66,6 +66,7 @@ from conftest import REPO_ROOT  # noqa: F401  (path setup)
 from opendox import cli as cli_mod
 from opendox import doxbench_binding as binding_mod
 from opendox import doxbench_install as install_mod
+from opendox import doxbench_intake as intake_mod
 from opendox import doxbench_model as model_mod
 from opendox import doxbench_provider as provider_mod
 from opendox.runtime import config as runtime_config
@@ -1846,6 +1847,15 @@ def test_f16_1_the_first_auth_kind_still_takes_a_credential():
     assert binding_mod.AUTH_KINDS[-1] == binding_mod.AUTH_KIND_NONE == "none"
 
 
+def test_the_console_flow_offers_every_kind_a_broker_enrols():
+    """The console's intake flow hands a credential to a broker, so it offers
+    every member of `AUTH_KINDS` but `none`, in the vocabulary's order. A
+    `none` binding holds no credential and is declared at the operator door."""
+    offered = [entry["kind"] for entry in intake_mod.auth_kind_disclosure()]
+    assert offered == [kind for kind in binding_mod.AUTH_KINDS
+                       if kind != binding_mod.AUTH_KIND_NONE]
+
+
 @pytest.mark.parametrize("endpoint", [
     f"https://user:{KEY_SENTINEL}@api.example.invalid/v1",
     f"https://{KEY_SENTINEL}@api.example.invalid/v1",
@@ -2191,7 +2201,7 @@ def test_an_env_reference_is_read_at_call_time_and_presented_as_the_bearer():
     assert port.ledger == [], "nothing was minted"
 
 
-def test_production_reads_this_processs_own_environment(monkeypatch):
+def test_production_reads_the_serving_process_environment(monkeypatch):
     monkeypatch.setenv(ENV_NAME, KEY_SENTINEL)
     port, opener = _unbrokered_port(_built_in_binding(),
                                     _chat_completion("a"))
