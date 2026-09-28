@@ -52,6 +52,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 __all__ = [
+    "COPY_IDS",
     "COPY_KIND",
     "CopyRefused",
     "PackagedCopy",
@@ -74,6 +75,14 @@ SPEC_LEG = "opensoft/openDox-spec"
 
 #: Where a copy sits under this package: `schemas/<the spec leg's file name>`.
 SCHEMA_DIR = "schemas"
+
+#: THE INPUT SET, as a record must hold it: openDox's own spec leg's four
+#: schemas (7.1, as T007's batch G amends it). A record that names any other
+#: copy, or leaves one of these out, is refused, like a record naming another
+#: leg. So no edit to the record lets a copy of `gate-intent` or of the
+#: possibles register (7.1b) be served, even with its file beside the others.
+COPY_IDS = frozenset({"ideation-workbench", "opendox-snapshot",
+                      "xfactory-workbench-chat-turn", "xfactory-workbench-model-catalog"})
 
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -186,6 +195,10 @@ def record() -> Record:
         if any(copy.id == copy_id for copy in copies):
             raise _refuse(f"{where}.id {copy_id!r} is recorded twice")
         copies.append(PackagedCopy(copy_id, path, digest))
+    recorded = {copy.id for copy in copies}
+    if recorded != COPY_IDS:
+        raise _refuse(f"it records {sorted(recorded)}, not openDox's four, "
+                      f"{sorted(COPY_IDS)} (7.1; 7.1b keeps every other schema out)")
     return Record(SPEC_LEG, commit, tuple(copies))
 
 

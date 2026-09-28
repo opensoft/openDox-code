@@ -433,12 +433,15 @@ def test_a_boolean_schema() -> None:
     # A JSON pointer's index is a plain decimal, never Python's reading of it.
     ({"$ref": "#/allOf/-1", "allOf": [{}]}, "names nothing in the copy"),
     ({"$ref": "#/allOf/01", "allOf": [{}, {}]}, "names nothing in the copy"),
+    # RFC 6901 escapes only ~0 and ~1, and a fragment's %-encoding is not decoded.
+    ({"$ref": "#/$defs/~2", "$defs": {"~2": {}}}, "names nothing in the copy"),
+    ({"$ref": "#/$defs/a%20b", "$defs": {"a b": {}, "a%20b": {}}}, "percent-encoded"),
 ], ids=["patternProperties", "else", "a format", "a remote reference",
         "a dangling reference", "a reference to text", "a bad pattern",
         "an unknown type", "an unimplemented reference rule", "a malformed catalog",
         "a format of another shape", "an unbounded repetition", "mixed keys",
         "an embedded $id", "an embedded $schema", "a negative index",
-        "a zero-padded index"])
+        "a zero-padded index", "an invalid escape", "a percent-encoded fragment"])
 def test_what_is_not_evaluated_is_refused_when_the_validator_is_built(
         schema: dict, says: str) -> None:
     with pytest.raises(V.SchemaNotEvaluable) as refused:
@@ -527,6 +530,14 @@ def test_a_references_target_is_checked_where_no_walk_of_the_subschemas_reaches(
                  "properties": {"a": {"$ref": "#/$defs/x/enum/0"}}}
     assert _found(patterned, {"a": "abc"}) == set()
     assert _found(patterned, {"a": "b"}) == {("pattern", "/a")}
+
+
+def test_a_references_escapes_are_read_as_rfc_6901_reads_them() -> None:
+    """`~1` is `/` and `~0` is `~`, so each reference names the key it spells."""
+    schema = {"properties": {"a": {"$ref": "#/$defs/x~1y"}, "b": {"$ref": "#/$defs/x~0y"}},
+              "$defs": {"x/y": {"type": "string"}, "x~y": {"type": "integer"}}}
+    assert _found(schema, {"a": 1, "b": "t"}) == {("type", "/a"), ("type", "/b")}
+    assert _found(schema, {"a": "t", "b": 1}) == set()
 
 
 def test_the_kinds_entry_is_a_schema_and_is_checked_wherever_it_is() -> None:

@@ -492,6 +492,9 @@ def _at_pointer(document: Any, pointer: str) -> Any:
     if not pointer.startswith("/"):
         raise KeyError(pointer)
     for token in pointer[1:].split("/"):
+        # RFC 6901 escapes only `~0` and `~1`; any other `~` makes no pointer.
+        if not _TOKEN.fullmatch(token):
+            raise KeyError(pointer)
         token = _unescape(token)
         if isinstance(node, dict):
             node = node[token]
@@ -507,6 +510,7 @@ def _at_pointer(document: Any, pointer: str) -> Any:
 
 
 _INDEX = re.compile(r"0|[1-9][0-9]*")
+_TOKEN = re.compile(r"(?:[^~]|~[01])*")
 
 
 # ---------------------------------------------------------------------------
@@ -710,6 +714,13 @@ class KindValidator:
             raise self._not_evaluable(
                 f"{where} refers to {_brief(ref)}; only a reference inside the copy "
                 "is evaluated")
+        if "%" in ref:
+            # A reference's fragment is percent-encoded (RFC 3986), and this
+            # module does not decode it: read literally, `a%20b` would name
+            # another key than the `a b` jsonschema resolves.
+            raise self._not_evaluable(
+                f"{where} refers to {ref!r}, a percent-encoded fragment, which this "
+                "module does not decode")
         try:
             target = _at_pointer(document, ref[1:])
         except (KeyError, IndexError, ValueError) as exc:

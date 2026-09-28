@@ -127,6 +127,7 @@ def test_gate_intent_and_the_possibles_register_are_not_in_the_set() -> None:
         assert name not in {copy for copy, _pointer in validator.KIND_ENTRIES.values()}, (
             f"a kind is validated against a copy of {name}")
         assert name not in contracts.record().ids, f"the record pins a copy of {name}"
+        assert name not in contracts.COPY_IDS, f"a record may name a copy of {name}"
         assert not (PACKAGE / "schemas" / f"{name}.schema.yaml").exists(), (
             f"a copy of {name} is carried under src/opendox/contracts/schemas/, "
             "which 7.1b refuses: requirement 1 keeps it with openxFactory")
@@ -148,6 +149,7 @@ def test_the_set_is_the_spec_legs_four_and_nothing_else() -> None:
     on_disk = {path.name.removesuffix(".schema.yaml")
                for path in (PACKAGE / "schemas").iterdir()}
     assert set(THE_FOUR) == entries == on_disk == set(contracts.record().ids)
+    assert contracts.COPY_IDS == set(THE_FOUR)
     assert not (set(OPENXDOX_SPECS) | set(OPENXFACTORYS)) & on_disk
     assert sorted(p.name for p in PACKAGE.iterdir() if p.name != "__pycache__") == [
         "__init__.py", "copies.yaml", "schemas"]
@@ -260,6 +262,10 @@ def test_an_absent_copy_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
         validator.validator_for("ideation-workbench")
 
 
+#: The shipped record's own entries, for the cases that add one or drop one.
+_SHIPPED = yaml.safe_load((PACKAGE / "copies.yaml").read_text(encoding="utf-8"))["copies"]
+
+
 @pytest.mark.parametrize("changes, says", [
     ({"copies": [{"id": "opendox-snapshot",
                   "path": "contracts/schemas/opendox-snapshot.schema.yaml",
@@ -278,8 +284,15 @@ def test_an_absent_copy_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     ({"kind": "pinned_contract_manifest"}, "kind is"),
     ({"schema_version": True}, "schema_version is"),
     ({"unread": 1}, "its keys are"),
+    # 7.1b at run time: an edited record cannot let a fifth schema in, even a
+    # well-formed entry whose file sits beside the four, nor leave one out.
+    ({"copies": _SHIPPED + [{"id": "gate-intent",
+                             "path": "contracts/schemas/gate-intent.schema.yaml",
+                             "sha256": "0" * 64}]}, "not openDox's four"),
+    ({"copies": _SHIPPED[:3]}, "not openDox's four"),
 ], ids=["empty digest", "no digest", "wrong path", "repeated id", "no copies",
-        "short commit", "another leg", "another kind", "boolean version", "unknown key"])
+        "short commit", "another leg", "another kind", "boolean version", "unknown key",
+        "a fifth copy", "three copies"])
 def test_a_record_that_cannot_hold_every_copy_is_refused(
         monkeypatch: pytest.MonkeyPatch, changes: dict, says: str) -> None:
     """An empty or absent digest is drift and never a pass, and so is a record
