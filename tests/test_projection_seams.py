@@ -550,6 +550,8 @@ def tree(tmp_path) -> Path:
     (root / "alias.md").symlink_to(".env")
     (root / "same.md").symlink_to("docs/a.md")
     (root / "spec.yaml").symlink_to("changes/.openspec.yaml")
+    # The writer's temporary sibling, as a crash mid-write would leave it.
+    (root / "docs" / ".snapshot.json.0123abcd.tmp").write_text("{", encoding="utf-8")
     return root
 
 
@@ -573,6 +575,7 @@ def tree(tmp_path) -> Path:
     ("alias.md", False),
     ("same.md", True),
     ("spec.yaml", True),
+    ("docs/.snapshot.json.0123abcd.tmp", False),
 ])
 def test_resolve_within_is_the_containment_source_has_always_had(tree, tail, served) -> None:
     """The rule `/source` has always been confined by, and one place where
@@ -954,6 +957,42 @@ def test_the_writer_is_canonical_and_writes_only_through_the_boundary(tmp_path) 
                     '"d": "\\u00e9"\n  },\n  "b": 1\n}\n')
     with pytest.raises(BoundaryViolation):
         writer.write_snapshot(snapshot, tmp_path / "elsewhere.json", boundary)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["snapshot.json"], (
+        "the boundary refused the destination before anything was created")
+
+
+def test_the_writer_replaces_the_snapshot_atomically(tmp_path) -> None:
+    """A request mid-read while a refresh rewrites the snapshot sees the
+    whole old snapshot, never a truncated one: the new bytes arrive by one
+    rename over the target, not by a rewrite in place."""
+    writer = default_projection.WRITER
+    target = tmp_path / "snapshot.json"
+    boundary = OutputBoundary(tmp_path, ["snapshot.json"])
+    writer.write_snapshot({"kind": NEUTRAL, "n": 1}, target, boundary)
+    before = os.stat(target).st_ino
+    with open(target, "rb") as reader:
+        writer.write_snapshot({"kind": NEUTRAL, "n": 2}, target, boundary)
+        assert json.loads(reader.read()) == {"kind": NEUTRAL, "n": 1}
+    assert json.loads(target.read_text(encoding="utf-8")) == {"kind": NEUTRAL, "n": 2}
+    assert os.stat(target).st_ino != before, "the bytes arrived by a rename"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["snapshot.json"], (
+        "no temporary sibling is left behind")
+
+
+def test_a_failed_move_leaves_the_old_snapshot_and_no_sibling(tmp_path, monkeypatch) -> None:
+    writer = default_projection.WRITER
+    target = tmp_path / "snapshot.json"
+    boundary = OutputBoundary(tmp_path, ["snapshot.json"])
+    writer.write_snapshot({"kind": NEUTRAL, "n": 1}, target, boundary)
+
+    def the_move_fails(source, destination):
+        raise OSError("the move failed")
+
+    monkeypatch.setattr(default_projection.os, "replace", the_move_fails)
+    with pytest.raises(OSError, match="the move failed"):
+        writer.write_snapshot({"kind": NEUTRAL, "n": 2}, target, boundary)
+    assert json.loads(target.read_text(encoding="utf-8")) == {"kind": NEUTRAL, "n": 1}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["snapshot.json"]
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"),

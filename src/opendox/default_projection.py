@@ -26,7 +26,8 @@ spaces of indent, ASCII only, a trailing newline, and no clock. So the same
 snapshot is the same bytes. It writes through the interactivity boundary it is
 handed, and only there. A snapshot holding what JSON cannot carry (NaN, an
 infinity, a value of no JSON type) is refused, `SnapshotNotWritable`, before
-anything is written.
+anything is written. The write is ATOMIC: a temporary sibling, then one
+`os.replace`, so a request never reads a half-written snapshot.
 
 `VALIDATOR`, THE VALIDATOR LOOKUP'S DEFAULT, FOR openDox's OWN KINDS. It is
 openDox's own validator, plan 034's T057, which this tree does not carry yet.
@@ -49,7 +50,10 @@ openxFactory and never what a destination assembles (RULED OQ-C).
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -168,9 +172,39 @@ class Writer:
 
     def write_snapshot(self, snapshot: dict[str, Any], path: Path | str,
                        boundary) -> Path:
-        """Render canonically and write through the interactivity boundary,
-        which writes only under its declared output allowlist."""
-        return boundary.write_output(path, self.canonical_json(snapshot))
+        """Render canonically and write where the interactivity boundary
+        permits: its root, under its declared output allowlist.
+
+        ATOMICALLY. `serve.py` answers `/snapshot.json` on threads of its own
+        while a refresh rewrites the very snapshot it serves, and a write in
+        place (truncate, then write) let a request read a truncated file. So
+        the bytes go to a temporary sibling first, and one `os.replace` moves
+        them over the target: a reader sees the whole old snapshot or the
+        whole new one, never part of either.
+
+        THE BOUNDARY STILL DECIDES THE DESTINATION. `permit_output` is the
+        check `write_output` makes, root and allowlist, with its refusal and
+        its ledger, and it runs first, so a refused target leaves nothing
+        behind. The sibling is created exclusively beside the permitted
+        target, with the mode an ordinary write would give it. Its name is a
+        dot-file with no document extension, so `/source` never serves it,
+        and it is removed if the write or the move fails."""
+        data = self.canonical_json(snapshot).encode("ascii")
+        target = boundary.permit_output(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise
+        return target
 
 
 class OwnValidatorNotBuilt:
