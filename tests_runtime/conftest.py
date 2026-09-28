@@ -219,6 +219,29 @@ def postgres_dsn() -> str:
     return dsn
 
 
+@pytest.fixture(scope="session")
+def migration_dsn(postgres_dsn: str) -> str:
+    """A DSN for `OPENDOX_MIGRATION_DATABASE_URL`, distinct from `postgres_dsn`.
+
+    Plan 034, 13.3: `load_settings` now REQUIRES this setting and refuses a
+    value that is simply `postgres_dsn` repeated (13.3's own collapse
+    refusal), so every fixture built from the pair below needs a second,
+    genuinely different string — not a second database. None of this
+    module's fixtures apply migrations through this identity: `database`
+    applies them directly with `MigrationRunner`, and the served app under
+    test is never asked to `migrate`. So `load_settings` is the only reader
+    that cares about this value at all, and what it asks of a DSN is a
+    PostgreSQL scheme (13.2), a STRING distinct from `postgres_dsn` (13.3),
+    and a database and schema that agree with it
+    (`_refuse_two_dsns_that_select_different_schemas`). A URI FRAGMENT is
+    invisible to `database_named_by`, `user_named_by` and `schema_selected_by`
+    alike — none of the three inspects `urlsplit(...).fragment` — so
+    appending one changes the STRING without moving the identity those
+    functions compare.
+    """
+    return postgres_dsn + "#opendox-test-migration-identity"
+
+
 @pytest.fixture
 def database(postgres_dsn: str) -> Iterator[object]:
     """A `Database` on a throwaway schema, with the migrations already applied."""
@@ -357,7 +380,7 @@ def verifier(jwks_path: str):
 
 
 @pytest.fixture()
-def client(database, postgres_dsn: str, verifier):
+def client(database, postgres_dsn: str, migration_dsn: str, verifier):
     """A `TestClient` over the REAL application, on this test's own schema.
 
     The application is given its OWN `Database` on the same schema rather than
@@ -376,6 +399,7 @@ def client(database, postgres_dsn: str, verifier):
 
     settings = load_settings({
         PREFIX + "DATABASE_URL": postgres_dsn,
+        PREFIX + "MIGRATION_DATABASE_URL": migration_dsn,
         PREFIX + "OIDC_ISSUER": TEST_ISSUER,
         PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
     })
@@ -399,8 +423,8 @@ def project_repository_root(tmp_path):
 
 
 @pytest.fixture()
-def client_with_repositories(database, postgres_dsn: str, verifier,
-                             project_repository_root):
+def client_with_repositories(database, postgres_dsn: str, migration_dsn: str,
+                             verifier, project_repository_root):
     """`client`, with the repository root pointed at this test's own directory."""
     fastapi_testclient = _import_fastapi_testclient()
     from opendox.runtime.app import create_app
@@ -409,6 +433,7 @@ def client_with_repositories(database, postgres_dsn: str, verifier,
 
     settings = load_settings({
         PREFIX + "DATABASE_URL": postgres_dsn,
+        PREFIX + "MIGRATION_DATABASE_URL": migration_dsn,
         PREFIX + "OIDC_ISSUER": TEST_ISSUER,
         PREFIX + "OIDC_AUDIENCE": TEST_AUDIENCE,
         PREFIX + "PROJECT_REPOSITORY_ROOT": str(project_repository_root),

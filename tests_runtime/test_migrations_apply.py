@@ -345,6 +345,11 @@ def test_status_reports_a_reachable_database_and_its_applied_migrations(
     # libpq startup parameter `Database(schema=…)` sets for the harness.
     scoped = (f"{postgres_dsn}?options=-c%20search_path%3D{database.schema}")
     monkeypatch.setenv(PREFIX + "DATABASE_URL", scoped)
+    # A DISTINCT STRING (13.3's collapse refusal) THAT SELECTS THE SAME SCHEMA
+    # (`_refuse_two_dsns_that_select_different_schemas`): a URI FRAGMENT moves
+    # neither, since neither reader inspects one.
+    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
+                       scoped + "#opendox-test-migration-identity")
     monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker.test/realms/x")
     monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
     monkeypatch.setenv(PREFIX + "MIGRATIONS_DIR", str(ROOT / "migrations"))
@@ -720,6 +725,8 @@ def test_status_calls_an_unmigrated_database_unhealthy_and_blames_the_tree(
             conn.execute(f"create schema {schema}")
         try:
             monkeypatch.setenv(PREFIX + "DATABASE_URL", scoped)
+            monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL",
+                               scoped + "#opendox-test-migration-identity")
             monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
             monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
             monkeypatch.setenv(PREFIX + "MIGRATIONS_DIR", str(ROOT / "migrations"))

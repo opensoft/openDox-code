@@ -81,7 +81,7 @@ SETTINGS: tuple[Setting, ...] = (
         "it must not be the identity migrations run as",
     ),
     Setting(
-        PREFIX + "MIGRATION_DATABASE_URL", None, False, True,
+        PREFIX + "MIGRATION_DATABASE_URL", None, True, True,
         "the PRIVILEGED DSN ordered-SQL migrations are applied with, used by "
         "`opendox runtime migrate` alone and never by the served application",
     ),
@@ -180,10 +180,14 @@ class RuntimeSettings:
     """The resolved configuration of one runtime process.
 
     Construct with :func:`load_settings`; the fields are in `SETTINGS` order.
+
+    `migration_database_url` is never `None` from either loader (plan 034,
+    13.3): `load_settings` requires it exactly as it requires `database_url`,
+    and `load_migration_settings` already refused to load without one.
     """
 
     database_url: str
-    migration_database_url: str | None
+    migration_database_url: str
     oidc_issuer: str
     oidc_audience: str
     oidc_jwks_url: str | None
@@ -1288,6 +1292,63 @@ def effective_schema(dsn: str) -> str | None:
     return user_named_by(dsn)
 
 
+#: THE ONLY DIALECT THIS RUNTIME KEEPS (plan 034, 13.2). `psycopg` is the one
+#: driver `runtime` depends on and it speaks PostgreSQL alone, but a DSN is a
+#: string and nothing stopped an operator writing `sqlite:///…` into either
+#: setting and discovering the mismatch however far the code got before the
+#: driver refused it. RULING Q1 keeps this database DOCUMENT-FREE, which is
+#: why a second dialect is refused HERE rather than supported: it would double
+#: every migration and every schema test forever, for a database that holds no
+#: document. `postgres://` is accepted beside `postgresql://` because libpq
+#: treats the two as one scheme.
+POSTGRESQL_SCHEMES = frozenset({"postgresql", "postgres"})
+
+
+def _refuse_non_postgresql_dsn(name: str, dsn: str) -> None:
+    """`name`'s DSN is refused unless it selects a PostgreSQL scheme.
+
+    A DSN in the keyword/value form (`host=h dbname=d …`) names NO DIALECT AT
+    ALL — that syntax is libpq's own conninfo grammar, and no other driver
+    reads it — so only the URI form is checked: `urlsplit` reports an EMPTY
+    scheme for the keyword/value form (there is no `://` to split on), and an
+    empty scheme is read as "says nothing" here, exactly as `schema_selected_by`
+    reads a DSN that names no schema as `None` rather than as a refusal.
+    """
+    scheme = urllib.parse.urlsplit(dsn).scheme
+    if scheme and scheme not in POSTGRESQL_SCHEMES:
+        raise ConfigurationError(
+            f"{name} names the {scheme!r} dialect. PostgreSQL "
+            "(`postgresql://` or `postgres://`) is the only dialect this "
+            "runtime keeps: a second one would double every migration and "
+            "every schema test forever, for a database that holds no "
+            "document (RULING Q1)")
+
+
+def _refuse_the_same_dsn_in_both_settings(served: str, migration: str) -> None:
+    """One credential pasted into both settings is refused (plan 034, 13.3).
+
+    `OPENDOX_DATABASE_URL` is the least-privileged identity the API serves
+    with; `OPENDOX_MIGRATION_DATABASE_URL` is the privileged one ordered-SQL
+    migrations run as — the whole point of keeping two settings. A
+    single-user install is not a reason to collapse them into one: this is
+    the two settings simply BEING each other, which is different from
+    `_refuse_two_dsns_that_select_different_schemas` below, where they
+    DISAGREE about where they land. It is different too from the accepted
+    "single-role install" (`test_a_dsn_that_names_no_database_still_reaches_
+    one`): two DSNs for the same ROLE with two DIFFERENT secrets are two
+    credentials, not one pasted twice, and this checks the value actually
+    given, not the identity it happens to resolve to.
+    """
+    if served == migration:
+        raise ConfigurationError(
+            f"{PREFIX}MIGRATION_DATABASE_URL is the same value as "
+            f"{PREFIX}DATABASE_URL. The identity migrations run as must not "
+            "also be the identity the API serves with; give the migration "
+            "credential its own DSN, even where both reach the same "
+            "database (the values are not repeated: a DSN carries a "
+            "password)")
+
+
 def _refuse_two_dsns_that_select_different_schemas(
         served: str, migration: str | None) -> None:
     """Both DSNs must land in one schema, or neither answer means anything.
@@ -1400,21 +1461,42 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
     accept `HS256` would verify a token signed with the public key anybody can
     fetch from the broker's JWKS, and discovering that on the first request
     means it is already serving.
+
+    BOTH DSNs ARE REQUIRED (plan 034, 13.3): `OPENDOX_MIGRATION_DATABASE_URL`
+    used to default to `None`, so the collapsed, single-role shape this
+    refuses (below) was reachable only by accident, through a caller who
+    happened to set both to the same value — an install that left the
+    migration credential unset was never asked the question at all. Naming it
+    explicitly, even at the same database a served DSN already names, is what
+    keeps the two identities two DECISIONS rather than one remembered twice.
     """
     env = os.environ if env is None else env
 
     algorithms = _algorithms(env)
-    # AND THE TWO DSNs LAND IN ONE SCHEMA. See
-    # `_refuse_two_dsns_that_select_different_schemas`: this is the half of
-    # that invariant a string can answer, and it is asked here because this is
-    # the one loader that holds BOTH values.
-    _refuse_two_dsns_that_select_different_schemas(
-        _require(env, _by_name(PREFIX + "DATABASE_URL")),
-        _optional(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL")))
+    served = _require(env, _by_name(PREFIX + "DATABASE_URL"))
+    migration = _require(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL"))
+    # THE DIALECT FIRST: a scheme this module cannot parse as PostgreSQL is not
+    # yet a DSN worth comparing at all.
+    _refuse_non_postgresql_dsn(PREFIX + "DATABASE_URL", served)
+    _refuse_non_postgresql_dsn(PREFIX + "MIGRATION_DATABASE_URL", migration)
+    # THEN WHETHER THEY DISAGREE. See `_refuse_two_dsns_that_select_different_
+    # schemas`: this is the half of that invariant a string can answer, and it
+    # is asked here because this is the one loader that holds BOTH values. A
+    # DSN compared against ITSELF can never disagree, so this step passes
+    # silently on exactly the pair the next one exists to catch.
+    _refuse_two_dsns_that_select_different_schemas(served, migration)
+    # AND, LAST, WHETHER THEY ARE SIMPLY EACH OTHER. Two DSNs that agree on
+    # where they land are ordinarily two credentials for the one database
+    # (`test_a_dsn_that_names_no_database_still_reaches_one`'s "single-role
+    # install" is exactly that, two DIFFERENT secrets for one role) — but
+    # agreement bought by pasting the SAME value into both settings is not a
+    # second decision at all, and this is the check the one before it cannot
+    # make.
+    _refuse_the_same_dsn_in_both_settings(served, migration)
 
     return RuntimeSettings(
-        database_url=_require(env, _by_name(PREFIX + "DATABASE_URL")),
-        migration_database_url=_optional(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL")),
+        database_url=served,
+        migration_database_url=migration,
         oidc_issuer=_broker_url(env, _by_name(PREFIX + "OIDC_ISSUER"),
                                 required=True, is_a_base_url=True) or "",
         oidc_audience=_require(env, _by_name(PREFIX + "OIDC_AUDIENCE")),
