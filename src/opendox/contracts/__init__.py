@@ -159,8 +159,10 @@ def record() -> Record:
 
     try:
         data = yaml.safe_load(_read_package_file(RECORD_NAME))
-    except (yaml.YAMLError, RecursionError) as exc:
+    except (yaml.YAMLError, RecursionError, ValueError) as exc:
         # RecursionError: YAML nested past Python's limit, which no read ends.
+        # ValueError: a literal PyYAML cannot construct (an integer past
+        # Python's 4300 digits, or an impossible date).
         raise _refuse(f"it is not YAML this module can read "
                       f"({exc.__class__.__name__})") from exc
     if not isinstance(data, dict):
@@ -232,7 +234,7 @@ def load(copy_id: str) -> Any:
     data = verified_bytes(copy_id)
     try:
         return yaml.safe_load(data)
-    except (yaml.YAMLError, RecursionError) as exc:
+    except (yaml.YAMLError, RecursionError, ValueError) as exc:
         raise CopyRefused(
             f"the packaged copy of {copy_id} matches its digest but is not "
             f"YAML ({exc.__class__.__name__})") from exc

@@ -125,6 +125,7 @@ import calendar
 import hashlib
 import math
 import re
+import reprlib
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Iterator, Mapping
@@ -260,8 +261,28 @@ def report(violations: Iterable[Violation]) -> list[str]:
 # JSON values
 # ---------------------------------------------------------------------------
 
+#: A repr that stops at a few levels, for a value too deep for `repr()`.
+_SHALLOW = reprlib.Repr()
+_SHALLOW.maxlevel = 3
+
+
+def _shown(value: Any) -> str:
+    """`repr(value)`, or a stand-in where it cannot be made: a value nested
+    past Python's limit shows its first levels, and an int past 4300 digits
+    (which only Python, never YAML or JSON, can hand in) shows its size."""
+    try:
+        return repr(value)
+    except (RecursionError, ValueError):
+        try:
+            return _SHALLOW.repr(value)
+        except (RecursionError, ValueError):
+            if isinstance(value, int):
+                return f"<an int of {value.bit_length()} bits>"
+            return f"<a {type(value).__name__} too large to show>"
+
+
 def _brief(value: Any) -> str:
-    text = repr(value)
+    text = _shown(value)
     return text if len(text) <= _BRIEF else text[:_BRIEF - 3] + "..."
 
 
@@ -287,25 +308,104 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _canon(value: Any) -> Any:
-    """JSON equality: `true` is not `1`, `1` is `1.0`, and key order is noise."""
+def _token(tag: str, text: str) -> str:
+    return f"{tag}{len(text)}:{text}"
+
+
+def _canon_scalar(value: Any) -> str | None:
+    """A value that is not a list or a mapping, canonical; None for one that is."""
     if isinstance(value, bool):
-        return ("boolean", value)
-    if isinstance(value, (int, float)):
-        return ("number", value)
+        return _token("b", "1" if value else "0")
+    if isinstance(value, int) or (isinstance(value, float) and value.is_integer()):
+        # 1 is 1.0. Hex, because decimal text of an int stops at 4300 digits.
+        return _token("n", format(int(value), "x"))
+    if isinstance(value, float):
+        return _token("f", value.hex())
     if isinstance(value, str):
-        return ("string", value)
+        return _token("s", value)
     if value is None:
-        return ("null",)
-    if isinstance(value, list):
-        return ("array", tuple(_canon(v) for v in value))
-    if isinstance(value, dict):
-        # A key is text in JSON. A YAML instance can carry another scalar as a
-        # key, so each key is tagged, and a mixed mapping still sorts.
-        return ("object", tuple(sorted(
-            ((("text", k) if isinstance(k, str) else ("other", repr(k))), _canon(v))
-            for k, v in value.items())))
-    return ("other", repr(value))       # never equal to a JSON value
+        return _token("z", "")
+    if isinstance(value, (list, dict)):
+        return None
+    # Never equal to a JSON value. Where no repr can be made, the object is its
+    # own identity, equal to itself alone.
+    try:
+        return _token("o", repr(value))
+    except (RecursionError, ValueError):
+        return _token("o", f"<{type(value).__name__} {id(value)}>")
+
+
+#: What a list or mapping that contains itself canonicalizes to. A YAML alias
+#: can build one, and no JSON value is one. No token begins with "!".
+_ITSELF = "!itself"
+
+
+def _canon(value: Any) -> str:
+    """JSON equality: `true` is not `1`, `1` is `1.0`, and key order is noise.
+
+    The canon is text: every value is a tag, a length and its payload, and a
+    list or mapping is its children's canons, the mapping's sorted, so two
+    canons are equal exactly when their values are. It is built without
+    recursing, and compared and hashed as text, so a value of any depth is
+    judged without exhausting Python's stack (nested tuples compare
+    recursively, and would). A list or mapping inside itself ends as
+    `_ITSELF`."""
+    scalar = _canon_scalar(value)
+    if scalar is not None:
+        return scalar
+    done: list[str] = []                # finished canons, in the order met
+    open_ids: set[int] = set()          # the containers on the current path
+    work: list[tuple[bool, Any]] = [(False, value)]
+    while work:
+        closing, item = work.pop()
+        if closing:
+            open_ids.discard(id(item))
+            done.append(_close(item, done))
+            continue
+        scalar = _canon_scalar(item)
+        if scalar is not None:
+            done.append(scalar)
+        elif id(item) in open_ids:
+            done.append(_ITSELF)
+        else:
+            open_ids.add(id(item))
+            work.append((True, item))
+            work.extend((False, child) for child in reversed(
+                list(item.values()) if isinstance(item, dict) else item))
+    return done[0]
+
+
+def _close(container: list[Any] | dict[Any, Any], done: list[str]) -> str:
+    """The canon of `container`, from its children's canons at the end of
+    `done`, which it takes off."""
+    count = len(container)
+    children = done[len(done) - count:]
+    del done[len(done) - count:]
+    if isinstance(container, list):
+        return f"a{count}:" + "".join(children)
+    # A key is text in JSON. A YAML instance can carry another scalar as a key,
+    # and a key is a scalar, so each key is its own canon: a text key is never
+    # the number it spells.
+    return f"d{count}:" + "".join(sorted(
+        _canon_scalar(key) + child for key, child in zip(container, children)))
+
+
+def _holds_itself(value: Any) -> bool:
+    """Whether a list or mapping inside `value` contains itself."""
+    path: set[int] = set()
+    work: list[tuple[bool, Any]] = [(False, value)]
+    while work:
+        leaving, node = work.pop()
+        if leaving:
+            path.discard(id(node))
+        elif isinstance(node, (list, dict)):
+            if id(node) in path:
+                return True
+            path.add(id(node))
+            work.append((True, node))
+            work.extend((False, child)
+                        for child in (node.values() if isinstance(node, dict) else node))
+    return False
 
 
 _DATE_TIME = re.compile(
@@ -527,7 +627,10 @@ def _is_count(value: Any) -> bool:
 
 
 def _is_bound(value: Any) -> bool:
-    return _is_number(value) and math.isfinite(value)
+    """A number that is not infinite or NaN. Every int is finite, and
+    `math.isfinite()` cannot convert one past a float's range, so it is asked
+    only about floats."""
+    return _is_number(value) and (isinstance(value, int) or math.isfinite(value))
 
 
 def _are_names(value: Any) -> bool:
@@ -686,6 +789,11 @@ class KindValidator:
                 f"{'$id' if '$id' in node else '$schema'}), which would move where "
                 "its references resolve; this module resolves every reference "
                 "against the copy's root")
+        for keyword in ("const", "enum"):
+            if keyword in node and _holds_itself(node[keyword]):
+                raise self._not_evaluable(
+                    f"{where}'s {keyword} holds a value that contains itself, "
+                    "which no JSON value does")
         for keyword, value in node.items():
             shape = _SHAPES.get(keyword)
             if shape is not None and not shape[0](value):
@@ -1008,7 +1116,7 @@ def validator_for(kind: str) -> KindValidator:
 
     try:
         document = yaml.safe_load(data)
-    except (yaml.YAMLError, RecursionError) as exc:
+    except (yaml.YAMLError, RecursionError, ValueError) as exc:
         raise ValidatorUnavailable(
             f"the packaged copy of {copy_id} matches its digest but is not YAML "
             f"({exc.__class__.__name__})") from exc

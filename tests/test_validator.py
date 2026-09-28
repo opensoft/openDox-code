@@ -415,6 +415,73 @@ def test_an_instance_whose_keys_are_not_text_is_judged_never_crashed_on() -> Non
     assert "unexpected properties [1, 2.5, None]" in V.report(judged)[0]
 
 
+def _deep(levels: int) -> list[Any]:
+    """A list nested `levels` deep, past Python's recursion limit at 5000."""
+    value: list[Any] = []
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def test_an_integer_bound_of_any_size_is_evaluated() -> None:
+    """YAML gives an integer of up to 4300 digits, and a JSON number has no
+    bound. `math.isfinite()` could not convert one past a float's range, so
+    such a bound crashed the build with OverflowError."""
+    huge = int("9" * 400)
+    assert _found({"minimum": huge}, 5) == {("minimum", "")}
+    assert _found({"maximum": -huge}, 5) == {("maximum", "")}
+    assert _found({"maxLength": huge, "const": huge}, huge) == set()
+
+
+def test_a_const_or_enum_that_contains_itself_is_refused() -> None:
+    """A YAML alias can build a list that contains itself. No JSON value does,
+    so a copy whose `const` or `enum` holds one is refused when built."""
+    looped = yaml.safe_load("&c [*c]")
+    for schema in ({"const": looped}, {"enum": [1, looped]}):
+        with pytest.raises(V.SchemaNotEvaluable) as refused:
+            _built({"properties": {"a": schema}})
+        assert "contains itself, which no JSON value does" in str(refused.value)
+
+
+def test_values_of_any_depth_are_compared_without_recursing() -> None:
+    """JSON equality is judged on a flat canon, built without recursing. So
+    neither a deep schema value nor a deep instance exhausts Python's stack
+    (nested tuples compare recursively, and did), and a violation's detail
+    stays brief."""
+    assert _found({"const": _deep(5000)}, _deep(5000)) == set()
+    assert _found({"const": [1]}, _deep(5000)) == {("const", "")}
+    assert _found({"enum": [_deep(5000)]}, _deep(4999)) == {("enum", "")}
+    assert _found({"uniqueItems": True}, [_deep(5000), _deep(5000)]) == {("uniqueItems", "")}
+    assert _found({"const": [[1]]}, yaml.safe_load("&c [*c]")) == {("const", "")}
+    assert len(_built({"const": [1]}).violations(_deep(5000))[0].detail) < 200
+
+
+def test_a_violations_detail_always_shows_the_value() -> None:
+    """repr() fails for a value nested deep enough (20000 levels here), and
+    for an int past 4300 digits, which Python can hand in though YAML and JSON
+    cannot. Either way the detail shows a stand-in, and the violation is
+    reported."""
+    [deep] = _built({"type": "string"}).violations(_deep(20000))
+    assert deep.detail == "[[[[...]]]] is not of type string"
+    [huge] = _built({"type": "string"}).violations(10 ** 5000)
+    assert huge.detail == f"<an int of {(10 ** 5000).bit_length()} bits> is not of type string"
+    [odd] = _built({"const": 1}).violations({10 ** 5000})
+    assert odd.detail == "<a set too large to show> is not 1"
+
+
+def test_the_canon_keeps_json_equality() -> None:
+    """`true` is not `1`, `1` is `1.0` and `-0.0` is `0`, key order is noise,
+    and a text key is not the number it spells."""
+    canon = V._canon
+    assert canon(True) != canon(1) and canon(False) != canon(0) and canon(None) != canon(0)
+    assert canon(1) == canon(1.0) and canon(-0.0) == canon(0) and canon(0.5) != canon(1)
+    assert canon({"a": 1, "b": [2, 3]}) == canon({"b": [2.0, 3], "a": 1.0})
+    assert canon({"1": "x"}) != canon({1: "x"}) and canon([1, 2]) != canon([2, 1])
+    assert canon("a") != canon(["a"]) and canon([]) != canon({}) and canon("") != canon(None)
+    # An int past 4300 digits has no decimal text, and still has a canon.
+    assert canon(10 ** 5000) == canon(10 ** 5000) != canon(10 ** 5000 + 1)
+
+
 def test_a_boolean_schema() -> None:
     assert not _found({"properties": {"a": True}}, {"a": object()})
     assert _found({"properties": {"a": False}}, {"a": 1}) == {("false", "/a")}

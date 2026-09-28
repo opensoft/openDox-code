@@ -331,22 +331,43 @@ def test_a_record_nested_past_the_limit_is_refused(monkeypatch: pytest.MonkeyPat
     assert "not YAML this module can read (RecursionError)" in str(refused.value)
 
 
-def test_a_copy_nested_past_the_limit_is_refused_under_its_own_digest(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("copy, raised", [
+    (_TOO_DEEP, "RecursionError"),
+    (b"kind: 2026-02-30\n", "ValueError"),
+], ids=["nested past the limit", "an impossible date"])
+def test_an_unreadable_copy_is_refused_under_its_own_digest(
+        monkeypatch: pytest.MonkeyPatch, copy: bytes, raised: str) -> None:
     """Recorded under its own digest, so it passes the identity check, the copy
-    is still refused as unreadable, never a RecursionError to the caller."""
+    is still refused as unreadable, never a RecursionError or a ValueError to
+    the caller."""
     entries = [dict(entry) for entry in _SHIPPED]
     for entry in entries:
         if entry["id"] == "opendox-snapshot":
-            entry["sha256"] = hashlib.sha256(_TOO_DEEP).hexdigest()
+            entry["sha256"] = hashlib.sha256(copy).hexdigest()
     _serve(monkeypatch, {contracts.RECORD_NAME: _record_with(copies=entries),
-                         "schemas/opendox-snapshot.schema.yaml": _TOO_DEEP})
+                         "schemas/opendox-snapshot.schema.yaml": copy})
     with pytest.raises(contracts.CopyRefused) as refused:
         contracts.load("opendox-snapshot")
-    assert "(RecursionError)" in str(refused.value)
+    assert f"({raised})" in str(refused.value)
     with pytest.raises(validator.ValidatorUnavailable) as unavailable:
         validator.validator_for("opendox-snapshot")
-    assert "(RecursionError)" in str(unavailable.value)
+    assert f"({raised})" in str(unavailable.value)
+
+
+@pytest.mark.parametrize("record", [
+    b"schema_version: " + b"9" * 5000 + b"\n",
+    b"schema_version: 1\nkind: 2026-02-30\n",
+], ids=["an integer past 4300 digits", "an impossible date"])
+def test_a_record_pyyaml_cannot_construct_is_refused(
+        monkeypatch: pytest.MonkeyPatch, record: bytes) -> None:
+    """PyYAML raises ValueError, not a YAMLError, for a literal it cannot
+    construct. The record is refused, never a ValueError to the caller."""
+    _serve(monkeypatch, {contracts.RECORD_NAME: record})
+    with pytest.raises(contracts.CopyRefused) as refused:
+        contracts.record()
+    assert "not YAML this module can read (ValueError)" in str(refused.value)
+    with pytest.raises(validator.ValidatorUnavailable):
+        validator.validator_for("opendox-snapshot")
 
 
 def test_the_record_as_shipped_is_accepted() -> None:
