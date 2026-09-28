@@ -2217,6 +2217,46 @@ def test_a_non_postgresql_dsn_is_refused_naming_the_dialect_kept() -> None:
                               "host=h dbname=db user=m"})
 
 
+def test_an_unparseable_dsn_is_refused_and_never_raises_a_bare_valueerror(
+) -> None:
+    """`urlsplit` itself raises for a DSN it cannot parse, and this module's
+    whole contract is that a bad variable produces a named
+    `ConfigurationError`, never a bare exception the CLI's boundary does not
+    catch (Copilot review of this PR).
+
+    MEASURED: `urllib.parse.urlsplit("postgresql://u:p@[::1/db")` raises
+    `ValueError("Invalid IPv6 URL")` — an unbracketed IPv6 host, which
+    `tests_runtime/conftest.py`'s own `postgres_dsn` docstring names as "the
+    ordinary way to mis-set this variable". `_split_url` exists for exactly
+    this shape in the broker settings (Copilot review of openDox-code#25,
+    round 24); `_refuse_non_postgresql_dsn` is its own boundary for the two
+    DSNs, asked of both.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox"}
+    broken = "postgresql://opendox:hunter2@[::1/opendox"
+
+    with pytest.raises(ConfigurationError) as served:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL": broken,
+                       PREFIX + "MIGRATION_DATABASE_URL":
+                           "postgresql://m:p@h/db"})
+    message = str(served.value)
+    assert PREFIX + "DATABASE_URL" in message
+    assert "ValueError" in message
+    # THE VALUE IS NOT REPEATED: a DSN this runtime cannot parse can still
+    # carry a password.
+    assert "hunter2" not in message and "opendox:" not in message
+
+    with pytest.raises(ConfigurationError) as migration:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+                       PREFIX + "MIGRATION_DATABASE_URL": broken})
+    assert PREFIX + "MIGRATION_DATABASE_URL" in str(migration.value)
+
+
 def test_the_same_dsn_in_both_settings_is_refused_naming_the_migration_one(
 ) -> None:
     """13.3: one credential pasted into both settings is refused.

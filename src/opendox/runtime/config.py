@@ -1313,8 +1313,23 @@ def _refuse_non_postgresql_dsn(name: str, dsn: str) -> None:
     scheme for the keyword/value form (there is no `://` to split on), and an
     empty scheme is read as "says nothing" here, exactly as `schema_selected_by`
     reads a DSN that names no schema as `None` rather than as a refusal.
+
+    `urlsplit` ITSELF RAISES for a DSN it cannot parse — MEASURED,
+    `ValueError("Invalid IPv6 URL")` for an unbracketed IPv6 host, which
+    `tests_runtime/conftest.py`'s own `postgres_dsn` docstring names as "the
+    ordinary way to mis-set this variable". `_split_url` exists for exactly
+    this shape in the broker settings (Copilot review of openDox-code#25,
+    round 24); this is its DSN-flavoured twin; a bad `OPENDOX_DATABASE_URL`
+    is not "set it to the broker endpoint", so it is not reused verbatim.
     """
-    scheme = urllib.parse.urlsplit(dsn).scheme
+    try:
+        scheme = urllib.parse.urlsplit(dsn).scheme
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"{name} is not a DSN this runtime can parse "
+            f"({type(exc).__name__}); the value is not repeated here, "
+            "because a DSN this runtime cannot parse can still carry a "
+            "password") from None
     if scheme and scheme not in POSTGRESQL_SCHEMES:
         raise ConfigurationError(
             f"{name} names the {scheme!r} dialect. PostgreSQL "
