@@ -37,7 +37,10 @@ EACH RECORD HAS ONE RESOLVER, and the record says which:
   * the BUILT-IN RESOLVER, for an `env:NAME` or `keyring:SERVICE/USERNAME`
     reference. It reads the reference at call time, inside `doxbench_provider`
     only (RULED R1Q17 (b)). Such a record needs no broker, and one given
-    beside it is refused, so no record has two resolvers;
+    beside it is refused, so no record has two resolvers. What it reads is a
+    LONG-LIVED key, so its endpoint must be a PRIVATE ROUTE: `https://`, or
+    `http://` to 127.0.0.1, ::1 or localhost (Brett Heap's ruling of
+    2026-09-28, "Refuse unless loopback"; `is_a_private_route`);
   * NONE, for an endpoint that takes no credential. It declares the auth kind
     `none` rather than leaving a field out, and `credential_ref` and
     `broker_argv` are forbidden under it (RULED R1Q18 (a)).
@@ -210,7 +213,58 @@ DIALECTS: tuple[str, ...] = (DIALECT_XFACTORY_PROMPT_V1, DIALECT_OPENAI_CHAT_V1)
 #: on-this-host proxy posture an operator may legitimately run; a scheme this
 #: tuple does not name is refused at declaration, because `file://` or a bare
 #: host is not something a provider client should discover at dispatch time.
+#: For a credential the built-in resolver reads, "on this host" is ENFORCED
+#: (`is_a_private_route`). A broker's minted token and the auth kind `none`
+#: keep the posture this tuple gives them, as the 2026-09-28 ruling leaves it.
 ENDPOINT_SCHEMES: tuple[str, ...] = ("https://", "http://")
+
+#: The hosts a credential the built-in resolver reads may reach over plain
+#: `http://`: this host, spelled exactly as Brett Heap's ruling of 2026-09-28
+#: names it ("Refuse unless loopback"). No other spelling of these addresses,
+#: and no other address of the loopback range, is one of them.
+LOOPBACK_HOSTS: tuple[str, ...] = ("127.0.0.1", "::1", "localhost")
+
+
+def _authority(host: str) -> str:
+    """`host` as a URL's authority spells it: an IPv6 literal is bracketed."""
+    return f"[{host}]" if ":" in host else host
+
+
+#: A PRIVATE ROUTE: `https://` to any host, or `http://` to one of
+#: `LOOPBACK_HOSTS`, with an optional port, then the path, the query, the
+#: fragment or nothing at all. It is matched against the endpoint AS WRITTEN,
+#: not against a parser's reading of it. A URL parser and the HTTP client read
+#: `http://evil.example\@localhost/` as two different hosts, and only the
+#: client's reading decides where the key would go. It is case-blind, because
+#: a scheme and a host name are: `HTTP://` is `http://`.
+_PRIVATE_ROUTE = re.compile(
+    r"https://|http://(?:"
+    + "|".join(re.escape(_authority(host)) for host in LOOPBACK_HOSTS)
+    + r")(?::[0-9]{1,5})?(?:[/?#]|\Z)",
+    re.IGNORECASE | re.ASCII)
+
+
+def is_a_private_route(endpoint: object) -> bool:
+    """Whether `endpoint` keeps a credential from crossing a network in
+    cleartext: `https://`, or `http://` to this host (`LOOPBACK_HOSTS`).
+
+    ONE PREDICATE. The record asks it when a binding is declared, and
+    `doxbench_provider`'s built-in resolver asks it again before it reads
+    anything."""
+    return (isinstance(endpoint, str)
+            and _PRIVATE_ROUTE.match(endpoint) is not None)
+
+
+#: The refusal a credential the built-in resolver reads earns on a route that
+#: is not private (Brett Heap's ruling of 2026-09-28, "Refuse unless
+#: loopback"). That resolver reads a LONG-LIVED key, where a broker mints a
+#: short-lived token, so plain `http://` carries one only to this host. A
+#: fixed sentence, and it repeats nothing of the endpoint.
+ENDPOINT_NOT_PRIVATE = (
+    "a credential the built-in resolver reads (an env: or keyring: reference) "
+    "is sent only over https://, or over http:// to this host (127.0.0.1, ::1 "
+    "or localhost), and this endpoint is neither; declare an https:// "
+    "endpoint, or a loopback one")
 
 #: The refusal a key inside the endpoint URL earns (#1144 box 16.3). Measured
 #: before 16.3: this record checked the endpoint's scheme and nothing else, so
@@ -500,6 +554,12 @@ class ModelProviderBinding:
                         f"broker_argv names the placeholder {{{name}}}, which "
                         f"is outside the closed vocabulary {ARGV_PLACEHOLDERS}")
         self._require_one_resolver(argv)
+        # A CREDENTIAL THE BUILT-IN RESOLVER READS TRAVELS ONLY BY A PRIVATE
+        # ROUTE (the 2026-09-28 ruling). A broker's minted token and the auth
+        # kind `none` keep the route they had.
+        if (self.credential_source() == CREDENTIAL_FROM_BUILT_IN_RESOLVER
+                and not is_a_private_route(self.endpoint)):
+            raise BindingRefused(ENDPOINT_NOT_PRIVATE)
 
     def _require_one_resolver(self, argv: tuple[str, ...]) -> None:
         """#1144 box 16.3: exactly one thing answers this record's credential.

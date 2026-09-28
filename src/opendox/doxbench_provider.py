@@ -710,13 +710,28 @@ def resolve_credential_reference(binding, *, environ=None,
     An unset variable, an absent keyring entry, or a value that cannot be
     presented as it is (`_presentable`) is `DIAG_REFERENCE_UNRESOLVED`. A
     keyring that cannot be read is `DIAG_KEYRING_UNAVAILABLE`. A keyring
-    backend's own error is dropped unread, like a broker's or a provider's."""
+    backend's own error is dropped unread, like a broker's or a provider's.
+
+    NOTHING IS READ FOR A ROUTE THAT IS NOT PRIVATE (Brett Heap's ruling of
+    2026-09-28, "Refuse unless loopback"). What this function reads is a
+    long-lived key, sent only over `https://` or over `http://` to this host.
+    The record refuses any other endpoint when the binding is declared
+    (`doxbench_binding.ENDPOINT_NOT_PRIVATE`), so no declared binding reaches
+    that check here. The check is repeated before the first read all the
+    same, because this is the function that holds the key. What reaches it
+    is a programming error, like a broker's reference, and nothing has been
+    read when it is raised."""
     reference = binding_mod.built_in_reference_parts(binding.credential_ref)
     if reference is None:
         raise AssertionError(
             f"binding {binding.id!r} names a broker's reference, which the "
             "broker resolves; the built-in resolver takes only the "
             f"{binding_mod.BUILT_IN_REFERENCE_FORMS} forms")
+    if not binding_mod.is_a_private_route(binding.endpoint):
+        raise AssertionError(
+            f"binding {binding.id!r} routes a credential the built-in "
+            "resolver reads over a route that is not private, which the "
+            "record refuses when it is declared; nothing was read")
     if reference.form == binding_mod.CREDENTIAL_REF_ENV:
         value = (os.environ if environ is None else environ).get(
             reference.name)

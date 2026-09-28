@@ -55,6 +55,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2148,6 +2149,147 @@ def test_a_binding_no_broker_answers_has_no_broker_operation():
             provider_mod.hand_off_credential(binding, stdin)
 
 
+# --- a built-in credential travels by a private route --------------------
+# Brett Heap's ruling of 2026-09-28 on this PR's question, "Refuse unless
+# loopback": a credential the built-in resolver reads is sent only over
+# https://, or over http:// to 127.0.0.1, ::1 or localhost.
+
+BUILT_IN_REFERENCES = (f"env:{ENV_NAME}",
+                       f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}")
+BACKSLASH = chr(92)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://api.example.invalid/v1/chat/completions",
+    "http://127.0.0.1:8080/v1/chat/completions",
+    "http://[::1]:8080/v1/chat/completions",
+    "http://localhost:11434/v1/chat/completions",
+    "http://LOCALHOST:11434/v1/chat/completions",
+    "http://localhost",
+], ids=["https", "ipv4-loopback", "ipv6-loopback", "localhost",
+        "localhost-in-capitals", "no-path"])
+def test_a_built_in_credential_is_declared_on_a_private_route(endpoint):
+    for reference in BUILT_IN_REFERENCES:
+        binding = _built_in_binding(reference, endpoint=endpoint)
+        assert binding.endpoint == endpoint
+        assert binding.credential_source() == (
+            binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://api.example.invalid/v1/chat/completions",
+    "http://localhost.evil.com/v1/chat/completions",
+    "http://127.0.0.1.evil.com/v1/chat/completions",
+    "http://evil.com/localhost",
+    "http://127.0.0.2:8080/v1",
+    "http://[0:0:0:0:0:0:0:1]:8080/v1",
+    "http://localhost./v1",
+    "http://localhost%2eevil.com/v1",
+    "http://0.0.0.0:8080/v1",
+], ids=["another-host", "resembles-localhost", "resembles-127",
+        "localhost-only-in-the-path", "a-loopback-address-not-named",
+        "another-spelling-of-ipv6-loopback", "trailing-dot",
+        "percent-encoded-dot", "unspecified-address"])
+def test_a_built_in_credential_over_http_to_another_host_is_refused(endpoint):
+    """Refused when it is declared, by the constructor and from a stored
+    record alike, with the one fixed sentence."""
+    for reference in BUILT_IN_REFERENCES:
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            _built_in_binding(reference, endpoint=endpoint)
+        assert str(caught.value) == binding_mod.ENDPOINT_NOT_PRIVATE
+        record = dict(_built_in_binding(reference).as_record(),
+                      endpoint=endpoint)
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            binding_mod.ModelProviderBinding.from_record(record)
+        assert str(caught.value) == binding_mod.ENDPOINT_NOT_PRIVATE
+
+
+@pytest.mark.parametrize("endpoint,private", [
+    ("HTTP://api.example.invalid/v1", False),
+    ("Http://localhost.evil.com/v1", False),
+    ("hTTp://127.0.0.1:8080/v1", True),
+    ("HTTP://[::1]:8080/v1", True),
+    ("http://LocalHost:11434/v1", True),
+    ("HTTPS://api.example.invalid/v1", True),
+    ("hTtPs://api.example.invalid/v1", True),
+    (f"http://evil.example{BACKSLASH}@localhost/v1", False),
+    (" http://localhost/v1", False),
+    ("ftp://localhost/v1", False),
+], ids=["capital-http-to-another-host", "mixed-case-http-to-a-lookalike",
+        "mixed-case-http-to-127", "capital-http-to-ipv6-loopback",
+        "mixed-case-localhost", "capital-https", "mixed-case-https",
+        "backslash-before-localhost", "leading-space", "another-scheme"])
+def test_a_private_route_is_read_case_blind_and_as_written(endpoint,
+                                                           private):
+    """A scheme and a host name are case-blind, so `HTTP://` to another host
+    is not private and `HTTP://` to this one is. The route is read AS
+    WRITTEN: a URL parser reads the backslash case's host as `localhost`, and
+    the HTTP client reads it as the whole authority."""
+    assert binding_mod.is_a_private_route(endpoint) is private
+
+
+class _RecordingEnviron(dict):
+    """An environment that records every name read from it."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.read: list[str] = []
+
+    def get(self, name, default=None):
+        self.read.append(name)
+        return super().get(name, default)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://api.example.invalid/v1", "HTTP://api.example.invalid/v1",
+    "http://localhost.evil.com/v1",
+    f"http://evil.example{BACKSLASH}@localhost/v1",
+], ids=["another-host", "mixed-case-scheme", "resembles-localhost",
+        "backslash"])
+def test_the_resolver_reads_nothing_for_a_route_that_is_not_private(
+        endpoint):
+    """BEFORE RESOLUTION, in the resolver itself. The record refuses such a
+    binding when it is declared, so this is a binding-shaped object that was
+    never declared, and it still cannot make the resolver read a key."""
+    for reference in BUILT_IN_REFERENCES:
+        shaped = types.SimpleNamespace(id="undeclared",
+                                       credential_ref=reference,
+                                       endpoint=endpoint)
+        environ = _RecordingEnviron({ENV_NAME: KEY_SENTINEL})
+        backend = _FakeKeyring({(KEYRING_SERVICE, KEYRING_USER): KEY_SENTINEL})
+        with pytest.raises(AssertionError) as caught:
+            provider_mod.resolve_credential_reference(
+                shaped, environ=environ, keyring_backend=backend)
+        assert "nothing was read" in str(caught.value)
+        assert environ.read == []
+        assert backend.asked == []
+
+
+def test_the_resolver_reads_a_key_for_a_private_route():
+    """The control for the case above: the same shape on IPv6 loopback is
+    read."""
+    shaped = types.SimpleNamespace(id="undeclared",
+                                   credential_ref=f"env:{ENV_NAME}",
+                                   endpoint="http://[::1]:8080/v1")
+    environ = _RecordingEnviron({ENV_NAME: KEY_SENTINEL})
+    assert provider_mod.resolve_credential_reference(
+        shaped, environ=environ) == KEY_SENTINEL
+    assert environ.read == [ENV_NAME]
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://api.example.invalid/turn", "http://localhost.evil.com/turn"])
+def test_the_loopback_rule_is_the_built_in_resolvers_alone(endpoint):
+    """The ruling leaves the broker path as it is today: a broker's minted
+    token may still be declared over plain http:// to any host, which is the
+    pre-existing gap the PR notes. The auth kind `none` presents no
+    credential, so it keeps its route too."""
+    assert _binding(endpoint=endpoint).credential_source() == (
+        binding_mod.CREDENTIAL_FROM_BROKER)
+    assert _none_binding(endpoint=endpoint).credential_source() == (
+        binding_mod.NO_CREDENTIAL)
+
+
 # --- the built-in resolver, at call time ---------------------------------
 
 
@@ -2494,6 +2636,20 @@ def test_the_cli_declares_a_binding_for_each_resolver(tmp_path, capsys):
     assert binding_mod.ENDPOINT_CARRIES_A_CREDENTIAL in captured.err
     assert KEY_SENTINEL not in captured.err + captured.out
     assert store.get("keyed") is None, "nothing is stored"
+
+    # a built-in credential over http:// to another host is refused (the
+    # 2026-09-28 loopback ruling), and a `none` binding to it is declared
+    cleartext = list(route)
+    cleartext[cleartext.index("--endpoint") + 1] = (
+        "http://api.example.invalid/v1/chat/completions")
+    assert run("model-binding", "add", *root, "--id", "cleartext",
+               *cleartext, "--auth-kind", "api_key",
+               "--credential-ref", f"env:{ENV_NAME}") == 1
+    assert binding_mod.ENDPOINT_NOT_PRIVATE in capsys.readouterr().err
+    assert store.get("cleartext") is None, "nothing is stored"
+    assert run("model-binding", "add", *root, "--id", "cleartext-none",
+               *cleartext, "--auth-kind", "none") == 0
+    capsys.readouterr()
 
     assert run("model-binding", "list", *root) == 0
     listed = capsys.readouterr().out
