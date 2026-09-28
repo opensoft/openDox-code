@@ -462,7 +462,7 @@ def validate_manifest(path: Path | str, *, validator: Path | None = None,
         try:
             registered = projection_seams.validators.for_kind(KIND)
         except projection_seams.ValidatorNotRegistered as exc:
-            return ManifestValidation(False, -1, "", str(exc).split("\n", 1)[0],
+            return ManifestValidation(False, -1, "", " ".join(str(exc).split()),
                                       None)
         result = registered.validate(path, strict=strict,
                                      search_from=(search_from or path.parent,))

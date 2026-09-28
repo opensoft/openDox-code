@@ -1030,6 +1030,7 @@ def test_openDoxs_own_kind_meets_the_stand_in_and_strict_makes_it_fatal(tmp_path
     assert cli._validate(written, _validate_args(tmp_path)) == 0
     err = capsys.readouterr().err
     assert "validation SKIPPED" in err and "'opendox-snapshot'" in err and "T057" in err
+    assert "the validator registered for kind 'opendox-snapshot' reached no verdict" in err
     assert str(written.parent) in err and str(tmp_path.resolve()) in err
     assert "the ENVIRONMENT, not the snapshot" in err
     assert cli._validate(written, _validate_args(tmp_path, "--strict")) == 1
@@ -1041,6 +1042,11 @@ def test_a_kind_with_no_validator_is_unavailable_not_another_kinds(tmp_path, cap
     assert cli._validate(_written(tmp_path, "stranger"), _validate_args(tmp_path)) == 0
     err = capsys.readouterr().err
     assert "no validator is registered for kind 'stranger'" in err
+    assert ps.validators.registration_call in err, (
+        "the lookup's refusal is given whole: it ends with the call that registers one")
+    assert "to search from" not in err and str(tmp_path / "out") not in err, (
+        "the lookup is the process's registry: no path could make a validator "
+        "reachable, so the warning names none")
 
 
 def test_a_rejection_fails_and_blames_the_snapshot(tmp_path, capsys) -> None:

@@ -341,34 +341,43 @@ def _validate_by_kind(written: Path, kind: str, *, strict: bool,
     directory first and the SERVED CHECKOUT second (T092 acceptance sweep,
     defect 8, which is why the order is kept). No validator registered for the
     kind is VALIDATOR UNAVAILABLE, sub-case "nothing to run", and the lookup's
-    own refusal is the reason given."""
+    own refusal is the reason given, whole, on one line: it ends with the call
+    that registers a validator, which is the remedy."""
     try:
         validator = projection_seams.validators.for_kind(kind)
     except projection_seams.ValidatorNotRegistered as exc:
         return None, projection_seams.ValidationResult(
             False, -1, "", "", None, projection_seams.VALIDATOR_UNAVAILABLE,
-            str(exc).split("\n", 1)[0])
+            " ".join(str(exc).split()))
     return validator, validator.validate(written, strict=strict,
                                          search_from=search_from)
 
 
 def _warn_validator_not_found(written: Path, repo_root: Path, kind: str,
-                              result) -> None:
+                              result, *, registered: bool) -> None:
     """VALIDATOR UNAVAILABLE, sub-case "nothing to run".
 
-    NOT routine. Both roots were offered to the search, so the message names
-    BOTH and blames neither on its own, and then gives the lookup's own reason:
-    reaching here means no validator for this snapshot's kind could be reached
-    from the OUTPUT path OR from the served checkout, and the snapshot went
-    unvalidated however good the corpus was. The old one-liner ("no reachable
-    openxFactory checkout") read as routine while quietly meaning
-    "unvalidated", and pointed at a checkout that was present and fine — which
-    is exactly where it sent the T092 pass."""
+    NOT routine: the snapshot went unvalidated however good the corpus was.
+    The old one-liner ("no reachable openxFactory checkout") read as routine
+    while quietly meaning "unvalidated", and pointed at a checkout that was
+    present and fine, which is exactly where it sent the T092 pass. So this
+    says which of the two things happened, and then gives the reason:
+
+    * NOTHING IS REGISTERED FOR THE KIND (`registered` false). The validator
+      lookup is the process's own registry, so no path can make a validator
+      reachable. Moving the output or the checkout would change nothing, and
+      the message names neither. The lookup's refusal says what registers one.
+    * THE VALIDATOR REGISTERED FOR THE KIND REACHED NO VERDICT. It was offered
+      both roots to search from, the OUTPUT path's directory first and the
+      served checkout second (T092 acceptance sweep, defect 8), so the message
+      names BOTH and blames neither on its own. Its own reason follows."""
     print("  validation SKIPPED — this snapshot was NOT checked against the "
           "pinned schema", file=sys.stderr)
-    print(f"    no validator for kind {kind!r} was reachable from "
-          f"{written.parent} (the OUTPUT path, searched first) or from "
-          f"{repo_root} (--repo-root, the fallback)", file=sys.stderr)
+    if registered:
+        print(f"    the validator registered for kind {kind!r} reached no "
+              f"verdict. It was offered {written.parent} (the OUTPUT path) "
+              f"first, then {repo_root} (--repo-root), to search from",
+              file=sys.stderr)
     if result.unavailable_reason:
         print(f"    {result.unavailable_reason}", file=sys.stderr)
 
@@ -441,7 +450,8 @@ def _validate(written: Path, args: argparse.Namespace, *,
         written, kind, strict=args.strict, search_from=(written.parent, repo_root))
     if not result.available:
         if result.validator is None:
-            _warn_validator_not_found(written, repo_root, kind, result)
+            _warn_validator_not_found(written, repo_root, kind, result,
+                                      registered=validator is not None)
         else:
             _warn_validator_could_not_run(result, validator)
         if args.strict:
