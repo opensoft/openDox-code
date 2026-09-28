@@ -2571,15 +2571,15 @@ def test_a_stand_in_server_sees_the_resolved_bearer_or_no_header(which,
 
 
 class _ElsewhereHandler(http.server.BaseHTTPRequestHandler):
-    """A second stand-in, where a redirect would lead. It records every
-    request it is sent, of any method."""
+    """A second stand-in, where a redirect or a proxy would lead. It records
+    every request it is sent, of any method."""
 
     seen: list = []
 
     def _record(self):
         _ElsewhereHandler.seen.append(
             (self.command, self.headers.get("Authorization")))
-        _answer_json(self, _chat_completion("followed a redirect"))
+        _answer_json(self, _chat_completion("answered from elsewhere"))
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
         self._record()
@@ -2631,6 +2631,33 @@ def test_a_built_in_credential_follows_no_redirect(monkeypatch, code):
             port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_REDIRECTED
     assert _ElsewhereHandler.seen == [], "the credential went nowhere else"
+
+
+def test_a_built_in_credential_over_http_to_this_host_uses_no_proxy(
+        monkeypatch):
+    """Copilot's review of openDox-code#63 at `1b0fb3f4`, over real sockets.
+    A plain-http route is private only because it stays on this host. With
+    `http_proxy` set, urllib's default opener sends a request addressed to
+    `127.0.0.1` to the proxy, credential header and all (measured). This
+    request goes direct, and the stand-in proxy hears nothing."""
+    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
+    monkeypatch.setattr(_ChatCompletionsHandler, "seen", {})
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    with _stand_in_provider(_ElsewhereHandler) as proxy, \
+            _stand_in_provider(_ChatCompletionsHandler) as base:
+        for name in ("http_proxy", "HTTP_PROXY"):
+            monkeypatch.setenv(name, proxy)
+        binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None,
+            environ={ENV_NAME: KEY_SENTINEL})
+        answer = port.dispatch(_Envelope())
+    assert answer["assistant_prose"] == "answered in the chat grammar"
+    assert _ChatCompletionsHandler.seen["authorization"] == (
+        f"Bearer {KEY_SENTINEL}")
+    assert _ElsewhereHandler.seen == [], "the proxy heard nothing"
 
 
 def _safe_repr(value) -> str:

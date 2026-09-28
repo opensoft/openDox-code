@@ -903,11 +903,26 @@ class _DeclineRedirects(urllib.request.HTTPRedirectHandler):
         raise _Redirected
 
 
-def _open_without_redirects(request, *, timeout):
-    """`urllib.request.urlopen`, but every redirect is declined. The opener
-    is built per call, as `urlopen` builds its own on first use, so the
-    proxy environment is read when a request is made."""
-    return urllib.request.build_opener(_DeclineRedirects).open(
+def _open_for_a_built_in_credential(request, *, timeout):
+    """`urllib.request.urlopen` for a request that carries a credential the
+    built-in resolver read. It changes two things, and nothing else.
+
+    * EVERY REDIRECT IS DECLINED (`_DeclineRedirects`).
+    * A PLAIN-`http://` REQUEST GOES DIRECT, whatever proxy the environment
+      names (Copilot's review of openDox-code#63 at `1b0fb3f4`). Such a
+      route is private only because it stays on this host, and a proxy
+      would carry it, in cleartext, to wherever the proxy is. Measured: with
+      `http_proxy` set, urllib's default opener sends a request addressed
+      to `127.0.0.1` to the proxy, credential header and all. An `https://`
+      request may still use the environment's proxy, because a proxy
+      reaches it only by CONNECT, and the credential stays inside TLS.
+
+    The opener is built per call, as `urlopen` builds its own on first use,
+    so the proxy environment is read when a request is made."""
+    handlers: list = [_DeclineRedirects]
+    if request.type == "http":
+        handlers.insert(0, urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers).open(
         request, timeout=timeout)
 
 
@@ -1205,13 +1220,13 @@ class BrokeredProviderPort:
         repeat: the reference names the same value on a second read, so a
         retry would buy a second paid call for the same refusal.
 
-        A REQUEST CARRYING A BUILT-IN CREDENTIAL FOLLOWS NO REDIRECT. The
-        default opener follows redirects and re-sends the credential header
-        (see `_DeclineRedirects`), so such a request swaps it for
-        `_open_without_redirects`. An opener a caller injected is that
-        caller's own seam and is used as given. The auth kind `none` sends no
-        credential, and a broker's minted token keeps the default opener, as
-        the 2026-09-28 ruling leaves that path.
+        A REQUEST CARRYING A BUILT-IN CREDENTIAL FOLLOWS NO REDIRECT AND, OVER
+        PLAIN `http://`, USES NO PROXY. The default opener does both, and
+        sends the credential header along each time, so such a request uses
+        `_open_for_a_built_in_credential` in its place. An opener a caller
+        injected is that caller's own seam and is used as given. The auth
+        kind `none` sends no credential, and a broker's minted token keeps
+        the default opener, as the 2026-09-28 ruling leaves that path.
 
         A REFUSAL OF A REQUEST THAT CARRIED A BUILT-IN CREDENTIAL CHAINS
         NOTHING. The credential stays wrapped in a `_PresentedCredential` in
@@ -1233,7 +1248,7 @@ class BrokeredProviderPort:
                 self._available = True
         opener = self._opener
         if credential is not None and opener is urllib.request.urlopen:
-            opener = _open_without_redirects
+            opener = _open_for_a_built_in_credential
         failure = None
         try:
             return _post_to_provider(
