@@ -2280,6 +2280,31 @@ def test_the_resolver_reads_a_key_for_a_private_route():
     assert environ.read == [ENV_NAME]
 
 
+def test_a_broker_reference_in_a_built_in_form_is_malformed(tmp_path):
+    """The built-in forms are reserved. A broker's reference in one would
+    make the record read it as the built-in resolver's, beside the broker
+    that holds the credential: two resolvers, refused where neither entry
+    point expects a refusal (Copilot's overview of openDox-code#63 at
+    `286655f3`). So the broker's answer is malformed, and it is refused as
+    one, which both entry points already catch."""
+    for index, reserved in enumerate(BUILT_IN_REFERENCES):
+        script = tmp_path / f"reserved-broker-{index}.py"
+        script.write_text(
+            "import json,sys\nsys.stdin.read()\n"
+            "print(json.dumps({'schema_version':1,"
+            "'kind':'openprofiler_broker_intake','reference':"
+            + repr(reserved) + ","
+            "'binding':'b','provider':'p','auth_kind':'api_key','label':None,"
+            "'created_at':'x','max_lifetime_seconds':300,'issued_by':'i',"
+            "'approved_by':'a','audit_ref':'opaud-x'}))\n",
+            encoding="utf-8")
+        binding = _broker_binding(script)
+        stdin = io.StringIO("x")
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            provider_mod.hand_off_credential(binding, stdin)
+        assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+
+
 @pytest.mark.parametrize("endpoint", [
     "http://api.example.invalid/turn", "http://localhost.evil.com/turn"])
 def test_the_loopback_rule_is_the_built_in_resolvers_alone(endpoint):
@@ -2465,6 +2490,9 @@ def test_a_keyring_that_cannot_be_read_refuses_and_says_nothing_of_its_own():
     assert caught.value.diagnostic == provider_mod.DIAG_KEYRING_UNAVAILABLE
     assert "leaks" not in str(caught.value)
     assert caught.value.__cause__ is None
+    # no context either: the backend's own frames are not kept (Copilot's
+    # overview of openDox-code#63 at `286655f3`)
+    assert caught.value.__context__ is None
     assert opener.requests == []
 
 

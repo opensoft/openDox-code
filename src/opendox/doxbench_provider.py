@@ -590,11 +590,22 @@ def hand_off_credential(binding, source, *,
 
     Returns the `reference` the broker gives back — the declaration's own field
     name (0.2 FINDING 4). That reference is the only thing that then lives in a
-    binding, in a file, in a log or in a review."""
+    binding, in a file, in a log or in a review.
+
+    THE BUILT-IN FORMS ARE RESERVED (#1144 box 16.3; Copilot's overview of
+    openDox-code#63 at `286655f3`). A broker's reference in the `env:` or
+    `keyring:` form would make the record read it as the built-in resolver's,
+    beside the broker that holds the credential, which is two resolvers. The
+    record refuses that, and it would do so where neither entry point
+    expects a refusal. So such an answer is malformed, and it is refused
+    here, where both entry points already catch a broker's refusal."""
     answer = runner(broker_operation_argv(binding, OPERATION_INTAKE),
                     source=source)
     document = _answer_document(answer, BROKER_INTAKE_KIND, INTAKE_FIELDS)
-    return _declared_string(document, "reference")
+    reference = _declared_string(document, "reference")
+    if binding_mod.names_a_built_in_form(reference):
+        raise BrokerRefused(DIAG_BROKER_MALFORMED)
+    return reference
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +697,12 @@ def _presentable(value: object) -> bool:
             and all("!" <= character <= "~" for character in value))
 
 
+#: What a keyring backend's failure reads as, inside the resolver only. A
+#: sentinel, not None, because None is what a backend answers for an absent
+#: entry, which is a different refusal.
+_UNREADABLE = object()
+
+
 def _os_keyring():
     """The OS keyring, through the `keyring` package, imported at call time.
 
@@ -753,7 +770,13 @@ def resolve_credential_reference(binding, *, environ=None,
             value = backend.get_password(reference.name, reference.user)
         # A keyring backend's own error, of any class, never reaches a caller.
         except Exception:  # noqa: BLE001
-            raise BrokerRefused(DIAG_KEYRING_UNAVAILABLE) from None
+            value = _UNREADABLE
+        if value is _UNREADABLE:
+            # Raised outside the handler, so the refusal keeps no context
+            # (Copilot's overview of openDox-code#63 at `286655f3`): the
+            # backend's own frames may hold what it was decoding when it
+            # failed.
+            raise BrokerRefused(DIAG_KEYRING_UNAVAILABLE)
     if not _presentable(value):
         # The refusal's traceback keeps this frame, so what was read leaves
         # it first: a value that cannot be presented can still be most of a
