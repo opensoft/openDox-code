@@ -133,19 +133,24 @@ from opendox import doxbench_install  # noqa: E402
 from opendox import doxbench_knowledge  # noqa: E402
 from opendox import doxbench_packet  # noqa: E402
 from opendox import doxbench_telemetry  # noqa: E402
-# THE PROJECTION REGISTRY, NAMED LATE, AND openDox'S OWN DEFAULTS BESIDE IT
-# (BUILD slice 2b). `from openxdox import snapshot_registry as registry_mod`
-# stood on this line: an import of the layer that PINS openDox, evaluated when
-# this module loads, which `design.md`:243 refuses — *"what must not survive is
-# the direction, not the calls."* The stand-in resolves on first attribute
-# access, so every `registry_mod.X` read below is unchanged.
+# THE PROJECTION REGISTRY, THROUGH ITS SEAM, AND openDox'S OWN DEFAULTS BESIDE
+# IT. `from openxdox import snapshot_registry as registry_mod` stood here until
+# BUILD slice 2b made it a late `consumer_reach` stand-in, which still refused
+# the first read in a lone openDox, so a server could not be built standalone
+# (plan 034, research R7). Since plan 034 T055 `registry_mod` is the proxy over
+# the snapshot registry SEAM (`projection_seams.registry`): each `registry_mod.X`
+# read below resolves the registry registered at that moment, openDox's own
+# (`opendox.default_registry`) where no host has contributed one, and every one
+# of them is unchanged.
 #
-# EXCEPT `build_server`'s two signature DEFAULTS (:1304, :1308), which no
-# stand-in can defer: a default argument is evaluated where the `def` sits, at
-# import time. openDox owns those two values (`defaults.py`), and openXdox-code's
-# drift guard holds the literals together.
+# EXCEPT `build_server`'s two signature DEFAULTS (`index_name` and
+# `peek_ttl_seconds`), which no proxy can defer: a default argument is
+# evaluated where the `def` sits, at import time. openDox owns those two
+# values (`defaults.py`), and openXdox-code's drift guard holds the literals
+# together.
 from opendox import consumer_reach  # noqa: E402
 from opendox import defaults  # noqa: E402
+from opendox import projection_seams  # noqa: E402
 # § 3.4 slice S5: `build_server()` publishes the VIEW MANIFEST on
 # `/capabilities`, the one line slice S3 built both ends of and left for the
 # slice at which a contribution first exists to deliver.
@@ -166,7 +171,7 @@ from opendox.runtime import local_git_adapter  # noqa: E402
 # Both modules are stdlib-only and name no sibling, so this adds no reach.
 from opendox import default_generator, generator_seam  # noqa: E402
 
-registry_mod = consumer_reach.snapshot_registry  # noqa: E402
+registry_mod = projection_seams.registry.proxy  # noqa: E402
 # THE BY-FUNCTION SPLIT (`split-opendox-two-layer-product` § 2.4, PRs 2 and 3
 # of 4). The openDox column's routes live in `serve_workbench.py` (the doxBench
 # workbench surface) and `serve_project.py` (projects, the notebook tile action,
@@ -258,11 +263,14 @@ from opendox.serve_project import (  # noqa: E402,F401
 # this module's name, and now a real definition here rather than a forwarder
 # into the layer that pins this one.
 #
-# `hosted_ref_refused` KEEPS ITS LATE STAND-IN. It decides at :785 that a hosted
-# response must never NAME a session ref, and FR-048 is the PROJECTION column's
-# confinement rule, not this core's: the route moved, the hosted-plane rule did
-# not. It resolves on first CALL, so it costs no import-time reach.
-hosted_ref_refused = consumer_reach.hosted_ref_refused  # noqa: E402
+# `hosted_ref_refused` IS DEFINED BELOW SINCE PLAN 034 T055, and the rule it
+# applies has not moved. It decides that a hosted response must never NAME a
+# session ref (FR-048), and its one dependency is the REGISTRY's own rule for
+# "a ref a hosted plane may see", `is_publishable_ref`, which it now reads
+# through the registry seam like every other `registry_mod.X`. It had to come
+# here with the core `/snapshot.json` arm's handlers (see `_serve_snapshot`),
+# which ask it on every response: forwarded to openXdox, a standalone server
+# refused every one.
 from opendox.serve_wire import (  # noqa: E402,F401
     AGENT_INVOCATION_REFUSAL,
     CONTEXT_REDUCED_REASON_MAX_LENGTH,
@@ -547,6 +555,24 @@ def _is_loopback(host: str) -> bool:
     return host in LOOPBACK_HOSTS
 
 
+# --------------------------- hosted-plane ref confinement (pure) ---------------------------
+
+def hosted_ref_refused(loopback: bool, ref: str | None) -> bool:
+    """Whether a request naming `ref` must be REFUSED because this is the
+    hosted plane (007-workbench-branch-sessions T083, FR-048: "a hosted request
+    naming a non-`main` ref MUST refuse").
+
+    The test is the BIND, never the advertised capability: the bind is what
+    makes a plane hosted. `None` or blank means `main`, so a ref-less request
+    is untouched, and the LOCAL plane is untouched entirely. "A ref a hosted
+    plane may see" is the REGISTERED registry's rule, `is_publishable_ref`,
+    read through the registry seam (plan 034 T055), so there is still one
+    definition of it per process: the one the registry serves by."""
+    if loopback:
+        return False
+    return not registry_mod.is_publishable_ref(ref)
+
+
 # --------------------------- the human console (FR-019) ---------------------------
 #
 # FR-019's THIRD clause — "reject and report any agent or automated invocation" —
@@ -613,28 +639,27 @@ def resolve_source_path(checkout_root: Path, url_tail: str) -> Path | None:
     Percent-decoding happens BEFORE the containment check so `%2e%2e` cannot slip
     past.
 
-    The containment check itself lives in `snapshot_registry.resolve_within`
-    so the SAME rule applies per registry entry (task 2.2); this stays the
+    The containment check itself lives in the registry's `resolve_within` so
+    the SAME rule applies per registry entry (task 2.2); this stays the
     single-root entry point every existing caller and test uses.
 
     ARRIVED HERE AT § 3.4 SLICE S6 (RULED Q4) with the route it confines, from
-    `openxdox/serve_projection.py`:66. The body is unchanged: the RULE is
-    `snapshot_registry.resolve_within` and the rule has NOT moved — it is the
-    projection column's, it is the same rule per registry entry, and openDox
-    reaches it through the same late `consumer_reach` seam `serve_workbench.py`
-    already uses at five sites. What moved is the ENTRY POINT, to the module
-    that now declares the route and to the module `notebook_action.py`:52
-    already imported it from. A second copy of the containment rule here would
-    be the fork `route_extension.py`:89 names; a forwarder into the consumer for
-    this core's OWN route is the direction `design.md`:243 names. This is
-    neither."""
+    `openxdox/serve_projection.py`:66. The body is unchanged: the RULE is the
+    registry's `resolve_within`, it is the same rule per registry entry, and
+    it is reached through the registry SEAM (plan 034 T055) that
+    `serve_workbench.py` reaches it by too, so a process has one rule: the
+    registered registry's. What moved is the ENTRY POINT, to the module that
+    now declares the route and to the module `notebook_action.py`:52 already
+    imported it from. A second copy of the containment rule here would be the
+    fork `route_extension.py`:89 names. This is not one."""
     return registry_mod.resolve_within(Path(checkout_root), url_tail)
 
 
 def _checkout_real(checkout_root: Path | str) -> bool:
     """A real corpus checkout, not the served image's empty `/srv/empty` sentinel.
 
-    "Real" means SCANNABLE AS A CORPUS (`corpus_root.corpus_scan_defect`) — the same
+    "Real" means SCANNABLE AS A CORPUS, as the REGISTERED corpus-root predicate
+    decides (`projection_seams.corpus_root`, plan 034 T055) — the same
     predicate `cli.py`'s `--repo-root` guard uses, which is the same value under a
     second spelling (runbook §2). It used to mean merely "an existing, non-empty
     directory", which is what the sentinel fails; but that let a wrong-but-populated
@@ -644,13 +669,12 @@ def _checkout_real(checkout_root: Path | str) -> bool:
     this makes the code keep the promise. The empty sentinel still fails it, so the
     hosted image is unchanged.
 
-    `corpus_root` is a stdlib-plus-`doc_health.corpus` module for exactly this
-    reason: this runs on every `build_server`, including the served image's, and
-    reaching the predicate through `generator` would newly require PyYAML in a
-    startup path that serves snapshots and scans nothing. Imported lazily, as this
-    module does for every sibling."""
-    from openxdox.corpus_root import corpus_scan_defect
-    return corpus_scan_defect(checkout_root) is None
+    This runs on every `build_server`, including the served image's, so the
+    predicate is structural and imports nothing heavy: openDox's own asks for
+    a git repository's root, and the governed one for the roots a snapshot is
+    projected from."""
+    return projection_seams.corpus_root.current().corpus_scan_defect(
+        checkout_root) is None
 
 
 def resolve_actor(checkout_root: Path | str, override: str | None = None) -> str | None:
@@ -772,8 +796,13 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
                        # `import opendox.serve` require the layer that PINS
                        # openDox. The stand-ins carry the same method names and
                        # forward to the same functions with the same `self` on
-                       # first call, so the core `/snapshot.json` arm and every
-                       # contributed binding behave exactly as before.
+                       # first call, so every contributed binding behaves
+                       # exactly as before. Since plan 034 T055 the core
+                       # `/snapshot.json` arm's handlers are THIS class's own
+                       # (`_serve_snapshot` below), and the projection stand-in
+                       # forwards one method, `_serve_index`, the one its
+                       # contributed `/snapshot-index.json` binding names
+                       # (T084 hands the column to the handler facet).
                        consumer_reach.LateGateRoutes,
                        consumer_reach.LateProjectionRoutes,
                        # Plan 034 T011 (#1144 task 2.2): openxFactory's
@@ -1117,6 +1146,88 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         if not self._route(head_only=True):
             super().do_HEAD()
 
+    # ---- the snapshot: `/snapshot.json`'s core arm (plan 034 T055) ----
+    # THIS CLASS'S OWN SINCE T055. The arm (`_route`'s first test) stayed core
+    # at § 2.4 PR 3, because it tests `path == self.snapshot_route`, a
+    # per-server keyword a frozen `RouteBinding.pattern` cannot carry, while
+    # its handlers travelled to openXdox's projection column and were reached
+    # through `consumer_reach.LateProjectionRoutes`. So a standalone server
+    # refused every `/snapshot.json`. The four methods below are that route's
+    # handlers, answering from the REGISTERED snapshot source: the query key,
+    # the active snapshot's bytes, the route itself, and FR-048's per-entry
+    # hosted refusal, which `_serve_source` asks too. The rules they consult
+    # are the registry's, through its seam.
+    def _query_key(self) -> tuple[str | None, str | None]:
+        """The optional `?repository=&ref=` of a read route. No repository
+        means the ACTIVE entry, which is what a query-less request asks for."""
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        return ((params.get("repository") or [None])[0],
+                (params.get("ref") or [None])[0])
+
+    def _read_snapshot(self) -> bytes | None:
+        """The ACTIVE snapshot's bytes, through the registry when a source is
+        bound, and from the configured path when none is (a hand-built
+        handler)."""
+        entry = self._active_entry()
+        if entry is not None:
+            return entry.read_bytes()
+        try:
+            return Path(self.snapshot_path).read_bytes()
+        except OSError:
+            return None
+
+    def _serve_snapshot(self, head_only: bool) -> None:
+        """`/snapshot.json`: the active snapshot, or the registered
+        `(repository, ref)` the query names. An unknown pair is a 404, and the
+        view the client already has stays as it is.
+
+        On the HOSTED plane a non-`main` ref refuses before anything resolves
+        (FR-048), and so does a query-less request whose ACTIVE entry is at a
+        session ref: the refusal follows the entry a request resolved to, not
+        only the ref it named. An id the registry does not hold may be an
+        aggregate the source composes, at the default ref only, and composed
+        from publishable members only off loopback; openDox's own source
+        composes none."""
+        repository, ref = self._query_key()
+        if hosted_ref_refused(self.loopback, ref):
+            self._send_json(403, {"ok": False, "error": "session_unavailable",
+                                  "message": HOSTED_SESSION_REFUSAL})
+            return
+        if repository and self.source is not None:
+            entry = self.source.registry.resolve(repository, ref)
+            if entry is None:
+                composed = None
+                if registry_mod.is_publishable_ref(ref):
+                    composed = self.source.compose_view(
+                        repository, publishable_only=not self.loopback)
+                if composed is not None:
+                    self._serve_bytes(json.dumps(composed).encode("utf-8"),
+                                      JSON_CTYPE, head_only)
+                    return
+                self.send_error(404, "no such snapshot")
+                return
+            if self._hosted_entry_refused(entry):
+                return
+            self._serve_bytes(entry.read_bytes(), JSON_CTYPE, head_only,
+                              entry=entry)
+            return
+        if repository:
+            self.send_error(404, "no such snapshot")
+            return
+        if self._hosted_entry_refused(self._active_entry()):
+            return
+        self._serve_bytes(self._read_snapshot(), JSON_CTYPE, head_only)
+
+    def _hosted_entry_refused(self, entry) -> bool:
+        """Refuse, and answer, when the entry a request RESOLVED to is at a
+        session ref and this is the hosted plane. Returns whether it answered."""
+        if entry is None or not hosted_ref_refused(
+                self.loopback, getattr(entry, "ref", None)):
+            return False
+        self._send_json(403, {"ok": False, "error": "session_unavailable",
+                              "message": HOSTED_SESSION_REFUSAL})
+        return True
+
     # ---- source pass-through ----
     # ARRIVED HERE AT § 3.4 SLICE S6 (RULED Q4, openxFactory#656 comment
     # 5642758731) from `openxdox/serve_projection.py`:295-361, byte for byte.
@@ -1124,18 +1235,15 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     # is the optional `<repository>@<ref>/` split it starts with, and
     # `_refuse_bare_source` is the bare route's one-line answer.
     #
-    # THEY STILL REACH THE CONSUMER, and that is unchanged rather than
-    # overlooked. `hosted_ref_refused` is FR-048, the projection column's
-    # hosted-plane confinement; `self.source.registry` and
-    # `self._hosted_entry_refused` are the snapshot registry's per-entry rules,
-    # and `_hosted_entry_refused` stays on `consumer_reach.LateProjectionRoutes`
-    # with `_serve_snapshot`, which also calls it. Q4 rules on ROUTE OWNERSHIP —
-    # "this is a route-ownership correction at § 4.3 of the packet, not a new
-    # capability" — so the arm comes here and the rules it consults stay where
-    # they are, reached through the seam this module already declares. Every one
-    # of those reaches is guarded by `self.source is not None`, which is None
-    # only in a hand-built handler, so the SHAPE of the neutral case is already
-    # here even though the BUILD arc (§ 3.5/3.6) is what makes it reachable.
+    # THE RULES THEY CONSULT ARE THE REGISTRY'S. `hosted_ref_refused` is
+    # FR-048's hosted-plane confinement, and `self.source.registry` and
+    # `self._hosted_entry_refused` apply the snapshot registry's per-entry
+    # rules. Q4 ruled on ROUTE OWNERSHIP — "this is a route-ownership
+    # correction at § 4.3 of the packet, not a new capability" — so the arm
+    # came here and its rules stayed the registry's. Since plan 034 T055 they
+    # are reached through the registry SEAM, so the route answers in a lone
+    # openDox, from openDox's own registry, and from a host's where one is
+    # registered.
     def _keyed_source(self, tail: str):
         """Split an optional `<repository>@<ref>/` prefix off a `/source/` tail.
         The prefix is honoured ONLY when it names a REGISTERED pair, so a real
@@ -1516,11 +1624,12 @@ def _read_source_revision(snapshot_path: Path) -> str | None:
 
 def _default_home_factory(root):
     """`home_corpus`'s shape (`adapter, ref = factory(root)`), over
-    `WorkingTreeCorpus` at its own bare defaults (`required_fields=()`; phase
-    2's T054 sets the neutral fields R1Q13 decides). Its `__init__` takes no
-    root -- it is root-agnostic, and `resolve(ref)` reads `ref.location` --
-    so one `CorpusRef` per call carries the root this factory was given, and
-    the adapter itself needs none.
+    `WorkingTreeCorpus` at its own defaults, whose `required_fields` is the
+    small neutral field set R1Q13 (a) decides (`NEUTRAL_FIELDS`, `title` and
+    `summary`, since plan 034 T054). Its `__init__` takes no root -- it is
+    root-agnostic, and `resolve(ref)` reads `ref.location` -- so one
+    `CorpusRef` per call carries the root this factory was given, and the
+    adapter itself needs none.
 
     READS THE WORKING TREE, uncommitted edits included -- RULING, Brett Heap,
     2026-09-27, via the holder: "Working tree (Recommended)". A standalone
@@ -1656,6 +1765,12 @@ def build_server(
     # AND openDox's OWN snapshot generator (5.4, T052; R1Q10 (a), in the same
     # R1Q3 (a) pattern), registered only where no host has contributed one.
     generator_seam.register_default(default_generator.GENERATOR)
+    # AND openDox's OWN snapshot registry and source, corpus-root predicate,
+    # writer and validators (5.5, T055; the same ruling and pattern), each only
+    # where no host has registered its own. The snapshot source below is built
+    # from the registered registry, which is what lets a server be BUILT with
+    # nothing else installed (plan 034, research R7).
+    projection_seams.register_defaults()
 
     from opendox import doxbench_turns
     # Imported HERE rather than at module scope, for the reason that is
@@ -2121,14 +2236,17 @@ def _refuse_impossible_checkout_root(value: Path | str) -> int:
         the served image mounts the empty `/srv/empty` sentinel precisely so
         `_checkout_real` reports false and the write-bearing affordances stay off.
         So it serves, and says loudly what it will not be able to do — which on a
-        LOCAL run is the same wrong path, diagnosed."""
-    from openxdox.corpus_root import corpus_root_refusal, corpus_scan_defect
+        LOCAL run is the same wrong path, diagnosed.
+
+    Both answers are the REGISTERED corpus-root predicate's
+    (`projection_seams.corpus_root`, plan 034 T055)."""
+    predicate = projection_seams.corpus_root.current()
     path = Path(value)
     if not path.is_dir():
-        print(corpus_root_refusal(value, flag="--checkout-root",
-                                  shape=_SERVE_SHAPE), file=sys.stderr)
+        print(predicate.corpus_root_refusal(value, flag="--checkout-root",
+                                            shape=_SERVE_SHAPE), file=sys.stderr)
         return 1
-    defect = corpus_scan_defect(value)
+    defect = predicate.corpus_scan_defect(value)
     if defect is not None:
         print(f"--checkout-root {path.resolve()} is not a corpus checkout: "
               f"{defect}", file=sys.stderr)
@@ -2156,6 +2274,10 @@ def main(argv: list[str] | None = None) -> int:
     corpus_adapter.register_default_home(_default_home_factory)
     # AND openDox's own snapshot generator (5.4, T052), the same way.
     generator_seam.register_default(default_generator.GENERATOR)
+    # AND openDox's own projection defaults (5.5, T055), the same way, and
+    # BEFORE the parser: its option defaults below read the registered
+    # registry (`registry_mod.DEFAULT_REF` and the data source's defaults).
+    projection_seams.register_defaults()
     parser = argparse.ArgumentParser(prog="ideation-dashboard-serve", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--web-dir", default=str(Path(__file__).resolve().parent / "web"),
@@ -2196,7 +2318,8 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"ref of the raw-file source (default: {registry_mod.DEFAULT_REF})")
     parser.add_argument("--data-source-path", default=registry_mod.DEFAULT_PUBLISH_PATH,
                         help=f"path of the published tree inside the source repository "
-                             f"(default: {registry_mod.DEFAULT_PUBLISH_PATH})")
+                             f"(default: "
+                             f"{registry_mod.DEFAULT_PUBLISH_PATH or 'the source root'})")
     parser.add_argument("--data-source-index", default=registry_mod.DEFAULT_INDEX_NAME,
                         help=f"index filename inside the data source (default: "
                              f"{registry_mod.DEFAULT_INDEX_NAME})")
@@ -2226,21 +2349,30 @@ def main(argv: list[str] | None = None) -> int:
     rc = _refuse_impossible_checkout_root(args.checkout_root)
     if rc:
         return rc
-    data_source = registry_mod.data_source_from_options(
-        directory=args.data_source_dir,
-        url=args.data_source_url or (registry_mod.github_raw_base_url(
-            args.data_source_github, ref=args.data_source_github_ref,
-            path=args.data_source_path) if args.data_source_github else None),
-        token_env=args.data_source_token_env,
-    )
-    serve(args.web_dir, args.snapshot, args.checkout_root, host=args.host,
-          port=args.port, actor=args.actor,
-          repository=args.repository, ref=args.ref,
-          data_source=data_source, index_name=args.data_source_index,
-          source_roots=_source_roots_from_args(args.source_root),
-          local_index=args.local_index,
-          project_register=args.project_register,
-          peek_ttl_seconds=args.data_source_peek_seconds)
+    try:
+        data_source = registry_mod.data_source_from_options(
+            directory=args.data_source_dir,
+            url=args.data_source_url or (registry_mod.github_raw_base_url(
+                args.data_source_github, ref=args.data_source_github_ref,
+                path=args.data_source_path) if args.data_source_github else None),
+            token_env=args.data_source_token_env,
+        )
+        serve(args.web_dir, args.snapshot, args.checkout_root, host=args.host,
+              port=args.port, actor=args.actor,
+              repository=args.repository, ref=args.ref,
+              data_source=data_source, index_name=args.data_source_index,
+              source_roots=_source_roots_from_args(args.source_root),
+              local_index=args.local_index,
+              project_register=args.project_register,
+              peek_ttl_seconds=args.data_source_peek_seconds)
+    except projection_seams.ProjectionSeamError as exc:
+        # A PROJECTION SEAM'S REFUSAL, before a socket is bound (plan 034
+        # T055): openDox's own registry refuses a declared data source or
+        # local index rather than ignoring it, since only a host's registry
+        # reads one. Reported on stderr with a non-zero status, as the
+        # `--checkout-root` refusal above is.
+        print(f"serve refused: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

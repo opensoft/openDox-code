@@ -68,10 +68,11 @@ WHAT IT HOLDS, and why each is here rather than implied:
    which is what makes them unshadowable: a contributed binding for `/source/`
    can no longer take the route back by arriving first.
 5. THE CONTAINMENT AUTHORITY IS SINGLE AND UNMOVED. `resolve_source_path` is a
-   real `def` here now, and its body is one call to
-   `snapshot_registry.resolve_within` — the SAME rule, still the projection
-   column's, reached through the late seam `serve_workbench.py` already uses at
-   five sites. A second copy of the check beside it is the fork
+   real `def` here now, and its body is one call to the registry's
+   `resolve_within` — the SAME rule, reached through the registry seam
+   `serve_workbench.py` reaches it by too (a late `consumer_reach` stand-in
+   until plan 034 T055, the registry seam's proxy since). A second copy of the
+   check beside it is the fork
    `route_extension.py`:89 names; that is what this asserts against, and it is
    also what carries openXdox-code's `tests/test_source_dot_directories.py`
    (T092 defect 10: `/source/.git/config` answering 200 with a remote's
@@ -85,9 +86,12 @@ WHAT IT HOLDS, and why each is here rather than implied:
    original move was careful not to introduce), and
    `send_error(404, "unreadable source")` for an OSError. Plus the two content
    types, and the absence of any write arm naming the route.
-7. FR-048 IS STILL ASKED. The hosted-plane confinement is the PROJECTION
-   column's rule, not this core's: the route moved and the rule did not, so both
-   `hosted_ref_refused` and `_hosted_entry_refused` must still be consulted.
+7. FR-048 IS STILL ASKED. The hosted-plane confinement is the snapshot
+   registry's rule (`is_publishable_ref`): the route moved and the rule did
+   not, so both `hosted_ref_refused` and `_hosted_entry_refused` must still be
+   consulted. Since plan 034 T055 both are `serve.py`'s own, with the core
+   `/snapshot.json` arm's handlers, and the rule is read through the registry
+   seam.
 8. THE FRONT END DID NOT CHANGE. § 5 row S6 says `views/viewer.js` and
    `views/wheel.js`:97 "become clean" — and they do it WITHOUT AN EDIT, because
    the route moved to them rather than them to it. Asserted as a positive: the
@@ -203,18 +207,27 @@ def test_the_consumer_column_no_longer_forwards_them(name):
         "is how a move looks complete and is not")
 
 
-def test_the_column_keeps_the_rules_the_ruling_did_not_move():
-    """`_serve_index` and `_serve_snapshot` stay the projection column's, and so
-    does `_hosted_entry_refused` — FR-048's per-entry hosted refusal, which
-    `_serve_snapshot` calls too. Q4 ruled on route OWNERSHIP, not on the rules a
-    route consults."""
+SNAPSHOT_METHODS = ("_query_key", "_read_snapshot", "_serve_snapshot",
+                    "_hosted_entry_refused")
+
+
+def test_the_column_keeps_only_its_own_contributed_route():
+    """`_serve_index` stays the projection column's: its contributed
+    `/snapshot-index.json` binding names it. Since plan 034 T055 it is the ONE
+    method forwarded. The core `/snapshot.json` arm's four handlers, which S6
+    left on the column, are this handler's own, because forwarded they refused
+    every `/snapshot.json` of a standalone server."""
     from opendox import consumer_reach
 
     _module, _cls, methods = consumer_reach.LateProjectionRoutes.LATE_COLUMN
-    for kept in ("_serve_index", "_serve_snapshot", "_hosted_entry_refused"):
-        assert kept in methods, (
-            f"{kept} is still openXdox's and must still be forwarded; S6 moved "
-            "the /source pair and nothing else")
+    assert methods == ("_serve_index",), methods
+
+
+@pytest.mark.parametrize("name", SNAPSHOT_METHODS)
+def test_the_snapshot_arms_handlers_are_defined_on_this_handler(name):
+    assert _method(name) is not None, (
+        f"DashboardHandler does not define {name}. Since plan 034 T055 the "
+        "core /snapshot.json arm's handlers are the neutral product's own")
 
 
 # ---------------------------------------------------------------------------
@@ -275,10 +288,10 @@ def test_the_containment_rule_is_the_one_authority_and_is_not_re_implemented():
     statements = [line for line in body.splitlines()
                   if line.strip() and not line.strip().startswith(("#", '"', "'"))]
     assert "registry_mod.resolve_within(" in body, (
-        "the containment rule is snapshot_registry.resolve_within and it did "
-        "NOT move: it is the projection column's, it is the same rule applied "
-        "per registry entry (task 2.2), and openDox reaches it through the "
-        "late consumer_reach seam serve_workbench.py already uses")
+        "the containment rule is the snapshot registry's resolve_within and it "
+        "did NOT move: it is the same rule applied per registry entry (task "
+        "2.2), and openDox reaches it through the registry seam "
+        "serve_workbench.py reaches it by too")
     assert len([s for s in statements if s.startswith("    return ")]) == 1, (
         "resolve_source_path is a delegation and must stay one. A second copy "
         "of the containment rule here is the fork route_extension.py:89 names "
@@ -368,12 +381,21 @@ def test_the_arm_still_asks_the_hosted_plane_refusal():
     assert "HOSTED_SESSION_REFUSAL" in body
 
 
-def test_hosted_ref_refused_is_still_reached_through_the_late_seam():
-    """The route moved; FR-048 did not. `hosted_ref_refused` stays bound to the
-    consumer stand-in, and `tests/test_consumer_reach.py` holds it to being read
-    only from inside a function body."""
-    node = _module_assign("hosted_ref_refused")
-    assert node is not None and "consumer_reach.hosted_ref_refused" in _source_of(node)
+def test_hosted_ref_refused_asks_the_registered_registrys_rule():
+    """The route moved; FR-048 did not. Since plan 034 T055 `hosted_ref_refused`
+    is `serve.py`'s own `def`, and "a ref a hosted plane may see" is still the
+    snapshot registry's rule, `is_publishable_ref`, read through the registry
+    seam. So there is one definition of it per process, and a standalone
+    server can answer at all."""
+    assert _module_assign("hosted_ref_refused") is None, (
+        "hosted_ref_refused is bound to a stand-in again; it is serve.py's own")
+    node = _module_function("hosted_ref_refused")
+    assert node is not None
+    body = _source_of(node)
+    assert "if loopback:" in body and "return False" in body, (
+        "the LOCAL plane is never confined")
+    assert "registry_mod.is_publishable_ref(ref)" in body, (
+        "the rule is the registered registry's, not a second spelling of it")
 
 
 # ---------------------------------------------------------------------------

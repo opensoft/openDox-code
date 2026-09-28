@@ -32,14 +32,14 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE RATHER THAN IMPLIED
    own rewriting all depend on it.
 7. THE SERVED COMPOSITION POINT IS EXECUTED, NOT DESCRIBED (RULED ASK-6 -> 1,
    `5635150678`). `serve.build_server()` reads `ROUTE_EXTENSIONS` through this
-   proxy. `opendox.serve` imports in a lone checkout since plan 034's T011, but a
-   SERVER still cannot be BUILT in one until phase 2: `build_server()` reaches
-   `openxdox.snapshot_registry` for its snapshot source and
-   `openxdox.corpus_root` in `_checkout_real` (plan 034, research R7). So the
-   statements that make up the composition point are lifted OUT of
-   `build_server`'s body BY AST and executed against a stand-in
-   `route_extension` seam. That runs the real source lines — an assertion about
-   the tree, not a paraphrase of it.
+   proxy. `opendox.serve` imports in a lone checkout since plan 034's T011, and
+   a SERVER can be BUILT in one since T055, which routed `build_server()`'s
+   snapshot source and `_checkout_real` through declared seams (plan 034,
+   research R7, measured the limit). The statements that make up the
+   composition point are lifted OUT of `build_server`'s body BY AST and
+   executed against a stand-in `route_extension` seam, which isolates them.
+   That runs the real source lines — an assertion about the tree, not a
+   paraphrase of it.
 8. THE ENTRY POINTS REGISTER openDox's OWN DEFAULT (R1Q3 (a), with (i) and
    (ii), `5817152735`; RN-1 (a), `5850003126`). `cli.build_parser()`,
    `serve.build_server()` and both `main()`s register `opendox.default_profile`
@@ -512,10 +512,11 @@ def test_the_repr_names_the_whole_composition_surface() -> None:
 # own files BY AST and executed against stand-ins for the two § 2.4 seams.
 #
 # Plan 034's T011 made both modules import, and section 10 below builds the
-# parser for real. A server still cannot be BUILT in a lone checkout until
-# phase 2 (research R7), so its composition point stays lifted. The parser's
-# lifted cases stay beside it: they hold the READ itself, apart from the entry
-# point's registration of the default that now precedes it.
+# parser for real. A server can be BUILT in a lone checkout since T055
+# (research R7 measured the limit it lifted), and its composition point stays
+# lifted because that holds the READ itself, as the parser's lifted cases
+# beside it do, apart from the entry point's registration of the default that
+# now precedes it.
 #
 # What runs is the tree's own statements — the module-level or function-level
 # binding of the proxy, and the statement that reads a facet off it — so a
@@ -979,10 +980,11 @@ def test_serve_main_registers_the_default_first_and_a_host_may_still_replace_it(
     register its own, and registering builds nothing. So a host that registers
     afterwards still replaces the default.
 
-    `serve.main()` cannot yet be run in a lone checkout, even to `--help`: its
-    own option defaults read `openxdox.snapshot_registry` (research R7; T055
-    routes that reach in phase 2). So its registration is executed from its own
-    source, as the server's is.
+    Its registration is executed from its own source, as the server's is,
+    which isolates the two statements this case is about. `serve.main()` could
+    not be run in a lone checkout at all until plan 034 T055, even to
+    `--help`, because its option defaults read `openxdox.snapshot_registry`
+    (research R7); they read the registry seam now.
     """
     _module_body_, main_body = _module_body(SERVE, "main")
     first = main_body[:2]

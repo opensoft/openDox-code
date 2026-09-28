@@ -17,6 +17,7 @@ the import path so the sibling `doc_health` package resolves either way.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tempfile
@@ -72,7 +73,6 @@ from opendox import doxbench_knowledge as knowledge_mod  # noqa: E402
 from opendox import consumer_reach  # noqa: E402
 gate_mod = consumer_reach.gate_console  # noqa: E402
 from opendox import serve as serve_mod  # noqa: E402
-snapshot_mod = consumer_reach.snapshot  # noqa: E402
 from opendox import workbench as workbench_mod  # noqa: E402
 # THE HOME-CORPUS SEAM'S DEFAULT (4.1a; plan 034 T022) -- see
 # `_default_home_factory` and `corpus_adapter.register_default_home(...)`
@@ -86,17 +86,18 @@ from opendox.runtime import local_git_adapter  # noqa: E402
 from opendox.boundary import (  # noqa: E402
     BoundaryViolation, HumanGate, OutputBoundary,
 )
-# THE CORPUS-ROOT PREDICATE AND THE SNAPSHOT GENERATOR, NAMED LATE (BUILD slice
-# 2b). Both statements named `openxdox` — the layer that PINS openDox — in an
-# IMPORT, so `import opendox.cli` required the consumer to be installed, which
-# `design.md`:243 refuses: *"what must not survive is the direction, not the
-# calls."* The four names bind to `consumer_reach` stand-ins instead, in the
-# idiom `gate_mod` and `snapshot_mod` above already use. Each resolves on first
-# CALL and refuses naming the layering; every call site below is unchanged
-# (`corpus_root_refusal` :141, `is_rfc3339_datetime` :167, `generate_snapshot`
-# :195 and :512).
-corpus_root_refusal = consumer_reach.corpus_root_refusal  # noqa: E402
-generate_snapshot = consumer_reach.generate_snapshot  # noqa: E402
+# THE CORPUS-ROOT PREDICATE, THE SNAPSHOT WRITER AND THE VALIDATOR LOOKUP, AS
+# SEAMS (plan 034 T055; #1144 5.5 and 4.3 in part; R1Q10 (a), openxFactory#656
+# comment 5850003126). BUILD slice 2b bound them, and the snapshot generator,
+# to late `consumer_reach` stand-ins over openXdox's `corpus_root`, `snapshot`
+# and `generator`, so a lone openDox refused at the first generate. Each is now
+# read from a declared seam (`opendox.projection_seams`, and the generator seam
+# for the generate operation), at the moment it is used, where either openDox's
+# own default or a host's contribution is registered. The entry points below
+# register the defaults where no host has. `is_rfc3339_datetime` is not a seam:
+# it is the neutral contract's own date-time rule, and openDox owns it.
+from opendox import projection_seams  # noqa: E402
+from opendox.rfc3339 import is_rfc3339_datetime  # noqa: E402
 
 # THE COMPOSITION POINT, BOUND AT LAST (§ 4.3; RULED ASK-2 option (2),
 # openxFactory#656 comment 5628886636). `build_parser()` below reads
@@ -132,12 +133,6 @@ from opendox import default_profile, domain_profile  # noqa: E402
 # registers it at (5.4; plan 034 T052). Importing either registers nothing:
 # `build_parser()` and `main()` below register it, only where no host has.
 from opendox import default_generator, generator_seam  # noqa: E402
-is_rfc3339_datetime = consumer_reach.is_rfc3339_datetime  # noqa: E402
-# ...and `SCANNED_ROOTS` keeps its NAME and its behaviour, not just its value:
-# :239 iterates it (`for root in SCANNED_ROOTS`) and that line is not one the
-# carve manifest declares, so the read cannot be respelled and the name has to
-# go on behaving like the tuple it was. `_LateConsumerValue` is why it can.
-SCANNED_ROOTS = consumer_reach.scanned_roots  # noqa: E402
 
 # THE MODULES THE § 2.4 SPLIT CREATED ARE NAMED RELATIVELY, and they are the
 # only imports in this file that are.
@@ -172,7 +167,8 @@ _GENERATE_SHAPE = (
 
 
 class RepoRootRefused(Exception):
-    """`--repo-root` does not name a corpus checkout (`corpus_root.corpus_scan_defect`).
+    """`--repo-root` does not name a corpus checkout, as the REGISTERED
+    corpus-root predicate decides (`projection_seams.corpus_root`).
 
     Raised from the ONE shared generation chokepoint, BEFORE any scan and before
     the `OutputBoundary` write, so no snapshot file exists to be mistaken for a
@@ -182,7 +178,8 @@ class RepoRootRefused(Exception):
 
 def _refuse_non_corpus_repo_root(args: argparse.Namespace) -> None:
     """Raise `RepoRootRefused` unless `--repo-root` could be a corpus checkout."""
-    refusal = corpus_root_refusal(args.repo_root, shape=_GENERATE_SHAPE)
+    refusal = projection_seams.corpus_root.current().corpus_root_refusal(
+        args.repo_root, shape=_GENERATE_SHAPE)
     if refusal is not None:
         raise RepoRootRefused(refusal)
 
@@ -197,16 +194,18 @@ class GeneratedAtRefused(Exception):
     scanned tree cannot supply it (the sealed source artifact
     `add-nightly-dashboard-refresh` hands the child is not a git checkout). So
     degrading here would drop the anchor in silence and produce the very
-    snapshot the flag exists to prevent: `generated_at` is OPTIONAL in
-    `contracts/schemas/ideation-dashboard-snapshot.schema.yaml`, so even
-    `--strict` would pass, the image would ship, and the served plane would lose
-    its freshness stamp with nothing anywhere saying why."""
+    snapshot the flag exists to prevent: `generated_at` is OPTIONAL in the
+    snapshot contracts (the neutral `opendox-snapshot` schema's and the
+    governed one's alike), so even `--strict` would pass, the image would ship,
+    and the served plane would lose its freshness stamp with nothing anywhere
+    saying why."""
 
 
 def _refuse_malformed_generated_at(args: argparse.Namespace) -> None:
     """Raise `GeneratedAtRefused` unless `--generated-at`, when given, is an
-    RFC 3339 date-time (`generator.is_rfc3339_datetime` — the shape the snapshot
-    schema declares for `generation.generated_at`)."""
+    RFC 3339 date-time (`opendox.rfc3339.is_rfc3339_datetime`, the neutral
+    snapshot contract's `generated-at-is-rfc3339` rule for
+    `generation.generated_at`)."""
     value = getattr(args, "generated_at", None)
     if value is None or is_rfc3339_datetime(value):
         return
@@ -230,13 +229,22 @@ def _generate_and_write(args: argparse.Namespace, output: Path) -> tuple[dict, P
     A `--repo-root` that cannot be a corpus checkout is REFUSED here — the ONE
     guard both verbs pass through, ahead of the generation and the write, because
     an empty snapshot that exits 0 is indistinguishable from an honest one (T092;
-    see `corpus_root.corpus_scan_defect`). A malformed `--generated-at` is
-    refused in the same place and for the same reason, one anchor over: both
-    verbs, ahead of the write, so no snapshot file can survive a refused run."""
+    the registered corpus-root predicate decides). A malformed `--generated-at`
+    is refused in the same place and for the same reason, one anchor over: both
+    verbs, ahead of the write, so no snapshot file can survive a refused run.
+
+    THE GENERATION AND THE WRITE GO THROUGH THE SEAMS (plan 034 T055). The
+    snapshot is generated by whichever generator is registered NOW
+    (`generator_seam.generate`, which looks it up on each call), and it is
+    written by the registered writer. An option given as `None` is not passed,
+    so an unset `--project-register` or `--possibles` asks nothing of a
+    generator that declares no such input. A given one that the registered
+    generator does not declare is refused as `GeneratorInputRefused`, before
+    anything is generated or written, and `main` reports it."""
     _refuse_non_corpus_repo_root(args)
     _refuse_malformed_generated_at(args)
     repo_root = Path(args.repo_root).resolve()
-    snapshot = generate_snapshot(
+    snapshot = generator_seam.generate(
         repo_root,
         args.repository,
         source_revision=args.source_revision,
@@ -245,16 +253,25 @@ def _generate_and_write(args: argparse.Namespace, output: Path) -> tuple[dict, P
         possibles_source=Path(args.possibles).resolve() if args.possibles else None,
     )
     boundary = OutputBoundary(output.parent, [output.name])
-    written = snapshot_mod.write_snapshot(snapshot, output, boundary)
+    written = projection_seams.writer.current().write_snapshot(
+        snapshot, output, boundary)
     return snapshot, written
 
 
 def _report(snapshot: dict, written: Path, repo_root: Path) -> None:
+    """What a generate verb says it wrote.
+
+    The neutral snapshot (`opendox-snapshot`) has no project and no project
+    group, so its line names its kind instead, rather than reporting a grouping
+    its contract does not carry. Every other kind's line is unchanged."""
     stats = _stats(snapshot)
     print(f"wrote {written}")
-    print(f"  repository={snapshot['repository']} "
-          f"project={snapshot.get('project', '<ungrouped>')} "
-          f"project_group={snapshot.get('project_group', '<none>')}")
+    if snapshot.get("kind") == generator_seam.NEUTRAL_SNAPSHOT_KIND:
+        print(f"  repository={snapshot['repository']} kind={snapshot['kind']}")
+    else:
+        print(f"  repository={snapshot['repository']} "
+              f"project={snapshot.get('project', '<ungrouped>')} "
+              f"project_group={snapshot.get('project_group', '<none>')}")
     print(f"  source_revision={snapshot['generation']['source_revision']}")
     # Printed even when absent: a missing freshness stamp used to be invisible
     # (the schema makes it optional, so nothing downstream complains), and a run
@@ -277,84 +294,107 @@ def _warn_on_empty_projection(stats: dict[str, int], repo_root: Path) -> None:
     `ideation/` exists but holds nothing passes it, and the dashboard then renders
     the same empty funnel it renders for an honest one, over copy that reads as a
     legitimate result. So the emptiness is stated on stderr, with the roots that
-    let the path through, and the human decides."""
+    let the path through, and the human decides.
+
+    The roots are the REGISTERED corpus-root predicate's (`SCANNED_ROOTS`).
+    openDox's own predicate names none, since its corpus is a whole repository,
+    and then the line says what it did accept instead."""
     if stats["documents"]:
         return
-    present = ", ".join(f"{root}/" for root in SCANNED_ROOTS
+    roots = tuple(projection_seams.corpus_root.current().SCANNED_ROOTS)
+    present = ", ".join(f"{root}/" for root in roots
                         if (repo_root / root).is_dir())
     print(f"  WARNING: ZERO documents were projected from {repo_root} — this "
           f"snapshot is EMPTY", file=sys.stderr)
-    print(f"    it was accepted as a corpus checkout because it holds {present}, "
-          f"but nothing under those roots produced a governed document",
-          file=sys.stderr)
+    if present:
+        print(f"    it was accepted as a corpus checkout because it holds {present}, "
+              f"but nothing under those roots produced a governed document",
+              file=sys.stderr)
+    else:
+        print("    it was accepted as a corpus checkout, but nothing in it was "
+              "read as a document", file=sys.stderr)
     print("    an empty corpus is legal, so this is a WARNING, not a failure — but "
           "the usual cause is a --repo-root naming the wrong tree, and the "
           "dashboard's empty funnel reads the same either way", file=sys.stderr)
 
 
-def _locate_validator(written: Path, repo_root: Path) -> Path | None:
-    """The pinned validator, searched from the OUTPUT path and then from the
-    SERVED CHECKOUT (T092 acceptance sweep, defect 8).
-
-    `snapshot.find_validator` walks UP from where it is started, and `_validate`
-    started it only at the output file's directory. `generate-and-open` defaults
-    its run dir to `tempfile.mkdtemp()`, so on the DOCUMENTED human launch the
-    search began in /tmp, no ancestor there ever holds an aggregation checkout,
-    and every such run printed "validation SKIPPED — no reachable openxFactory
-    checkout" and served an unvalidated snapshot. SC-002's fail-loud validation
-    therefore never fired for a real user, and the message blamed the one thing
-    that WAS present: `--repo-root` is by definition the openxFactory checkout
-    being rendered, and it carries the validator.
-
-    The output path is still tried FIRST, so a run that deliberately writes
-    beside a different aggregation checkout keeps using that one; `--repo-root`
-    is the fallback that makes the ordinary launch validate."""
-    return (snapshot_mod.find_validator(written.parent)
-            or snapshot_mod.find_validator(repo_root))
+def _written_kind(written: Path) -> str | None:
+    """The `kind` the written snapshot declares, which chooses its validator,
+    or None where the file declares none it can be read by."""
+    try:
+        document = json.loads(written.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    kind = document.get("kind") if isinstance(document, dict) else None
+    return kind if isinstance(kind, str) and kind else None
 
 
-def _warn_validator_not_found(written: Path, repo_root: Path) -> None:
+def _validate_by_kind(written: Path, kind: str, *, strict: bool,
+                      search_from: tuple[Path, ...]):
+    """`(validator, result)` for the written snapshot, by its KIND
+    (`projection_seams.validators`, plan 034 T055).
+
+    The validator registered for the snapshot's own kind runs it, and none
+    other: its generator's declared contract is that kind, so openDox's own
+    validator checks openDox's neutral snapshot and a host's checks the host's.
+    It is handed the two roots a search may start from, the OUTPUT path's
+    directory first and the SERVED CHECKOUT second (T092 acceptance sweep,
+    defect 8, which is why the order is kept). No validator registered for the
+    kind is VALIDATOR UNAVAILABLE, sub-case "nothing to run", and the lookup's
+    own refusal is the reason given."""
+    try:
+        validator = projection_seams.validators.for_kind(kind)
+    except projection_seams.ValidatorNotRegistered as exc:
+        return None, projection_seams.ValidationResult(
+            False, -1, "", "", None, projection_seams.VALIDATOR_UNAVAILABLE,
+            str(exc).split("\n", 1)[0])
+    return validator, validator.validate(written, strict=strict,
+                                         search_from=search_from)
+
+
+def _warn_validator_not_found(written: Path, repo_root: Path, kind: str,
+                              result) -> None:
     """VALIDATOR UNAVAILABLE, sub-case "nothing to run".
 
-    NOT routine, and — now that `_locate_validator` falls back to `--repo-root`
-    — no longer the ordinary launch's fate either. Both roots were searched, so
-    the message names BOTH and blames neither on its own: reaching here means no
-    aggregation checkout is reachable from the OUTPUT path OR from the served
-    checkout, and the snapshot went unvalidated however good the corpus was. The
-    old one-liner ("no reachable openxFactory checkout") read as routine while
-    quietly meaning "unvalidated", and pointed at a checkout that was present and
-    fine — which is exactly where it sent the T092 pass."""
+    NOT routine. Both roots were offered to the search, so the message names
+    BOTH and blames neither on its own, and then gives the lookup's own reason:
+    reaching here means no validator for this snapshot's kind could be reached
+    from the OUTPUT path OR from the served checkout, and the snapshot went
+    unvalidated however good the corpus was. The old one-liner ("no reachable
+    openxFactory checkout") read as routine while quietly meaning
+    "unvalidated", and pointed at a checkout that was present and fine — which
+    is exactly where it sent the T092 pass."""
     print("  validation SKIPPED — this snapshot was NOT checked against the "
           "pinned schema", file=sys.stderr)
-    print(f"    no {snapshot_mod.VALIDATOR_RELPATH} exists above "
-          f"{written.parent} (the OUTPUT path, searched first) or above "
+    print(f"    no validator for kind {kind!r} was reachable from "
+          f"{written.parent} (the OUTPUT path, searched first) or from "
           f"{repo_root} (--repo-root, the fallback)", file=sys.stderr)
-    print("    render a checkout that sits inside an aggregation checkout, "
-          "or write the snapshot into one (--output on generate, --run-dir "
-          "on generate-and-open), to have it validated", file=sys.stderr)
+    if result.unavailable_reason:
+        print(f"    {result.unavailable_reason}", file=sys.stderr)
 
 
-def _warn_validator_could_not_run(result) -> None:
+def _warn_validator_could_not_run(result, validator) -> None:
     """VALIDATOR UNAVAILABLE, sub-case "found it, could not run it".
 
     The validator's OWN words are relayed verbatim rather than paraphrased: it
     is the thing that knows which dependency it wanted, and quoting it keeps
     this warning correct when that message changes. What we add is the part it
     cannot know — WHICH interpreter it was run under (a separate `sys.executable`
-    process, so the libraries have to exist wherever the dashboard runs, not
-    wherever openxFactory is developed), the remedy, and the reassurance that
-    the corpus is not the accused."""
+    process, so the libraries have to exist wherever the dashboard runs), the
+    remedy the registered validator declares (`dependency_remedy`), and the
+    reassurance that the corpus is not the accused."""
     print("  validation SKIPPED — this snapshot was NOT checked against the "
           "pinned schema", file=sys.stderr)
     print(f"    the validator was found ({result.validator}) but could not run: "
           f"{result.unavailable_reason}", file=sys.stderr)
     for line in (result.stderr or result.stdout).strip().splitlines()[-10:]:
         print(f"      {line}", file=sys.stderr)
-    print(f"    it runs under {sys.executable} — a SEPARATE interpreter from "
-          f"whatever installed openxFactory — and the usual cause is that this "
-          f"one lacks its libraries. Remedy:", file=sys.stderr)
-    print(f"      {sys.executable} -m {snapshot_mod.DEPENDENCY_REMEDY}",
-          file=sys.stderr)
+    remedy = getattr(validator, "dependency_remedy", None)
+    if remedy:
+        print(f"    it runs under {sys.executable} — a SEPARATE interpreter "
+              f"from whatever installed the validator — and the usual cause is "
+              f"that this one lacks its libraries. Remedy:", file=sys.stderr)
+        print(f"      {sys.executable} -m {remedy}", file=sys.stderr)
 
 
 def _report_non_conformance(written: Path, result) -> None:
@@ -372,7 +412,9 @@ def _report_non_conformance(written: Path, result) -> None:
 
 def _validate(written: Path, args: argparse.Namespace, *,
               continues: str = "this command continues and exits 0") -> int:
-    """Post-render validation, with THREE outcomes (see `snapshot.VALIDATED`).
+    """Post-render validation, with THREE outcomes
+    (`projection_seams.VALIDATED`, `NOT_CONFORMANT`, `VALIDATOR_UNAVAILABLE`),
+    by the validator registered for the written snapshot's own KIND.
 
     A snapshot the validator REJECTS still fails the command. A validator that
     could not RUN warns loudly and returns 0 — for `generate-and-open` because a
@@ -382,21 +424,26 @@ def _validate(written: Path, args: argparse.Namespace, *,
     file is written either way, the environment is what failed, and one policy
     across both verbs is one thing to explain. `--strict` overrides that in both
     — asking for strictness and getting "we skipped the check" would make the
-    flag a lie. `validate_or_raise` is untouched and still raises: that is the
-    generator's deliberate fail-loud path, and it is chosen by code, not by a
-    human waiting on a browser tab."""
+    flag a lie. A written snapshot that declares no kind cannot choose a
+    validator, and it is not conformant either: every snapshot says which
+    contract it is."""
     if args.no_validate:
         print("  validation skipped (--no-validate)")
         return 0
     repo_root = Path(args.repo_root).resolve()
-    validator = _locate_validator(written, repo_root)
-    result = snapshot_mod.validate_snapshot(written, strict=args.strict,
-                                            validator=validator)
+    kind = _written_kind(written)
+    if kind is None:
+        print(f"  validation FAILED — {written} declares no kind, so no "
+              f"validator can be chosen for it, and a snapshot that does not "
+              f"say which contract it is conforms to none.", file=sys.stderr)
+        return 1
+    validator, result = _validate_by_kind(
+        written, kind, strict=args.strict, search_from=(written.parent, repo_root))
     if not result.available:
         if result.validator is None:
-            _warn_validator_not_found(written, repo_root)
+            _warn_validator_not_found(written, repo_root, kind, result)
         else:
-            _warn_validator_could_not_run(result)
+            _warn_validator_could_not_run(result, validator)
         if args.strict:
             print("    --strict was given and it means what it says: a run that "
                   "COULD NOT be validated FAILS rather than continuing "
@@ -551,9 +598,10 @@ def _gate_actor(repo_root: Path, args: argparse.Namespace) -> str:
 
 def _gate_snapshot(args: argparse.Namespace) -> tuple[Path, dict]:
     """Regenerate the snapshot the gate action plans against (the same
-    deterministic generation the dashboard reads)."""
+    deterministic generation the dashboard reads), through the generator seam
+    as `_generate_and_write` does (plan 034 T055)."""
     repo_root = Path(args.repo_root).resolve()
-    snapshot = generate_snapshot(
+    snapshot = generator_seam.generate(
         repo_root, args.repository, source_revision=args.source_revision,
         project_register_source=Path(args.project_register).resolve() if args.project_register else None,
         possibles_source=Path(args.possibles).resolve() if args.possibles else None)
@@ -628,10 +676,10 @@ def _session_registry(checkout_root: Path, repository: str | None):
     own remedy on stderr, and this function deletes nothing.
 
     This is the ONE place a CLI verb obtains a registry — every session-bearing
-    verb this feature adds goes through it."""
-    from openxdox.snapshot_registry import SnapshotRegistry
-
-    registry = SnapshotRegistry()
+    verb this feature adds goes through it. The registry is the REGISTERED
+    snapshot registry's (`projection_seams.registry`, plan 034 T055): openDox's
+    own where no host has contributed one."""
+    registry = projection_seams.registry.current().SnapshotRegistry()
     report = branch_session_mod.bootstrap_sessions(
         registry, repository=repository or "", checkout_root=Path(checkout_root))
     for note in report.stale:
@@ -873,11 +921,12 @@ def _add_generate_args(sub: argparse.ArgumentParser) -> None:
 
 def _default_home_factory(root):
     """`home_corpus`'s shape (`adapter, ref = factory(root)`), over
-    `WorkingTreeCorpus` at its own bare defaults (`required_fields=()`; phase
-    2's T054 sets the neutral fields R1Q13 decides). Its `__init__` takes no
-    root -- it is root-agnostic, and `resolve(ref)` reads `ref.location` --
-    so one `CorpusRef` per call carries the root this factory was given, and
-    the adapter itself needs none.
+    `WorkingTreeCorpus` at its own defaults, whose `required_fields` is the
+    small neutral field set R1Q13 (a) decides (`NEUTRAL_FIELDS`, `title` and
+    `summary`, since plan 034 T054). Its `__init__` takes no root -- it is
+    root-agnostic, and `resolve(ref)` reads `ref.location` -- so one
+    `CorpusRef` per call carries the root this factory was given, and the
+    adapter itself needs none.
 
     READS THE WORKING TREE, uncommitted edits included -- RULING, Brett Heap,
     2026-09-27, via the holder: "Working tree (Recommended)". A standalone
@@ -958,6 +1007,11 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     # AND openDox's OWN snapshot generator (5.4, T052; R1Q10 (a), in the same
     # R1Q3 (a) pattern), registered only where no host has contributed one.
     generator_seam.register_default(default_generator.GENERATOR)
+    # AND openDox's OWN snapshot registry and source, corpus-root predicate,
+    # writer and validators (5.5, T055; the same ruling and pattern), each
+    # only where no host has registered its own. Registering reads nothing, so
+    # a host that registers after this parser is built still replaces them.
+    projection_seams.register_defaults()
     parser = argparse.ArgumentParser(prog="ideation-dashboard", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1063,6 +1117,8 @@ def main(argv: list[str] | None = None, *,
     corpus_adapter.register_default_home(_default_home_factory)
     # AND openDox's own snapshot generator (5.4, T052), the same way.
     generator_seam.register_default(default_generator.GENERATOR)
+    # AND openDox's own projection defaults (5.5, T055), the same way.
+    projection_seams.register_defaults()
     args = build_parser(
         subcommand_extensions=subcommand_extensions).parse_args(argv)
     try:
@@ -1081,10 +1137,23 @@ def main(argv: list[str] | None = None, *,
         print(str(exc), file=sys.stderr)
         return 1
     except RepoRootRefused as exc:
-        # The refusal is the whole message (`corpus_root.corpus_root_refusal`);
-        # stderr and a non-zero status, so a wrapper script cannot mistake a
-        # refused run for a generated snapshot.
+        # The refusal is the whole message (the registered corpus-root
+        # predicate's `corpus_root_refusal`); stderr and a non-zero status, so
+        # a wrapper script cannot mistake a refused run for a generated
+        # snapshot.
         print(str(exc), file=sys.stderr)
+        return 1
+    except (generator_seam.GeneratorSeamError,
+            projection_seams.ProjectionSeamError,
+            corpus_adapter.CorpusRefused) as exc:
+        # A SEAM'S REFUSAL, reported like every refusal above (plan 034
+        # T055): the generator seam's (an input the registered generator does
+        # not declare, or a projection that cannot be made, such as a checkout
+        # with neither a pinned nor a resolvable revision), the projection
+        # seams', and the home corpus's own refusal of the tree it was handed.
+        # Each is raised before anything is written, so the run leaves no
+        # snapshot to be mistaken for a result.
+        print(f"{_command_label(args)} refused: {exc}", file=sys.stderr)
         return 1
 
 

@@ -40,9 +40,11 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE
    deadlocking the seam. What the default generates is T054's neutral
    projection, and `tests/test_neutral_projection.py` holds it.
 7. EACH ENTRY POINT REGISTERS IT. `cli.build_parser()` and `cli.main()` run for
-   real. `serve.build_server()` and `serve.main()` still cannot run in a lone
-   checkout (research R7), so their registration is executed from their own
-   source lines, as `tests/test_authoring_seam.py` does for the home corpus.
+   real. `serve.build_server()`'s and `serve.main()`'s registration is executed
+   from their own source lines, as `tests/test_authoring_seam.py` does for the
+   home corpus, because that isolates the one statement under test. Since plan
+   034 T055 both also run whole in a lone checkout
+   (`tests/test_projection_seams.py`).
 8. `CorpusAdapter` STAYS CLOSED AT SIX MEMBERS.
 
 `--noconftest` SAFE. The autouse fixture below saves and restores the three
@@ -919,10 +921,11 @@ def test_a_host_registered_first_is_kept_by_the_cli_entry_points() -> None:
 
 @pytest.mark.parametrize("function", ("build_server", "main"))
 def test_the_server_entry_points_register_openDoxs_own_generator(function: str) -> None:
-    """`serve.build_server()` and `serve.main()` cannot run in a lone checkout
-    until phase 2 routes their snapshot source (research R7). So the import
-    and the registration are lifted out of `serve.py` and executed: the tree's
-    own statements, not a paraphrase of them."""
+    """The import and the registration, lifted out of `serve.py` and executed:
+    the tree's own statements, not a paraphrase of them. They were lifted
+    because `serve.build_server()` and `serve.main()` could not run in a lone
+    checkout until plan 034 T055 routed their snapshot source (research R7);
+    they stay lifted because that isolates the one statement under test."""
     module_body, body = _module_and_function(SERVE, function)
     lifted = [stmt for stmt in module_body if _binds_the_seam(stmt)] + \
              [stmt for stmt in body if _is_the_registration(stmt)]

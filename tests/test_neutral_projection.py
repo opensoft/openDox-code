@@ -11,8 +11,9 @@ writing T053's neutral snapshot. Its falsifier, from plan 034's tasks.md:
     source.
 
 Those are the first three cases below, in that order. F5.3 itself runs
-`python -m opendox.cli generate`, whose verb reaches the consumer's generator
-until T055 routes it, so T056 and T063 quote it.
+`python -m opendox.cli generate`, whose verb generates through the generator
+seam since T055, with openDox's own generator where no host registered one,
+and T056 and T063 quote it.
 
 THE SCHEMA. `tests/fixtures/opendox-snapshot.schema.yaml` is openDox-spec's
 neutral snapshot contract, copied byte for byte from openDox-spec#16 at
