@@ -1429,16 +1429,18 @@ def test_the_prompt_dialect_is_unchanged_byte_for_byte(tmp_path):
         "content-not-text", "the-other-grammar"])
 def test_a_chat_answer_off_the_declared_path_is_malformed(tmp_path, answer):
     port, _opener = _port(tmp_path, answer, dialect=OPENAI_CHAT)
+    envelope = _Envelope()
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        port.dispatch(_Envelope())
+        port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_MALFORMED
 
 
 def test_a_chat_shaped_answer_is_not_the_prompt_grammars_answer(tmp_path):
     """Each arm reads its own grammar and no other."""
     port, _opener = _port(tmp_path, _chat_completion())
+    envelope = _Envelope()
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        port.dispatch(_Envelope())
+        port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_MALFORMED
 
 
@@ -1465,15 +1467,17 @@ def test_the_expiry_ruling_holds_for_the_chat_grammar(tmp_path):
         provider_mod.REASON_EXPIRY_REMINT,
         provider_mod.REASON_PAID_RETRY,
     ]
-    assert printed and "re-minted once and retried" in printed[0]
+    assert printed
+    assert "re-minted once and retried" in printed[0]
 
 
 def test_the_answer_bound_holds_for_the_chat_grammar(tmp_path):
     bound = provider_mod.MAX_PROVIDER_ANSWER_BYTES
     oversize = json.dumps(_chat_completion("x" * bound)).encode("utf-8")
     port, _opener = _port(tmp_path, oversize, dialect=OPENAI_CHAT)
+    envelope = _Envelope()
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        port.dispatch(_Envelope())
+        port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_MALFORMED
 
 
@@ -1483,8 +1487,9 @@ def test_a_chat_provider_refusal_lands_on_the_fixed_sentence(tmp_path):
         urllib.error.HTTPError(ENDPOINT, 400, "Bad Request", {},
                                io.BytesIO(b'{"error":{"message":"leaky"}}')),
         dialect=OPENAI_CHAT)
+    envelope = _Envelope()
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        port.dispatch(_Envelope())
+        port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_REFUSED
     assert "leaky" not in str(caught.value)
 
