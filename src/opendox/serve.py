@@ -1164,11 +1164,16 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         return ((params.get("repository") or [None])[0],
                 (params.get("ref") or [None])[0])
 
-    def _read_snapshot(self) -> bytes | None:
-        """The ACTIVE snapshot's bytes, through the registry when a source is
-        bound, and from the configured path when none is (a hand-built
-        handler)."""
-        entry = self._active_entry()
+    def _read_snapshot(self, entry=None) -> bytes | None:
+        """The bytes of `entry`, the active entry a request resolved to, and
+        of the configured path where it resolved none (a hand-built handler, or
+        a source with nothing registered).
+
+        It never resolves the active entry itself. `_serve_snapshot` resolves
+        it ONCE and hands the same entry to the refusal, this read and the
+        headers, so a refresh that changes the active entry mid-request cannot
+        pass the hosted refusal with one entry and serve another's bytes
+        (FR-048)."""
         if entry is not None:
             return entry.read_bytes()
         try:
@@ -1214,9 +1219,13 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         if repository:
             self.send_error(404, "no such snapshot")
             return
-        if self._hosted_entry_refused(self._active_entry()):
+        # ONE RESOLUTION of the active entry, for the refusal, the body and
+        # the headers alike (see `_read_snapshot`).
+        entry = self._active_entry()
+        if self._hosted_entry_refused(entry):
             return
-        self._serve_bytes(self._read_snapshot(), JSON_CTYPE, head_only)
+        self._serve_bytes(self._read_snapshot(entry), JSON_CTYPE, head_only,
+                          entry=entry)
 
     def _hosted_entry_refused(self, entry) -> bool:
         """Refuse, and answer, when the entry a request RESOLVED to is at a

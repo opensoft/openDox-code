@@ -817,6 +817,44 @@ def test_the_hosted_plane_refuses_a_session_ref_named_or_active(tmp_path) -> Non
     assert status == 403, "the refusal follows the entry the request resolved to"
 
 
+def test_one_request_serves_the_entry_its_refusal_checked(tmp_path, monkeypatch) -> None:
+    """FR-048 against a concurrent refresh. The active entry is resolved ONCE
+    for the refusal, the body and the headers: a refresh that makes a session
+    active right after the refusal passed `main` cannot put the session's bytes
+    in that response."""
+    _repo, _out, httpd = _served(tmp_path)
+    bound = httpd.RequestHandlerClass.func
+    bound.loopback = False
+    main = bound.source.registry.active
+    session_path = tmp_path / "session.json"
+    session_path.write_text('{"kind": "a-session-snapshot"}', encoding="utf-8")
+    session = default_registry.SnapshotEntry("garden", "draft/t",
+                                             snapshot_path=session_path)
+    landed = []
+
+    class _Registry(default_registry.SnapshotRegistry):
+        @property
+        def active(self):
+            return session if landed else main
+
+    registry = _Registry()
+    registry.register(main)
+    registry.register(session)
+    bound.source.registry = registry
+    checked = bound._hosted_entry_refused
+
+    def refusal_then_a_refresh_lands(self, entry):
+        answered = checked(self, entry)
+        landed.append(True)
+        return answered
+
+    monkeypatch.setattr(bound, "_hosted_entry_refused", refusal_then_a_refresh_lands)
+    status, headers, body = _get(httpd, "/snapshot.json")
+    assert status == 200 and landed, "the refusal ran, and a refresh landed after it"
+    assert json.loads(body)["kind"] == NEUTRAL, "the body is the entry the refusal checked"
+    assert headers["X-Snapshot-Ref"] == "main"
+
+
 def test_hosted_ref_refused_asks_the_registered_registry() -> None:
     ps.register_defaults()
     assert serve.hosted_ref_refused(True, "draft/t") is False
@@ -879,6 +917,33 @@ def test_the_writer_is_canonical_and_writes_only_through_the_boundary(tmp_path) 
                     '"d": "\\u00e9"\n  },\n  "b": 1\n}\n')
     with pytest.raises(BoundaryViolation):
         writer.write_snapshot(snapshot, tmp_path / "elsewhere.json", boundary)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"),
+                                   Path("not-json"), {"a": {1, 2}}])
+def test_the_writer_refuses_what_json_cannot_carry(tmp_path, value) -> None:
+    """Never the `NaN`/`Infinity` that `json` would otherwise write, which no
+    JSON reader parses; and nothing is written."""
+    boundary = OutputBoundary(tmp_path, ["snapshot.json"])
+    with pytest.raises(default_projection.SnapshotNotWritable) as caught:
+        default_projection.WRITER.write_snapshot(
+            {"kind": NEUTRAL, "value": value}, tmp_path / "snapshot.json", boundary)
+    assert isinstance(caught.value, ps.ProjectionSeamError)
+    assert "JSON cannot carry" in str(caught.value)
+    assert not (tmp_path / "snapshot.json").exists()
+
+
+def test_generate_refuses_a_snapshot_json_cannot_carry(tmp_path, capsys) -> None:
+    def operation(repo_root, repository, *, source_revision=None, generated_at=None):
+        return {"schema_version": 1, "kind": "host-snapshot", "repository": repository,
+                "generation": {"source_revision": "r"}, "score": float("nan")}
+
+    gs.register(gs.SnapshotGenerator(contract="host-snapshot", generate=operation))
+    out = tmp_path / "out" / "snapshot.json"
+    assert _generate(_repository(tmp_path), out, "--no-validate") == 1
+    err = capsys.readouterr().err
+    assert "generate refused:" in err and "JSON cannot carry" in err
+    assert not out.exists()
 
 
 def test_the_validator_stand_in_concludes_nothing_and_names_T057(tmp_path) -> None:

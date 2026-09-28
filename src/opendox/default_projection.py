@@ -24,7 +24,9 @@ folder with a staged origin, which is what `change_rows` enumerates for
 `WRITER`, THE SNAPSHOT WRITER. Canonical JSON: keys sorted at every depth, two
 spaces of indent, ASCII only, a trailing newline, and no clock. So the same
 snapshot is the same bytes. It writes through the interactivity boundary it is
-handed, and only there.
+handed, and only there. A snapshot holding what JSON cannot carry (NaN, an
+infinity, a value of no JSON type) is refused, `SnapshotNotWritable`, before
+anything is written.
 
 `VALIDATOR`, THE VALIDATOR LOOKUP'S DEFAULT, FOR openDox's OWN KINDS. It is
 openDox's own validator, plan 034's T057, which this tree does not carry yet.
@@ -54,7 +56,7 @@ from typing import Any
 from opendox import generator_seam, projection_seams
 
 __all__ = ["CORPUS_ROOT", "CorpusRoot", "OWN_KINDS", "OwnValidatorNotBuilt",
-           "VALIDATOR", "WRITER", "Writer"]
+           "SnapshotNotWritable", "VALIDATOR", "WRITER", "Writer"]
 
 #: The workbench manifest's kind, `opendox.workbench.KIND`, restated because
 #: `workbench` imports PyYAML and this module must import with nothing extra.
@@ -134,15 +136,35 @@ class CorpusRoot:
         return ()
 
 
+class SnapshotNotWritable(projection_seams.ProjectionSeamError):
+    """The snapshot holds a value JSON cannot carry, so the writer refuses it
+    and writes nothing. A generate verb reports it as a refusal."""
+
+
 class Writer:
     """openDox's own canonical snapshot writer."""
 
     @staticmethod
     def canonical_json(snapshot: dict[str, Any]) -> str:
         """Deterministic JSON: keys sorted at every depth, two spaces of
-        indent, ASCII only, and a trailing newline."""
-        return json.dumps(snapshot, indent=2, sort_keys=True,
-                          ensure_ascii=True) + "\n"
+        indent, ASCII only, and a trailing newline.
+
+        NOTHING JSON CANNOT CARRY. NaN and the infinities are refused
+        (`allow_nan=False`) rather than written as the `NaN` and `Infinity`
+        that Python's `json` would otherwise emit, which no JSON reader parses:
+        not the server's, not a browser's, not a validator's. So is a value of
+        no JSON type, and a structure that contains itself. A registered
+        generator can answer any of them, and the seam checks only a
+        snapshot's kind and version."""
+        try:
+            return json.dumps(snapshot, indent=2, sort_keys=True,
+                              ensure_ascii=True, allow_nan=False) + "\n"
+        except (TypeError, ValueError) as exc:
+            raise SnapshotNotWritable(
+                f"the snapshot holds a value JSON cannot carry ({exc}). NaN, "
+                "the infinities and values of no JSON type have no JSON "
+                "spelling, and a file carrying one would be one no JSON reader "
+                "parses, so nothing was written") from exc
 
     def write_snapshot(self, snapshot: dict[str, Any], path: Path | str,
                        boundary) -> Path:
