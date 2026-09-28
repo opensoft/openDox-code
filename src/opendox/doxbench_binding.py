@@ -93,21 +93,31 @@ AUTH_KIND_OAUTH = "oauth"
 AUTH_KINDS: tuple[str, ...] = (AUTH_KIND_API_KEY, AUTH_KIND_OAUTH)
 
 #: The CLOSED dialect vocabulary a binding may declare — the request grammar the
-#: provider client speaks at the declared endpoint. ONE member today: this
-#: repository's own already-declared turn shape, a prompt in and an
-#: `assistant_prose` out, which is the shape `doxbench_model.dispatch_turn`
-#: validates on the way back, so no second response grammar exists to keep
-#: honest. CLOSED rather than open because an UNKNOWN dialect must REFUSE rather
-#: than be guessed at: sending an assembled prompt to an endpoint whose grammar
-#: this client does not know is a paid call that cannot succeed. A second member
-#: joins here and an arm joins beside the first in `doxbench_provider`; the check
-#: is never loosened.
+#: provider client speaks at the declared endpoint. CLOSED rather than open
+#: because an UNKNOWN dialect must REFUSE rather than be guessed at: sending an
+#: assembled prompt to an endpoint whose grammar this client does not know is a
+#: paid call that cannot succeed. A member joins here and an arm joins beside the
+#: others in `doxbench_provider`; the check is never loosened.
+#:
+#: TWO MEMBERS, and the second joined exactly that way (#1144 box 16.1; plan 034
+#: T078):
+#:
+#:   * `xfactory-prompt-v1` — this repository's own already-declared turn shape,
+#:     a POST of a model and a prompt answered by an `assistant_prose`, which is
+#:     the shape `doxbench_model.dispatch_turn` validates on the way back. It
+#:     stays FIRST, and it is unchanged byte for byte;
+#:   * `openai-chat-v1` — the OpenAI-compatible chat-completions grammar: a
+#:     request of a model and a list of messages, answered by the content of
+#:     the first choice's message. It is what a hosted API and the usual local
+#:     server both speak, which the first member does not. Its arm is in
+#:     `doxbench_provider` alone, beside the first one's.
 #:
 #: THE VOCABULARY LIVES HERE, on the record that declares it, and
 #: `doxbench_provider` reads it from this module — so an unknown dialect is
 #: refused when an operator DECLARES the binding rather than when a turn fails.
 DIALECT_XFACTORY_PROMPT_V1 = "xfactory-prompt-v1"
-DIALECTS: tuple[str, ...] = (DIALECT_XFACTORY_PROMPT_V1,)
+DIALECT_OPENAI_CHAT_V1 = "openai-chat-v1"
+DIALECTS: tuple[str, ...] = (DIALECT_XFACTORY_PROMPT_V1, DIALECT_OPENAI_CHAT_V1)
 
 #: The URL schemes a declared endpoint may carry. `http://` is permitted for the
 #: on-this-host proxy posture an operator may legitimately run; a scheme this
