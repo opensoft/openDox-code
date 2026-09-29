@@ -679,6 +679,37 @@ def test_a_recursive_schema_that_moves_into_the_instance_is_evaluated() -> None:
     assert _found({"if": {"$ref": "#"}, "type": "string"}, 5) == {("type", "")}
 
 
+def test_an_instance_deeper_than_the_walk_is_judged_not_crashed_on() -> None:
+    """Copilot at 27bcefc0 (r4136329332). The tree above recurs once per level
+    of the instance, so a deep enough tree raised `RecursionError` out of the
+    validator. A 200-level tree already did, at the default limit of 1000. It
+    is now judged: one `DEPTH_RULE` violation at the root, so it is never
+    valid. What the walk found before the limit stands, and a tree the walk
+    does reach is judged as before."""
+    tree = {"$defs": {"node": {"type": "object", "required": ["name"], "properties": {
+                "name": {"type": "string"},
+                "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}}}},
+            "$ref": "#/$defs/node"}
+
+    def tree_of(levels: int) -> dict[str, Any]:
+        node: dict[str, Any] = {"name": "leaf"}
+        for _ in range(levels):
+            node = {"name": "n", "children": [node]}
+        return node
+
+    built = _built(tree)
+    assert built.violations(tree_of(50)) == []
+    deep = tree_of(5000)
+    [found] = built.violations(deep)
+    assert (found.rule, found.where, found.keyword) == (V.DEPTH_RULE, "", "depth")
+    assert found.line().startswith("[evaluation-depth] <root>: ")
+    assert not built.is_valid(deep)
+    # A broken node near the top is still named, beside the limit.
+    del deep["children"][0]["name"]
+    assert {(v.rule, v.where) for v in built.violations(deep)} == {
+        ("required", "/children/0"), (V.DEPTH_RULE, "")}
+
+
 def test_a_copy_nested_deeper_than_the_walk_is_refused() -> None:
     """Python's recursion limit bounds the walk. A copy nested past it is
     refused as unavailable, never a RecursionError out of the build."""

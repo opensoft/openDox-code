@@ -75,7 +75,11 @@ another shape (`_SHAPES`: `uniqueItems: "yes"`, `type: {}`, a negative
 would move where its references resolve), a subschema that contains itself,
 and a cycle of references that never moves into the instance (`$ref: "#"`),
 which no evaluation ends. A recursive schema that moves into the instance
-before it recurs (a tree's children, as items) is evaluated. The build walks
+before it recurs (a tree's children, as items) is evaluated. It recurs once per
+level of the instance, so an instance nested past what Python's recursion limit
+lets the walk reach cannot be walked to its end. Such an instance is judged,
+never crashed on: it breaks `DEPTH_RULE`, at the root, so it is never valid,
+and whatever the walk found before the limit stands. The build walks
 every subschema and every reference's target, so nothing the evaluator can
 reach escapes those checks, and a malformed copy is reported as unavailable
 instead of crashing the build or an evaluation, or misjudging an instance.
@@ -133,6 +137,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 from opendox import contracts
 
 __all__ = [
+    "DEPTH_RULE",
     "DIALECT",
     "FORMATS",
     "KEYWORDS",
@@ -152,6 +157,14 @@ __all__ = [
 
 #: The one dialect the four copies declare, and the one this module evaluates.
 DIALECT = "https://json-schema.org/draft/2020-12/schema"
+
+#: The rule an instance breaks when it nests deeper than the evaluation can
+#: walk. It is this evaluator's own limit, and no contract's rule. A recursive
+#: schema that moves into the instance recurs once per level, so a deep enough
+#: instance reaches Python's recursion limit. It is judged, not crashed on
+#: (`KindValidator.iter_errors`): one violation at the root, so it is never
+#: valid, which is failing closed.
+DEPTH_RULE = "evaluation-depth"
 
 #: THE INPUT SET (7.1, as batch G amends it): each instance kind openDox
 #: validates, and where its schema is, as (packaged copy id, JSON pointer into
@@ -859,7 +872,20 @@ class KindValidator:
     # -- evaluating ---------------------------------------------------------
 
     def iter_errors(self, instance: Any) -> Iterator[Violation]:
-        yield from self._evaluate(instance, self._entry, ())
+        try:
+            yield from self._evaluate(instance, self._entry, ())
+        except RecursionError:
+            # JUDGED, NOT CRASHED ON (Copilot at openDox-code#58 27bcefc0,
+            # r4136329332). A recursive schema that moves into the instance
+            # recurs once per level, so an instance nested past what Python's
+            # recursion limit lets the walk reach raised out of the validator.
+            # The walk's frames have unwound by the time this is yielded.
+            # What it found before the limit stands, and one violation names
+            # the limit, so the instance is never valid.
+            yield Violation(DEPTH_RULE, (), "depth",
+                            "the instance nests deeper than this validator's "
+                            "evaluation can walk (Python's recursion limit), so "
+                            "it is not judged valid")
         for check in self._reference:
             yield from check(instance)
 
