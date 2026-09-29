@@ -971,6 +971,32 @@ def test_the_lead_block_is_the_neutral_fields_in_order_then_a_blank_line() -> No
     assert set(lga.NEUTRAL_FIELDS) <= set(authoring.SCAFFOLD_LEAD_FIELDS)
 
 
+@pytest.mark.parametrize("field", ["title", "summary"])
+@pytest.mark.parametrize("breaker", ["\n", "\r", "\r\n", "\x0b", "\x1e", "\x85",
+                                     " ", " ", "\t", "\x00"])
+def test_a_lead_value_that_is_not_one_header_line_is_refused(
+        field: str, breaker: str, tmp_path: Path) -> None:
+    """A leading `title:` or `summary:` is ONE header line. A value that
+    breaks it would put a line of the caller's choosing into the block the
+    default adapter reads: `summary="ok\\nstage: completion"` read as the
+    document's own `stage:` (Copilot at openDox-code#57 1a603677,
+    r4139383472). So it is refused before anything is rendered or written.
+    A value with no lead block to break keeps the governed layout as before,
+    and an ordinary value with inner spaces and dashes still leads."""
+    value = f"ok{breaker}stage: completion"
+    asked = {**_CREATE, field: value}
+    with pytest.raises(ValueError, match=f"leading {field}: must be one header line"):
+        authoring.render_scaffold(**asked, lead_fields=("title", "summary"))
+    assert authoring.render_scaffold(**asked).startswith("# "), (
+        "with no lead block, nothing new is refused")
+    with pytest.raises(ValueError):
+        authoring.create_scaffold(OutputBoundary(tmp_path, actor=HUMAN), **asked)
+    assert not any(tmp_path.rglob("*.md")), "a refused create writes nothing"
+    fine = {**_CREATE, field: "A shed roof — pitched, not flat"}
+    assert authoring.render_scaffold(**fine, lead_fields=(field,)).startswith(
+        f"{field}: A shed roof — pitched, not flat\n")
+
+
 def test_a_scaffold_with_no_corpus_registered_refuses_and_writes_nothing(
         tmp_path: Path) -> None:
     """`create_scaffold` asks the corpus which fields to lead with, as
