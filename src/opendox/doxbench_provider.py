@@ -637,7 +637,20 @@ def mint(binding, *, retry_of: str | None = None,
     this check. It is repeated before the broker is asked all the same, as the
     built-in resolver repeats it before it reads, because this is the function
     that obtains the token. What reaches it is a programming error, and
-    nothing has been minted when it is raised."""
+    nothing has been minted when it is raised.
+
+    A TOKEN THAT CANNOT BE PRESENTED AS IT IS, IS REFUSED, with
+    `DIAG_BROKER_MALFORMED`. The test is the built-in resolver's own
+    (`_presentable`), and the refusal comes before the port holds the token
+    or any provider is contacted. Measured at T080's head: a token outside
+    latin-1 failed inside `urllib` as `DIAG_PROVIDER_UNREACHABLE`, which
+    names the wrong party, and one with a space or another non-ASCII
+    character was sent as it was.
+
+    NO REFUSAL OF THE ANSWER KEEPS IT. The answer carries the token, so every
+    refusal raised once it is read is raised again here, afresh, after the
+    answer has left this frame. It keeps no frame, cause or context that
+    holds the token, as the built-in resolver lets go of what it read."""
     if not binding_mod.is_a_private_route(binding.endpoint):
         raise AssertionError(
             f"binding {binding.id!r} would present a minted token over a "
@@ -645,9 +658,28 @@ def mint(binding, *, retry_of: str | None = None,
             "declared; nothing was minted")
     answer = runner(broker_operation_argv(binding, OPERATION_MINT,
                                           retry_of=retry_of))
+    try:
+        return _minted_token(answer, binding)
+    except BrokerRefused as refusal:
+        failure = refusal.diagnostic
+    del answer
+    raise BrokerRefused(failure)
+
+
+def _minted_token(answer: object, binding) -> MintedToken:
+    """A mint answer, read EXACTLY (`_answer_document`), as a `MintedToken`.
+
+    Every refusal is `DIAG_BROKER_MALFORMED`: an answer of another shape, a
+    token that cannot be presented as it is (`_presentable`, which also
+    refuses one that is not a string or is blank), or an expiry or an audit
+    reference the declaration does not allow. `mint` raises each one again,
+    holding nothing of the answer."""
     document = _answer_document(answer, BROKER_MINT_KIND, MINT_FIELDS)
+    token = document["token"]
+    if not _presentable(token):
+        raise BrokerRefused(DIAG_BROKER_MALFORMED)
     return MintedToken(
-        token=_declared_string(document, "token"),
+        token=token,
         expires_at=_parse_expires_at(document["expires_at"]),
         endpoint=binding.endpoint,
         dialect=binding.dialect,
@@ -691,8 +723,9 @@ def list_references(binding, *, runner=subprocess_broker_runner) -> list:
 # ---------------------------------------------------------------------------
 
 def _presentable(value: object) -> bool:
-    """Whether a resolved value can be presented AS IT IS, as the bearer
-    credential of the request's Authorization header.
+    """Whether a credential can be presented AS IT IS, as the bearer
+    credential of the request's Authorization header. It is asked of a value
+    the built-in resolver read, and of a token a broker minted (`mint`).
 
     It must be a non-empty string of printable ASCII with no whitespace, which
     a bearer credential is by its grammar (RFC 6750's `b64token` is narrower
@@ -706,7 +739,8 @@ def _presentable(value: object) -> bool:
       * any other non-ASCII character, and an embedded space, is SENT, as a
         credential the grammar does not allow.
     Trimming or re-encoding the value would present a credential other than
-    the one the reference names, so the value is refused instead."""
+    the one the reference names or the broker minted, so the value is
+    refused instead."""
     return (isinstance(value, str) and value != ""
             and all("!" <= character <= "~" for character in value))
 
@@ -895,9 +929,11 @@ class _PresentedCredential:
     of openDox-code#63 at `d240fd50`). A traceback keeps the frames it passes
     through, and an error reporter that records a frame's locals records them
     by their repr. So in this module a raw credential is a local of no frame
-    except the one that reads it: `resolve_credential_reference`, until it
-    returns. Every frame that carries a credential to the provider carries
-    this wrapper instead."""
+    except the ones that read it, until they return:
+    `resolve_credential_reference`, and `subprocess_broker_runner`, `mint`
+    and `_minted_token` reading a broker's answer. Every frame that carries a
+    credential to the provider carries this wrapper instead, or a
+    `MintedToken`."""
 
     __slots__ = ("_value",)
 

@@ -3117,3 +3117,119 @@ def test_a_re_mint_the_broker_refuses_after_an_expiry_keeps_no_context(
     assert refusal.diagnostic == provider_mod.DIAG_BROKER_REFUSED
     assert len(opener.requests) == 1, "no paid retry without a token"
     assert refusal.__context__ is None
+
+
+@pytest.mark.parametrize("token", [
+    f"{SENTINEL_TOKEN}€", f"{SENTINEL_TOKEN}é",
+    "mint-stand-in NOT-A-TOKEN", "mint-stand-in\tNOT-A-TOKEN",
+    f"{SENTINEL_TOKEN}\n", f"{SENTINEL_TOKEN}\x00", f"{SENTINEL_TOKEN}\x7f",
+    f"{SENTINEL_TOKEN} ",
+], ids=["outside-latin-1", "latin-1-not-ascii", "embedded-space", "tab",
+        "line-break", "nul", "delete", "trailing-space"])
+def test_an_unpresentable_token_is_refused_before_any_request(tmp_path,
+                                                            token):
+    """Gap 4. A bearer credential is printable ASCII with no whitespace, and
+    the minted token is held to the test the built-in resolver's value
+    meets. At T080's head each of these reached the opener as it was. A
+    refused answer is no mint: nothing is held, and nothing is recorded."""
+    port, opener = _port(tmp_path, _chat_completion(), dialect=OPENAI_CHAT,
+                         token=token)
+    refusal = _refused_turn(port)
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    assert opener.requests == [], "no provider was contacted"
+    assert port.catalog().entries[0].available is False
+    assert port.ledger == []
+
+
+def test_a_token_outside_latin_1_is_refused_before_any_header_is_built(
+        tmp_path, monkeypatch):
+    """Gap 4, over a real socket, because the failure was `urllib`'s. At
+    T080's head such a token failed while the header was encoded, and the
+    turn read `DIAG_PROVIDER_UNREACHABLE`, which names the wrong party. It
+    is now the broker's answer that is refused, nothing is chained, and no
+    request is sent."""
+    monkeypatch.setattr(_ChatCompletionsHandler, "seen", {})
+    with _stand_in_provider(_ChatCompletionsHandler) as base:
+        refusal = _refused_turn(_minting_port(
+            tmp_path, f"{base}/v1/chat/completions",
+            token=f"{SENTINEL_TOKEN}€"))
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert _ChatCompletionsHandler.seen == {}, "no request reached the server"
+
+
+def test_a_token_of_printable_ascii_is_presented_as_it_is(tmp_path):
+    """The control for gap 4: the check refuses what a bearer credential
+    cannot be and nothing more, so every printable ASCII character but the
+    space is presented unchanged."""
+    token = "mint-" + "".join(chr(code) for code in range(0x21, 0x7F))
+    port, opener = _port(tmp_path, _chat_completion("a"), dialect=OPENAI_CHAT,
+                         token=token)
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    assert opener.requests[0].get_header("Authorization") == f"Bearer {token}"
+
+
+def test_an_unpresentable_token_leaves_no_frame_that_holds_it(tmp_path):
+    """A token refused as unpresentable can still be most of a token, such
+    as one with a line break after it. The refusal keeps no frame that holds
+    it, as the built-in resolver's refusal of an unpresentable value keeps
+    none."""
+    port, _opener = _port(tmp_path, _chat_completion(), dialect=OPENAI_CHAT,
+                          token=f"{SENTINEL_TOKEN}\n")
+    refusal = _refused_turn(port)
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    assert _locals_holding(refusal, SENTINEL_TOKEN) == []
+
+
+def _mint_answer(**changes) -> dict:
+    """A mint answer in the declared shape, carrying `SENTINEL_TOKEN`, with
+    `changes` applied."""
+    answer = {
+        "schema_version": 1, "kind": "openprofiler_broker_mint",
+        "reference": FAKE_REFERENCE, "binding": "openprofiler-demo",
+        "provider": "demo-provider", "auth_kind": "api_key",
+        "token": SENTINEL_TOKEN, "token_type": "api_key",
+        "issued_at": "2026-08-26T14:07:52Z",
+        "expires_at": _iso(time.time() + 300), "expires_in_seconds": 300,
+        "scope": [], "issued_by": "openprofiler-broker/0.1.4-fake",
+        "approved_by": "brett@opensoft.one",
+        "audit_ref": "opaud-" + "0" * 24, "retry_of": None,
+        "enforcement": {"expiry": "broker_bookkeeping", "scope": "declared"}}
+    answer.update(changes)
+    return answer
+
+
+def _broker_answering(tmp_path, text: str) -> Path:
+    """A broker that answers every operation with `text`, verbatim."""
+    script = tmp_path / "answering-broker.py"
+    script.write_text(f"import sys\nsys.stdout.write({text!r})\n",
+                      encoding="utf-8")
+    return script
+
+
+def test_the_declared_mint_answer_mints(tmp_path):
+    """The control for the case below: this answer, unchanged, mints."""
+    script = _broker_answering(tmp_path, json.dumps(_mint_answer()))
+    assert provider_mod.mint(_broker_binding(script)).token == SENTINEL_TOKEN
+
+
+@pytest.mark.parametrize("text", [
+    json.dumps(_mint_answer(expires_at="not-an-instant")),
+    json.dumps(_mint_answer(debug_note="a key the declaration does not name")),
+    json.dumps(_mint_answer())[:-1],
+], ids=["expiry-malformed", "undeclared-key", "not-json"])
+def test_a_malformed_mint_answer_keeps_no_frame_that_holds_its_token(
+        tmp_path, text):
+    """The same rule for every refusal of the answer that carried the token.
+    At T080's head the answer stayed in the refusal's frames (measured:
+    `mint.answer`, `mint.document`, `_answer_document.text` and
+    `_answer_document.document`). Its refusal keeps no frame, cause or
+    context that holds the token."""
+    binding = _broker_binding(_broker_answering(tmp_path, text))
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.mint(binding)
+    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert _locals_holding(caught.value, SENTINEL_TOKEN) == []
