@@ -32,8 +32,8 @@ A slice that moved a route and left its only proof in the non-running half
 would be a slice whose claim rests on a commit message. This module is that
 proof.
 
-So this module is the RUNNABLE half, in the shape its four neighbours on
-`validate`'s explicit list already use (`test_leg_shape.py`,
+So this module is the RUNNABLE half, in the shape its four neighbours on the
+explicit list `validate` ran until plan 034 T036 already use (`test_leg_shape.py`,
 `test_consumer_reach.py`, `test_web_boundary.py`, `test_view_registry.py`): it
 PARSES `src/opendox/serve.py` and reads the live `opendox.consumer_reach`, and
 it imports `opendox.serve` nowhere. It was written while `opendox.serve` could
@@ -93,7 +93,8 @@ WHAT IT HOLDS, and why each is here rather than implied:
    the route moved to them rather than them to it. Asserted as a positive: the
    four `/source/` literals are still there, in files this slice never opened.
 
-`--noconftest` SAFE, deliberately, like its neighbours on the explicit list:
+`--noconftest` SAFE, deliberately, like its neighbours on the explicit list
+`validate` ran until plan 034 T036:
 nothing here needs a fixture, a path insertion or an installed consumer, and the
 one import (`opendox.consumer_reach`) is the module whose whole point is that
 importing it resolves nothing.

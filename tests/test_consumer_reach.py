@@ -35,9 +35,10 @@ below. That move is the point of the second test: it FAILED on the slice-2b
 commit that made the module importable, and this act is the answer it asked
 for.
 
-`--noconftest` safe and dependency-free: `.github/workflows/validate.yml` runs
-this file beside `tests/test_leg_shape.py`, and the repository's root
-`conftest.py` is not loaded for either.
+`--noconftest` safe and dependency-free. `.github/workflows/validate.yml` ran
+this file beside `tests/test_leg_shape.py`, with the repository's root
+`conftest.py` loaded for neither, until plan 034 T036 made the required job
+run the whole suite with it.
 
 A CREATED FILE with no manifest row (RULED OQ-C); it sits under a declared root
 and is named to the arrival verifier as

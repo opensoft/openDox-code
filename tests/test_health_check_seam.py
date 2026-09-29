@@ -26,7 +26,8 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE
    no deferred reach into the publisher or the consumer, read by `ast` the way
    F4.1's scan reads the whole package.
 
-`--noconftest` SAFE, like every file `validate` runs today. It imports
+`--noconftest` SAFE, as every file `validate` ran was until plan 034 T036.
+It imports
 `opendox.workbench` alone, which imports with no sibling present, and neither
 `opendox.serve` nor `opendox.cli` (plan 034, tasks.md § Phase 1: those two
 modules do not import in a lone checkout until T011 lands).
