@@ -3031,11 +3031,15 @@ def _refused_turn(port) -> provider_mod.BrokerRefused:
 
 @pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
 def test_a_broker_token_follows_no_redirect(tmp_path, monkeypatch, code):
-    """Gap 2, over real sockets. At T080's head a POST answered 301, 302 or
-    303 reached the redirect's target as a GET that still carried the minted
-    token, and the turn was answered from there. A 307 or 308 read as the
-    provider refusing. The redirect is declined, the second server hears
-    nothing, and the refusal chains nothing."""
+    """Gap 2, over real sockets, for each redirect code.
+
+    At T080's head, urllib followed only the 301, 302 and 303 codes. For
+    those it sent a GET that still carried the minted token to the
+    redirect's target, and the turn was answered from there. It did not
+    follow a 307 or a 308, and the turn refused with
+    `DIAG_PROVIDER_REFUSED`, as though the provider had refused. Now every
+    redirect is declined, the second server hears nothing, and the refusal
+    chains nothing."""
     with _a_provider_that_redirects(monkeypatch, code) as base:
         refusal = _refused_turn(
             _minting_port(tmp_path, f"{base}/v1/chat/completions"))
