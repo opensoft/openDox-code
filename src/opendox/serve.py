@@ -2364,6 +2364,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="project-register instance passed to the generator on a "
                              "local regenerate (grouping resolution)")
     args = parser.parse_args(argv)
+    if args.project_register == "":
+        # AN EMPTY `--project-register` IS REFUSED, fail closed (the holder,
+        # 2026-09-28; the generate verbs refuse it the same way, as
+        # `cli.SourceOptionRefused`). The snapshot source tests the value for
+        # truth, so an empty one would be dropped without a word, and
+        # `Path("")` would name the current directory. Neither is what a
+        # caller who typed the option asked for.
+        print("serve refused: --project-register was given an empty path. "
+              "Name the file to read, or leave --project-register out",
+              file=sys.stderr)
+        return 1
     rc = _refuse_impossible_checkout_root(args.checkout_root)
     if rc:
         return rc

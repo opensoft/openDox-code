@@ -201,6 +201,40 @@ class GeneratedAtRefused(Exception):
     saying why."""
 
 
+class SourceOptionRefused(Exception):
+    """`--project-register` or `--possibles` was given an EMPTY path.
+
+    REFUSED, fail closed, on the holder's decision of 2026-09-28 (plan 034
+    T055). This used to be decided by testing the value for truth, which
+    DROPPED an empty one: the option was silently not passed, and the run went
+    on as if it had never been given. Resolving it instead, as
+    `Path("").resolve()`, would name the CURRENT DIRECTORY as the register to
+    read. Neither is what a caller who typed the option asked for, so an empty
+    value ends the run, before anything is generated or written. An option
+    that is not given at all is `None` and is still simply not passed."""
+
+
+def _source_option(args: argparse.Namespace, attr: str, flag: str) -> Path | None:
+    """The file a `--project-register`/`--possibles` option names, resolved;
+    `None` when the option was not given; `SourceOptionRefused` when it was
+    given an empty path (see that class)."""
+    value = getattr(args, attr, None)
+    if value is None:
+        return None
+    if value == "":
+        raise SourceOptionRefused(
+            f"{flag} was given an empty path. It is refused: dropping it would "
+            f"ignore the option without a word, and resolving it would read "
+            f"the current directory. Name the file to read, or leave {flag} out")
+    return Path(value).resolve()
+
+
+def _refuse_empty_source_options(args: argparse.Namespace) -> None:
+    """Raise `SourceOptionRefused` if either source option is an empty path."""
+    _source_option(args, "project_register", "--project-register")
+    _source_option(args, "possibles", "--possibles")
+
+
 def _refuse_malformed_generated_at(args: argparse.Namespace) -> None:
     """Raise `GeneratedAtRefused` unless `--generated-at`, when given, is an
     RFC 3339 date-time (`opendox.rfc3339.is_rfc3339_datetime`, the neutral
@@ -238,19 +272,22 @@ def _generate_and_write(args: argparse.Namespace, output: Path) -> tuple[dict, P
     (`generator_seam.generate`, which looks it up on each call), and it is
     written by the registered writer. An option given as `None` is not passed,
     so an unset `--project-register` or `--possibles` asks nothing of a
-    generator that declares no such input. A given one that the registered
+    generator that declares no such input. An EMPTY one is refused as
+    `SourceOptionRefused`, never dropped and never read as the current
+    directory (the holder, 2026-09-28). A given one that the registered
     generator does not declare is refused as `GeneratorInputRefused`, before
     anything is generated or written, and `main` reports it."""
     _refuse_non_corpus_repo_root(args)
     _refuse_malformed_generated_at(args)
+    _refuse_empty_source_options(args)
     repo_root = Path(args.repo_root).resolve()
     snapshot = generator_seam.generate(
         repo_root,
         args.repository,
         source_revision=args.source_revision,
         generated_at=args.generated_at,
-        project_register_source=Path(args.project_register).resolve() if args.project_register else None,
-        possibles_source=Path(args.possibles).resolve() if args.possibles else None,
+        project_register_source=_source_option(args, "project_register", "--project-register"),
+        possibles_source=_source_option(args, "possibles", "--possibles"),
     )
     boundary = OutputBoundary(output.parent, [output.name])
     written = projection_seams.writer.current().write_snapshot(
@@ -480,6 +517,7 @@ def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -
     # (it is the one no caller can skip); these are the same checks, earlier.
     _refuse_non_corpus_repo_root(args)
     _refuse_malformed_generated_at(args)
+    _refuse_empty_source_options(args)
     run_dir = Path(args.run_dir).resolve() if args.run_dir else Path(
         tempfile.mkdtemp(prefix="ideation-dashboard-"))
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -613,8 +651,8 @@ def _gate_snapshot(args: argparse.Namespace) -> tuple[Path, dict]:
     repo_root = Path(args.repo_root).resolve()
     snapshot = generator_seam.generate(
         repo_root, args.repository, source_revision=args.source_revision,
-        project_register_source=Path(args.project_register).resolve() if args.project_register else None,
-        possibles_source=Path(args.possibles).resolve() if args.possibles else None)
+        project_register_source=_source_option(args, "project_register", "--project-register"),
+        possibles_source=_source_option(args, "possibles", "--possibles"))
     return repo_root, snapshot
 
 
@@ -1145,6 +1183,12 @@ def main(argv: list[str] | None = None, *,
         # a generation anchor that was TYPED and is malformed ends the run on
         # stderr, rather than degrading to a stamp that is quietly absent.
         print(str(exc), file=sys.stderr)
+        return 1
+    except SourceOptionRefused as exc:
+        # An EMPTY `--project-register`/`--possibles`, refused before
+        # anything is generated or written (the holder, 2026-09-28): the
+        # option was typed, so it is neither dropped nor read as `.`.
+        print(f"{_command_label(args)} refused: {exc}", file=sys.stderr)
         return 1
     except RepoRootRefused as exc:
         # The refusal is the whole message (the registered corpus-root

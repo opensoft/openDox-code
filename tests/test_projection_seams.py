@@ -674,6 +674,22 @@ def test_serve_main_refuses_a_data_source_openDoxs_registry_cannot_read(
         assert "serve refused:" in err and named in err, (flags, err)
 
 
+def test_serve_main_refuses_an_empty_project_register(tmp_path, capsys, monkeypatch) -> None:
+    """The holder's decision of 2026-09-28, at `serve`'s own option: an EMPTY
+    `--project-register` is refused before a socket is bound, and never
+    dropped, as `SnapshotSource` would drop it by testing it for truth. A
+    given one is still handed over as given."""
+    reached: list = []
+    monkeypatch.setattr(serve, "serve", lambda *a, **k: reached.append(k))
+    repo = _repository(tmp_path)
+    base = ["--snapshot", str(tmp_path / "s.json"), "--checkout-root", str(repo)]
+    assert serve.main([*base, "--project-register", ""]) == 1 and not reached
+    assert ("serve refused: --project-register was given an empty path"
+            in capsys.readouterr().err)
+    assert serve.main([*base, "--project-register", "register.yaml"]) == 0
+    assert reached and reached[0]["project_register"] == "register.yaml"
+
+
 def test_dropping_the_active_entry_clears_the_active_key(tmp_path) -> None:
     """No ref-less request meets a key with nothing behind it, and the next
     entry registered becomes active, as the first one did."""
@@ -1068,6 +1084,81 @@ def test_an_input_the_generator_does_not_declare_is_refused_before_a_write(tmp_p
     err = capsys.readouterr().err
     assert "generate refused:" in err and "project_register_source" in err
     assert not out.exists()
+
+
+def _declaring_generator(calls: list) -> None:
+    """Register a host generator that DECLARES both source inputs, so that a
+    refusal of an empty option is the option's own, not the seam's
+    `GeneratorInputRefused` for an input the generator does not take."""
+    def operation(repo_root, repository, *, source_revision=None, generated_at=None,
+                  project_register_source=None, possibles_source=None):
+        calls.append((project_register_source, possibles_source))
+        return {"schema_version": 1, "kind": "host-snapshot",
+                "repository": repository, "generation": {"source_revision": "s"},
+                "documents": []}
+
+    gs.register(gs.SnapshotGenerator(
+        contract="host-snapshot", generate=operation,
+        inputs=("project_register_source", "possibles_source")))
+
+
+@pytest.mark.parametrize("flag", ["--project-register", "--possibles"])
+def test_an_empty_source_option_is_refused_before_anything_is_generated(
+        flag, tmp_path, capsys) -> None:
+    """The holder's decision of 2026-09-28: an EMPTY `--project-register` or
+    `--possibles` is refused, fail closed. It is not dropped, as testing the
+    value for truth used to drop it. And it is not `Path("").resolve()`, which
+    is the current directory. The generator declares the input, so nothing
+    else refuses it."""
+    calls: list = []
+    _declaring_generator(calls)
+    repo = _repository(tmp_path)
+    out = tmp_path / "out" / "snapshot.json"
+    assert _generate(repo, out, flag, "") == 1
+    err = capsys.readouterr().err
+    assert f"generate refused: {flag} was given an empty path" in err, err
+    assert calls == [] and not out.exists()
+
+
+@pytest.mark.parametrize("attr, flag", [("project_register", "--project-register"),
+                                        ("possibles", "--possibles")])
+def test_the_gate_snapshot_refuses_an_empty_source_option(attr, flag, tmp_path) -> None:
+    calls: list = []
+    _declaring_generator(calls)
+    args = argparse.Namespace(repo_root=str(tmp_path), repository="garden",
+                              source_revision="abc", project_register=None,
+                              possibles=None)
+    setattr(args, attr, "")
+    with pytest.raises(cli.SourceOptionRefused, match=f"{flag} was given an empty path"):
+        cli._gate_snapshot(args)
+    assert calls == []
+
+
+def test_a_given_source_option_is_resolved_and_an_unset_one_is_not_passed(
+        tmp_path, monkeypatch) -> None:
+    calls: list = []
+    _declaring_generator(calls)
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(repo_root=str(tmp_path), repository="garden",
+                              source_revision="abc", project_register="register.yaml",
+                              possibles=None)
+    cli._gate_snapshot(args)
+    assert calls == [(tmp_path.resolve() / "register.yaml", None)]
+
+
+def test_generate_and_open_refuses_an_empty_source_option_before_its_run_dir(
+        tmp_path, capsys) -> None:
+    calls: list = []
+    _declaring_generator(calls)
+    repo = _repository(tmp_path)
+    run_dir = tmp_path / "run"
+    rc = cli.main(["generate-and-open", "--repo-root", str(repo), "--repository",
+                   "garden", "--run-dir", str(run_dir), "--no-open", "--no-serve",
+                   "--possibles", ""])
+    assert rc == 1
+    assert ("generate-and-open refused: --possibles was given an empty path"
+            in capsys.readouterr().err)
+    assert calls == [] and not run_dir.exists()
 
 
 def test_a_root_openDoxs_predicate_refuses_is_refused_with_its_message(tmp_path, capsys) -> None:
