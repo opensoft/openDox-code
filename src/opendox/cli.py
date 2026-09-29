@@ -598,7 +598,13 @@ def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -
     url = serve_mod.server_url(httpd, "/index.html")
     print(f"  serving {url}")
     print(f"  snapshot {serve_mod.server_url(httpd, '/snapshot.json')}")
-    print(url)  # the URL is ALWAYS printed on its own line
+    # The URL is ALWAYS printed on its own line, AND FLUSHED (plan 034 T056).
+    # Where standard output is a pipe or a file, Python buffers it by block,
+    # and the process is about to block in `serve_forever()`. So without the
+    # flush, a wrapper reading this line never sees it while the server runs,
+    # and it cannot learn an ephemeral port or tell that the server started.
+    # Measured at openDox-code#59 e3ef506a: zero lines in 20 s on a pipe.
+    print(url, flush=True)
 
     if not args.no_open:
         try:
@@ -610,7 +616,7 @@ def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -
         httpd.server_close()
         return 0
 
-    print("  serving until interrupted (Ctrl-C to stop)")
+    print("  serving until interrupted (Ctrl-C to stop)", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
