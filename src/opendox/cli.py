@@ -128,6 +128,10 @@ from opendox.profile_proxy import profile_openxfactory  # noqa: E402
 # in (R1Q3 (a)). Importing either registers nothing: `build_parser()` and
 # `main()` below make the registration, and only where no host has made one.
 from opendox import default_profile, domain_profile  # noqa: E402
+# openDox's OWN snapshot generator, and the generator seam an entry point
+# registers it at (5.4; plan 034 T052). Importing either registers nothing:
+# `build_parser()` and `main()` below register it, only where no host has.
+from opendox import default_generator, generator_seam  # noqa: E402
 is_rfc3339_datetime = consumer_reach.is_rfc3339_datetime  # noqa: E402
 # ...and `SCANNED_ROOTS` keeps its NAME and its behaviour, not just its value:
 # :239 iterates it (`for root in SCANNED_ROOTS`) and that line is not one the
@@ -951,6 +955,9 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     # `SUBCOMMAND_EXTENSIONS` is read a few lines below; the corpus
     # adapter's registration is read later, from `authoring.py`).
     corpus_adapter.register_default_home(_default_home_factory)
+    # AND openDox's OWN snapshot generator (5.4, T052; R1Q10 (a), in the same
+    # R1Q3 (a) pattern), registered only where no host has contributed one.
+    generator_seam.register_default(default_generator.GENERATOR)
     parser = argparse.ArgumentParser(prog="ideation-dashboard", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1054,6 +1061,8 @@ def main(argv: list[str] | None = None, *,
     # own match here: the OUTERMOST entry point states the contract on its
     # own, independent of what `build_parser()` does inside.
     corpus_adapter.register_default_home(_default_home_factory)
+    # AND openDox's own snapshot generator (5.4, T052), the same way.
+    generator_seam.register_default(default_generator.GENERATOR)
     args = build_parser(
         subcommand_extensions=subcommand_extensions).parse_args(argv)
     try:
