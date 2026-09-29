@@ -1376,9 +1376,18 @@ const declared = D.readDisplay({{ display: {{
            submission: {{ one: "filing", many: "filings", short: "filings",
                         label: "filings" }} }},
 }} }});
+// A HOST THAT ANSWERS BOTH SEED ROUTES. Since plan 034 T088 (R1Q19 (a)) the
+// lens offers the two seed actions, and the selection that feeds them, only where
+// a binding answers them, so this drives the lens as it renders under such a
+// host: the pick bar is a pane whose words this reads. The standalone lens,
+// which offers neither, is `tests/test_lens_seed_actions.py`'s.
+const caps = {{ views: {{ contributed_routes: [
+  {{ method: "POST", pattern: "/actions/dtn-seed", is_prefix: false }},
+  {{ method: "POST", pattern: "/actions/staging-seed", is_prefix: false }},
+] }} }};
 function page(display) {{
   const root = new Node("div");
-  L.renderLens(root, snap, {{ display }});
+  L.renderLens(root, snap, {{ display, caps }});
   // every rendered string on the page: text nodes AND the title/aria-label
   // attributes, because half this view's station words are on a tooltip.
   const nodes = flatten(root);
