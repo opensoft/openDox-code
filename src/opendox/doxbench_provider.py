@@ -251,19 +251,19 @@ DIAG_KEYRING_UNAVAILABLE = (
     "the OS keyring could not be read by this process, so the keyring "
     "reference could not be resolved")
 
-#: The answer to a redirect of a request that carried a credential the
-#: built-in resolver read. That request follows no redirect (see
-#: `_DeclineRedirects`), so the credential went to the declared endpoint and
-#: nowhere else, and the sentence says what to declare instead.
+#: The answer to a redirect of a request that carried a credential: a broker's
+#: minted token, or what the built-in resolver read. That request follows no
+#: redirect (see `_DeclineRedirects`), so the credential went to the declared
+#: endpoint and nowhere else, and the sentence says what to declare instead.
 DIAG_PROVIDER_REDIRECTED = (
-    "the provider answered with a redirect, which a credential the built-in "
-    "resolver reads does not follow, so it was sent nowhere else; declare "
-    "the endpoint the provider redirects to")
+    "the provider answered with a redirect, which a request carrying a "
+    "credential does not follow, so the credential was sent nowhere else; "
+    "declare the endpoint the provider redirects to")
 
 #: The closed set, so a test can assert no other sentence can be raised.
 #: ELEVEN: the eight the reconciliation left, the built-in resolver's two
-#: (#1144 box 16.3), and the redirect a request carrying a built-in
-#: credential declines. `DIAG_DIALECT_UNKNOWN` is gone because the fact it guarded
+#: (#1144 box 16.3), and the redirect a request carrying a credential
+#: declines. `DIAG_DIALECT_UNKNOWN` is gone because the fact it guarded
 #: moved: the dialect is the BINDING's, validated against the closed vocabulary
 #: when the operator declares it
 #: (`doxbench_binding.ModelProviderBinding.__post_init__`), so an unknown
@@ -915,8 +915,8 @@ class _PresentedCredential:
 
 
 class _Redirected(Exception):
-    """A provider answered a request carrying a built-in credential with a
-    redirect, and the redirect was declined.
+    """A provider answered a request carrying a credential with a redirect,
+    and the redirect was declined.
 
     PRIVATE and never raised out of this module: the port answers it with
     `DIAG_PROVIDER_REDIRECTED` before any caller sees anything."""
@@ -929,20 +929,23 @@ class _DeclineRedirects(urllib.request.HTTPRedirectHandler):
     `urllib`'s own handler re-sends a request's headers, all but the content
     ones, to whatever `Location` the provider names, whatever its host and
     scheme. Measured: a POST answered 301, 302 or 303 reaches the redirect's
-    target as a GET that still carries `Authorization: Bearer ...`. The
-    loopback ruling of 2026-09-28 sends a credential the built-in resolver
-    reads only by a private route, and a followed redirect would send it by
-    any route. So a request that carries one declines every redirect, with
-    the redirect's answer closed unread."""
+    target as a GET that still carries `Authorization: Bearer ...`, whether
+    the bearer is a built-in credential or a broker's minted token. A
+    credential travels only by a private route (the loopback ruling of
+    2026-09-28, which Brett Heap's word of 2026-09-29 gave a minted token
+    too), and a followed redirect would send it by any route. So a request
+    that carries one declines every redirect, with the redirect's answer
+    closed unread."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         fp.close()
         raise _Redirected
 
 
-def _open_for_a_built_in_credential(request, *, timeout):
-    """`urllib.request.urlopen` for a request that carries a credential the
-    built-in resolver read. It changes two things, and nothing else.
+def _open_with_a_credential(request, *, timeout):
+    """`urllib.request.urlopen` for a request that carries a credential: a
+    broker's minted token, or what the built-in resolver read. It changes two
+    things, and nothing else.
 
     * EVERY REDIRECT IS DECLINED (`_DeclineRedirects`).
     * A PLAIN-`http://` REQUEST GOES DIRECT, whatever proxy the environment
@@ -1201,7 +1204,14 @@ class BrokeredProviderPort:
         what every request sent before the field existed, byte for byte.
 
         A RECORD NO BROKER ANSWERS takes `_dispatch_without_a_broker` instead
-        (#1144 box 16.3): no mint, no ledger event, and no retry."""
+        (#1144 box 16.3): no mint, no ledger event, and no retry.
+
+        EITHER WAY, THE PROVIDER IS CALLED THROUGH `_call_provider`, so a
+        broker's minted token keeps every rule a built-in credential keeps: no
+        redirect, no proxy over plain `http://`, and a refusal that chains
+        nothing (Brett Heap's word of 2026-09-29). The re-mint and the retry
+        above therefore happen outside every handler, so a refusal raised by
+        either keeps no context either."""
         handle = getattr(prompt_envelope, "model_id", None)
         if not isinstance(handle, str) or not handle:
             entries = self._declared_catalog.entries
@@ -1215,13 +1225,10 @@ class BrokeredProviderPort:
                         model=model, prompt=prompt),
                     "proposals": []}
         token = self._current_token(REASON_FIRST_MINT)
-        try:
-            prose = _post_to_provider(
-                endpoint=token.endpoint, dialect=token.dialect,
-                credential=_PresentedCredential(token.token), model=model,
-                prompt=prompt, timeout=self._timeout_seconds,
-                opener=self._opener)
-        except _TokenExpired:
+        prose = self._call_provider(
+            _PresentedCredential(token.token), endpoint=token.endpoint,
+            dialect=token.dialect, model=model, prompt=prompt)
+        if prose is None:
             # PER-TURN STATE, and no longer than the turn: the expired mint's
             # own audit reference, read before the token is dropped, so the
             # re-mint can name what it replaces.
@@ -1231,15 +1238,12 @@ class BrokeredProviderPort:
             token = self._current_token(REASON_EXPIRY_REMINT,
                                         retry_of=replaced)
             self._record(REASON_PAID_RETRY)
-            try:
-                prose = _post_to_provider(
-                    endpoint=token.endpoint, dialect=token.dialect,
-                    credential=_PresentedCredential(token.token), model=model,
-                    prompt=prompt, timeout=self._timeout_seconds,
-                    opener=self._opener)
-            except _TokenExpired:
+            prose = self._call_provider(
+                _PresentedCredential(token.token), endpoint=token.endpoint,
+                dialect=token.dialect, model=model, prompt=prompt)
+            if prose is None:
                 self._forget_token()
-                raise BrokerRefused(DIAG_TOKEN_EXPIRED_TWICE) from None
+                raise BrokerRefused(DIAG_TOKEN_EXPIRED_TWICE)
         return {"assistant_prose": prose, "proposals": []}
 
     def _dispatch_without_a_broker(self, *, model: str, prompt: str) -> str:
@@ -1255,21 +1259,11 @@ class BrokeredProviderPort:
         A 401 HERE IS A REFUSAL, NOT AN EXPIRY. The 2026-08-26 retry ruling is
         about a MINTED token outliving its turn, and here there is no mint to
         repeat: the reference names the same value on a second read, so a
-        retry would buy a second paid call for the same refusal.
+        retry would buy a second paid call for the same refusal. It is raised
+        outside every handler, so it keeps no context.
 
-        A REQUEST CARRYING A BUILT-IN CREDENTIAL FOLLOWS NO REDIRECT AND, OVER
-        PLAIN `http://`, USES NO PROXY. The default opener does both, and
-        sends the credential header along each time, so such a request uses
-        `_open_for_a_built_in_credential` in its place. An opener a caller
-        injected is that caller's own seam and is used as given. The auth
-        kind `none` sends no credential, and a broker's minted token keeps
-        the default opener, as the 2026-09-28 ruling leaves that path.
-
-        A REFUSAL OF A REQUEST THAT CARRIED A BUILT-IN CREDENTIAL CHAINS
-        NOTHING. The credential stays wrapped in a `_PresentedCredential` in
-        every frame here, and the refusal is raised afresh, with no cause and
-        no context, so no traceback it carries reaches a frame inside
-        `urllib` whose locals hold the request's headers."""
+        The request itself is made through `_call_provider`, which keeps the
+        rules for a request that carries a credential."""
         credential = None
         if (self._binding.credential_source()
                 == binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER):
@@ -1283,27 +1277,58 @@ class BrokeredProviderPort:
                 raise
             with self._lock:
                 self._available = True
+        prose = self._call_provider(
+            credential, endpoint=self._binding.endpoint,
+            dialect=self._binding.dialect, model=model, prompt=prompt)
+        if prose is None:
+            raise BrokerRefused(DIAG_PROVIDER_REFUSED)
+        return prose
+
+    def _call_provider(self, credential: _PresentedCredential | None, *,
+                       endpoint: str, dialect: str, model: str,
+                       prompt: str) -> str | None:
+        """ONE provider call, under the rules a request that carries a
+        credential keeps, whichever resolver answered it: a broker's minted
+        token, or what the built-in resolver read. Returns the prose, or None
+        when the provider said the credential is no longer valid (a 401), which
+        each path answers in its own way.
+
+        A REQUEST THAT CARRIES A CREDENTIAL FOLLOWS NO REDIRECT AND, OVER
+        PLAIN `http://`, USES NO PROXY. The default opener does both, and
+        sends the credential header along each time, so such a request uses
+        `_open_with_a_credential` in its place. An opener a caller injected is
+        that caller's own seam, and it is used as given.
+
+        A REFUSAL OF A REQUEST THAT CARRIED A CREDENTIAL CHAINS NOTHING. The
+        credential stays wrapped in a `_PresentedCredential` in every frame
+        here, and the refusal is raised afresh, with no cause and no context,
+        so no traceback it carries reaches a frame inside `urllib` whose locals
+        hold the request's headers (Copilot's review of openDox-code#63 at
+        `d240fd50`).
+
+        T080 gave these rules to the built-in resolver's key. Brett Heap's
+        word of 2026-09-29 gave them to a broker's minted token too. The auth
+        kind `none` presents nothing, so its request keeps the default opener,
+        and its refusal is raised as `_post_to_provider` raised it."""
         opener = self._opener
         if credential is not None and opener is urllib.request.urlopen:
-            opener = _open_for_a_built_in_credential
-        failure = None
+            opener = _open_with_a_credential
         try:
             return _post_to_provider(
-                endpoint=self._binding.endpoint, dialect=self._binding.dialect,
-                credential=credential, model=model, prompt=prompt,
-                timeout=self._timeout_seconds, opener=opener)
+                endpoint=endpoint, dialect=dialect, credential=credential,
+                model=model, prompt=prompt, timeout=self._timeout_seconds,
+                opener=opener)
         except _TokenExpired:
-            failure = DIAG_PROVIDER_REFUSED
+            return None
         except _Redirected:
             failure = DIAG_PROVIDER_REDIRECTED
         except BrokerRefused as refusal:
             if credential is None:
                 raise
             failure = refusal.diagnostic
-        # RAISED HERE, OUTSIDE EVERY HANDLER, so the refusal chains nothing
-        # (Copilot's review of openDox-code#63 at `d240fd50`). A cause chained
-        # from inside `urllib` keeps frames whose locals hold the request's
-        # headers, and so the credential.
+        # RAISED HERE, OUTSIDE EVERY HANDLER, so the refusal chains nothing. A
+        # cause chained from inside `urllib` keeps frames whose locals hold the
+        # request's headers, and so the credential.
         raise BrokerRefused(failure)
 
     # -- token custody ------------------------------------------------------

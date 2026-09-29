@@ -268,9 +268,9 @@ def is_a_private_route(endpoint: object) -> bool:
 #: it expires. A fixed sentence, and it repeats nothing of the endpoint.
 ENDPOINT_NOT_PRIVATE = (
     "a credential (a broker's minted token, or the key an env: or keyring: "
-    "reference names) is sent only over https://, or over http:// to this host "
-    "(127.0.0.1, ::1 or localhost), and this endpoint is neither; declare an "
-    "https:// endpoint, or a loopback one")
+    "reference names) is sent only over https://, or over http:// to this "
+    "host (127.0.0.1, ::1 or localhost), and this endpoint is neither; "
+    "declare an https:// endpoint, or a loopback one")
 
 #: The refusal a key inside the endpoint URL earns (#1144 box 16.3). Measured
 #: before 16.3: this record checked the endpoint's scheme and nothing else, so

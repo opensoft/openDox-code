@@ -60,6 +60,7 @@ import threading
 import time
 import types
 import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -891,14 +892,15 @@ def _expired_error():
 
 def _port(tmp_path, *outcomes, expires=None, notice=None, clock=time.time,
           endpoint=ENDPOINT, dialect=binding_mod.DIALECT_XFACTORY_PROMPT_V1,
-          model=None):
-    script = _write_broker(tmp_path, expires=expires)
+          model=None, token=SENTINEL_TOKEN,
+          runner=provider_mod.subprocess_broker_runner):
+    script = _write_broker(tmp_path, expires=expires, token=token)
     binding = _broker_binding(script, endpoint=endpoint, dialect=dialect,
                               model=model)
     opener = _Opener(*outcomes)
     port = provider_mod.BrokeredProviderPort(
         binding, install_mod.brokered_catalog(binding),
-        opener=opener, clock=clock,
+        runner=runner, opener=opener, clock=clock,
         notice=notice if notice is not None else (lambda _text: None))
     return port, opener
 
@@ -2641,6 +2643,40 @@ class _RedirectingHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
+@contextlib.contextmanager
+def _a_provider_that_redirects(monkeypatch, code):
+    """A stand-in provider that answers every request with a `code` redirect
+    to a second stand-in, `_ElsewhereHandler`, which records whatever it is
+    sent. It yields the first one's base URL."""
+    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
+    monkeypatch.setattr(_RedirectingHandler, "code", code)
+    with _stand_in_provider(_ElsewhereHandler) as elsewhere, \
+            _stand_in_provider(_RedirectingHandler) as base:
+        monkeypatch.setattr(_RedirectingHandler, "location",
+                            f"{elsewhere}/v1/chat/completions")
+        yield base
+
+
+@contextlib.contextmanager
+def _an_environment_proxy(monkeypatch):
+    """A stand-in proxy that `http_proxy` names, recording into
+    `_ElsewhereHandler.seen`, for the length of one test.
+
+    `urlopen`'s global opener is dropped first. `urlopen` builds it on first
+    use and reads the proxy environment then, so a request made through
+    `urlopen` here reads this environment, as it would in a process started
+    with the variable set. Without that, a proxy case would pass or fail by
+    whichever earlier test built the opener."""
+    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    with _stand_in_provider(_ElsewhereHandler) as proxy:
+        for name in ("http_proxy", "HTTP_PROXY"):
+            monkeypatch.setenv(name, proxy)
+        yield proxy
+
+
 @pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
 def test_a_built_in_credential_follows_no_redirect(monkeypatch, code):
     """Copilot's review of openDox-code#63 at `4abc6d4d`, over real sockets.
@@ -2648,12 +2684,7 @@ def test_a_built_in_credential_follows_no_redirect(monkeypatch, code):
     GET to the `Location`, with the credential header still on it (measured).
     A request that carries a built-in credential declines the redirect, and
     the second server hears nothing at all."""
-    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
-    monkeypatch.setattr(_RedirectingHandler, "code", code)
-    with _stand_in_provider(_ElsewhereHandler) as elsewhere, \
-            _stand_in_provider(_RedirectingHandler) as base:
-        monkeypatch.setattr(_RedirectingHandler, "location",
-                            f"{elsewhere}/v1/chat/completions")
+    with _a_provider_that_redirects(monkeypatch, code) as base:
         binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
@@ -2673,14 +2704,9 @@ def test_a_built_in_credential_over_http_to_this_host_uses_no_proxy(
     `http_proxy` set, urllib's default opener sends a request addressed to
     `127.0.0.1` to the proxy, credential header and all (measured). This
     request goes direct, and the stand-in proxy hears nothing."""
-    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
     monkeypatch.setattr(_ChatCompletionsHandler, "seen", {})
-    for name in ("no_proxy", "NO_PROXY"):
-        monkeypatch.delenv(name, raising=False)
-    with _stand_in_provider(_ElsewhereHandler) as proxy, \
+    with _an_environment_proxy(monkeypatch), \
             _stand_in_provider(_ChatCompletionsHandler) as base:
-        for name in ("http_proxy", "HTTP_PROXY"):
-            monkeypatch.setenv(name, proxy)
         binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
@@ -2980,3 +3006,114 @@ def test_the_cli_refuses_a_broker_binding_over_http_to_another_host(
     assert binding_mod.ENDPOINT_NOT_PRIVATE in capsys.readouterr().err
     store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
     assert store.list() == (), "nothing is stored"
+
+
+def _minting_port(tmp_path, endpoint, *, token=SENTINEL_TOKEN):
+    """A port as a served install builds one, for a binding at `endpoint`
+    whose broker, a real child, mints `token`. It keeps the default opener,
+    so nothing stands between the port and the socket."""
+    binding = _broker_binding(_write_broker(tmp_path, token=token),
+                              endpoint=endpoint, dialect=OPENAI_CHAT)
+    return provider_mod.BrokeredProviderPort(
+        binding, install_mod.brokered_catalog(binding),
+        notice=lambda _text: None)
+
+
+def _refused_turn(port) -> provider_mod.BrokerRefused:
+    """The refusal one turn on `port` ends in."""
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    return caught.value
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_a_broker_token_follows_no_redirect(tmp_path, monkeypatch, code):
+    """Gap 2, over real sockets. At T080's head a POST answered 301, 302 or
+    303 reached the redirect's target as a GET that still carried the minted
+    token, and the turn was answered from there. A 307 or 308 read as the
+    provider refusing. The redirect is declined, the second server hears
+    nothing, and the refusal chains nothing."""
+    with _a_provider_that_redirects(monkeypatch, code) as base:
+        refusal = _refused_turn(
+            _minting_port(tmp_path, f"{base}/v1/chat/completions"))
+    assert refusal.diagnostic == provider_mod.DIAG_PROVIDER_REDIRECTED
+    assert _ElsewhereHandler.seen == [], "the token went nowhere else"
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+
+
+def test_a_broker_token_over_http_to_this_host_uses_no_proxy(tmp_path,
+                                                             monkeypatch):
+    """Gap 2, over real sockets. With `http_proxy` set, T080's head sent a
+    request that carried a minted token to the proxy, even one addressed to
+    `127.0.0.1` (measured with a fresh global opener, as in a process
+    started with the variable set). The request goes direct, and the
+    stand-in proxy hears nothing."""
+    monkeypatch.setattr(_ChatCompletionsHandler, "seen", {})
+    with _an_environment_proxy(monkeypatch), \
+            _stand_in_provider(_ChatCompletionsHandler) as base:
+        answer = _minting_port(
+            tmp_path, f"{base}/v1/chat/completions").dispatch(_Envelope())
+    assert answer["assistant_prose"] == "answered in the chat grammar"
+    assert _ChatCompletionsHandler.seen["authorization"] == (
+        f"Bearer {SENTINEL_TOKEN}")
+    assert _ElsewhereHandler.seen == [], "the proxy heard nothing"
+
+
+def test_a_refused_connection_keeps_no_frame_that_holds_the_token(tmp_path):
+    """Gap 3, over the real transport. At T080's head this refusal chained
+    urllib's `URLError`, and five frames it kept held the token in their
+    locals (measured: `do_open.headers`, `_send_request.headers`,
+    `_send_output.msg`, `send.data` and `request.headers`). The refusal
+    chains nothing, and no frame it keeps holds the token."""
+    with _a_closed_loopback_port() as closed:
+        refusal = _refused_turn(_minting_port(
+            tmp_path, f"http://127.0.0.1:{closed}/v1/chat/completions"))
+    assert refusal.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert _locals_holding(refusal, SENTINEL_TOKEN) == []
+
+
+@pytest.mark.parametrize("outcomes,expected", [
+    ((urllib.error.URLError("down"),),
+     provider_mod.DIAG_PROVIDER_UNREACHABLE),
+    ((urllib.error.HTTPError(ENDPOINT, 500, "boom", {},
+                             io.BytesIO(b"provider detail")),),
+     provider_mod.DIAG_PROVIDER_REFUSED),
+    ((b"not json",), provider_mod.DIAG_PROVIDER_MALFORMED),
+    ((_expired_error(), _expired_error()),
+     provider_mod.DIAG_TOKEN_EXPIRED_TWICE),
+], ids=["unreachable", "refused", "malformed", "expired-twice"])
+def test_a_refusal_of_a_turn_that_presented_a_token_chains_nothing(
+        tmp_path, outcomes, expected):
+    """Gap 3, for each refusal a presented token can meet. At T080's head
+    each of them kept urllib's error, or the expiry, as its cause or its
+    context."""
+    port, _opener = _port(tmp_path, *outcomes)
+    refusal = _refused_turn(port)
+    assert refusal.diagnostic == expected
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+
+
+def test_a_re_mint_the_broker_refuses_after_an_expiry_keeps_no_context(
+        tmp_path):
+    """The one re-mint the 2026-08-26 ruling allows happens outside every
+    handler, so the broker's refusal of it keeps no context. At T080's head
+    it kept the expiry, which kept urllib's error."""
+    asked: list = []
+
+    def refuses_a_second_mint(argv, **kwargs):
+        asked.append(argv)
+        if len(asked) > 1:
+            raise provider_mod.BrokerRefused(provider_mod.DIAG_BROKER_REFUSED)
+        return provider_mod.subprocess_broker_runner(argv, **kwargs)
+
+    port, opener = _port(tmp_path, _expired_error(),
+                         runner=refuses_a_second_mint)
+    refusal = _refused_turn(port)
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_REFUSED
+    assert len(opener.requests) == 1, "no paid retry without a token"
+    assert refusal.__context__ is None
