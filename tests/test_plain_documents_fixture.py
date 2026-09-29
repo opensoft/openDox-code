@@ -199,17 +199,86 @@ def test_at_least_two_sources_share_a_topic() -> None:
     )
 
 
+#: The two words this fixture's titles use that carry no topic under any
+#: reading of a name: an article and a conjunction. They are dropped before
+#: two names are compared, and nothing else is.
+FUNCTION_WORDS = frozenset({"the", "and"})
+
+_LETTER_RUN = re.compile(r"[^\W\d_]+")
+
+
+def _tokens(text: str) -> list[str]:
+    """The runs of letters in `text`, case-folded, in order."""
+    return [run.casefold() for run in _LETTER_RUN.findall(text)]
+
+
+def _name_words(header: dict[str, str]) -> set[str]:
+    """The words of a document's name: its `title:` (every document here
+    declares one, `test_required_fields_present`), as runs of three or more
+    letters, without `FUNCTION_WORDS`."""
+    return {word for word in _tokens(header.get("title", ""))
+            if len(word) >= 3} - FUNCTION_WORDS
+
+
+def _names(text: str, path: Path, header: dict[str, str]) -> bool:
+    """Whether `text` names the document at `path`: whether it holds that
+    document's title, or its file name, as a run of whole words."""
+    words = _tokens(text)
+    for name in (header.get("title", ""), path.stem):
+        run = _tokens(name)
+        if run and any(words[i:i + len(run)] == run
+                       for i in range(len(words) - len(run) + 1)):
+            return True
+    return False
+
+
 def test_at_least_one_source_shares_no_topic() -> None:
-    """Keeps the assertion above honest: a fixture where every source shared
-    one word would not exercise topic-based selection at all."""
-    singleton = [
-        path for path, (header, body) in _documents().items()
-        if "stage" not in header
-        and SHARED_SOURCE_TOPIC not in " ".join(
-            (header.get("title", ""), header.get("summary", ""), body)
-        ).lower()
-    ]
-    assert singleton, "every source shares the same topic phrase"
+    """At least one source shares no topic with the rain-barrel pair.
+    Without it, a fixture where every source shared one topic would not
+    exercise topic-based grouping at all.
+
+    NO TOPIC, not just not the phrase. The phrase check alone would pass a
+    fixture edit that gave the sources some other topic in common, so this
+    compares the two things a topic that sources share can be derived from
+    when nobody declares one (R1Q13 (a) with (c)):
+    - the words of each document's name;
+    - the other documents each one names.
+
+    So each rain-barrel note's name carries the pair's topic. A source
+    outside the pair shares no name word with either note, and it and the
+    notes never name each other, in either direction. Words elsewhere in
+    the body are not compared. That the projection then forms exactly this
+    group is proved over this fixture by T054's projection test.
+    """
+    sources = {path: parts for path, parts in _documents().items()
+               if "stage" not in parts[0]}
+    pair = [path for path, (header, body) in sources.items()
+            if SHARED_SOURCE_TOPIC in " ".join(
+                (header.get("title", ""), header.get("summary", ""), body)
+            ).lower()]
+    others = [path for path in sources if path not in pair]
+    assert others, "every source shares the same topic phrase"
+
+    topic = set(SHARED_SOURCE_TOPIC.split())
+    for member in pair:
+        assert topic <= _name_words(sources[member][0]), (
+            f"{member.name}'s name does not carry {SHARED_SOURCE_TOPIC!r}")
+
+    for other in others:
+        other_header = sources[other][0]
+        for member in pair:
+            member_header = sources[member][0]
+            shared = _name_words(other_header) & _name_words(member_header)
+            assert not shared, (
+                f"{other.name} and {member.name} share the name word(s) "
+                f"{sorted(shared)}, so a topic rule could group them")
+            for writer, named, named_header in (
+                    (other, member, member_header),
+                    (member, other, other_header)):
+                assert not _names(writer.read_text(encoding="utf-8"),
+                                  named, named_header), (
+                    f"{writer.name} names {named.name}, so its topics "
+                    "could reach across the pair")
 
 
 if __name__ == "__main__":
