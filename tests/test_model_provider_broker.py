@@ -2318,9 +2318,9 @@ def test_a_broker_reference_in_a_built_in_form_is_malformed(tmp_path):
 @NOT_ON_A_PRIVATE_ROUTE
 def test_a_none_binding_keeps_a_route_that_is_not_private(endpoint):
     """The auth kind `none` presents no credential, so it is the one kind
-    that keeps such a route. Until the broker path's hardening (the last
-    section of this file), this case also declared a broker binding on these
-    routes, pinning T080's scope. That half is now refused."""
+    that keeps such a route. Before the broker path's hardening (the last
+    section of this file), T080 pinned its scope here by declaring a broker
+    binding on two such routes as well. That half is now refused."""
     assert _none_binding(endpoint=endpoint).credential_source() == (
         binding_mod.NO_CREDENTIAL)
 
@@ -2957,6 +2957,7 @@ def test_set_credential_refuses_a_binding_no_broker_answers(tmp_path, capsys,
 
 @ON_A_PRIVATE_ROUTE
 def test_a_broker_token_is_declared_on_a_private_route(endpoint):
+    """The control for gap 1: every route a built-in credential may take."""
     binding = _binding(endpoint=endpoint, dialect=OPENAI_CHAT)
     assert binding.endpoint == endpoint
     assert binding.credential_source() == binding_mod.CREDENTIAL_FROM_BROKER
@@ -2993,6 +2994,7 @@ def test_mint_asks_no_broker_for_a_token_on_a_route_that_is_not_private(
 
 def test_the_cli_refuses_a_broker_binding_over_http_to_another_host(
         tmp_path, capsys):
+    """Gap 1, through the operator door: refused, and nothing is stored."""
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     args = cli_mod.build_parser().parse_args([
@@ -3120,7 +3122,7 @@ def test_a_re_mint_the_broker_refuses_after_an_expiry_keeps_no_context(
 
 
 @pytest.mark.parametrize("token", [
-    f"{SENTINEL_TOKEN}€", f"{SENTINEL_TOKEN}é",
+    f"{SENTINEL_TOKEN}\u20ac", f"{SENTINEL_TOKEN}\u00e9",
     "mint-stand-in NOT-A-TOKEN", "mint-stand-in\tNOT-A-TOKEN",
     f"{SENTINEL_TOKEN}\n", f"{SENTINEL_TOKEN}\x00", f"{SENTINEL_TOKEN}\x7f",
     f"{SENTINEL_TOKEN} ",
@@ -3152,7 +3154,7 @@ def test_a_token_outside_latin_1_is_refused_before_any_header_is_built(
     with _stand_in_provider(_ChatCompletionsHandler) as base:
         refusal = _refused_turn(_minting_port(
             tmp_path, f"{base}/v1/chat/completions",
-            token=f"{SENTINEL_TOKEN}€"))
+            token=f"{SENTINEL_TOKEN}\u20ac"))
     assert refusal.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
     assert refusal.__cause__ is None
     assert refusal.__context__ is None
