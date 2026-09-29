@@ -300,20 +300,30 @@ def _report(snapshot: dict, written: Path, repo_root: Path) -> None:
 
     The neutral snapshot (`opendox-snapshot`) has no project and no project
     group, so its line names its kind instead, rather than reporting a grouping
-    its contract does not carry. Every other kind's line is unchanged."""
+    its contract does not carry. Every other kind's line is unchanged.
+
+    A REGISTERED GENERATOR OWES THE SEAM ONLY ITS DECLARED `kind` AND AN INTEGER
+    `schema_version` (`generator_seam`), so nothing else is indexed here as if
+    every contract carried it (Copilot at openDox-code#59 96f18c45,
+    r4136863311). A field the snapshot lacks, or carries in another shape, is
+    reported `<absent>`. The snapshot is already written, and whether its own
+    contract required the field is its validator's to say, which runs next."""
     stats = _stats(snapshot)
+    generation = snapshot.get("generation")
+    generation = generation if isinstance(generation, dict) else {}
+    repository = snapshot.get("repository", "<absent>")
     print(f"wrote {written}")
     if snapshot.get("kind") == generator_seam.NEUTRAL_SNAPSHOT_KIND:
-        print(f"  repository={snapshot['repository']} kind={snapshot['kind']}")
+        print(f"  repository={repository} kind={snapshot['kind']}")
     else:
-        print(f"  repository={snapshot['repository']} "
+        print(f"  repository={repository} "
               f"project={snapshot.get('project', '<ungrouped>')} "
               f"project_group={snapshot.get('project_group', '<none>')}")
-    print(f"  source_revision={snapshot['generation']['source_revision']}")
+    print(f"  source_revision={generation.get('source_revision', '<absent>')}")
     # Printed even when absent: a missing freshness stamp used to be invisible
     # (the schema makes it optional, so nothing downstream complains), and a run
     # that meant to pin one needs to see whether it landed.
-    print(f"  generated_at={snapshot['generation'].get('generated_at', '<absent>')}")
+    print(f"  generated_at={generation.get('generated_at', '<absent>')}")
     print(f"  documents={stats['documents']} clusters={stats['clusters']} "
           f"possibles={stats['possibles']} staged_topics={stats['staged_topics']} "
           f"changes={stats['changes']} keywords={stats['keyword_index']}")
@@ -933,7 +943,13 @@ def _pull_request_port(repo_root: Path):
 
 
 def _stats(snapshot: dict) -> dict[str, int]:
-    return {k: len(snapshot.get(k, [])) for k in (
+    """How many of each collection the snapshot carries. One it lacks, or
+    carries as something other than a list or a mapping, counts 0: a
+    registered generator's contract need carry none of them (see `_report`)."""
+    def count(value: object) -> int:
+        return len(value) if isinstance(value, (list, dict)) else 0
+
+    return {k: count(snapshot.get(k)) for k in (
         "documents", "clusters", "possibles", "staged_topics", "changes", "keyword_index")}
 
 

@@ -737,6 +737,55 @@ def test_the_registry_keeps_a_sessions_owner_and_base_and_confines_each_entry(tm
     assert registry.get("garden", "draft/t") is None and len(registry) == 1
 
 
+@pytest.mark.parametrize("read,after", [
+    ("active", "main"),
+    ("resolve", "main"),
+    ("get", None),
+    ("len", 1),
+])
+def test_a_read_waits_for_a_held_read_modify_write(read, after, tmp_path) -> None:
+    """Every read takes the registry's lock, so none answers from the middle
+    of a block `atomically()` holds (Copilot at openDox-code#59 96f18c45,
+    r4136863481). Here the block registers a session, promotes it, and then
+    puts `main` back and drops the session, as a read-modify-write may. A
+    read on another thread starts while the session is promoted. Unheld, it
+    saw the session, or two entries. Held, it waits, and it answers the
+    registry as the block left it."""
+    reg = default_registry
+    registry = reg.SnapshotRegistry()
+    main = registry.register(reg.SnapshotEntry("garden", source_root=tmp_path))
+    session = reg.SnapshotEntry("garden", "draft/t", source_root=tmp_path)
+    reads = {
+        "active": lambda: registry.active,
+        "resolve": lambda: registry.resolve(None),
+        "get": lambda: registry.get("garden", "draft/t"),
+        "len": lambda: len(registry),
+    }
+    promoted, reading = threading.Event(), threading.Event()
+    answered: list = []
+
+    def reader() -> None:
+        promoted.wait(timeout=10)
+        reading.set()
+        answered.append(reads[read]())
+
+    worker = threading.Thread(target=reader, daemon=True)
+    worker.start()
+    with registry.atomically():
+        registry.register(session, active=True)
+        promoted.set()
+        reading.wait(timeout=10)
+        # Time to answer, where nothing holds the registry. A read that
+        # waits for the lock is still waiting when this runs out.
+        worker.join(timeout=0.5)
+        registry.set_active("garden")
+        registry.drop("garden", "draft/t")
+    worker.join(timeout=10)
+    expected = {"main": main, None: None, 1: 1}[after]
+    assert answered == [expected], (
+        f"{read} answered from the middle of a held block: {answered!r}")
+
+
 def test_the_regenerate_runs_the_registered_generator_and_writer(tmp_path) -> None:
     calls, writes = [], []
 
@@ -915,17 +964,16 @@ def test_the_source_arm_confines_to_the_entry_its_refusal_checked(tmp_path) -> N
 
 @pytest.mark.parametrize("query", ["", "?repository=garden&ref=main"],
                          ids=["unkeyed", "keyed"])
-def test_a_refresh_cannot_land_between_the_source_arms_two_lookups(
+def test_a_refresh_that_replaces_the_key_cannot_move_the_source_arms_root(
         tmp_path, query) -> None:
-    """FR-048 on `/source/`, against a refresh that REPLACES the key. The
-    arm resolves the entry once and asks for the path by that entry's pair,
-    and `resolve_source` looks the pair up again. Here a refresh on another
-    thread re-registers `garden@main`, with another root, right after the
-    first lookup. Unheld, it landed between the two, and the path came from
-    the replacement's root under the first entry's refusal and headers
-    (Copilot at openDox-code#59 687d37bf, r4136585695). Made under the
-    registry's own lock, the two lookups see one entry, and the refresh
-    lands after the read."""
+    """FR-048 on `/source/`, against a refresh that REPLACES the key. Here a
+    refresh on another thread re-registers `garden@main`, with another root,
+    right after the arm's one resolution. When the path was asked for by the
+    entry's pair, `resolve_source` looked the pair up again, and the path
+    came from the replacement's root under the first entry's refusal and
+    headers (Copilot at openDox-code#59 687d37bf, r4136585695). Confined to
+    the root of the entry in hand, it comes from the entry the refusal
+    checked, and the refresh lands as it would."""
     repo, _out, httpd = _served(tmp_path)
     bound = httpd.RequestHandlerClass.func
     first = bound.source.registry.active
@@ -942,6 +990,7 @@ def test_a_refresh_cannot_land_between_the_source_arms_two_lookups(
         registry.register(replacement)
 
     refresher = threading.Thread(target=refresh, daemon=True)
+    landed_before_the_path: list[bool] = []
 
     class _Registry(default_registry.SnapshotRegistry):
         def resolve(self, repository, ref=None):
@@ -949,9 +998,9 @@ def test_a_refresh_cannot_land_between_the_source_arms_two_lookups(
             if entry is first and refresher.ident is None:
                 refresher.start()
                 attempting.wait(timeout=10)
-                # Time to land, where nothing holds the registry. A held
-                # lock keeps it waiting, and this wait simply runs out.
-                refresher.join(timeout=0.5)
+                refresher.join(timeout=10)
+                landed_before_the_path.append(
+                    self.get(*first.key) is replacement)
             return entry
 
     registry = _Registry()
@@ -959,11 +1008,11 @@ def test_a_refresh_cannot_land_between_the_source_arms_two_lookups(
     bound.source.registry = registry
     status, _headers, body = _get(
         httpd, f"/source/notes-toolshed-inventory.md{query}")
-    refresher.join(timeout=10)
-    assert registry.get(*first.key) is replacement, "the refresh landed after"
+    assert landed_before_the_path == [True], (
+        "the refresh landed after the arm's one resolution, and before its "
+        "path was confined")
     assert b"THE REPLACEMENT'S BYTES" not in body, (
-        "a refresh landed between the arm's two lookups, and the path came "
-        "from the replacement's root")
+        "the path was looked up again, and came from the replacement's root")
     assert status == 200
     assert body == (repo / "notes-toolshed-inventory.md").read_bytes()
 
@@ -1132,6 +1181,40 @@ def test_generate_refuses_a_snapshot_json_cannot_carry(tmp_path, capsys) -> None
     err = capsys.readouterr().err
     assert "generate refused:" in err and "JSON cannot carry" in err
     assert not out.exists()
+
+
+@pytest.mark.parametrize("extra", [
+    {},
+    {"generation": "r1", "documents": 7, "keyword_index": "k"},
+], ids=["only-what-the-seam-requires", "other-shapes"])
+def test_generate_reports_a_snapshot_whatever_else_its_contract_carries(
+        extra, tmp_path, capsys) -> None:
+    """A registered generator owes the seam only its declared `kind` and an
+    integer `schema_version`. Its snapshot is written and reported, with
+    what it lacks shown as `<absent>`, and the verb goes on to the validator
+    for its kind. The report indexed `repository` and `generation` as if
+    every contract carried them, so such a snapshot failed with a `KeyError`
+    after it was written (Copilot at openDox-code#59 96f18c45,
+    r4136863311)."""
+    snapshot = {"schema_version": 1, "kind": "host-snapshot", **extra}
+
+    def operation(repo_root, repository, *, source_revision=None, generated_at=None):
+        return dict(snapshot)
+
+    gs.register(gs.SnapshotGenerator(contract="host-snapshot", generate=operation))
+    validator = _Validator()
+    ps.validators.register("host-snapshot", validator)
+    out = tmp_path / "out" / "snapshot.json"
+    assert _generate(_repository(tmp_path), out) == 0
+    assert json.loads(out.read_text(encoding="utf-8")) == snapshot
+    lines = capsys.readouterr().out.splitlines()
+    for line in ("  repository=<absent> project=<ungrouped> project_group=<none>",
+                 "  source_revision=<absent>", "  generated_at=<absent>",
+                 "  documents=0 clusters=0 possibles=0 staged_topics=0 "
+                 "changes=0 keywords=0"):
+        assert line in lines, lines
+    assert [call["path"].resolve() for call in validator.calls] == [out.resolve()], (
+        "the verb goes on to the validator registered for the snapshot's kind")
 
 
 def test_the_validator_stand_in_concludes_nothing_and_names_T057(tmp_path) -> None:

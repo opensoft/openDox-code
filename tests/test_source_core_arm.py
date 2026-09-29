@@ -305,23 +305,23 @@ def test_the_arm_resolves_through_that_entry_point_and_the_registry_only():
     body = _source_of(_method("_serve_source"))
     assert "resolve_source_path(Path(self.checkout_root), rest)" in body, (
         "the no-registry path resolves through the single-root entry point")
-    assert "self.source.registry.resolve_source(" in body and \
-        "entry.repository, entry.ref, rest)" in body, (
+    assert "root = None if entry is None else entry.source_root" in body and \
+        "resolve_source_path(Path(root), rest)" in body, (
         "the registry path resolves through the entry's OWN root (per-entry "
-        "confinement, task 2.2) — not through the served checkout with a key "
-        "stripped off, which is the silent-wrong-data failure the seam exists "
-        "to prevent")
+        "confinement, task 2.2), by the same entry point — not through the "
+        "served checkout with a key stripped off, which is the "
+        "silent-wrong-data failure the seam exists to prevent")
     assert body.count("self.source.registry.resolve(") == 1, (
-        "ONE resolution of the entry, whose own pair the path is then asked "
-        "for (plan 034 T055, FR-048): resolved a second time, the active "
-        "entry could change between the refusal and the path")
-    held = body.split("with self.source.registry.atomically():", 1)
-    assert len(held) == 2 and "self.source.registry.resolve(" in held[1] \
-        and "self.source.registry.resolve_source(" in held[1], (
-            "both lookups under the registry's own lock (openDox-code#59, "
-            "r4136585695): resolve_source looks the pair up again, and a "
-            "refresh that re-registered the key in between put another root "
-            "behind the path")
+        "ONE resolution of the entry, whose own root the path is then "
+        "confined to (plan 034 T055, FR-048): resolved a second time, the "
+        "active entry could change between the refusal and the path")
+    assert "resolve_source(" not in body and "atomically(" not in body, (
+        "and the path is never looked up again (openDox-code#59, "
+        "r4136585695): asked for by the entry's pair, a refresh that "
+        "re-registered the key in between put another root behind the path. "
+        "Nor does the arm hold the registry's lock for it, which asks a "
+        "contributed registry for a method the seam does not declare "
+        "(r4136863569)")
     assert "resolve_within(" not in body, (
         "the arm must not call the containment rule directly: one entry point, "
         "so a change to the rule cannot reach the route by one path and miss "

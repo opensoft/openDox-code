@@ -342,7 +342,15 @@ class SnapshotRegistry:
     Per-process and in memory. `serve.py` answers requests on threads of their
     own, so every mutation is serialized under a re-entrant lock, and
     `atomically()` holds it across a read-modify-write, as
-    `branch_session._preserving_active` needs."""
+    `branch_session._preserving_active` needs.
+
+    EVERY READ TAKES THE LOCK TOO (Copilot at openDox-code#59 96f18c45,
+    r4136863481). A read-modify-write is atomic only to a reader that waits
+    for it. Read unheld, `active` and `get` could answer from the middle of a
+    block `atomically()` holds: a key promoted and not yet put back, or an
+    entry registered and not yet dropped. So `get`, `active` and `len()` read
+    under the lock, as `entries()` and `keys()` already did. Each answers the
+    registry as it stood before a held block or after it, never half-way."""
 
     def __init__(self) -> None:
         self._entries: dict[tuple[str, str], SnapshotEntry] = {}
@@ -387,7 +395,9 @@ class SnapshotRegistry:
 
     def get(self, repository: str, ref: str | None = None) -> SnapshotEntry | None:
         """A ref-less lookup means `main`."""
-        return self._entries.get(snapshot_key(repository, ref))
+        key = snapshot_key(repository, ref)
+        with self._lock:
+            return self._entries.get(key)
 
     def entries(self) -> list[SnapshotEntry]:
         """Every entry, ordered by `(repository, ref)`."""
@@ -399,12 +409,15 @@ class SnapshotRegistry:
             return sorted(self._entries)
 
     def __len__(self) -> int:
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
     @property
     def active(self) -> SnapshotEntry | None:
-        key = self._active
-        return None if key is None else self._entries.get(key)
+        """The active entry, its key and its entry read as one."""
+        with self._lock:
+            key = self._active
+            return None if key is None else self._entries.get(key)
 
     def set_active(self, repository: str,
                    ref: str | None = None) -> SnapshotEntry | None:

@@ -1298,28 +1298,27 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             # `_serve_snapshot` closes. Resolved twice, once for the path and
             # once for the refusal, a refresh that changed the active entry
             # between the two could serve one entry's file under another's
-            # refusal and headers (FR-048). So the entry is resolved once, and
-            # the path is asked for by THAT entry's own pair, which is the pair
-            # the refusal checked, never "the active entry" a second time.
+            # refusal and headers (FR-048). So the entry is resolved once.
             #
-            # AND BOTH LOOKUPS ARE MADE UNDER THE REGISTRY'S OWN LOCK (Copilot
-            # at openDox-code#59 687d37bf, r4136585695). `resolve_source`
-            # looks that pair up again, so a refresh that re-registered the
-            # key in between put another entry, with another root, behind the
-            # path. `atomically()` holds the lock that `register` and `drop`
-            # take, in openDox's registry and in a host's, so no refresh lands
-            # between the two. The path still comes through `resolve_source`,
-            # the one entry point to the containment rule. Nothing is sent
-            # while the lock is held, so a slow client cannot hold a refresh
-            # up: the refusal is decided on the entry in hand afterwards, and
-            # a refused entry's path is never read.
-            with self.source.registry.atomically():
-                entry = self.source.registry.resolve(repository, ref)
-                target = (None if entry is None else
-                          self.source.registry.resolve_source(
-                              entry.repository, entry.ref, rest))
+            # AND THE PATH IS CONFINED TO THAT ENTRY'S OWN ROOT, with no second
+            # lookup (Copilot at openDox-code#59: r4136585695 at 687d37bf and
+            # r4136863569 at 96f18c45). Asked for by the entry's pair, the
+            # registry looked the pair up again, so a refresh that
+            # re-registered the key in between put another root behind the
+            # path. Holding the registry's lock across both lookups would ask
+            # a contributed registry for a method the seam does not declare.
+            # So the entry in hand is confined through this arm's one entry
+            # point, `resolve_source_path`, as the no-registry path below is.
+            # It applies the registry's declared per-entry containment rule
+            # (`projection_seams.REGISTRY_CALLABLES`), as `serve_workbench.py`
+            # does for the roots it holds. An entry with no root serves
+            # nothing.
+            entry = self.source.registry.resolve(repository, ref)
             if self._hosted_entry_refused(entry):
                 return
+            root = None if entry is None else entry.source_root
+            target = (None if root is None else
+                      resolve_source_path(Path(root), rest))
         else:
             target = resolve_source_path(Path(self.checkout_root), rest)
         if target is None:
