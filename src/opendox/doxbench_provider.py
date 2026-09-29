@@ -99,6 +99,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -359,11 +360,26 @@ def _parse_expires_at(value: object) -> float:
     Accepts an ISO-8601 instant (the spelling `credential-contracts` uses for
     its own `expires_at`) or a plain number of epoch seconds. A naive instant is
     read as UTC — the alternative, reading it in the console host's local zone,
-    would make a token's life depend on where the operator lives."""
+    would make a token's life depend on where the operator lives.
+
+    A NUMBER MUST BE FINITE (Copilot's review of openDox-code#64 at
+    `a2c838a0`). JSON can carry an integer too large for a float, which
+    `float()` refuses with an `OverflowError`. Python's JSON reader also takes
+    `NaN`, `Infinity` and `-Infinity`, and none of them is an instant: the
+    token would never expire, or would always have expired. Each is a
+    malformed answer, refused with the fixed sentence, so no token whose
+    expiry cannot be read is held, and `mint` raises the refusal again,
+    holding nothing of the answer."""
     if isinstance(value, bool):
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
     if isinstance(value, (int, float)):
-        return float(value)
+        try:
+            seconds = float(value)
+        except OverflowError:
+            seconds = math.inf
+        if not math.isfinite(seconds):
+            raise BrokerRefused(DIAG_BROKER_MALFORMED)
+        return seconds
     if not isinstance(value, str) or not value.strip():
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
     text = value.strip()
@@ -546,7 +562,10 @@ def _answer_document(text: object, kind: str, fields) -> dict:
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
     try:
         document = json.loads(text)
-    except (ValueError, TypeError) as error:
+    # A RecursionError too: arrays nested past the interpreter's limit fit
+    # well inside MAX_BROKER_ANSWER_BYTES (measured: 30,000 of them in 60 KB),
+    # and such an answer is malformed, not a crash that escapes with it.
+    except (ValueError, TypeError, RecursionError) as error:
         raise BrokerRefused(DIAG_BROKER_MALFORMED) from error
     if not isinstance(document, dict):
         raise BrokerRefused(DIAG_BROKER_MALFORMED)

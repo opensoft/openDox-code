@@ -3220,18 +3220,40 @@ def test_the_declared_mint_answer_mints(tmp_path):
     assert provider_mod.mint(_broker_binding(script)).token == SENTINEL_TOKEN
 
 
+#: A mint answer nested past the interpreter's recursion limit, and still well
+#: inside the broker's answer bound.
+_NESTED_PAST_THE_LIMIT = (json.dumps(_mint_answer())[:-1] + ', "deep": '
+                          + "[" * 30_000 + "]" * 30_000 + "}")
+
+
 @pytest.mark.parametrize("text", [
     json.dumps(_mint_answer(expires_at="not-an-instant")),
     json.dumps(_mint_answer(debug_note="a key the declaration does not name")),
     json.dumps(_mint_answer())[:-1],
-], ids=["expiry-malformed", "undeclared-key", "not-json"])
+    json.dumps(_mint_answer(expires_at=10 ** 400)),
+    json.dumps(_mint_answer(expires_at=float("nan"))),
+    json.dumps(_mint_answer(expires_at=float("inf"))),
+    json.dumps(_mint_answer(expires_at=float("-inf"))),
+    _NESTED_PAST_THE_LIMIT,
+], ids=["expiry-malformed", "undeclared-key", "not-json",
+        "expiry-past-a-float", "expiry-nan", "expiry-infinite",
+        "expiry-minus-infinite", "nested-past-the-recursion-limit"])
 def test_a_malformed_mint_answer_keeps_no_frame_that_holds_its_token(
         tmp_path, text):
     """The same rule for every refusal of the answer that carried the token.
     At T080's head the answer stayed in the refusal's frames (measured:
     `mint.answer`, `mint.document`, `_answer_document.text` and
-    `_answer_document.document`). Its refusal keeps no frame, cause or
-    context that holds the token."""
+    `_answer_document.document`).
+
+    Some answers escaped `mint` outright (Copilot's review of
+    openDox-code#64 at `a2c838a0`): an expiry past a float's range, as an
+    `OverflowError`, and an answer nested past the recursion limit, as a
+    `RecursionError`. An expiry of `NaN` or an infinity minted a token that
+    would never expire, or would always have expired. Each is now a
+    malformed answer, and its refusal keeps no frame, cause or context that
+    holds the token."""
+    assert len(text.encode("utf-8")) <= provider_mod.MAX_BROKER_ANSWER_BYTES, \
+        "a case for the answer's parser, not for the runner's bound"
     binding = _broker_binding(_broker_answering(tmp_path, text))
     with pytest.raises(provider_mod.BrokerRefused) as caught:
         provider_mod.mint(binding)
