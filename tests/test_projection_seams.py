@@ -42,6 +42,7 @@ import http.client
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -1008,6 +1009,45 @@ def test_a_failed_move_leaves_the_old_snapshot_and_no_sibling(tmp_path, monkeypa
     with pytest.raises(OSError, match="the move failed"):
         writer.write_snapshot({"kind": NEUTRAL, "n": 2}, target, boundary)
     assert json.loads(target.read_text(encoding="utf-8")) == {"kind": NEUTRAL, "n": 1}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["snapshot.json"]
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o444])
+def test_a_refresh_keeps_the_snapshots_permissions(tmp_path, mode) -> None:
+    """Copilot at d7aa9d8c (r4136439187). `os.replace` carries the sibling's
+    mode over the target, and the sibling had a new file's ordinary mode, so
+    a snapshot kept restricted was widened by every refresh. Its permission
+    bits now carry over. A new snapshot gets an ordinary new file's mode."""
+    writer = default_projection.WRITER
+    target = tmp_path / "snapshot.json"
+    boundary = OutputBoundary(tmp_path, ["snapshot.json"])
+    writer.write_snapshot({"kind": NEUTRAL, "n": 1}, target, boundary)
+    ordinary = tmp_path / "ordinary"
+    ordinary.write_bytes(b"")
+    assert (stat.S_IMODE(os.stat(target).st_mode)
+            == stat.S_IMODE(os.stat(ordinary).st_mode)), "a new snapshot is ordinary"
+    os.chmod(target, mode)
+    writer.write_snapshot({"kind": NEUTRAL, "n": 2}, target, boundary)
+    assert stat.S_IMODE(os.stat(target).st_mode) == mode
+    assert json.loads(target.read_text(encoding="utf-8")) == {"kind": NEUTRAL, "n": 2}
+
+
+def test_a_mode_that_cannot_be_kept_fails_the_write_and_widens_nothing(
+        tmp_path, monkeypatch) -> None:
+    writer = default_projection.WRITER
+    target = tmp_path / "snapshot.json"
+    boundary = OutputBoundary(tmp_path, ["snapshot.json"])
+    writer.write_snapshot({"kind": NEUTRAL, "n": 1}, target, boundary)
+    os.chmod(target, 0o600)
+
+    def the_mode_cannot_be_set(descriptor, mode):
+        raise OSError("fchmod is not permitted here")
+
+    monkeypatch.setattr(default_projection.os, "fchmod", the_mode_cannot_be_set)
+    with pytest.raises(OSError, match="fchmod is not permitted here"):
+        writer.write_snapshot({"kind": NEUTRAL, "n": 2}, target, boundary)
+    assert json.loads(target.read_text(encoding="utf-8")) == {"kind": NEUTRAL, "n": 1}
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
     assert sorted(p.name for p in tmp_path.iterdir()) == ["snapshot.json"]
 
 

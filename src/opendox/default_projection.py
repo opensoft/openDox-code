@@ -53,6 +53,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import stat
 import uuid
 from pathlib import Path
 from typing import Any
@@ -186,9 +187,11 @@ class Writer:
         check `write_output` makes, root and allowlist, with its refusal and
         its ledger, and it runs first, so a refused target leaves nothing
         behind. The sibling is created exclusively beside the permitted
-        target, with the mode an ordinary write would give it. Its name is a
-        dot-file with no document extension, so `/source` never serves it,
-        and it is removed if the write or the move fails."""
+        target, with the mode an ordinary write would give it, or with the
+        target's own permission bits where the target exists, so a refresh
+        never widens a restricted snapshot. Its name is a dot-file with no
+        document extension, so `/source` never serves it, and it is removed if
+        the write or the move fails."""
         data = self.canonical_json(snapshot).encode("ascii")
         target = boundary.permit_output(path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +199,18 @@ class Writer:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
         try:
             with os.fdopen(descriptor, "wb") as stream:
+                # THE SNAPSHOT KEEPS ITS PERMISSIONS (Copilot at
+                # openDox-code#59 d7aa9d8c, r4136439187). `os.replace` carries
+                # the SIBLING's mode over the target, and the sibling is
+                # created with a new file's ordinary mode, so a snapshot kept
+                # restricted (0600, say) was widened by every refresh. Where
+                # the target exists, its permission bits go onto the sibling
+                # before a byte is written. A new target keeps the ordinary
+                # mode. If they cannot be copied, the write fails: the stream
+                # closes the descriptor, the sibling is removed below, and the
+                # snapshot is never silently widened.
+                with contextlib.suppress(FileNotFoundError):
+                    os.fchmod(stream.fileno(), stat.S_IMODE(os.stat(target).st_mode))
                 stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
