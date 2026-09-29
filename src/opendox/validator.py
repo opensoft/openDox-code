@@ -932,9 +932,9 @@ class KindValidator:
             yield from self._string(value, schema, broken)
         if _is_number(value):
             if "minimum" in schema and value < schema["minimum"]:
-                yield broken("minimum", f"{_brief(value)} is less than {schema['minimum']}")
+                yield broken("minimum", f"{_brief(value)} is less than {_brief(schema['minimum'])}")
             if "maximum" in schema and value > schema["maximum"]:
-                yield broken("maximum", f"{_brief(value)} is more than {schema['maximum']}")
+                yield broken("maximum", f"{_brief(value)} is more than {_brief(schema['maximum'])}")
         if isinstance(value, list):
             yield from self._array(value, schema, path, broken)
         if isinstance(value, dict):
@@ -960,9 +960,9 @@ class KindValidator:
     def _string(self, value: str, schema: dict[str, Any],
                 broken: Callable[[str, str], Violation]) -> Iterator[Violation]:
         if len(value) < schema.get("minLength", 0):
-            yield broken("minLength", f"{_brief(value)} is shorter than {schema['minLength']}")
+            yield broken("minLength", f"{_brief(value)} is shorter than {_brief(schema['minLength'])}")
         if "maxLength" in schema and len(value) > schema["maxLength"]:
-            yield broken("maxLength", f"{_brief(value)} is longer than {schema['maxLength']}")
+            yield broken("maxLength", f"{_brief(value)} is longer than {_brief(schema['maxLength'])}")
         if "pattern" in schema and not self._pattern(schema["pattern"]).search(value):
             yield broken("pattern", f"{_brief(value)} does not match the rule's pattern")
         if "format" in schema and not FORMATS[schema["format"]](value):
@@ -972,9 +972,9 @@ class KindValidator:
                path: tuple[str | int, ...],
                broken: Callable[[str, str], Violation]) -> Iterator[Violation]:
         if len(value) < schema.get("minItems", 0):
-            yield broken("minItems", f"{len(value)} items, fewer than {schema['minItems']}")
+            yield broken("minItems", f"{len(value)} items, fewer than {_brief(schema['minItems'])}")
         if "maxItems" in schema and len(value) > schema["maxItems"]:
-            yield broken("maxItems", f"{len(value)} items, more than {schema['maxItems']}")
+            yield broken("maxItems", f"{len(value)} items, more than {_brief(schema['maxItems'])}")
         if schema.get("uniqueItems") and len({_canon(v) for v in value}) != len(value):
             yield broken("uniqueItems", f"{_brief(value)} repeats an item")
         if "items" in schema:
@@ -993,10 +993,10 @@ class KindValidator:
                 yield broken("required", f"{key!r} is required")
         if len(value) < schema.get("minProperties", 0):
             yield broken("minProperties",
-                         f"{len(value)} properties, fewer than {schema['minProperties']}")
+                         f"{len(value)} properties, fewer than {_brief(schema['minProperties'])}")
         if "maxProperties" in schema and len(value) > schema["maxProperties"]:
             yield broken("maxProperties",
-                         f"{len(value)} properties, more than {schema['maxProperties']}")
+                         f"{len(value)} properties, more than {_brief(schema['maxProperties'])}")
         for key, needed in schema.get("dependentRequired", {}).items():
             if key in value:
                 for other in needed:

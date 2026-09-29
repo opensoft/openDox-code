@@ -469,6 +469,24 @@ def test_a_violations_detail_always_shows_the_value() -> None:
     assert odd.detail == "<a set too large to show> is not 1"
 
 
+@pytest.mark.parametrize("schema, instance", [
+    ({"minimum": 10 ** 5000}, 0), ({"maximum": -(10 ** 5000)}, 0),
+    ({"minLength": 10 ** 5000}, "a"), ({"minItems": 10 ** 5000}, []),
+    ({"minProperties": 10 ** 5000}, {})],
+    ids=["minimum", "maximum", "minLength", "minItems", "minProperties"])
+def test_a_violations_detail_shows_a_bound_of_any_size(schema, instance) -> None:
+    """Copilot at bf51a30a, a finding its review lists as previously missed.
+    A bound builds at any size, but the detail interpolated it directly, so a
+    bound past 4300 digits raised `ValueError` while its violation was being
+    written. The bound is now shown the way the value is."""
+    [found] = _built(schema).violations(instance)
+    assert found.keyword == next(iter(schema))
+    assert f"<an int of {(10 ** 5000).bit_length()} bits>" in found.detail
+    # An ordinary bound reads exactly as it did.
+    [plain] = _built({"minimum": 5}).violations(1)
+    assert plain.detail == "1 is less than 5"
+
+
 def test_the_canon_keeps_json_equality() -> None:
     """`true` is not `1`, `1` is `1.0` and `-0.0` is `0`, key order is noise,
     and a text key is not the number it spells."""
