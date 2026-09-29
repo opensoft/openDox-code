@@ -6,7 +6,8 @@ holds HOW it judges an instance against them.
 
 THE CORPUS. `tests/fixtures/spec-examples/` is openDox-spec's own examples,
 copied byte for byte from openDox-spec#16 at `cd49eb25`
-(`examples/ideation-dashboard/`, T053). They are the positive examples of the
+(`examples/ideation-dashboard/`, T053). T053 landed as `f7ee3c76`, with the
+same tree, so the copies are the landed files. They are the positive examples of the
 neutral snapshot, chat-turn and model-catalog kinds, and the neutral snapshot
 contract's 32 negatives, one per rule. Each negative's `# expected_failure:`
 line names the rule it breaks, so the corpus asks the validator for the rule

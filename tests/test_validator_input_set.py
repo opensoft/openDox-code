@@ -56,17 +56,18 @@ PACKAGE = ROOT / "src" / "opendox" / "contracts"
 THE_FOUR = ("ideation-workbench", "opendox-snapshot", "xfactory-workbench-chat-turn",
             "xfactory-workbench-model-catalog")
 
-#: The commit the copies were taken at: openDox-spec#16's head (T053), the one
-#: commit that carries all four. When T053's root step moves the openDox root's
-#: spec pin to T053's landed commit, this moves with the record, in lockstep.
-SPEC_COMMIT = "cd49eb253a431202b67de70b2c9ed941a72d0aa4"
+#: The spec-leg commit the openDox root pins, which the copies are held to: T053
+#: as landed, openDox-spec#16's squash (opensoft/openDox#14 moved the root's spec
+#: pin to it). It is the one commit that carries all four. It moved from #16's
+#: head, cd49eb25, with the record, in lockstep. The two commits have one tree.
+SPEC_COMMIT = "f7ee3c763b3af4581daf1cd54406e5111e9358e6"
 
 #: WHAT THE OPENDOX ROOT PINS, stated here apart from the record, so that a copy
-#: and its recorded digest cannot move together unseen. The first three are
-#: the digests the root's `contracts/manifest.yaml` records for them at its
-#: spec pin, 8fe8c4c7 (the root's `main` at 663ac683). `SPEC_COMMIT` carries
-#: those three files unchanged. The fourth is the digest T053's held root step
-#: records for its new `opendox-snapshot` manifest entry (openDox-spec#16).
+#: and its recorded digest cannot move together unseen. All four are the
+#: digests the root's `contracts/manifest.yaml` records for them at its spec
+#: pin, `SPEC_COMMIT` (the root's `main` at 52005213, opensoft/openDox#14). The
+#: first three are unchanged from the root's previous spec pin, 8fe8c4c7. The
+#: fourth is T053's new `opendox-snapshot` entry.
 PINNED_BY_THE_ROOT = {
     "ideation-workbench":
         "d30438491119c20928fbe4e85088fc33682829eeb6558d87dafce651000faafc",
