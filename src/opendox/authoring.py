@@ -9,7 +9,10 @@ split so per-actor authority is structural, not a runtime flag:
       family's ` — Brainstorm` suffix, `Status:`/`Kind:`/`Summary:`/`Topics:`/
       `Repository context:`/`Captured:` pre-filled, plus a `## Possible feats`
       seed section per the openxFactory `ideation/README.md` "Ideation Header
-      Format") into the CHOSEN ideation area and writes it through
+      Format"). Where the registered corpus obliges openDox's small neutral
+      field set, the skeleton leads with a `title:`/`summary:` block above
+      the H1 (`scaffold_lead_fields`, plan 034 T054). It renders that skeleton
+      into the CHOSEN ideation area and writes it through
       `boundary.OutputBoundary.create_document` — create-only, so scaffolding
       over an existing path refuses as a SOURCE_EDIT (never silently
       overwritten). `edit_target`/`edit_command` back "select-to-edit": they
@@ -105,6 +108,21 @@ DEFAULT_POSSIBLE_FEAT = "TODO — a candidate feat this thinking could spawn."
 # directory" while only the TRAVERSAL half was checked (PR #49 wave-2 critic).
 IDEATION_PREFIX = "ideation/"
 
+#: THE FIELDS A SCAFFOLD CAN LEAD WITH (plan 034 T054; the holder's decision of
+#: 2026-09-28): openDox's small neutral field set, `local_git_adapter
+#: .NEUTRAL_FIELDS` (RULED R1Q13 (a)), each filled from the create's own input.
+#: openDox's own default adapter reads a document's fields from its LEADING
+#: `name: value` block (`local_git_adapter.leading_header`), which ends at the
+#: first blank line. The governed block below the H1 carries neither name: its
+#: `Summary:` is a different field, and it has no title field at all. So a
+#: scaffold that must satisfy that adapter leads with them.
+#:
+#: They are written only where the registered corpus obliges them
+#: (`scaffold_lead_fields`). Where it obliges neither, the governed layout is
+#: unchanged: openxFactory's gated create and openXdox's authoring suite pin it
+#: with the H1 on the first line.
+SCAFFOLD_LEAD_FIELDS: tuple[str, ...] = ("title", "summary")
+
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -118,7 +136,7 @@ def render_scaffold(
     *, title: str, summary: str, topics: Sequence[str], repository_context: str,
     kind: str = DEFAULT_KIND, status: str = DEFAULT_STATUS,
     possible_feats: Sequence[str] = (), source: str | None = None,
-    now: str | None = None,
+    now: str | None = None, lead_fields: Sequence[str] = (),
 ) -> str:
     """Render a header-compliant skeleton for a NEW ideation document: the H1
     with the family's ` — Brainstorm` suffix (so `grep '— Brainstorm$'` finds
@@ -132,15 +150,40 @@ def render_scaffold(
     the keyword-lens recipe at a named `source_revision`). It is additive: the
     six required fields keep their declared order and their positions, so every
     existing header check still passes and a scaffold with no source is
-    byte-identical to what this function rendered before."""
+    byte-identical to what this function rendered before.
+
+    `lead_fields` (plan 034 T054) names the fields of `SCAFFOLD_LEAD_FIELDS`
+    that the scaffold LEADS with.
+    - Each is written first, as a `name: value` line, in that tuple's order,
+      and a blank line then separates the block from the H1.
+    - `title` is the title as given, without the family suffix. `summary` is
+      the summary as given.
+    - That block is where openDox's own default adapter reads its small
+      neutral field set, so a created document satisfies it.
+      `create_scaffold` passes `scaffold_lead_fields()`.
+    - A name outside `SCAFFOLD_LEAD_FIELDS` is refused (`ValueError`), since
+      the scaffold has no value for it.
+    - With none, which is the default, the scaffold is byte-identical to what
+      this function rendered before, H1 first."""
+    unknown = [name for name in lead_fields if name not in SCAFFOLD_LEAD_FIELDS]
+    if unknown:
+        raise ValueError(
+            f"a scaffold can lead only with {SCAFFOLD_LEAD_FIELDS}, and it has "
+            f"no value for {unknown}")
     now = now or _utcnow()
-    heading = title if title.endswith(BRAINSTORM_SUFFIX) else f"{title}{BRAINSTORM_SUFFIX}"
+    suffixed = title.endswith(BRAINSTORM_SUFFIX)
+    heading = title if suffixed else f"{title}{BRAINSTORM_SUFFIX}"
+    lead_values = {"title": title[:-len(BRAINSTORM_SUFFIX)] if suffixed else title,
+                   "summary": summary}
+    lead = "".join(f"{name}: {lead_values[name]}\n"
+                   for name in SCAFFOLD_LEAD_FIELDS if name in lead_fields)
     topics_line = ", ".join(t.strip() for t in topics if t and t.strip())
     feats = [f for f in possible_feats if f and f.strip()] or [DEFAULT_POSSIBLE_FEAT]
     feat_lines = "\n".join(f"- {f}" for f in feats)
     source_line = f"Source: {source.strip()}\n" if source and source.strip() else ""
     return (
-        f"# {heading}\n\n"
+        (f"{lead}\n" if lead else "")
+        + f"# {heading}\n\n"
         f"Status: {status}\n"
         f"Kind: {kind}\n"
         f"Summary: {summary}\n"
@@ -248,12 +291,25 @@ def create_scaffold(
     `staged` from an `ideation/staging/` area; the ruling REVERSED that and the
     `status_for_area` helper it needed is gone.) `source` records the optional
     provenance citation. Both are additive: omitting them reproduces the
-    previous behaviour exactly."""
+    previous behaviour exactly.
+
+    THE SCAFFOLD LEADS WITH WHAT THE REGISTERED CORPUS OBLIGES (plan 034 T054;
+    the holder's decision of 2026-09-28). The fields come from
+    `scaffold_lead_fields()`, and they are the small neutral field set,
+    `title` and `summary`, wherever the corpus obliges them, as openDox's own
+    default adapter does. Before this, openDox's own scaffold read there as
+    missing both: its H1 comes first, and its `Summary:` is capitalized. So
+    standalone `agent_capture` refused a document `create` had written, and
+    the neutral projection lost its summary. Under a corpus that obliges
+    neither, openxFactory's among them, the scaffold is byte-identical to what
+    this function wrote before. Asking the corpus means a bare process, with
+    no home registered, refuses here as `agent_capture` does."""
     rel = scaffold_relpath(area, title)
     text = render_scaffold(title=title, summary=summary, topics=topics,
                             repository_context=repository_context, kind=kind,
                             status=status or DEFAULT_STATUS,
-                            possible_feats=possible_feats, source=source, now=now)
+                            possible_feats=possible_feats, source=source, now=now,
+                            lead_fields=scaffold_lead_fields())
     return boundary.create_document(rel, text)
 
 
@@ -444,6 +500,27 @@ def required_header_fields() -> tuple[str, ...]:
     and the tree, not of what the body happens to carry.
     """
     return _classify_proposal("").required_fields
+
+
+def scaffold_lead_fields() -> tuple[str, ...]:
+    """The fields a scaffold for THIS corpus leads with: those of
+    `SCAFFOLD_LEAD_FIELDS` that the registered corpus obliges
+    (`required_header_fields()`), in `SCAFFOLD_LEAD_FIELDS`' order.
+
+    - Under openDox's own default adapter, `WorkingTreeCorpus`, that is both.
+      So a document `create` writes carries its small neutral field set where
+      that adapter reads it. `agent_capture` then accepts it, and the neutral
+      projection copies its title and summary (plan 034 T054).
+    - Under an adapter that obliges neither, the answer is `()`, and the
+      scaffold keeps the governed layout, H1 first. openxFactory's adapter is
+      one such: its fields are the governed block's own `Status:`, `Kind:`,
+      `Summary:` and the rest.
+
+    It asks the corpus the way `agent_capture` does. So with nothing
+    registered it refuses as that does (4.2), rather than guessing a layout.
+    """
+    obliged = set(required_header_fields())
+    return tuple(name for name in SCAFFOLD_LEAD_FIELDS if name in obliged)
 
 
 def missing_required_headers(text: str) -> list[str]:
