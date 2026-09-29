@@ -167,9 +167,11 @@ MAX_HEADER_LINES = 64
 #: standalone default adapter, `WorkingTreeCorpus`, obliges of a document it
 #: recognizes, so `authoring.required_header_fields()` answers it. They are
 #: the `title` and `summary` of T053's neutral snapshot, which openDox's own
-#: projection copies from the same header (`leading_header`). A document
-#: without them is still listed and read, as a source: a missing field is
-#: reported, never a reason to refuse or drop the document.
+#: projection copies from the same header (`leading_header`). openDox's own
+#: `create` writes them there wherever the corpus obliges them
+#: (`authoring.scaffold_lead_fields`). A document without them is still
+#: listed and read, as a source: a missing field is reported, never a reason
+#: to refuse or drop the document.
 NEUTRAL_FIELDS: tuple[str, ...] = ("title", "summary")
 
 #: The corpus's ONE verdict of its own, and it is a fact about git rather than
