@@ -37,13 +37,18 @@ EACH RECORD HAS ONE RESOLVER, and the record says which:
   * the BUILT-IN RESOLVER, for an `env:NAME` or `keyring:SERVICE/USERNAME`
     reference. It reads the reference at call time, inside `doxbench_provider`
     only (RULED R1Q17 (b)). Such a record needs no broker, and one given
-    beside it is refused, so no record has two resolvers. What it reads is a
-    LONG-LIVED key, so its endpoint must be a PRIVATE ROUTE: `https://`, or
-    `http://` to 127.0.0.1, ::1 or localhost (Brett Heap's ruling of
-    2026-09-28, "Refuse unless loopback"; `is_a_private_route`);
+    beside it is refused, so no record has two resolvers;
   * NONE, for an endpoint that takes no credential. It declares the auth kind
     `none` rather than leaving a field out, and `credential_ref` and
     `broker_argv` are forbidden under it (RULED R1Q18 (a)).
+
+WHATEVER A RECORD PRESENTS TRAVELS ONLY BY A PRIVATE ROUTE: `https://`, or
+`http://` to 127.0.0.1, ::1 or localhost (`is_a_private_route`). That holds for
+the built-in resolver's LONG-LIVED key (Brett Heap's ruling of 2026-09-28,
+"Refuse unless loopback") and for a broker's minted token alike (his word of
+2026-09-29 on openDox-code#63's closing question, "Yes, separate phase-3
+draft"). Only the auth kind `none`, which presents nothing, keeps the route it
+declares.
 
 This module classifies a reference's FORM when a binding is declared. It never
 reads what a reference names.
@@ -213,15 +218,15 @@ DIALECTS: tuple[str, ...] = (DIALECT_XFACTORY_PROMPT_V1, DIALECT_OPENAI_CHAT_V1)
 #: on-this-host proxy posture an operator may legitimately run; a scheme this
 #: tuple does not name is refused at declaration, because `file://` or a bare
 #: host is not something a provider client should discover at dispatch time.
-#: For a credential the built-in resolver reads, "on this host" is ENFORCED
-#: (`is_a_private_route`). A broker's minted token and the auth kind `none`
-#: keep the posture this tuple gives them, as the 2026-09-28 ruling leaves it.
+#: For every record that presents a credential, "on this host" is ENFORCED
+#: (`is_a_private_route`). The auth kind `none` presents none, so it keeps the
+#: posture this tuple gives it.
 ENDPOINT_SCHEMES: tuple[str, ...] = ("https://", "http://")
 
-#: The hosts a credential the built-in resolver reads may reach over plain
-#: `http://`: this host, spelled exactly as Brett Heap's ruling of 2026-09-28
-#: names it ("Refuse unless loopback"). No other spelling of these addresses,
-#: and no other address of the loopback range, is one of them.
+#: The hosts a credential may reach over plain `http://`: this host, spelled
+#: exactly as Brett Heap's ruling of 2026-09-28 names it ("Refuse unless
+#: loopback"). No other spelling of these addresses, and no other address of
+#: the loopback range, is one of them.
 LOOPBACK_HOSTS: tuple[str, ...] = ("127.0.0.1", "::1", "localhost")
 
 
@@ -248,23 +253,24 @@ def is_a_private_route(endpoint: object) -> bool:
     """Whether `endpoint` keeps a credential from crossing a network in
     cleartext: `https://`, or `http://` to this host (`LOOPBACK_HOSTS`).
 
-    ONE PREDICATE. The record asks it when a binding is declared, and
-    `doxbench_provider`'s built-in resolver asks it again before it reads
-    anything."""
+    ONE PREDICATE. The record asks it when a binding is declared.
+    `doxbench_provider` asks it again before the built-in resolver reads
+    anything, and before `mint` asks a broker for a token."""
     return (isinstance(endpoint, str)
             and _PRIVATE_ROUTE.match(endpoint) is not None)
 
 
-#: The refusal a credential the built-in resolver reads earns on a route that
-#: is not private (Brett Heap's ruling of 2026-09-28, "Refuse unless
-#: loopback"). That resolver reads a LONG-LIVED key, where a broker mints a
-#: short-lived token, so plain `http://` carries one only to this host. A
-#: fixed sentence, and it repeats nothing of the endpoint.
+#: The refusal a record that presents a credential earns on a route that is
+#: not private. Brett Heap ruled it on 2026-09-28 ("Refuse unless loopback")
+#: for the built-in resolver's LONG-LIVED key. His word of 2026-09-29 gave a
+#: broker's minted token the same rule. A short-lived token is still a
+#: credential: sent in cleartext, it can be replayed by whoever reads it until
+#: it expires. A fixed sentence, and it repeats nothing of the endpoint.
 ENDPOINT_NOT_PRIVATE = (
-    "a credential the built-in resolver reads (an env: or keyring: reference) "
-    "is sent only over https://, or over http:// to this host (127.0.0.1, ::1 "
-    "or localhost), and this endpoint is neither; declare an https:// "
-    "endpoint, or a loopback one")
+    "a credential (a broker's minted token, or the key an env: or keyring: "
+    "reference names) is sent only over https://, or over http:// to this host "
+    "(127.0.0.1, ::1 or localhost), and this endpoint is neither; declare an "
+    "https:// endpoint, or a loopback one")
 
 #: The refusal a key inside the endpoint URL earns (#1144 box 16.3). Measured
 #: before 16.3: this record checked the endpoint's scheme and nothing else, so
@@ -563,11 +569,12 @@ class ModelProviderBinding:
                 f"{ENDPOINT_SCHEMES}")
 
     def _require_a_private_route(self) -> None:
-        """A CREDENTIAL THE BUILT-IN RESOLVER READS TRAVELS ONLY BY A PRIVATE
-        ROUTE (Brett Heap's ruling of 2026-09-28, "Refuse unless loopback";
-        `is_a_private_route`). A broker's minted token and the auth kind
-        `none` keep the route they had, as the ruling leaves them."""
-        if (self.credential_source() == CREDENTIAL_FROM_BUILT_IN_RESOLVER
+        """A CREDENTIAL TRAVELS ONLY BY A PRIVATE ROUTE (`is_a_private_route`),
+        whichever resolver answers it: the built-in resolver's key (Brett
+        Heap's ruling of 2026-09-28, "Refuse unless loopback") or a broker's
+        minted token (his word of 2026-09-29). The auth kind `none` presents
+        no credential, so its route is its own."""
+        if (self.credential_source() != NO_CREDENTIAL
                 and not is_a_private_route(self.endpoint)):
             raise BindingRefused(ENDPOINT_NOT_PRIVATE)
 

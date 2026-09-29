@@ -628,7 +628,21 @@ def mint(binding, *, retry_of: str | None = None,
     WHERE the token is good and WHAT GRAMMAR that endpoint speaks come from the
     BINDING, not from this answer: the declaration emits neither and says why —
     the broker is provider-agnostic about the request grammar and will not name
-    an endpoint it would then be accountable for (0.2 FINDING 3)."""
+    an endpoint it would then be accountable for (0.2 FINDING 3).
+
+    NO TOKEN IS ASKED FOR ON A ROUTE THAT IS NOT PRIVATE (Brett Heap's word of
+    2026-09-29: a broker's minted token keeps the rules a built-in credential
+    keeps). The record refuses such a binding when it is declared
+    (`doxbench_binding.ENDPOINT_NOT_PRIVATE`), so no declared binding reaches
+    this check. It is repeated before the broker is asked all the same, as the
+    built-in resolver repeats it before it reads, because this is the function
+    that obtains the token. What reaches it is a programming error, and
+    nothing has been minted when it is raised."""
+    if not binding_mod.is_a_private_route(binding.endpoint):
+        raise AssertionError(
+            f"binding {binding.id!r} would present a minted token over a "
+            "route that is not private, which the record refuses when it is "
+            "declared; nothing was minted")
     answer = runner(broker_operation_argv(binding, OPERATION_MINT,
                                           retry_of=retry_of))
     document = _answer_document(answer, BROKER_MINT_KIND, MINT_FIELDS)

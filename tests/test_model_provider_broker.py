@@ -25,7 +25,9 @@ A SIXTH LAYER, (f), holds #1144 Group 16's binding and provider boxes (plan
 034 phase 3, slice P3-B). 16.1 is the OpenAI-compatible dialect (T078), 16.2
 is the model name the provider receives (T079), and 16.3 is the credential
 staying a reference: a key in the URL or an extra field refused, the built-in
-`env:` and keyring resolver, and the auth kind `none` (T080).
+`env:` and keyring resolver, and the auth kind `none` (T080). Its last section
+holds a broker's minted token to the rules T080 gave a built-in credential
+(the broker path's hardening, Brett Heap's word of 2026-09-29).
 
 THE FAKE BROKER SPEAKS THE DECLARED CONTRACT (task 2.6). It was this
 repository's own invented stdin/stdout protocol until the reconciliation, which
@@ -2161,8 +2163,10 @@ BUILT_IN_REFERENCES = (f"env:{ENV_NAME}",
                        f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}")
 BACKSLASH = chr(92)
 
-
-@pytest.mark.parametrize("endpoint", [
+#: The routes a credential may take, and the routes it may not. One list of
+#: each, shared by the built-in resolver's cases here and the broker path's
+#: cases below, because the rule is one rule.
+ON_A_PRIVATE_ROUTE = pytest.mark.parametrize("endpoint", [
     "https://api.example.invalid/v1/chat/completions",
     "http://127.0.0.1:8080/v1/chat/completions",
     "http://[::1]:8080/v1/chat/completions",
@@ -2171,15 +2175,7 @@ BACKSLASH = chr(92)
     "http://localhost",
 ], ids=["https", "ipv4-loopback", "ipv6-loopback", "localhost",
         "localhost-in-capitals", "no-path"])
-def test_a_built_in_credential_is_declared_on_a_private_route(endpoint):
-    for reference in BUILT_IN_REFERENCES:
-        binding = _built_in_binding(reference, endpoint=endpoint)
-        assert binding.endpoint == endpoint
-        assert binding.credential_source() == (
-            binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER)
-
-
-@pytest.mark.parametrize("endpoint", [
+NOT_ON_A_PRIVATE_ROUTE = pytest.mark.parametrize("endpoint", [
     "http://api.example.invalid/v1/chat/completions",
     "http://localhost.evil.com/v1/chat/completions",
     "http://127.0.0.1.evil.com/v1/chat/completions",
@@ -2193,6 +2189,18 @@ def test_a_built_in_credential_is_declared_on_a_private_route(endpoint):
         "localhost-only-in-the-path", "a-loopback-address-not-named",
         "another-spelling-of-ipv6-loopback", "trailing-dot",
         "percent-encoded-dot", "unspecified-address"])
+
+
+@ON_A_PRIVATE_ROUTE
+def test_a_built_in_credential_is_declared_on_a_private_route(endpoint):
+    for reference in BUILT_IN_REFERENCES:
+        binding = _built_in_binding(reference, endpoint=endpoint)
+        assert binding.endpoint == endpoint
+        assert binding.credential_source() == (
+            binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER)
+
+
+@NOT_ON_A_PRIVATE_ROUTE
 def test_a_built_in_credential_over_http_to_another_host_is_refused(endpoint):
     """Refused when it is declared, by the constructor and from a stored
     record alike, with the one fixed sentence."""
@@ -2305,15 +2313,12 @@ def test_a_broker_reference_in_a_built_in_form_is_malformed(tmp_path):
         assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
 
 
-@pytest.mark.parametrize("endpoint", [
-    "http://api.example.invalid/turn", "http://localhost.evil.com/turn"])
-def test_the_loopback_rule_is_the_built_in_resolvers_alone(endpoint):
-    """The ruling leaves the broker path as it is today: a broker's minted
-    token may still be declared over plain http:// to any host, which is the
-    pre-existing gap the PR notes. The auth kind `none` presents no
-    credential, so it keeps its route too."""
-    assert _binding(endpoint=endpoint).credential_source() == (
-        binding_mod.CREDENTIAL_FROM_BROKER)
+@NOT_ON_A_PRIVATE_ROUTE
+def test_a_none_binding_keeps_a_route_that_is_not_private(endpoint):
+    """The auth kind `none` presents no credential, so it is the one kind
+    that keeps such a route. Until the broker path's hardening (the last
+    section of this file), this case also declared a broker binding on these
+    routes, pinning T080's scope. That half is now refused."""
     assert _none_binding(endpoint=endpoint).credential_source() == (
         binding_mod.NO_CREDENTIAL)
 
@@ -2903,3 +2908,75 @@ def test_set_credential_refuses_a_binding_no_broker_answers(tmp_path, capsys,
         args, source=_UnreadableSource()) == 1
     assert "names no broker" in capsys.readouterr().err
     assert store.get(binding.id) == binding, "nothing changed"
+
+
+# --- the broker path keeps the same rules (follows T080) -----------------
+# Brett Heap's word of 2026-09-29, answering openDox-code#63's closing
+# question ("Should the broker path follow it?"): "Yes, separate phase-3
+# draft". A broker's minted token keeps every rule T080 gave a credential the
+# built-in resolver reads. At `main`, and at T080's head, the broker path had
+# four gaps, each measured over real sockets and a real broker child:
+#
+#   1. the token could be declared over plain http:// to any host;
+#   2. a redirect, or an environment proxy, carried it elsewhere;
+#   3. a provider-unreachable refusal chained urllib's error, whose frames
+#      held the token in their locals;
+#   4. a token that cannot be presented went to urllib as it was, so one
+#      outside latin-1 failed there as DIAG_PROVIDER_UNREACHABLE.
+#
+# Each gap's cases below fail at T080's head, and the controls beside them
+# (a private route declared, a presentable token presented) pass there too.
+# Every token here is an obvious fake.
+
+
+@ON_A_PRIVATE_ROUTE
+def test_a_broker_token_is_declared_on_a_private_route(endpoint):
+    binding = _binding(endpoint=endpoint, dialect=OPENAI_CHAT)
+    assert binding.endpoint == endpoint
+    assert binding.credential_source() == binding_mod.CREDENTIAL_FROM_BROKER
+
+
+@NOT_ON_A_PRIVATE_ROUTE
+def test_a_broker_token_over_http_to_another_host_is_refused(endpoint):
+    """Gap 1. Refused when it is declared, by the constructor and from a
+    stored record alike, with the fixed sentence a built-in credential
+    earns on the same route."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=endpoint, dialect=OPENAI_CHAT)
+    assert str(caught.value) == binding_mod.ENDPOINT_NOT_PRIVATE
+    record = dict(_binding().as_record(), endpoint=endpoint)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        binding_mod.ModelProviderBinding.from_record(record)
+    assert str(caught.value) == binding_mod.ENDPOINT_NOT_PRIVATE
+
+
+def test_mint_asks_no_broker_for_a_token_on_a_route_that_is_not_private(
+        tmp_path):
+    """Gap 1, in `mint` itself, as the built-in resolver checks before it
+    reads. The record refuses such a binding when it is declared, so this
+    one is forced past that check, as no declaration can do. It still
+    cannot make a broker mint."""
+    script = _write_broker(tmp_path)
+    binding = _broker_binding(script)
+    object.__setattr__(binding, "endpoint", "http://api.example.invalid/v1")
+    with pytest.raises(AssertionError) as caught:
+        provider_mod.mint(binding)
+    assert "nothing was minted" in str(caught.value)
+    assert _seen_all(script) == [], "the broker was never asked"
+
+
+def test_the_cli_refuses_a_broker_binding_over_http_to_another_host(
+        tmp_path, capsys):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    args = cli_mod.build_parser().parse_args([
+        "model-binding", "add", "--repo-root", str(checkout),
+        "--id", "cleartext-broker", "--label", "L", "--provider", "local",
+        "--credential-ref", FAKE_REFERENCE, "--auth-kind", "api_key",
+        "--credential-approver", "brett@opensoft.one",
+        "--endpoint", "http://api.example.invalid/v1/chat/completions",
+        "--dialect", OPENAI_CHAT, "--", "openprofiler-broker"])
+    assert args.func(args) == 1
+    assert binding_mod.ENDPOINT_NOT_PRIVATE in capsys.readouterr().err
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+    assert store.list() == (), "nothing is stored"
