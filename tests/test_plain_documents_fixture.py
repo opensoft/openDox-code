@@ -35,13 +35,10 @@ Every document also carries the small neutral field set the default adapter
 will require regardless of station — `title` and `summary` — per T050's task
 line and the answer's own example.
 
-NOT YET WIRED INTO `.github/workflows/validate.yml`'s explicit pytest list:
-the phase-2 draft-ahead scope keeps this PR out of that file (conftest.py,
-pyproject.toml, validate.yml and README.md are the phase-1 chain's), so this
-suite runs by node id today, exactly as other narrowed-out suites in this
-tree have (`tests/test_display_facet_leaves.py`'s own S7-residue history).
-It joins the enumerated list whichever later task next touches it — most
-likely F5.3/T056, or T049's own close.
+COLLECTED BY THE REQUIRED CHECK. Since T036, `validate` runs the whole suite
+(`python -m pytest -q` over the configured testpaths) instead of an explicit
+list of files, so this suite is collected like every other and needs no entry
+anywhere.
 
 A CREATED file: no row in openxFactory's `docs/opendox-carve-manifest.yaml`
 (RULED OQ-C: the manifest declares what LEAVES openxFactory, never what a
