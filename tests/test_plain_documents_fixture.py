@@ -159,7 +159,12 @@ def test_required_fields_present(path: Path) -> None:
 
 def test_spread_across_the_six_stations() -> None:
     """One document per explicit station, and every undeclared document is
-    a source (R1Q13 (a) with (c))."""
+    a source (R1Q13 (a) with (c)).
+
+    No document declares `stage: source`. This fixture's sources are the
+    documents that declare nothing, which is the case R1Q13 (a) with (c)
+    names ("a document that declares nothing is a source"), so the fixture
+    exercises that reading and not a declared one."""
     by_role: dict[str, list[Path]] = {role: [] for role in STAGE_ROLES}
     for path, (header, _) in _documents().items():
         stage = header.get("stage")
@@ -168,6 +173,10 @@ def test_spread_across_the_six_stations() -> None:
             continue
         assert stage in STAGE_ROLES, (
             f"{path.name} declares stage {stage!r}, not one of {STAGE_ROLES}"
+        )
+        assert stage != "source", (
+            f"{path.name} declares `stage: source`; a source in this fixture "
+            "declares nothing, so that it exercises that reading"
         )
         by_role[stage].append(path)
 
@@ -200,17 +209,106 @@ def test_at_least_two_sources_share_a_topic() -> None:
     )
 
 
+#: The two words this fixture's titles use that carry no topic under any
+#: reading of a name: an article and a conjunction. They are dropped before
+#: two names are compared, and nothing else is. So the comparison is
+#: stricter than a topic rule that drops more words: it may call a word a
+#: shared topic where such a rule would not, but it never misses one.
+FUNCTION_WORDS = frozenset({"the", "and"})
+
+_LETTER_RUN = re.compile(r"[^\W\d_]+")
+
+
+def _tokens(text: str) -> list[str]:
+    """The runs of letters in `text`, case-folded, in order."""
+    return [run.casefold() for run in _LETTER_RUN.findall(text)]
+
+
+def _name_words(header: dict[str, str]) -> set[str]:
+    """The words of a document's name: its `title:` (every document here
+    declares one, `test_required_fields_present`), as runs of three or more
+    letters, without `FUNCTION_WORDS`."""
+    return {word for word in _tokens(header.get("title", ""))
+            if len(word) >= 3} - FUNCTION_WORDS
+
+
+def _names(text: str, path: Path, header: dict[str, str]) -> bool:
+    """Whether `text` names the document at `path`: whether it holds that
+    document's title, or its file name, as a run of whole words."""
+    words = _tokens(text)
+    for name in (header.get("title", ""), path.stem):
+        run = _tokens(name)
+        if run and any(words[i:i + len(run)] == run
+                       for i in range(len(words) - len(run) + 1)):
+            return True
+    return False
+
+
+def _derived_topics(path: Path,
+                    documents: dict[Path, tuple[dict[str, str], str]]) -> set[str]:
+    """The topics a document that declares none is read to carry: the words
+    of its own name, and the name words of every other document in the
+    fixture that it names, whatever that document's station."""
+    header, _ = documents[path]
+    topics = set(_name_words(header))
+    text = path.read_text(encoding="utf-8")
+    for named, (named_header, _) in documents.items():
+        if named != path and _names(text, named, named_header):
+            topics |= _name_words(named_header)
+    return topics
+
+
 def test_at_least_one_source_shares_no_topic() -> None:
-    """Keeps the assertion above honest: a fixture where every source shared
-    one word would not exercise topic-based selection at all."""
-    singleton = [
-        path for path, (header, body) in _documents().items()
-        if "stage" not in header
-        and SHARED_SOURCE_TOPIC not in " ".join(
-            (header.get("title", ""), header.get("summary", ""), body)
-        ).lower()
-    ]
-    assert singleton, "every source shares the same topic phrase"
+    """At least one source shares no topic with the rain-barrel pair.
+    Without it, a fixture where every source shared one topic would not
+    exercise topic-based grouping at all.
+
+    NO TOPIC, not just not the phrase. The phrase check alone would pass a
+    fixture edit that gave the sources some other topic in common. So this
+    compares each source's whole derived topic set: what a topic that
+    sources share can come from when nobody declares one (R1Q13 (a) with
+    (c)). That set is:
+    - the words of the source's name;
+    - the name words of every other document it names.
+    Comparing whole sets catches every way two sources come to share a
+    topic: a common name word, one naming the other, or both naming the same
+    third document.
+
+    THE SHAPE is the one the module docstring states: three sources, two of
+    which share "rain barrel". Each note in the pair carries the pair's
+    topic. The third source's topics meet neither note's. Words elsewhere in
+    a body are not topics and are not compared. That the projection then
+    forms exactly this group is proved over this fixture by T054's
+    projection test.
+    """
+    documents = _documents()
+    sources = [path for path, (header, _) in documents.items()
+               if "stage" not in header]
+    pair = [path for path in sources
+            if SHARED_SOURCE_TOPIC in " ".join(
+                (documents[path][0].get("title", ""),
+                 documents[path][0].get("summary", ""),
+                 documents[path][1])
+            ).lower()]
+    others = [path for path in sources if path not in pair]
+    assert (len(pair), len(others)) == (2, 1), (
+        f"want two sources sharing {SHARED_SOURCE_TOPIC!r} and one outside "
+        f"them; the pair is {[p.name for p in pair]} and the rest "
+        f"{[p.name for p in others]}"
+    )
+
+    derived = {path: _derived_topics(path, documents) for path in sources}
+    topic = set(SHARED_SOURCE_TOPIC.split())
+    for member in pair:
+        assert topic <= derived[member], (
+            f"{member.name} does not carry {SHARED_SOURCE_TOPIC!r}: "
+            f"{sorted(derived[member])}")
+    for other in others:
+        for member in pair:
+            shared = derived[other] & derived[member]
+            assert not shared, (
+                f"{other.name} and {member.name} share the topic(s) "
+                f"{sorted(shared)}, so a topic rule could group them")
 
 
 if __name__ == "__main__":

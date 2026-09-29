@@ -41,6 +41,10 @@ WHAT ELSE IT HOLDS.
 5. THE FIELD SET: openDox's default adapter obliges `title` and `summary`
    (R1Q13 (a)), so `authoring.required_header_fields()` answers them through
    the entry point, and a document without them is still read.
+   (5a) THE SCAFFOLD. Following the holder's decision, what openDox's own
+   `create` writes carries that field set where the adapter reads it, so
+   `agent_capture` accepts it and the projection keeps its title and summary.
+   Where the corpus obliges neither field, the governed layout is unchanged.
 6. THE VALUES: `SNAPSHOT_VALUES`' defaults, in Python and in `display.js`, are
    the neutral schema's values, so openDox's views match openDox's snapshot.
    And the wheel's grouping tile counts a group's edges where the group carries
@@ -80,6 +84,7 @@ from opendox import (
 )
 from opendox import generator_seam as gs
 from opendox import neutral_projection as projection
+from opendox.boundary import HUMAN, OutputBoundary
 from opendox.runtime import local_git_adapter as lga
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -568,6 +573,15 @@ def test_the_projection_over_the_plain_documents_fixture_is_a_neutral_snapshot(
     assert derived, snapshot["clusters"]
     assert any(set(c["topics"]) >= {"rain", "barrel"} for c in derived), derived
 
+    # AND THE SOURCE OUTSIDE THAT PAIR LANDS IN NO GROUP. T050's own fixture
+    # test pins what the topics are derived from, the names and what each
+    # document names (openDox-code#53, Copilot r4135803935 and r4135883800).
+    # This pins the projection's own reading of them.
+    grouped = {e["document"] for c in snapshot["clusters"]
+               for e in c["document_edges"]}
+    assert "notes-toolshed-inventory.md" in sources
+    assert "notes-toolshed-inventory.md" not in grouped, snapshot["clusters"]
+
 
 # ---------------------------------------------------------------------------
 # the falsifier, part 2: the topic rule over repository (b), no front matter
@@ -867,6 +881,107 @@ def test_required_header_fields_answers_the_neutral_set_through_the_entry_point(
 def test_the_header_reader_keeps_an_empty_value_and_stops_at_a_blank_line() -> None:
     assert lga.leading_header("a: 1\nno colon here\nb:\na: 2\n\nc: 3\n") == {
         "a": "2", "b": ""}
+
+
+# ---------------------------------------------------------------------------
+# 5a — openDox's own scaffold carries the small neutral field set
+# ---------------------------------------------------------------------------
+
+#: One create's input, with its date pinned, so two scaffolds compare as bytes.
+_CREATE: dict[str, Any] = {
+    "title": "Shed roof", "summary": "Where the water gets in after a storm.",
+    "topics": ["shed"], "repository_context": "garden",
+    "now": "2026-09-29T12:00:00Z"}
+
+
+def test_openDoxs_own_scaffold_carries_the_small_neutral_field_set(
+        tmp_path: Path) -> None:
+    """The holder's decision of 2026-09-28 on this PR: what `create` writes
+    must satisfy `NEUTRAL_FIELDS` under openDox's own default adapter.
+
+    It read there as missing both fields, because its H1 comes first and its
+    `Summary:` is capitalized. So standalone `agent_capture` refused what
+    `create` had written, and the projection lost the supplied summary
+    (Copilot r4126022820, reproduced on openDox-code#59). The scaffold now
+    leads with `title:` and `summary:`, and its governed block follows it
+    unchanged."""
+    root = _repository(tmp_path, files={"notes-first.md": "title: F\nsummary: S\n"})
+    assert authoring.scaffold_lead_fields() == lga.NEUTRAL_FIELDS
+    written = authoring.create_scaffold(OutputBoundary(root, actor=HUMAN),
+                                        **_CREATE)
+    text = written.read_text(encoding="utf-8")
+
+    assert lga.leading_header(text) == {"title": "Shed roof",
+                                        "summary": _CREATE["summary"]}
+    assert authoring.missing_required_headers(text) == []
+    assert text == (f"title: Shed roof\nsummary: {_CREATE['summary']}\n\n"
+                    + authoring.render_scaffold(**_CREATE))
+
+    # AN AGENT'S CAPTURE OF THE SAME TEXT is not refused as header-incomplete.
+    captured = authoring.agent_capture(
+        authoring.agent_boundary(root),
+        path="ideation/brainstorm/shed-roof-again.md", text=text)
+    assert captured.read_text(encoding="utf-8") == text
+
+    # AND THE PROJECTION KEEPS the title and summary the create was given.
+    documents = _by_path(_generate(root))
+    for path in (written, captured):
+        document = documents[path.relative_to(root).as_posix()]
+        assert (document["title"], document["summary"]) == (
+            "Shed roof", _CREATE["summary"])
+
+
+def test_a_scaffold_keeps_the_governed_layout_where_the_corpus_obliges_neither(
+        tmp_path: Path) -> None:
+    """Under a corpus that obliges neither neutral field, the scaffold is
+    byte-identical to `render_scaffold`'s default, H1 first. openxFactory's
+    adapter is one such, since its fields are the governed block's own.
+    openxFactory's gated create (`tests/ideation-dashboard/test_gate_routes.py`)
+    and openXdox's authoring suite (`tests/test_authoring_agent.py`) pin that
+    layout."""
+    governed = ("Status", "Kind", "Summary", "Topics", "Repository context",
+                "Captured")
+    corpus_adapter.register_home(lambda root: (
+        lga.WorkingTreeCorpus(required_fields=governed),
+        corpus_adapter.CorpusRef(name="home", location=str(root))))
+    assert authoring.required_header_fields() == governed
+    assert authoring.scaffold_lead_fields() == ()
+    root = _repository(tmp_path, files={"notes-first.md": "title: F\nsummary: S\n"})
+    written = authoring.create_scaffold(OutputBoundary(root, actor=HUMAN),
+                                        **_CREATE)
+    text = written.read_text(encoding="utf-8")
+    assert text == authoring.render_scaffold(**_CREATE)
+    assert text.startswith("# Shed roof — Brainstorm\n")
+
+
+def test_the_lead_block_is_the_neutral_fields_in_order_then_a_blank_line() -> None:
+    """The lead is `SCAFFOLD_LEAD_FIELDS`' order whatever order it is asked
+    in. The neutral title is the title without the family suffix, which
+    stays on the H1. A field the scaffold has no value for is refused. And
+    every field openDox's own default obliges is one a scaffold can lead
+    with, so a created document always satisfies it."""
+    suffixed = {**_CREATE, "title": "Shed roof — Brainstorm"}
+    plain = authoring.render_scaffold(**suffixed)
+    assert plain.startswith("# Shed roof — Brainstorm\n")
+    assert authoring.render_scaffold(**suffixed, lead_fields=("summary", "title")) == (
+        f"title: Shed roof\nsummary: {_CREATE['summary']}\n\n" + plain)
+    assert authoring.render_scaffold(**suffixed, lead_fields=("summary",)) == (
+        f"summary: {_CREATE['summary']}\n\n" + plain)
+    with pytest.raises(ValueError, match=r"no value for \['author'\]"):
+        authoring.render_scaffold(**suffixed, lead_fields=("title", "author"))
+    assert set(lga.NEUTRAL_FIELDS) <= set(authoring.SCAFFOLD_LEAD_FIELDS)
+
+
+def test_a_scaffold_with_no_corpus_registered_refuses_and_writes_nothing(
+        tmp_path: Path) -> None:
+    """`create_scaffold` asks the corpus which fields to lead with, as
+    `agent_capture` asks it which to require. So with no home registered it
+    refuses as that does (4.2), naming the seam, and it writes nothing."""
+    corpus_adapter._home_factory = corpus_adapter._UNSET
+    with pytest.raises(corpus_adapter.CorpusRefused) as refused:
+        authoring.create_scaffold(OutputBoundary(tmp_path, actor=HUMAN), **_CREATE)
+    assert refused.value.refusal.kind == corpus_adapter.ADAPTER_NOT_REGISTERED
+    assert list(tmp_path.rglob("*")) == []
 
 
 # ---------------------------------------------------------------------------
