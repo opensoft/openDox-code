@@ -315,6 +315,13 @@ def test_the_arm_resolves_through_that_entry_point_and_the_registry_only():
         "ONE resolution of the entry, whose own pair the path is then asked "
         "for (plan 034 T055, FR-048): resolved a second time, the active "
         "entry could change between the refusal and the path")
+    held = body.split("with self.source.registry.atomically():", 1)
+    assert len(held) == 2 and "self.source.registry.resolve(" in held[1] \
+        and "self.source.registry.resolve_source(" in held[1], (
+            "both lookups under the registry's own lock (openDox-code#59, "
+            "r4136585695): resolve_source looks the pair up again, and a "
+            "refresh that re-registered the key in between put another root "
+            "behind the path")
     assert "resolve_within(" not in body, (
         "the arm must not call the containment rule directly: one entry point, "
         "so a change to the rule cannot reach the route by one path and miss "

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import dataclasses
 import http.client
 import json
 import os
@@ -910,6 +911,61 @@ def test_the_source_arm_confines_to_the_entry_its_refusal_checked(tmp_path) -> N
     status, _headers, body = _get(httpd, "/source/secret.md")
     assert b"SESSION-ONLY" not in body, "a hosted plane served a session's file"
     assert status == 403 and json.loads(body)["error"] == "session_unavailable"
+
+
+@pytest.mark.parametrize("query", ["", "?repository=garden&ref=main"],
+                         ids=["unkeyed", "keyed"])
+def test_a_refresh_cannot_land_between_the_source_arms_two_lookups(
+        tmp_path, query) -> None:
+    """FR-048 on `/source/`, against a refresh that REPLACES the key. The
+    arm resolves the entry once and asks for the path by that entry's pair,
+    and `resolve_source` looks the pair up again. Here a refresh on another
+    thread re-registers `garden@main`, with another root, right after the
+    first lookup. Unheld, it landed between the two, and the path came from
+    the replacement's root under the first entry's refusal and headers
+    (Copilot at openDox-code#59 687d37bf, r4136585695). Made under the
+    registry's own lock, the two lookups see one entry, and the refresh
+    lands after the read."""
+    repo, _out, httpd = _served(tmp_path)
+    bound = httpd.RequestHandlerClass.func
+    first = bound.source.registry.active
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "notes-toolshed-inventory.md").write_text(
+        "THE REPLACEMENT'S BYTES\n", encoding="utf-8")
+    replacement = dataclasses.replace(first, source_root=elsewhere,
+                                      source_revision="replaced")
+    attempting = threading.Event()
+
+    def refresh() -> None:
+        attempting.set()
+        registry.register(replacement)
+
+    refresher = threading.Thread(target=refresh, daemon=True)
+
+    class _Registry(default_registry.SnapshotRegistry):
+        def resolve(self, repository, ref=None):
+            entry = super().resolve(repository, ref)
+            if entry is first and refresher.ident is None:
+                refresher.start()
+                attempting.wait(timeout=10)
+                # Time to land, where nothing holds the registry. A held
+                # lock keeps it waiting, and this wait simply runs out.
+                refresher.join(timeout=0.5)
+            return entry
+
+    registry = _Registry()
+    registry.register(first)
+    bound.source.registry = registry
+    status, _headers, body = _get(
+        httpd, f"/source/notes-toolshed-inventory.md{query}")
+    refresher.join(timeout=10)
+    assert registry.get(*first.key) is replacement, "the refresh landed after"
+    assert b"THE REPLACEMENT'S BYTES" not in body, (
+        "a refresh landed between the arm's two lookups, and the path came "
+        "from the replacement's root")
+    assert status == 200
+    assert body == (repo / "notes-toolshed-inventory.md").read_bytes()
 
 
 def test_hosted_ref_refused_asks_the_registered_registry() -> None:
