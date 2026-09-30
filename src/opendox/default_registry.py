@@ -622,8 +622,13 @@ class SnapshotSource:
         if root is None or not Path(root).is_dir():
             raise ValueError(f"{entry.key_id}: no served checkout to regenerate from")
         generate = self._generator or generator_seam.generate
-        snapshot = generate(Path(root), entry.repository,
-                            project_register_source=self.project_register)
+        # AN UNSET INPUT IS NOT PASSED (Copilot at openDox-code#59 c2a8ad9f,
+        # r4146219833), as the generator seam omits one. An injected
+        # generator that takes only the core arguments then regenerates, and
+        # one given a register still receives it.
+        inputs = ({} if self.project_register is None else
+                  {"project_register_source": self.project_register})
+        snapshot = generate(Path(root), entry.repository, **inputs)
         target = Path(entry.snapshot_path)
         boundary = OutputBoundary(target.parent, [target.name])
         projection_seams.writer.current().write_snapshot(snapshot, target, boundary)
