@@ -1,11 +1,19 @@
 """`OPENDOX_INSTALL_MODE`: the local single-user install, and the hosted one
 it cannot be reached from by omission (plan 034 T070; #1144 13.4, 13.5, 13.6).
 
-HERMETIC: standard library plus `opendox.runtime.config` and the runtime CLI,
-both stdlib-only at import. No database is reached: every DSN below is a
-well-formed PostgreSQL URI aimed at port 1 of the loopback, so a refusal here
-is always a CONFIGURATION refusal, which is the whole of what 13.4-13.6 ask of
+HERMETIC, WITH ONE EXCEPTION. Every case but one uses the standard library
+plus `opendox.runtime.config` and the runtime CLI, both stdlib-only at import,
+and reaches no database. Each DSN in those cases is a well-formed PostgreSQL
+URI aimed at port 1 of the loopback, so a refusal there is always a
+CONFIGURATION refusal, which is the whole of what 13.4-13.6 ask of
 `load_settings`.
+
+The exception is `test_runtime_status_of_a_healthy_local_install_exits_zero`,
+which is DB-BACKED (Copilot review of openDox-code#67). A healthy local
+`status` exits 0 only against a database that answers, so that case takes the
+suite's `postgres_dsn` and `database` fixtures (`tests_runtime/conftest.py`).
+Like every DB-backed case, it is skipped where there is no Postgres, and it
+fails under CI.
 
 WHAT IS RULED AND WHAT IS READ, so a reviewer can tell them apart:
 
