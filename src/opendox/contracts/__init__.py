@@ -140,12 +140,23 @@ def _refuse(detail: str) -> CopyRefused:
 
 
 def _read_package_file(name: str) -> bytes:
+    """`name`'s bytes from the package, or `CopyRefused`.
+
+    EVERY `OSError` IS A REFUSAL (the T058 writer's measurement, from Copilot
+    at openDox-code#68, r4139734412). A file that is absent is refused as
+    missing. One that is present and cannot be read, such as a record at mode
+    000, raised `PermissionError` straight out of `validator_for()`, so
+    `generate --strict` ended in a traceback where it owes a refusal."""
     try:
         return resources.files(__name__).joinpath(name).read_bytes()
     except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as exc:
         raise CopyRefused(
             f"opendox.contracts has no {name}: the package was built or "
             f"installed without it ({type(exc).__name__})") from exc
+    except OSError as exc:
+        raise CopyRefused(
+            f"opendox.contracts has {name}, and it cannot be read "
+            f"({type(exc).__name__}: {exc.strerror or exc})") from exc
 
 
 def record() -> Record:
