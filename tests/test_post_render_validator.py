@@ -270,6 +270,49 @@ def test_a_packaged_copy_that_fails_its_identity_is_unavailable(tmp_path, monkey
     assert "is not the file the record pins" in result.unavailable_reason
 
 
+def test_a_packaged_file_that_cannot_be_read_is_unavailable_not_a_traceback(
+        tmp_path, monkeypatch, capsys) -> None:
+    """A packaged record or copy that is present but unreadable raises an
+    `OSError` below `opendox.contracts`, which converts only a missing one.
+    The adapter reports it as unavailable, and the verb warns, or fails under
+    `--strict`, in its own words."""
+    import argparse
+
+    from opendox import cli
+
+    path = _snapshot(tmp_path, PLAIN)
+
+    def unreadable(name):
+        raise PermissionError(13, "Permission denied", name)
+
+    monkeypatch.setattr(contracts, "_read_package_file", unreadable)
+    result = default_projection.VALIDATORS[NEUTRAL].validate(path)
+    assert (result.ok, result.outcome) == (False, ps.VALIDATOR_UNAVAILABLE)
+    assert result.unavailable_reason == (
+        "openDox's packaged contracts could not be read (PermissionError: "
+        "Permission denied), so nothing was judged")
+    ps.register_defaults()
+    args = argparse.Namespace(repo_root=str(tmp_path), no_validate=False, strict=True)
+    assert cli._validate(path, args) == 1
+    err = capsys.readouterr().err
+    assert "could not run: openDox's packaged contracts could not be read" in err
+    assert "--strict was given" in err
+
+
+def test_the_rules_read_a_long_list_in_linear_time() -> None:
+    """None of the three lists is bounded by the schema, so a rule's reading
+    of one must not be quadratic: 50,000 distinct names, and a repeat of
+    each, are read in well under the seconds a quadratic scan would take."""
+    import time
+
+    names = [f"keyword-{index}" for index in range(50_000)]
+    started = time.monotonic()
+    read = default_projection._names(names + names + [7, None])
+    elapsed = time.monotonic() - started
+    assert read == names
+    assert elapsed < 5, f"{elapsed:.1f}s to read 100,002 entries"
+
+
 def test_strict_and_search_from_change_nothing(tmp_path) -> None:
     validator = default_projection.VALIDATORS[NEUTRAL]
     for fixture in (PLAIN, MALFORMED):

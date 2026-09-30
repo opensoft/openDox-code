@@ -289,14 +289,20 @@ def _refuse_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _names(value: Any) -> list[str]:
     """A list's string entries, once each, in order. Anything else answers
-    none: its shape is the schema's to judge, and these rules only compare."""
+    none: its shape is the schema's to judge, and these rules only compare.
+
+    Linear: the schema bounds none of the three lists, so membership is a
+    set's, and the list only keeps the order (Copilot at openDox-code#68
+    09cd1e8a, r4139734444)."""
     if not isinstance(value, list):
         return []
-    seen: list[str] = []
+    names: list[str] = []
+    seen: set[str] = set()
     for item in value:
         if isinstance(item, str) and item not in seen:
-            seen.append(item)
-    return seen
+            seen.add(item)
+            names.append(item)
+    return names
 
 
 #: How many names a rule's detail quotes before it says how many more.
@@ -396,6 +402,17 @@ class OwnValidator:
             kind_validator = own.validator_for(self.kind)
         except (own.ValidatorUnavailable, own.UnknownKind) as exc:
             return self._unavailable(" ".join(str(exc).split()))
+        except OSError as exc:
+            # A packaged file that is present but cannot be read (its
+            # permissions, say). `opendox.contracts` refuses a MISSING copy
+            # as `CopyRefused`, and any other read failure reaches here as
+            # itself. It is still "the check could not be performed", so the
+            # verb reports it, and `--strict` fails, without a traceback
+            # (Copilot at openDox-code#68 09cd1e8a, r4139734412).
+            return self._unavailable(
+                f"openDox's packaged contracts could not be read "
+                f"({type(exc).__name__}: {exc.strerror or exc}), so nothing "
+                "was judged")
         ran = (f"opendox.validator, over its packaged copy {kind_validator.copy_id} "
                f"(sha256 {kind_validator.digest[:12]})")
         try:
