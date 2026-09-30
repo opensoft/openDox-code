@@ -17,8 +17,9 @@ skips validation. This file holds:
 3. The adapter's three outcomes: `VALIDATED`, `NOT_CONFORMANT` naming each
    rule, and `VALIDATOR_UNAVAILABLE` for `ValidatorUnavailable` and for a
    document it could not read. A document that cannot be read as JSON (or
-   as YAML), a number that cannot be read as written included, breaks
-   `SYNTAX_RULE`. `strict` and `search_from` change nothing.
+   as YAML) breaks `SYNTAX_RULE`, and a readable one holding a number that
+   cannot be read as written breaks `NUMBER_RULE`. `strict` and
+   `search_from` change nothing.
 4. The workbench manifest, read as YAML, with the two validator rules its
    schema leaves to the validator, and `workbench.save(validate=True)` over
    them.
@@ -215,12 +216,6 @@ def test_the_verdict_is_openDoxs_validators_own(tmp_path) -> None:
     ('{"kind": "opendox-snapshot"', "Expecting"),
     (b'{"kind": "\xff"}', "codec"),
     ("[" * 100_000 + "]" * 100_000, ""),
-    ('{"kind": "opendox-snapshot", "extra": 1e999}', "1e999 reads as inf"),
-    ('{"kind": "opendox-snapshot", "extra": [-1E+400]}', "-1E+400 reads as -inf"),
-    ('{"kind": "opendox-snapshot", "schema_version": 1.0000000000000001}',
-     "1.0000000000000001 cannot be read as written: the precision JSON readers "
-     "share holds it as 1.0"),
-    ('{"kind": "opendox-snapshot", "extra": 1.5e-400}', "1.5e-400 cannot be read as written"),
 ])
 def test_a_snapshot_that_is_not_json_breaks_the_syntax_rule(tmp_path, text, why) -> None:
     result = default_projection.VALIDATORS[NEUTRAL].validate(_file(tmp_path, "s.json", text))
@@ -232,15 +227,40 @@ def test_a_snapshot_that_is_not_json_breaks_the_syntax_rule(tmp_path, text, why)
     assert why in first
 
 
+@pytest.mark.parametrize("text,why", [
+    ('{"kind": "opendox-snapshot", "extra": 1e999}', "1e999 reads as inf"),
+    ('{"kind": "opendox-snapshot", "extra": [-1E+400]}', "-1E+400 reads as -inf"),
+    ('{"kind": "opendox-snapshot", "schema_version": 1.0000000000000001}',
+     "1.0000000000000001 cannot be read as written: the precision JSON readers "
+     "share holds it as 1.0"),
+    ('{"kind": "opendox-snapshot", "extra": 1.5e-400}', "1.5e-400 cannot be read as written"),
+])
+def test_a_snapshot_number_that_cannot_be_read_as_written_breaks_the_number_rule(
+        tmp_path, text, why) -> None:
+    """Valid JSON, but a number no float verdict would judge honestly. It is
+    reported under its own rule, not as a syntax error (Copilot at
+    openDox-code#68 c7768ed5, r4146428769)."""
+    result = default_projection.VALIDATORS[NEUTRAL].validate(_file(tmp_path, "s.json", text))
+    assert (result.ok, result.returncode, result.outcome) == (False, 1, ps.NOT_CONFORMANT)
+    first = result.stdout.splitlines()[0]
+    assert first.startswith(f"[{default_projection.NUMBER_RULE}] <root>: the document "
+                            "reads as JSON, but holds a number that cannot be read as "
+                            "written, so no verdict over it would be a verdict over the "
+                            "document: "), first
+    assert why in first
+    assert default_projection.SYNTAX_RULE not in result.stdout
+
+
 @pytest.mark.parametrize("literal", ["0.1", "2.50", "1E2", "-0.0", "0.30000000000000004",
                                      "1e-300", "100000000000000000000001"])
 def test_a_number_read_as_written_is_the_contracts_to_judge(tmp_path, literal) -> None:
     """The control for the two cases above: a number the shared precision
-    holds as written is read, and judged by the contract, not the syntax
-    rule. So is any integer, which Python reads exactly."""
+    holds as written is read, and judged by the contract, not the syntax or
+    number rules. So is any integer, which Python reads exactly."""
     result = default_projection.VALIDATORS[NEUTRAL].validate(_file(
         tmp_path, "s.json", '{"kind": "opendox-snapshot", "extra": ' + literal + "}"))
     assert f"[{default_projection.SYNTAX_RULE}]" not in result.stdout, result.stdout
+    assert f"[{default_projection.NUMBER_RULE}]" not in result.stdout, result.stdout
     assert "[envelope-keys] <root>:" in result.stdout
 
 
@@ -259,9 +279,11 @@ def test_a_manifest_number_is_read_as_the_snapshots_are(tmp_path, value, why) ->
     result = default_projection.VALIDATORS[workbench.KIND].validate(
         _file(tmp_path, "set.workbench.yaml", document))
     first = result.stdout.splitlines()[0]
-    assert first.startswith(f"[{default_projection.SYNTAX_RULE}] <root>: the document "
-                            "cannot be read as YAML"), first
+    assert first.startswith(f"[{default_projection.NUMBER_RULE}] <root>: the document "
+                            "reads as YAML, but holds a number that cannot be read as "
+                            "written"), first
     assert why in first
+    assert default_projection.SYNTAX_RULE not in result.stdout
 
 
 def test_a_document_that_cannot_be_read_is_unavailable_not_a_verdict(tmp_path) -> None:

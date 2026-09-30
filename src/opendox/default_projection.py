@@ -49,8 +49,10 @@ it is registered under.
   and the standard output names each one as `[<rule>] <where>: <detail>`, so
   the rule's identifier reaches the verb's report (F7.2 asserts T051's
   `EXPECTED_RULE` there). A document that cannot be read as JSON, or as
-  YAML, breaks `SYNTAX_RULE`, and so does one holding a number that cannot
-  be read as written: an infinity, a NaN, or one binary64 would round.
+  YAML, breaks `SYNTAX_RULE`. One that can be read, but holds a number that
+  cannot be read as written (an infinity, a NaN, one binary64 would round,
+  or a spelling that cannot be proved), breaks `NUMBER_RULE` instead, so the
+  report names the numeric policy and not a syntax error.
   `ValidatorUnavailable`, a packaged copy that failed its
   identity check or cannot be evaluated, is `VALIDATOR_UNAVAILABLE`, with the
   validator's own reason, and so is a document that could not be read. That
@@ -95,7 +97,7 @@ from typing import Any
 from opendox import generator_seam, projection_seams
 
 __all__ = ["CORPUS_ROOT", "CorpusRoot", "OWN_KINDS", "OwnValidator",
-           "SYNTAX_RULE", "SnapshotNotWritable", "VALIDATORS", "WORKBENCH_RULES",
+           "NUMBER_RULE", "SYNTAX_RULE", "SnapshotNotWritable", "VALIDATORS", "WORKBENCH_RULES",
            "WRITER", "Writer"]
 
 #: The workbench manifest's kind, `opendox.workbench.KIND`, restated because
@@ -116,9 +118,16 @@ _SYNTAX: dict[str, str] = {generator_seam.NEUTRAL_SNAPSHOT_KIND: "JSON",
                            WORKBENCH_KIND: "YAML"}
 
 #: The rule a document breaks when it cannot be read as JSON, or as YAML, as
-#: its kind is written, numbers included (`_exact`). It is the adapter's, and no contract's: a contract's rules are
-#: about a document that could be read.
+#: its kind is written. It is the adapter's, and no contract's: a contract's
+#: rules are about a document that could be read.
 SYNTAX_RULE = "document-syntax"
+
+#: The rule a document breaks when it reads as JSON, or as YAML, but holds a
+#: number that cannot be read as written (`_exact`): no verdict over the
+#: float it was read as would be a verdict over the number written. Kept apart
+#: from `SYNTAX_RULE`, so the report does not call a valid document malformed
+#: (Copilot at openDox-code#68 c7768ed5, r4146428769).
+NUMBER_RULE = "document-number"
 
 #: The workbench manifest's two validator rules, which its schema leaves to
 #: the validator, under the identifiers the consumer's script gave them.
@@ -273,6 +282,10 @@ class Writer:
         return target
 
 
+class _Unprovable(ValueError):
+    """A number the document holds that cannot be read as written."""
+
+
 class _NotJSON(ValueError):
     """A JSON text holds what JSON does not: a key given twice, NaN or an
     infinity."""
@@ -305,16 +318,16 @@ def _exact(text: str, value: float) -> float:
       openDox-code#68 80153754, r4146201125). JSON has no such spelling, and
       openDox's writers write none."""
     if not math.isfinite(value):
-        raise _NotJSON(f"the number {text[:40]} reads as {value}, and JSON "
+        raise _Unprovable(f"the number {text[:40]} reads as {value}, and JSON "
                        "carries no infinity or NaN")
     try:
         written = Decimal(text.replace("_", ""))
     except InvalidOperation:
-        raise _NotJSON(f"the number {text[:40]} is in a spelling that cannot "
+        raise _Unprovable(f"the number {text[:40]} is in a spelling that cannot "
                        "be proved as written (a YAML base-60 number, say), and "
                        "JSON has no such spelling") from None
     if Decimal(repr(value)) != written:
-        raise _NotJSON(f"the number {text[:40]} cannot be read as written: "
+        raise _Unprovable(f"the number {text[:40]} cannot be read as written: "
                        f"the precision JSON readers share holds it as {value!r}")
     return value
 
@@ -478,6 +491,12 @@ class OwnValidator:
                f"(sha256 {kind_validator.digest[:12]})")
         try:
             document = self._read(data.decode("utf-8"))
+        except _Unprovable as exc:
+            violations = [own.Violation(
+                NUMBER_RULE, (), "number",
+                f"the document reads as {self.syntax}, but holds a number "
+                f"that cannot be read as written, so no verdict over it would "
+                f"be a verdict over the document: {' '.join(str(exc).split())}")]
         except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             violations = [own.Violation(
                 SYNTAX_RULE, (), "syntax",
