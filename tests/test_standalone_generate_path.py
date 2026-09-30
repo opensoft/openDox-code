@@ -157,6 +157,7 @@ def _assert_the_port_is_closed(base: tuple[str, int]) -> None:
 
 
 _URL = re.compile(r"^(http://([0-9.]+):([0-9]+))/index\.html$")
+_SERVING = re.compile(r"^  serving until interrupted \(Ctrl-C to stop\)$")
 _SERVE_URL = re.compile(r"^serving ideation dashboard at "
                         r"(http://([0-9.]+):([0-9]+))/index\.html$")
 
@@ -249,7 +250,13 @@ def test_the_unedited_fixture_declares_that_document_a_candidate(tmp_path) -> No
 def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path) -> None:
     """`python -m opendox.cli generate-and-open --no-open`, with no
     `--no-serve`: the server starts, says where on a buffered pipe, answers
-    the core routes, and stops on an interrupt with status 0."""
+    the core routes, and stops on an interrupt with status 0.
+
+    Both lines it prints before blocking in `serve_forever()`, the URL and
+    "serving until interrupted", are read WHILE IT RUNS, before the
+    interrupt: after it, Python's exit flush would deliver an unflushed line
+    anyway, and the case would not tell (Copilot at openDox-code#66
+    e3574774, r4146289331)."""
     repo = _fresh_repository(tmp_path)
     run_dir = tmp_path / "run"
     child = Child(tmp_path, "opendox.cli", "generate-and-open",
@@ -259,13 +266,14 @@ def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path
         match = child.wait_for_line(_URL)
         base = (match.group(2), int(match.group(3)))
         assert child.process.poll() is None, "the server exited after printing its URL"
+        child.wait_for_line(_SERVING)
+        assert child.process.poll() is None, "the server exited after saying it serves"
         _assert_the_server_answers(base, run_dir / "snapshot.json", repo)
         assert child.interrupt() == 0, child.stderr_text()
     finally:
         child.kill()
     _assert_the_port_is_closed(base)
     assert child.refused() == [], child.refused()
-    assert "serving until interrupted" in "".join(child.stdout)
 
 
 # ---------------------------------------------------------------------------
