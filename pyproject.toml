@@ -246,9 +246,10 @@ where = ["src"]
 # `COPY migrations ./migrations`, run from `/app`) and every checkout run finds
 # it; this maps the same files into the wheel's data directory, so an install
 # run OUTSIDE a checkout still has the migrations its bundled server applies.
-# `opendox.runtime.config.packaged_migrations_dir` finds them through the
-# installed distribution's own record, and the canonical digest gate is what
-# proves the copy found is the pinned one. A data directory and not package
+# `opendox.runtime.config.installation_migrations_dir` finds them through the
+# own record of the installed distribution that holds the running module
+# (after the source tree, for a checkout), and the canonical digest gate is
+# what proves the copy found is the pinned one. A data directory and not package
 # data because package data must live inside the package, and the one tree is
 # not moved.
 [tool.setuptools.data-files]

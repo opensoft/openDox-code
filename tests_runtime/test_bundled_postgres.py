@@ -245,6 +245,11 @@ def test_the_local_extra_carries_the_runtime_and_the_server_and_test_joins_it(
     assert re.search(r"(?m)^pgserver==", lock), "the lock does not pin pgserver"
     files = project["tool"]["setuptools"]["data-files"]
     assert files == {"share/opendox/migrations": ["migrations/*.sql"]}
+    # and the packaging notes name functions that exist (Copilot review of #69)
+    for name in re.findall(r"opendox\.runtime\.config\.(\w+)",
+                           (ROOT / "pyproject.toml").read_text()):
+        assert hasattr(config, name), (
+            f"pyproject.toml points readers at config.{name}, which does not exist")
 
 
 # -- the layout, before anything starts ----------------------------------------
