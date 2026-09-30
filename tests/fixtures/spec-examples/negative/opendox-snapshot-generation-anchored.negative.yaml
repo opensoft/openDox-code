@@ -1,0 +1,50 @@
+# expected_failure: generation-anchored
+# INVALID: `generation` carries no `source_revision`.
+# The no-front-matter example with this one change, so it breaks this
+# shape rule and no other.
+{
+  "schema_version": 1,
+  "kind": "opendox-snapshot",
+  "repository": "plain-notes",
+  "generation": {"generated_at": "2026-09-27T12:00:00Z"},
+  "documents": [
+    {
+      "id": "kitchen",
+      "path": "kitchen.md",
+      "stage": "source",
+      "title": null,
+      "summary": null,
+      "topics": ["bread", "oven"]
+    },
+    {
+      "id": "bakery-visit",
+      "path": "bakery-visit.md",
+      "stage": "source",
+      "title": null,
+      "summary": null,
+      "topics": ["bread", "flour"]
+    },
+    {
+      "id": "garden",
+      "path": "garden.md",
+      "stage": "source",
+      "title": null,
+      "summary": null,
+      "topics": ["herbs"]
+    }
+  ],
+  "clusters": [
+    {
+      "id": "bread",
+      "name": "bread",
+      "topics": ["bread"],
+      "document_edges": [
+        {"document": "kitchen", "matched_topics": ["bread"]},
+        {"document": "bakery-visit", "matched_topics": ["bread"]}
+      ]
+    }
+  ],
+  "possibles": [],
+  "staged_topics": [],
+  "changes": []
+}
