@@ -348,6 +348,10 @@ def _redacted_settings(settings: RuntimeSettings) -> dict[str, Any]:
         # needs to know, because it decides whether the broker lines below
         # mean anything at all.
         "OPENDOX_INSTALL_MODE": settings.install_mode,
+        # WHERE A LOCAL INSTALL'S BUNDLED SERVER LIVES (plan 034 T072): a path
+        # and never a credential. Reported for a hosted install too, which
+        # never reads it, so the report covers the whole declared list.
+        "OPENDOX_STATE_DIR": str(settings.state_dir),
         # THE BROKER URLS ARE REDACTED HERE TOO. `load_settings` refuses
         # userinfo in the issuer and in an explicit JWKS URL — but this report
         # prints a DERIVED value, and a settings object can also be built by
@@ -680,6 +684,20 @@ def cmd_status(args: argparse.Namespace) -> int:
         return _emit({"verb": "status", "refusal": "configuration",
                       "message": _safe_message(exc)}, ok=False)
     report["settings"] = _redacted_settings(settings)
+    # THE BUNDLED SERVER THIS INSTALL OWNS (plan 034 T072; #1144 13.1): where
+    # its data directory and socket are, and the pid of the server running on
+    # them, read from the server's own `postmaster.pid`. `null` for a hosted
+    # install, which brings no server. Reported, never started: `status`
+    # changes nothing, and the process that owns the server is the document
+    # server that started it (R1Q16 (i)).
+    if settings.install_mode == INSTALL_MODE_LOCAL:
+        from opendox.runtime import bundle as bundle_mod
+        from opendox.runtime.config import database_bundle
+
+        report["database_bundle"] = bundle_mod.report(
+            database_bundle(settings.state_dir))
+    else:
+        report["database_bundle"] = None
 
     try:
         report["canonical_sha256"] = migrations.verify_canonical_digest(

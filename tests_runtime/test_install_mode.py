@@ -62,6 +62,11 @@ DSNS = {
 HOSTED = {**DSNS,
           PREFIX + "OIDC_ISSUER": "https://issuer.example.invalid/realms/fixture",
           PREFIX + "OIDC_AUDIENCE": "fixture"}
+#: A LOCAL install's whole environment: the selector and a state directory.
+#: No DSN — the local install supplies both from the server it bundles
+#: (plan 034 T072), and one given beside it is refused. Nothing is created
+#: there: `load_settings` derives paths, and starts nothing.
+LOCAL = {MODE: "local", PREFIX + "STATE_DIR": "/nonexistent/opendox-state"}
 
 
 def _refusal(env: dict, **kwargs) -> str:
@@ -190,7 +195,7 @@ def test_the_hosted_mode_is_unchanged() -> None:
 
 @pytest.mark.parametrize("selection", ["setting", "flag"])
 def test_a_local_install_needs_no_broker(selection: str) -> None:
-    env = dict(DSNS)
+    env = {PREFIX + "STATE_DIR": LOCAL[PREFIX + "STATE_DIR"]}
     kwargs = {}
     if selection == "setting":
         env[MODE] = "local"
@@ -213,13 +218,19 @@ def test_a_broker_setting_beside_the_local_mode_is_refused_by_name(
     """A holder reading (#656, T070): a broker setting says hosted was meant."""
     assert set(HOSTED_ONLY_SETTINGS) == {PREFIX + "OIDC_ISSUER",
                                          PREFIX + "OIDC_AUDIENCE",
-                                         PREFIX + "OIDC_JWKS_URL"}
-    secret = "https://svc:hunter2@broker.example.invalid/realms/x"
-    message = _refusal({**DSNS, MODE: "local", name: secret})
+                                         PREFIX + "OIDC_JWKS_URL",
+                                         # and T072's two: the local install
+                                         # supplies both DSNs itself (13.1)
+                                         PREFIX + "DATABASE_URL",
+                                         PREFIX + "MIGRATION_DATABASE_URL"}
+    secret = ("https://svc:hunter2@broker.example.invalid/realms/x"
+              if "OIDC" in name else "postgresql://u:hunter2@db.invalid/x")
+    message = _refusal({**LOCAL, name: secret})
     assert name in message, message
     assert "hunter2" not in message, "the value must not be repeated"
     # and the flag spelling of the same selection refuses it the same way
-    assert name in _refusal({**DSNS, name: secret}, local_flag=True)
+    assert name in _refusal({PREFIX + "STATE_DIR": LOCAL[PREFIX + "STATE_DIR"],
+                             name: secret}, local_flag=True)
 
 
 def test_every_broker_setting_given_is_named_at_once() -> None:
@@ -231,8 +242,7 @@ def test_every_broker_setting_given_is_named_at_once() -> None:
 
 @pytest.mark.parametrize("host", sorted(LOCAL_BIND_HOSTS))
 def test_a_local_install_binds_each_loopback_spelling(host: str) -> None:
-    settings = load_settings({**DSNS, MODE: "local",
-                              PREFIX + "BIND_HOST": host})
+    settings = load_settings({**LOCAL, PREFIX + "BIND_HOST": host})
     assert settings.bind_host == host
 
 
@@ -243,7 +253,7 @@ def test_a_local_install_refuses_a_non_loopback_bind_naming_the_rule(
     """13.4: loopback ONLY, and no opt-in. `127.0.0.2` is refused too: the
     document server does not treat it as loopback (`serve.LOOPBACK_HOSTS`),
     and the mode makes the SAME judgement at its own boundary."""
-    message = _refusal({**DSNS, MODE: "local", PREFIX + "BIND_HOST": host})
+    message = _refusal({**LOCAL, PREFIX + "BIND_HOST": host})
     assert PREFIX + "BIND_HOST" in message, message
     assert "loopback" in message.lower(), message
     assert "no opt-in" in message.lower(), message
@@ -283,9 +293,8 @@ def test_runtime_serve_refuses_under_the_local_mode(scrubbed) -> None:
     stub.Config, stub.Server = _Config, _Server
     scrubbed.setitem(sys.modules, "uvicorn", stub)
     scrubbed.setattr(app_module, "create_app", lambda **kwargs: object())
-    for name, value in DSNS.items():
+    for name, value in LOCAL.items():
         scrubbed.setenv(name, value)
-    scrubbed.setenv(MODE, "local")
     code, evidence = _run(["runtime", "serve"])
     assert served == [], "the API was started for a LOCAL install"
     assert code == 1
@@ -306,9 +315,8 @@ def test_runtime_status_under_the_local_mode_probes_no_broker(
                              "install, which has no broker")
 
     monkeypatch.setattr(oidc, "build_verifier", _no_broker)
-    for name, value in DSNS.items():
+    for name, value in LOCAL.items():
         scrubbed.setenv(name, value)
-    scrubbed.setenv(MODE, "local")
     code, evidence = _run(["runtime", "status", "--probe-timeout", "0.2"])
     assert evidence.get("refusal") is None, evidence
     assert evidence["broker_keys"] == "not configured (local mode)"
@@ -316,8 +324,11 @@ def test_runtime_status_under_the_local_mode_probes_no_broker(
     assert evidence["settings"][MODE] == INSTALL_MODE_LOCAL
     assert evidence["settings"][PREFIX + "OIDC_ISSUER"] == ""
     assert evidence["settings"][PREFIX + "OIDC_JWKS_URL"] == ""
-    # the database half (port 1, unreachable) is the ONLY reason `ok` is false
+    # the database half is the ONLY reason `ok` is false: no bundled server
+    # is running on this (nonexistent) state directory, and `status` reports
+    # that rather than starting one
     assert evidence["database"].startswith("unreachable"), evidence
+    assert evidence["database_bundle"]["pid"] is None, evidence
     assert code == 1
 
 

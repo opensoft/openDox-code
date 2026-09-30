@@ -1,0 +1,415 @@
+"""The LOCAL install's bundled PostgreSQL server (plan 034 T072; #1144 13.1, as
+T007 batch H's addendum reads; RULED R1Q16 (i)-(iv), `5850003126`).
+
+T072's falsifier is F13.1's TCP-listener block, which reads the kernel's
+socket table at run time, and its `runtime status` block. Both are run here
+against a server the REAL entry point started: `generate-and-open --local`,
+launched in the background as F13.1 launches it, reached over HTTP, asked
+about by a second process, and stopped with a signal. Where F13.1 reads the
+server's pid from `caps.json`, these cases read the same pid from
+`runtime status`'s `database_bundle`. `/capabilities`' `install` block is
+T073's, and nothing here pretends it exists.
+
+R1Q16, each part asserted:
+  (i)   the server is a CHILD of the entry point's process (its `PPid`);
+  (ii)  it is started AND migrated, the ledger holding every migration;
+  (iii) the `local` extra carries it, and the `test` extra joins the extra;
+  (iv)  it stops with the entry point: on SIGTERM, which the serve loop reads
+        as Ctrl-C, and — the backstop — on SIGKILL, through the parent-death
+        signal.
+
+And the migrations gap the holder assigned to T072: a WHEEL install, run from
+a directory that is not a checkout, migrates its bundled server from the copy
+the wheel carries.
+
+NOT SKIPPED IN CI. These cases need the `local` extra's server, which the
+`test` extra installs; under `CI` its absence is a FAILURE, as a missing
+`postgres:16` service is for the DB-backed suites (`conftest._skip_or_fail`'s
+rule, restated below), because `validate.yml` pins the skip count exactly.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import sysconfig
+import tempfile
+import time
+import tomllib
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+from opendox.runtime import bundle as bundle_mod
+from opendox.runtime import config
+from opendox.runtime.config import PREFIX
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+DRIVER = Path(__file__).resolve().parent / "local_entrypoint_driver.py"
+MODE = PREFIX + "INSTALL_MODE"
+STATE = PREFIX + "STATE_DIR"
+
+
+def _in_ci() -> bool:
+    return os.environ.get("CI", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _the_server_is_installed() -> None:
+    """The `local` extra's binaries, or this module's refusal to pass silently."""
+    try:
+        bundle_mod.server_binaries()
+    except bundle_mod.BundleRefused as exc:
+        if _in_ci():
+            pytest.fail(f"CI is set, so the bundled-server suite must RUN: {exc}",
+                        pytrace=False)
+        pytest.skip(str(exc))
+    if hasattr(os, "geteuid") and os.geteuid() == 0:   # pragma: no cover
+        pytest.fail("the bundled server refuses root; run the suite as a user")
+
+
+@pytest.fixture()
+def state_dir():
+    """A state directory nothing else has touched, with a SHORT path.
+
+    Short because the socket's whole path is bounded by the kernel, and
+    pytest's own `tmp_path` grows with the test's name. Removed afterwards,
+    once any server on it has been checked stopped.
+    """
+    base = "/tmp" if os.path.isdir("/tmp") else None
+    path = Path(tempfile.mkdtemp(prefix="odx-", dir=base))
+    yield path
+    pid = bundle_mod.running_pid(config.DatabaseBundle(path))
+    if pid is not None:                                  # pragma: no cover
+        os.kill(pid, signal.SIGKILL)
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _clean_env(**extra: str) -> dict[str, str]:
+    env = {name: value for name, value in os.environ.items()
+           if name not in config.SETTING_NAMES and not name.startswith("PG")}
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(SRC), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+    env.update(extra)
+    return env
+
+
+def _parent_of(pid: int) -> int:
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("PPid:"):
+            return int(line.split()[1])
+    raise AssertionError(f"no PPid for {pid}")         # pragma: no cover
+
+
+def _tcp_listeners(pid: int) -> list[tuple[str, str]]:
+    """F13.1's TCP-listener block, verbatim in substance: every socket the
+    process holds, looked up in the KERNEL's TCP tables, never self-report."""
+    inodes = set()
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            m = re.match(r"socket:\[(\d+)\]", os.readlink(f"/proc/{pid}/fd/{fd}"))
+        except OSError:
+            continue
+        if m:
+            inodes.add(m.group(1))
+    return [(tbl, row.split()[1]) for tbl in ("/proc/net/tcp", "/proc/net/tcp6")
+            for row in open(tbl).read().splitlines()[1:]
+            if row.split()[3] == "0A" and row.split()[9] in inodes]
+
+
+def _wait_gone(pid: int, seconds: float = 30.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        # a zombie is gone as a server: reaped by init once its parent is
+        try:
+            if "State:\tZ" in Path(f"/proc/{pid}/status").read_text():
+                return True
+        except OSError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _launch(corpus: Path, state: Path, run_dir: Path) -> tuple[subprocess.Popen, str]:
+    """`generate-and-open --local` in the BACKGROUND, and the URL it serves."""
+    child = subprocess.Popen(
+        [sys.executable, str(DRIVER), "generate-and-open", config.LOCAL_FLAG,
+         "--repo-root", str(corpus), "--repository", "fixture",
+         "--run-dir", str(run_dir), "--no-open", "--no-validate",
+         "--port", "0"],
+        env=_clean_env(**{STATE: str(state)}), cwd=ROOT,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 90
+    url = None
+    while time.monotonic() < deadline and url is None:
+        line = child.stdout.readline()
+        if not line:
+            break
+        if line.startswith("http://"):
+            url = line.strip()
+    if url is None:
+        child.kill()
+        out, err = child.communicate(timeout=30)
+        raise AssertionError(f"the entry point never served: {err[-2000:]}")
+    return child, url
+
+
+def _status(state: Path) -> tuple[int, dict]:
+    """`OPENDOX_INSTALL_MODE=local opendox-runtime runtime status`, a SECOND process."""
+    done = subprocess.run(
+        [sys.executable, "-m", "opendox.runtime.cli", "runtime", "status",
+         "--probe-timeout", "10"],
+        env=_clean_env(**{MODE: "local", STATE: str(state)}), cwd=ROOT,
+        capture_output=True, text=True, timeout=60)
+    return done.returncode, json.loads(done.stdout)
+
+
+@pytest.fixture()
+def corpus(tmp_path: Path) -> Path:
+    root = tmp_path / "plain-documents"
+    root.mkdir()
+    (root / "note.md").write_text("# A note\n\nPlain text.\n", encoding="utf-8")
+    return root
+
+
+# -- (iii): the packaging ----------------------------------------------------
+
+
+def test_the_local_extra_carries_the_runtime_and_the_server_and_test_joins_it(
+) -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    extras = project["project"]["optional-dependencies"]
+    assert "opendox[runtime]" in extras["local"]
+    assert any(req.startswith("pgserver") for req in extras["local"])
+    assert "opendox[local]" in extras["test"], (
+        "F9.1 installs `.[test]` alone; without the local extra there, this "
+        "suite could not start the server it tests")
+    lock = (ROOT / "constraints-cpython312-linux.txt").read_text()
+    assert re.search(r"(?m)^pgserver==", lock), "the lock does not pin pgserver"
+    files = project["tool"]["setuptools"]["data-files"]
+    assert files == {"share/opendox/migrations": ["migrations/*.sql"]}
+
+
+# -- the layout, before anything starts ----------------------------------------
+
+
+def test_the_two_dsns_are_two_users_over_the_one_socket(state_dir: Path) -> None:
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    bundle = config.database_bundle(state_dir)
+    assert settings.database_url == bundle.served_dsn
+    assert settings.migration_database_url == bundle.migration_dsn
+    assert settings.database_url != settings.migration_database_url      # 13.3
+    for dsn in (settings.database_url, settings.migration_database_url):
+        assert dsn.startswith("postgresql://")                           # 13.2
+        assert f"host={bundle.socket_dir}" in dsn and "port=5432" in dsn
+    assert config.user_named_by(settings.database_url) == config.BUNDLE_SERVED_ROLE
+    assert config.user_named_by(settings.migration_database_url) == \
+        config.BUNDLE_OWNER_ROLE
+    assert bundle.data_dir.parent == bundle.socket_dir.parent
+    assert bundle.data_dir.is_relative_to(state_dir)
+    assert bundle.socket_dir.is_relative_to(state_dir)
+
+
+def test_a_state_dir_too_long_for_a_unix_socket_is_refused_naming_it() -> None:
+    long = "/tmp/" + "x" * 120
+    with pytest.raises(config.ConfigurationError) as caught:
+        config.load_settings({MODE: "local", STATE: long})
+    assert STATE in str(caught.value) and "socket" in str(caught.value)
+
+
+def test_a_relative_state_dir_is_refused_naming_it() -> None:
+    with pytest.raises(config.ConfigurationError) as caught:
+        config.load_settings({MODE: "local", STATE: "var/state"})
+    assert STATE in str(caught.value)
+
+
+def test_the_default_state_dir_is_the_users_own(monkeypatch) -> None:
+    home = config.state_dir({"HOME": "/ignored"})
+    assert home.name == "opendox" and home.is_absolute()
+    assert config.state_dir({"XDG_STATE_HOME": "/srv/state"}) == \
+        Path("/srv/state/opendox")
+    # the XDG rule: a relative value is ignored, never joined onto the cwd
+    assert config.state_dir({"XDG_STATE_HOME": "relative"}) == \
+        Path.home() / ".local" / "state" / "opendox"
+
+
+# -- 13.1 and R1Q16 (i), (ii), (iv): F13.1's two blocks, on the real entry point
+
+
+def test_the_entry_point_owns_a_migrated_server_with_no_tcp_listener(
+        corpus: Path, state_dir: Path, tmp_path: Path) -> None:
+    """F13.1's `runtime status` block and its TCP-listener block, against the
+    server `generate-and-open --local` started in the background; then
+    `kill "$SERVER"; wait`, and the server is gone with it."""
+    server, url = _launch(corpus, state_dir, tmp_path / "run")
+    try:
+        with urllib.request.urlopen(url, timeout=10) as answer:       # ready
+            assert answer.status == 200
+        # -- F13.1's `runtime status` block --------------------------------
+        code, status = _status(state_dir)
+        assert status.get("database") == "reachable", \
+            f"no bundled database answered: {status}"
+        assert status.get("applied_migrations") and \
+            not status.get("pending_migrations"), f"not migrated: {status}"
+        state = os.path.realpath(state_dir)
+        bundle = status.get("database_bundle") or {}
+        for key in ("data_dir", "socket_dir"):
+            got = os.path.realpath(bundle.get(key, ""))
+            assert got.startswith(state + os.sep), \
+                f"{key} {got!r} is not under the install's state dir {state!r}"
+        # a local install has no broker, and that is not a fault (T070)
+        assert status["broker_keys"] == "not configured (local mode)"
+        assert code == 0 and status["ok"] is True, status
+        # -- F13.1's TCP-listener block, the pid from `database_bundle` -----
+        pid = bundle.get("pid")
+        assert isinstance(pid, int), f"the bundle reports no server pid: {pid!r}"
+        assert not _tcp_listeners(pid), \
+            f"the bundled server listens on TCP: {_tcp_listeners(pid)}"
+        # -- R1Q16 (i): the server is the document server's own child ------
+        assert _parent_of(pid) == server.pid, (
+            "the bundled server is not a child of the process serving the "
+            "document surface")
+        mode = os.stat(bundle["socket_dir"]).st_mode & 0o777
+        assert mode == 0o700, f"the socket directory is {mode:o}"
+    finally:
+        server.send_signal(signal.SIGTERM)                # `kill "$SERVER"`
+        server.communicate(timeout=60)                    # `wait "$SERVER"`
+    # -- R1Q16 (iv): it stopped with the entry point, and cleanly ----------
+    assert server.returncode == 0, server.returncode
+    assert _wait_gone(pid), "the bundled server outlived its entry point"
+    assert config.DatabaseBundle(state_dir).data_dir.joinpath("PG_VERSION").is_file(), \
+        "the data directory must survive a stop: it is the install's database"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="PR_SET_PDEATHSIG is Linux's")
+def test_the_server_stops_even_when_the_entry_point_is_killed_outright(
+        corpus: Path, state_dir: Path, tmp_path: Path) -> None:
+    """(iv)'s backstop: SIGKILL gives the entry point no chance to stop
+    anything, and the parent-death signal stops the server all the same."""
+    server, _url = _launch(corpus, state_dir, tmp_path / "run")
+    pid = bundle_mod.running_pid(config.DatabaseBundle(state_dir))
+    assert isinstance(pid, int)
+    server.kill()
+    server.communicate(timeout=30)
+    assert _wait_gone(pid), "the bundled server outlived a SIGKILLed entry point"
+
+
+def test_a_second_entry_point_on_the_same_state_dir_is_refused(
+        state_dir: Path) -> None:
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    first = bundle_mod.BundledServer(settings).start()
+    try:
+        with pytest.raises(bundle_mod.BundleRefused) as caught:
+            bundle_mod.BundledServer(settings).start()
+        assert str(first.report()["pid"]) in str(caught.value)
+        # and a restart of the one that owns it re-migrates nothing
+        assert first.applied == ["0001", "0002"]
+    finally:
+        first.stop()
+    again = bundle_mod.BundledServer(settings).start()
+    try:
+        assert again.applied == []
+    finally:
+        again.stop()
+
+
+def test_migrate_under_the_local_mode_uses_the_bundle_and_refuses_a_dsn(
+        state_dir: Path) -> None:
+    """`runtime migrate` is part of the same install: it reads the bundle's
+    owner DSN, and an operator's migration DSN beside `local` is refused."""
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    with bundle_mod.BundledServer(settings):
+        done = subprocess.run(
+            [sys.executable, "-m", "opendox.runtime.cli", "runtime", "migrate"],
+            env=_clean_env(**{MODE: "local", STATE: str(state_dir)}), cwd=ROOT,
+            capture_output=True, text=True, timeout=60)
+        evidence = json.loads(done.stdout)
+        assert done.returncode == 0 and evidence["applied"] == [], evidence
+        done = subprocess.run(
+            [sys.executable, "-m", "opendox.runtime.cli", "runtime", "migrate"],
+            env=_clean_env(**{MODE: "local", STATE: str(state_dir),
+                              PREFIX + "MIGRATION_DATABASE_URL":
+                                  "postgresql://m:hunter2@db.invalid/x"}),
+            cwd=ROOT, capture_output=True, text=True, timeout=60)
+        evidence = json.loads(done.stdout)
+        assert evidence["refusal"] == "configuration", evidence
+        assert PREFIX + "MIGRATION_DATABASE_URL" in evidence["message"]
+        assert "hunter2" not in done.stdout
+
+
+# -- the migrations gap: a wheel, outside any checkout --------------------------
+
+
+def test_a_wheel_install_migrates_its_bundled_server_outside_a_checkout(
+        state_dir: Path, tmp_path: Path) -> None:
+    """Build this package's wheel, install it OUTSIDE the checkout, run it from
+    a directory with no `migrations/`, and migrate the bundled server from the
+    copy the wheel carries (the holder's assignment to T072)."""
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in ("pyproject.toml", "src", "migrations"):
+        item = ROOT / name
+        (shutil.copytree if item.is_dir() else shutil.copy2)(
+            item, source / name, **({"ignore": shutil.ignore_patterns(
+                "__pycache__", "*.egg-info")} if item.is_dir() else {}))
+    wheels = tmp_path / "wheels"
+    built = subprocess.run(
+        [sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-index",
+         "--no-build-isolation", "-q", "-w", str(wheels), str(source)],
+        capture_output=True, text=True, timeout=300)
+    assert built.returncode == 0, built.stderr[-3000:]
+    (wheel,) = wheels.glob("opendox-*.whl")
+    prefix = tmp_path / "prefix"
+    # `--ignore-installed` IS LOAD-BEARING: without it pip treats the suite's
+    # own (editable) `opendox` as the installed copy of the same project and
+    # UNINSTALLS it before writing the new one under `--prefix` — measured, it
+    # emptied the environment this very suite runs in.
+    installed = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--no-deps", "--no-index",
+         "--ignore-installed", "-q", "--prefix", str(prefix), str(wheel)],
+        capture_output=True, text=True, timeout=300)
+    assert installed.returncode == 0, installed.stderr[-3000:]
+    assert "uninstall" not in (installed.stdout + installed.stderr).lower()
+    # ...and the environment this suite runs in still has its own install
+    still = subprocess.run(
+        [sys.executable, "-c", "import importlib.metadata as m; "
+         "print(m.distribution('opendox').version)"],
+        env=_clean_env(PYTHONPATH=""), capture_output=True, text=True, timeout=60)
+    assert still.returncode == 0, "installing the wheel removed the suite's opendox"
+    site = Path(sysconfig.get_path("purelib", vars={"base": str(prefix),
+                                                     "platbase": str(prefix)}))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    program = f"""
+import json, sys
+from pathlib import Path
+import opendox
+from opendox.runtime import bundle, config
+prefix = Path({str(prefix)!r}).resolve()
+assert Path(opendox.__file__).resolve().is_relative_to(prefix), opendox.__file__
+assert not Path("migrations").exists()
+settings = config.load_settings()
+found = Path(settings.migrations_dir).resolve()
+assert found.is_relative_to(prefix / "share" / "opendox"), found
+with bundle.BundledServer(settings) as server:
+    print(json.dumps({{"applied": server.applied, "dir": str(found)}}))
+"""
+    env = _clean_env(**{MODE: "local", STATE: str(state_dir)})
+    env["PYTHONPATH"] = str(site)
+    done = subprocess.run([sys.executable, "-c", program], cwd=elsewhere,
+                          env=env, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr[-3000:]
+    result = json.loads(done.stdout.strip().splitlines()[-1])
+    assert result["applied"] == ["0001", "0002"], result

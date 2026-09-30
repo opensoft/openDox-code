@@ -26,14 +26,16 @@ instead of failing to start with the same ImportError it was about to explain.
 
 from __future__ import annotations
 
+import importlib.metadata
 import ipaddress
 import os
 import re
 import shlex
+import sys
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 
 #: The environment prefix. One string, so a rename is one edit.
 PREFIX = "OPENDOX_"
@@ -96,6 +98,18 @@ SETTINGS: tuple[Setting, ...] = (
         "makes the same selection; the two may not disagree, and with "
         "neither the install is hosted, so a hosted install with no issuer "
         "refuses rather than falling into local mode (13.4, 13.5)",
+    ),
+    # WHERE A LOCAL INSTALL KEEPS ITS OWN STATE (plan 034 T072; #1144 13.1):
+    # the bundled PostgreSQL server's data directory and its Unix socket. No
+    # default string, because the default is COMPUTED, per user — see
+    # `state_dir`. A hosted install never reads it.
+    Setting(
+        PREFIX + "STATE_DIR", None, False, False,
+        "the directory a LOCAL install owns: the bundled PostgreSQL server's "
+        "data directory and its Unix socket live under it, and the server "
+        "listens on that socket and on no TCP port (13.1). Unset, it is "
+        "`$XDG_STATE_HOME/opendox`, else `~/.local/state/opendox`. A hosted "
+        "install never reads it",
     ),
     Setting(
         PREFIX + "OIDC_ISSUER", None, True, False,
@@ -172,7 +186,11 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         PREFIX + "MIGRATIONS_DIR", "migrations", False, False,
-        "the ordered-SQL directory, repository-root-relative",
+        "the ordered-SQL directory, repository-root-relative. Unset, it is "
+        "`migrations` where the working directory holds one (a checkout, or "
+        "the image's /app), and otherwise the copy the installed package "
+        "ships (plan 034 T072), so an install run from anywhere else still "
+        "has the migrations it applies",
     ),
     Setting(
         PREFIX + "PROJECT_REPOSITORY_ROOT", "var/projects", False, False,
@@ -214,6 +232,7 @@ class RuntimeSettings:
     database_url: str
     migration_database_url: str | None
     install_mode: str
+    state_dir: Path
     oidc_issuer: str
     oidc_audience: str
     oidc_jwks_url: str | None
@@ -236,6 +255,7 @@ class RuntimeSettings:
             "migration_database_url="
             f"{'<redacted>' if self.migration_database_url else 'None'}, "
             f"install_mode={self.install_mode!r}, "
+            f"state_dir={str(self.state_dir)!r}, "
             # REDACTED TOO, and not because `load_settings` allows userinfo
             # here — it refuses it. A `RuntimeSettings` built by hand, in a
             # test or by a future caller, does not go through that door, and
@@ -1552,13 +1572,189 @@ LOCAL_BIND_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 #: is REFUSED, by name (a holder reading on openxFactory#656, plan 034 T070,
 #: the same fail-closed reading as the disagreeing flag and setting): an issuer
 #: next to `local` says a broker was meant, and honouring `local` over it would
-#: silently drop the authentication the operator configured. T072 adds the two
-#: DSNs, which the local install supplies itself (13.1).
+#: silently drop the authentication the operator configured.
+#:
+#: AND THE TWO DSNs (plan 034 T072; the same holder reading): a local install
+#: SUPPLIES BOTH ITSELF, from the server it bundles (#1144 13.1, "so no
+#: pre-existing service can stand in for it"), so an operator's DSN beside
+#: `local` is either about to be silently overridden or is another server
+#: trying to stand in for the bundled one. Neither is accepted.
 HOSTED_ONLY_SETTINGS: tuple[str, ...] = (
     PREFIX + "OIDC_ISSUER",
     PREFIX + "OIDC_AUDIENCE",
     PREFIX + "OIDC_JWKS_URL",
+    PREFIX + "DATABASE_URL",
+    PREFIX + "MIGRATION_DATABASE_URL",
 )
+
+#: THE BUNDLED SERVER'S IDENTITY (plan 034 T072; #1144 13.1, as T007 batch H's
+#: addendum reads). The data directory and the socket directory live under the
+#: install's own `OPENDOX_STATE_DIR`, at these paths — SHORT ONES, because a
+#: Unix socket's whole path is bounded by the kernel (`sun_path`) and the
+#: socket file is `<socket dir>/.s.PGSQL.<port>`.
+BUNDLE_DATA_DIR = PurePath("postgres", "data")
+BUNDLE_SOCKET_DIR = PurePath("postgres", "run")
+#: The port NUMBER, which names the socket file and opens NO TCP port: the
+#: server is started with `listen_addresses` empty (13.1: "on NO TCP port").
+BUNDLE_PORT = 5432
+#: The two identities 13.3 keeps apart, and the one database. The MIGRATION
+#: identity owns the database and every table it creates; the SERVED identity
+#: is the least-privileged role the API reads and writes as, granted what
+#: `deploy/compose/init-runtime-role.sh` grants the compose stack's role of the
+#: same name. Two DSNs, two users, never one pasted twice (13.3).
+BUNDLE_OWNER_ROLE = "opendox"
+BUNDLE_SERVED_ROLE = "opendox_runtime"
+BUNDLE_DATABASE = "opendox"
+
+#: The longest socket path the kernel takes, in bytes: `sizeof(sun_path)` less
+#: its terminating NUL — 108 on Linux, 104 on macOS and the BSDs. PostgreSQL
+#: refuses a longer one at startup; this refuses it at configuration, naming
+#: the setting that made it long.
+UNIX_SOCKET_PATH_MAX = 107 if sys.platform.startswith("linux") else 103
+
+
+@dataclass(frozen=True)
+class DatabaseBundle:
+    """Where a LOCAL install's bundled PostgreSQL server lives, and its DSNs.
+
+    Pure path and string arithmetic over `OPENDOX_STATE_DIR`, so `load_settings`
+    can name both DSNs without starting anything, and `runtime status` in a
+    second process derives the SAME ones and finds the same server.
+    `opendox.runtime.bundle` is what starts and stops it.
+    """
+
+    state_dir: Path
+
+    @property
+    def data_dir(self) -> Path:
+        return self.state_dir / BUNDLE_DATA_DIR
+
+    @property
+    def socket_dir(self) -> Path:
+        return self.state_dir / BUNDLE_SOCKET_DIR
+
+    @property
+    def socket_path(self) -> Path:
+        return self.socket_dir / f".s.PGSQL.{BUNDLE_PORT}"
+
+    def dsn(self, role: str) -> str:
+        """A DSN for `role` over the bundle's Unix socket, and never TCP.
+
+        `host` is the socket DIRECTORY (libpq's rule for a value that starts
+        with `/`), percent-encoded so a state directory holding a space or a
+        `&` is still one value; `port` is spelled so a `PGPORT` in the
+        environment cannot send libpq to a different socket file. No password:
+        the socket directory is 0700 and the server's own `pg_hba.conf`
+        trusts local connections only, so reaching the socket IS the
+        credential, and a host connection is rejected outright.
+        """
+        host = urllib.parse.quote(str(self.socket_dir), safe="/")
+        return (f"postgresql://{role}@/{BUNDLE_DATABASE}"
+                f"?host={host}&port={BUNDLE_PORT}")
+
+    @property
+    def served_dsn(self) -> str:
+        return self.dsn(BUNDLE_SERVED_ROLE)
+
+    @property
+    def migration_dsn(self) -> str:
+        return self.dsn(BUNDLE_OWNER_ROLE)
+
+
+def state_dir(env: Mapping[str, str] | None = None) -> Path:
+    """The install's own state directory: `OPENDOX_STATE_DIR`, or the per-user one.
+
+    ABSOLUTE, or refused: the document server that starts the bundled server
+    and a `runtime status` run from another directory must derive the same
+    socket, and a relative value would give each its own. Unset, it is
+    `$XDG_STATE_HOME/opendox` where that is absolute (the XDG rule ignores a
+    relative one), and otherwise `~/.local/state/opendox`.
+    """
+    env = os.environ if env is None else env
+    setting = PREFIX + "STATE_DIR"
+    raw = env.get(setting, "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            raise ConfigurationError(
+                f"{setting} is {raw!r}, which is not an absolute path. The "
+                "document server that starts the bundled PostgreSQL server "
+                "and a `runtime status` run from another directory must find "
+                "the same socket, so the state directory is named absolutely")
+        return path
+    xdg = env.get("XDG_STATE_HOME", "").strip()
+    base = Path(xdg) if xdg and Path(xdg).is_absolute() else (
+        Path.home() / ".local" / "state")
+    return base / "opendox"
+
+
+def database_bundle(state: Path) -> DatabaseBundle:
+    """The bundle under `state`, refusing a socket path the kernel cannot bind."""
+    bundle = DatabaseBundle(state_dir=state)
+    length = len(os.fsencode(str(bundle.socket_path)))
+    if length > UNIX_SOCKET_PATH_MAX:
+        raise ConfigurationError(
+            f"{PREFIX}STATE_DIR is too long for the bundled server's Unix "
+            f"socket: {bundle.socket_path} is {length} bytes and this kernel "
+            f"takes at most {UNIX_SOCKET_PATH_MAX}. The socket must live under "
+            "the install's own state directory (13.1), so choose a shorter "
+            f"{PREFIX}STATE_DIR")
+    return bundle
+
+
+#: WHERE AN INSTALLED WHEEL KEEPS ITS MIGRATIONS (plan 034 T072). The
+#: repository's `migrations/` stays where it is — the image copies it to
+#: `/app/migrations` and runs from `/app` — and `pyproject.toml` maps the same
+#: files into the wheel's data directory under this path, so an install run
+#: outside any checkout still has the migrations it applies. The canonical
+#: digest gate (`migrations.verify_canonical_digest`) is what proves any copy
+#: found this way is the pinned one.
+PACKAGED_MIGRATIONS = PurePath("share", "opendox", "migrations")
+
+
+def packaged_migrations_dir() -> Path | None:
+    """The migrations this INSTALLATION carries, or `None` where it carries none.
+
+    Two places, in order. The installed distribution's own data files — a
+    wheel install, whose `RECORD` lists them wherever the install scheme put
+    them. Then the source tree this module was imported from — an editable
+    install, which installs no data files, or `src/` on the path — whose
+    `migrations/` sits beside `src/`.
+    """
+    try:
+        files = importlib.metadata.distribution("opendox").files or ()
+    except importlib.metadata.PackageNotFoundError:
+        files = ()
+    for entry in files:
+        parts = PurePath(entry).parts
+        if (entry.name.endswith(".sql")
+                and tuple(parts[-4:-1]) == PACKAGED_MIGRATIONS.parts):
+            return Path(entry.locate()).resolve().parent
+    source = Path(__file__).resolve().parents[3]
+    if (source / "pyproject.toml").is_file() and (source / "migrations").is_dir():
+        return source / "migrations"
+    return None
+
+
+def migrations_dir(env: Mapping[str, str] | None = None) -> Path:
+    """`OPENDOX_MIGRATIONS_DIR`, or where this install's migrations are.
+
+    Set, it is used as given, as it always was. Unset, it is `migrations`
+    wherever the working directory holds one — a checkout, or the image's
+    `/app` — which is today's default, unchanged; and OTHERWISE the copy the
+    installed package carries (`packaged_migrations_dir`), so `pip install
+    "opendox[local]"` run from a user's home directory migrates its bundled
+    server instead of refusing for a missing directory. Where neither exists
+    it is still `migrations`, and the canonical gate refuses it by name.
+    """
+    env = os.environ if env is None else env
+    raw = env.get(PREFIX + "MIGRATIONS_DIR", "").strip()
+    if raw:
+        return Path(raw)
+    here = Path("migrations")
+    if here.is_dir():
+        return here
+    return packaged_migrations_dir() or here
 
 
 def install_mode(env: Mapping[str, str] | None = None, *,
@@ -1686,6 +1882,19 @@ def require_the_hosted_issuer(env: Mapping[str, str] | None = None) -> None:
         f"{PREFIX}INSTALL_MODE=local")
 
 
+def _hosted_state_dir(env: Mapping[str, str]) -> Path:
+    """A HOSTED install's `state_dir`: reported, never read, never refused.
+
+    A hosted install has no bundled server, so a value it will never use is
+    not a reason for it to refuse to start (13.6: otherwise unchanged). It is
+    still reported, so `status` describes the whole declared setting list.
+    """
+    try:
+        return state_dir(env)
+    except ConfigurationError:
+        return Path(env.get(PREFIX + "STATE_DIR", "").strip())
+
+
 def load_settings(env: Mapping[str, str] | None = None, *,
                   local_flag: bool = False) -> RuntimeSettings:
     """Resolve :class:`RuntimeSettings` from `env` (default `os.environ`).
@@ -1728,8 +1937,20 @@ def load_settings(env: Mapping[str, str] | None = None, *,
     if local:
         refuse_what_a_local_install_cannot_be(env)
     algorithms = _algorithms(env)
-    served = _require(env, _by_name(PREFIX + "DATABASE_URL"))
-    migration = _optional(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL"))
+    # A LOCAL INSTALL SUPPLIES BOTH DSNs ITSELF (plan 034 T072; #1144 13.1),
+    # from the server it bundles under its own state directory, and an
+    # operator's DSN beside it was refused above. The two it supplies are two
+    # users over one socket, so T071's three checks below pass them for the
+    # reason they exist: one dialect, one database, and never one credential
+    # in both settings.
+    state = state_dir(env) if local else _hosted_state_dir(env)
+    if local:
+        bundle = database_bundle(state)
+        served: str = bundle.served_dsn
+        migration: str | None = bundle.migration_dsn
+    else:
+        served = _require(env, _by_name(PREFIX + "DATABASE_URL"))
+        migration = _optional(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL"))
     # THE DIALECT FIRST: a scheme this module cannot parse as PostgreSQL is not
     # yet a DSN worth comparing at all. A no-op on an ABSENT migration DSN —
     # see `_refuse_non_postgresql_dsn`.
@@ -1756,6 +1977,7 @@ def load_settings(env: Mapping[str, str] | None = None, *,
         database_url=served,
         migration_database_url=migration,
         install_mode=mode,
+        state_dir=state,
         oidc_issuer="" if local else _broker_url(
             env, _by_name(PREFIX + "OIDC_ISSUER"),
             required=True, is_a_base_url=True) or "",
@@ -1768,11 +1990,15 @@ def load_settings(env: Mapping[str, str] | None = None, *,
         oidc_leeway_seconds=_positive_int(env, _by_name(PREFIX + "OIDC_LEEWAY_SECONDS")),
         bind_host=bind_host,
         bind_port=_positive_int(env, _by_name(PREFIX + "BIND_PORT")),
-        runtime_pg_role=_role_name(env),
+        # THE BUNDLE'S OWN NAMES where the operator declares none: the served
+        # role the migration narrows and verifies, and the database it may
+        # touch. An operator's declaration still wins, and a wrong one is
+        # refused by the migration run's own guards, as on a hosted install.
+        runtime_pg_role=_role_name(env) or (BUNDLE_SERVED_ROLE if local else None),
         served_schema=_served_schema(env),
-        served_database=_served_database(env),
+        served_database=_served_database(env) or (BUNDLE_DATABASE if local else None),
         publish_openapi=_boolean(env, _by_name(PREFIX + "PUBLISH_OPENAPI")),
-        migrations_dir=Path(_optional(env, _by_name(PREFIX + "MIGRATIONS_DIR")) or "migrations"),
+        migrations_dir=migrations_dir(env),
         project_repository_root=Path(
             _optional(env, _by_name(PREFIX + "PROJECT_REPOSITORY_ROOT")) or "var/projects"
         ),
@@ -1801,7 +2027,18 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
     not, because those are the served runtime and must have the real thing.
     """
     env = os.environ if env is None else env
-    dsn = env.get(PREFIX + "MIGRATION_DATABASE_URL", "").strip()
+    mode = install_mode(env)
+    local = mode == INSTALL_MODE_LOCAL
+    if local:
+        # THE BUNDLE'S OWNER, over its socket (plan 034 T072): a local install
+        # supplies its migration DSN as it supplies the served one, and an
+        # operator's beside it is refused, exactly as `load_settings` refuses.
+        refuse_what_a_local_install_cannot_be(env)
+        state = state_dir(env)
+        dsn = database_bundle(state).migration_dsn
+    else:
+        state = _hosted_state_dir(env)
+        dsn = env.get(PREFIX + "MIGRATION_DATABASE_URL", "").strip()
     if not dsn:
         raise ConfigurationError(
             f"{PREFIX}MIGRATION_DATABASE_URL is required to apply migrations; "
@@ -1822,7 +2059,8 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
         # a migration run is part of the same install and one reading of the
         # selector serves every verb. It changes nothing else a migration run
         # does; the broker fields below are sentinels in either shape.
-        install_mode=install_mode(env),
+        install_mode=mode,
+        state_dir=state,
         oidc_issuer=MIGRATION_SENTINEL_ISSUER,
         oidc_audience=MIGRATION_SENTINEL_AUDIENCE,
         oidc_jwks_url=None,
@@ -1831,12 +2069,11 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
         oidc_leeway_seconds=1,
         bind_host="127.0.0.1",
         bind_port=1,
-        runtime_pg_role=_role_name(env),
+        runtime_pg_role=_role_name(env) or (BUNDLE_SERVED_ROLE if local else None),
         served_schema=_served_schema(env),
-        served_database=_served_database(env),
+        served_database=_served_database(env) or (BUNDLE_DATABASE if local else None),
         publish_openapi=False,
-        migrations_dir=Path(
-            _optional(env, _by_name(PREFIX + "MIGRATIONS_DIR")) or "migrations"),
+        migrations_dir=migrations_dir(env),
         project_repository_root=Path(
             _optional(env, _by_name(PREFIX + "PROJECT_REPOSITORY_ROOT"))
             or "var/projects"),
