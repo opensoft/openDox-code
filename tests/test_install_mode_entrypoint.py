@@ -49,11 +49,19 @@ HOSTED_WITHOUT_ISSUER = {
 
 @pytest.fixture()
 def corpus(tmp_path: Path) -> Path:
-    """A fresh repository, as F13.1's preamble makes one."""
+    """A fresh repository, as F13.1's preamble makes one.
+
+    Made APART FROM the user's own git configuration (`GIT_CONFIG_GLOBAL`,
+    `GIT_CONFIG_NOSYSTEM`), as `tests/test_checkout_head.py` makes its
+    repositories, so a global signing rule or hook cannot fail the setup
+    before the install-mode probe it exists for ever runs (Copilot review of
+    this PR).
+    """
     root = tmp_path / "plain-documents"
     root.mkdir()
     (root / "note.md").write_text("# A note\n\nPlain text.\n", encoding="utf-8")
     env = {**os.environ,
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
            "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
            "GIT_COMMITTER_NAME": "fixture",
            "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
