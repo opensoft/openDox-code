@@ -5,10 +5,10 @@ the publishing repository's own vocabulary (plan 034, T050).
 2, slice P2-F): a handful of `.md` documents a plain, ungoverned git
 repository could contain, read by AT-R1 (spec.md § "AT-R1 — the release-1
 acceptance test", step 3(a)) and by F5.3, F7.2, F10.1 and F13.1 once those
-falsifiers exist. None of it is wired to any `opendox` code yet — T052 and
-T054 (the generator seam and the neutral projection) have not landed — so
-this suite tests the fixture's own two guarantees rather than a projection
-over it.
+falsifiers exist. T054's neutral projection reads it:
+`tests/test_neutral_projection.py` projects it with every sibling blocked and
+validates the snapshot against T053's schema. This suite tests the fixture's
+own two guarantees, which hold whatever reads it.
 
 THE TWO GUARANTEES, AND WHY.
 
@@ -26,14 +26,15 @@ THE TWO GUARANTEES, AND WHY.
    document that declares no `stage:` line at all is a SOURCE. This fixture
    carries one document per explicit station (`grouping`, `candidate`,
    `selection`, `submission`, `completion`) and three sources, two of which
-   share the phrase "rain barrel" verbatim so a future topic-based grouping
-   pass (T054) has a pair to find — the fixture must yield at least one
+   share the phrase "rain barrel" verbatim so T054's topic rule has a pair
+   to find — the fixture must yield at least one
    group, so AT-R1 can open the chat pane from a grouping tile (spec.md
    § AT-R1 steps 6-7).
 
 Every document also carries the small neutral field set the default adapter
-will require regardless of station — `title` and `summary` — per T050's task
-line and the answer's own example.
+requires regardless of station — `title` and `summary`
+(`local_git_adapter.NEUTRAL_FIELDS`, T054) — per T050's task line and the
+answer's own example.
 
 COLLECTED BY THE REQUIRED CHECK. Since T036, `validate` runs the whole suite
 (`python -m pytest -q` over the configured testpaths) instead of an explicit

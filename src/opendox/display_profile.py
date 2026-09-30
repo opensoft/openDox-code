@@ -224,12 +224,25 @@ STAGE_FIELDS: tuple[tuple[str, str, str | None], ...] = (
 #: A HOST MAY STILL OVERRIDE THEM, on the `values` block of the facet, for the
 #: descendant whose generator writes different words into the same schema. The
 #: default is openDox's declaration, not a domain's silence.
+#:
+#: THE DEFAULTS ARE openDox's OWN NEUTRAL SNAPSHOT'S VALUES (RULED R1Q11 (a),
+#: openxFactory#656 comment `5850003126`; plan 034 T054, as T007's batch G
+#: amends #1144's 5.3). openDox generates that snapshot itself
+#: (`neutral_projection`), and T053's schema closes both enums: a document's
+#: stage is one of the six station role keys, and a candidate's state is one
+#: of `unselected`, `selected`, `declined` and `replaced`. So the product's own
+#: views match its own snapshot with no facet declared. A source document's
+#: stage is `source`, and a document that gathers others is at `grouping`, so
+#: those two are the captured and the organized stage. The candidate's four
+#: are NEUTRAL_DISPLAY's own candidate words below, role for role. No word is
+#: re-authored. The governed snapshot's own values move to openXdox's facet,
+#: on its `values` block (T060).
 SNAPSHOT_VALUES: dict[str, dict[str, str]] = {
     # `documents[].stage` — which pipeline column a source document sits in.
-    "document_stage": {"captured": "brainstorm", "organized": "staged"},
+    "document_stage": {"captured": "source", "organized": "grouping"},
     # `possibles[].state` — the candidate register's own four-state enum.
-    "register_state": {"captured": "latent", "proposed": "picked",
-                       "retired": "rejected", "superseded": "superseded"},
+    "register_state": {"captured": "unselected", "proposed": "selected",
+                       "retired": "declined", "superseded": "replaced"},
 }
 
 #: THE STAGING TEMPLATE'S CANONICAL HEADING ORDER — the last member of § 2.2
