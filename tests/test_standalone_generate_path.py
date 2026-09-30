@@ -219,7 +219,9 @@ def test_the_verb_reports_a_stage_outside_the_six_and_reads_it_as_a_source(
     snapshot = json.loads(out.read_text(encoding="utf-8"))
     [entry] = [d for d in snapshot["documents"] if d["path"] == document]
     assert entry["stage"] == "source"
-    assert "someday" not in set(_string_values(snapshot))
+    carried = [text for text in _string_values(snapshot) if "someday" in text]
+    assert carried == [], (
+        f"the undeclared value reached the snapshot, inside {carried}")
     assert {d["stage"] for d in snapshot["documents"]} <= set(ROLE_KEYS)
 
 
