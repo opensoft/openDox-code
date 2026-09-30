@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import shlex
 import tempfile
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -163,6 +164,12 @@ def render_scaffold(
       `create_scaffold` passes `scaffold_lead_fields()`.
     - A name outside `SCAFFOLD_LEAD_FIELDS` is refused (`ValueError`), since
       the scaffold has no value for it.
+    - A lead value that is not ONE header line is refused (`ValueError`)
+      before anything is rendered: a line break, any other control
+      character, or a line or paragraph separator. Written into the block, `summary="ok\nstage:
+      completion"` would be read as the document's own `stage:` line, so a
+      create could land a document in a station the caller never asked for
+      (Copilot at openDox-code#57 1a603677, r4139383472).
     - With none, which is the default, the scaffold is byte-identical to what
       this function rendered before, H1 first."""
     unknown = [name for name in lead_fields if name not in SCAFFOLD_LEAD_FIELDS]
@@ -175,6 +182,12 @@ def render_scaffold(
     heading = title if suffixed else f"{title}{BRAINSTORM_SUFFIX}"
     lead_values = {"title": title[:-len(BRAINSTORM_SUFFIX)] if suffixed else title,
                    "summary": summary}
+    for name in SCAFFOLD_LEAD_FIELDS:
+        if name in lead_fields and not _one_header_line(lead_values[name]):
+            raise ValueError(
+                f"a scaffold's leading {name}: must be one header line, and "
+                f"{lead_values[name]!r} carries a line break or another "
+                "control character")
     lead = "".join(f"{name}: {lead_values[name]}\n"
                    for name in SCAFFOLD_LEAD_FIELDS if name in lead_fields)
     topics_line = ", ".join(t.strip() for t in topics if t and t.strip())
@@ -196,6 +209,16 @@ def render_scaffold(
         "## Possible feats\n\n"
         f"{feat_lines}\n"
     )
+
+
+def _one_header_line(value: str) -> bool:
+    """Whether `value` can stand as one `name: value` header line: no control
+    character (Unicode `Cc`, which holds `\n`, `\r`, `\t`, `\x85` and the
+    other ASCII breaks) and no line or paragraph separator (`Zl`, `Zp`). That
+    is every character `str.splitlines` ends a line at, and every other
+    control a header reader could stumble on."""
+    return not any(unicodedata.category(char) in ("Cc", "Zl", "Zp")
+                   for char in value)
 
 
 def normalized_area(area: str) -> str:

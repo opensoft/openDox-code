@@ -94,6 +94,7 @@ from opendox.runtime.local_git_adapter import leading_header
 __all__ = [
     "GENERATOR_VERSION",
     "Notice",
+    "PATH_KEYS",
     "Projection",
     "ProjectionRefused",
     "SCHEMA_VERSION",
@@ -160,6 +161,13 @@ _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 #: The characters the neutral schema refuses in a path or a topic
 #: (`path-is-repo-relative`, `topic-is-trimmed-text`).
 _CONTROL = re.compile("[\u0000-\u001f\u007f-\u009f]")
+
+
+#: What an adapter declares, as a class or instance attribute set to True,
+#: for this projection to read its `DocumentId.key` as a repository path and
+#: its documents' leading `Name: value` block as their header. `LocalGitCorpus`
+#: declares it. An adapter that does not is refused, not guessed at.
+PATH_KEYS = "document_keys_are_paths"
 
 
 class ProjectionRefused(generator_seam.GeneratorSeamError):
@@ -420,6 +428,16 @@ def project(adapter: CorpusAdapter, corpus: ResolvedCorpus, repository: str,
     the projection refuses, since the contract requires an anchor.
     `generated_at`, where given, is recorded verbatim, and it is otherwise
     absent. `repository` is recorded as given."""
+    if getattr(adapter, PATH_KEYS, False) is not True:
+        raise ProjectionRefused(
+            f"the neutral snapshot records each document by its repository "
+            f"path, and {type(adapter).__name__} does not declare "
+            f"`{PATH_KEYS} = True`. A `DocumentId.key` is opaque to the "
+            "CorpusAdapter interface: it may be an object id or a row key, and "
+            "read as a path it would fabricate one. Register a home corpus "
+            "whose keys are repository paths and whose documents open with a "
+            "`Name: value` header, and have it declare so (Copilot at "
+            "openDox-code#57 50b0d42b, r4139607560).")
     revision = source_revision if source_revision is not None else corpus.revision
     if revision is None:
         raise ProjectionRefused(
