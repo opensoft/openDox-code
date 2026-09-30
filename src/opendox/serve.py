@@ -2216,7 +2216,12 @@ def serve(
             checkout_root=checkout_root))
     httpd = build_server(web_dir, snapshot_path, checkout_root, host=host,
                          port=port, quiet=quiet, actor=actor, **build_kwargs)
-    print(f"serving ideation dashboard at {server_url(httpd, '/index.html')}")
+    # FLUSHED before the process blocks (plan 034 T056): where standard
+    # output is a pipe or a file it is block-buffered, so an unflushed line
+    # never reaches a wrapper while the server runs, and the wrapper cannot
+    # learn an ephemeral port or tell that the server started.
+    print(f"serving ideation dashboard at {server_url(httpd, '/index.html')}",
+          flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
