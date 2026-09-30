@@ -222,8 +222,8 @@ def test_a_snapshot_that_is_not_json_breaks_the_syntax_rule(tmp_path, text, why)
     assert (result.ok, result.returncode, result.outcome) == (False, 1, ps.NOT_CONFORMANT)
     first = result.stdout.splitlines()[0]
     assert first.startswith(f"[{default_projection.SYNTAX_RULE}] <root>: the document "
-                            "cannot be read as JSON, which is how a 'opendox-snapshot' "
-                            "document is written: "), first
+                            "cannot be read as JSON, which is how a document of kind "
+                            "'opendox-snapshot' is written: "), first
     assert why in first
 
 
@@ -503,7 +503,7 @@ def test_a_manifest_that_is_not_yaml_breaks_the_syntax_rule(tmp_path) -> None:
     assert result.outcome == ps.NOT_CONFORMANT
     assert result.stdout.startswith(
         f"[{default_projection.SYNTAX_RULE}] <root>: the document cannot be read as "
-        "YAML, which is how a 'ideation-workbench' document is written: ")
+        "YAML, which is how a document of kind 'ideation-workbench' is written: ")
 
 
 def test_save_with_validate_keeps_a_valid_manifest_and_unwinds_a_broken_one(tmp_path) -> None:

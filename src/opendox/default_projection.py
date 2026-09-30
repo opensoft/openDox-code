@@ -501,7 +501,7 @@ class OwnValidator:
             violations = [own.Violation(
                 SYNTAX_RULE, (), "syntax",
                 f"the document cannot be read as {self.syntax}, which is how "
-                f"a {self.kind!r} document is written: "
+                f"a document of kind {self.kind!r} is written: "
                 f"{' '.join(str(exc).split()) or type(exc).__name__}")]
         else:
             violations = kind_validator.violations(document)
