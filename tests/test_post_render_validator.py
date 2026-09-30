@@ -249,6 +249,8 @@ def test_a_number_read_as_written_is_the_contracts_to_judge(tmp_path, literal) -
     (".inf", "reads as inf"),
     ("-.Inf", "reads as -inf"),
     (".nan", "reads as nan"),
+    ("0:1.0000000000000001", "cannot be proved as written"),
+    ("190:20:30.15", "cannot be proved as written"),
 ])
 def test_a_manifest_number_is_read_as_the_snapshots_are(tmp_path, value, why) -> None:
     document = _recipe_set().render().replace("schema_version: 1\n",

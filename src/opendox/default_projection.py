@@ -297,15 +297,22 @@ def _exact(text: str, value: float) -> float:
       verdict over the float would be a verdict over the number written.
       `0.1`, `2.50` and `1E2` read as written, and so does every float
       openDox's own writer writes, which is the float's own shortest
-      spelling. A literal this cannot compare (a YAML sexagesimal) keeps its
-      float."""
+      spelling.
+    * PROVABLE. A spelling this cannot compare with the float is refused,
+      not trusted. YAML's base-60 floats (`0:1.0000000000000001`) are read
+      and rounded by PyYAML, but `Decimal` cannot parse them, so no proof
+      was made, and such a literal passed as `1.0` (Copilot at
+      openDox-code#68 80153754, r4146201125). JSON has no such spelling, and
+      openDox's writers write none."""
     if not math.isfinite(value):
         raise _NotJSON(f"the number {text[:40]} reads as {value}, and JSON "
                        "carries no infinity or NaN")
     try:
         written = Decimal(text.replace("_", ""))
     except InvalidOperation:
-        return value
+        raise _NotJSON(f"the number {text[:40]} is in a spelling that cannot "
+                       "be proved as written (a YAML base-60 number, say), and "
+                       "JSON has no such spelling") from None
     if Decimal(repr(value)) != written:
         raise _NotJSON(f"the number {text[:40]} cannot be read as written: "
                        f"the precision JSON readers share holds it as {value!r}")
