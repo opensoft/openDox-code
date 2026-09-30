@@ -854,6 +854,33 @@ def test_an_injected_generator_is_used_and_a_session_ref_is_never_promoted(tmp_p
         {"source_revision": "s1"}
 
 
+def test_a_regenerate_promotes_no_session_and_moves_no_active_key(tmp_path) -> None:
+    """FR-014a at the source boundary: a regenerated session never becomes
+    active while `main` is, and one that was ALREADY active, set there on
+    purpose, stays so, since moving the key off it is a change nobody asked
+    the regenerate for (Copilot at openDox-code#59 183b40fc, r4146370161, is
+    answered by this case)."""
+    ps.register_defaults()
+
+    def generator(root, repository):
+        return {"schema_version": 1, "kind": NEUTRAL, "repository": repository,
+                "generation": {"source_revision": "s1"}}
+
+    source = default_registry.SnapshotSource(checkout_root=tmp_path, generator=generator)
+    registry = source.registry
+    main = registry.register(default_registry.SnapshotEntry(
+        "garden", snapshot_path=tmp_path / "main.json", source_root=tmp_path))
+    registry.register(default_registry.SnapshotEntry(
+        "garden", "draft/t", snapshot_path=tmp_path / "session.json",
+        source_root=tmp_path))
+    source.refresh(repository="garden", ref="draft/t")
+    assert registry.active.key == main.key, "a regenerated session is not promoted"
+    registry.set_active("garden", "draft/t")
+    source.refresh(repository="garden", ref="draft/t")
+    assert registry.active.key == ("garden", "draft/t"), (
+        "an entry active already stays active: nothing was promoted")
+
+
 def test_an_injected_generator_is_handed_the_register_only_when_one_is_set(tmp_path) -> None:
     """An unset project register is not passed to an injected generator, as
     the generator seam omits an unset input, so one that takes only the core
