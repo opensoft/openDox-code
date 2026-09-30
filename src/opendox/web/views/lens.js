@@ -73,18 +73,35 @@ export const STAGING_SEED_ROUTE = "/actions/staging-seed";
 //
 // This mirrors `RouteBinding.matches` (`src/route_extension.py`): the method,
 // then the path, exact or under a prefix, and a GET binding answers HEAD too. A
-// test holds it to `route_extension.match()` itself. It FAILS CLOSED: a payload
-// that is absent, that carries no manifest, or whose route this cannot classify
-// answers no, as `probeCapabilityPath` reads a missing payload as an unmet
-// requirement. Unlike `manifestRoutes()` it never throws, because it gates a
-// control, and a control that cannot be justified is left out rather than made a
-// reason to lose the whole lens.
+// test holds it to `route_extension.match()` itself.
+//
+// IT FAILS CLOSED, and on the WHOLE manifest, as `manifestRoutes()` does: a
+// payload that is absent, that carries no manifest, or in which ANY route is not
+// the shape the server would have accepted answers no for every route. A list
+// with one malformed entry beside a good one is a list this cannot vouch for, so
+// the good one is not taken on trust (Copilot, #65). That shape is
+// `RouteBinding.__post_init__`'s, entry by entry; a test holds the two to each
+// other. Unlike `manifestRoutes()` it never throws, because it gates a control,
+// and a control that cannot be justified is left out rather than made a reason
+// to lose the whole lens (`probeCapabilityPath`'s own posture: a missing payload
+// is an unmet requirement, not an error).
+
+// `route_extension.METHODS`.
+const ROUTE_METHODS = ["GET", "HEAD", "POST"];
+
+// One manifest entry, held to what `RouteBinding.__post_init__` accepts: a known
+// method, a pattern rooted at a slash with no query or fragment, a boolean
+// `is_prefix`, and a prefix that ends in a slash.
+function wellFormedRoute(route) {
+  return route !== null && typeof route === "object"
+    && ROUTE_METHODS.includes(route.method)
+    && typeof route.pattern === "string" && route.pattern.startsWith("/")
+    && !/[?#]/.test(route.pattern)
+    && typeof route.is_prefix === "boolean"
+    && (!route.is_prefix || route.pattern.endsWith("/"));
+}
+
 function routeMatches(route, method, path) {
-  if (route === null || typeof route !== "object") return false;
-  if (typeof route.method !== "string" || typeof route.pattern !== "string"
-      || typeof route.is_prefix !== "boolean") {
-    return false;
-  }
   const sameMethod = route.method === method
     || (route.method === "GET" && method === "HEAD");
   if (!sameMethod) return false;
@@ -93,8 +110,8 @@ function routeMatches(route, method, path) {
 
 export function bindingAnswers(capabilities, method, path) {
   const routes = capabilities?.views?.contributed_routes;
-  return Array.isArray(routes)
-    && routes.some((route) => routeMatches(route, method, path));
+  if (!Array.isArray(routes) || !routes.every(wellFormedRoute)) return false;
+  return routes.some((route) => routeMatches(route, method, path));
 }
 
 //: How many of the ranked relationships the rail offers. Enough to choose

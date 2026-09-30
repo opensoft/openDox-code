@@ -437,10 +437,67 @@ def test_a_payload_that_cannot_say_a_binding_answers_reads_as_none_answering(tmp
                   "is_prefix": "false"}), "POST", DTN_SEED_ROUTE),
         (_routes({"method": "POST", "pattern": 7, "is_prefix": False}), "POST",
          DTN_SEED_ROUTE),
-        # and the control: the same route, well formed, IS answered
+        # ONE bad entry beside a good one poisons the whole list (Copilot, #65):
+        # a manifest this cannot vouch for is not taken on trust route by route,
+        # as `manifestRoutes()` refuses the whole payload for one bad entry
+        (_routes(good, None), "POST", DTN_SEED_ROUTE),
+        (_routes(None, good), "POST", DTN_SEED_ROUTE),
+        (_routes(good, {"method": "POST", "pattern": "", "is_prefix": True}),
+         "POST", DTN_SEED_ROUTE),
+        (_routes(good, {"method": "POST", "pattern": "/x"}), "POST",
+         DTN_SEED_ROUTE),
+        # and the controls: the same route, well formed, alone and with company
         (_routes(good), "POST", DTN_SEED_ROUTE),
+        (_routes(_route("GET", "/a.json"), good), "POST", DTN_SEED_ROUTE),
     ]
-    assert _answers(cases, tmp_path) == [False] * (len(cases) - 1) + [True]
+    assert _answers(cases, tmp_path) == [False] * (len(cases) - 2) + [True] * 2
+
+
+#: Candidate manifest entries, each as `(method, pattern, is_prefix)`, chosen to
+#: sit on both sides of every clause of `RouteBinding.__post_init__`.
+_CANDIDATE_ENTRIES = [
+    ("POST", "/x", False), ("POST", "/x/", True), ("GET", "/", True),
+    ("HEAD", "/h", False), ("GET", "/x/y.json", False),
+    ("PUT", "/x", False), ("post", "/x", False), ("", "/x", False),
+    ("POST", "x", False), ("POST", "", False), ("POST", "", True),
+    ("POST", "/x?y", False), ("POST", "/x#y", False), ("POST", "/x/?y", True),
+    ("POST", "/x", True), ("POST", "/x/y", True),
+    ("POST", "/x", "false"), ("POST", "/x", 0), ("POST", "/x", None),
+    ("POST", 7, False), ("POST", None, False),
+]
+
+
+def _the_server_accepts(method, pattern, is_prefix) -> bool:
+    try:
+        RouteBinding(method, pattern, is_prefix, "_h")
+    except route_extension.RouteBindingError:
+        return False
+    return True
+
+
+@needs_node
+def test_a_manifest_entry_is_trusted_only_if_the_server_would_have_accepted_it(
+        tmp_path):
+    """The lens's notion of a well-formed route is `RouteBinding`'s own.
+
+    A manifest is taken on trust whole or not at all, so what counts as a
+    malformed entry decides when the controls disappear. That must not be a
+    second opinion. For each candidate, a list holding it beside one good seed
+    route answers yes exactly when `RouteBinding` accepts the candidate, and it
+    says so for the shapes that reach the client as JSON and were never
+    constructed: `is_prefix` as a string, a number or null, a pattern that is
+    not text.
+    """
+    good = _route("POST", DTN_SEED_ROUTE)
+    cases = [
+        (_routes(good, {"method": m, "pattern": p, "is_prefix": ip}), "POST",
+         DTN_SEED_ROUTE)
+        for m, p, ip in _CANDIDATE_ENTRIES
+    ]
+    expected = [_the_server_accepts(*entry) for entry in _CANDIDATE_ENTRIES]
+    assert any(expected) and not all(expected), (
+        "the candidates must sit on both sides or they prove nothing")
+    assert _answers(cases, tmp_path) == expected
 
 
 @needs_node
