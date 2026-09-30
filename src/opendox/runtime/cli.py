@@ -664,6 +664,19 @@ def cmd_serve(args: argparse.Namespace) -> int:
                              "exiting normally"}, ok=True)
 
 
+def _report_the_local_broker(report: dict[str, Any]) -> None:
+    """What `status` says of a LOCAL install's broker, on every path.
+
+    Its broker is NOT CONFIGURED (plan 034 T070; #1144 13.4): a statement
+    about the install's configuration rather than a probe's result, so there
+    is no discovery URL to report and nothing counts against `ok`. `status`
+    returns from two places, and both write it here, so the two answers
+    cannot drift apart (Copilot review of openDox-code#67).
+    """
+    report["broker_keys"] = "not configured (local mode)"
+    report["broker_discovery"] = None
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Report, never change: configuration, the schema pin, the ledger, the broker.
 
@@ -693,10 +706,18 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     try:
         from opendox.runtime.db import Database
-    except ImportError as exc:  # pragma: no cover - the extra is absent
+    except ImportError as exc:
         report["runtime_extra"] = f"absent: {_safe_message(exc)}"
         report["database"] = "not probed"
-        report["broker_keys"] = "not probed"
+        # A LOCAL INSTALL'S BROKER IS NOT CONFIGURED WHETHER OR NOT THE EXTRA
+        # IS PRESENT (plan 034 T070; Copilot review of openDox-code#67). That
+        # answer comes from its configuration, not from a probe, so this early
+        # return gives the same one the full report gives below. A hosted
+        # install's broker was never probed, and says so, as before.
+        if settings.install_mode == INSTALL_MODE_LOCAL:
+            _report_the_local_broker(report)
+        else:
+            report["broker_keys"] = "not probed"
         return _emit(report, ok=False)
     report["runtime_extra"] = "present"
 
@@ -778,8 +799,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     # — F13.1 runs it under `set -e`, and a verdict of "unhealthy" for a
     # broker the install was never meant to have would be false.
     if settings.install_mode == INSTALL_MODE_LOCAL:
-        report["broker_keys"] = "not configured (local mode)"
-        report["broker_discovery"] = None
+        _report_the_local_broker(report)
         return _emit(report, ok=ok)
     try:
         from opendox.runtime.oidc import build_verifier

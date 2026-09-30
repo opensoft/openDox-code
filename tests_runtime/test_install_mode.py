@@ -352,6 +352,34 @@ def test_migrate_refuses_a_non_loopback_bind_beside_the_local_mode(
     assert "loopback" in evidence["message"].lower(), evidence
 
 
+@pytest.mark.parametrize("mode", [INSTALL_MODE_LOCAL, INSTALL_MODE_HOSTED])
+def test_runtime_status_without_the_runtime_extra_reports_the_broker_by_mode(
+        scrubbed, mode: str) -> None:
+    """`status` returns early when the runtime extra is absent, and that
+    return gives the local broker the same answer the full report gives
+    (Copilot review of openDox-code#67). A hosted install's broker reads
+    "not probed", unchanged (13.6). `None` in `sys.modules` is how an absent
+    module is simulated: the import raises `ImportError`, as it would without
+    the extra."""
+    import sys
+
+    scrubbed.setitem(sys.modules, "opendox.runtime.db", None)
+    for name, value in (HOSTED if mode == INSTALL_MODE_HOSTED else DSNS).items():
+        scrubbed.setenv(name, value)
+    scrubbed.setenv(MODE, mode)
+    code, evidence = _run(["runtime", "status", "--probe-timeout", "0.2"])
+    assert evidence["runtime_extra"].startswith("absent"), evidence
+    assert evidence["database"] == "not probed", evidence
+    assert code == 1
+    if mode == INSTALL_MODE_LOCAL:
+        assert evidence["broker_keys"] == "not configured (local mode)", evidence
+        assert "broker_discovery" in evidence, evidence
+        assert evidence["broker_discovery"] is None
+    else:
+        assert evidence["broker_keys"] == "not probed", evidence
+        assert "broker_discovery" not in evidence, evidence
+
+
 def test_runtime_status_reports_the_hosted_mode_it_loaded(scrubbed) -> None:
     for name, value in HOSTED.items():
         scrubbed.setenv(name, value)
