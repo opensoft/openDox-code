@@ -34,6 +34,11 @@
 # (`-c` this file), for plan 034 T072's `local` extra and the `test` extra's
 # `setuptools`: pgserver, its psutil, platformdirs and fasteners, and
 # setuptools are new; no earlier pin moved.
+# Re-resolved 2026-09-30 on cpython 3.12.3 / linux x86_64, in a clean
+# environment under the pins above less `pgserver`, when the carrier became
+# `pixeltable-pgserver` (RULED, openxFactory#656 `5916000030` item 2): the one
+# line that moved is `pgserver==0.1.4` -> `pixeltable-pgserver==0.6.0`, whose
+# own requirements were all pinned already.
 PyJWT==2.14.0
 PyYAML==6.0.3
 Pygments==2.21.0
@@ -53,7 +58,7 @@ httpx==0.28.1
 idna==3.20
 iniconfig==2.3.0
 packaging==26.3
-pgserver==0.1.4
+pixeltable-pgserver==0.6.0
 platformdirs==4.12.2
 pluggy==1.6.0
 psutil==7.2.2

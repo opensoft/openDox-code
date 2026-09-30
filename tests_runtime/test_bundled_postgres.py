@@ -36,6 +36,7 @@ import re
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -238,12 +239,16 @@ def test_the_local_extra_carries_the_runtime_and_the_server_and_test_joins_it(
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     extras = project["project"]["optional-dependencies"]
     assert "opendox[runtime]" in extras["local"]
-    assert any(req.startswith("pgserver") for req in extras["local"])
+    # the carrier RULED on openxFactory#656 `5916000030` item 2
+    assert any(req.startswith("pixeltable-pgserver") for req in extras["local"])
+    assert not any(req.startswith("pgserver") for req in extras["local"])
     assert "opendox[local]" in extras["test"], (
         "F9.1 installs `.[test]` alone; without the local extra there, this "
         "suite could not start the server it tests")
     lock = (ROOT / "constraints-cpython312-linux.txt").read_text()
-    assert re.search(r"(?m)^pgserver==", lock), "the lock does not pin pgserver"
+    assert re.search(r"(?m)^pixeltable-pgserver==", lock), \
+        "the lock does not pin pixeltable-pgserver"
+    assert not re.search(r"(?m)^pgserver==", lock), "the lock still pins pgserver"
     files = project["tool"]["setuptools"]["data-files"]
     assert files == {"share/opendox/migrations": ["migrations/*.sql"]}
     # and the packaging notes name functions that exist (Copilot review of #69)
@@ -430,6 +435,90 @@ def test_a_stale_lock_naming_a_recycled_pid_does_not_hold_the_bundle(
     finally:
         decoy.kill()
         decoy.wait(timeout=10)
+
+
+# -- peer authentication (RULED openxFactory#656 `5916000030` item 3) ----------
+
+
+def _owner(server) -> "object":
+    import psycopg
+
+    return psycopg.connect(server.bundle.migration_dsn, autocommit=True)
+
+
+def test_the_bundle_authenticates_by_peer_through_the_one_map(
+        state_dir: Path) -> None:
+    """The server's OWN reading of its two files, from `pg_hba_file_rules`
+    and `pg_ident_file_mappings`, and the method each connection really
+    used, from `system_user`. There is one local rule, peer through the
+    `opendox` map. Host is rejected. There is no `trust` anywhere. The map
+    admits this OS user as the two roles and names no other OS user."""
+    user = bundle_mod.os_user()
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    with bundle_mod.BundledServer(settings) as server:
+        with _owner(server) as conn:
+            rules = conn.execute(
+                "select type, database, user_name, auth_method, options, error "
+                "from pg_hba_file_rules order by rule_number").fetchall()
+            mappings = conn.execute(
+                "select map_name, sys_name, pg_username, error "
+                "from pg_ident_file_mappings order by map_number").fetchall()
+        for dsn, role in ((server.bundle.migration_dsn, config.BUNDLE_OWNER_ROLE),
+                          (server.bundle.served_dsn, config.BUNDLE_SERVED_ROLE)):
+            import psycopg
+
+            with psycopg.connect(dsn) as conn:
+                assert conn.execute("select current_user, system_user").fetchone() \
+                    == (role, f"peer:{user}")
+    assert rules == [
+        ("local", ["all"], ["all"], "peer", [f"map={bundle_mod.IDENT_MAP}"], None),
+        ("host", ["all"], ["all"], "reject", None, None),
+        ("host", ["all"], ["all"], "reject", None, None)], rules
+    assert mappings == [
+        (bundle_mod.IDENT_MAP, user, config.BUNDLE_OWNER_ROLE, None),
+        (bundle_mod.IDENT_MAP, user, config.BUNDLE_SERVED_ROLE, None)], mappings
+
+
+def test_a_role_outside_the_map_is_refused_even_for_this_os_user(
+        state_dir: Path) -> None:
+    """The MAP decides, not the socket. The same OS user, over the same
+    0700 socket, asking for a role the map does not name, is refused by
+    peer authentication. A suite that does not run as root cannot connect
+    as a second OS user. What stands for that case is the map itself, read
+    back above, which names this user and no other."""
+    import psycopg
+    from psycopg import sql
+
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    with bundle_mod.BundledServer(settings) as server:
+        with _owner(server) as conn:
+            conn.execute(sql.SQL("create role {} login").format(
+                sql.Identifier("odx_stranger")))
+        with pytest.raises(psycopg.OperationalError) as caught:
+            psycopg.connect(server.bundle.dsn("odx_stranger")).close()
+    assert "peer authentication failed" in str(caught.value).lower(), caught.value
+
+
+def test_an_older_trust_cluster_is_brought_back_to_peer_on_start(
+        state_dir: Path) -> None:
+    """A data directory an earlier build initialized with `trust` (or a file
+    edited by hand) is put back to the one configuration before the next
+    launch, so it never serves as trust."""
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    bundle_mod.BundledServer(settings).start().stop()
+    data = config.DatabaseBundle(state_dir).data_dir
+    (data / "pg_hba.conf").write_text("local all all trust\n", encoding="utf-8")
+    (data / "pg_ident.conf").write_text("", encoding="utf-8")
+    with bundle_mod.BundledServer(settings) as server:
+        import psycopg
+
+        with psycopg.connect(server.bundle.served_dsn) as conn:
+            method = conn.execute("select system_user").fetchone()[0]
+    expected = bundle_mod.authentication_files(bundle_mod.os_user())
+    for name, content in expected.items():
+        assert (data / name).read_text(encoding="utf-8") == content, name
+        assert stat.S_IMODE((data / name).stat().st_mode) == 0o600, name
+    assert method == f"peer:{bundle_mod.os_user()}", method
 
 
 def test_migrate_under_the_local_mode_uses_the_bundle_and_refuses_a_dsn(

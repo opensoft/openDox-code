@@ -16,16 +16,18 @@ addendum records it) names it:
         packages and the server's own;
   (iv)  it stops with the entry point.
 
-THE SERVER'S OWN PACKAGE IS `pgserver` (pyproject.toml's `local` extra), and
-only its BINARIES are used: `initdb` and `postgres` from the wheel's
-`pginstall/bin`, found by `importlib.util.find_spec` without importing
-`pgserver` at all. Its Python manager is deliberately not used — it daemonizes
-the server through `pg_ctl`, which re-parents it away from this process
-(against (i)), shares one server between processes by reference count and
-stops it from `atexit` (which a SIGTERM never runs, against (iv)), and may put
-the socket under the user's runtime directory instead of the state directory
-(against 13.1). The binaries themselves link only libc and libz, so they run on
-any manylinux2014 host, which a wheel that links the system's ICU does not.
+THE SERVER'S OWN PACKAGE IS `pixeltable-pgserver` (pyproject.toml's `local`
+extra; RULED openxFactory#656 `5916000030` item 2), and only its BINARIES are
+used: PostgreSQL 16's `initdb` and `postgres` from the wheel's `pginstall/bin`,
+found by `importlib.util.find_spec` without importing `pixeltable_pgserver` at
+all. Its Python manager is deliberately not used. It daemonizes the server
+through `pg_ctl`, which re-parents it away from this process (against (i)). It
+shares one server between processes by reference count and stops it from
+`atexit`, which a SIGTERM never runs (against (iv)). And it may put the socket
+under the user's runtime directory, opened to 0777, instead of the state
+directory (against 13.1). The binaries link only the C library (libc, libm,
+libpthread, librt, libdl) and libz from the system, plus the wheel's own
+vendored libpq, so they need no system PostgreSQL and no ICU.
 
 THE LIFECYCLE, IN FULL:
 
@@ -33,10 +35,15 @@ THE LIFECYCLE, IN FULL:
     renamed into place only when it has succeeded, so an interrupted first
     start never leaves a half-built cluster: the MIGRATION identity
     (`config.BUNDLE_OWNER_ROLE`) is the bootstrap superuser, local connections
-    are `trust` and host connections are `reject`, UTF-8 in the `C` locale.
-    Trust is safe BECAUSE of the socket: its directory is 0700, owned by the
-    user running the install, and the server opens no TCP port at all, so
-    reaching the socket is the credential and nothing else can.
+    are `peer` and host connections are `reject`, UTF-8 in the `C` locale.
+  * PEER AUTHENTICATION, re-asserted before every launch (RULED
+    openxFactory#656 `5916000030` item 3). `pg_hba.conf` admits Unix-socket
+    connections through the `opendox` map only, and `pg_ident.conf`'s map
+    admits THIS install's OS user as the two roles and nobody else. The kernel
+    reports the connecting process's uid (`SO_PEERCRED`), so no password
+    exists to leak or to store, and a process of any other user is refused
+    even where it could reach the socket. The socket's directory is 0700
+    besides, and the server opens no TCP port at all.
   * `postgres` started as a DIRECT CHILD of this process (`subprocess.Popen`,
     never `pg_ctl`), with `listen_addresses` empty and the socket directory
     given. On Linux it also carries `PR_SET_PDEATHSIG`, so an entry point
@@ -88,8 +95,13 @@ from opendox.runtime.config import (
     database_bundle,
 )
 
-#: The distribution the `local` extra installs for the server's binaries.
-SERVER_DISTRIBUTION = "pgserver"
+#: The distribution the `local` extra installs for the server's binaries, and
+#: the package it installs them under.
+SERVER_DISTRIBUTION = "pixeltable-pgserver"
+SERVER_PACKAGE = "pixeltable_pgserver"
+
+#: The `pg_ident.conf` map `pg_hba.conf`'s one local line authenticates through.
+IDENT_MAP = "opendox"
 
 #: How long a start may take before it is a failure: `initdb` on a slow disk,
 #: plus the server's own recovery on a data directory an earlier run did not
@@ -114,11 +126,11 @@ class BundleRefused(Exception):
 def server_binaries() -> Path:
     """The directory holding the bundled `initdb` and `postgres`, or a refusal.
 
-    Found WITHOUT importing `pgserver`: its package initializer imports its
-    manager, which this module does not use and whose import creates a lock
-    object under the user's runtime directory as a side effect.
+    Found WITHOUT importing `pixeltable_pgserver`: its package initializer
+    imports its manager, which this module does not use and which registers an
+    `atexit` handler and reaches for the user's runtime directory.
     """
-    spec = importlib.util.find_spec(SERVER_DISTRIBUTION)
+    spec = importlib.util.find_spec(SERVER_PACKAGE)
     # THE FIRST LOCATION, OR NONE, read without an index, so no path reaches
     # a subscript that could raise (SonarCloud S6466 on openDox-code#69).
     location = next(iter(spec.submodule_search_locations or ()), None) \
@@ -332,6 +344,78 @@ def _die_with_parent():
 BUNDLE_TREE = BUNDLE_SOCKET_DIR.parts
 
 
+def os_user() -> str:
+    """The name of the OS user this runs as, which peer authentication maps.
+
+    The SERVER resolves a connecting uid to a name through the same password
+    database, so a uid with no entry could not be authenticated at all, and is
+    refused here, by name. So is a name that `pg_ident.conf` could read as more
+    than a name: a regular expression (a leading `/`), a quote, a comment
+    mark, or white space.
+    """
+    import pwd
+
+    uid = os.getuid()
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        raise BundleRefused(
+            f"uid {uid} has no entry in the password database, and the bundled "
+            "server's peer authentication maps the connecting user BY NAME, so "
+            "it could never admit this one. Run the local install as a user "
+            "the system knows") from None
+    if not name or name.startswith("/") or any(
+            ch in name for ch in '"#') or any(ch.isspace() for ch in name):
+        raise BundleRefused(
+            f"the OS user name {name!r} cannot be written into the bundled "
+            "server's pg_ident.conf as a plain name (it holds a quote, a `#`, "
+            "white space, or starts with `/`)")
+    return name
+
+
+def authentication_files(user: str) -> dict[str, str]:
+    """`pg_hba.conf` and `pg_ident.conf` for a local install run by `user`.
+
+    RULED openxFactory#656 `5916000030` item 3 ("Peer auth + accept"):
+      * ONE local line, PEER through the `opendox` map. The kernel reports the
+        connecting process's uid, and the map admits `user` as the owner role
+        and as the served role, and nobody else as anybody.
+      * Every HOST connection is rejected. The server also listens on no TCP
+        address at all (`listen_addresses` is empty), so these lines never
+        match. They are written so that the file says what the install is.
+      * No replication line, so a replication connection is refused.
+    """
+    header = ("# Written by opendox.runtime.bundle before every start of this local\n"
+              "# install's bundled server (plan 034 T072). Changes here are replaced.\n")
+    hba = (header +
+           "# TYPE  DATABASE  USER  ADDRESS      METHOD\n"
+           f"local   all       all                peer map={IDENT_MAP}\n"
+           "host    all       all   0.0.0.0/0    reject\n"
+           "host    all       all   ::/0         reject\n")
+    ident = (header +
+             "# MAPNAME  SYSTEM-USERNAME  PG-USERNAME\n"
+             f'{IDENT_MAP}  "{user}"  {BUNDLE_OWNER_ROLE}\n'
+             f'{IDENT_MAP}  "{user}"  {BUNDLE_SERVED_ROLE}\n')
+    return {"pg_hba.conf": hba, "pg_ident.conf": ident}
+
+
+def write_authentication(data_dir: Path, user: str) -> None:
+    """Write both files into `data_dir`, each replaced atomically, mode 0600.
+
+    Before EVERY launch, not only after `initdb`: a data directory an earlier
+    build initialized, or a file edited by hand, is brought back to the one
+    configuration this install runs with.
+    """
+    for name, content in authentication_files(user).items():
+        target = data_dir / name
+        temporary = data_dir / f".{name}.opendox-{os.getpid()}"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                             0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temporary, target)
+
+
 def _unsafe_because(info: os.stat_result, *, uid: int, own: bool) -> str | None:
     """Why one directory of the socket's path is unsafe, or `None`."""
     mode = info.st_mode
@@ -407,6 +491,8 @@ class BundledServer:
             self._prepare_directories()
             phase = "initializing its data directory"
             self._initialize(binaries)
+            phase = "configuring its authentication"
+            write_authentication(self.bundle.data_dir, os_user())
             phase = "launching it"
             _remove_a_proven_stale_lock(self.bundle)
             self._launch(binaries)
@@ -439,9 +525,9 @@ class BundledServer:
 
         A directory that already exists is NOT re-moded, on the rule the
         runtime's `init` keeps for an operator's own path — except the socket
-        directory, whose mode IS the access control of a `trust` server: it is
-        this install's own, under its own state directory, and it is narrowed
-        to 0700 whatever it was.
+        directory, which guards the only way in: it is this install's own,
+        under its own state directory, and it is narrowed to 0700 whatever it
+        was.
         """
         for directory in (self.bundle.state_dir, self.bundle.data_dir.parent):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -454,11 +540,14 @@ class BundledServer:
     def _refuse_an_unsafe_tree(self) -> None:
         """The socket's whole path is this user's to change, or it is refused.
 
-        `trust` makes reaching the socket the credential, so the 0700 on the
-        socket directory is worth only what the path above it is worth. A
-        directory entry is controlled by its PARENT: a parent that another
-        user can write lets them rename `run` away, or put a symbolic link in
-        its place, after the mode is set. A symbolic link on the way there
+        The socket's directory is how this install's clients find ITS
+        server, so the 0700 on it is worth only what the path above it is
+        worth. Peer authentication keeps other users out of the server, but
+        not a substitute socket out of the path: whoever could replace `run`
+        could stand up a server of their own for this install's clients to
+        talk to. A directory entry is controlled by its PARENT: a parent that
+        another user can write lets them rename `run` away, or put a symbolic
+        link in its place, after the mode is set. A symbolic link on the way there
         can be pointed elsewhere by whoever owns it, or by whoever can write
         the directory it sits in (Copilot review of openDox-code#69). So:
 
@@ -498,9 +587,9 @@ class BundledServer:
     def _unsafe(directory: Path, reason: str) -> BundleRefused:
         return BundleRefused(
             f"{directory} {reason}, so another user could replace the bundled "
-            "server's socket directory, and reaching that socket is the only "
-            "credential the server asks for. Use a state directory only this "
-            f"user can change ({PREFIX}STATE_DIR)")
+            "server's socket directory and put a server of their own where "
+            "this install's clients look for it. Use a state directory only "
+            f"this user can change ({PREFIX}STATE_DIR)")
 
     #: The prefix an initialization attempt's directory carries, beside the
     #: data directory, followed by the pid of the process making it.
@@ -565,7 +654,7 @@ class BundledServer:
     def _initdb(self, binaries: Path, target: Path) -> None:
         done = subprocess.run(
             [str(binaries / "initdb"), "-D", str(target),
-             "-U", BUNDLE_OWNER_ROLE, "--auth-local=trust", "--auth-host=reject",
+             "-U", BUNDLE_OWNER_ROLE, "--auth-local=peer", "--auth-host=reject",
              "--encoding=UTF8", "--locale=C", "--no-instructions"],
             env=_child_environment(), capture_output=True, text=True,
             timeout=START_TIMEOUT_SECONDS)
@@ -719,5 +808,6 @@ class BundledServer:
 
 
 __all__ = ["BUNDLE_PORT", "BundleRefused", "BundledServer",
-           "isolated_from_libpq_environment", "report", "running_pid",
-           "server_binaries"]
+           "authentication_files", "isolated_from_libpq_environment",
+           "os_user", "report", "running_pid", "server_binaries",
+           "write_authentication"]

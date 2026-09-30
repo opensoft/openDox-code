@@ -119,18 +119,29 @@ test = [
 # `opendox generate-and-open --local …`. It carries the runtime's packages and
 # the bundled server's own, and nothing else.
 #
-# `pgserver` IS THE SERVER'S CARRIER, and only its binaries are used (see
-# `opendox/runtime/bundle.py` for why its own manager is not): it ships
-# PostgreSQL 16 as `initdb` and `postgres` inside the wheel, built to link only
-# libc and libz, so a manylinux2014 host needs nothing else installed — no
-# system PostgreSQL, no ICU. Apache-2.0; the server it carries is under the
-# PostgreSQL License. `>=0.1.4` is the release this package has been exercised
-# against (measured 2026-09-30, python 3.12.3: PostgreSQL 16.2), the same rule
-# every floor in this file is set by. Its own three requirements (psutil,
-# platformdirs, fasteners) arrive with it and are imported by nothing here.
+# `pixeltable-pgserver` IS THE SERVER'S CARRIER (RULED, openxFactory#656
+# comment `5916000030` item 2, Brett Heap 2026-09-30: "pixeltable-pgserver
+# (Recommended)"), and only its binaries are used (see `opendox/runtime/
+# bundle.py` for why its own manager is not). It is the maintained fork of
+# `pgserver`, and it ships PostgreSQL 16 as `initdb` and `postgres` inside the
+# wheel, built to link only libc and libz, so a host needs no system
+# PostgreSQL and no ICU. Measured 2026-09-30 on its 0.6.0 cp312 manylinux
+# wheel:
+#   * PostgreSQL 16.14 (`pginstall/bin/postgres --version`); the wheel also
+#     carries an 18.4 under `pginstall18/`, which this package does not use;
+#   * wheels for cp310 to cp314, so every interpreter `requires-python`
+#     admits today has one; `pgserver` 0.1.4 stopped at cp312 and 16.2;
+#   * linux wheels tagged manylinux_2_27/2_28 (glibc 2.27 and later), on
+#     x86_64 and aarch64, plus macOS and Windows;
+#   * about 24.7 MB per wheel, because it carries the two server majors;
+#   * Apache-2.0 for the package; the PostgreSQL License for the server.
+# `>=0.6.0` is the release this package has been exercised against, the same
+# rule every floor in this file is set by. Its own requirements (fasteners,
+# platformdirs, psutil, typing-extensions) arrive with it and are imported by
+# nothing here.
 local = [
     "opendox[runtime]",
-    "pgserver>=0.1.4",
+    "pixeltable-pgserver>=0.6.0",
 ]
 
 # THE RUNTIME EXTRA — `split-opendox-two-layer-product` § 3.5, RULED Q2

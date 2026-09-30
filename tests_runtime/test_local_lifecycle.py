@@ -569,19 +569,88 @@ def test_both_classes_together_name_both_reasons() -> None:
 @pytest.mark.parametrize("found", ["absent", "no-locations"])
 def test_a_missing_server_package_is_the_named_refusal(
         monkeypatch: pytest.MonkeyPatch, found: str) -> None:
-    """No `pgserver` at all, or a spec with no location: both are the one
-    refusal naming the `local` extra, never an `IndexError`."""
+    """No `pixeltable_pgserver` at all, or a spec with no location: both are
+    the one refusal naming the `local` extra, never an `IndexError`."""
     import importlib.machinery
 
     spec = None
     if found == "no-locations":
-        spec = importlib.machinery.ModuleSpec("pgserver", None, is_package=True)
+        spec = importlib.machinery.ModuleSpec(bundle_mod.SERVER_PACKAGE, None,
+                                              is_package=True)
         spec.submodule_search_locations = []
     monkeypatch.setattr(bundle_mod.importlib.util, "find_spec",
                         lambda name: spec)
     with pytest.raises(bundle_mod.BundleRefused) as caught:
         bundle_mod.server_binaries()
     assert 'opendox[local]' in str(caught.value), caught.value
+
+
+# -- peer authentication, hermetic ----------------------------------------------
+
+
+def test_the_authentication_files_admit_one_os_user_as_the_two_roles() -> None:
+    files = bundle_mod.authentication_files("alice")
+    active = {name: [line.split() for line in text.splitlines()
+                     if line.strip() and not line.startswith("#")]
+              for name, text in files.items()}
+    assert active["pg_hba.conf"] == [
+        ["local", "all", "all", "peer", f"map={bundle_mod.IDENT_MAP}"],
+        ["host", "all", "all", "0.0.0.0/0", "reject"],
+        ["host", "all", "all", "::/0", "reject"]]
+    assert active["pg_ident.conf"] == [
+        [bundle_mod.IDENT_MAP, '"alice"', config.BUNDLE_OWNER_ROLE],
+        [bundle_mod.IDENT_MAP, '"alice"', config.BUNDLE_SERVED_ROLE]]
+    assert "trust" not in " ".join(" ".join(r) for rows in active.values() for r in rows)
+
+
+def test_the_files_are_written_0600_and_replace_what_was_there(
+        tmp_path: Path) -> None:
+    (tmp_path / "pg_hba.conf").write_text("local all all trust\n")
+    bundle_mod.write_authentication(tmp_path, "alice")
+    for name, content in bundle_mod.authentication_files("alice").items():
+        assert (tmp_path / name).read_text(encoding="utf-8") == content
+        assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o600
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["pg_hba.conf", "pg_ident.conf"]
+
+
+@pytest.mark.parametrize("name", ["/regex", 'quo"te', "has space", "hash#tag", ""])
+def test_an_os_user_name_the_map_cannot_hold_plainly_is_refused(
+        monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    import pwd
+
+    class _Entry:
+        pw_name = name
+
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: _Entry())
+    with pytest.raises(bundle_mod.BundleRefused):
+        bundle_mod.os_user()
+
+
+def test_a_uid_with_no_password_entry_is_refused_by_name(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    import pwd
+
+    def _missing(uid):
+        raise KeyError(uid)
+
+    monkeypatch.setattr(pwd, "getpwuid", _missing)
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        bundle_mod.os_user()
+    assert "password database" in str(caught.value)
+
+
+def test_initdb_is_asked_for_peer_and_host_reject(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    """The flags `initdb` receives, recorded by a stand-in: local is `peer`,
+    host is `reject`, and `trust` is not asked for anywhere."""
+    record = tmp_path / "initdb-argv"
+    server = _server(monkeypatch, tmp_path, short_state, initdb=(
+        f'echo "$@" > "{record}"\nexit 1'))
+    with pytest.raises(bundle_mod.BundleRefused):
+        server.start()
+    argv = record.read_text(encoding="utf-8").split()
+    assert "--auth-local=peer" in argv and "--auth-host=reject" in argv, argv
+    assert not [a for a in argv if "trust" in a], argv
 
 
 # -- initdb, and every phase of a start ---------------------------------------

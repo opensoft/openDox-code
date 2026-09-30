@@ -1665,10 +1665,15 @@ class DatabaseBundle:
         `host` is the socket DIRECTORY (libpq's rule for a value that starts
         with `/`), percent-encoded so a state directory holding a space or a
         `&` is still one value; `port` is spelled so a `PGPORT` in the
-        environment cannot send libpq to a different socket file. No password:
-        the socket directory is 0700 and the server's own `pg_hba.conf`
-        trusts local connections only, so reaching the socket IS the
-        credential, and a host connection is rejected outright.
+        environment cannot send libpq to a different socket file. NO
+        PASSWORD, because there is none to give: the server authenticates a
+        Unix-socket connection by PEER (RULED openxFactory#656 `5916000030`
+        item 3). The kernel reports the connecting process's uid, and
+        `pg_ident.conf` maps this install's OS user, and nobody else, to the
+        two roles. The socket's directory is 0700, the server opens no TCP
+        port, and a host connection is rejected outright. SonarCloud's S2115
+        ("add password protection") is ACCEPTED on this line for that reason,
+        with the same ruling as its authority.
         """
         host = urllib.parse.quote(str(self.socket_dir), safe="/")
         return (f"postgresql://{role}@/{BUNDLE_DATABASE}"
