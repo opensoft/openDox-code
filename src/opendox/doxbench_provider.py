@@ -100,11 +100,13 @@ What that means in practice, and where the line falls:
 
 from __future__ import annotations
 
+import codecs
 import dataclasses
 import json
 import math
 import os
-import shutil
+import select
+import selectors
 import signal
 import subprocess
 import sys
@@ -204,10 +206,8 @@ DIALECTS: tuple[str, ...] = binding_mod.DIALECTS
 #: cannot answer.
 BROKER_TIMEOUT_SECONDS = 30.0
 
-#: How long a refused broker's reader is waited for once the broker's process
-#: group has been killed. A descendant that left the group can still hold the
-#: answer's pipe open, and the refusal does not wait on it past this.
-BROKER_REAP_SECONDS = 2.0
+#: How much of the credential is read from its source at a time.
+_STDIN_CHUNK = 8192
 
 #: The largest answer a broker may write. A bound, not a policy: an unbounded
 #: read of a child's stdout is a way to spend this process's memory by
@@ -462,8 +462,8 @@ def subprocess_broker_runner(argv, *, source=None,
     operation reads no standard input at all, and this function closes the pipe
     immediately for them, which is what the declaration says a caller may do.
 
-    The credential is STREAMED, not read: `shutil.copyfileobj` moves it in
-    chunks from the operator's handle to the child's pipe, so the whole value
+    The credential is STREAMED, not read: `_answer_of` moves it in chunks
+    from the operator's handle to the child's pipe, so the whole value
     never becomes a string in this process and there is no variable holding it
     to outlive the call.
 
@@ -511,35 +511,11 @@ def subprocess_broker_runner(argv, *, source=None,
     return answer
 
 
-def _read_at_most(stream, limit: int, into: list) -> None:
-    """A reader thread's work: at most `limit` bytes of the child's standard
-    output, or fewer if it ends first, appended to `into`. A read that fails
-    appends nothing.
-
-    It reads the descriptor itself (`os.read`), not the buffered file, so a
-    reader still blocked when the interpreter exits holds no lock that
-    finalization needs. The thread keeps `stream`, so the descriptor is not
-    closed and reused under it."""
-    chunks: list[bytes] = []
-    size = 0
-    try:
-        descriptor = stream.fileno()
-        while size < limit:
-            chunk = os.read(descriptor, min(65_536, limit - size))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            size += len(chunk)
-    except (OSError, ValueError):
-        return
-    into.append(b"".join(chunks))
-
-
 def _kill_the_group(child) -> None:
     """Kill the broker and every descendant still in its process group. A
     descendant holding the answer's pipe open would otherwise keep the
-    reader, and so the refusal, waiting. Where process groups do not exist,
-    the broker alone is killed."""
+    answer from ending. Where process groups do not exist, the broker alone
+    is killed."""
     killpg = getattr(os, "killpg", None)
     if killpg is not None:
         try:
@@ -550,17 +526,25 @@ def _kill_the_group(child) -> None:
     child.kill()
 
 
-def _reap(child, reader) -> None:
+def _reap(child) -> None:
     """Kill a child this runner is refusing, and its process group, wait for
-    it, and let its reader finish, for at most `BROKER_REAP_SECONDS`.
-    Whatever the child wrote is dropped with the reader. A reader still
-    blocked then (a descendant that left the group holds the pipe) is left
-    to its daemon thread, with the descriptor it reads."""
+    it, and close both of this process's ends of its pipes. Nothing is left
+    reading them. A descendant that left the group keeps only its own copy
+    of the pipe, which nothing here waits on."""
     _kill_the_group(child)
     child.wait()
-    reader.join(BROKER_REAP_SECONDS)
-    if not reader.is_alive():
-        child.stdout.close()
+    _close_quietly(child.stdin)
+    child.stdin = None
+    child.stdout.close()
+
+
+def _close_quietly(stream) -> None:
+    if stream is None:
+        return
+    try:
+        stream.close()
+    except OSError:
+        pass
 
 
 def _run_broker(argv, *, source,
@@ -571,13 +555,20 @@ def _run_broker(argv, *, source,
     wrote.
 
     THE BOUND IS A BOUND ON WHAT IS READ (Copilot's review of
-    openDox-code#64 at `25788f91`). A reader thread reads at most one byte
-    past `MAX_BROKER_ANSWER_BYTES`, and a broker that writes that byte is
+    openDox-code#64 at `25788f91`). At most one byte past
+    `MAX_BROKER_ANSWER_BYTES` is read, and a broker that writes that byte is
     refused and killed there. At `25788f91` the whole of the child's output
     was read before the bound was checked, so a broker that wrote without
-    end filled this process's memory until the timeout, and was refused as
-    a timeout. The thread also drains the answer while the credential is
-    still being written, as `communicate` did not.
+    end filled this process's memory until the timeout.
+
+    ONE LOOP, IN THIS THREAD, AND ONE DEADLINE (Copilot's reviews at
+    `b847ef3d` and `a603a032`). The credential is written and the answer is
+    read by one selector loop, as `communicate` does on POSIX, and the
+    timeout covers both. There is no reader thread to abandon. A refusal
+    kills the broker's process group and closes this process's ends of both
+    pipes, so a descendant that left the group, and holds the answer's pipe
+    open, costs no thread and no descriptor here and can add nothing to
+    what was read.
 
     The answer is decoded as UTF-8, JSON's own encoding, where
     `communicate` used the locale's. An answer that is not UTF-8 is
@@ -598,75 +589,83 @@ def _run_broker(argv, *, source,
     except (OSError, ValueError):
         return None, DIAG_BROKER_UNREACHABLE
     received: list[bytes] = []
-    reader = threading.Thread(
-        target=_read_at_most,
-        args=(child.stdout.buffer, MAX_BROKER_ANSWER_BYTES + 1, received),
-        name="broker-answer", daemon=True)
-    reader.start()
     try:
-        return _answer_of(child, reader, received, source=source,
-                          timeout=timeout)
+        return _answer_of(child, received, source=source, timeout=timeout)
     except BaseException:
         # Anything else that escapes, such as the credential's own source
         # failing while it is copied (the operator's input, not the broker's
         # output), goes on as it was. The child is reaped first, and what it
-        # wrote is dropped: a reader left blocked in its daemon thread would
-        # abort the interpreter when it exits.
-        _reap(child, reader)
+        # wrote is dropped. Nothing else can add to it once this loop has
+        # stopped.
+        _reap(child)
         received.clear()
         raise
 
 
-def _answer_of(child, reader, received: list, *, source,
+def _answer_of(child, received: list, *, source,
                timeout: float) -> tuple[str | None, str | None]:
-    """`_run_broker`'s work once the child and its reader are running: the
-    credential, if any, then the answer, within the bound and the
-    timeout."""
-    try:
-        if source is not None:
-            # The credential's ONLY path through this process: handle to
-            # pipe, in chunks, never assembled.
-            shutil.copyfileobj(source, child.stdin)
-        child.stdin.close()
-    except BrokenPipeError:
-        # THE REFUSAL ARRIVING. Nothing is raised here; the exit code and
-        # the child's own answer are read below, exactly as the declaration
-        # instructs. The close is still attempted so the descriptor is not
-        # left to a garbage collector, and its own broken pipe is dropped
-        # for the same reason the first one was.
-        try:
-            child.stdin.close()
-        except OSError:
-            pass
-    except OSError:
-        _reap(child, reader)
-        return None, DIAG_BROKER_UNREACHABLE
-    # Closing `child.stdin` IS the signal a streamed credential's end of file
-    # needs. Dropping the reference says "stdin is finished with", and it was
-    # the last place in this process that could have held the pipe the
-    # credential travelled down.
-    child.stdin = None
+    """`_run_broker`'s work once the child is running: the credential, if
+    any, streamed to its standard input, and its answer read, within the
+    bound and the timeout."""
     deadline = time.monotonic() + timeout
-    reader.join(timeout)
-    if reader.is_alive():
-        _reap(child, reader)
-        return None, DIAG_BROKER_TIMEOUT
-    if not received:
-        _reap(child, reader)
-        return None, DIAG_BROKER_UNREACHABLE
-    if len(received[0]) > MAX_BROKER_ANSWER_BYTES:
-        _reap(child, reader)
-        return None, DIAG_BROKER_OVERSIZE
+    encoder = codecs.getincrementalencoder(child.stdin.encoding)()
+    pending = b""
+    source_done = source is None
+    size = 0
+    with selectors.DefaultSelector() as selector:
+        selector.register(child.stdout, selectors.EVENT_READ)
+        selector.register(child.stdin, selectors.EVENT_WRITE)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _reap(child)
+                return None, DIAG_BROKER_TIMEOUT
+            for key, _events in selector.select(remaining):
+                if key.fileobj is child.stdin:
+                    if not pending and not source_done:
+                        # The credential's ONLY path through this process:
+                        # handle to pipe, in chunks, never assembled.
+                        text = source.read(_STDIN_CHUNK)
+                        pending = encoder.encode(text, final=not text)
+                        source_done = not text
+                    try:
+                        written = os.write(child.stdin.fileno(),
+                                           pending[:select.PIPE_BUF])
+                    except BrokenPipeError:
+                        # THE REFUSAL ARRIVING. Nothing is raised here; the
+                        # exit code and the child's own answer are read
+                        # below, exactly as the declaration instructs.
+                        written, pending, source_done = 0, b"", True
+                    pending = pending[written:]
+                    if source_done and not pending:
+                        # Closing it IS the signal a streamed credential's
+                        # end of file needs.
+                        selector.unregister(child.stdin)
+                        _close_quietly(child.stdin)
+                        child.stdin = None
+                    continue
+                # Read straight into `received`, so no other name in this
+                # frame holds what the broker wrote.
+                received.append(os.read(child.stdout.fileno(),
+                                        MAX_BROKER_ANSWER_BYTES + 1 - size))
+                if not received[-1]:
+                    received.pop()
+                    selector.unregister(child.stdout)
+                    continue
+                size += len(received[-1])
+                if size > MAX_BROKER_ANSWER_BYTES:
+                    _reap(child)
+                    return None, DIAG_BROKER_OVERSIZE
     try:
         returncode = child.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
-        _reap(child, reader)
+        _reap(child)
         return None, DIAG_BROKER_TIMEOUT
     child.stdout.close()
     if returncode != 0:
         return None, DIAG_BROKER_REFUSED
     try:
-        return received[0].decode("utf-8"), None
+        return b"".join(received).decode("utf-8"), None
     except UnicodeDecodeError:
         return None, DIAG_BROKER_MALFORMED
 

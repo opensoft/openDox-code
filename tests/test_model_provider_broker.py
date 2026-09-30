@@ -3531,23 +3531,42 @@ def test_a_credential_source_that_fails_leaves_no_broker_running(tmp_path):
     assert "sk-stand-in-input-side-NOT-A-KEY" not in run.stderr
 
 
+def _still_running(pid: int, *, within: float = 2.0) -> bool:
+    """Whether `pid` is still running after `within` seconds. A zombie,
+    which a container's first process may never reap, has stopped."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1]
+        except OSError:
+            return False
+        if state.split()[0] in ("Z", "X"):
+            return False
+        if time.monotonic() > deadline:
+            return True
+        time.sleep(0.05)
+
+
 @pytest.mark.parametrize("leaves_the_group", [False, True],
                          ids=["descendant-in-its-group",
                               "descendant-that-left-it"])
 def test_a_broker_whose_descendant_holds_its_output_is_still_refused_in_time(
         tmp_path, leaves_the_group):
-    """Copilot's review of openDox-code#64 at `b847ef3d`: a descendant that
-    inherits the broker's standard output kept the pipe open after the
-    broker was killed, so the reader, and the refusal, waited forever. The
-    broker now has its own process group, which a refusal kills whole. A
-    descendant that left the group is waited for no longer than
-    `BROKER_REAP_SECONDS`."""
+    """Copilot's reviews of openDox-code#64 at `b847ef3d` and `a603a032`.
+    A descendant that inherits the broker's standard output kept the pipe
+    open after the broker was killed. At `e3eec6b1` the refusal waited on it
+    forever. At `a603a032` a descendant that left the group left a reader
+    thread blocked, and its descriptor open, behind every refusal. The
+    broker now has its own process group, which a refusal kills whole, and
+    one loop in the calling thread reads the answer. So the refusal comes
+    at the timeout, and leaves no thread and no descriptor behind."""
     script = tmp_path / "forking-broker.py"
     script.write_text(
         "import os, subprocess, sys, time\n"
-        "subprocess.Popen([sys.executable, '-c', "
+        "descendant = subprocess.Popen([sys.executable, '-c', "
         f"'import os, time\\n{'os.setsid()' if leaves_the_group else 'pass'}"
         "\\ntime.sleep(10)'])\n"
+        "open(sys.argv[0] + '.pid', 'w').write(str(descendant.pid))\n"
         f"sys.stdout.write({SENTINEL_TOKEN!r})\n"
         "sys.stdout.flush()\n"
         "time.sleep(30)\n", encoding="utf-8")
@@ -3561,6 +3580,8 @@ def test_a_broker_whose_descendant_holds_its_output_is_still_refused_in_time(
         except provider_mod.BrokerRefused as refusal:
             caught.append(refusal)
 
+    threads = threading.active_count()
+    descriptors = len(os.listdir("/proc/self/fd"))
     runner = threading.Thread(target=run, daemon=True)
     started = time.monotonic()
     runner.start()
@@ -3568,43 +3589,81 @@ def test_a_broker_whose_descendant_holds_its_output_is_still_refused_in_time(
     assert not runner.is_alive(), "the refusal waited on the descendant"
     elapsed = time.monotonic() - started
     [refusal] = caught
-    grace = provider_mod.BROKER_REAP_SECONDS
-    assert elapsed < 0.5 + grace + 3
+    assert elapsed < 0.5 + 2, "refused at the timeout"
+    assert threading.active_count() == threads, "no thread is left behind"
+    assert len(os.listdir("/proc/self/fd")) == descriptors, \
+        "no descriptor is left behind"
+    descendant = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
     if not leaves_the_group:
-        assert elapsed < 0.5 + grace, \
-            "the whole group is killed, so nothing is left to wait on"
+        assert not _still_running(descendant), \
+            "the broker's whole process group is killed"
     assert refusal.diagnostic == provider_mod.DIAG_BROKER_TIMEOUT
     assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
 
 
+def test_a_broker_that_never_reads_the_credential_is_refused_in_time(
+        tmp_path):
+    """The timeout covers the credential's streaming too. At `a603a032` the
+    credential was written before the timeout began, so a broker that never
+    read a credential larger than its pipe held the refusal until the broker
+    itself exited."""
+    script = tmp_path / "deaf-broker.py"
+    # It reads a little and then stops, so the pipe has room for some of
+    # the credential but not for all of it.
+    script.write_text("import os, time\nos.read(0, 5000)\ntime.sleep(30)\n",
+                      encoding="utf-8")
+    binding = _broker_binding(script)
+    runner = functools.partial(provider_mod.subprocess_broker_runner,
+                               timeout=0.5)
+    caught: list = []
+
+    def run():
+        try:
+            provider_mod.hand_off_credential(
+                binding, io.StringIO("k" * 1_000_000), runner=runner)
+        except provider_mod.BrokerRefused as refusal:
+            caught.append(refusal)
+
+    thread = threading.Thread(target=run, daemon=True)
+    started = time.monotonic()
+    thread.start()
+    thread.join(10)
+    assert not thread.is_alive(), "the refusal waited on the broker"
+    assert time.monotonic() - started < 0.5 + 2
+    [refusal] = caught
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_TIMEOUT
+    assert refusal.operation == provider_mod.OPERATION_INTAKE
+
+
 class _SourceFailingOnceMarked:
-    """A credential source that fails on its second read, once `mark`
-    exists, so the broker has written before it fails."""
+    """A credential source that gives a small part at each read, and fails
+    a few reads after `mark` exists. So the broker has written, and its
+    answer has been read, before the source fails."""
 
     def __init__(self, mark: Path) -> None:
-        self.parts = ["sk-stand-in-input-side-NOT-A-KEY"]
         self.mark = mark
+        self.reads_since_marked = 0
 
     def read(self, _size=-1):
-        if self.parts:
-            return self.parts.pop()
-        deadline = time.monotonic() + 10
-        while not self.mark.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        raise UnicodeDecodeError("utf-8", b"x", 0, 1, "stand-in")
+        time.sleep(0.02)
+        if self.mark.exists():
+            self.reads_since_marked += 1
+        if self.reads_since_marked > 5:
+            raise UnicodeDecodeError("utf-8", b"x", 0, 1, "stand-in")
+        return "sk-stand-in-input-side-NOT-A-KEY"
 
 
 def test_a_failing_credential_source_escapes_with_no_broker_output(tmp_path):
     """The same escape, in this process, from a broker that wrote the
-    token before it read its standard input. What escapes keeps nothing the
-    broker wrote, as a refusal would not, and the broker is not left
-    running, where it would read the end of its input and store whatever
-    part of the credential had reached it."""
+    token while the credential was still streaming. What escapes keeps
+    nothing the broker wrote, as a refusal would not. The broker is not
+    left running, where it would read the end of its input and store
+    whatever part of the credential had reached it."""
     script = tmp_path / "early-writing-broker.py"
     script.write_text(_MISBEHAVING_PREAMBLE.format(
         token=SENTINEL_TOKEN, bound=provider_mod.MAX_BROKER_ANSWER_BYTES)
         + "pathlib.Path(sys.argv[0] + '.pid').write_text(str(os.getpid()))\n"
-        "sys.stdout.write(TOKEN)\nwrote()\nsys.stdin.read()\n",
+        "sys.stdout.write(TOKEN)\nwrote()\ntime.sleep(30)\n",
         encoding="utf-8")
     source = _SourceFailingOnceMarked(Path(str(script) + ".wrote"))
     with pytest.raises(UnicodeDecodeError) as caught:
