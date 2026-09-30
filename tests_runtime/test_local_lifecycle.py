@@ -524,6 +524,58 @@ def test_a_link_another_user_owns_is_refused(
     assert str(link) in str(caught.value) and "symbolic link owned by" in str(caught.value)
 
 
+@pytest.mark.parametrize("umask", [0o002, 0o200])
+def test_missing_directories_are_created_0700_whatever_the_umask(
+        monkeypatch, tmp_path: Path, short_state: Path, umask: int) -> None:
+    """A fresh default path creates the directories above the state tree
+    too. Under umask 0002 `mkdir(parents=True)` would make them 0775, and
+    the tree check would then refuse what this install had just made
+    (Copilot review of #69). A umask that takes the owner's own bits would
+    leave them unusable. Each is created exactly 0700, and the start reaches
+    `initdb`, which the stand-in fails on purpose."""
+    state = short_state / "a" / "b" / "state"
+    server = _prepared(monkeypatch, tmp_path, state)
+    previous = os.umask(umask)
+    try:
+        with pytest.raises(bundle_mod.BundleRefused) as caught:
+            server.start()
+    finally:
+        os.umask(previous)
+    assert "initdb" in str(caught.value), caught.value
+    for directory in (short_state / "a", short_state / "a" / "b", state,
+                      state / "postgres", state / "postgres" / "run"):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700, directory
+
+
+@pytest.mark.parametrize("shape", ["link", "broken-link", "open"])
+def test_a_data_directory_that_is_not_this_installs_own_is_refused(
+        monkeypatch, tmp_path: Path, short_state: Path, shape: str) -> None:
+    """An existing `data` joins the tree check (Copilot review of #69): as a
+    link to a cluster elsewhere, as a broken link, or as a directory others
+    can write. It is refused before anything is written into it or launched
+    on it."""
+    elsewhere = tmp_path / "cluster-elsewhere"
+    (short_state / "postgres").mkdir(mode=0o700)
+    data = short_state / "postgres" / "data"
+    if shape in {"link", "open"}:
+        target = elsewhere if shape == "link" else data
+        target.mkdir(mode=0o700)
+        (target / "PG_VERSION").write_text("16\n", encoding="utf-8")
+    if shape in {"link", "broken-link"}:
+        data.symlink_to(elsewhere)
+    if shape == "open":
+        data.chmod(0o777)
+    server = _prepared(monkeypatch, tmp_path, short_state)
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    message = str(caught.value)
+    assert str(data) in message, message
+    assert ("symbolic link" if shape != "open" else "writable by every user") \
+        in message, message
+    if shape == "link":
+        assert not (elsewhere / "pg_hba.conf").exists(), "wrote into the link's target"
+
+
 @pytest.mark.parametrize("variable", [STATE, "XDG_STATE_HOME"])
 def test_parent_traversal_in_the_state_path_is_refused(variable: str) -> None:
     value = "/tmp/odx-a/../odx-b"

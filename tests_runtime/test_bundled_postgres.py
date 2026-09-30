@@ -437,6 +437,30 @@ def test_a_stale_lock_naming_a_recycled_pid_does_not_hold_the_bundle(
         decoy.wait(timeout=10)
 
 
+def test_readiness_is_this_childs_server_not_a_winners_socket(
+        state_dir: Path) -> None:
+    """Two entry points racing from an idle state both launch. The loser's
+    `postgres` lives a moment before it refuses the winner's lock, while the
+    winner's socket already answers. The loser must wait for ITS child, and
+    be refused when that child exits, not connect to the winner and carry on
+    as if it owned a database (Copilot review of openDox-code#69). The
+    loser's child is stood in by a process that lives three seconds."""
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    with bundle_mod.BundledServer(settings):
+        loser = bundle_mod.BundledServer(settings)
+        loser.process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(3)"])
+        began = time.monotonic()
+        try:
+            with pytest.raises(bundle_mod.BundleRefused) as caught:
+                loser._wait_until_ready()
+        finally:
+            loser.process.kill()
+            loser.process.wait(timeout=10)
+    assert "exited during start" in str(caught.value), caught.value
+    assert time.monotonic() - began < bundle_mod.START_TIMEOUT_SECONDS
+
+
 # -- peer authentication (RULED openxFactory#656 `5916000030` item 3) ----------
 
 

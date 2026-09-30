@@ -84,6 +84,7 @@ from typing import Any
 from opendox.runtime import migrations
 from opendox.runtime.config import (
     BUNDLE_DATABASE,
+    BUNDLE_DATA_DIR,
     BUNDLE_OWNER_ROLE,
     BUNDLE_PORT,
     BUNDLE_SERVED_ROLE,
@@ -344,6 +345,31 @@ def _die_with_parent():
 BUNDLE_TREE = BUNDLE_SOCKET_DIR.parts
 
 
+def _make_private_directories(leaf: Path) -> None:
+    """`leaf` and every missing directory above it, each created 0700.
+
+    `Path.mkdir(parents=True)` gives the directories it creates on the way
+    the default mode less the umask, whatever mode the leaf is given. So
+    under a common umask of 0002 a fresh `~/.local/state/opendox/...` would
+    create `.local` and `state` group-writable, and the tree check would
+    then refuse the directories this install had just made (Copilot review
+    of openDox-code#69). Each missing component is created here, one at a
+    time, and set to exactly 0700, whatever the umask is. A directory that
+    already exists is left as it is, and the tree check judges it.
+    """
+    missing = []
+    for directory in (leaf, *leaf.parents):
+        if os.path.lexists(directory):
+            break
+        missing.append(directory)
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            continue                    # made by a concurrent start; judged below
+        os.chmod(directory, 0o700)
+
+
 def os_user() -> str:
     """The name of the OS user this runs as, which peer authentication maps.
 
@@ -529,9 +555,7 @@ class BundledServer:
         under its own state directory, and it is narrowed to 0700 whatever it
         was.
         """
-        for directory in (self.bundle.state_dir, self.bundle.data_dir.parent):
-            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.bundle.socket_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _make_private_directories(self.bundle.socket_dir)
         # CHECKED BEFORE THE CHMOD, which follows a symbolic link: a `run`
         # placed there as a link would otherwise have its TARGET re-moded.
         self._refuse_an_unsafe_tree()
@@ -568,6 +592,14 @@ class BundledServer:
         configured = self.bundle.state_dir
         state = configured.resolve()
         tree = [state, state / BUNDLE_TREE[0], state / BUNDLE_TREE[0] / BUNDLE_TREE[1]]
+        # AND THE DATA DIRECTORY, where one exists already, a broken link
+        # included (Copilot review of openDox-code#69). A `data` placed there
+        # as a link to a cluster elsewhere would otherwise be launched, and
+        # given this install's authentication files, outside the state tree.
+        # A fresh one needs no check: `_initialize` renames it into place.
+        data = state / BUNDLE_DATA_DIR
+        if os.path.lexists(data):
+            tree.append(data)
         checks = [(path, True) for path in tree] + [
             (path, False) for path in dict.fromkeys(
                 [*state.parents, *configured.parents])]
@@ -701,7 +733,22 @@ class BundledServer:
                 with psycopg.connect(self._dsn(BUNDLE_OWNER_ROLE, "postgres"),
                                      connect_timeout=2, autocommit=True) as conn:
                     conn.execute("select 1")
-                return
+                # READY MEANS THIS CHILD IS SERVING, not merely that the socket
+                # answered (Copilot review of openDox-code#69). Two entry points
+                # racing from an idle state both launch. The loser's `postgres`
+                # lives a moment before it refuses the winner's lock, and the
+                # winner's socket already answers. So once a connection has
+                # answered, the data directory's lock file must name THIS
+                # child. Otherwise the wait goes on until this child exits and
+                # is refused. One check, AFTER the connection, is enough. The
+                # lock admits one postmaster per data directory, the socket
+                # directory belongs to exactly one data directory, and a
+                # lock naming this child therefore means the socket that
+                # answered is this child's.
+                if self._serving_is_this_child():
+                    return
+                last = "the socket answered, but not from this child"
+                time.sleep(0.1)
             except psycopg.OperationalError as exc:
                 # THE CLASS NAME ONLY: a driver's message quotes the DSN it
                 # could not reach, and this package never repeats one
@@ -712,6 +759,11 @@ class BundledServer:
             f"the bundled PostgreSQL server did not accept a connection within "
             f"{START_TIMEOUT_SECONDS:.0f}s ({last}); its log is "
             f"{self.log_path}")
+
+    def _serving_is_this_child(self) -> bool:
+        """Whether the data directory's lock file names the child just launched."""
+        return (self.process is not None
+                and _lock_file_pid(self.bundle) == self.process.pid)
 
     def _dsn(self, role: str, database: str) -> str:
         """`DatabaseBundle.dsn`, aimed at a database other than the served one."""
