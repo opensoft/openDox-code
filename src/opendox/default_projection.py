@@ -48,8 +48,10 @@ it is registered under.
   violation is `VALIDATED`. Any violation is `NOT_CONFORMANT`, return code 1,
   and the standard output names each one as `[<rule>] <where>: <detail>`, so
   the rule's identifier reaches the verb's report (F7.2 asserts T051's
-  `EXPECTED_RULE` there). A document that is not JSON, or not YAML, breaks
-  `SYNTAX_RULE`. `ValidatorUnavailable`, a packaged copy that failed its
+  `EXPECTED_RULE` there). A document that cannot be read as JSON, or as
+  YAML, breaks `SYNTAX_RULE`, and so does one holding a number that cannot
+  be read as written: an infinity, a NaN, or one binary64 would round.
+  `ValidatorUnavailable`, a packaged copy that failed its
   identity check or cannot be evaluated, is `VALIDATOR_UNAVAILABLE`, with the
   validator's own reason, and so is a document that could not be read. That
   is "the check could not be performed", never a pass, and `--strict` makes it
@@ -86,6 +88,7 @@ import math
 import os
 import stat
 import uuid
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -112,8 +115,8 @@ OWN_KINDS: tuple[str, ...] = (generator_seam.NEUTRAL_SNAPSHOT_KIND, WORKBENCH_KI
 _SYNTAX: dict[str, str] = {generator_seam.NEUTRAL_SNAPSHOT_KIND: "JSON",
                            WORKBENCH_KIND: "YAML"}
 
-#: The rule a document breaks when it is not JSON, or not YAML, as its kind
-#: is written. It is the adapter's, and no contract's: a contract's rules are
+#: The rule a document breaks when it cannot be read as JSON, or as YAML, as
+#: its kind is written, numbers included (`_exact`). It is the adapter's, and no contract's: a contract's rules are
 #: about a document that could be read.
 SYNTAX_RULE = "document-syntax"
 
@@ -279,16 +282,39 @@ def _refuse_constant(name: str) -> Any:
     raise _NotJSON(f"{name} is not JSON")
 
 
-def _finite(text: str) -> float:
-    """A JSON number with a fraction or an exponent, read as a float, which
-    must stay finite. `1e999` is a valid JSON number that Python reads as an
-    infinity without calling `parse_constant`, and JSON carries no infinity
-    (Copilot at openDox-code#68 21e4723f, r4139840593)."""
-    value = float(text)
+def _exact(text: str, value: float) -> float:
+    """`value`, the float a number literal `text` was read as, once it is
+    proved to be the number written: finite, and not rounded.
+
+    * FINITE. `1e999` is a valid JSON number that Python reads as an infinity
+      without calling `parse_constant`, and JSON carries no infinity (Copilot
+      at openDox-code#68 21e4723f, r4139840593).
+    * NOT ROUNDED. A float holds what binary64 holds, the precision JSON
+      readers share (RFC 8259 section 6), so `1.0000000000000001` reads as
+      `1.0`, and would then meet `const: 1` (Copilot at openDox-code#68
+      69ca0e27, r4139937566). A literal whose value differs from the
+      shortest spelling of the float read from it is refused, since no
+      verdict over the float would be a verdict over the number written.
+      `0.1`, `2.50` and `1E2` read as written, and so does every float
+      openDox's own writer writes, which is the float's own shortest
+      spelling. A literal this cannot compare (a YAML sexagesimal) keeps its
+      float."""
     if not math.isfinite(value):
         raise _NotJSON(f"the number {text[:40]} reads as {value}, and JSON "
-                       "carries no infinity")
+                       "carries no infinity or NaN")
+    try:
+        written = Decimal(text.replace("_", ""))
+    except InvalidOperation:
+        return value
+    if Decimal(repr(value)) != written:
+        raise _NotJSON(f"the number {text[:40]} cannot be read as written: "
+                       f"the precision JSON readers share holds it as {value!r}")
     return value
+
+
+def _json_float(text: str) -> float:
+    """A JSON number with a fraction or an exponent (`parse_float`)."""
+    return _exact(text, float(text))
 
 
 def _refuse_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -370,12 +396,21 @@ class OwnValidator:
         (a YAML error included) where it is not."""
         if self.syntax == "JSON":
             return json.loads(text, parse_constant=_refuse_constant,
-                              parse_float=_finite,
+                              parse_float=_json_float,
                               object_pairs_hook=_refuse_repeated_keys)
         import yaml
 
+        class _Loader(yaml.SafeLoader):
+            """PyYAML's safe loader, whose floats are proved as the snapshot's
+            JSON numbers are (`_exact`): finite, and not rounded."""
+
+        def construct_float(loader, node):
+            return _exact(str(node.value),
+                          yaml.SafeLoader.construct_yaml_float(loader, node))
+
+        _Loader.add_constructor("tag:yaml.org,2002:float", construct_float)
         try:
-            return yaml.safe_load(text)
+            return yaml.load(text, Loader=_Loader)  # noqa: S506 - a SafeLoader subclass
         except yaml.YAMLError as exc:
             raise ValueError(" ".join(str(exc).split())) from exc
 
@@ -439,8 +474,8 @@ class OwnValidator:
         except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             violations = [own.Violation(
                 SYNTAX_RULE, (), "syntax",
-                f"the document is not {self.syntax}, which is how a "
-                f"{self.kind!r} document is written: "
+                f"the document cannot be read as {self.syntax}, which is how "
+                f"a {self.kind!r} document is written: "
                 f"{' '.join(str(exc).split()) or type(exc).__name__}")]
         else:
             violations = kind_validator.violations(document)
