@@ -437,7 +437,20 @@ class SnapshotRegistry:
     def resolve_source(self, repository: str | None, ref: str | None,
                        tail: str) -> Path | None:
         """A `/source/` read through ONE entry, confined to that entry's own
-        root. An unknown pair, or an entry with no root, serves nothing."""
+        root. An unknown pair, or an entry with no root, serves nothing.
+
+        FOR A CALLER THAT HOLDS ONLY A PAIR. The pair is looked up here, once,
+        and the path is confined to the entry that one lookup returned. A
+        caller that ALREADY holds an entry must not ask again by its pair
+        (Copilot at openDox-code#59 0c946f4e, "previously missed"): a refresh
+        that re-registers the key in between puts another entry's root behind
+        the path, so the caller would decide by one entry and act on another.
+        It confines the entry in hand, through the seam's declared
+        `resolve_within(entry.source_root, tail)`, as `serve.py`'s `/source`
+        arm and `serve_project._resolved_listed_edit_entry` do. No module in
+        openDox calls this today, `tests/test_edit_action_one_entry.py` holds
+        it so, and it is on no seam's declared list, so nothing may rely on a
+        contributed registry having one."""
         entry = self.resolve(repository, ref)
         if entry is None or entry.source_root is None:
             return None
