@@ -143,29 +143,54 @@ def _lock_file_pid(bundle: DatabaseBundle) -> int | None:
         return None
 
 
+#: Where the kernel answers what a pid is, on Linux. A module constant so a
+#: case can take it away and exercise a platform without it.
+PROC = Path("/proc")
+
+
+def _identity(pid: int) -> tuple[str, str] | None:
+    """`(executable, working directory)` of `pid`, from the kernel's `/proc`.
+
+    `None` where the process is gone or is not this user's to inspect. A
+    process that exits between the lock file's read and this one is GONE,
+    never proof of anything (Copilot review of openDox-code#69). Raises
+    `LookupError` where there is no `/proc` at all (macOS, the BSDs): the
+    standard library has no portable way to ask, and `running_pid` then
+    believes nothing it cannot prove.
+    """
+    if not PROC.joinpath("self").exists():
+        raise LookupError("no /proc to ask")
+    try:
+        return (os.readlink(PROC / str(pid) / "exe"),
+                os.readlink(PROC / str(pid) / "cwd"))
+    except OSError:                  # gone, or another user's: not inspectable
+        return None
+
+
 def _serves(pid: int, bundle: DatabaseBundle) -> bool | None:
     """Whether `pid` is the postmaster of `bundle`'s data directory.
 
-    Asked of the KERNEL, as the pair this module launches: an executable named
-    `postgres` whose working directory IS the data directory. The postmaster
-    changes into its data directory at startup, and neither of the two can be
-    rewritten by its process title, so a recycled pid given to anything else,
-    even another `postgres` serving another directory, is not it (Copilot
-    review of openDox-code#69).
+    Asked of the platform, as the pair this module launches: an executable
+    named `postgres` whose working directory IS the data directory. The
+    postmaster changes into its data directory at startup, and neither of the
+    two can be rewritten by its process title. So a recycled pid given to
+    anything else is not it, even another `postgres` serving another directory
+    (Copilot review of openDox-code#69).
 
-    `False` also when the kernel will not say: another user's process cannot
-    be this bundle's server, because the server runs as the owner of a 0700
-    data directory, the user this runs as. `None` only where there is no
-    `/proc` to ask at all.
+    `False` also for a process that is gone, or that the platform will not
+    describe: another user's process cannot be this bundle's server, because
+    the server runs as the owner of a 0700 data directory, which is the user
+    this runs as. `None` only where nothing can be asked at all.
     """
-    if not Path("/proc/self").exists():
-        return None
     try:
-        executable = os.readlink(f"/proc/{pid}/exe")
-        cwd = os.readlink(f"/proc/{pid}/cwd")
-    except OSError:
+        identity = _identity(pid)
+    except LookupError:
+        return None
+    if identity is None:
         return False
-    if Path(executable.removesuffix(" (deleted)")).name != "postgres":
+    executable, cwd = identity
+    if Path(executable.removesuffix(" (deleted)")).name not in {"postgres",
+                                                                 "postgres.exe"}:
         return False
     try:
         return Path(cwd).resolve() == bundle.data_dir.resolve()
@@ -189,7 +214,14 @@ def running_pid(bundle: DatabaseBundle) -> int | None:
     except (ProcessLookupError, PermissionError):
         # gone; or alive and another user's, which cannot be this server
         return None
-    return pid if _serves(pid, bundle) is not False else None
+    # BELIEVED ONLY WHEN PROVEN. Where nothing can say what the pid is (no
+    # `/proc`), it is not reported as this server, and this module does not
+    # refuse a start over it. PostgreSQL's own interlocks, the lock file's
+    # live-pid check and the shared-memory check, still refuse a second
+    # postmaster on one data directory. So an unverifiable pid never yields
+    # two servers, and never a refusal over a process that is not one. The
+    # price on such a platform is a `status` that reports no pid.
+    return pid if _serves(pid, bundle) is True else None
 
 
 def _remove_a_proven_stale_lock(bundle: DatabaseBundle) -> None:

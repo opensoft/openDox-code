@@ -203,7 +203,11 @@ def _lock(bundle: config.DatabaseBundle, pid: int) -> None:
         f"{pid}\n{bundle.data_dir}\n", encoding="utf-8")
 
 
-@pytest.mark.skipif(not Path("/proc/self").exists(), reason="asks /proc")
+needs_proc = pytest.mark.skipif(not bundle_mod.PROC.joinpath("self").exists(),
+                                reason="asks /proc")
+
+
+@needs_proc
 def test_a_recycled_pid_is_not_believed_even_with_postgres_in_its_argv(
         short_state: Path) -> None:
     """Even IN the data directory, and with `postgres -D <data dir>` in its
@@ -225,7 +229,7 @@ def test_a_recycled_pid_is_not_believed_even_with_postgres_in_its_argv(
         decoy.wait(timeout=10)
 
 
-@pytest.mark.skipif(not Path("/proc/self").exists(), reason="asks /proc")
+@needs_proc
 def test_a_postgres_serving_another_directory_is_not_this_server(
         short_state: Path, tmp_path: Path) -> None:
     """The exact pair: an executable NAMED `postgres` is not enough, it must
@@ -244,15 +248,50 @@ def test_a_postgres_serving_another_directory_is_not_this_server(
         decoy = _decoy(str(named), cwd, "60")
         try:
             _lock(bundle, decoy.pid)
-            deadline = time.monotonic() + 10
-            while (Path(os.readlink(f"/proc/{decoy.pid}/exe")).name != "postgres"
-                   and time.monotonic() < deadline):
-                time.sleep(0.02)                         # the exec is complete
             got = bundle_mod.running_pid(bundle)
             assert got == (decoy.pid if believed else None), (cwd, got)
         finally:
             decoy.kill()
             decoy.wait(timeout=10)
+
+
+def test_a_pid_nothing_can_describe_is_not_believed_and_its_lock_is_kept(
+        short_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No `/proc` (macOS, the BSDs): nothing can say what the pid is, so it
+    is not reported as this server, and its lock is NOT removed, since
+    nothing proved it stale. PostgreSQL's own interlock is left to judge a
+    start. The decoy would be believed if it could be described (the case
+    above, where it is)."""
+    monkeypatch.setattr(bundle_mod, "PROC", tmp_path / "no-proc")
+    sleeper = shutil.which("sleep")
+    assert sleeper
+    named = tmp_path / "bin" / "postgres"
+    named.parent.mkdir()
+    shutil.copy2(sleeper, named)
+    bundle = config.DatabaseBundle(short_state)
+    bundle.data_dir.mkdir(parents=True)
+    decoy = _decoy(str(named), bundle.data_dir, "60")
+    try:
+        _lock(bundle, decoy.pid)
+        assert bundle_mod.running_pid(bundle) is None
+        bundle_mod._remove_a_proven_stale_lock(bundle)
+        assert (bundle.data_dir / "postmaster.pid").exists()
+    finally:
+        decoy.kill()
+        decoy.wait(timeout=10)
+
+
+@needs_proc
+def test_a_process_that_exits_before_it_is_described_is_not_believed(
+        short_state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Alive at the signal check, gone by the time it is described: that is
+    a stale lock, never proof of a server."""
+    bundle = config.DatabaseBundle(short_state)
+    gone = subprocess.Popen(["true"])
+    gone.wait(timeout=10)
+    _lock(bundle, gone.pid)
+    monkeypatch.setattr(bundle_mod.os, "kill", lambda pid, sig: None)
+    assert bundle_mod.running_pid(bundle) is None
 
 
 def test_another_users_process_is_not_this_server(short_state: Path) -> None:
@@ -264,6 +303,35 @@ def test_another_users_process_is_not_this_server(short_state: Path) -> None:
     bundle = config.DatabaseBundle(short_state)
     _lock(bundle, 1)
     assert bundle_mod.running_pid(bundle) is None
+
+
+# -- the state directory, refused by name --------------------------------------
+
+
+def test_a_state_dir_naming_an_unknown_user_is_refused_by_name() -> None:
+    raw = "~no-such-user-odx-8f3a/state"
+    with pytest.raises(config.ConfigurationError) as caught:
+        config.state_dir({STATE: raw})
+    assert STATE in str(caught.value), caught.value
+    with pytest.raises(config.ConfigurationError):
+        config.load_settings({MODE: "local", STATE: raw})
+    # a HOSTED install never reads it, and is not refused over it (13.6)
+    hosted = config.load_settings({
+        STATE: raw, PREFIX + "DATABASE_URL": "postgresql://s@127.0.0.1:1/x",
+        PREFIX + "OIDC_ISSUER": "https://issuer.example.invalid/realms/x",
+        PREFIX + "OIDC_AUDIENCE": "fixture"})
+    assert hosted.install_mode == config.INSTALL_MODE_HOSTED
+
+
+def test_no_home_for_the_default_state_dir_is_refused_by_name(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    def _no_home():
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(config.Path, "home", staticmethod(_no_home))
+    with pytest.raises(config.ConfigurationError) as caught:
+        config.state_dir({})
+    assert STATE in str(caught.value), caught.value
 
 
 # -- the two refusal classes, each with its own reason --------------------------

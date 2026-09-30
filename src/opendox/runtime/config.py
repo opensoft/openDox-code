@@ -1696,7 +1696,16 @@ def state_dir(env: Mapping[str, str] | None = None) -> Path:
     setting = PREFIX + "STATE_DIR"
     raw = env.get(setting, "").strip()
     if raw:
-        path = Path(raw).expanduser()
+        try:
+            path = Path(raw).expanduser()
+        except RuntimeError:
+            # `~nosuchuser/...`: `expanduser` raises rather than answering, and
+            # a setting is refused by name, never by a traceback (Copilot
+            # review of openDox-code#69).
+            raise ConfigurationError(
+                f"{setting} is {raw!r}, whose `~` names no user this system "
+                "knows, so it expands to no directory. Name the state "
+                "directory absolutely") from None
         if not path.is_absolute():
             raise ConfigurationError(
                 f"{setting} is {raw!r}, which is not an absolute path. The "
@@ -1705,9 +1714,16 @@ def state_dir(env: Mapping[str, str] | None = None) -> Path:
                 "the same socket, so the state directory is named absolutely")
         return path
     xdg = env.get("XDG_STATE_HOME", "").strip()
-    base = Path(xdg) if xdg and Path(xdg).is_absolute() else (
-        Path.home() / ".local" / "state")
-    return base / "opendox"
+    if xdg and Path(xdg).is_absolute():
+        return Path(xdg) / "opendox"
+    try:
+        home = Path.home()
+    except RuntimeError:
+        raise ConfigurationError(
+            f"{setting} is unset and this process has no home directory to "
+            "put the default under (no HOME, and no password entry for the "
+            f"user). Set {setting} to an absolute path") from None
+    return home / ".local" / "state" / "opendox"
 
 
 def database_bundle(state: Path) -> DatabaseBundle:
