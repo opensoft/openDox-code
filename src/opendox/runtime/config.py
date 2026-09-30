@@ -1706,6 +1706,14 @@ def state_dir(env: Mapping[str, str] | None = None) -> Path:
                 f"{setting} is {raw!r}, whose `~` names no user this system "
                 "knows, so it expands to no directory. Name the state "
                 "directory absolutely") from None
+        if ".." in path.parts:
+            # PARENT TRAVERSAL IS REFUSED, so the path the bundle checks is
+            # the one the kernel walks: `a/../b` names `b` lexically and
+            # something else wherever `a` is a symbolic link (Copilot review
+            # of openDox-code#69).
+            raise ConfigurationError(
+                f"{setting} is {raw!r}, which climbs out through `..`. Name "
+                "the state directory directly")
         if not path.is_absolute():
             raise ConfigurationError(
                 f"{setting} is {raw!r}, which is not an absolute path. The "
@@ -1715,6 +1723,11 @@ def state_dir(env: Mapping[str, str] | None = None) -> Path:
         return path
     xdg = env.get("XDG_STATE_HOME", "").strip()
     if xdg and Path(xdg).is_absolute():
+        if ".." in Path(xdg).parts:
+            raise ConfigurationError(
+                f"{setting} is unset and XDG_STATE_HOME is {xdg!r}, which "
+                f"climbs out through `..`. Set {setting}, or XDG_STATE_HOME, "
+                "to the directory itself")
         return Path(xdg) / "opendox"
     try:
         home = Path.home()
@@ -1732,6 +1745,10 @@ def state_dir(env: Mapping[str, str] | None = None) -> Path:
             "absolute path, so the default state directory would depend on "
             f"the working directory. Set {setting} to an absolute path, or "
             "HOME to one")
+    if ".." in home.parts:
+        raise ConfigurationError(
+            f"{setting} is unset and HOME is {str(home)!r}, which climbs out "
+            f"through `..`. Set {setting} to the directory itself")
     return home / ".local" / "state" / "opendox"
 
 

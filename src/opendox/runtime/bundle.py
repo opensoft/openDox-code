@@ -80,6 +80,7 @@ from opendox.runtime.config import (
     BUNDLE_OWNER_ROLE,
     BUNDLE_PORT,
     BUNDLE_SERVED_ROLE,
+    BUNDLE_SOCKET_DIR,
     LOCAL_FLAG,
     PREFIX,
     DatabaseBundle,
@@ -326,8 +327,12 @@ def _die_with_parent():
     return _preexec
 
 
-def _unsafe_because(info: os.stat_result, *, uid: int, gid: int,
-                    own: bool) -> str | None:
+#: The install's own two directories under its state directory, the socket's
+#: parent and the socket directory (`config.BUNDLE_SOCKET_DIR`).
+BUNDLE_TREE = BUNDLE_SOCKET_DIR.parts
+
+
+def _unsafe_because(info: os.stat_result, *, uid: int, own: bool) -> str | None:
     """Why one directory of the socket's path is unsafe, or `None`."""
     mode = info.st_mode
     if stat.S_ISLNK(mode):
@@ -343,13 +348,11 @@ def _unsafe_because(info: os.stat_result, *, uid: int, gid: int,
         return None
     if info.st_uid not in (uid, 0):
         return f"is owned by uid {info.st_uid}, neither this user nor root"
-    sticky = bool(mode & stat.S_ISVTX)
-    if mode & 0o002 and not sticky:
-        return (f"is writable by every user and is not sticky "
-                f"(mode {stat.S_IMODE(mode):o})")
-    if mode & 0o020 and info.st_gid != gid and not sticky:
-        return (f"is writable by group {info.st_gid}, which is not this "
-                f"user's own, and is not sticky (mode {stat.S_IMODE(mode):o})")
+    # A GROUP IS OTHER USERS, the user's own primary group included: it can
+    # have other members (Copilot review of openDox-code#69).
+    if mode & 0o022 and not mode & stat.S_ISVTX:
+        return (f"is writable by {'every user' if mode & 0o002 else 'its group'}"
+                f" and is not sticky (mode {stat.S_IMODE(mode):o})")
     return None
 
 
@@ -452,37 +455,52 @@ class BundledServer:
         """The socket's whole path is this user's to change, or it is refused.
 
         `trust` makes reaching the socket the credential, so the 0700 on the
-        socket directory is worth only what the directories above it are
-        worth. A directory entry is controlled by its PARENT. A parent that
-        another user can write lets them rename `run` away, or put a symbolic
-        link in its place, after the mode is set (Copilot review of
-        openDox-code#69). So, over the RESOLVED path, which a user's own
-        symbolic link in `OPENDOX_STATE_DIR` may lead to:
+        socket directory is worth only what the path above it is worth. A
+        directory entry is controlled by its PARENT: a parent that another
+        user can write lets them rename `run` away, or put a symbolic link in
+        its place, after the mode is set. A symbolic link on the way there
+        can be pointed elsewhere by whoever owns it, or by whoever can write
+        the directory it sits in (Copilot review of openDox-code#69). So:
 
-          * this install's own tree, the state directory, `postgres/` and
-            `run/`, must be real directories, owned by this user and writable
-            by no one else;
-          * every directory above it must be owned by this user or by root.
-            One that every user can write must be sticky, as `/tmp` is, so
-            nobody can rename what is not theirs. One that its group can
-            write must be sticky too, unless the group is this user's own,
-            which is how a umask-002 system creates the user's directories.
+          * THE INSTALL'S OWN TREE, as the configured path resolves: the
+            state directory, `postgres/` and `run/` must be real directories,
+            owned by this user and writable by no one else;
+          * EVERY DIRECTORY ABOVE IT, on the configured path and on the path
+            it resolves to, must be owned by this user or by root. One that
+            anyone else can write, a group included, must be sticky, as
+            `/tmp` is, so nobody can rename what is not theirs;
+          * EVERY SYMBOLIC LINK on the configured path must be this user's or
+            root's.
+
+        `OPENDOX_STATE_DIR` never holds `..` (`config.state_dir` refuses it),
+        so the configured path's components are the ones the kernel walks.
         """
-        uid, gid = os.getuid(), os.getgid()
-        state = self.bundle.state_dir.resolve()
-        own = [state, state / self.bundle.socket_dir.parent.name,
-               state / self.bundle.socket_dir.parent.name / self.bundle.socket_dir.name]
-        for directory, mine in [(path, True) for path in own] + \
-                [(path, False) for path in state.parents]:
-            info = os.lstat(directory)
-            reason = _unsafe_because(info, uid=uid, gid=gid, own=mine)
+        uid = os.getuid()
+        configured = self.bundle.state_dir
+        state = configured.resolve()
+        tree = [state, state / BUNDLE_TREE[0], state / BUNDLE_TREE[0] / BUNDLE_TREE[1]]
+        checks = [(path, True) for path in tree] + [
+            (path, False) for path in dict.fromkeys(
+                [*state.parents, *configured.parents])]
+        for directory, mine in checks:
+            info = os.lstat(directory) if mine else os.stat(directory)
+            reason = _unsafe_because(info, uid=uid, own=mine)
             if reason is not None:
-                raise BundleRefused(
-                    f"{directory} {reason}, so another user could replace the "
-                    "bundled server's socket directory, and reaching that "
-                    "socket is the only credential the server asks for. Use a "
-                    f"state directory only this user can change ({PREFIX}"
-                    "STATE_DIR)")
+                raise self._unsafe(directory, reason)
+        for component in (configured, *configured.parents):
+            info = os.lstat(component)
+            if stat.S_ISLNK(info.st_mode) and info.st_uid not in (uid, 0):
+                raise self._unsafe(
+                    component, f"is a symbolic link owned by uid {info.st_uid}, "
+                    "neither this user nor root, who could point it elsewhere")
+
+    @staticmethod
+    def _unsafe(directory: Path, reason: str) -> BundleRefused:
+        return BundleRefused(
+            f"{directory} {reason}, so another user could replace the bundled "
+            "server's socket directory, and reaching that socket is the only "
+            "credential the server asks for. Use a state directory only this "
+            f"user can change ({PREFIX}STATE_DIR)")
 
     #: The prefix an initialization attempt's directory carries, beside the
     #: data directory, followed by the pid of the process making it.

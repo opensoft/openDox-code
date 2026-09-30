@@ -441,21 +441,95 @@ def test_an_ancestor_every_user_can_write_without_the_sticky_bit_is_refused(
     assert str(open_dir) in str(caught.value) and "not sticky" in str(caught.value)
 
 
-def test_a_sticky_or_own_group_ancestor_is_accepted(
+def test_a_sticky_ancestor_is_accepted(
         monkeypatch, tmp_path: Path, short_state: Path) -> None:
-    """The positive controls: `/tmp`'s shape (every user, sticky) and a
-    umask-002 system's shape (this user's own group). The start gets past
-    the tree and reaches `initdb`, which the stand-in fails on purpose."""
+    """The positive control, `/tmp`'s shape: every user can write it, and it
+    is sticky. The start gets past the tree and reaches `initdb`, which the
+    stand-in fails on purpose."""
     sticky = short_state / "sticky"
     sticky.mkdir()
     sticky.chmod(0o1777)
-    group = sticky / "group"
-    group.mkdir()
-    group.chmod(0o775)
-    server = _prepared(monkeypatch, tmp_path, group / "state")
+    server = _prepared(monkeypatch, tmp_path, sticky / "state")
     with pytest.raises(bundle_mod.BundleRefused) as caught:
         server.start()
     assert "initdb" in str(caught.value), caught.value
+
+
+def test_a_group_writable_ancestor_is_refused_even_for_this_users_group(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    """A group is other users, the user's own primary group included (Copilot
+    review of #69): a 0775 ancestor is refused whatever its group."""
+    group = short_state / "group"
+    group.mkdir()
+    group.chmod(0o775)
+    assert group.stat().st_gid == os.getgid()          # this user's own group
+    server = _prepared(monkeypatch, tmp_path, group / "state")
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert str(group) in str(caught.value) and "its group" in str(caught.value)
+
+
+def test_a_link_in_a_directory_others_can_write_is_refused(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    """The configured path goes through a symbolic link, and the link sits
+    in a directory every user can write. The link's TARGET is private, and
+    it is still refused, because anyone could replace the link (Copilot
+    review of #69)."""
+    private = short_state / "private"
+    private.mkdir(mode=0o700)
+    open_dir = short_state / "open"
+    open_dir.mkdir()
+    open_dir.chmod(0o777)
+    (open_dir / "link").symlink_to(private)
+    server = _prepared(monkeypatch, tmp_path, open_dir / "link" / "state")
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert str(open_dir) in str(caught.value) and "not sticky" in str(caught.value)
+
+
+def test_this_users_own_link_to_a_private_directory_is_accepted(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    private = short_state / "private"
+    private.mkdir(mode=0o700)
+    (short_state / "link").symlink_to(private)
+    server = _prepared(monkeypatch, tmp_path, short_state / "link" / "state")
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert "initdb" in str(caught.value), caught.value
+
+
+def test_a_link_another_user_owns_is_refused(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    """Another user's link could be pointed elsewhere after the check. A
+    non-root suite cannot create one, so its `lstat` is stood in, for that
+    one path only."""
+    private = short_state / "private"
+    private.mkdir(mode=0o700)
+    link = short_state / "link"
+    link.symlink_to(private)
+    real_lstat = os.lstat
+
+    def _lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if Path(path) == link:
+            fields = list(info)
+            fields[4] = os.getuid() + 4242                     # st_uid
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(bundle_mod.os, "lstat", _lstat)
+    server = _prepared(monkeypatch, tmp_path, link / "state")
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert str(link) in str(caught.value) and "symbolic link owned by" in str(caught.value)
+
+
+@pytest.mark.parametrize("variable", [STATE, "XDG_STATE_HOME"])
+def test_parent_traversal_in_the_state_path_is_refused(variable: str) -> None:
+    value = "/tmp/odx-a/../odx-b"
+    with pytest.raises(config.ConfigurationError) as caught:
+        config.state_dir({variable: value})
+    assert "`..`" in str(caught.value), caught.value
 
 
 # -- the two refusal classes, each with its own reason --------------------------
