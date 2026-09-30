@@ -505,16 +505,23 @@ def subprocess_broker_runner(argv, *, source=None,
     return answer
 
 
-def _reap(child) -> None:
-    """Kill a child this runner is refusing and finish its communication,
-    dropping whatever it wrote. The drop includes an answer that is not
-    UTF-8, whose `UnicodeDecodeError` would otherwise escape from the
-    handler that called this, holding that answer."""
-    child.kill()
+def _read_at_most(stream, limit: int, into: list) -> None:
+    """A reader thread's work: at most `limit` bytes of the child's standard
+    output, or fewer if it ends first, appended to `into`. A read that fails
+    appends nothing."""
     try:
-        child.communicate()
-    except UnicodeDecodeError:
+        into.append(stream.read(limit))
+    except (OSError, ValueError):
         pass
+
+
+def _reap(child, reader) -> None:
+    """Kill a child this runner is refusing, wait for it, and let its reader
+    finish. Whatever the child wrote is dropped with the reader."""
+    child.kill()
+    child.wait()
+    reader.join()
+    child.stdout.close()
 
 
 def _run_broker(argv, *, source,
@@ -522,7 +529,20 @@ def _run_broker(argv, *, source,
     """The work of `subprocess_broker_runner`: `(answer, None)`, or
     `(None, sentence)` for a refusal. It raises no refusal itself, so no
     refusal keeps its frame, which holds the child and what the child
-    wrote."""
+    wrote.
+
+    THE BOUND IS A BOUND ON WHAT IS READ (Copilot's review of
+    openDox-code#64 at `25788f91`). A reader thread reads at most one byte
+    past `MAX_BROKER_ANSWER_BYTES`, and a broker that writes that byte is
+    refused and killed there. At `25788f91` the whole of the child's output
+    was read before the bound was checked, so a broker that wrote without
+    end filled this process's memory until the timeout, and was refused as
+    a timeout. The thread also drains the answer while the credential is
+    still being written, as `communicate` did not.
+
+    The answer is decoded as UTF-8, JSON's own encoding, where
+    `communicate` used the locale's. An answer that is not UTF-8 is
+    malformed."""
     try:
         child = subprocess.Popen(  # noqa: S603 - argv from a declared binding plus the declared subcommand, never a shell string
             list(argv),
@@ -534,50 +554,59 @@ def _run_broker(argv, *, source,
         )
     except (OSError, ValueError):
         return None, DIAG_BROKER_UNREACHABLE
+    received: list[bytes] = []
+    reader = threading.Thread(
+        target=_read_at_most,
+        args=(child.stdout.buffer, MAX_BROKER_ANSWER_BYTES + 1, received),
+        name="broker-answer", daemon=True)
+    reader.start()
     try:
+        if source is not None:
+            # The credential's ONLY path through this process: handle to
+            # pipe, in chunks, never assembled.
+            shutil.copyfileobj(source, child.stdin)
+        child.stdin.close()
+    except BrokenPipeError:
+        # THE REFUSAL ARRIVING. Nothing is raised here; the exit code and
+        # the child's own answer are read below, exactly as the declaration
+        # instructs. The close is still attempted so the descriptor is not
+        # left to a garbage collector, and its own broken pipe is dropped
+        # for the same reason the first one was.
         try:
-            if source is not None:
-                # The credential's ONLY path through this process: handle to
-                # pipe, in chunks, never assembled.
-                shutil.copyfileobj(source, child.stdin)
             child.stdin.close()
-        except BrokenPipeError:
-            # THE REFUSAL ARRIVING. Nothing is raised here; the exit code and
-            # the child's own answer are read below, exactly as the declaration
-            # instructs. The close is still attempted so the descriptor is not
-            # left to a garbage collector, and its own broken pipe is dropped
-            # for the same reason the first one was.
-            try:
-                child.stdin.close()
-            except OSError:
-                pass
-        # `communicate` flushes `child.stdin` before reading, which raises on a
-        # handle this function has already closed — and closing it IS the
-        # signal a streamed credential's end of file needs. Dropping the
-        # reference is the documented way to say "stdin is finished with", and
-        # it is also the last place in this process that could have held the
-        # pipe the credential travelled down.
-        child.stdin = None
-        try:
-            output, _dropped_stderr = child.communicate(timeout=timeout)
-        except UnicodeDecodeError:
-            # An answer that is not UTF-8. `communicate` decodes only after
-            # it has waited for the child, so the exit code is read below
-            # as for any other answer.
-            output = None
-    except subprocess.TimeoutExpired:
-        _reap(child)
-        return None, DIAG_BROKER_TIMEOUT
+        except OSError:
+            pass
     except OSError:
-        _reap(child)
+        _reap(child, reader)
         return None, DIAG_BROKER_UNREACHABLE
-    if child.returncode != 0:
-        return None, DIAG_BROKER_REFUSED
-    if output is None:
-        return None, DIAG_BROKER_MALFORMED
-    if len(output.encode("utf-8")) > MAX_BROKER_ANSWER_BYTES:
+    # Closing `child.stdin` IS the signal a streamed credential's end of file
+    # needs. Dropping the reference says "stdin is finished with", and it was
+    # the last place in this process that could have held the pipe the
+    # credential travelled down.
+    child.stdin = None
+    deadline = time.monotonic() + timeout
+    reader.join(timeout)
+    if reader.is_alive():
+        _reap(child, reader)
+        return None, DIAG_BROKER_TIMEOUT
+    if not received:
+        _reap(child, reader)
+        return None, DIAG_BROKER_UNREACHABLE
+    if len(received[0]) > MAX_BROKER_ANSWER_BYTES:
+        _reap(child, reader)
         return None, DIAG_BROKER_OVERSIZE
-    return output, None
+    try:
+        returncode = child.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        _reap(child, reader)
+        return None, DIAG_BROKER_TIMEOUT
+    child.stdout.close()
+    if returncode != 0:
+        return None, DIAG_BROKER_REFUSED
+    try:
+        return received[0].decode("utf-8"), None
+    except UnicodeDecodeError:
+        return None, DIAG_BROKER_MALFORMED
 
 
 def broker_operation_argv(binding, operation: str, *,

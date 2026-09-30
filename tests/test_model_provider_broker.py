@@ -3287,8 +3287,9 @@ def test_a_malformed_mint_answer_keeps_no_frame_that_holds_its_token(
 #   * exits non-zero: the runner's frame held the token, in `answer` and in
 #     the child's `_fileobj2output`;
 #   * answers past the bound: the same, and the refusal read as MALFORMED;
-#   * times out: the refusal chained the `TimeoutExpired`, whose `output`
-#     and whose frames inside `subprocess` held the token;
+#   * times out, with its output open or closed: the refusal chained the
+#     `TimeoutExpired`, whose `output` and whose frames inside `subprocess`
+#     held the token;
 #   * answers in bytes that are not UTF-8: a `UnicodeDecodeError` escaped
 #     holding the token in `object`, and no refusal was raised at all.
 #
@@ -3307,10 +3308,13 @@ _MISBEHAVIOURS = {
         "sys.stdout.write(TOKEN)\nwrote()\nsys.exit(3)\n",
         "DIAG_BROKER_REFUSED"),
     "answers-past-the-bound": (
-        "sys.stdout.write(TOKEN + 'x' * BOUND)\nwrote()\n",
+        "sys.stdout.write(TOKEN)\nwrote()\nsys.stdout.write('x' * BOUND)\n",
         "DIAG_BROKER_OVERSIZE"),
     "times-out": (
         "sys.stdout.write(TOKEN)\nwrote()\ntime.sleep(30)\n",
+        "DIAG_BROKER_TIMEOUT"),
+    "closes-its-output-and-times-out": (
+        "sys.stdout.write(TOKEN)\nwrote()\nos.close(1)\ntime.sleep(30)\n",
         "DIAG_BROKER_TIMEOUT"),
     "answers-in-no-utf-8": (
         "sys.stdout.buffer.write(TOKEN.encode() + b'\\xff')\nwrote()\n",
@@ -3324,7 +3328,7 @@ _MISBEHAVIOURS = {
 #: The broker's preamble. `wrote()` flushes, then leaves a mark beside the
 #: script, so a test can show the token was written before the misbehaviour.
 _MISBEHAVING_PREAMBLE = (
-    "import pathlib, sys, time\n"
+    "import os, pathlib, sys, time\n"
     "TOKEN = {token!r}\n"
     "BOUND = {bound!r}\n"
     "def wrote():\n"
@@ -3408,6 +3412,33 @@ def test_the_shared_runner_refuses_a_misbehaving_broker_keeping_nothing(
     assert refusal.diagnostic == expected
     assert refusal.operation is None
     assert str(refusal) == expected
+
+
+def test_a_broker_that_writes_without_end_is_refused_at_the_bound(tmp_path):
+    """Copilot's review of openDox-code#64 at `25788f91`: the bound was
+    checked only once the whole answer had been read, so it bounded nothing
+    in memory. A broker that writes without end is now refused as soon as it
+    passes the bound, well inside the timeout, and it is killed there. At
+    `25788f91`, and at `788d764b`, the runner read it until the timeout and
+    refused it as a timeout."""
+    script = tmp_path / "endless-broker.py"
+    script.write_text(
+        "import sys, time\n"
+        f"sys.stdout.write({SENTINEL_TOKEN!r})\n"
+        "while True:\n"
+        "    sys.stdout.write('x' * 65536)\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(0.01)\n", encoding="utf-8")
+    argv = provider_mod.broker_operation_argv(
+        _broker_binding(script), provider_mod.OPERATION_MINT)
+    started = time.monotonic()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.subprocess_broker_runner(argv, timeout=5.0)
+    assert time.monotonic() - started < 2.5, "refused at the bound"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert _kept_anywhere(caught.value, SENTINEL_TOKEN) == []
+    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_OVERSIZE
 
 
 @pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
