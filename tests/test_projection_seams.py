@@ -854,6 +854,35 @@ def test_an_injected_generator_is_used_and_a_session_ref_is_never_promoted(tmp_p
         {"source_revision": "s1"}
 
 
+def test_an_injected_generator_is_handed_the_register_only_when_one_is_set(tmp_path) -> None:
+    """An unset project register is not passed to an injected generator, as
+    the generator seam omits an unset input, so one that takes only the core
+    arguments regenerates. A set register is still handed over (Copilot at
+    openDox-code#59 c2a8ad9f, r4146219833)."""
+    ps.register_defaults()
+    calls = []
+
+    def core_only(root, repository):
+        calls.append(("core", repository))
+        return {"schema_version": 1, "kind": NEUTRAL, "repository": repository,
+                "generation": {"source_revision": "s1"}}
+
+    def with_register(root, repository, *, project_register_source):
+        calls.append(("register", project_register_source))
+        return core_only(root, repository)
+
+    register = tmp_path / "register.yaml"
+    for generator, project_register in ((core_only, None), (with_register, register)):
+        source = default_registry.SnapshotSource(
+            checkout_root=tmp_path, generator=generator,
+            project_register=project_register)
+        source.registry.register(default_registry.SnapshotEntry(
+            "garden", snapshot_path=tmp_path / "main.json", source_root=tmp_path))
+        source.refresh(repository="garden")
+    assert calls == [("core", "garden"), ("register", register),
+                     ("core", "garden")]
+
+
 # ---------------------------------------------------------------------------
 # 5b — the core `/snapshot.json` arm, answered from the registered source
 # ---------------------------------------------------------------------------
