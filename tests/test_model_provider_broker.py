@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import http.server
 import io
 import json
@@ -1141,12 +1142,19 @@ def test_the_fixed_diagnostics_are_all_reachable_and_no_more():
     declaration-time refusal; keeping an unraisable sentence would be a refusal
     nobody can trigger. ELEVEN since #1144 box 16.3: the built-in resolver's
     two joined, and so did the redirect a built-in credential declines.
-    Section (f) below reaches each of the three."""
-    assert len(provider_mod.FIXED_DIAGNOSTICS) == 11
+    Section (f) below reaches each of the three. TWELVE since Brett Heap's
+    word of 2026-09-29: a broker answer past the bound has its own sentence,
+    and the last section reaches it."""
+    assert len(provider_mod.FIXED_DIAGNOSTICS) == 12
     assert {provider_mod.DIAG_REFERENCE_UNRESOLVED,
             provider_mod.DIAG_KEYRING_UNAVAILABLE,
-            provider_mod.DIAG_PROVIDER_REDIRECTED} <= \
+            provider_mod.DIAG_PROVIDER_REDIRECTED,
+            provider_mod.DIAG_BROKER_OVERSIZE} <= \
         provider_mod.FIXED_DIAGNOSTICS
+    assert provider_mod.BROKER_DIAGNOSTICS == {
+        provider_mod.DIAG_BROKER_UNREACHABLE,
+        provider_mod.DIAG_BROKER_REFUSED, provider_mod.DIAG_BROKER_MALFORMED,
+        provider_mod.DIAG_BROKER_TIMEOUT, provider_mod.DIAG_BROKER_OVERSIZE}
     assert not hasattr(provider_mod, "DIAG_DIALECT_UNKNOWN")
 
 
@@ -1351,14 +1359,19 @@ def test_a_broker_that_hangs_is_refused_at_the_declared_timeout(tmp_path):
 
 
 def test_the_broker_answer_is_bounded(tmp_path):
-    script = tmp_path / "loud-broker.py"
-    script.write_text(
-        "import sys\n"
-        f"sys.stdout.write('x' * {provider_mod.MAX_BROKER_ANSWER_BYTES + 1})\n",
-        encoding="utf-8")
-    with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.mint(_broker_binding(script))
-    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    """One byte past the bound has its own sentence since Brett Heap's word
+    of 2026-09-29. It was `DIAG_BROKER_MALFORMED`, beside every answer of
+    the wrong shape. An answer at the bound is read, and refused only as
+    what it is: here, not JSON."""
+    bound = provider_mod.MAX_BROKER_ANSWER_BYTES
+    for size, expected in ((bound + 1, provider_mod.DIAG_BROKER_OVERSIZE),
+                           (bound, provider_mod.DIAG_BROKER_MALFORMED)):
+        script = tmp_path / f"loud-broker-{size}.py"
+        script.write_text(f"import sys\nsys.stdout.write('x' * {size})\n",
+                          encoding="utf-8")
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            provider_mod.mint(_broker_binding(script))
+        assert caught.value.diagnostic == expected
 
 
 def test_the_subprocess_runner_never_uses_a_shell(tmp_path):
@@ -3261,3 +3274,236 @@ def test_a_malformed_mint_answer_keeps_no_frame_that_holds_its_token(
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert _locals_holding(caught.value, SENTINEL_TOKEN) == []
+
+
+# --- a broker that misbehaves is refused with nothing it wrote -----------
+# Brett Heap's word of 2026-09-29 (openxFactory#656, the lane's latest RULED
+# comment): "Yes, add to #64". When a broker misbehaves, the shared runner's
+# refusal carries no broker output, no cause and no context, for all four
+# operations. So that it stays useful, it names the operation and the failure
+# class, and never the bytes. Measured at #64's `788d764b`, with a broker that
+# wrote the token before it misbehaved:
+#
+#   * exits non-zero: the runner's frame held the token, in `answer` and in
+#     the child's `_fileobj2output`;
+#   * answers past the bound: the same, and the refusal read as MALFORMED;
+#   * times out: the refusal chained the `TimeoutExpired`, whose `output`
+#     and whose frames inside `subprocess` held the token;
+#   * answers in bytes that are not UTF-8: a `UnicodeDecodeError` escaped
+#     holding the token in `object`, and no refusal was raised at all.
+#
+# No refusal named its operation, and two of the sentences said no token
+# could be minted, whichever operation had failed. Every case below fails at
+# `788d764b`. Every token here is an obvious fake.
+
+#: Long enough for a Python child to start and write, well before it expires.
+_MISBEHAVING_TIMEOUT = 1.0
+
+#: What each broker below does once it has written `SENTINEL_TOKEN`, and the
+#: failure class its refusal names. The sentence is named here, and read
+#: only once the refusal has been checked for what it keeps.
+_MISBEHAVIOURS = {
+    "exits-non-zero": (
+        "sys.stdout.write(TOKEN)\nwrote()\nsys.exit(3)\n",
+        "DIAG_BROKER_REFUSED"),
+    "answers-past-the-bound": (
+        "sys.stdout.write(TOKEN + 'x' * BOUND)\nwrote()\n",
+        "DIAG_BROKER_OVERSIZE"),
+    "times-out": (
+        "sys.stdout.write(TOKEN)\nwrote()\ntime.sleep(30)\n",
+        "DIAG_BROKER_TIMEOUT"),
+    "answers-in-no-utf-8": (
+        "sys.stdout.buffer.write(TOKEN.encode() + b'\\xff')\nwrote()\n",
+        "DIAG_BROKER_MALFORMED"),
+    "answers-in-no-utf-8-and-times-out": (
+        "sys.stdout.buffer.write(TOKEN.encode() + b'\\xff')\nwrote()\n"
+        "time.sleep(30)\n",
+        "DIAG_BROKER_TIMEOUT"),
+}
+
+#: The broker's preamble. `wrote()` flushes, then leaves a mark beside the
+#: script, so a test can show the token was written before the misbehaviour.
+_MISBEHAVING_PREAMBLE = (
+    "import pathlib, sys, time\n"
+    "TOKEN = {token!r}\n"
+    "BOUND = {bound!r}\n"
+    "def wrote():\n"
+    "    sys.stdout.flush()\n"
+    "    pathlib.Path(sys.argv[0] + '.wrote').touch()\n")
+
+
+def _misbehaving_broker(tmp_path, misbehaviour: str) -> Path:
+    body, _sentence = _MISBEHAVIOURS[misbehaviour]
+    script = tmp_path / f"{misbehaviour}-broker.py"
+    script.write_text(_MISBEHAVING_PREAMBLE.format(
+        token=SENTINEL_TOKEN, bound=provider_mod.MAX_BROKER_ANSWER_BYTES)
+        + body, encoding="utf-8")
+    return script
+
+
+def _sentence_for(misbehaviour: str) -> str:
+    return getattr(provider_mod, _MISBEHAVIOURS[misbehaviour][1])
+
+
+def _wrote(script: Path) -> bool:
+    return Path(str(script) + ".wrote").is_file()
+
+
+def _kept_anywhere(exception, secret: str) -> list[str]:
+    """`_locals_holding`, and one level deeper. The attributes of each local
+    are searched too, since that is where a `Popen` keeps what its child
+    wrote (`_fileobj2output`). So are the refusal's own arguments and
+    attributes."""
+    found = set(_locals_holding(exception, secret))
+    for frame in _frames_kept_by(exception):
+        for name, value in list(frame.f_locals.items()):
+            attributes = getattr(value, "__dict__", None)
+            if (isinstance(attributes, dict)
+                    and secret in _safe_repr(attributes)):
+                found.add(f"{frame.f_code.co_name}.{name}.__dict__")
+    if (secret in _safe_repr(exception.args)
+            or secret in _safe_repr(vars(exception))):
+        found.add("the refusal itself")
+    return sorted(found)
+
+
+#: Each operation, asked through its own function, with the real runner.
+_OPERATIONS_ASKED = {
+    provider_mod.OPERATION_INTAKE: lambda binding, runner: (
+        provider_mod.hand_off_credential(
+            binding, io.StringIO("sk-stand-in-intake-NOT-A-KEY"),
+            runner=runner)),
+    provider_mod.OPERATION_MINT: lambda binding, runner: (
+        provider_mod.mint(binding, runner=runner)),
+    provider_mod.OPERATION_REVOKE: lambda binding, runner: (
+        provider_mod.revoke(binding, runner=runner)),
+    provider_mod.OPERATION_LIST: lambda binding, runner: (
+        provider_mod.list_references(binding, runner=runner)),
+}
+
+
+def test_every_operation_is_asked_here():
+    assert tuple(_OPERATIONS_ASKED) == provider_mod.OPERATIONS
+
+
+@pytest.mark.parametrize("misbehaviour", sorted(_MISBEHAVIOURS))
+def test_the_shared_runner_refuses_a_misbehaving_broker_keeping_nothing(
+        tmp_path, misbehaviour):
+    """The runner itself, called directly. Its refusal keeps no cause, no
+    context, and no frame or attribute that holds what the broker wrote.
+    It names the failure class. It is not told the operation, so it names
+    none."""
+    script = _misbehaving_broker(tmp_path, misbehaviour)
+    argv = provider_mod.broker_operation_argv(
+        _broker_binding(script), provider_mod.OPERATION_MINT)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.subprocess_broker_runner(
+            argv, timeout=_MISBEHAVING_TIMEOUT)
+    refusal = caught.value
+    assert _wrote(script), "the broker wrote the token before it misbehaved"
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
+    expected = _sentence_for(misbehaviour)
+    assert refusal.diagnostic == expected
+    assert refusal.operation is None
+    assert str(refusal) == expected
+
+
+@pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
+@pytest.mark.parametrize("misbehaviour", sorted(_MISBEHAVIOURS))
+def test_a_misbehaving_broker_is_refused_naming_the_operation(
+        tmp_path, misbehaviour, operation):
+    """Each of the four operations, through the real runner. The refusal
+    names the operation and the failure class, and keeps nothing the broker
+    wrote."""
+    script = _misbehaving_broker(tmp_path, misbehaviour)
+    runner = functools.partial(provider_mod.subprocess_broker_runner,
+                               timeout=_MISBEHAVING_TIMEOUT)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        _OPERATIONS_ASKED[operation](_broker_binding(script), runner)
+    refusal = caught.value
+    assert _wrote(script), "the broker wrote the token before it misbehaved"
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
+    expected = _sentence_for(misbehaviour)
+    assert refusal.diagnostic == expected
+    assert refusal.operation == operation
+    assert str(refusal) == f"broker {operation}: {expected}"
+
+
+@pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
+def test_a_broker_that_cannot_be_started_chains_nothing(tmp_path, operation):
+    """A program that does not exist wrote nothing, and its refusal chains
+    nothing either. At `788d764b` it chained the `FileNotFoundError`, by the
+    runner and by the operation alike."""
+    binding = _binding(broker_argv=(str(tmp_path / "no-such-broker"),))
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.subprocess_broker_runner(
+            provider_mod.broker_operation_argv(binding, operation))
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_UNREACHABLE
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        _OPERATIONS_ASKED[operation](binding,
+                                     provider_mod.subprocess_broker_runner)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert caught.value.operation == operation
+    assert str(caught.value) == (
+        f"broker {operation}: {provider_mod.DIAG_BROKER_UNREACHABLE}")
+
+
+@pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
+def test_an_injected_runners_refusal_is_named_too(tmp_path, operation):
+    """The operation is named by the function that asked, so a runner that
+    was injected is covered as the default one is."""
+    def refusing(argv, **_kwargs):
+        raise provider_mod.BrokerRefused(provider_mod.DIAG_BROKER_REFUSED)
+
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        _OPERATIONS_ASKED[operation](_binding(), refusing)
+    assert caught.value.operation == operation
+    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_REFUSED
+    assert caught.value.__context__ is None
+
+
+def test_only_a_broker_sentence_names_a_declared_operation():
+    refusal = provider_mod.BrokerRefused(
+        provider_mod.DIAG_BROKER_TIMEOUT,
+        operation=provider_mod.OPERATION_REVOKE)
+    assert str(refusal) == f"broker revoke: {provider_mod.DIAG_BROKER_TIMEOUT}"
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_TIMEOUT
+    assert refusal.operation == provider_mod.OPERATION_REVOKE
+    with pytest.raises(AssertionError):
+        provider_mod.BrokerRefused(provider_mod.DIAG_BROKER_REFUSED,
+                                   operation="exfiltrate")
+    with pytest.raises(AssertionError):
+        provider_mod.BrokerRefused(provider_mod.DIAG_PROVIDER_REFUSED,
+                                   operation=provider_mod.OPERATION_MINT)
+    provider_refusal = provider_mod.BrokerRefused(
+        provider_mod.DIAG_PROVIDER_REFUSED)
+    assert provider_refusal.operation is None
+    assert str(provider_refusal) == provider_mod.DIAG_PROVIDER_REFUSED
+
+
+def test_the_operator_door_names_the_operation_and_withholds_the_answer(
+        tmp_path, capsys):
+    """What an operator reads when `set-credential` meets a broker that wrote
+    and then exited non-zero: the operation and the failure class, and none
+    of what it wrote."""
+    script = _misbehaving_broker(tmp_path, "exits-non-zero")
+    checkout = tmp_path / "checkout"
+    (checkout / "ideation" / "dashboard").mkdir(parents=True)
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+    store.add(_broker_binding(script, credential_ref="opref-" + "0" * 24))
+    args = cli_mod.build_parser().parse_args([
+        "model-binding", "set-credential", "--repo-root", str(checkout),
+        "--id", "openprofiler-demo"])
+    assert cli_mod.cmd_model_binding_set_credential(
+        args, source=io.StringIO("sk-stand-in-intake-NOT-A-KEY")) == 1
+    captured = capsys.readouterr()
+    assert captured.err == (
+        f"broker intake: {provider_mod.DIAG_BROKER_REFUSED}\n")
+    assert SENTINEL_TOKEN not in captured.out + captured.err

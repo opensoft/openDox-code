@@ -70,7 +70,10 @@ WHAT NEVER HAPPENS HERE:
     this module raises carries one of the FIXED sentences below, composed from
     nothing the broker or the provider said, so `doxbench_model.dispatch_turn`
     maps it onto the same redacted `model_failed` every other adapter failure
-    already maps onto.
+    already maps onto. A broker's refusal keeps nothing the broker wrote: no
+    cause, no context, and no frame that holds its answer (Brett Heap's word
+    of 2026-09-29). It names the operation that failed, one of the declared
+    four, and the failure class.
 
 THE PROGRAM IS DECLARED; THE VERBS ARE THE DECLARATION'S (task 2.6). This was
 written while openProfiler was unbuilt, so it named the operation in a JSON
@@ -224,14 +227,32 @@ MAX_PROVIDER_ANSWER_BYTES = model_mod.SERVER_MAX_OUTPUT_LIMIT_BYTES
 #: the provider said. A broker's stderr, a provider's error body and an
 #: exception's text are all dropped unread at the boundary that observes them,
 #: exactly as `dispatch_turn` drops a provider exception's text.
+#:
+#: THE BROKER'S SENTENCES NAME A FAILURE CLASS AND NO OPERATION. They are
+#: shared by all four operations, and a refusal raised by one of them names
+#: that operation beside the sentence (`BrokerRefused.operation`). At
+#: `788d764b` two of them said "so no token could be minted" whichever
+#: operation had failed, and a broker that answered past the bound was refused
+#: as MALFORMED, beside every answer of the wrong shape.
 DIAG_BROKER_UNREACHABLE = (
-    "the credential broker could not be started, so no token could be minted")
+    "the credential broker could not be started")
 DIAG_BROKER_REFUSED = (
-    "the credential broker refused, so no token could be minted")
+    "the credential broker exited non-zero, and its answer is withheld by "
+    "design")
 DIAG_BROKER_MALFORMED = (
-    "the credential broker's answer did not match the declared mint contract")
+    "the credential broker's answer did not match the operation's declared "
+    "contract, and it is withheld by design")
 DIAG_BROKER_TIMEOUT = (
-    "the credential broker did not answer within the declared timeout")
+    "the credential broker did not answer within the declared timeout, and "
+    "anything it wrote is withheld by design")
+#: `MAX_BROKER_ANSWER_BYTES` exceeded. The provider's bound stays on
+#: `DIAG_PROVIDER_MALFORMED` (see `MAX_PROVIDER_ANSWER_BYTES`). The broker's
+#: has its own sentence: Brett Heap's word of 2026-09-29 names three ways a
+#: broker misbehaves, this is one of them, and a refusal names its class. It
+#: says only that the bound was passed, never by how much.
+DIAG_BROKER_OVERSIZE = (
+    "the credential broker's answer was larger than the declared bound, and "
+    "it is withheld by design")
 DIAG_PROVIDER_UNREACHABLE = (
     "the provider could not be reached and its details are withheld by design")
 DIAG_PROVIDER_REFUSED = (
@@ -262,9 +283,10 @@ DIAG_PROVIDER_REDIRECTED = (
     "declare the endpoint the provider redirects to")
 
 #: The closed set, so a test can assert no other sentence can be raised.
-#: ELEVEN: the eight the reconciliation left, the built-in resolver's two
-#: (#1144 box 16.3), and the redirect a request carrying a credential
-#: declines. `DIAG_DIALECT_UNKNOWN` is gone because the fact it guarded
+#: TWELVE: the eight the reconciliation left, the built-in resolver's two
+#: (#1144 box 16.3), the redirect a request carrying a credential declines,
+#: and a broker answer past the bound (2026-09-29).
+#: `DIAG_DIALECT_UNKNOWN` is gone because the fact it guarded
 #: moved: the dialect is the BINDING's, validated against the closed vocabulary
 #: when the operator declares it
 #: (`doxbench_binding.ModelProviderBinding.__post_init__`), so an unknown
@@ -276,7 +298,14 @@ FIXED_DIAGNOSTICS: frozenset[str] = frozenset({
     DIAG_BROKER_TIMEOUT, DIAG_PROVIDER_UNREACHABLE,
     DIAG_PROVIDER_REFUSED, DIAG_PROVIDER_MALFORMED, DIAG_TOKEN_EXPIRED_TWICE,
     DIAG_REFERENCE_UNRESOLVED, DIAG_KEYRING_UNAVAILABLE,
-    DIAG_PROVIDER_REDIRECTED,
+    DIAG_PROVIDER_REDIRECTED, DIAG_BROKER_OVERSIZE,
+})
+
+#: The sentences a BROKER's failure is stated in, the only ones a refusal may
+#: name an operation beside.
+BROKER_DIAGNOSTICS: frozenset[str] = frozenset({
+    DIAG_BROKER_UNREACHABLE, DIAG_BROKER_REFUSED, DIAG_BROKER_MALFORMED,
+    DIAG_BROKER_TIMEOUT, DIAG_BROKER_OVERSIZE,
 })
 
 
@@ -286,16 +315,33 @@ class BrokerRefused(RuntimeError):
 
     Deliberately carries no payload, no status code, no stderr and no response
     body: there is no attribute a caller could log that discloses provider or
-    broker detail, which is the same discipline `TurnDispatchFailure` keeps."""
+    broker detail, which is the same discipline `TurnDispatchFailure` keeps.
 
-    def __init__(self, diagnostic: str) -> None:
+    A BROKER'S REFUSAL NAMES ITS OPERATION, so that a refusal holding
+    nothing a broker wrote (Brett Heap's word of 2026-09-29, openxFactory#656)
+    still says what failed. `operation` is one of `OPERATIONS`, given only
+    beside a broker's sentence (`BROKER_DIAGNOSTICS`), and the message reads
+    "broker <operation>: <sentence>". Both halves come from this module's
+    closed vocabularies, so the message still holds nothing a broker wrote.
+    `diagnostic` stays the sentence alone, and `operation` is None for a
+    provider's refusal and for one the runner raises by itself."""
+
+    def __init__(self, diagnostic: str, *,
+                 operation: str | None = None) -> None:
         if diagnostic not in FIXED_DIAGNOSTICS:
             raise AssertionError(
                 "a broker refusal carries a FIXED diagnostic; composing one "
                 "from what the broker or the provider said is exactly what "
                 "this class exists to prevent")
-        super().__init__(diagnostic)
+        if operation is not None and (operation not in OPERATIONS
+                                      or diagnostic not in BROKER_DIAGNOSTICS):
+            raise AssertionError(
+                "a refusal names an operation only beside a broker's "
+                "sentence, and only one of the declared four")
+        super().__init__(diagnostic if operation is None
+                         else f"broker {operation}: {diagnostic}")
         self.diagnostic = diagnostic
+        self.operation = operation
 
 
 class _TokenExpired(Exception):
@@ -439,7 +485,44 @@ def subprocess_broker_runner(argv, *, source=None,
     broker's own words must never reach a caller, inheriting this process's
     stderr would put them on the console, and capturing them into a pipe would
     make this process's memory a function of how noisy a declared program
-    chooses to be. The kernel drops them instead, unread by construction."""
+    chooses to be. The kernel drops them instead, unread by construction.
+
+    A BROKER THAT MISBEHAVES IS REFUSED WITH NOTHING IT WROTE (Brett Heap's
+    word of 2026-09-29, openxFactory#656), for all four operations. That is a
+    broker that exits non-zero, answers past `MAX_BROKER_ANSWER_BYTES`, times
+    out, or writes an answer that is not UTF-8. Each refusal is raised here,
+    after `_run_broker` has returned: outside every handler, so it keeps no
+    cause and no context, and from the one frame that never held the child or
+    its answer. Measured at #64's `788d764b`, a broker that wrote a token and
+    then exited non-zero, or wrote past the bound, left it in this frame's
+    `answer` and in the child's buffers. One that wrote it and then timed out
+    chained the `TimeoutExpired` that holds it. One that wrote it beside a
+    byte that is not UTF-8 escaped as a `UnicodeDecodeError` that holds it,
+    and was no refusal at all."""
+    answer, failure = _run_broker(argv, source=source, timeout=timeout)
+    if failure is not None:
+        raise BrokerRefused(failure)
+    return answer
+
+
+def _reap(child) -> None:
+    """Kill a child this runner is refusing and finish its communication,
+    dropping whatever it wrote. The drop includes an answer that is not
+    UTF-8, whose `UnicodeDecodeError` would otherwise escape from the
+    handler that called this, holding that answer."""
+    child.kill()
+    try:
+        child.communicate()
+    except UnicodeDecodeError:
+        pass
+
+
+def _run_broker(argv, *, source,
+                timeout: float) -> tuple[str | None, str | None]:
+    """The work of `subprocess_broker_runner`: `(answer, None)`, or
+    `(None, sentence)` for a refusal. It raises no refusal itself, so no
+    refusal keeps its frame, which holds the child and what the child
+    wrote."""
     try:
         child = subprocess.Popen(  # noqa: S603 - argv from a declared binding plus the declared subcommand, never a shell string
             list(argv),
@@ -449,8 +532,8 @@ def subprocess_broker_runner(argv, *, source=None,
             env=bridge_mod.child_environment(os.environ),
             text=True,
         )
-    except (OSError, ValueError) as error:
-        raise BrokerRefused(DIAG_BROKER_UNREACHABLE) from error
+    except (OSError, ValueError):
+        return None, DIAG_BROKER_UNREACHABLE
     try:
         try:
             if source is not None:
@@ -475,20 +558,26 @@ def subprocess_broker_runner(argv, *, source=None,
         # it is also the last place in this process that could have held the
         # pipe the credential travelled down.
         child.stdin = None
-        answer, _dropped_stderr = child.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as error:
-        child.kill()
-        child.communicate()
-        raise BrokerRefused(DIAG_BROKER_TIMEOUT) from error
-    except OSError as error:
-        child.kill()
-        child.communicate()
-        raise BrokerRefused(DIAG_BROKER_UNREACHABLE) from error
+        try:
+            output, _dropped_stderr = child.communicate(timeout=timeout)
+        except UnicodeDecodeError:
+            # An answer that is not UTF-8. `communicate` decodes only after
+            # it has waited for the child, so the exit code is read below
+            # as for any other answer.
+            output = None
+    except subprocess.TimeoutExpired:
+        _reap(child)
+        return None, DIAG_BROKER_TIMEOUT
+    except OSError:
+        _reap(child)
+        return None, DIAG_BROKER_UNREACHABLE
     if child.returncode != 0:
-        raise BrokerRefused(DIAG_BROKER_REFUSED)
-    if len(answer.encode("utf-8")) > MAX_BROKER_ANSWER_BYTES:
-        raise BrokerRefused(DIAG_BROKER_MALFORMED)
-    return answer
+        return None, DIAG_BROKER_REFUSED
+    if output is None:
+        return None, DIAG_BROKER_MALFORMED
+    if len(output.encode("utf-8")) > MAX_BROKER_ANSWER_BYTES:
+        return None, DIAG_BROKER_OVERSIZE
+    return output, None
 
 
 def broker_operation_argv(binding, operation: str, *,
@@ -585,6 +674,37 @@ def _declared_string(document: Mapping, field: str) -> str:
     return value
 
 
+def _broker_operation(binding, operation: str, read, *, runner,
+                      source=None, retry_of: str | None = None):
+    """Run one declared `operation` through `runner`, and return what `read`
+    makes of its answer. It is the one way each of the four operations asks
+    the broker.
+
+    EVERY REFUSAL KEEPS NOTHING THE BROKER WROTE (Brett Heap's word of
+    2026-09-29, openxFactory#656), AND NAMES THE OPERATION. A refusal from the
+    runner, or from `read`, is raised again here with the operation named
+    (`BrokerRefused.operation`). It is raised afresh, outside the handler and
+    after the answer has left this frame, so it keeps no cause, no context
+    and no frame that holds the answer, whichever runner was injected. The
+    answer is dropped even when it carries no secret, since a broker that
+    misbehaves may write anything into it.
+
+    `source` is given to the runner only when there is one, which is
+    `intake`'s case. Every other operation reads no standard input."""
+    argv = broker_operation_argv(binding, operation, retry_of=retry_of)
+    answer = None
+    try:
+        if source is None:
+            answer = runner(argv)
+        else:
+            answer = runner(argv, source=source)
+        return read(answer)
+    except BrokerRefused as refusal:
+        failure = refusal.diagnostic
+    del answer
+    raise BrokerRefused(failure, operation=operation)
+
+
 # ---------------------------------------------------------------------------
 # the credential hand-off (task 1.3)
 # ---------------------------------------------------------------------------
@@ -617,9 +737,16 @@ def hand_off_credential(binding, source, *,
     beside the broker that holds the credential, which is two resolvers. The
     record refuses that, and it would do so where neither entry point
     expects a refusal. So such an answer is malformed, and it is refused
-    here, where both entry points already catch a broker's refusal."""
-    answer = runner(broker_operation_argv(binding, OPERATION_INTAKE),
-                    source=source)
+    here, where both entry points already catch a broker's refusal.
+
+    A refusal names `intake` and keeps nothing the broker wrote
+    (`_broker_operation`)."""
+    return _broker_operation(binding, OPERATION_INTAKE, _intake_reference,
+                             runner=runner, source=source)
+
+
+def _intake_reference(answer: object) -> str:
+    """An intake answer, read EXACTLY, as the `reference` it returns."""
     document = _answer_document(answer, BROKER_INTAKE_KIND, INTAKE_FIELDS)
     reference = _declared_string(document, "reference")
     if binding_mod.names_a_built_in_form(reference):
@@ -667,22 +794,19 @@ def mint(binding, *, retry_of: str | None = None,
     character was sent as it was.
 
     NO REFUSAL OF THE ANSWER KEEPS IT. The answer carries the token, so every
-    refusal raised once it is read is raised again here, afresh, after the
-    answer has left this frame. It keeps no frame, cause or context that
-    holds the token, as the built-in resolver lets go of what it read."""
+    refusal is raised again, afresh, after the answer has left the frame that
+    read it (`_broker_operation`), and it names `mint`. It keeps no frame,
+    cause or context that holds the token, as the built-in resolver lets go
+    of what it read."""
     if not binding_mod.is_a_private_route(binding.endpoint):
         raise AssertionError(
             f"binding {binding.id!r} would present a minted token over a "
             "route that is not private, which the record refuses when it is "
             "declared; nothing was minted")
-    answer = runner(broker_operation_argv(binding, OPERATION_MINT,
-                                          retry_of=retry_of))
-    try:
-        return _minted_token(answer, binding)
-    except BrokerRefused as refusal:
-        failure = refusal.diagnostic
-    del answer
-    raise BrokerRefused(failure)
+    return _broker_operation(
+        binding, OPERATION_MINT,
+        lambda answer: _minted_token(answer, binding),
+        runner=runner, retry_of=retry_of)
 
 
 def _minted_token(answer: object, binding) -> MintedToken:
@@ -691,8 +815,8 @@ def _minted_token(answer: object, binding) -> MintedToken:
     Every refusal is `DIAG_BROKER_MALFORMED`: an answer of another shape, a
     token that cannot be presented as it is (`_presentable`, which also
     refuses one that is not a string or is blank), or an expiry or an audit
-    reference the declaration does not allow. `mint` raises each one again,
-    holding nothing of the answer."""
+    reference the declaration does not allow. `_broker_operation` raises each
+    one again, holding nothing of the answer."""
     document = _answer_document(answer, BROKER_MINT_KIND, MINT_FIELDS)
     token = document["token"]
     if not _presentable(token):
@@ -712,8 +836,14 @@ def revoke(binding, *, runner=subprocess_broker_runner) -> str:
     trail through a revocation and refuses an unknown reference rather than
     answering silently, so "there was nothing there" and "it is gone now" stay
     different answers — and both reach a caller here as the same fixed refusal
-    or the same returned reference, never as the broker's own words."""
-    answer = runner(broker_operation_argv(binding, OPERATION_REVOKE))
+    or the same returned reference, never as the broker's own words. A
+    refusal names `revoke` (`_broker_operation`)."""
+    return _broker_operation(binding, OPERATION_REVOKE, _revocation_audit_ref,
+                             runner=runner)
+
+
+def _revocation_audit_ref(answer: object) -> str:
+    """A revocation answer, read EXACTLY, as its `audit_ref`."""
     document = _answer_document(answer, BROKER_REVOCATION_KIND,
                                 REVOCATION_FIELDS)
     if document["revoked"] is not True:
@@ -727,8 +857,14 @@ def list_references(binding, *, runner=subprocess_broker_runner) -> list:
     Safe to read and safe to print: `list` never opens a custody file, and the
     index it reads carries no credential material. Returned as the declaration's
     own list of entries rather than reshaped, because a consumer that reshapes
-    an index it does not own invents a second contract for it."""
-    answer = runner(broker_operation_argv(binding, OPERATION_LIST))
+    an index it does not own invents a second contract for it. A refusal
+    names `list` (`_broker_operation`)."""
+    return _broker_operation(binding, OPERATION_LIST, _reference_index,
+                             runner=runner)
+
+
+def _reference_index(answer: object) -> list:
+    """A reference-index answer, read EXACTLY, as its list of entries."""
     document = _answer_document(answer, BROKER_REFERENCE_LIST_KIND,
                                 REFERENCE_LIST_FIELDS)
     references = document["references"]
