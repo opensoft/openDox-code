@@ -214,6 +214,8 @@ def test_the_verdict_is_openDoxs_validators_own(tmp_path) -> None:
     ('{"kind": "opendox-snapshot"', "Expecting"),
     (b'{"kind": "\xff"}', "codec"),
     ("[" * 100_000 + "]" * 100_000, ""),
+    ('{"kind": "opendox-snapshot", "extra": 1e999}', "1e999 reads as inf"),
+    ('{"kind": "opendox-snapshot", "extra": [-1E+400]}', "-1E+400 reads as -inf"),
 ])
 def test_a_snapshot_that_is_not_json_breaks_the_syntax_rule(tmp_path, text, why) -> None:
     result = default_projection.VALIDATORS[NEUTRAL].validate(_file(tmp_path, "s.json", text))
@@ -313,6 +315,26 @@ def test_the_rules_read_a_long_list_in_linear_time() -> None:
     assert elapsed < 5, f"{elapsed:.1f}s to read 100,002 entries"
 
 
+def test_a_kind_given_twice_chooses_no_validator_and_fails(tmp_path, capsys) -> None:
+    """The verb chooses a validator by the written snapshot's `kind`. A key
+    given twice leaves the document with no one meaning, so no validator is
+    chosen for it, and the verb fails whatever `--strict` says. With the last
+    `kind` winning, it had chosen `unknown`, found no validator, and exited 0."""
+    import argparse
+
+    from opendox import cli
+
+    ps.register_defaults()
+    written = _file(tmp_path, "snapshot.json",
+                    '{"kind": "opendox-snapshot", "schema_version": 1, "kind": "unknown"}')
+    args = argparse.Namespace(repo_root=str(tmp_path), no_validate=False, strict=False)
+    assert cli._validate(written, args) == 1
+    err = capsys.readouterr().err
+    assert (f"validation FAILED — {written} gives the key 'kind' twice in one "
+            "object, so it has no one meaning") in err
+    assert "validation SKIPPED" not in err
+
+
 def test_strict_and_search_from_change_nothing(tmp_path) -> None:
     validator = default_projection.VALIDATORS[NEUTRAL]
     for fixture in (PLAIN, MALFORMED):
@@ -379,6 +401,16 @@ def test_a_rules_detail_quotes_a_few_names_and_counts_the_rest(tmp_path) -> None
     assert first.startswith("[workbench-pinned-not-checked] /recipe/pinned: pinned "
                             "keyword(s) ['k00', 'k01', ")
     assert "'k09', and 15 more] are not in checked" in first and "'k10'" not in first
+
+
+def test_a_rules_detail_cuts_a_long_name(tmp_path) -> None:
+    document = yaml.safe_load(_recipe_set().render())
+    document["recipe"]["pinned"] = ["w" * 10_000]
+    result = default_projection.VALIDATORS[workbench.KIND].validate(
+        _manifest(tmp_path, document))
+    first = result.stdout.splitlines()[0]
+    assert f"['{'w' * 79}…'] are not in checked" in first
+    assert len(first) < 300, len(first)
 
 
 def test_a_new_candidate_already_placed_breaks_its_rule(tmp_path) -> None:

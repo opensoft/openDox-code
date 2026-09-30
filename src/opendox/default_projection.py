@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import stat
 import uuid
@@ -278,6 +279,18 @@ def _refuse_constant(name: str) -> Any:
     raise _NotJSON(f"{name} is not JSON")
 
 
+def _finite(text: str) -> float:
+    """A JSON number with a fraction or an exponent, read as a float, which
+    must stay finite. `1e999` is a valid JSON number that Python reads as an
+    infinity without calling `parse_constant`, and JSON carries no infinity
+    (Copilot at openDox-code#68 21e4723f, r4139840593)."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise _NotJSON(f"the number {text[:40]} reads as {value}, and JSON "
+                       "carries no infinity")
+    return value
+
+
 def _refuse_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     document: dict[str, Any] = {}
     for key, value in pairs:
@@ -305,14 +318,19 @@ def _names(value: Any) -> list[str]:
     return names
 
 
-#: How many names a rule's detail quotes before it says how many more.
+#: How many names a rule's detail quotes before it says how many more, and
+#: how much of each name it quotes.
 _QUOTED = 10
+_NAME_CHARS = 80
 
 
 def _quoted(names: list[str]) -> str:
-    """`names` as a detail quotes them: the first few, and a count of the
-    rest, so one violation stays one readable line."""
-    shown = repr(names[:_QUOTED])
+    """`names` as a detail quotes them: the first few, each cut to a readable
+    length, and a count of the rest, so one violation stays one readable line.
+    The schema bounds neither the lists nor their strings (Copilot at
+    openDox-code#68 21e4723f, r4139769791)."""
+    shown = repr([name if len(name) <= _NAME_CHARS else name[:_NAME_CHARS - 1] + "…"
+                  for name in names[:_QUOTED]])
     return shown if len(names) <= _QUOTED else f"{shown[:-1]}, and {len(names) - _QUOTED} more]"
 
 
@@ -352,6 +370,7 @@ class OwnValidator:
         (a YAML error included) where it is not."""
         if self.syntax == "JSON":
             return json.loads(text, parse_constant=_refuse_constant,
+                              parse_float=_finite,
                               object_pairs_hook=_refuse_repeated_keys)
         import yaml
 
