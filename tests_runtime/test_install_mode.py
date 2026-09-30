@@ -365,6 +365,47 @@ def test_migrate_refuses_a_non_loopback_bind_beside_the_local_mode(
     assert "loopback" in evidence["message"].lower(), evidence
 
 
+def test_runtime_status_of_a_healthy_local_install_exits_zero(
+        scrubbed, monkeypatch: pytest.MonkeyPatch) -> None:
+    """THE EXIT CODE IS THE DATABASE'S VERDICT ALONE (Copilot review of
+    openDox-code#67). A migrated, reachable database is the only thing a
+    local install's `status` needs, and with it the verb exits 0. The broker
+    is reported as not configured and is never probed, so F13.1's `set -e`
+    survives. The other local cases force a database fault and exit 1, so
+    they cannot tell a broker counted as a fault from a database that failed.
+
+    The database is the local install's OWN (T072): a local install refuses
+    an operator's DSN, so the case starts the bundled server on a fresh state
+    directory and asks `status` about it.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from opendox.runtime import bundle as bundle_mod
+    from opendox.runtime import oidc
+
+    def _no_broker(_settings):
+        raise AssertionError("status built a broker verifier for a LOCAL "
+                             "install, which has no broker")
+
+    monkeypatch.setattr(oidc, "build_verifier", _no_broker)
+    state = Path(tempfile.mkdtemp(prefix="odx-s-", dir="/tmp"))
+    try:
+        scrubbed.setenv(MODE, "local")
+        scrubbed.setenv(PREFIX + "STATE_DIR", str(state))
+        with bundle_mod.BundledServer(load_settings()):
+            code, evidence = _run(["runtime", "status", "--probe-timeout", "10"])
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
+    assert evidence["database"] == "reachable", evidence
+    assert evidence["pending_migrations"] == [], evidence
+    assert not evidence["migration_drift"], evidence
+    assert evidence["broker_keys"] == "not configured (local mode)", evidence
+    assert evidence["broker_discovery"] is None
+    assert evidence["ok"] is True and code == 0, evidence
+
+
 @pytest.mark.parametrize("mode", [INSTALL_MODE_LOCAL, INSTALL_MODE_HOSTED])
 def test_runtime_status_without_the_runtime_extra_reports_the_broker_by_mode(
         scrubbed, mode: str) -> None:
