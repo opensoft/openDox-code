@@ -609,9 +609,12 @@ class SnapshotSource:
         rewrite that entry's snapshot through the REGISTERED writer, inside
         the interactivity boundary. The only write a refresh performs.
 
-        A regenerate keeps `main` active, and never promotes a session's ref:
-        a session enters the key space and changes nothing the shared
-        surfaces render (FR-014a)."""
+        A regenerate never PROMOTES a session's ref: a session enters the key
+        space and changes nothing the shared surfaces render (FR-014a). So
+        `main` stays active while a session is regenerated. The one entry a
+        regenerate leaves active besides a publishable ref is the entry that
+        was active already: that is no promotion, and moving the active key
+        off it would be a change the regenerate was never asked for."""
         previous = self.registry.active
         entry = self.registry.resolve(repository, ref)
         if entry is None:
