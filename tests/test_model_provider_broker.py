@@ -54,6 +54,7 @@ import functools
 import http.server
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -3530,6 +3531,52 @@ def test_a_credential_source_that_fails_leaves_no_broker_running(tmp_path):
     assert "sk-stand-in-input-side-NOT-A-KEY" not in run.stderr
 
 
+@pytest.mark.parametrize("leaves_the_group", [False, True],
+                         ids=["descendant-in-its-group",
+                              "descendant-that-left-it"])
+def test_a_broker_whose_descendant_holds_its_output_is_still_refused_in_time(
+        tmp_path, leaves_the_group):
+    """Copilot's review of openDox-code#64 at `b847ef3d`: a descendant that
+    inherits the broker's standard output kept the pipe open after the
+    broker was killed, so the reader, and the refusal, waited forever. The
+    broker now has its own process group, which a refusal kills whole. A
+    descendant that left the group is waited for no longer than
+    `BROKER_REAP_SECONDS`."""
+    script = tmp_path / "forking-broker.py"
+    script.write_text(
+        "import os, subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        f"'import os, time\\n{'os.setsid()' if leaves_the_group else 'pass'}"
+        "\\ntime.sleep(10)'])\n"
+        f"sys.stdout.write({SENTINEL_TOKEN!r})\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(30)\n", encoding="utf-8")
+    argv = provider_mod.broker_operation_argv(
+        _broker_binding(script), provider_mod.OPERATION_MINT)
+    caught: list = []
+
+    def run():
+        try:
+            provider_mod.subprocess_broker_runner(argv, timeout=0.5)
+        except provider_mod.BrokerRefused as refusal:
+            caught.append(refusal)
+
+    runner = threading.Thread(target=run, daemon=True)
+    started = time.monotonic()
+    runner.start()
+    runner.join(10)
+    assert not runner.is_alive(), "the refusal waited on the descendant"
+    elapsed = time.monotonic() - started
+    [refusal] = caught
+    grace = provider_mod.BROKER_REAP_SECONDS
+    assert elapsed < 0.5 + grace + 3
+    if not leaves_the_group:
+        assert elapsed < 0.5 + grace, \
+            "the whole group is killed, so nothing is left to wait on"
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_TIMEOUT
+    assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
+
+
 class _SourceFailingOnceMarked:
     """A credential source that fails on its second read, once `mark`
     exists, so the broker has written before it fails."""
@@ -3550,17 +3597,23 @@ class _SourceFailingOnceMarked:
 def test_a_failing_credential_source_escapes_with_no_broker_output(tmp_path):
     """The same escape, in this process, from a broker that wrote the
     token before it read its standard input. What escapes keeps nothing the
-    broker wrote, as a refusal would not."""
+    broker wrote, as a refusal would not, and the broker is not left
+    running, where it would read the end of its input and store whatever
+    part of the credential had reached it."""
     script = tmp_path / "early-writing-broker.py"
     script.write_text(_MISBEHAVING_PREAMBLE.format(
         token=SENTINEL_TOKEN, bound=provider_mod.MAX_BROKER_ANSWER_BYTES)
-        + "sys.stdout.write(TOKEN)\nwrote()\nsys.stdin.read()\n",
+        + "pathlib.Path(sys.argv[0] + '.pid').write_text(str(os.getpid()))\n"
+        "sys.stdout.write(TOKEN)\nwrote()\nsys.stdin.read()\n",
         encoding="utf-8")
     source = _SourceFailingOnceMarked(Path(str(script) + ".wrote"))
     with pytest.raises(UnicodeDecodeError) as caught:
         provider_mod.hand_off_credential(_broker_binding(script), source)
     assert _wrote(script), "the broker wrote before the source failed"
     assert _kept_anywhere(caught.value, SENTINEL_TOKEN) == []
+    pid = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 @pytest.mark.parametrize("operation", provider_mod.OPERATIONS)

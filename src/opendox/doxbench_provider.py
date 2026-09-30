@@ -105,6 +105,7 @@ import json
 import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -202,6 +203,11 @@ DIALECTS: tuple[str, ...] = binding_mod.DIALECTS
 #: custody work; a broker that cannot answer in this long is a broker that
 #: cannot answer.
 BROKER_TIMEOUT_SECONDS = 30.0
+
+#: How long a refused broker's reader is waited for once the broker's process
+#: group has been killed. A descendant that left the group can still hold the
+#: answer's pipe open, and the refusal does not wait on it past this.
+BROKER_REAP_SECONDS = 2.0
 
 #: The largest answer a broker may write. A bound, not a policy: an unbounded
 #: read of a child's stdout is a way to spend this process's memory by
@@ -508,20 +514,53 @@ def subprocess_broker_runner(argv, *, source=None,
 def _read_at_most(stream, limit: int, into: list) -> None:
     """A reader thread's work: at most `limit` bytes of the child's standard
     output, or fewer if it ends first, appended to `into`. A read that fails
-    appends nothing."""
+    appends nothing.
+
+    It reads the descriptor itself (`os.read`), not the buffered file, so a
+    reader still blocked when the interpreter exits holds no lock that
+    finalization needs. The thread keeps `stream`, so the descriptor is not
+    closed and reused under it."""
+    chunks: list[bytes] = []
+    size = 0
     try:
-        into.append(stream.read(limit))
+        descriptor = stream.fileno()
+        while size < limit:
+            chunk = os.read(descriptor, min(65_536, limit - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
     except (OSError, ValueError):
-        pass
+        return
+    into.append(b"".join(chunks))
+
+
+def _kill_the_group(child) -> None:
+    """Kill the broker and every descendant still in its process group. A
+    descendant holding the answer's pipe open would otherwise keep the
+    reader, and so the refusal, waiting. Where process groups do not exist,
+    the broker alone is killed."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is not None:
+        try:
+            killpg(child.pid, signal.SIGKILL)
+            return
+        except OSError:
+            pass
+    child.kill()
 
 
 def _reap(child, reader) -> None:
-    """Kill a child this runner is refusing, wait for it, and let its reader
-    finish. Whatever the child wrote is dropped with the reader."""
-    child.kill()
+    """Kill a child this runner is refusing, and its process group, wait for
+    it, and let its reader finish, for at most `BROKER_REAP_SECONDS`.
+    Whatever the child wrote is dropped with the reader. A reader still
+    blocked then (a descendant that left the group holds the pipe) is left
+    to its daemon thread, with the descriptor it reads."""
+    _kill_the_group(child)
     child.wait()
-    reader.join()
-    child.stdout.close()
+    reader.join(BROKER_REAP_SECONDS)
+    if not reader.is_alive():
+        child.stdout.close()
 
 
 def _run_broker(argv, *, source,
@@ -551,6 +590,10 @@ def _run_broker(argv, *, source,
             stderr=subprocess.DEVNULL,
             env=bridge_mod.child_environment(os.environ),
             text=True,
+            # Its own process group, so a refusal can kill its descendants
+            # too (`_kill_the_group`). The session, and so the terminal, is
+            # this process's.
+            process_group=0 if hasattr(os, "killpg") else None,
         )
     except (OSError, ValueError):
         return None, DIAG_BROKER_UNREACHABLE
