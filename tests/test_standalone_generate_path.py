@@ -22,6 +22,9 @@ is what research R7 measured as refused, and this file holds the lifted limit:
    refuses `/source/.git/config`, and stops on an interrupt with status 0.
 4. `python -m opendox.serve`, the server's own entry point, starts and answers
    the same way.
+5. The harness itself: a child that ignores the interrupt is killed at the
+   deadline, and the timeout is raised, so a server that will not stop is
+   reported rather than waited out.
 
 HOW "NEITHER SIBLING IS IMPORTABLE" IS MADE TRUE. Each run is a real child
 process, `python -m ...`, built by `tests/standalone_child.py`. The child's
@@ -52,8 +55,14 @@ import http.client
 import json
 import re
 import socket
+import subprocess
+import textwrap
+import time
 from pathlib import Path
 
+import pytest
+
+import standalone_child
 from standalone_child import Child, fresh_repository, run_module
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -281,3 +290,33 @@ def test_serve_main_starts_a_server_that_answers_with_no_sibling(tmp_path) -> No
         child.kill()
     _assert_the_port_is_closed(base)
     assert child.refused() == [], child.refused()
+
+
+# ---------------------------------------------------------------------------
+# 5 — the harness itself: an ignored interrupt is reported, not waited out
+# ---------------------------------------------------------------------------
+
+def test_a_child_that_ignores_the_interrupt_is_killed_at_the_deadline(
+        tmp_path, monkeypatch) -> None:
+    """The regression path cases 3 and 4 guard: a server that does not stop
+    on Ctrl-C. `Child.interrupt()` raises at its deadline with the child
+    already killed, so the caller is not held while its pipes drain."""
+    monkeypatch.setattr(standalone_child, "STOP_DEADLINE_SECONDS", 1.0)
+    blocker = tmp_path / "sibling-blocker"
+    blocker.mkdir()
+    (blocker / "t056_ignores_sigint.py").write_text(textwrap.dedent("""
+        import signal, time
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        print("ready", flush=True)
+        time.sleep(600)
+        """), encoding="utf-8")
+    child = Child(tmp_path, "t056_ignores_sigint")
+    try:
+        child.wait_for_line(re.compile(r"^ready$"))
+        started = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            child.interrupt()
+        assert child.process.poll() is not None, "the child outlived its deadline"
+        assert time.monotonic() - started < 10
+    finally:
+        child.kill()

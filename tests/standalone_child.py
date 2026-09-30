@@ -189,11 +189,19 @@ class Child:
             self._join()
 
     def interrupt(self) -> int:
-        """Send SIGINT, as Ctrl-C would, and answer the exit status."""
+        """Send SIGINT, as Ctrl-C would, and answer the exit status.
+
+        A child that does not stop within `STOP_DEADLINE_SECONDS` is KILLED
+        before its pipes are joined, and the timeout is raised (Copilot at
+        openDox-code#66 1597511d, r4139607689). Its readers block until the
+        pipes close, so joining first would hold the caller for two more
+        deadlines on exactly the path, an interrupt that is ignored, this
+        helper exists to report."""
         self.process.send_signal(signal.SIGINT)
         try:
             return self.process.wait(timeout=STOP_DEADLINE_SECONDS)
         finally:
+            self.kill()
             self._join()
 
     def kill(self) -> None:
