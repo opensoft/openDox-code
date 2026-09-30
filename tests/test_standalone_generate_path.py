@@ -24,18 +24,16 @@ is what research R7 measured as refused, and this file holds the lifted limit:
    the same way.
 
 HOW "NEITHER SIBLING IS IMPORTABLE" IS MADE TRUE. Each run is a real child
-process, `python -m ...`, whose interpreter loads a `sitecustomize` from a
-directory put first on `PYTHONPATH`. It installs a meta-path finder that
-refuses `openxdox`, `ideation_dashboard`, `doc_health` and
-`corpus_adapter_openxfactory`, whatever is installed, and it records every
-refused name in a log. Each case asserts that the log is EMPTY. A refused
+process, `python -m ...`, built by `tests/standalone_child.py`. The child's
+interpreter refuses `openxdox`, `ideation_dashboard`, `doc_health` and
+`corpus_adapter_openxfactory` at its first finder, whatever is installed, and
+logs every refused name. Each case asserts that the log is EMPTY. A refused
 import that some `except ImportError` swallowed would otherwise pass as a
 degraded run, so the case holds both halves: the siblings cannot be imported,
 and nothing on the path tries to.
 
 THE CHILD'S STANDARD OUTPUT IS A PIPE, with Python's default buffering, as
-any wrapper that reads the URL sees it. `PYTHONUNBUFFERED` is taken out of the
-child's environment on purpose. A server that printed its URL and then
+any wrapper that reads the URL sees it. A server that printed its URL and then
 blocked in `serve_forever()` without flushing never delivered that line on a
 pipe, so a caller could neither learn an ephemeral port nor tell that the
 server had started (measured at openDox-code#59 `e3ef506a`: zero lines in 20
@@ -52,23 +50,15 @@ from __future__ import annotations
 
 import http.client
 import json
-import os
-import queue
 import re
-import shutil
-import signal
 import socket
-import subprocess
-import sys
-import threading
-import time
 from pathlib import Path
+
+from standalone_child import Child, fresh_repository, run_module
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAIN_DOCUMENTS = ROOT / "tests" / "fixtures" / "plain-documents"
 NEUTRAL = "opendox-snapshot"
-SIBLINGS = ("openxdox", "ideation_dashboard", "doc_health",
-            "corpus_adapter_openxfactory")
 
 #: The six station role keys, in the order the neutral contract lists them.
 ROLE_KEYS = ("source", "grouping", "candidate", "selection", "submission",
@@ -81,172 +71,18 @@ F53_WORDS = ["brainstorm", "staged", "draft", "ratified", "standard",
              "tasks.md", "design.md", "added requirements",
              "modified requirements"]
 
-#: How long a child may take to say where it serves. Generation over the
-#: fixture takes about a second; the margin is for a loaded CI runner.
-START_DEADLINE_SECONDS = 120.0
-
-#: How long a child may take to stop once interrupted.
-STOP_DEADLINE_SECONDS = 30.0
-
-#: The `sitecustomize` every child loads. It refuses the siblings at the
-#: FIRST finder, drops any that a `.pth` file imported before it ran, and
-#: logs each refused name to the file `OPENDOX_T056_REFUSED` names.
-_BLOCKER = f'''\
-import os
-import sys
-
-_SIBLINGS = {SIBLINGS!r}
-
-for _name in list(sys.modules):
-    if _name.split(".")[0] in _SIBLINGS:
-        del sys.modules[_name]
-
-
-class _RefuseTheSiblings:
-    """Neither sibling is importable in this process (plan 034 T056)."""
-
-    def find_spec(self, name, path=None, target=None):
-        if name.split(".")[0] not in _SIBLINGS:
-            return None
-        log = os.environ.get("OPENDOX_T056_REFUSED")
-        if log:
-            with open(log, "a", encoding="utf-8") as stream:
-                stream.write(name + "\\n")
-        raise ModuleNotFoundError(
-            f"No module named {{name!r}} (refused: a lone openDox has no "
-            f"sibling)", name=name)
-
-
-sys.meta_path.insert(0, _RefuseTheSiblings())
-'''
-
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
-def _git(root: Path, *args: str) -> None:
-    """`git` in `root` as F5.3's fixture identity, with no inherited `GIT_*`
-    variable and no user or system configuration."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update({
-        "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
-        "GIT_COMMITTER_NAME": "fixture",
-        "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
-        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
-    })
-    subprocess.run(["git", "-C", str(root), *args], check=True,
-                   capture_output=True, env=env)
-
-
 def _fresh_repository(tmp_path: Path, *, edits: dict[str, str] | None = None) -> Path:
-    """F5.3's preamble: T050's fixture copied into a FRESH repository, with
-    `edits` (a document's new text, by name) applied before the commit."""
-    root = tmp_path / "plain-documents"
-    shutil.copytree(PLAIN_DOCUMENTS, root)
-    for name, text in (edits or {}).items():
-        (root / name).write_text(text, encoding="utf-8")
-    _git(root, "-c", "init.defaultBranch=main", "init", "-q")
-    _git(root, "add", "-A")
-    _git(root, "commit", "-qm", "fixture")
-    return root
+    """F5.3's preamble over T050's fixture (`standalone_child.fresh_repository`)."""
+    return fresh_repository(PLAIN_DOCUMENTS, tmp_path, edits=edits)
 
 
-class _Child:
-    """One `python -m <module> ...` child with the siblings refused, its
-    standard output a buffered pipe."""
-
-    def __init__(self, tmp_path: Path, module: str, *args: str) -> None:
-        blocker = tmp_path / "sibling-blocker"
-        blocker.mkdir(exist_ok=True)
-        (blocker / "sitecustomize.py").write_text(_BLOCKER, encoding="utf-8")
-        self.refused_log = tmp_path / "refused-imports.log"
-        env = dict(os.environ)
-        env.pop("PYTHONUNBUFFERED", None)
-        env["PYTHONPATH"] = os.pathsep.join(
-            [str(blocker), *filter(None, [env.get("PYTHONPATH")])])
-        env["OPENDOX_T056_REFUSED"] = str(self.refused_log)
-        self.argv = [sys.executable, "-m", module, *args]
-        verb = args[0] if args and not args[0].startswith("-") else ""
-        self.label = f"python -m {module} {verb}".strip()
-        self.process = subprocess.Popen(
-            self.argv, cwd=ROOT, env=env, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, encoding="utf-8",
-            errors="replace")
-        self.lines: queue.Queue[str | None] = queue.Queue()
-        self.stdout: list[str] = []
-        self.stderr: list[str] = []
-        self._pumps = [
-            threading.Thread(target=self._pump, args=(self.process.stdout, True),
-                             daemon=True),
-            threading.Thread(target=self._pump, args=(self.process.stderr, False),
-                             daemon=True),
-        ]
-        for pump in self._pumps:
-            pump.start()
-
-    def _pump(self, stream, is_stdout: bool) -> None:
-        for line in stream:
-            (self.stdout if is_stdout else self.stderr).append(line)
-            if is_stdout:
-                self.lines.put(line)
-        if is_stdout:
-            self.lines.put(None)
-
-    def wait_for_line(self, pattern: re.Pattern[str]) -> re.Match[str]:
-        """The first standard-output line matching `pattern`, read while the
-        child runs. Fails, naming what the child said, if it exits first or
-        the deadline passes."""
-        deadline = time.monotonic() + START_DEADLINE_SECONDS
-        while time.monotonic() < deadline:
-            try:
-                line = self.lines.get(timeout=0.25)
-            except queue.Empty:
-                continue
-            if line is None:
-                break
-            match = pattern.search(line)
-            if match:
-                return match
-        raise AssertionError(
-            f"{self.label} never printed a line matching "
-            f"{pattern.pattern!r} on its (buffered) standard output while it "
-            f"ran: exit status {self.process.poll()}, standard output "
-            f"{''.join(self.stdout)!r}, standard error {self.stderr_text()[-2000:]!r}")
-
-    def interrupt(self) -> int:
-        """Send SIGINT, as Ctrl-C would, and answer the exit status."""
-        self.process.send_signal(signal.SIGINT)
-        try:
-            return self.process.wait(timeout=STOP_DEADLINE_SECONDS)
-        finally:
-            for pump in self._pumps:
-                pump.join(timeout=STOP_DEADLINE_SECONDS)
-
-    def kill(self) -> None:
-        if self.process.poll() is None:
-            self.process.kill()
-            self.process.wait(timeout=STOP_DEADLINE_SECONDS)
-
-    def stderr_text(self) -> str:
-        return "".join(self.stderr)
-
-    def refused(self) -> list[str]:
-        if not self.refused_log.exists():
-            return []
-        return self.refused_log.read_text(encoding="utf-8").split()
-
-
-def _run(tmp_path: Path, module: str, *args: str) -> tuple[_Child, int]:
-    """A child run to completion."""
-    child = _Child(tmp_path, module, *args)
-    try:
-        status = child.process.wait(timeout=300)
-    finally:
-        child.kill()
-    for pump in child._pumps:
-        pump.join(timeout=STOP_DEADLINE_SECONDS)
-    return child, status
+def _run(tmp_path: Path, module: str, *args: str) -> tuple[Child, int]:
+    return run_module(tmp_path, module, *args)
 
 
 def _get(base: tuple[str, int], path: str) -> tuple[int, str, bytes]:
@@ -405,7 +241,7 @@ def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path
     the core routes, and stops on an interrupt with status 0."""
     repo = _fresh_repository(tmp_path)
     run_dir = tmp_path / "run"
-    child = _Child(tmp_path, "opendox.cli", "generate-and-open",
+    child = Child(tmp_path, "opendox.cli", "generate-and-open",
                    "--repo-root", str(repo), "--repository", "fixture",
                    "--no-open", "--port", "0", "--run-dir", str(run_dir))
     try:
@@ -434,7 +270,7 @@ def test_serve_main_starts_a_server_that_answers_with_no_sibling(tmp_path) -> No
                              "--repo-root", str(repo), "--repository", "fixture",
                              "--output", str(out), "--no-validate")
     assert status == 0, generated.stderr_text()
-    child = _Child(tmp_path, "opendox.serve", "--snapshot", str(out),
+    child = Child(tmp_path, "opendox.serve", "--snapshot", str(out),
                    "--checkout-root", str(repo), "--port", "0")
     try:
         match = child.wait_for_line(_SERVE_URL)
