@@ -459,9 +459,19 @@ def _resolve_install_shape(args: argparse.Namespace,
     return runtime_config.load_settings(env, local_flag=local_flag)
 
 
-def _terminate_as_interrupt(signum, frame):  # pragma: no cover - a signal
+class _Terminated(KeyboardInterrupt):
+    """SIGTERM, raised as the interrupt the serve loop already stops cleanly on.
+
+    A subclass, so the serve loop's own `except KeyboardInterrupt` still ends
+    a served run with 0 (F13.1's `kill "$SERVER"; wait "$SERVER"`). An
+    interrupt that arrives BEFORE the serve loop can still say which signal
+    it was.
+    """
+
+
+def _terminate_as_interrupt(signum, frame):
     """SIGTERM, read as the Ctrl-C the serve loop already stops cleanly on."""
-    raise KeyboardInterrupt
+    raise _Terminated
 
 
 def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -> int:
@@ -513,10 +523,28 @@ def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -
         print(f"  database {report['socket_dir']} (bundled, pid {report['pid']}, "
               f"migrations applied now: {server.applied or 'none pending'})")
         return _generate_and_open(args, opener=opener)
+    except KeyboardInterrupt as interrupt:
+        # AN INTERRUPT ANYWHERE IN THE LOCAL LIFECYCLE IS A CLEAN STOP (Copilot
+        # review of openDox-code#69). SIGTERM, or Ctrl-C, can arrive while the
+        # server is initializing or migrating, or while the snapshot is being
+        # generated, all before the serve loop's own handler. It is a stop
+        # that was asked for, so it is not a traceback: the `finally` below
+        # stops the bundled server and restores the handler. Nothing was
+        # served, so the exit is the signal's conventional status (128 + its
+        # number) and not 0.
+        signum = (signal.SIGTERM if isinstance(interrupt, _Terminated)
+                  else signal.SIGINT)
+        print(f"generate-and-open interrupted ({signum.name}) before it "
+              "served; its bundled PostgreSQL server stops with it",
+              file=sys.stderr)
+        return 128 + int(signum)
     finally:
-        server.stop()
+        # THE HANDLER FIRST, so a second SIGTERM during the stop takes the
+        # default action at once; the parent-death signal still stops the
+        # server if this process goes before `stop()` has finished.
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
+        server.stop()
 
 
 def _generate_and_open(args: argparse.Namespace, *, opener) -> int:

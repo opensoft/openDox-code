@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import shutil
 import signal
 import subprocess
@@ -141,6 +142,33 @@ def _wait_gone(pid: int, seconds: float = 30.0) -> bool:
     return False
 
 
+def _first_url(child: subprocess.Popen, seconds: float) -> str | None:
+    """The first `http://` line `child` prints within `seconds`, or `None`.
+
+    BOUNDED BY THE DEADLINE, not by the child: a blocking `readline()` waits
+    for as long as a child that is alive and silent stays so, which is exactly
+    the startup failure this has to diagnose (Copilot review of
+    openDox-code#69). So the pipe is polled with a selector, only up to the
+    time left, and read in whatever pieces arrive.
+    """
+    deadline = time.monotonic() + seconds
+    pending = b""
+    with selectors.DefaultSelector() as selector:
+        selector.register(child.stdout, selectors.EVENT_READ)
+        while (remaining := deadline - time.monotonic()) > 0:
+            if not selector.select(timeout=remaining):
+                return None                                  # the deadline
+            chunk = os.read(child.stdout.fileno(), 65536)
+            if not chunk:
+                return None                                  # the child closed it
+            pending += chunk
+            *lines, pending = pending.split(b"\n")
+            for line in lines:
+                if line.startswith(b"http://"):
+                    return line.strip().decode()
+    return None
+
+
 def _launch(corpus: Path, state: Path, run_dir: Path) -> tuple[subprocess.Popen, str]:
     """`generate-and-open --local` in the BACKGROUND, and the URL it serves."""
     child = subprocess.Popen(
@@ -149,20 +177,38 @@ def _launch(corpus: Path, state: Path, run_dir: Path) -> tuple[subprocess.Popen,
          "--run-dir", str(run_dir), "--no-open", "--no-validate",
          "--port", "0"],
         env=_clean_env(**{STATE: str(state)}), cwd=ROOT,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    deadline = time.monotonic() + 90
-    url = None
-    while time.monotonic() < deadline and url is None:
-        line = child.stdout.readline()
-        if not line:
-            break
-        if line.startswith("http://"):
-            url = line.strip()
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    url = _first_url(child, 90)
     if url is None:
         child.kill()
-        out, err = child.communicate(timeout=30)
-        raise AssertionError(f"the entry point never served: {err[-2000:]}")
+        _out, err = child.communicate(timeout=30)
+        raise AssertionError(
+            f"the entry point never served: {err.decode(errors='replace')[-2000:]}")
     return child, url
+
+
+def test_the_launch_helper_is_bounded_by_its_deadline_not_by_the_child() -> None:
+    """A child that is alive and silent does not hold the helper past its
+    deadline; one that prints the URL is read, however the pieces arrive."""
+    silent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                              stdout=subprocess.PIPE)
+    try:
+        began = time.monotonic()
+        assert _first_url(silent, 1.0) is None
+        assert time.monotonic() - began < 10
+    finally:
+        silent.kill()
+        silent.communicate(timeout=10)
+    talker = subprocess.Popen(
+        [sys.executable, "-c", "import sys, time; sys.stdout.write('  serving '); "
+         "sys.stdout.flush(); time.sleep(0.2); print('x'); "
+         "print('http://127.0.0.1:1/index.html', flush=True); time.sleep(60)"],
+        stdout=subprocess.PIPE)
+    try:
+        assert _first_url(talker, 30) == "http://127.0.0.1:1/index.html"
+    finally:
+        talker.kill()
+        talker.communicate(timeout=10)
 
 
 def _status(state: Path) -> tuple[int, dict]:
@@ -323,6 +369,34 @@ def test_a_second_entry_point_on_the_same_state_dir_is_refused(
         assert again.applied == []
     finally:
         again.stop()
+
+
+@pytest.mark.skipif(not Path("/proc/self").exists(), reason="asks /proc")
+def test_a_stale_lock_naming_a_recycled_pid_does_not_hold_the_bundle(
+        state_dir: Path) -> None:
+    """A server that did not stop cleanly leaves its `postmaster.pid`, and the
+    kernel gives its pid to something else, here a process with `postgres` in
+    its argv. `status` does not report that process, and the next start
+    starts, with the proven-stale lock removed (Copilot review of
+    openDox-code#69)."""
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    bundle_mod.BundledServer(settings).start().stop()          # a real cluster
+    bundle = config.DatabaseBundle(state_dir)
+    decoy = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", "postgres"],
+        cwd=bundle.data_dir, stdout=subprocess.DEVNULL)
+    try:
+        (bundle.data_dir / "postmaster.pid").write_text(
+            f"{decoy.pid}\n{bundle.data_dir}\n", encoding="utf-8")
+        assert bundle_mod.report(bundle)["pid"] is None
+        server = bundle_mod.BundledServer(settings).start()
+        try:
+            assert bundle_mod.running_pid(bundle) == server.report()["pid"]
+        finally:
+            server.stop()
+    finally:
+        decoy.kill()
+        decoy.wait(timeout=10)
 
 
 def test_migrate_under_the_local_mode_uses_the_bundle_and_refuses_a_dsn(

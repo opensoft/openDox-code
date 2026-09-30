@@ -32,10 +32,12 @@ import os
 import re
 import shlex
 import sys
+import tomllib
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath
+from typing import Any
 
 #: The environment prefix. One string, so a rename is one edit.
 PREFIX = "OPENDOX_"
@@ -186,11 +188,13 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         PREFIX + "MIGRATIONS_DIR", "migrations", False, False,
-        "the ordered-SQL directory, repository-root-relative. Unset, it is "
-        "`migrations` where the working directory holds one (a checkout, or "
-        "the image's /app), and otherwise the copy the installed package "
-        "ships (plan 034 T072), so an install run from anywhere else still "
-        "has the migrations it applies",
+        "the ordered-SQL directory, repository-root-relative. Unset, a HOSTED "
+        "install uses `migrations` where the working directory holds one (a "
+        "checkout, or the image's /app), as it always has, and otherwise the "
+        "copy this installation carries; a LOCAL install uses ONLY the copy "
+        "this installation carries and never the working directory's (plan "
+        "034 T072), so launching it from a checkout of somebody else's "
+        "repository cannot run that repository's SQL",
     ),
     Setting(
         PREFIX + "PROJECT_REPOSITORY_ROOT", "var/projects", False, False,
@@ -1579,13 +1583,21 @@ LOCAL_BIND_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 #: pre-existing service can stand in for it"), so an operator's DSN beside
 #: `local` is either about to be silently overridden or is another server
 #: trying to stand in for the bundled one. Neither is accepted.
-HOSTED_ONLY_SETTINGS: tuple[str, ...] = (
+#:
+#: TWO CLASSES, TWO REASONS (Copilot review of openDox-code#69): the broker
+#: settings are refused because honouring `local` would drop an
+#: authentication, and the DSNs because the local install supplies its own
+#: database. Each refusal says its own reason.
+BROKER_SETTINGS: tuple[str, ...] = (
     PREFIX + "OIDC_ISSUER",
     PREFIX + "OIDC_AUDIENCE",
     PREFIX + "OIDC_JWKS_URL",
+)
+OPERATOR_DATABASE_SETTINGS: tuple[str, ...] = (
     PREFIX + "DATABASE_URL",
     PREFIX + "MIGRATION_DATABASE_URL",
 )
+HOSTED_ONLY_SETTINGS: tuple[str, ...] = BROKER_SETTINGS + OPERATOR_DATABASE_SETTINGS
 
 #: THE BUNDLED SERVER'S IDENTITY (plan 034 T072; #1144 13.1, as T007 batch H's
 #: addendum reads). The data directory and the socket directory live under the
@@ -1712,49 +1724,121 @@ def database_bundle(state: Path) -> DatabaseBundle:
 PACKAGED_MIGRATIONS = PurePath("share", "opendox", "migrations")
 
 
-def packaged_migrations_dir() -> Path | None:
-    """The migrations this INSTALLATION carries, or `None` where it carries none.
+def _source_tree_migrations(module_file: Path) -> Path | None:
+    """The `migrations/` of the SOURCE TREE `module_file` was imported from.
 
-    Two places, in order. The installed distribution's own data files — a
-    wheel install, whose `RECORD` lists them wherever the install scheme put
-    them. Then the source tree this module was imported from — an editable
-    install, which installs no data files, or `src/` on the path — whose
-    `migrations/` sits beside `src/`.
+    `module_file` is this module (`src/opendox/runtime/config.py`), so the
+    tree is three directories up: a checkout run with `src/` on the path, or
+    an editable install, neither of which installs data files. It counts only
+    where it really is that tree: `src/` is the directory the package sits
+    in, and the root's `pyproject.toml` names THIS project. A wheel's
+    `site-packages`, or a `--target` directory that happens to sit inside
+    some other checkout, is neither.
     """
+    here = module_file.resolve()
+    package_parent, root = here.parents[2], here.parents[3]
+    if package_parent.name != "src":
+        return None
     try:
-        files = importlib.metadata.distribution("opendox").files or ()
-    except importlib.metadata.PackageNotFoundError:
-        files = ()
+        project = tomllib.loads(
+            (root / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    if project.get("project", {}).get("name") != "opendox":
+        return None
+    candidate = root / "migrations"
+    return candidate if candidate.is_dir() else None
+
+
+def _distribution_migrations(module_file: Path,
+                             distribution: Any | None = None) -> Path | None:
+    """The migrations the INSTALLED DISTRIBUTION of `module_file` carries.
+
+    From the distribution's own `RECORD`, wherever its install scheme put the
+    data files — and ONLY when that distribution is the one `module_file` was
+    loaded from. A name lookup alone is not: with a checkout's `src/` on the
+    path, `distribution("opendox")` can find an older wheel installed beside
+    it, and that wheel's migrations are another version's (Copilot review of
+    openDox-code#69).
+    """
+    if distribution is None:
+        try:
+            distribution = importlib.metadata.distribution("opendox")
+        except importlib.metadata.PackageNotFoundError:
+            return None
+    files = list(distribution.files or ())
+    here = module_file.resolve()
+    tail = here.parts[-3:]                      # ("opendox", "runtime", "config.py")
+    if not any(PurePath(entry).parts[-3:] == tail
+               and Path(entry.locate()).resolve() == here for entry in files):
+        return None
     for entry in files:
         parts = PurePath(entry).parts
         if (entry.name.endswith(".sql")
                 and tuple(parts[-4:-1]) == PACKAGED_MIGRATIONS.parts):
             return Path(entry.locate()).resolve().parent
-    source = Path(__file__).resolve().parents[3]
-    if (source / "pyproject.toml").is_file() and (source / "migrations").is_dir():
-        return source / "migrations"
     return None
 
 
-def migrations_dir(env: Mapping[str, str] | None = None) -> Path:
+def installation_migrations_dir() -> Path | None:
+    """The migrations THIS INSTALLATION carries, or `None` where it carries none.
+
+    Tied to the code that is running, never to a name or to the working
+    directory. First the source tree this module was imported from (a
+    checkout, or an editable install). Then the installed distribution that
+    this module belongs to, from its `RECORD` (a wheel install). A real wheel
+    install has no `pyproject.toml` beside its package, so it falls through to
+    its own `RECORD` (Copilot review of openDox-code#69).
+    """
+    module_file = Path(__file__)
+    return (_source_tree_migrations(module_file)
+            or _distribution_migrations(module_file))
+
+
+def migrations_dir(env: Mapping[str, str] | None = None, *,
+                   local: bool = False) -> Path:
     """`OPENDOX_MIGRATIONS_DIR`, or where this install's migrations are.
 
-    Set, it is used as given, as it always was. Unset, it is `migrations`
-    wherever the working directory holds one — a checkout, or the image's
-    `/app` — which is today's default, unchanged; and OTHERWISE the copy the
-    installed package carries (`packaged_migrations_dir`), so `pip install
-    "opendox[local]"` run from a user's home directory migrates its bundled
-    server instead of refusing for a missing directory. Where neither exists
-    it is still `migrations`, and the canonical gate refuses it by name.
+    SET, it is used as given, in either shape: executing another directory's
+    SQL is something an operator says, not something a directory implies.
+
+    UNSET, the shape decides.
+      * A LOCAL install uses ONLY the copy this installation carries
+        (`installation_migrations_dir`), never the working directory's. Its
+        entry point runs every migration it finds as the bundled server's
+        OWNER, and the canonical gate pins `0001` alone. So a `migrations/`
+        in whatever directory a user launches it from, holding the pinned
+        `0001` and SQL of its own, would otherwise be executed (Copilot
+        review of openDox-code#69). An installation that carries none is
+        refused, naming the setting.
+      * A HOSTED install keeps today's default, unchanged (13.6): `migrations`
+        where the working directory holds one (the image's `/app`, a
+        checkout), and otherwise the copy this installation carries. Where
+        neither exists, it is still `migrations`, and the canonical gate
+        refuses it by name. The compose file and the Kubernetes manifests
+        set the variable explicitly, so they read nothing implicit.
     """
     env = os.environ if env is None else env
-    raw = env.get(PREFIX + "MIGRATIONS_DIR", "").strip()
+    setting = PREFIX + "MIGRATIONS_DIR"
+    raw = env.get(setting, "").strip()
     if raw:
         return Path(raw)
+    if local:
+        found = installation_migrations_dir()
+        if found is None:
+            raise ConfigurationError(
+                f"{setting} is unset, and this installation carries no "
+                "migrations of its own: a wheel install has them under "
+                f"`{PACKAGED_MIGRATIONS}` in its data directory, and a "
+                "checkout has `migrations/` beside `src/`. A LOCAL install "
+                "never reads the working directory's `migrations/`, because "
+                "its entry point runs them as the bundled server's owner. "
+                f"Reinstall the package, or name the directory in {setting}")
+        return found
     here = Path("migrations")
     if here.is_dir():
         return here
-    return packaged_migrations_dir() or here
+    return installation_migrations_dir() or here
 
 
 def install_mode(env: Mapping[str, str] | None = None, *,
@@ -1837,21 +1921,46 @@ def refuse_what_a_local_install_cannot_be(env: Mapping[str, str]) -> None:
         _optional(env, _by_name(PREFIX + "BIND_HOST")) or "127.0.0.1")
 
 
+def _named(given: list[str]) -> str:
+    return f"{' and '.join(given)} {'are' if len(given) > 1 else 'is'} set"
+
+
 def _refuse_hosted_only_settings(env: Mapping[str, str]) -> None:
-    """Every setting in `HOSTED_ONLY_SETTINGS` given beside `local`, named."""
-    given = [name for name in HOSTED_ONLY_SETTINGS
-             if env.get(name, "").strip()]
-    if given:
-        raise ConfigurationError(
-            f"{' and '.join(given)} {'are' if len(given) > 1 else 'is'} set, "
-            "and this is a LOCAL install, which has no broker and reads "
-            f"{'none of them' if len(given) > 1 else 'none'}. A broker "
+    """Every setting in `HOSTED_ONLY_SETTINGS` given beside `local`, named.
+
+    Each CLASS carries its own reason (Copilot review of openDox-code#69).
+    A broker setting says a hosted install was meant, and a DSN says another
+    database was meant. A local run with only `OPENDOX_DATABASE_URL` is told
+    about its database, not about an authentication it never configured.
+    The values are never repeated: a DSN carries a password.
+    """
+    def given(names: tuple[str, ...]) -> list[str]:
+        return [name for name in names if env.get(name, "").strip()]
+
+    brokers, databases = given(BROKER_SETTINGS), given(OPERATOR_DATABASE_SETTINGS)
+    if not (brokers or databases):
+        return
+    reasons = []
+    if brokers:
+        reasons.append(
+            f"{_named(brokers)}, and a LOCAL install has no broker and reads "
+            f"{'none of them' if len(brokers) > 1 else 'none'}. A broker "
             "setting beside the local mode says a HOSTED install was meant, "
             "and honouring `local` over it would silently drop that "
-            f"authentication: unset {'them' if len(given) > 1 else 'it'} for "
-            f"a local install, or drop {LOCAL_FLAG} / "
-            f"{PREFIX}INSTALL_MODE=local for a hosted one (the values are not "
-            "repeated here)")
+            "authentication")
+    if databases:
+        reasons.append(
+            f"{_named(databases)}, and a LOCAL install supplies BOTH of its "
+            "DSNs itself, from the PostgreSQL server it bundles under "
+            f"{PREFIX}STATE_DIR (13.1). An operator's DSN beside the local "
+            "mode would either be silently overridden or be another server "
+            "standing in for the bundled one, and neither is accepted")
+    every = brokers + databases
+    raise ConfigurationError(
+        "; and ".join(reasons) + f". Unset {'them' if len(every) > 1 else 'it'} "
+        f"for a local install, or drop {LOCAL_FLAG} / "
+        f"{PREFIX}INSTALL_MODE=local for a hosted one (the values are not "
+        "repeated here)")
 
 
 def require_the_hosted_issuer(env: Mapping[str, str] | None = None) -> None:
@@ -1998,7 +2107,7 @@ def load_settings(env: Mapping[str, str] | None = None, *,
         served_schema=_served_schema(env),
         served_database=_served_database(env) or (BUNDLE_DATABASE if local else None),
         publish_openapi=_boolean(env, _by_name(PREFIX + "PUBLISH_OPENAPI")),
-        migrations_dir=migrations_dir(env),
+        migrations_dir=migrations_dir(env, local=local),
         project_repository_root=Path(
             _optional(env, _by_name(PREFIX + "PROJECT_REPOSITORY_ROOT")) or "var/projects"
         ),
@@ -2081,7 +2190,7 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
         served_schema=_served_schema(env),
         served_database=_served_database(env) or (BUNDLE_DATABASE if local else None),
         publish_openapi=False,
-        migrations_dir=migrations_dir(env),
+        migrations_dir=migrations_dir(env, local=local),
         project_repository_root=Path(
             _optional(env, _by_name(PREFIX + "PROJECT_REPOSITORY_ROOT"))
             or "var/projects"),

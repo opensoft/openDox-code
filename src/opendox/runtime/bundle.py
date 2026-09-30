@@ -29,7 +29,9 @@ any manylinux2014 host, which a wheel that links the system's ICU does not.
 
 THE LIFECYCLE, IN FULL:
 
-  * `initdb` once per data directory: the MIGRATION identity
+  * `initdb` once per data directory, into an attempt directory that is
+    renamed into place only when it has succeeded, so an interrupted first
+    start never leaves a half-built cluster: the MIGRATION identity
     (`config.BUNDLE_OWNER_ROLE`) is the bootstrap superuser, local connections
     are `trust` and host connections are `reject`, UTF-8 in the `C` locale.
     Trust is safe BECAUSE of the socket: its directory is 0700, owned by the
@@ -60,9 +62,11 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -129,33 +133,84 @@ def server_binaries() -> Path:
     return binaries
 
 
+def _lock_file_pid(bundle: DatabaseBundle) -> int | None:
+    """The pid on the first line of the server's `postmaster.pid`, or `None`."""
+    try:
+        first = (bundle.data_dir / "postmaster.pid").read_text(
+            encoding="utf-8").splitlines()[0]
+        return int(first.strip())
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _serves(pid: int, bundle: DatabaseBundle) -> bool | None:
+    """Whether `pid` is the postmaster of `bundle`'s data directory.
+
+    Asked of the KERNEL, as the pair this module launches: an executable named
+    `postgres` whose working directory IS the data directory. The postmaster
+    changes into its data directory at startup, and neither of the two can be
+    rewritten by its process title, so a recycled pid given to anything else,
+    even another `postgres` serving another directory, is not it (Copilot
+    review of openDox-code#69).
+
+    `False` also when the kernel will not say: another user's process cannot
+    be this bundle's server, because the server runs as the owner of a 0700
+    data directory, the user this runs as. `None` only where there is no
+    `/proc` to ask at all.
+    """
+    if not Path("/proc/self").exists():
+        return None
+    try:
+        executable = os.readlink(f"/proc/{pid}/exe")
+        cwd = os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return False
+    if Path(executable.removesuffix(" (deleted)")).name != "postgres":
+        return False
+    try:
+        return Path(cwd).resolve() == bundle.data_dir.resolve()
+    except OSError:
+        return False
+
+
 def running_pid(bundle: DatabaseBundle) -> int | None:
     """The pid of a live server on `bundle`'s data directory, or `None`.
 
     Read from the server's own `postmaster.pid` (its first line), and only
-    believed while that process exists: a file left by a server that did not
-    stop cleanly names a pid that is gone, or that the kernel has since given
-    to something else, and PostgreSQL itself treats such a file as stale.
+    believed while that process exists and IS this bundle's server: a file
+    left by a server that did not stop cleanly names a pid that is gone, or
+    that the kernel has since given to something else (`_serves`).
     """
-    try:
-        first = (bundle.data_dir / "postmaster.pid").read_text(
-            encoding="utf-8").splitlines()[0]
-        pid = int(first.strip())
-    except (OSError, IndexError, ValueError):
+    pid = _lock_file_pid(bundle)
+    if pid is None:
         return None
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
+        # gone; or alive and another user's, which cannot be this server
         return None
-    except PermissionError:
-        return pid                    # alive, and not ours to signal
-    # A REUSED PID IS NOT A SERVER: where the kernel says what runs there, it
-    # must be a postgres, or the file is stale whatever its first line says.
+    return pid if _serves(pid, bundle) is not False else None
+
+
+def _remove_a_proven_stale_lock(bundle: DatabaseBundle) -> None:
+    """Remove a `postmaster.pid` the kernel PROVES is not this server's.
+
+    PostgreSQL removes a lock file whose pid is gone. It refuses to start,
+    however, over one whose pid the kernel has given to another live process
+    of the same user, and that refusal would last as long as the unrelated
+    process does. Where `/proc` shows that process is not this data
+    directory's postmaster, the lock is stale by proof and is removed. Where
+    nothing can be proven, it is left for PostgreSQL to judge.
+    """
+    pid = _lock_file_pid(bundle)
+    if pid is None:
+        return
     try:
-        command = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return pid                    # no /proc to ask; believe the live pid
-    return pid if b"postgres" in command else None
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return                      # PostgreSQL's own rule covers both
+    if _serves(pid, bundle) is False:
+        (bundle.data_dir / "postmaster.pid").unlink(missing_ok=True)
 
 
 def report(bundle: DatabaseBundle) -> dict[str, Any]:
@@ -245,25 +300,37 @@ class BundledServer:
                 f"(pid {already}). One local install's database belongs to one "
                 "entry point at a time: stop the other `generate-and-open "
                 f"{LOCAL_FLAG}`, or give this one its own {PREFIX}STATE_DIR")
-        self._prepare_directories()
-        if not (self.bundle.data_dir / "PG_VERSION").is_file():
-            self._initdb(binaries)
-        self._launch(binaries)
+        # THE WHOLE START IS ONE GUARDED OPERATION (Copilot review of
+        # openDox-code#69). The directories, `initdb` and the launch fail as
+        # plainly as the connection does: a timeout, a permission, a missing
+        # file. Each one comes out as the one named refusal the entry point
+        # prints, with whatever was started stopped, never as a traceback.
+        phase = "preparing its directories"
         try:
+            self._prepare_directories()
+            phase = "initializing its data directory"
+            self._initialize(binaries)
+            phase = "launching it"
+            _remove_a_proven_stale_lock(self.bundle)
+            self._launch(binaries)
+            phase = "waiting for it to accept a connection"
             self._wait_until_ready()
+            phase = "bootstrapping its database and served role"
             self._bootstrap()
+            phase = "migrating it"
             self._migrate()
         except (BundleRefused, migrations.MigrationError):
             self.stop()
             raise
-        except Exception as exc:  # noqa: BLE001 - the driver's, named not quoted
+        except Exception as exc:  # noqa: BLE001 - named, never quoted
             # THE DRIVER'S TEXT IS NOT REPEATED, for the reason `runtime/cli.py`
-            # gives: it quotes the connection string it was handed. The class
-            # names what went wrong and the server's own log says the rest.
+            # gives: it quotes the connection string it was handed. The phase
+            # and the class name say what went wrong, and the server's own log
+            # says the rest.
             self.stop()
             raise BundleRefused(
-                f"the bundled PostgreSQL server started but could not be "
-                f"prepared ({type(exc).__name__}); its log is "
+                f"the bundled PostgreSQL server could not be started "
+                f"({phase}: {type(exc).__name__}); its log is "
                 f"{self.log_path}") from None
         except BaseException:
             self.stop()
@@ -284,9 +351,69 @@ class BundledServer:
         self.bundle.socket_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.bundle.socket_dir, 0o700)
 
-    def _initdb(self, binaries: Path) -> None:
+    #: The prefix an initialization attempt's directory carries, beside the
+    #: data directory, followed by the pid of the process making it.
+    ATTEMPT_PREFIX = "data.initdb-"
+
+    def _initialize(self, binaries: Path) -> None:
+        """A complete cluster at `data_dir`, or a refusal. Never a partial one.
+
+        `initdb` runs into an ATTEMPT directory beside the data directory, and
+        the attempt is renamed into place only once `initdb` has succeeded. So
+        a data directory exists only as a finished cluster, and a first start
+        that dies midway (a kill, a full disk, a power cut) leaves an attempt
+        and not a half-built data directory that the next start would either
+        launch or fail to re-initialize for ever (Copilot review of
+        openDox-code#69). The next start removes an attempt whose process is
+        gone, and starts again.
+
+        A data directory that exists and holds no cluster is NOT this
+        install's to remove, unless it is empty: it is refused, named, and
+        left as it is.
+        """
+        data = self.bundle.data_dir
+        if (data / "PG_VERSION").is_file():
+            return
+        if data.exists():
+            try:
+                data.rmdir()                    # an empty directory holds nothing
+            except OSError:
+                raise BundleRefused(
+                    f"{data} exists and holds no PostgreSQL cluster, so it is "
+                    "not this install's database, and it is left untouched: "
+                    "move it aside, or give this install its own "
+                    f"{PREFIX}STATE_DIR") from None
+        self._remove_abandoned_attempts()
+        attempt = Path(tempfile.mkdtemp(
+            prefix=f"{self.ATTEMPT_PREFIX}{os.getpid()}-", dir=data.parent))
+        try:
+            self._initdb(binaries, attempt)
+            try:
+                os.rename(attempt, data)
+            except OSError:
+                if not (data / "PG_VERSION").is_file():
+                    raise
+                # another start finished first; its cluster is the one used
+                shutil.rmtree(attempt, ignore_errors=True)
+        except BaseException:
+            shutil.rmtree(attempt, ignore_errors=True)
+            raise
+
+    def _remove_abandoned_attempts(self) -> None:
+        """Every initialization attempt whose process no longer exists."""
+        for candidate in self.bundle.data_dir.parent.glob(
+                f"{self.ATTEMPT_PREFIX}*"):
+            owner = candidate.name[len(self.ATTEMPT_PREFIX):].split("-", 1)[0]
+            try:
+                os.kill(int(owner), 0)
+            except ProcessLookupError:
+                shutil.rmtree(candidate, ignore_errors=True)
+            except (ValueError, OSError):
+                continue                        # alive, or not ours to judge
+
+    def _initdb(self, binaries: Path, target: Path) -> None:
         done = subprocess.run(
-            [str(binaries / "initdb"), "-D", str(self.bundle.data_dir),
+            [str(binaries / "initdb"), "-D", str(target),
              "-U", BUNDLE_OWNER_ROLE, "--auth-local=trust", "--auth-host=reject",
              "--encoding=UTF8", "--locale=C", "--no-instructions"],
             env=_child_environment(), capture_output=True, text=True,
