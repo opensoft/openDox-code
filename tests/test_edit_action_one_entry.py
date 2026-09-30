@@ -28,7 +28,8 @@ never asked for a method the seam does not declare.
 4. A host registry needs only what the seam declares.
 
 Every case starts with nothing registered at the four seams or the generator
-seam, and puts back every registry it found.
+seam, and puts back every registry it found (`test_projection_seams.py`'s own
+isolation, imported).
 
 A CREATED FILE: no carve-manifest row (RULED OQ-C).
 """
@@ -39,79 +40,33 @@ import ast
 import dataclasses
 import http.client
 import json
-import os
 import shutil
-import subprocess
 import threading
 import types
 from pathlib import Path
 
-import pytest
 
 from opendox import cli
-from opendox import corpus_adapter
 from opendox import default_registry
-from opendox import domain_profile
-from opendox import generator_seam as gs
 from opendox import projection_seams as ps
 from opendox import serve
 from opendox import serve_project
+# THE SAME ISOLATION AND THE SAME `git` HELPER `test_projection_seams.py` HOLDS,
+# imported rather than copied: a copy of the fixture's thirty lines is a second
+# place for the private state it puts back to go stale in, and it is what the
+# quality gate's duplication check read as new code. `_isolated_registries` is
+# autouse, so importing it is what applies it to this module's cases.
+from test_projection_seams import _git, _isolated_registries  # noqa: F401
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT / "src" / "opendox"
 PLAIN_DOCUMENTS = ROOT / "tests" / "fixtures" / "plain-documents"
 LISTED = "notes-toolshed-inventory.md"
-SINGLE_SEAMS = {"registry": ps.registry, "corpus_root": ps.corpus_root,
-                "writer": ps.writer}
-
-
-@pytest.fixture(autouse=True)
-def _isolated_registries():
-    """Nothing registered at the four seams or the generator seam, and every
-    registry PUT BACK whole, records included, so an entry point's default is
-    never handed back as a host's (the same isolation
-    `test_projection_seams.py` holds)."""
-    single = {name: (seam._registered, seam._is_default, seam._default_read)
-              for name, seam in SINGLE_SEAMS.items()}
-    kinds = (dict(ps.validators._registered), set(ps.validators._default_read))
-    generator = (gs._registered, gs._is_default, gs._generated_from_default,
-                 gs._default_generations_under_way, gs._registration_serial)
-    profile = (domain_profile._registered, domain_profile._is_default,
-               domain_profile._built_from_default)
-    home = corpus_adapter._home_factory
-    for seam in SINGLE_SEAMS.values():
-        seam.unregister()
-    ps.validators.unregister()
-    gs.unregister()
-    corpus_adapter.register_home(cli._default_home_factory)
-    yield
-    for name, seam in SINGLE_SEAMS.items():
-        seam._registered, seam._is_default, seam._default_read = single[name]
-    ps.validators._registered, ps.validators._default_read = kinds
-    (gs._registered, gs._is_default, gs._generated_from_default,
-     gs._default_generations_under_way, gs._registration_serial) = generator
-    (domain_profile._registered, domain_profile._is_default,
-     domain_profile._built_from_default) = profile
-    corpus_adapter._home_factory = home
 
 
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------
-
-def _git(root: Path, *args: str) -> None:
-    """`git` in `root` as the fixture's own identity, with no inherited `GIT_*`
-    variable and no user or system configuration."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update({
-        "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
-        "GIT_COMMITTER_NAME": "fixture",
-        "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
-        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
-    })
-    subprocess.run(["git", "-C", str(root), *args], check=True,
-                   capture_output=True, env=env)
-
 
 def _own_payload(*paths: str) -> bytes:
     """A snapshot's bytes that list exactly `paths` as documents."""
