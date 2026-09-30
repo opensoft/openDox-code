@@ -3371,6 +3371,16 @@ def _kept_anywhere(exception, secret: str) -> list[str]:
     return sorted(found)
 
 
+def _children_kept_by(exception) -> list[str]:
+    """The frame locals that hold a broker child (`subprocess.Popen`). A
+    child holds the pipe its answer came down, and whatever that pipe's
+    buffers still hold, so no refusal keeps one."""
+    return sorted({f"{frame.f_code.co_name}.{name}"
+                   for frame in _frames_kept_by(exception)
+                   for name, value in list(frame.f_locals.items())
+                   if isinstance(value, subprocess.Popen)})
+
+
 #: Each operation, asked through its own function, with the real runner.
 _OPERATIONS_ASKED = {
     provider_mod.OPERATION_INTAKE: lambda binding, runner: (
@@ -3394,9 +3404,9 @@ def test_every_operation_is_asked_here():
 def test_the_shared_runner_refuses_a_misbehaving_broker_keeping_nothing(
         tmp_path, misbehaviour):
     """The runner itself, called directly. Its refusal keeps no cause, no
-    context, and no frame or attribute that holds what the broker wrote.
-    It names the failure class. It is not told the operation, so it names
-    none."""
+    context, no frame or attribute that holds what the broker wrote, and no
+    frame that holds the child. It names the failure class. It is not told
+    the operation, so it names none."""
     script = _misbehaving_broker(tmp_path, misbehaviour)
     argv = provider_mod.broker_operation_argv(
         _broker_binding(script), provider_mod.OPERATION_MINT)
@@ -3408,6 +3418,7 @@ def test_the_shared_runner_refuses_a_misbehaving_broker_keeping_nothing(
     assert refusal.__cause__ is None
     assert refusal.__context__ is None
     assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
+    assert _children_kept_by(refusal) == []
     expected = _sentence_for(misbehaviour)
     assert refusal.diagnostic == expected
     assert refusal.operation is None
@@ -3438,6 +3449,7 @@ def test_a_broker_that_writes_without_end_is_refused_at_the_bound(tmp_path):
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert _kept_anywhere(caught.value, SENTINEL_TOKEN) == []
+    assert _children_kept_by(caught.value) == []
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_OVERSIZE
 
 
@@ -3458,6 +3470,7 @@ def test_a_misbehaving_broker_is_refused_naming_the_operation(
     assert refusal.__cause__ is None
     assert refusal.__context__ is None
     assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
+    assert _children_kept_by(refusal) == []
     expected = _sentence_for(misbehaviour)
     assert refusal.diagnostic == expected
     assert refusal.operation == operation
@@ -3484,6 +3497,70 @@ def test_a_broker_that_cannot_be_started_chains_nothing(tmp_path, operation):
     assert caught.value.operation == operation
     assert str(caught.value) == (
         f"broker {operation}: {provider_mod.DIAG_BROKER_UNREACHABLE}")
+
+
+def test_a_credential_source_that_fails_leaves_no_broker_running(tmp_path):
+    """The credential's own source is the operator's input, not the
+    broker's output, so the ruling does not reach it. A source that fails
+    while it is copied still escapes as it did. But the broker must not be
+    left running with its reader blocked on it, which aborted the
+    interpreter at exit at `b847ef3d` ("Fatal Python error:
+    _enter_buffered_busy"). A child interpreter runs it, so that its exit
+    is what is measured."""
+    binding = _broker_binding(_write_broker(tmp_path))
+    fields = {field.name: getattr(binding, field.name)
+              for field in dataclasses.fields(binding)}
+    program = (
+        "from opendox import doxbench_binding as b\n"
+        "from opendox import doxbench_provider as p\n"
+        "class Failing:\n"
+        "    parts = ['sk-stand-in-input-side-NOT-A-KEY']\n"
+        "    def read(self, _size=-1):\n"
+        "        if self.parts:\n"
+        "            return self.parts.pop()\n"
+        "        raise UnicodeDecodeError('utf-8', b'x', 0, 1, 'stand-in')\n"
+        f"binding = b.ModelProviderBinding(**{fields!r})\n"
+        "p.hand_off_credential(binding, Failing())\n")
+    run = subprocess.run([sys.executable, "-c", program], cwd=tmp_path,
+                         capture_output=True, text=True, timeout=60,
+                         check=False)
+    assert "Fatal Python error" not in run.stderr
+    assert run.returncode == 1
+    assert "UnicodeDecodeError" in run.stderr
+    assert "sk-stand-in-input-side-NOT-A-KEY" not in run.stderr
+
+
+class _SourceFailingOnceMarked:
+    """A credential source that fails on its second read, once `mark`
+    exists, so the broker has written before it fails."""
+
+    def __init__(self, mark: Path) -> None:
+        self.parts = ["sk-stand-in-input-side-NOT-A-KEY"]
+        self.mark = mark
+
+    def read(self, _size=-1):
+        if self.parts:
+            return self.parts.pop()
+        deadline = time.monotonic() + 10
+        while not self.mark.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        raise UnicodeDecodeError("utf-8", b"x", 0, 1, "stand-in")
+
+
+def test_a_failing_credential_source_escapes_with_no_broker_output(tmp_path):
+    """The same escape, in this process, from a broker that wrote the
+    token before it read its standard input. What escapes keeps nothing the
+    broker wrote, as a refusal would not."""
+    script = tmp_path / "early-writing-broker.py"
+    script.write_text(_MISBEHAVING_PREAMBLE.format(
+        token=SENTINEL_TOKEN, bound=provider_mod.MAX_BROKER_ANSWER_BYTES)
+        + "sys.stdout.write(TOKEN)\nwrote()\nsys.stdin.read()\n",
+        encoding="utf-8")
+    source = _SourceFailingOnceMarked(Path(str(script) + ".wrote"))
+    with pytest.raises(UnicodeDecodeError) as caught:
+        provider_mod.hand_off_credential(_broker_binding(script), source)
+    assert _wrote(script), "the broker wrote before the source failed"
+    assert _kept_anywhere(caught.value, SENTINEL_TOKEN) == []
 
 
 @pytest.mark.parametrize("operation", provider_mod.OPERATIONS)

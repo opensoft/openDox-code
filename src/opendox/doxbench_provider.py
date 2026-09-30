@@ -561,6 +561,25 @@ def _run_broker(argv, *, source,
         name="broker-answer", daemon=True)
     reader.start()
     try:
+        return _answer_of(child, reader, received, source=source,
+                          timeout=timeout)
+    except BaseException:
+        # Anything else that escapes, such as the credential's own source
+        # failing while it is copied (the operator's input, not the broker's
+        # output), goes on as it was. The child is reaped first, and what it
+        # wrote is dropped: a reader left blocked in its daemon thread would
+        # abort the interpreter when it exits.
+        _reap(child, reader)
+        received.clear()
+        raise
+
+
+def _answer_of(child, reader, received: list, *, source,
+               timeout: float) -> tuple[str | None, str | None]:
+    """`_run_broker`'s work once the child and its reader are running: the
+    credential, if any, then the answer, within the bound and the
+    timeout."""
+    try:
         if source is not None:
             # The credential's ONLY path through this process: handle to
             # pipe, in chunks, never assembled.
