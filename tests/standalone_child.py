@@ -20,6 +20,14 @@ builds that child and reads it:
 * It is read on threads while it runs (`Child.wait_for_line`), so a server that
   never exits can still be asked where it serves, and then interrupted
   (`Child.interrupt`, SIGINT, as Ctrl-C sends).
+* CTRL-C REACHES IT AS IT WOULD AT A TERMINAL, whatever the runner's own
+  disposition. The same `sitecustomize` sets SIGINT back to Python's
+  KeyboardInterrupt handler. A runner started as a background job
+  (`nohup pytest ... &`) has SIGINT ignored, and every child would inherit
+  that, so an interrupted server would time out and the case would report the
+  runner, not the server (measured at openDox-code#66 a6e953ce). A child that
+  ignores SIGINT ITSELF, after startup, still does, and is killed at the
+  deadline.
 
 `fresh_repository()` is #1144's preamble: a fixture copied into a FRESH git
 repository and committed as the fixture's own identity.
@@ -61,7 +69,12 @@ REFUSED_LOG_ENV = "OPENDOX_STANDALONE_CHILD_REFUSED"
 #: The `sitecustomize` every child loads.
 _BLOCKER = f'''\
 import os
+import signal
 import sys
+
+# Ctrl-C as at a terminal: a runner started as a background job ignores
+# SIGINT, and an ignored signal is inherited across exec (tests/standalone_child.py).
+signal.signal(signal.SIGINT, signal.default_int_handler)
 
 _SIBLINGS = {SIBLINGS!r}
 
