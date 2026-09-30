@@ -1606,6 +1606,13 @@ class LocalGitCorpus:
     #: (Copilot review of openDox-code#26). A parameter that cannot change an
     #: outcome is removed rather than wired up, because wiring it up would
     #: reintroduce the assumption `_served_ref` exists to refuse.
+    #: THIS ADAPTER'S KEYS ARE REPOSITORY PATHS, and its documents open with a
+    #: leading `Name: value` header. `DocumentId.key` is opaque to the
+    #: `CorpusAdapter` interface, so a consumer that needs a path, openDox's
+    #: neutral projection, reads keys as paths only where the adapter says so
+    #: (`neutral_projection.PATH_KEYS`).
+    document_keys_are_paths = True
+
     def __init__(self, *, executable: str = "git",
                  write_path: str | None = WRITE_PATH,
                  kind_field: str | None = None,
@@ -1614,6 +1621,13 @@ class LocalGitCorpus:
         self._write_path = write_path
         self._kind_field = kind_field
         self._required_fields = tuple(required_fields)
+
+    @property
+    def executable(self) -> str:
+        """The `git` this corpus runs, for a caller that reads the same
+        checkout with its own `GitRunner` (`default_generator`'s commit date),
+        so both run one git."""
+        return self._executable
 
     # -- resolve ----------------------------------------------------------
 
@@ -1999,10 +2013,13 @@ class LocalGitCorpus:
                 unclassifiable=(
                     f"{document.key!r} carries no {self._kind_field!r} header; "
                     "it is still listed and still readable"))
+        # THE SAME EMPTINESS RULE AS THE SUFFIX PATH (Copilot at
+        # openDox-code#57 03e06ccd, r4139523226): a field given with nothing
+        # after its colon is no field, whichever vocabulary is in force.
         return Classification(
             id=document, kind=kind, required_fields=self._required_fields,
             missing_fields=tuple(field for field in self._required_fields
-                                 if field not in header))
+                                 if not header.get(field)))
 
     def _header_of(self, corpus: ResolvedCorpus,
                    document: DocumentId) -> dict[str, str]:

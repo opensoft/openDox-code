@@ -835,6 +835,39 @@ def test_the_anchors_come_from_the_source_revision_and_the_bytes_repeat(
     assert "generated_at" not in unknown
 
 
+def test_an_adapter_whose_keys_are_not_declared_paths_is_refused(tmp_path: Path) -> None:
+    """`DocumentId.key` is opaque to the `CorpusAdapter` interface, so the
+    projection reads keys as repository paths only for an adapter that
+    declares `PATH_KEYS`. One that does not is refused, naming the
+    declaration, rather than having an object id or a row key written as a
+    path (Copilot at openDox-code#57 50b0d42b, r4139607560)."""
+    root = _repository(tmp_path, files={"a.md": "title: A\nsummary: S\n"})
+    assert projection.PATH_KEYS == "document_keys_are_paths"
+    assert lga.LocalGitCorpus.document_keys_are_paths is True
+
+    class _Opaque:
+        """Delegates everything to a path adapter, and declares nothing."""
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name == projection.PATH_KEYS:
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    inner = lga.WorkingTreeCorpus()
+    corpus = inner.resolve(corpus_adapter.CorpusRef(name="home", location=str(root)))
+    with pytest.raises(projection.ProjectionRefused) as caught:
+        projection.project(_Opaque(inner), corpus, "garden")
+    assert "document_keys_are_paths = True" in str(caught.value)
+    assert isinstance(caught.value, gs.GeneratorSeamError)
+    declared = _Opaque(inner)
+    declared.document_keys_are_paths = True
+    paths = [d["path"] for d in
+             projection.project(declared, corpus, "garden").snapshot["documents"]]
+    assert paths == ["a.md"]
+
+
 def test_a_repository_with_no_commit_needs_a_pinned_revision(tmp_path: Path) -> None:
     root = _repository(tmp_path, files={"a.md": "# A\n"}, commit=False)
     with pytest.raises(projection.ProjectionRefused) as caught:
@@ -866,6 +899,50 @@ def test_the_default_adapter_obliges_the_small_neutral_field_set(tmp_path: Path)
                        "empty.md": ("title",), "Makefile": ()}
     # a document without the fields is still read, as a source
     assert _by_path(_generate(root))["none.md"]["stage"] == "source"
+
+
+def test_an_empty_field_is_missing_whichever_vocabulary_is_in_force(
+        tmp_path: Path) -> None:
+    """The suffix vocabulary and the `kind_field` one read a field given with
+    nothing after its colon the same way: as no field. The `kind_field` path
+    counted it present by its key alone (Copilot at openDox-code#57
+    03e06ccd, r4139523226)."""
+    root = _repository(tmp_path, files={
+        "both.md": "kind: note\ntitle: T\nsummary: S\n",
+        "empty.md": "kind: note\ntitle:\nsummary: S\n",
+        "none.md": "kind: note\n"})
+    ref = corpus_adapter.CorpusRef(name="home", location=str(root))
+    by_suffix = lga.LocalGitCorpus(required_fields=lga.NEUTRAL_FIELDS)
+    by_header = lga.LocalGitCorpus(kind_field="kind",
+                                   required_fields=lga.NEUTRAL_FIELDS)
+    for adapter in (by_suffix, by_header):
+        corpus = adapter.resolve(ref)
+        missing = {d.key: adapter.classify(corpus, d).missing_fields
+                   for d in adapter.list_documents(corpus)}
+        assert missing == {"both.md": (), "empty.md": ("title",),
+                           "none.md": ("title", "summary")}, adapter._kind_field
+
+
+def test_the_commit_date_is_read_by_the_home_corpus_s_own_git(tmp_path: Path) -> None:
+    """`generated_at` is read with the git the home corpus runs, not a bare
+    `git` from PATH, so the date and the revision it stamps come from one
+    git (Copilot at openDox-code#57 03e06ccd, r4139523258)."""
+    from opendox import default_generator
+
+    root = _repository(tmp_path, files={"a.md": "title: A\nsummary: S\n"})
+    real = shutil.which("git")
+    log = tmp_path / "calls.log"
+    wrapper = tmp_path / "logging-git"
+    wrapper.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real}" "$@"\n',
+                       encoding="utf-8")
+    wrapper.chmod(0o755)
+    corpus_adapter.register_home(lambda location: (
+        lga.WorkingTreeCorpus(executable=str(wrapper)),
+        corpus_adapter.CorpusRef(name="home", location=str(location))))
+    snapshot = default_generator.generate(root, "garden")
+    assert snapshot["generation"].get("generated_at"), "a date was read"
+    assert "--format=%cI" in log.read_text(encoding="utf-8"), (
+        "the commit date was read by the home corpus's own git")
 
 
 def test_required_header_fields_answers_the_neutral_set_through_the_entry_point() -> None:
@@ -969,6 +1046,32 @@ def test_the_lead_block_is_the_neutral_fields_in_order_then_a_blank_line() -> No
     with pytest.raises(ValueError, match=r"no value for \['author'\]"):
         authoring.render_scaffold(**suffixed, lead_fields=("title", "author"))
     assert set(lga.NEUTRAL_FIELDS) <= set(authoring.SCAFFOLD_LEAD_FIELDS)
+
+
+@pytest.mark.parametrize("field", ["title", "summary"])
+@pytest.mark.parametrize("breaker", ["\n", "\r", "\r\n", "\x0b", "\x1e", "\x85",
+                                     " ", " ", "\t", "\x00"])
+def test_a_lead_value_that_is_not_one_header_line_is_refused(
+        field: str, breaker: str, tmp_path: Path) -> None:
+    """A leading `title:` or `summary:` is ONE header line. A value that
+    breaks it would put a line of the caller's choosing into the block the
+    default adapter reads: `summary="ok\\nstage: completion"` read as the
+    document's own `stage:` (Copilot at openDox-code#57 1a603677,
+    r4139383472). So it is refused before anything is rendered or written.
+    A value with no lead block to break keeps the governed layout as before,
+    and an ordinary value with inner spaces and dashes still leads."""
+    value = f"ok{breaker}stage: completion"
+    asked = {**_CREATE, field: value}
+    with pytest.raises(ValueError, match=f"leading {field}: must be one header line"):
+        authoring.render_scaffold(**asked, lead_fields=("title", "summary"))
+    assert authoring.render_scaffold(**asked).startswith("# "), (
+        "with no lead block, nothing new is refused")
+    with pytest.raises(ValueError):
+        authoring.create_scaffold(OutputBoundary(tmp_path, actor=HUMAN), **asked)
+    assert not any(tmp_path.rglob("*.md")), "a refused create writes nothing"
+    fine = {**_CREATE, field: "A shed roof — pitched, not flat"}
+    assert authoring.render_scaffold(**fine, lead_fields=(field,)).startswith(
+        f"{field}: A shed roof — pitched, not flat\n")
 
 
 def test_a_scaffold_with_no_corpus_registered_refuses_and_writes_nothing(
