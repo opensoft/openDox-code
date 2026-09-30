@@ -424,6 +424,34 @@ def _deep(levels: int) -> list[Any]:
     return value
 
 
+def test_an_instance_key_of_any_size_is_named_not_crashed_on() -> None:
+    """A mapping key that is an int past 4300 digits has no decimal text, so
+    naming it in a violation's pointer, or ordering it in the report of
+    unexpected properties, raised ValueError (Copilot at openDox-code#58
+    2b8ad245, r4139823704 and r4139823779). Both now show its size. An
+    ordinary key reads exactly as before."""
+    huge = 10 ** 5000
+    shown = f"<an int of {huge.bit_length()} bits>"
+    below = _built({"additionalProperties": {"type": "string"}}).violations({huge: 1})
+    assert [(v.keyword, v.where) for v in below] == [("type", f"/{shown}")]
+    extra = _built({"additionalProperties": False}).violations({huge: 1, "b": 2})
+    assert [v.keyword for v in extra] == ["additionalProperties"]
+    assert shown in V.report(extra)[0] and "'b'" in V.report(extra)[0]
+    assert _found({"additionalProperties": {"type": "string"}}, {7: 1, "a/b": 2}) == {
+        ("type", "/7"), ("type", "/a~1b")}
+
+
+def test_a_non_text_key_that_is_not_a_scalar_is_judged_as_itself() -> None:
+    """A tuple key is canonicalized as an opaque value, never equal to a JSON
+    one, so `const`, `enum` and `uniqueItems` judge it without crashing
+    (Copilot at openDox-code#58 2b8ad245, r4139823750, which does not
+    reproduce: this is the guard that it stays so)."""
+    odd = {("non-text",): 1}
+    assert _found({"enum": [{"a": 1}]}, odd) == {("enum", "")}
+    assert _found({"const": {"non-text": 1}}, odd) == {("const", "")}
+    assert _found({"uniqueItems": True}, [odd, {("non-text",): 1}]) == {("uniqueItems", "")}
+
+
 def test_an_integer_bound_of_any_size_is_evaluated() -> None:
     """YAML gives an integer of up to 4300 digits, and a JSON number has no
     bound. `math.isfinite()` could not convert one past a float's range, so

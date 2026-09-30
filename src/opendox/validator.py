@@ -243,8 +243,12 @@ class Violation:
 
     @property
     def where(self) -> str:
-        """`path` as a JSON pointer ("" is the instance itself)."""
-        return "".join("/" + str(part).replace("~", "~0").replace("/", "~1")
+        """`path` as a JSON pointer ("" is the instance itself). A part that
+        is not text or an index is shown as `_shown` shows it, so a key of any
+        size is named and never crashes the pointer (an int past 4300 digits
+        has no decimal text; Copilot at openDox-code#58 2b8ad245,
+        r4139823704)."""
+        return "".join("/" + _part_text(part).replace("~", "~0").replace("/", "~1")
                        for part in self.path)
 
     # jsonschema's names for the same fields, for the doxBench seam's readers.
@@ -294,8 +298,28 @@ def _shown(value: Any) -> str:
             return f"<a {type(value).__name__} too large to show>"
 
 
+def _part_text(part: Any) -> str:
+    """A path part as pointer text: text as it is, anything else as `str()`
+    gives it, or as `_shown` does where `str()` cannot."""
+    if isinstance(part, str):
+        return part
+    try:
+        return str(part)
+    except (RecursionError, ValueError):
+        return _shown(part)
+
+
 def _brief(value: Any) -> str:
     text = _shown(value)
+    return text if len(text) <= _BRIEF else text[:_BRIEF - 3] + "..."
+
+
+def _brief_items(values: list[Any]) -> str:
+    """A list shown item by item, each as `_shown` shows it, and cut as
+    `_brief` cuts. So one key too large to show is named by its size, and the
+    others still read as themselves (Copilot at openDox-code#58 2b8ad245,
+    r4139823779). An ordinary list reads exactly as `_brief` shows it."""
+    text = "[" + ", ".join(_shown(value) for value in values) + "]"
     return text if len(text) <= _BRIEF else text[:_BRIEF - 3] + "..."
 
 
@@ -818,7 +842,7 @@ class KindValidator:
         """Refuse `node` unless this module evaluates it as it stands, and
         answer its reference's target, for the walk to check in its turn."""
         where = at or "<root>"
-        unknown = sorted((key for key in node if key not in KEYWORDS), key=repr)
+        unknown = sorted((key for key in node if key not in KEYWORDS), key=_shown)
         if unknown:
             raise self._not_evaluable(f"{where} uses {unknown}, which "
                                       "this module does not evaluate")
@@ -1050,7 +1074,7 @@ class KindValidator:
                 if extra:
                     yield broken("additionalProperties",
                                  f"unexpected properties "
-                                 f"{_brief(sorted(extra, key=repr))}")
+                                 f"{_brief_items(sorted(extra, key=_shown))}")
             else:
                 for key in extra:
                     yield from self._evaluate(value[key], extra_schema, path + (key,))
