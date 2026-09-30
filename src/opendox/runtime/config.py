@@ -1723,6 +1723,15 @@ def state_dir(env: Mapping[str, str] | None = None) -> Path:
             f"{setting} is unset and this process has no home directory to "
             "put the default under (no HOME, and no password entry for the "
             f"user). Set {setting} to an absolute path") from None
+    if not home.is_absolute():
+        # `Path.home()` returns HOME as given, and a relative one would give
+        # the serving process and a `runtime status` run from another
+        # directory two different sockets (Copilot review of openDox-code#69).
+        raise ConfigurationError(
+            f"{setting} is unset and HOME is {str(home)!r}, which is not an "
+            "absolute path, so the default state directory would depend on "
+            f"the working directory. Set {setting} to an absolute path, or "
+            "HOME to one")
     return home / ".local" / "state" / "opendox"
 
 

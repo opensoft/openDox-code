@@ -80,6 +80,7 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import re
 import stat
 import sys
@@ -97,6 +98,7 @@ from opendox.runtime.config import (
     ConfigurationError,
     redacted_url,
     RuntimeSettings,
+    install_mode,
     load_migration_settings,
     load_settings,
     migration_database_url,
@@ -1225,6 +1227,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _isolated_when_local() -> contextlib.AbstractContextManager[None]:
+    """A LOCAL install's verbs run with libpq's `PG*` defaults out of reach.
+
+    The bundle's DSNs name their socket, but libpq fills everything else from
+    the environment, and `PGHOSTADDR` alone would send `status` or `migrate`
+    to a TCP server instead (Copilot review of openDox-code#69; see
+    `bundle.isolated_from_libpq_environment`). A hosted install's operator
+    configures libpq as they please, as before (13.6). A selector that cannot
+    be read isolates nothing; the verb refuses it by name.
+    """
+    try:
+        local = install_mode(os.environ) == INSTALL_MODE_LOCAL
+    except ConfigurationError:
+        local = False
+    if not local:
+        return contextlib.nullcontext()
+    from opendox.runtime import bundle as bundle_mod
+
+    return bundle_mod.isolated_from_libpq_environment()
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse and dispatch, and NEVER let a traceback be the whole answer.
 
@@ -1240,7 +1263,8 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = build_parser().parse_args(argv)
     try:
-        return int(args.func(args))
+        with _isolated_when_local():
+            return int(args.func(args))
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001

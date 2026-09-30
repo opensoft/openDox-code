@@ -169,14 +169,15 @@ def _first_url(child: subprocess.Popen, seconds: float) -> str | None:
     return None
 
 
-def _launch(corpus: Path, state: Path, run_dir: Path) -> tuple[subprocess.Popen, str]:
+def _launch(corpus: Path, state: Path, run_dir: Path,
+            **extra: str) -> tuple[subprocess.Popen, str]:
     """`generate-and-open --local` in the BACKGROUND, and the URL it serves."""
     child = subprocess.Popen(
         [sys.executable, str(DRIVER), "generate-and-open", config.LOCAL_FLAG,
          "--repo-root", str(corpus), "--repository", "fixture",
          "--run-dir", str(run_dir), "--no-open", "--no-validate",
          "--port", "0"],
-        env=_clean_env(**{STATE: str(state)}), cwd=ROOT,
+        env=_clean_env(**{STATE: str(state)}, **extra), cwd=ROOT,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     url = _first_url(child, 90)
     if url is None:
@@ -211,12 +212,12 @@ def test_the_launch_helper_is_bounded_by_its_deadline_not_by_the_child() -> None
         talker.communicate(timeout=10)
 
 
-def _status(state: Path) -> tuple[int, dict]:
+def _status(state: Path, **extra: str) -> tuple[int, dict]:
     """`OPENDOX_INSTALL_MODE=local opendox-runtime runtime status`, a SECOND process."""
     done = subprocess.run(
         [sys.executable, "-m", "opendox.runtime.cli", "runtime", "status",
          "--probe-timeout", "10"],
-        env=_clean_env(**{MODE: "local", STATE: str(state)}), cwd=ROOT,
+        env=_clean_env(**{MODE: "local", STATE: str(state)}, **extra), cwd=ROOT,
         capture_output=True, text=True, timeout=60)
     return done.returncode, json.loads(done.stdout)
 
@@ -341,6 +342,33 @@ def test_the_entry_point_owns_a_migrated_server_with_no_tcp_listener(
     assert _wait_gone(pid), "the bundled server outlived its entry point"
     assert config.DatabaseBundle(state_dir).data_dir.joinpath("PG_VERSION").is_file(), \
         "the data directory must survive a stop: it is the install's database"
+
+
+#: libpq defaults that, READ, would move the bundle's connections: to an
+#: unroutable TCP address (TEST-NET-1, RFC 5737), through a service that does
+#: not exist, and into a schema that does not either.
+HOSTILE_LIBPQ = {"PGHOSTADDR": "192.0.2.1", "PGSERVICE": "no-such-service-odx",
+                 "PGOPTIONS": "-c search_path=nowhere"}
+
+
+def test_libpq_defaults_in_the_environment_never_reach_the_bundle(
+        corpus: Path, state_dir: Path, tmp_path: Path) -> None:
+    """`PGHOSTADDR` outranks a DSN's socket `host`, `PGSERVICE` fills
+    parameters from a service file, and `PGOPTIONS` sets the session's
+    parameters. With all three set, the entry point still starts, migrates
+    and serves ITS OWN server, and `runtime status` in a second process still
+    finds it (Copilot review of openDox-code#69)."""
+    server, url = _launch(corpus, state_dir, tmp_path / "run", **HOSTILE_LIBPQ)
+    try:
+        code, status = _status(state_dir, **HOSTILE_LIBPQ)
+        assert status.get("database") == "reachable", status
+        assert status.get("applied_migrations") and \
+            not status.get("pending_migrations"), status
+        assert code == 0 and status["ok"] is True, status
+    finally:
+        server.send_signal(signal.SIGTERM)
+        server.communicate(timeout=60)
+    assert server.returncode == 0, server.returncode
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"),

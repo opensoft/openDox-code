@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -334,6 +335,129 @@ def test_no_home_for_the_default_state_dir_is_refused_by_name(
     assert STATE in str(caught.value), caught.value
 
 
+def test_a_relative_home_for_the_default_state_dir_is_refused_by_name(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """`Path.home()` returns HOME as given; a relative one would put the
+    socket wherever each process happens to run (Copilot review of #69)."""
+    monkeypatch.setenv("HOME", "relative-home")
+    with pytest.raises(config.ConfigurationError) as caught:
+        config.state_dir({})
+    assert STATE in str(caught.value) and "HOME" in str(caught.value)
+    # an absolute XDG_STATE_HOME still answers without HOME at all
+    assert config.state_dir({"XDG_STATE_HOME": "/srv/state"}) == \
+        Path("/srv/state/opendox")
+
+
+# -- libpq's environment, out of reach ---------------------------------------
+
+
+def test_libpq_defaults_are_lifted_for_the_duration_and_put_back(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PGHOSTADDR", "192.0.2.1")
+    monkeypatch.setenv("PGSERVICE", "no-such-service-odx")
+    monkeypatch.setenv("OPENDOX_NOT_LIBPQ", "kept")
+    with bundle_mod.isolated_from_libpq_environment():
+        assert not [name for name in os.environ if name.startswith("PG")]
+        assert os.environ["OPENDOX_NOT_LIBPQ"] == "kept"
+    assert os.environ["PGHOSTADDR"] == "192.0.2.1"
+    assert os.environ["PGSERVICE"] == "no-such-service-odx"
+
+
+def test_the_runtime_cli_isolates_only_a_local_install(
+        monkeypatch: pytest.MonkeyPatch, scrubbed) -> None:
+    from opendox.runtime import cli as runtime_cli
+
+    seen: dict = {}
+
+    def _verb(args) -> int:
+        seen["PGHOSTADDR"] = os.environ.get("PGHOSTADDR")
+        return 0
+
+    monkeypatch.setenv("PGHOSTADDR", "192.0.2.1")
+    parser = runtime_cli.build_parser()
+    monkeypatch.setattr(runtime_cli, "build_parser", lambda: parser)
+    real_parse = parser.parse_args
+
+    def _parse(argv=None):
+        args = real_parse(argv)
+        args.func = _verb
+        return args
+
+    monkeypatch.setattr(parser, "parse_args", _parse)
+    scrubbed.setenv(MODE, "local")
+    assert runtime_cli.main(["runtime", "status"]) == 0
+    assert seen["PGHOSTADDR"] is None, "a local verb saw PGHOSTADDR"
+    scrubbed.setenv(MODE, "hosted")
+    assert runtime_cli.main(["runtime", "status"]) == 0
+    assert seen["PGHOSTADDR"] == "192.0.2.1", "a hosted verb lost its libpq setting"
+    assert os.environ["PGHOSTADDR"] == "192.0.2.1"
+
+
+# -- the socket's path, this user's to change -----------------------------------
+
+
+def _prepared(monkeypatch, tmp_path: Path, state: Path) -> bundle_mod.BundledServer:
+    binaries = _binaries(tmp_path, initdb='echo "initdb reached" >&2; exit 1')
+    monkeypatch.setattr(bundle_mod, "server_binaries", lambda: binaries)
+    return bundle_mod.BundledServer(_local(state))
+
+
+def test_a_state_dir_others_can_write_is_refused(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    short_state.chmod(0o777)
+    server = _prepared(monkeypatch, tmp_path, short_state)
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert "writable by every user" in str(caught.value), caught.value
+    assert str(short_state) in str(caught.value)
+
+
+@pytest.mark.parametrize("which", ["postgres", "run"])
+def test_a_symlink_inside_the_state_tree_is_refused_and_its_target_untouched(
+        monkeypatch, tmp_path: Path, short_state: Path, which: str) -> None:
+    target = tmp_path / "somewhere-else"
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
+    if which == "postgres":
+        (short_state / "postgres").symlink_to(target)
+    else:
+        (short_state / "postgres").mkdir(mode=0o700)
+        (short_state / "postgres" / "run").symlink_to(target)
+    server = _prepared(monkeypatch, tmp_path, short_state)
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert "symbolic link" in str(caught.value), caught.value
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755, "the link's target was re-moded"
+
+
+def test_an_ancestor_every_user_can_write_without_the_sticky_bit_is_refused(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    open_dir = short_state / "open"
+    open_dir.mkdir()
+    open_dir.chmod(0o777)
+    server = _prepared(monkeypatch, tmp_path, open_dir / "state")
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert str(open_dir) in str(caught.value) and "not sticky" in str(caught.value)
+
+
+def test_a_sticky_or_own_group_ancestor_is_accepted(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    """The positive controls: `/tmp`'s shape (every user, sticky) and a
+    umask-002 system's shape (this user's own group). The start gets past
+    the tree and reaches `initdb`, which the stand-in fails on purpose."""
+    sticky = short_state / "sticky"
+    sticky.mkdir()
+    sticky.chmod(0o1777)
+    group = sticky / "group"
+    group.mkdir()
+    group.chmod(0o775)
+    server = _prepared(monkeypatch, tmp_path, group / "state")
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert "initdb" in str(caught.value), caught.value
+
+
 # -- the two refusal classes, each with its own reason --------------------------
 
 
@@ -366,6 +490,24 @@ def test_both_classes_together_name_both_reasons() -> None:
                      "authentication", "bundles"):
         assert fragment in message, (fragment, message)
     assert "hunter2" not in message
+
+
+@pytest.mark.parametrize("found", ["absent", "no-locations"])
+def test_a_missing_server_package_is_the_named_refusal(
+        monkeypatch: pytest.MonkeyPatch, found: str) -> None:
+    """No `pgserver` at all, or a spec with no location: both are the one
+    refusal naming the `local` extra, never an `IndexError`."""
+    import importlib.machinery
+
+    spec = None
+    if found == "no-locations":
+        spec = importlib.machinery.ModuleSpec("pgserver", None, is_package=True)
+        spec.submodule_search_locations = []
+    monkeypatch.setattr(bundle_mod.importlib.util, "find_spec",
+                        lambda name: spec)
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        bundle_mod.server_binaries()
+    assert 'opendox[local]' in str(caught.value), caught.value
 
 
 # -- initdb, and every phase of a start ---------------------------------------

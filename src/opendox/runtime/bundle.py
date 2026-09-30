@@ -59,15 +59,18 @@ inside the functions that connect, like every other module the
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import importlib.util
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -115,14 +118,17 @@ def server_binaries() -> Path:
     object under the user's runtime directory as a side effect.
     """
     spec = importlib.util.find_spec(SERVER_DISTRIBUTION)
-    locations = list(spec.submodule_search_locations or ()) if spec else []
-    if not locations:
+    # THE FIRST LOCATION, OR NONE, read without an index, so no path reaches
+    # a subscript that could raise (SonarCloud S6466 on openDox-code#69).
+    location = next(iter(spec.submodule_search_locations or ()), None) \
+        if spec else None
+    if location is None:
         raise BundleRefused(
             "the local install's PostgreSQL server is not installed: it "
             "arrives with the `local` extra, `pip install \"opendox[local]\"` "
             "(R1Q16 (iii)). A local install brings its own database and never "
             "borrows one")
-    binaries = Path(locations[0]) / "pginstall" / "bin"
+    binaries = Path(location) / "pginstall" / "bin"
     missing = [name for name in ("initdb", "postgres")
                if not os.access(binaries / name, os.X_OK)]
     if missing:
@@ -263,6 +269,35 @@ def _child_environment() -> dict[str, str]:
             if not name.startswith("PG")}
 
 
+@contextlib.contextmanager
+def isolated_from_libpq_environment() -> Iterator[None]:
+    """Run a LOCAL install's client side with libpq's `PG*` defaults out of reach.
+
+    libpq fills every connection parameter a DSN leaves unset from the
+    process environment. Some of those parameters move the connection
+    somewhere else. `PGHOSTADDR` outranks the DSN's socket `host` and sends
+    it to a TCP server. `PGSERVICE` fills parameters from a service file.
+    `PGOPTIONS` sets session parameters, a `search_path` among them. The
+    bundle's DSNs name their socket, port, user and database, but they
+    cannot name every parameter libpq has, and an explicitly empty `service`
+    is itself an error. So a local install's process reads NONE of them while
+    it runs its database: they are lifted out of `os.environ` for the
+    duration and put back afterwards (Copilot review of openDox-code#69).
+    `_child_environment` already does the same for `initdb` and the server.
+
+    For the process's own entry points only: `generate-and-open --local`
+    around its whole lifecycle, and the runtime CLI's verbs under `local`.
+    Nothing else in those processes speaks libpq.
+    """
+    lifted = {name: os.environ.pop(name) for name in
+              [name for name in os.environ if name.startswith("PG")]}
+    try:
+        yield
+    finally:
+        for name, value in lifted.items():
+            os.environ.setdefault(name, value)
+
+
 def _die_with_parent():
     """A `preexec_fn` that signals the server when its parent goes away (iv).
 
@@ -289,6 +324,33 @@ def _die_with_parent():
             os._exit(1)
 
     return _preexec
+
+
+def _unsafe_because(info: os.stat_result, *, uid: int, gid: int,
+                    own: bool) -> str | None:
+    """Why one directory of the socket's path is unsafe, or `None`."""
+    mode = info.st_mode
+    if stat.S_ISLNK(mode):
+        return "is a symbolic link"
+    if not stat.S_ISDIR(mode):
+        return "is not a directory"
+    if own:
+        if info.st_uid != uid:
+            return f"is owned by uid {info.st_uid}, not by this user"
+        if mode & 0o022:
+            return (f"is writable by {'every user' if mode & 0o002 else 'its group'}"
+                    f" (mode {stat.S_IMODE(mode):o})")
+        return None
+    if info.st_uid not in (uid, 0):
+        return f"is owned by uid {info.st_uid}, neither this user nor root"
+    sticky = bool(mode & stat.S_ISVTX)
+    if mode & 0o002 and not sticky:
+        return (f"is writable by every user and is not sticky "
+                f"(mode {stat.S_IMODE(mode):o})")
+    if mode & 0o020 and info.st_gid != gid and not sticky:
+        return (f"is writable by group {info.st_gid}, which is not this "
+                f"user's own, and is not sticky (mode {stat.S_IMODE(mode):o})")
+    return None
 
 
 class BundledServer:
@@ -381,7 +443,46 @@ class BundledServer:
         for directory in (self.bundle.state_dir, self.bundle.data_dir.parent):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.bundle.socket_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # CHECKED BEFORE THE CHMOD, which follows a symbolic link: a `run`
+        # placed there as a link would otherwise have its TARGET re-moded.
+        self._refuse_an_unsafe_tree()
         os.chmod(self.bundle.socket_dir, 0o700)
+
+    def _refuse_an_unsafe_tree(self) -> None:
+        """The socket's whole path is this user's to change, or it is refused.
+
+        `trust` makes reaching the socket the credential, so the 0700 on the
+        socket directory is worth only what the directories above it are
+        worth. A directory entry is controlled by its PARENT. A parent that
+        another user can write lets them rename `run` away, or put a symbolic
+        link in its place, after the mode is set (Copilot review of
+        openDox-code#69). So, over the RESOLVED path, which a user's own
+        symbolic link in `OPENDOX_STATE_DIR` may lead to:
+
+          * this install's own tree, the state directory, `postgres/` and
+            `run/`, must be real directories, owned by this user and writable
+            by no one else;
+          * every directory above it must be owned by this user or by root.
+            One that every user can write must be sticky, as `/tmp` is, so
+            nobody can rename what is not theirs. One that its group can
+            write must be sticky too, unless the group is this user's own,
+            which is how a umask-002 system creates the user's directories.
+        """
+        uid, gid = os.getuid(), os.getgid()
+        state = self.bundle.state_dir.resolve()
+        own = [state, state / self.bundle.socket_dir.parent.name,
+               state / self.bundle.socket_dir.parent.name / self.bundle.socket_dir.name]
+        for directory, mine in [(path, True) for path in own] + \
+                [(path, False) for path in state.parents]:
+            info = os.lstat(directory)
+            reason = _unsafe_because(info, uid=uid, gid=gid, own=mine)
+            if reason is not None:
+                raise BundleRefused(
+                    f"{directory} {reason}, so another user could replace the "
+                    "bundled server's socket directory, and reaching that "
+                    "socket is the only credential the server asks for. Use a "
+                    f"state directory only this user can change ({PREFIX}"
+                    "STATE_DIR)")
 
     #: The prefix an initialization attempt's directory carries, beside the
     #: data directory, followed by the pid of the process making it.
@@ -599,5 +700,6 @@ class BundledServer:
         self.stop()
 
 
-__all__ = ["BUNDLE_PORT", "BundleRefused", "BundledServer", "report",
-           "running_pid", "server_binaries"]
+__all__ = ["BUNDLE_PORT", "BundleRefused", "BundledServer",
+           "isolated_from_libpq_environment", "report", "running_pid",
+           "server_binaries"]

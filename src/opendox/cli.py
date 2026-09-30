@@ -508,6 +508,17 @@ def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -
     _refuse_malformed_generated_at(args)
     server = bundle_mod.BundledServer(settings)
     args.database_bundle = server
+    # NO `PG*` DEFAULT REACHES THE BUNDLE'S CONNECTIONS while this process
+    # runs its database (Copilot review of openDox-code#69): see
+    # `bundle.isolated_from_libpq_environment`.
+    with bundle_mod.isolated_from_libpq_environment():
+        return _run_the_local_lifecycle(args, server, opener=opener)
+
+
+def _run_the_local_lifecycle(args: argparse.Namespace, server, *, opener) -> int:
+    """Start the bundled server, generate and serve, and stop it, however
+    this ends: a served run ended by Ctrl-C or SIGTERM, a `--no-serve` run, a
+    refusal, a failure, or an interrupt before anything was served."""
     try:
         previous = signal.signal(signal.SIGTERM, _terminate_as_interrupt)
     except ValueError:                  # not the main thread: no handler to own
