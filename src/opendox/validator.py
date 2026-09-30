@@ -421,6 +421,32 @@ def _holds_itself(value: Any) -> bool:
     return False
 
 
+def _first_non_json(value: Any) -> str | None:
+    """What in `value` is not a JSON value, or None where all of it is: text,
+    a whole or finite number, true, false, null, and lists and mappings of
+    them whose keys are text. Walked without recursing; the caller has
+    already refused a value that contains itself."""
+    work: list[Any] = [value]
+    while work:
+        node = work.pop()
+        if node is None or isinstance(node, (bool, str)):
+            continue
+        if _is_number(node):
+            if not _is_bound(node):
+                return f"the non-finite number {node!r}"
+            continue
+        if isinstance(node, list):
+            work.extend(node)
+        elif isinstance(node, dict):
+            for key, child in node.items():
+                if not isinstance(key, str):
+                    return f"a mapping key that is not text ({_brief(key)})"
+                work.append(child)
+        else:
+            return f"a {type(node).__name__} ({_brief(node)})"
+    return None
+
+
 _DATE_TIME = re.compile(
     r"([0-9]{4})-(0[1-9]|1[0-2])-([0-9]{2})T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
     r"(?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])")
@@ -807,6 +833,16 @@ class KindValidator:
                 raise self._not_evaluable(
                     f"{where}'s {keyword} holds a value that contains itself, "
                     "which no JSON value does")
+            # AND ONLY JSON VALUES (Copilot at openDox-code#58 cb40b977,
+            # r4139739110). YAML builds sets, bytes and dates, which no JSON
+            # value is, and a `const: !!set {a: null}` would otherwise build
+            # and accept an equal set. Checked after the cycle test, so the
+            # walk ends.
+            stray = _first_non_json(node[keyword]) if keyword in node else None
+            if stray is not None:
+                raise self._not_evaluable(
+                    f"{where}'s {keyword} holds {stray}, which is not a JSON "
+                    "value")
         for keyword, value in node.items():
             shape = _SHAPES.get(keyword)
             if shape is not None and not shape[0](value):

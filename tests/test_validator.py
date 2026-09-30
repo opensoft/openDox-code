@@ -444,6 +444,29 @@ def test_a_const_or_enum_that_contains_itself_is_refused() -> None:
         assert "contains itself, which no JSON value does" in str(refused.value)
 
 
+@pytest.mark.parametrize("text,what", [
+    ("!!set {a: null}", "a set"),
+    ("!!binary aGk=", "a bytes"),
+    ("2026-09-30", "a date"),
+    ("[1, {2: x}]", "a mapping key that is not text"),
+    ("{a: [.inf]}", "the non-finite number inf"),
+    ("[.nan]", "the non-finite number nan"),
+], ids=["set", "binary", "date", "int-key", "inf", "nan"])
+def test_a_const_or_enum_that_holds_a_value_json_has_not_is_refused(text, what) -> None:
+    """YAML builds values JSON has not: sets, bytes, dates, non-text keys and
+    non-finite numbers. A `const` or `enum` holding one is refused when built,
+    anywhere inside the value (Copilot at openDox-code#58 cb40b977,
+    r4139739110). Before, `const: !!set {a: null}` built and accepted an
+    equal set. A JSON value, nested, still builds."""
+    value = yaml.safe_load(text)
+    for schema in ({"const": value}, {"enum": ["ok", value]}):
+        with pytest.raises(V.SchemaNotEvaluable) as refused:
+            _built({"properties": {"a": schema}})
+        assert what in str(refused.value) and "is not a JSON value" in str(refused.value)
+    nested = yaml.safe_load("{a: [1, 2.5, true, null, {b: text}]}")
+    assert _found({"const": nested}, nested) == set()
+
+
 def test_values_of_any_depth_are_compared_without_recursing() -> None:
     """JSON equality is judged on a flat canon, built without recursing. So
     neither a deep schema value nor a deep instance exhausts Python's stack
