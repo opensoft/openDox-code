@@ -40,10 +40,10 @@ WHAT IT REPORTS. The projection's notices go to standard error, one line each,
 six role keys is one (R1Q13 (a)): the line names the document, the value and
 the six keys, and the snapshot reads that document as a source.
 
-NO VERB REACHES IT YET. The generate verbs still call the consumer's generator,
-through `consumer_reach`, until T055 routes them through the seam (T055 comes
-after T054, in `cli.py`'s and `serve.py`'s single-writer order). Until then a
-library caller reaches it through the seam, `generator_seam.generate()`.
+THE VERBS REACH IT THROUGH THE SEAM. Since plan 034's T055 the generate verbs
+and the local regenerate generate through `generator_seam.generate()`, so a
+process where no host registered a generator of its own generates with this
+one. A library caller reaches it the same way.
 
 HOW IT IS REGISTERED: by the entry points, and never at import (R1Q3 (a)'s
 pattern). `cli.build_parser()`, `cli.main()`, `serve.build_server()` and

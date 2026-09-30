@@ -14,11 +14,12 @@ names the same gap from the other side. The injection that would retire its
 implementation"*, *"does not exist yet and is BUILD-arc work"*. This module is
 that declaration (plan 034's T052).
 
-IT ROUTES NOTHING YET. The generate verbs still call the consumer's generator
-through `consumer_reach` until plan 034's T055 routes them through `generate()`
-below. T055 comes after T054, which builds openDox's own projection. So from
-the day a verb generates through this seam, openDox's own generator can
-generate.
+WHAT GENERATES THROUGH IT. Since plan 034's T055 the generate verbs
+(`cli._generate_and_write`, `cli._gate_snapshot`) and the local regenerate of
+openDox's own snapshot source (`default_registry.SnapshotSource.refresh`) call
+`generate()` below, looking the generator up on each call. T055 came after
+T054, which built openDox's own projection, so the day a verb first generated
+through this seam, openDox's own generator could generate.
 
 `CorpusAdapter` IS NOT IT, AND STAYS CLOSED AT SIX MEMBERS. The corpus-read
 interface (`corpus_adapter.py`) declares `resolve`, `list_documents`, `read`,
