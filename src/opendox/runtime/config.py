@@ -85,10 +85,23 @@ SETTINGS: tuple[Setting, ...] = (
         "the PRIVILEGED DSN ordered-SQL migrations are applied with, used by "
         "`opendox runtime migrate` alone and never by the served application",
     ),
+    # THE INSTALL SHAPE, READ BESIDE THE ISSUER IT DECIDES ABOUT (plan 034
+    # T070; #1144 13.4, 13.5). Not `required`: its default is the SAFE value,
+    # and "unset" is the case 13.4 names as the one that must be safe.
+    Setting(
+        PREFIX + "INSTALL_MODE", "hosted", False, False,
+        "the install shape: `hosted` (the default — the broker, the pinned "
+        "issuer and an operator's database, exactly as before) or `local` "
+        "(one user, no broker, loopback only). `generate-and-open --local` "
+        "makes the same selection; the two may not disagree, and with "
+        "neither the install is hosted, so a hosted install with no issuer "
+        "refuses rather than falling into local mode (13.4, 13.5)",
+    ),
     Setting(
         PREFIX + "OIDC_ISSUER", None, True, False,
         "the Keycloak broker's issuer, pinned: a token from any other issuer "
-        "is refused rather than trusted (RULING Q2)",
+        "is refused rather than trusted (RULING Q2). Required by a HOSTED "
+        "install; a LOCAL install has no broker and refuses one given here",
     ),
     Setting(
         PREFIX + "OIDC_AUDIENCE", None, True, False,
@@ -188,10 +201,19 @@ class RuntimeSettings:
     docker-compose.yaml`'s `opendox` service and `docs/runtime.md` § 3 never
     supply it, and `load_migration_settings` is the loader that actually
     requires one (unaffected by this: it already refused to load without one).
+
+    `install_mode` is `INSTALL_MODE_HOSTED` or `INSTALL_MODE_LOCAL` (plan 034
+    T070; #1144 13.4). A LOCAL install has no broker, so its `oidc_issuer` and
+    `oidc_audience` are EMPTY and its `oidc_jwks_url` is `None` — never a
+    placeholder that looks like an endpoint — and `jwks_url()` and
+    `discovery_url()` answer the empty string for it rather than a path glued
+    onto nothing. A hosted install always carries a real issuer, because
+    `load_settings` refuses one without it.
     """
 
     database_url: str
     migration_database_url: str | None
+    install_mode: str
     oidc_issuer: str
     oidc_audience: str
     oidc_jwks_url: str | None
@@ -213,6 +235,7 @@ class RuntimeSettings:
             "RuntimeSettings(database_url=<redacted>, "
             "migration_database_url="
             f"{'<redacted>' if self.migration_database_url else 'None'}, "
+            f"install_mode={self.install_mode!r}, "
             # REDACTED TOO, and not because `load_settings` allows userinfo
             # here — it refuses it. A `RuntimeSettings` built by hand, in a
             # test or by a future caller, does not go through that door, and
@@ -241,13 +264,25 @@ class RuntimeSettings:
         it saves one variable in the common case; setting it explicitly is what
         a broker behind a rewriting proxy needs, which is why the variable
         exists at all rather than the URL always being computed.
+
+        EMPTY FOR A LOCAL INSTALL, which has no issuer to derive one from
+        (plan 034 T070): the derivation would otherwise answer the bare path
+        `/protocol/openid-connect/certs`, which `status` would print as if it
+        were a configured endpoint.
         """
         if self.oidc_jwks_url:
             return self.oidc_jwks_url
+        if not self.oidc_issuer:
+            return ""
         return self.oidc_issuer.rstrip("/") + "/protocol/openid-connect/certs"
 
     def discovery_url(self) -> str:
-        """The issuer's discovery document, for `opendox runtime status`."""
+        """The issuer's discovery document, for `opendox runtime status`.
+
+        Empty for a local install, for the reason `jwks_url` gives.
+        """
+        if not self.oidc_issuer:
+            return ""
         return self.oidc_issuer.rstrip("/") + "/.well-known/openid-configuration"
 
 
@@ -1488,7 +1523,171 @@ def _refuse_two_dsns_that_select_different_schemas(
         "carries a password)")
 
 
-def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
+#: THE TWO INSTALL SHAPES (plan 034 T070; #1144 13.4). One selector decides
+#: the whole shape at once — the identity mode here, and the datastore source
+#: 13.1 adds — because requirements 12 and 13 both describe "the standalone
+#: install" and one deliberate choice should decide both.
+INSTALL_MODE_HOSTED = "hosted"
+INSTALL_MODE_LOCAL = "local"
+INSTALL_MODES: tuple[str, ...] = (INSTALL_MODE_LOCAL, INSTALL_MODE_HOSTED)
+
+#: The flag that makes the same selection as `OPENDOX_INSTALL_MODE=local`,
+#: spelled ONCE: `opendox.cli` declares `generate-and-open`'s option with this
+#: constant, and every refusal below names it with the same one (R1Q15 (b), as
+#: T007 batch H's 13.4 addendum reads).
+LOCAL_FLAG = "--local"
+
+#: LOOPBACK, AS THE DOCUMENT SERVER ALREADY JUDGES IT. `serve.py` makes its
+#: `session` capability conditional on a bind in exactly this set
+#: (`serve.LOOPBACK_HOSTS`), and 13.4 asks the local mode to "make the same
+#: judgement at the mode's own boundary" — so it is the same set, not
+#: `_is_loopback` above: that one reads `127.0.0.0/8` as loopback, and a local
+#: install bound to `127.0.0.2` would then pass here while the server it starts
+#: treats that very bind as off-loopback. This module cannot import `serve`
+#: (the import weight in `opendox/runtime/__init__.py`), so the set is spelled
+#: here and `tests_runtime/test_install_mode.py` holds it equal to serve's.
+LOCAL_BIND_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
+
+#: THE SETTINGS ONLY A HOSTED INSTALL READS. Given beside the local mode, each
+#: is REFUSED, by name (a holder reading on openxFactory#656, plan 034 T070,
+#: the same fail-closed reading as the disagreeing flag and setting): an issuer
+#: next to `local` says a broker was meant, and honouring `local` over it would
+#: silently drop the authentication the operator configured. T072 adds the two
+#: DSNs, which the local install supplies itself (13.1).
+HOSTED_ONLY_SETTINGS: tuple[str, ...] = (
+    PREFIX + "OIDC_ISSUER",
+    PREFIX + "OIDC_AUDIENCE",
+    PREFIX + "OIDC_JWKS_URL",
+)
+
+
+def install_mode(env: Mapping[str, str] | None = None, *,
+                 local_flag: bool = False) -> str:
+    """`INSTALL_MODE_LOCAL` or `INSTALL_MODE_HOSTED`, or a refusal naming why.
+
+    THE DEFAULT IS HOSTED, and it is the default because it is the safe one
+    (#1144 13.4: "It is UNSET, not `local`, that must be safe"): an install
+    that sets nothing is hosted, and a hosted install with no issuer refuses
+    (13.5), so single-user operation is never reached by forgetting to
+    configure something. A BLANK value is unset, the reading `_optional` gives
+    every other setting.
+
+    `local_flag` is `generate-and-open --local` (R1Q15 (b)). It selects local
+    exactly as `OPENDOX_INSTALL_MODE=local` does, and the two may not
+    DISAGREE: `--local` beside `OPENDOX_INSTALL_MODE=hosted` is refused naming
+    both, so no explicit selection is silently overridden by the other. No
+    answer on #656 rules that pair; the refusal is plan 034's fail-closed
+    reading (Principle VII, T070), recorded for Brett in
+    `evidence/analyze-round-2.md` and NOT written into #1144.
+
+    AN UNRECOGNISED VALUE IS REFUSED, matched case-sensitively (a holder
+    reading on #656, T070): `Local` or `single-user` is not a spelling of
+    either shape, and guessing which one was meant is the one thing a
+    selector whose default is a safety property must not do.
+    """
+    env = os.environ if env is None else env
+    setting = PREFIX + "INSTALL_MODE"
+    raw = env.get(setting, "").strip()
+    if raw and raw not in INSTALL_MODES:
+        raise ConfigurationError(
+            f"{setting} is {raw!r}, which is neither `local` nor `hosted` (the "
+            "two values are matched exactly, case included). Unset means "
+            "hosted; a single-user install selects `local` explicitly, with "
+            f"{setting}=local or `generate-and-open {LOCAL_FLAG}`")
+    if local_flag and raw == INSTALL_MODE_HOSTED:
+        raise ConfigurationError(
+            f"{LOCAL_FLAG} selects the LOCAL install and {setting}=hosted "
+            "selects the HOSTED one. Both are explicit selections and they "
+            "disagree, so neither is allowed to override the other: drop the "
+            f"flag for a hosted install, or unset {setting} (or set it to "
+            "`local`) for a local one")
+    if local_flag:
+        return INSTALL_MODE_LOCAL
+    return raw or INSTALL_MODE_HOSTED
+
+
+def refuse_a_non_loopback_local_bind(name: str, host: str) -> None:
+    """A LOCAL install binds loopback only, with NO opt-in (#1144 13.4).
+
+    `name` is what set the address — `--host` on `generate-and-open`, or
+    `OPENDOX_BIND_HOST` for the runtime's own listener — so the refusal names
+    the thing the operator actually typed. The local mode has no broker, so a
+    local install other machines can reach is an unauthenticated multi-user
+    service wearing the word "local"; an install that must be reachable from
+    another machine is a HOSTED install, with a broker.
+    """
+    if host in LOCAL_BIND_HOSTS:
+        return
+    raise ConfigurationError(
+        f"{name} {host!r} is not a loopback address, and a LOCAL install binds "
+        f"LOOPBACK ONLY ({', '.join(sorted(LOCAL_BIND_HOSTS))}). The local "
+        "mode has no identity broker, so a local install another machine can "
+        "reach would be an unauthenticated multi-user service. There is no "
+        "opt-in: an install that must be reachable from another machine is a "
+        "HOSTED install, with a broker (13.4)")
+
+
+def refuse_what_a_local_install_cannot_be(env: Mapping[str, str]) -> None:
+    """The two refusals a LOCAL install makes of its own environment.
+
+    Every hosted-only setting given beside it (`HOSTED_ONLY_SETTINGS`), and a
+    non-loopback `OPENDOX_BIND_HOST`, the runtime's own listener. One function,
+    because `load_settings` and `generate-and-open --local` both ask it and the
+    two must not come to disagree about what a local install is.
+    """
+    _refuse_hosted_only_settings(env)
+    refuse_a_non_loopback_local_bind(
+        PREFIX + "BIND_HOST",
+        _optional(env, _by_name(PREFIX + "BIND_HOST")) or "127.0.0.1")
+
+
+def _refuse_hosted_only_settings(env: Mapping[str, str]) -> None:
+    """Every setting in `HOSTED_ONLY_SETTINGS` given beside `local`, named."""
+    given = [name for name in HOSTED_ONLY_SETTINGS
+             if env.get(name, "").strip()]
+    if given:
+        raise ConfigurationError(
+            f"{' and '.join(given)} {'are' if len(given) > 1 else 'is'} set, "
+            "and this is a LOCAL install, which has no broker and reads "
+            f"{'none of them' if len(given) > 1 else 'none'}. A broker "
+            "setting beside the local mode says a HOSTED install was meant, "
+            "and honouring `local` over it would silently drop that "
+            f"authentication: unset {'them' if len(given) > 1 else 'it'} for "
+            f"a local install, or drop {LOCAL_FLAG} / "
+            f"{PREFIX}INSTALL_MODE=local for a hosted one (the values are not "
+            "repeated here)")
+
+
+def require_the_hosted_issuer(env: Mapping[str, str] | None = None) -> None:
+    """A HOSTED install with no issuer refuses, NAMING THE ISSUER (#1144 13.5).
+
+    `load_settings` asks for the served DSN before it asks for the issuer, so
+    a hosted `generate-and-open` run with NOTHING configured would otherwise
+    be refused naming `OPENDOX_DATABASE_URL` — true, and not the refusal 13.5
+    and plan 034's requirement-13 scenario ask for, which is the one that
+    tells an operator this install is HOSTED and how to select the other one.
+    So the document server's entry point asks this first, and `load_settings`
+    keeps its own order for every verb that already relies on it (13.6: the
+    hosted mode is otherwise unchanged).
+    """
+    env = os.environ if env is None else env
+    issuer = PREFIX + "OIDC_ISSUER"
+    if env.get(issuer, "").strip():
+        return
+    selected = (f"{PREFIX}INSTALL_MODE=hosted"
+                if env.get(PREFIX + "INSTALL_MODE", "").strip()
+                else f"{PREFIX}INSTALL_MODE is unset, and unset means hosted")
+    raise ConfigurationError(
+        f"{issuer} is required and is not set, and this install is HOSTED "
+        f"({selected}). A hosted install authenticates through the broker "
+        "whose issuer this names, and it does NOT fall back to single-user "
+        "operation without one (13.5). A single-user install selects the "
+        f"local mode explicitly: `generate-and-open {LOCAL_FLAG}` or "
+        f"{PREFIX}INSTALL_MODE=local")
+
+
+def load_settings(env: Mapping[str, str] | None = None, *,
+                  local_flag: bool = False) -> RuntimeSettings:
     """Resolve :class:`RuntimeSettings` from `env` (default `os.environ`).
 
     Refuses with :class:`ConfigurationError` naming the variable — never with a
@@ -1512,9 +1711,22 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
     checks below still apply: a non-PostgreSQL migration DSN is refused
     (13.2), and the two being the exact same value is refused (13.3) —
     optional does not mean unchecked.
+
+    THE INSTALL MODE FIRST (plan 034 T070; #1144 13.4-13.6). `local_flag` is
+    `generate-and-open --local`, resolved against `OPENDOX_INSTALL_MODE` by
+    `install_mode`, which refuses the two disagreeing. A HOSTED install — the
+    default — is exactly what this function has always loaded, in the same
+    order, with the issuer and audience required (13.6). A LOCAL install needs
+    no broker: its issuer, audience and key-set URL are empty, and any of the
+    three GIVEN beside it is refused (`HOSTED_ONLY_SETTINGS`); and its own
+    listener, `OPENDOX_BIND_HOST`, must be loopback, with no opt-in.
     """
     env = os.environ if env is None else env
 
+    mode = install_mode(env, local_flag=local_flag)
+    local = mode == INSTALL_MODE_LOCAL
+    if local:
+        refuse_what_a_local_install_cannot_be(env)
     algorithms = _algorithms(env)
     served = _require(env, _by_name(PREFIX + "DATABASE_URL"))
     migration = _optional(env, _by_name(PREFIX + "MIGRATION_DATABASE_URL"))
@@ -1538,18 +1750,23 @@ def load_settings(env: Mapping[str, str] | None = None) -> RuntimeSettings:
     # make.
     _refuse_the_same_dsn_in_both_settings(served, migration)
 
+    bind_host = _optional(env, _by_name(PREFIX + "BIND_HOST")) or "127.0.0.1"
+
     return RuntimeSettings(
         database_url=served,
         migration_database_url=migration,
-        oidc_issuer=_broker_url(env, _by_name(PREFIX + "OIDC_ISSUER"),
-                                required=True, is_a_base_url=True) or "",
-        oidc_audience=_require(env, _by_name(PREFIX + "OIDC_AUDIENCE")),
-        oidc_jwks_url=_broker_url(env, _by_name(PREFIX + "OIDC_JWKS_URL"),
-                                  required=False),
+        install_mode=mode,
+        oidc_issuer="" if local else _broker_url(
+            env, _by_name(PREFIX + "OIDC_ISSUER"),
+            required=True, is_a_base_url=True) or "",
+        oidc_audience="" if local else _require(
+            env, _by_name(PREFIX + "OIDC_AUDIENCE")),
+        oidc_jwks_url=None if local else _broker_url(
+            env, _by_name(PREFIX + "OIDC_JWKS_URL"), required=False),
         oidc_algorithms=algorithms,
         oidc_jwks_ttl_seconds=_positive_int(env, _by_name(PREFIX + "OIDC_JWKS_TTL_SECONDS")),
         oidc_leeway_seconds=_positive_int(env, _by_name(PREFIX + "OIDC_LEEWAY_SECONDS")),
-        bind_host=_optional(env, _by_name(PREFIX + "BIND_HOST")) or "127.0.0.1",
+        bind_host=bind_host,
         bind_port=_positive_int(env, _by_name(PREFIX + "BIND_PORT")),
         runtime_pg_role=_role_name(env),
         served_schema=_served_schema(env),
@@ -1601,6 +1818,11 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
     return RuntimeSettings(
         database_url=dsn,
         migration_database_url=dsn,
+        # READ, SO AN UNRECOGNISED VALUE IS REFUSED HERE TOO (plan 034 T070):
+        # a migration run is part of the same install and one reading of the
+        # selector serves every verb. It changes nothing else a migration run
+        # does; the broker fields below are sentinels in either shape.
+        install_mode=install_mode(env),
         oidc_issuer=MIGRATION_SENTINEL_ISSUER,
         oidc_audience=MIGRATION_SENTINEL_AUDIENCE,
         oidc_jwks_url=None,
