@@ -203,12 +203,22 @@ class RuntimeSettings:
     requires one (unaffected by this: it already refused to load without one).
 
     `install_mode` is `INSTALL_MODE_HOSTED` or `INSTALL_MODE_LOCAL` (plan 034
-    T070; #1144 13.4). A LOCAL install has no broker, so its `oidc_issuer` and
-    `oidc_audience` are EMPTY and its `oidc_jwks_url` is `None` — never a
-    placeholder that looks like an endpoint — and `jwks_url()` and
-    `discovery_url()` answer the empty string for it rather than a path glued
-    onto nothing. A hosted install always carries a real issuer, because
-    `load_settings` refuses one without it.
+    T070; #1144 13.4), whichever loader built the object.
+
+    THE BROKER FIELDS DEPEND ON THE LOADER, and what follows holds for
+    `load_settings` only (Copilot review of openDox-code#67):
+      * From `load_settings`, a LOCAL install has no broker. Its
+        `oidc_issuer` and `oidc_audience` are EMPTY and its `oidc_jwks_url`
+        is `None`, never a placeholder that looks like an endpoint, and
+        `jwks_url()` and `discovery_url()` answer the empty string rather
+        than a path glued onto nothing. A HOSTED one always carries a real
+        issuer, because `load_settings` refuses one without it.
+      * From `load_migration_settings`, in EITHER shape, the issuer and
+        audience are `MIGRATION_SENTINEL_ISSUER` and
+        `MIGRATION_SENTINEL_AUDIENCE`. A migration run reaches no broker at
+        all, and anything that tried to with those values would fail naming
+        them. So neither statement above applies to it. `install_mode` there
+        records the shape the run belongs to, and nothing else.
     """
 
     database_url: str
