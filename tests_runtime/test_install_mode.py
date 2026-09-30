@@ -321,6 +321,37 @@ def test_runtime_status_under_the_local_mode_probes_no_broker(
     assert code == 1
 
 
+@pytest.mark.parametrize("verb", [["runtime", "migrate"],
+                                  ["runtime", "reset", "--confirm",
+                                   cli.RESET_CONFIRMATION]])
+@pytest.mark.parametrize("name", [PREFIX + "OIDC_ISSUER",
+                                  PREFIX + "OIDC_AUDIENCE",
+                                  PREFIX + "OIDC_JWKS_URL"])
+def test_migrate_and_reset_refuse_a_broker_setting_beside_the_local_mode(
+        scrubbed, verb: list[str], name: str) -> None:
+    """The migration loader asks what every other loader asks of `local`
+    (Copilot review of openDox-code#67): refused at CONFIGURATION, before any
+    database is reached — `reset` included, confirmation and all."""
+    scrubbed.setenv(PREFIX + "MIGRATION_DATABASE_URL", DSNS[PREFIX + "MIGRATION_DATABASE_URL"])
+    scrubbed.setenv(MODE, "local")
+    scrubbed.setenv(name, "https://issuer.example.invalid/realms/x"
+                    if name != PREFIX + "OIDC_AUDIENCE" else "fixture")
+    code, evidence = _run(verb)
+    assert code == 1
+    assert evidence["refusal"] == "configuration", evidence
+    assert name in evidence["message"], evidence
+
+
+def test_migrate_refuses_a_non_loopback_bind_beside_the_local_mode(
+        scrubbed) -> None:
+    scrubbed.setenv(PREFIX + "MIGRATION_DATABASE_URL", DSNS[PREFIX + "MIGRATION_DATABASE_URL"])
+    scrubbed.setenv(MODE, "local")
+    scrubbed.setenv(PREFIX + "BIND_HOST", "0.0.0.0")
+    code, evidence = _run(["runtime", "migrate"])
+    assert code == 1 and evidence["refusal"] == "configuration", evidence
+    assert "loopback" in evidence["message"].lower(), evidence
+
+
 def test_runtime_status_reports_the_hosted_mode_it_loaded(scrubbed) -> None:
     for name, value in HOSTED.items():
         scrubbed.setenv(name, value)

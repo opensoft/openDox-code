@@ -1801,6 +1801,16 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
     not, because those are the served runtime and must have the real thing.
     """
     env = os.environ if env is None else env
+    # THE ONE READING OF THE SELECTOR, AND OF WHAT A LOCAL INSTALL CANNOT BE
+    # (plan 034 T070; Copilot review of openDox-code#67). A migration run is
+    # part of the same install as the served one, so `runtime migrate` and
+    # `runtime reset` refuse what `load_settings` and `generate-and-open`
+    # refuse beside `local` — a broker setting, or a non-loopback
+    # `OPENDOX_BIND_HOST` — rather than accepting it in the one loader that
+    # never reads it.
+    mode = install_mode(env)
+    if mode == INSTALL_MODE_LOCAL:
+        refuse_what_a_local_install_cannot_be(env)
     dsn = env.get(PREFIX + "MIGRATION_DATABASE_URL", "").strip()
     if not dsn:
         raise ConfigurationError(
@@ -1818,11 +1828,10 @@ def load_migration_settings(env: Mapping[str, str] | None = None) -> RuntimeSett
     return RuntimeSettings(
         database_url=dsn,
         migration_database_url=dsn,
-        # READ, SO AN UNRECOGNISED VALUE IS REFUSED HERE TOO (plan 034 T070):
-        # a migration run is part of the same install and one reading of the
-        # selector serves every verb. It changes nothing else a migration run
-        # does; the broker fields below are sentinels in either shape.
-        install_mode=install_mode(env),
+        # READ ABOVE, SO AN UNRECOGNISED VALUE IS REFUSED HERE TOO (plan 034
+        # T070). It changes nothing else a migration run does; the broker
+        # fields below are sentinels in either shape.
+        install_mode=mode,
         oidc_issuer=MIGRATION_SENTINEL_ISSUER,
         oidc_audience=MIGRATION_SENTINEL_AUDIENCE,
         oidc_jwks_url=None,
