@@ -218,8 +218,12 @@ def test_the_verb_reports_a_stage_outside_the_six_and_reads_it_as_a_source(
     notice = notices[0]
     assert document in notice
     assert "'someday'" in notice
-    for key in ROLE_KEYS:
-        assert re.search(rf"\b{key}\b", notice), (key, notice)
+    # The six keys as ONE rendered list: `candidate` is in the document's name
+    # and `source` in "read as a source", so a word-by-word check passed a
+    # list that left both out (Copilot at openDox-code#66 149d7295,
+    # r4147767447).
+    listed = "(" + ", ".join(ROLE_KEYS) + ")"
+    assert listed in notice, (listed, notice)
     assert "read as a source" in notice
     snapshot = json.loads(out.read_text(encoding="utf-8"))
     [entry] = [d for d in snapshot["documents"] if d["path"] == document]
