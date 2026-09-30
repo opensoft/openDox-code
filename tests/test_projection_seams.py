@@ -362,7 +362,7 @@ def test_register_defaults_registers_openDoxs_own_at_each_seam_and_reads_nothing
     assert ps.corpus_root._registered is default_projection.CORPUS_ROOT
     assert ps.writer._registered is default_projection.WRITER
     for kind in default_projection.OWN_KINDS:
-        assert ps.validators._registered[kind] == (default_projection.VALIDATOR, True)
+        assert ps.validators._registered[kind] == (default_projection.VALIDATORS[kind], True)
     for seam in SINGLE_SEAMS.values():
         host = _stub(seam)
         assert seam.register(host) is host, (
@@ -1273,11 +1273,21 @@ def test_generate_reports_a_snapshot_whatever_else_its_contract_carries(
         "the verb goes on to the validator registered for the snapshot's kind")
 
 
-def test_the_validator_stand_in_concludes_nothing_and_names_T057(tmp_path) -> None:
-    result = default_projection.VALIDATOR.validate(tmp_path / "x.json")
-    assert result.available is False and result.ok is False
-    assert result.validator is None and "T057" in result.unavailable_reason
-    assert default_projection.VALIDATOR.dependency_remedy is None
+def test_openDoxs_own_validator_is_bound_to_each_own_kind(tmp_path) -> None:
+    """T058: the stand-in is gone, and openDox's own validator is registered
+    per kind. The seam hands a validator only a path, so each is bound to the
+    kind it is registered under, and reads its document as that kind is
+    written. It runs no subprocess, so it declares no remedy."""
+    validators = default_projection.VALIDATORS
+    assert tuple(validators) == default_projection.OWN_KINDS
+    assert {kind: v.kind for kind, v in validators.items()} == {
+        kind: kind for kind in default_projection.OWN_KINDS}
+    assert (validators[NEUTRAL].syntax, validators[workbench.KIND].syntax) == ("JSON", "YAML")
+    assert all(v.dependency_remedy is None for v in validators.values())
+    assert not hasattr(default_projection, "OwnValidatorNotBuilt")
+    assert not hasattr(default_projection, "VALIDATOR")
+    with pytest.raises(ValueError, match="openDox's own kinds"):
+        default_projection.OwnValidator("ideation-dashboard-snapshot")
 
 
 def test_a_validation_results_outcome_follows_ok_unless_given() -> None:
@@ -1486,20 +1496,44 @@ def test_validation_is_by_the_written_snapshots_kind(tmp_path, capsys) -> None:
     assert cli._validate(written, _validate_args(tmp_path)) == 0
     assert host_validator.calls == [{"path": written, "strict": False,
                                      "search_from": (written.parent, tmp_path.resolve())}]
-    assert ps.validators.for_kind(NEUTRAL) is default_projection.VALIDATOR, (
+    assert ps.validators.for_kind(NEUTRAL) is default_projection.VALIDATORS[NEUTRAL], (
         "the host's kind took nothing from openDox's own")
     assert "validation: stand-in: 0 error(s)" in capsys.readouterr().out
 
 
-def test_openDoxs_own_kind_meets_the_stand_in_and_strict_makes_it_fatal(tmp_path, capsys) -> None:
+def test_openDoxs_own_kind_meets_openDoxs_own_validator(tmp_path, capsys) -> None:
+    """T058: a snapshot of openDox's own kind is judged by openDox's own
+    validator. This one lacks most of the contract, so it is NOT CONFORMANT:
+    the verb fails, blames the snapshot, and names each broken rule."""
+    ps.register_defaults()
+    written = _written(tmp_path)
+    assert cli._validate(written, _validate_args(tmp_path)) == 1
+    err = capsys.readouterr().err
+    assert "REJECTED" in err and "This is the SNAPSHOT" in err
+    assert "[envelope-keys] <root>: 'documents' is required" in err, err
+    assert "6 violation(s) of the opendox-snapshot contract, by opendox.validator" in err
+    assert "validation SKIPPED" not in err
+
+
+def test_openDoxs_own_validator_unavailable_is_skipped_and_strict_makes_it_fatal(
+        tmp_path, capsys, monkeypatch) -> None:
+    """T058: `ValidatorUnavailable` (here a packaged copy that fails its
+    identity check) is VALIDATOR UNAVAILABLE, never a pass. The verb warns and
+    goes on, and `--strict` makes it fatal."""
+    from opendox import contracts
+
+    def refused(copy_id):
+        raise contracts.CopyRefused(f"the packaged copy {copy_id} differs from its digest")
+
+    monkeypatch.setattr(contracts, "verified_bytes", refused)
     ps.register_defaults()
     written = _written(tmp_path)
     assert cli._validate(written, _validate_args(tmp_path)) == 0
     err = capsys.readouterr().err
-    assert "validation SKIPPED" in err and "'opendox-snapshot'" in err and "T057" in err
-    assert "the validator registered for kind 'opendox-snapshot' reached no verdict" in err
-    assert str(written.parent) in err and str(tmp_path.resolve()) in err
-    assert "the ENVIRONMENT, not the snapshot" in err
+    assert "validation SKIPPED" in err
+    assert ("the validator was found (opendox.validator) but could not run: the "
+            "packaged copy opendox-snapshot differs from its digest") in err
+    assert "the ENVIRONMENT, not the snapshot" in err and "pip install" not in err
     assert cli._validate(written, _validate_args(tmp_path, "--strict")) == 1
     assert "--strict was given" in capsys.readouterr().err
 
@@ -1625,9 +1659,11 @@ def test_a_manifest_is_validated_by_the_validator_for_its_kind(tmp_path) -> None
                              "search_from": (manifest.resolve().parent,)}]
     ps.validators.unregister()
     ps.register_defaults()
-    unchecked = workbench.validate_manifest(manifest, search_from=tmp_path)
-    assert not unchecked.ok and unchecked.validator is None
-    assert "T057" in unchecked.stderr and "validator not found" in unchecked.summary()
+    judged = workbench.validate_manifest(manifest, search_from=tmp_path)
+    assert not judged.ok and judged.returncode == 1
+    assert str(judged.validator).startswith("opendox.validator, over its packaged copy "
+                                            "ideation-workbench")
+    assert "[required] <root>:" in judged.stdout, judged.stdout
     ps.validators.unregister()
     refused = workbench.validate_manifest(manifest)
     assert not refused.ok and "ideation-workbench" in refused.stderr

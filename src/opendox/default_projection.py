@@ -29,19 +29,53 @@ infinity, a value of no JSON type) is refused, `SnapshotNotWritable`, before
 anything is written. The write is ATOMIC: a temporary sibling, then one
 `os.replace`, so a request never reads a half-written snapshot.
 
-`VALIDATOR`, THE VALIDATOR LOOKUP'S DEFAULT, FOR openDox's OWN KINDS. It is
-openDox's own validator, plan 034's T057, which this tree does not carry yet.
-Until it does, this stand-in answers every validation `VALIDATOR_UNAVAILABLE`,
-naming T057, and never `VALIDATED`: nothing here has checked anything. So a
-generate verb warns that its snapshot was not checked, and fails under
-`--strict`, and a workbench manifest saved with `validate=True` is refused as
-unvalidated, which is what a lone openDox answered before T055 whenever no
-validator was reachable. T057's validator replaces it here, under the same
-kinds.
+`VALIDATORS`, THE VALIDATOR LOOKUP'S DEFAULT, ONE PER OWN KIND (plan 034's
+T058). Each is an adapter over openDox's own validator, `opendox.validator`
+(T057), bound to one of `OWN_KINDS`, and it keeps the lookup's protocol:
+`validate(path, *, strict, search_from)` answers a
+`projection_seams.ValidationResult`. The seam registers one validator per
+kind and hands it only a path, so the adapter is what knows the kind: the one
+it is registered under.
+
+* IT READS THE DOCUMENT AS ITS KIND IS WRITTEN. The neutral snapshot is JSON,
+  as this module's writer writes it, and it is parsed as JSON alone: NaN, the
+  infinities and a key given twice are not JSON, and are refused. The
+  workbench manifest is YAML, parsed with PyYAML's safe loader, as
+  `workbench.py` reads it. Then `opendox.validator.validator_for(kind)` judges
+  it against openDox's packaged copy of that kind's schema, which is proved
+  against its recorded digest on every call.
+* THREE OUTCOMES, as `cli._validate` gives them their consequences. No
+  violation is `VALIDATED`. Any violation is `NOT_CONFORMANT`, return code 1,
+  and the standard output names each one as `[<rule>] <where>: <detail>`, so
+  the rule's identifier reaches the verb's report (F7.2 asserts T051's
+  `EXPECTED_RULE` there). A document that cannot be read as JSON, or as
+  YAML, breaks `SYNTAX_RULE`. One that can be read, but holds a number that
+  cannot be read as written (an infinity, a NaN, one binary64 would round,
+  or a spelling that cannot be proved), breaks `NUMBER_RULE` instead, so the
+  report names the numeric policy and not a syntax error.
+  `ValidatorUnavailable`, a packaged copy that failed its
+  identity check or cannot be evaluated, is `VALIDATOR_UNAVAILABLE`, with the
+  validator's own reason, and so is a document that could not be read. That
+  is "the check could not be performed", never a pass, and `--strict` makes it
+  fatal.
+* `strict` CHANGES NOTHING HERE: openDox's validator has no warnings to
+  harden. `search_from` IS NOT READ: the schemas are package data, so nothing
+  is searched for, and no path can make the validator reachable or not. No
+  subprocess runs, so there is no dependency remedy (`dependency_remedy` is
+  None).
+* THE WORKBENCH MANIFEST'S TWO VALIDATOR RULES. Its schema says of two rules
+  that it cannot state them, and leaves them to the validator. The consumer's
+  script checked them in single-file mode, and they are carried here, under
+  its identifiers, so routing `validate_manifest` to openDox's validator drops
+  neither (the holder's decision, 2026-09-28). `workbench-pinned-not-checked`:
+  every `recipe.pinned` keyword is also in `recipe.checked`.
+  `workbench-candidate-overlap`: no `recipe.new_candidates` document is
+  already a member or excluded.
 
 IMPORT WEIGHT. `opendox.generator_seam`, `opendox.projection_seams` and the
 standard library. So this module imports with no extra installed and no
-sibling present.
+sibling present. `opendox.validator` (the standard library and
+`opendox.contracts`) and PyYAML are imported when a validation runs.
 
 A CREATED FILE: it has no row in openxFactory's
 `docs/opendox-carve-manifest.yaml`, because the manifest declares what LEAVES
@@ -52,27 +86,53 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import stat
 import uuid
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from opendox import generator_seam, projection_seams
 
-__all__ = ["CORPUS_ROOT", "CorpusRoot", "OWN_KINDS", "OwnValidatorNotBuilt",
-           "SnapshotNotWritable", "VALIDATOR", "WRITER", "Writer"]
+__all__ = ["CORPUS_ROOT", "CorpusRoot", "OWN_KINDS", "OwnValidator",
+           "NUMBER_RULE", "SYNTAX_RULE", "SnapshotNotWritable", "VALIDATORS", "WORKBENCH_RULES",
+           "WRITER", "Writer"]
 
 #: The workbench manifest's kind, `opendox.workbench.KIND`, restated because
 #: `workbench` imports PyYAML and this module must import with nothing extra.
 #: `tests/test_projection_seams.py` holds the two spellings together.
 WORKBENCH_KIND = "ideation-workbench"
 
-#: The kinds openDox's own validator answers for, which the entry points
-#: register it under: the neutral snapshot every generate verb writes with
-#: openDox's own generator, and the workbench manifest `workbench.save()`
-#: validates. T057 names its full input set, and registers under it.
+#: The kinds openDox's own validator answers for at the validator lookup,
+#: which the entry points register it under: the neutral snapshot every
+#: generate verb writes with openDox's own generator, and the workbench
+#: manifest `workbench.save()` validates. `opendox.validator` validates the
+#: doxBench wire kinds too, and they reach it through their own seam
+#: (`serve_wire.register_doxbench_validators`, T085), not through this one.
 OWN_KINDS: tuple[str, ...] = (generator_seam.NEUTRAL_SNAPSHOT_KIND, WORKBENCH_KIND)
+
+#: How each own kind is written, and so how its document is read.
+_SYNTAX: dict[str, str] = {generator_seam.NEUTRAL_SNAPSHOT_KIND: "JSON",
+                           WORKBENCH_KIND: "YAML"}
+
+#: The rule a document breaks when it cannot be read as JSON, or as YAML, as
+#: its kind is written. It is the adapter's, and no contract's: a contract's
+#: rules are about a document that could be read.
+SYNTAX_RULE = "document-syntax"
+
+#: The rule a document breaks when it reads as JSON, or as YAML, but holds a
+#: number that cannot be read as written (`_exact`): no verdict over the
+#: float it was read as would be a verdict over the number written. Kept apart
+#: from `SYNTAX_RULE`, so the report does not call a valid document malformed
+#: (Copilot at openDox-code#68 c7768ed5, r4146428769).
+NUMBER_RULE = "document-number"
+
+#: The workbench manifest's two validator rules, which its schema leaves to
+#: the validator, under the identifiers the consumer's script gave them.
+WORKBENCH_RULES: tuple[str, ...] = ("workbench-pinned-not-checked",
+                                    "workbench-candidate-overlap")
 
 
 class CorpusRoot:
@@ -222,21 +282,241 @@ class Writer:
         return target
 
 
-class OwnValidatorNotBuilt:
-    """The validator lookup's default until openDox's own validator (T057) is
-    in this tree. It concludes nothing, and says so."""
+class _Unprovable(ValueError):
+    """A number the document holds that cannot be read as written."""
 
-    #: No dependency to install would make it run.
+
+class _NotJSON(ValueError):
+    """A JSON text holds what JSON does not: a key given twice, NaN or an
+    infinity."""
+
+
+def _refuse_constant(name: str) -> Any:
+    raise _NotJSON(f"{name} is not JSON")
+
+
+def _exact(text: str, value: float) -> float:
+    """`value`, the float a number literal `text` was read as, once it is
+    proved to be the number written: finite, and not rounded.
+
+    * FINITE. `1e999` is a valid JSON number that Python reads as an infinity
+      without calling `parse_constant`, and JSON carries no infinity (Copilot
+      at openDox-code#68 21e4723f, r4139840593).
+    * NOT ROUNDED. A float holds what binary64 holds, the precision JSON
+      readers share (RFC 8259 section 6), so `1.0000000000000001` reads as
+      `1.0`, and would then meet `const: 1` (Copilot at openDox-code#68
+      69ca0e27, r4139937566). A literal whose value differs from the
+      shortest spelling of the float read from it is refused, since no
+      verdict over the float would be a verdict over the number written.
+      `0.1`, `2.50` and `1E2` read as written, and so does every float
+      openDox's own writer writes, which is the float's own shortest
+      spelling.
+    * PROVABLE. A spelling this cannot compare with the float is refused,
+      not trusted. YAML's base-60 floats (`0:1.0000000000000001`) are read
+      and rounded by PyYAML, but `Decimal` cannot parse them, so no proof
+      was made, and such a literal passed as `1.0` (Copilot at
+      openDox-code#68 80153754, r4146201125). JSON has no such spelling, and
+      openDox's writers write none."""
+    if not math.isfinite(value):
+        raise _Unprovable(f"the number {text[:40]} reads as {value}, and JSON "
+                       "carries no infinity or NaN")
+    try:
+        written = Decimal(text.replace("_", ""))
+    except InvalidOperation:
+        raise _Unprovable(f"the number {text[:40]} is in a spelling that cannot "
+                       "be proved as written (a YAML base-60 number, say), and "
+                       "JSON has no such spelling") from None
+    if Decimal(repr(value)) != written:
+        raise _Unprovable(f"the number {text[:40]} cannot be read as written: "
+                       f"the precision JSON readers share holds it as {value!r}")
+    return value
+
+
+def _json_float(text: str) -> float:
+    """A JSON number with a fraction or an exponent (`parse_float`)."""
+    return _exact(text, float(text))
+
+
+def _refuse_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    document: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in document:
+            raise _NotJSON(f"the key {key!r} is given twice in one object")
+        document[key] = value
+    return document
+
+
+def _names(value: Any) -> list[str]:
+    """A list's string entries, once each, in order. Anything else answers
+    none: its shape is the schema's to judge, and these rules only compare.
+
+    Linear: the schema bounds none of the three lists, so membership is a
+    set's, and the list only keeps the order (Copilot at openDox-code#68
+    09cd1e8a, r4139734444)."""
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if isinstance(item, str) and item not in seen:
+            seen.add(item)
+            names.append(item)
+    return names
+
+
+#: How many names a rule's detail quotes before it says how many more, and
+#: how much of each name it quotes.
+_QUOTED = 10
+_NAME_CHARS = 80
+
+
+def _quoted(names: list[str]) -> str:
+    """`names` as a detail quotes them: the first few, each cut to a readable
+    length, and a count of the rest, so one violation stays one readable line.
+    The schema bounds neither the lists nor their strings (Copilot at
+    openDox-code#68 21e4723f, r4139769791)."""
+    shown = repr([name if len(name) <= _NAME_CHARS else name[:_NAME_CHARS - 1] + "…"
+                  for name in names[:_QUOTED]])
+    return shown if len(names) <= _QUOTED else f"{shown[:-1]}, and {len(names) - _QUOTED} more]"
+
+
+def _documents(entries: Any) -> set[str]:
+    """The `document` of each entry of a members or excluded list."""
+    if not isinstance(entries, list):
+        return set()
+    return {entry["document"] for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("document"), str)}
+
+
+class OwnValidator:
+    """openDox's own validator for ONE of its kinds, behind the validator
+    lookup's protocol (plan 034's T058; this module's docstring)."""
+
+    #: No subprocess runs, so no dependency to install would make it run.
     dependency_remedy = None
+
+    def __init__(self, kind: str) -> None:
+        if kind not in _SYNTAX:
+            raise ValueError(
+                f"openDox's own validator is bound only to openDox's own kinds "
+                f"{list(_SYNTAX)}, each read as it is written, not {kind!r}")
+        self.kind = kind
+        self.syntax = _SYNTAX[kind]
+
+    def __repr__(self) -> str:
+        return f"<openDox's own validator for {self.kind!r}>"
+
+    def _unavailable(self, reason: str) -> projection_seams.ValidationResult:
+        return projection_seams.ValidationResult(
+            False, -1, "", "", "opendox.validator",
+            projection_seams.VALIDATOR_UNAVAILABLE, reason)
+
+    def _read(self, text: str) -> Any:
+        """The document, parsed as its kind is written. Raises `ValueError`
+        (a YAML error included) where it is not."""
+        if self.syntax == "JSON":
+            return json.loads(text, parse_constant=_refuse_constant,
+                              parse_float=_json_float,
+                              object_pairs_hook=_refuse_repeated_keys)
+        import yaml
+
+        class _Loader(yaml.SafeLoader):
+            """PyYAML's safe loader, whose floats are proved as the snapshot's
+            JSON numbers are (`_exact`): finite, and not rounded."""
+
+        def construct_float(loader, node):
+            return _exact(str(node.value),
+                          yaml.SafeLoader.construct_yaml_float(loader, node))
+
+        _Loader.add_constructor("tag:yaml.org,2002:float", construct_float)
+        try:
+            return yaml.load(text, Loader=_Loader)  # noqa: S506 - a SafeLoader subclass
+        except yaml.YAMLError as exc:
+            raise ValueError(" ".join(str(exc).split())) from exc
+
+    @staticmethod
+    def _workbench_rules(document: Any) -> list:
+        """The manifest's two validator rules (this module's docstring)."""
+        from opendox.validator import Violation
+
+        if not isinstance(document, dict) or not isinstance(document.get("recipe"), dict):
+            return []
+        recipe = document["recipe"]
+        found = []
+        checked = set(_names(recipe.get("checked")))
+        stray = [name for name in _names(recipe.get("pinned")) if name not in checked]
+        if stray:
+            found.append(Violation(
+                WORKBENCH_RULES[0], ("recipe", "pinned"), "workbench-rule",
+                f"pinned keyword(s) {_quoted(stray)} are not in checked: every pinned "
+                "keyword MUST also be checked"))
+        placed = _documents(document.get("members")) | _documents(document.get("excluded"))
+        overlap = [name for name in _names(recipe.get("new_candidates")) if name in placed]
+        if overlap:
+            found.append(Violation(
+                WORKBENCH_RULES[1], ("recipe", "new_candidates"), "workbench-rule",
+                f"new_candidates {_quoted(overlap)} already appear in members or "
+                "excluded: a new candidate is a document the set has not "
+                "placed yet"))
+        return found
 
     def validate(self, path: Path | str, *, strict: bool = False,
                  search_from: tuple = ()) -> projection_seams.ValidationResult:
+        """Validate the document at `path` as this validator's kind. `strict`
+        and `search_from` are the protocol's, and change nothing here."""
+        from opendox import validator as own
+
+        try:
+            data = Path(path).read_bytes()
+        except OSError as exc:
+            return self._unavailable(
+                f"the document could not be read ({exc.strerror or exc}), so "
+                "nothing was judged")
+        try:
+            kind_validator = own.validator_for(self.kind)
+        except (own.ValidatorUnavailable, own.UnknownKind) as exc:
+            return self._unavailable(" ".join(str(exc).split()))
+        except OSError as exc:
+            # A packaged file that is present but cannot be read (its
+            # permissions, say). `opendox.contracts` refuses a MISSING copy
+            # as `CopyRefused`, and any other read failure reaches here as
+            # itself. It is still "the check could not be performed", so the
+            # verb reports it, and `--strict` fails, without a traceback
+            # (Copilot at openDox-code#68 09cd1e8a, r4139734412).
+            return self._unavailable(
+                f"openDox's packaged contracts could not be read "
+                f"({type(exc).__name__}: {exc.strerror or exc}), so nothing "
+                "was judged")
+        ran = (f"opendox.validator, over its packaged copy {kind_validator.copy_id} "
+               f"(sha256 {kind_validator.digest[:12]})")
+        try:
+            document = self._read(data.decode("utf-8"))
+        except _Unprovable as exc:
+            violations = [own.Violation(
+                NUMBER_RULE, (), "number",
+                f"the document reads as {self.syntax}, but holds a number "
+                f"that cannot be read as written, so no verdict over it would "
+                f"be a verdict over the document: {' '.join(str(exc).split())}")]
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            violations = [own.Violation(
+                SYNTAX_RULE, (), "syntax",
+                f"the document cannot be read as {self.syntax}, which is how "
+                f"a document of kind {self.kind!r} is written: "
+                f"{' '.join(str(exc).split()) or type(exc).__name__}")]
+        else:
+            violations = kind_validator.violations(document)
+            if self.kind == WORKBENCH_KIND:
+                violations += self._workbench_rules(document)
+        if not violations:
+            return projection_seams.ValidationResult(
+                True, 0, f"{self.kind}: 0 violations, by {ran}\n", "", ran)
+        lines = own.report(violations)
+        lines.append(f"{len(violations)} violation(s) of the {self.kind} "
+                     f"contract, by {ran}")
         return projection_seams.ValidationResult(
-            False, -1, "", "", None, projection_seams.VALIDATOR_UNAVAILABLE,
-            "openDox's own validator is plan 034's T057, and this build does "
-            "not carry it yet, so nothing of openDox's own kinds is checked")
+            False, 1, "\n".join(lines) + "\n", "", ran)
 
 
 CORPUS_ROOT = CorpusRoot()
 WRITER = Writer()
-VALIDATOR = OwnValidatorNotBuilt()
+VALIDATORS: dict[str, OwnValidator] = {kind: OwnValidator(kind) for kind in OWN_KINDS}

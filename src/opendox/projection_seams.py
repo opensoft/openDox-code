@@ -601,4 +601,4 @@ def register_defaults() -> None:
     corpus_root.register_default(default_projection.CORPUS_ROOT)
     writer.register_default(default_projection.WRITER)
     for kind in default_projection.OWN_KINDS:
-        validators.register_default(kind, default_projection.VALIDATOR)
+        validators.register_default(kind, default_projection.VALIDATORS[kind])

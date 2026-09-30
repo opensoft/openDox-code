@@ -365,12 +365,37 @@ def _warn_on_empty_projection(stats: dict[str, int], repo_root: Path) -> None:
           "dashboard's empty funnel reads the same either way", file=sys.stderr)
 
 
+class _RepeatedKey(ValueError):
+    """A JSON object in the written snapshot gives one key twice."""
+
+
+def _refuse_repeated_keys(pairs: list[tuple[str, object]]) -> dict:
+    document: dict = {}
+    for key, value in pairs:
+        if key in document:
+            raise _RepeatedKey(f"the key {key!r} twice in one object")
+        document[key] = value
+    return document
+
+
 def _written_kind(written: Path) -> str | None:
     """The `kind` the written snapshot declares, which chooses its validator,
-    or None where the file declares none it can be read by."""
+    or None where the file declares none it can be read by.
+
+    A KEY GIVEN TWICE IS REFUSED, `_RepeatedKey` (plan 034 T058; Copilot at
+    openDox-code#68 09cd1e8a, r4139769819). Python's `json` keeps the last
+    of two, so `"kind": "opendox-snapshot", "kind": "unknown"` chose no
+    registered validator, and an ordinary run then warned and exited 0,
+    though no reader could say which contract the file meant. Such a
+    document has no one meaning, whatever its kind, so no validator is chosen
+    for it. Which constants or numbers a contract admits is the chosen
+    validator's to judge, since none of them makes the kind ambiguous."""
     try:
-        document = json.loads(written.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError):
+        document = json.loads(written.read_text(encoding="utf-8"),
+                              object_pairs_hook=_refuse_repeated_keys)
+    except _RepeatedKey:
+        raise
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
         return None
     kind = document.get("kind") if isinstance(document, dict) else None
     return kind if isinstance(kind, str) and kind else None
@@ -487,7 +512,13 @@ def _validate(written: Path, args: argparse.Namespace, *,
         print("  validation skipped (--no-validate)")
         return 0
     repo_root = Path(args.repo_root).resolve()
-    kind = _written_kind(written)
+    try:
+        kind = _written_kind(written)
+    except _RepeatedKey as exc:
+        print(f"  validation FAILED — {written} gives {exc}, so it has no one "
+              f"meaning: its kind cannot be read, and no validator can be "
+              f"chosen for it.", file=sys.stderr)
+        return 1
     if kind is None:
         print(f"  validation FAILED — {written} declares no kind, so no "
               f"validator can be chosen for it, and a snapshot that does not "

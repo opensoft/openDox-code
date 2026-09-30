@@ -15,11 +15,13 @@ Those are the first three cases below, in that order. F5.3 itself runs
 seam since T055, with openDox's own generator where no host registered one,
 and T056 and T063 quote it.
 
-THE SCHEMA. `tests/fixtures/opendox-snapshot.schema.yaml` is openDox-spec's
-neutral snapshot contract, copied byte for byte from openDox-spec#16 at
-`cd49eb25` (T053), and held here to that file's sha256. T057 ships the packaged
-copy, and that copy replaces this one when it lands. The evaluator below is a
-port of openDox-spec's own (`tests/test_opendox_snapshot_contract.py` there):
+THE SCHEMA is openDox-spec's neutral snapshot contract (T053), read from the
+product's PACKAGED copy (`opendox.contracts`, T057) through
+`contracts.verified_bytes()`, which proves the bytes against `copies.yaml`'s
+recorded digest before a byte is parsed. T058 made that swap: T054 held a copy
+of its own at `tests/fixtures/opendox-snapshot.schema.yaml`, pinned by a
+digest in this file, and the tree now carries one copy, the product's. The
+evaluator below is a port of openDox-spec's own (`tests/test_opendox_snapshot_contract.py` there):
 the JSON Schema keywords the contract uses, as draft 2020-12 defines them, and
 its seven reference rules. The leg's test extra installs no `jsonschema`, so
 none is imported.
@@ -77,6 +79,7 @@ import pytest
 
 from opendox import (
     authoring,
+    contracts,
     corpus_adapter,
     default_generator,
     display_profile,
@@ -92,14 +95,12 @@ SRC = ROOT / "src"
 FIXTURES = ROOT / "tests" / "fixtures"
 PLAIN = FIXTURES / "plain-documents"      # T050, openDox-code#53
 MALFORMED = FIXTURES / "malformed"        # T051, openDox-code#56
-SCHEMA_PATH = FIXTURES / "opendox-snapshot.schema.yaml"
 DISPLAY_JS = SRC / "opendox" / "web" / "views" / "display.js"
 WHEEL_MODEL_JS = SRC / "opendox" / "web" / "views" / "wheel-model.js"
 NODE = shutil.which("node")
 
-#: The sha256 of `contracts/schemas/opendox-snapshot.schema.yaml` at
-#: openDox-spec#16's head, `cd49eb25` (T053; its PR records the same digest).
-SCHEMA_SHA256 = "f9e3e111af1d4bd4c377c933027d81b582ae2b0a395b66f4e4621992454a584a"
+#: The packaged copy of the neutral contract that openDox's validator reads.
+SCHEMA_COPY = "opendox-snapshot"
 
 #: The four packages a neutral openDox must import without (#1144's F2.1).
 SIBLINGS = ("openxdox", "ideation_dashboard", "doc_health",
@@ -235,16 +236,17 @@ def _no_constants(name: str) -> Any:
     raise ValueError(f"{name} is not JSON")
 
 
-def _read_schema(path: Path) -> Any:
+def _read_schema(text: str) -> Any:
     """The schema file's body: one JSON object after its `#` comment lines."""
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = text.splitlines(keepends=True)
     while lines and (lines[0].startswith("#") or not lines[0].strip()):
         lines.pop(0)
     return json.loads("".join(lines), object_pairs_hook=_no_duplicate_keys,
                       parse_constant=_no_constants)
 
 
-SCHEMA = _read_schema(SCHEMA_PATH)
+SCHEMA_BYTES = contracts.verified_bytes(SCHEMA_COPY)
+SCHEMA = _read_schema(SCHEMA_BYTES.decode("utf-8"))
 
 
 class Violation(NamedTuple):
@@ -486,13 +488,16 @@ def violations(snapshot: Any) -> list[Violation]:
 
 
 def test_the_schema_copy_is_openDox_specs_contract_and_matches_the_product() -> None:
-    """The copy is T053's file, and the product's own declarations are the
-    contract's closed values (T053's writer asked for this cross-check)."""
-    digest = hashlib.sha256(SCHEMA_PATH.read_bytes()).hexdigest()
-    assert digest == SCHEMA_SHA256, (
-        f"tests/fixtures/opendox-snapshot.schema.yaml is {digest}, not "
-        "openDox-spec#16's contract at cd49eb25. Copy the spec leg's file "
-        "again and update SCHEMA_SHA256 with it, in one commit")
+    """The copy is T053's file, the one the product ships and its validator
+    reads, and the product's own declarations are the contract's closed values
+    (T053's writer asked for this cross-check)."""
+    pinned = contracts.record().copy(SCHEMA_COPY)
+    assert pinned.path == "contracts/schemas/opendox-snapshot.schema.yaml"
+    assert hashlib.sha256(SCHEMA_BYTES).hexdigest() == pinned.sha256
+    assert SCHEMA == contracts.load(SCHEMA_COPY), (
+        "this file's strict JSON read and the product's YAML read are one contract")
+    assert not (FIXTURES / "opendox-snapshot.schema.yaml").exists(), (
+        "T058 replaced T054's copy with the packaged one: the tree carries one")
     defs = SCHEMA["$defs"]
     assert SCHEMA["properties"]["kind"]["const"] == gs.NEUTRAL_SNAPSHOT_KIND
     assert SCHEMA["properties"]["schema_version"]["const"] == projection.SCHEMA_VERSION
