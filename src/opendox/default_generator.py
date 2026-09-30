@@ -70,7 +70,7 @@ from pathlib import Path
 from typing import Any
 
 from opendox import corpus_adapter, generator_seam, neutral_projection
-from opendox.runtime.local_git_adapter import GitCommandFailed, GitRunner
+from opendox.runtime.local_git_adapter import GitCommandFailed, GitRunner, LocalGitCorpus
 
 __all__ = ["GENERATOR", "generate"]
 
@@ -86,13 +86,17 @@ _COMMIT_DATE = re.compile(
     r"(?:Z|[+-][0-9]{2}:[0-9]{2})")
 
 
-def _commit_date(location: str, revision: str) -> str | None:
+def _commit_date(location: str, revision: str, *,
+                 executable: str = "git") -> str | None:
     """The committer date of `revision` in the checkout at `location`, or
-    None where `git` cannot answer one."""
+    None where `git` cannot answer one. `executable` is the git to run: the
+    home corpus's own where it is a `LocalGitCorpus`, so the date is read by
+    the git that resolved the revision (Copilot at openDox-code#57 03e06ccd,
+    r4139523258)."""
     if not _OBJECT_ID.fullmatch(revision):
         return None
     try:
-        stamp = GitRunner(Path(location)).out(
+        stamp = GitRunner(Path(location), executable).out(
             "show", "-s", "--format=%cI", f"{revision}^{{commit}}", "--")
     except (GitCommandFailed, OSError):
         return None
@@ -109,7 +113,10 @@ def generate(repo_root: Path, repository: str, *,
     corpus = adapter.resolve(ref)
     anchor = source_revision if source_revision is not None else corpus.revision
     if generated_at is None and anchor is not None:
-        generated_at = _commit_date(corpus.location, anchor)
+        generated_at = _commit_date(
+            corpus.location, anchor,
+            executable=(adapter.executable if isinstance(adapter, LocalGitCorpus)
+                        else "git"))
     projection = neutral_projection.project(
         adapter, corpus, repository,
         source_revision=anchor, generated_at=generated_at)

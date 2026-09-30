@@ -868,6 +868,50 @@ def test_the_default_adapter_obliges_the_small_neutral_field_set(tmp_path: Path)
     assert _by_path(_generate(root))["none.md"]["stage"] == "source"
 
 
+def test_an_empty_field_is_missing_whichever_vocabulary_is_in_force(
+        tmp_path: Path) -> None:
+    """The suffix vocabulary and the `kind_field` one read a field given with
+    nothing after its colon the same way: as no field. The `kind_field` path
+    counted it present by its key alone (Copilot at openDox-code#57
+    03e06ccd, r4139523226)."""
+    root = _repository(tmp_path, files={
+        "both.md": "kind: note\ntitle: T\nsummary: S\n",
+        "empty.md": "kind: note\ntitle:\nsummary: S\n",
+        "none.md": "kind: note\n"})
+    ref = corpus_adapter.CorpusRef(name="home", location=str(root))
+    by_suffix = lga.LocalGitCorpus(required_fields=lga.NEUTRAL_FIELDS)
+    by_header = lga.LocalGitCorpus(kind_field="kind",
+                                   required_fields=lga.NEUTRAL_FIELDS)
+    for adapter in (by_suffix, by_header):
+        corpus = adapter.resolve(ref)
+        missing = {d.key: adapter.classify(corpus, d).missing_fields
+                   for d in adapter.list_documents(corpus)}
+        assert missing == {"both.md": (), "empty.md": ("title",),
+                           "none.md": ("title", "summary")}, adapter._kind_field
+
+
+def test_the_commit_date_is_read_by_the_home_corpus_s_own_git(tmp_path: Path) -> None:
+    """`generated_at` is read with the git the home corpus runs, not a bare
+    `git` from PATH, so the date and the revision it stamps come from one
+    git (Copilot at openDox-code#57 03e06ccd, r4139523258)."""
+    from opendox import default_generator
+
+    root = _repository(tmp_path, files={"a.md": "title: A\nsummary: S\n"})
+    real = shutil.which("git")
+    log = tmp_path / "calls.log"
+    wrapper = tmp_path / "logging-git"
+    wrapper.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real}" "$@"\n',
+                       encoding="utf-8")
+    wrapper.chmod(0o755)
+    corpus_adapter.register_home(lambda location: (
+        lga.WorkingTreeCorpus(executable=str(wrapper)),
+        corpus_adapter.CorpusRef(name="home", location=str(location))))
+    snapshot = default_generator.generate(root, "garden")
+    assert snapshot["generation"].get("generated_at"), "a date was read"
+    assert "--format=%cI" in log.read_text(encoding="utf-8"), (
+        "the commit date was read by the home corpus's own git")
+
+
 def test_required_header_fields_answers_the_neutral_set_through_the_entry_point() -> None:
     from opendox import cli
 
