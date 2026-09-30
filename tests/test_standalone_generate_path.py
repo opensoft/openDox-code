@@ -24,7 +24,10 @@ is what research R7 measured as refused, and this file holds the lifted limit:
    the same way.
 5. The harness itself: a child that ignores the interrupt is killed at the
    deadline, and the timeout is raised, so a server that will not stop is
-   reported rather than waited out.
+   reported rather than waited out. And a child stops on the interrupt even
+   when the RUNNER ignores SIGINT, as a suite started as a background job
+   (`nohup ... &`) does, so cases 3 and 4 test the server, not how the suite
+   was launched.
 
 HOW "NEITHER SIBLING IS IMPORTABLE" IS MADE TRUE. Each run is a real child
 process, `python -m ...`, built by `tests/standalone_child.py`. The child's
@@ -54,6 +57,7 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import signal
 import socket
 import subprocess
 import textwrap
@@ -214,8 +218,12 @@ def test_the_verb_reports_a_stage_outside_the_six_and_reads_it_as_a_source(
     notice = notices[0]
     assert document in notice
     assert "'someday'" in notice
-    for key in ROLE_KEYS:
-        assert re.search(rf"\b{key}\b", notice), (key, notice)
+    # The six keys as ONE rendered list: `candidate` is in the document's name
+    # and `source` in "read as a source", so a word-by-word check passed a
+    # list that left both out (Copilot at openDox-code#66 149d7295,
+    # r4147767447).
+    listed = "(" + ", ".join(ROLE_KEYS) + ")"
+    assert listed in notice, (listed, notice)
     assert "read as a source" in notice
     snapshot = json.loads(out.read_text(encoding="utf-8"))
     [entry] = [d for d in snapshot["documents"] if d["path"] == document]
@@ -330,3 +338,45 @@ def test_a_child_that_ignores_the_interrupt_is_killed_at_the_deadline(
         assert time.monotonic() - started < 10
     finally:
         child.kill()
+
+
+def test_a_child_stops_on_the_interrupt_even_when_the_runner_ignores_it(
+        tmp_path, monkeypatch) -> None:
+    """A runner started as a background job ignores SIGINT: POSIX starts an
+    asynchronous command with SIGINT and SIGQUIT ignored when job control is
+    off, and `nohup ... &` from a script is such a command. An ignored signal
+    stays ignored across `exec`, and Python installs its KeyboardInterrupt
+    handler only where SIGINT was not ignored. So every child such a runner
+    starts would ignore the interrupt, and cases 3 and 4 would time out
+    having tested nothing about the server. Measured at openDox-code#66
+    a6e953ce: both failed that way under `nohup pytest ... &`, and passed
+    run in the foreground.
+
+    The case builds that runner in process. SIGINT is ignored while the child
+    is started, and restored at once. The child, a module that sleeps until
+    interrupted, must still stop on the interrupt and exit 0."""
+    monkeypatch.setattr(standalone_child, "STOP_DEADLINE_SECONDS", 10.0)
+    blocker = tmp_path / "sibling-blocker"
+    blocker.mkdir()
+    (blocker / "t056_waits_for_sigint.py").write_text(textwrap.dedent("""
+        import time
+        print("ready", flush=True)
+        try:
+            time.sleep(600)
+        except KeyboardInterrupt:
+            print("interrupted", flush=True)
+            raise SystemExit(0)
+        """), encoding="utf-8")
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        child = Child(tmp_path, "t056_waits_for_sigint")
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
+    try:
+        child.wait_for_line(re.compile(r"^ready$"))
+        assert child.interrupt() == 0, child.stderr_text()
+    finally:
+        child.kill()
+    assert child.stdout_text().splitlines() == ["ready", "interrupted"]
+    assert signal.getsignal(signal.SIGINT) is previous
