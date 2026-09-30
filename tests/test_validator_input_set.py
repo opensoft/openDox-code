@@ -39,6 +39,9 @@ A CREATED file: no carve-manifest row (RULED OQ-C).
 from __future__ import annotations
 
 import hashlib
+import os
+import shutil
+import types
 from pathlib import Path
 
 import pytest
@@ -205,6 +208,31 @@ def _serve(monkeypatch: pytest.MonkeyPatch, replaced: dict[str, bytes | None]) -
         return real(name)
 
     monkeypatch.setattr(contracts, "_read_package_file", read)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads a file at mode 000")
+@pytest.mark.parametrize("name", ["copies.yaml", "schemas/opendox-snapshot.schema.yaml"])
+def test_a_present_file_that_cannot_be_read_is_refused_not_raised(
+        name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A packaged record or copy that is present but unreadable is refused as
+    `CopyRefused`, so the validator reports itself unavailable, as for a
+    missing one. It raised `PermissionError` out of `validator_for()`, and
+    `generate --strict` ended in a traceback (the T058 writer's measurement,
+    from Copilot at openDox-code#68, r4139734412)."""
+    package = tmp_path / "contracts"
+    shutil.copytree(PACKAGE, package)
+    (package / name).chmod(0)
+    monkeypatch.setattr(contracts, "resources",
+                        types.SimpleNamespace(files=lambda _name: package))
+    try:
+        with pytest.raises(contracts.CopyRefused) as refused:
+            contracts.load("opendox-snapshot")
+        assert "cannot be read (PermissionError" in str(refused.value)
+        with pytest.raises(validator.ValidatorUnavailable):
+            validator.validator_for("opendox-snapshot")
+    finally:
+        (package / name).chmod(0o644)
 
 
 def _record_with(**changes) -> bytes:
