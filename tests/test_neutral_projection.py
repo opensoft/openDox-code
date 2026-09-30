@@ -835,6 +835,39 @@ def test_the_anchors_come_from_the_source_revision_and_the_bytes_repeat(
     assert "generated_at" not in unknown
 
 
+def test_an_adapter_whose_keys_are_not_declared_paths_is_refused(tmp_path: Path) -> None:
+    """`DocumentId.key` is opaque to the `CorpusAdapter` interface, so the
+    projection reads keys as repository paths only for an adapter that
+    declares `PATH_KEYS`. One that does not is refused, naming the
+    declaration, rather than having an object id or a row key written as a
+    path (Copilot at openDox-code#57 50b0d42b, r4139607560)."""
+    root = _repository(tmp_path, files={"a.md": "title: A\nsummary: S\n"})
+    assert projection.PATH_KEYS == "document_keys_are_paths"
+    assert lga.LocalGitCorpus.document_keys_are_paths is True
+
+    class _Opaque:
+        """Delegates everything to a path adapter, and declares nothing."""
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name == projection.PATH_KEYS:
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    inner = lga.WorkingTreeCorpus()
+    corpus = inner.resolve(corpus_adapter.CorpusRef(name="home", location=str(root)))
+    with pytest.raises(projection.ProjectionRefused) as caught:
+        projection.project(_Opaque(inner), corpus, "garden")
+    assert "document_keys_are_paths = True" in str(caught.value)
+    assert isinstance(caught.value, gs.GeneratorSeamError)
+    declared = _Opaque(inner)
+    declared.document_keys_are_paths = True
+    paths = [d["path"] for d in
+             projection.project(declared, corpus, "garden").snapshot["documents"]]
+    assert paths == ["a.md"]
+
+
 def test_a_repository_with_no_commit_needs_a_pinned_revision(tmp_path: Path) -> None:
     root = _repository(tmp_path, files={"a.md": "# A\n"}, commit=False)
     with pytest.raises(projection.ProjectionRefused) as caught:

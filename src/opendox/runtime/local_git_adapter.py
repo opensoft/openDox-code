@@ -1606,6 +1606,13 @@ class LocalGitCorpus:
     #: (Copilot review of openDox-code#26). A parameter that cannot change an
     #: outcome is removed rather than wired up, because wiring it up would
     #: reintroduce the assumption `_served_ref` exists to refuse.
+    #: THIS ADAPTER'S KEYS ARE REPOSITORY PATHS, and its documents open with a
+    #: leading `Name: value` header. `DocumentId.key` is opaque to the
+    #: `CorpusAdapter` interface, so a consumer that needs a path, openDox's
+    #: neutral projection, reads keys as paths only where the adapter says so
+    #: (`neutral_projection.PATH_KEYS`).
+    document_keys_are_paths = True
+
     def __init__(self, *, executable: str = "git",
                  write_path: str | None = WRITE_PATH,
                  kind_field: str | None = None,
