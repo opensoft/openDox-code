@@ -71,7 +71,6 @@ import http.client
 import os
 import posixpath
 import re
-import selectors
 import shutil
 import signal
 import subprocess
@@ -232,24 +231,22 @@ def state_dir():
     shutil.rmtree(path, ignore_errors=True)
 
 
-def _first_url(child: subprocess.Popen, seconds: float) -> str | None:
-    """The first `http://` line `child` prints within `seconds`, or `None`,
-    bounded by the deadline rather than by a silent child."""
+def _served_url(child: subprocess.Popen, said: Path, seconds: float) -> str | None:
+    """The URL line the entry point prints once it serves, read from the FILE
+    its standard output goes to, or `None` once `seconds` pass or it exits.
+
+    A file and not a pipe: nothing has to drain it while the server runs, and
+    the entry point flushes that line before it blocks (plan 034 T056), so a
+    server that serves has said where by the time the line is looked for."""
     deadline = time.monotonic() + seconds
-    pending = b""
-    with selectors.DefaultSelector() as selector:
-        selector.register(child.stdout, selectors.EVENT_READ)
-        while (remaining := deadline - time.monotonic()) > 0:
-            if not selector.select(timeout=remaining):
-                return None
-            chunk = os.read(child.stdout.fileno(), 65536)
-            if not chunk:
-                return None
-            pending += chunk
-            *lines, pending = pending.split(b"\n")
-            for line in lines:
-                if line.startswith(b"http://"):
-                    return line.strip().decode()
+    while time.monotonic() < deadline:
+        text = said.read_text(encoding="utf-8", errors="replace")
+        found = [line for line in text.splitlines() if line.startswith("http://")]
+        if found:
+            return found[0].strip()
+        if child.poll() is not None:
+            return None
+        time.sleep(0.2)
     return None
 
 
@@ -367,21 +364,21 @@ def test_F10_1_fetch_the_installed_local_entry_point_serves_every_bundle_file(
                             capture_output=True, text=True, timeout=60)
     assert helped.returncode == 0, helped.stderr[-2000:]
 
-    # Standard error goes to a FILE: the server logs every request there, and
-    # an unread pipe that fills would stall the server mid-fetch.
-    log = tmp_path / "entry-point.stderr"
-    with log.open("wb") as stderr:
+    # Both streams go to FILES: the server logs every request on standard
+    # error, and an unread pipe that fills would stall it mid-fetch.
+    out, err = tmp_path / "entry-point.stdout", tmp_path / "entry-point.stderr"
+    with out.open("wb") as stdout, err.open("wb") as stderr:
         child = subprocess.Popen(
             [str(script), "generate-and-open", "--local",
              "--repo-root", str(repo), "--repository", "fixture",
              "--run-dir", str(tmp_path / "run"), "--no-open", "--port", "0"],
-            cwd=elsewhere, env=env, stdout=subprocess.PIPE, stderr=stderr)
+            cwd=elsewhere, env=env, stdout=stdout, stderr=stderr)
 
     def said() -> str:
-        return log.read_text(encoding="utf-8", errors="replace")[-3000:]
+        return err.read_text(encoding="utf-8", errors="replace")[-3000:]
 
     try:
-        url = _first_url(child, START_SECONDS)
+        url = _served_url(child, out, START_SECONDS)
         if url is None:
             child.kill()
             child.wait(timeout=STOP_SECONDS)
@@ -434,5 +431,4 @@ def test_F10_1_fetch_the_installed_local_entry_point_serves_every_bundle_file(
         if child.poll() is None:
             child.kill()
             child.wait(timeout=STOP_SECONDS)
-        child.stdout.close()
     assert bundle_mod.running_pid(config.DatabaseBundle(state_dir)) is None
