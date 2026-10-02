@@ -3277,6 +3277,50 @@ def test_a_malformed_mint_answer_keeps_no_frame_that_holds_its_token(
     assert _locals_holding(caught.value, SENTINEL_TOKEN) == []
 
 
+#: A provider answer nested past the interpreter's recursion limit, and still
+#: well inside the provider's answer bound.
+_PROVIDER_ANSWER_NESTED_PAST_THE_LIMIT = (
+    b'{"choices": ' + b"[" * 30_000 + b"]" * 30_000 + b"}")
+
+
+@pytest.mark.parametrize("source", ["broker", "built-in", "none"])
+def test_a_provider_answer_nested_past_the_recursion_limit_is_malformed(
+        tmp_path, source):
+    """Copilot's review of openDox-code#64 at `e1a6cb0f`. The provider's
+    answer is parsed in `_post_to_provider`, whose frame holds the request,
+    and so its authorization header. An answer nested past the recursion
+    limit fits well inside the answer's bound. Its parse escaped as a
+    `RecursionError`, with that frame in its traceback, on every path. It
+    is now a malformed answer. A refusal of a request that carried a
+    credential chains nothing, and keeps no frame of the call that held it.
+    Under the auth kind `none` nothing was presented, so its refusal is held
+    to the fixed sentence alone."""
+    payload = _PROVIDER_ANSWER_NESTED_PAST_THE_LIMIT
+    assert len(payload) <= provider_mod.MAX_PROVIDER_ANSWER_BYTES, \
+        "a case for the answer's parser, not for its bound"
+    secret = None
+    if source == "broker":
+        port, _opener = _port(tmp_path, payload)
+        secret = SENTINEL_TOKEN
+    elif source == "built-in":
+        port, _opener = _unbrokered_port(
+            _built_in_binding(), payload, environ={ENV_NAME: KEY_SENTINEL})
+        secret = KEY_SENTINEL
+    else:
+        port, _opener = _unbrokered_port(_none_binding(), payload)
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_MALFORMED
+    if secret is not None:
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        kept = {frame.f_code.co_name
+                for frame in _frames_kept_by(caught.value)}
+        assert "_post_to_provider" not in kept, kept
+        assert _locals_holding(caught.value, secret) == []
+
+
 # --- a broker that misbehaves is refused with nothing it wrote -----------
 # Brett Heap's word of 2026-09-29 (openxFactory#656, the lane's latest RULED
 # comment): "Yes, add to #64". When a broker misbehaves, the shared runner's
