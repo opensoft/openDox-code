@@ -465,6 +465,34 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 ACTIONS_GATE_PREFIX = "/actions/gate/"
 ACTIONS_REFRESH_ROUTE = "/actions/refresh"
 
+# THE STATIC BUNDLE'S CONTENT TYPES, PINNED (plan 034 T084, the holder's
+# addition for #1144 10.2, "reachable in a browser from an openDox-only
+# install", from T075's finding on openDox-code#73). The static route is
+# `SimpleHTTPRequestHandler`'s, whose `guess_type` reads the handler's
+# `extensions_map` FIRST and the platform's `mimetypes` table only for an
+# extension that map lacks. The platform table is the host's: on Linux and
+# in CI it answers `text/javascript` for `.js`, but a host whose table
+# differs, and Windows reads its table from the registry, can serve an ES
+# module as `text/plain`, which a browser refuses to run, so the console
+# opens blank. Every extension the wheel's bundle carries is pinned here
+# (measured at T084: 41 files under `opendox/web/`, 39 `.js`, one `.html` and
+# one `.css`), with the types the bundle's own kinds of file take beside
+# them. Each value is the one the standard library's built-in table gives
+# (`.woff2`, which it lacks, takes its registered type, RFC 8081), so a host
+# whose table was already right serves exactly what it served before. Any
+# other extension still falls back to the platform table.
+STATIC_CONTENT_TYPES: dict[str, str] = {
+    ".html": "text/html",
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".json": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/vnd.microsoft.icon",
+    ".woff2": "font/woff2",
+}
+
 
 def answers_a_gate_verb(binding) -> bool:
     """Whether a contributed route binding answers `POST /actions/gate/<verb>`
@@ -881,6 +909,11 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     # duration: a slow model dispatch performs no socket operation while it
     # waits, and a healthy local client is orders of magnitude faster.
     timeout = 30
+
+    # The static bundle's types, pinned ahead of the platform's table (see
+    # `STATIC_CONTENT_TYPES`). The stdlib's own compression entries stay.
+    extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map,
+                      **STATIC_CONTENT_TYPES}
 
     checkout_root: Path = Path(".")
     snapshot_path: Path = Path("snapshot.json")
