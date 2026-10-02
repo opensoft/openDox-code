@@ -64,10 +64,12 @@ So the group above names nothing this module DEFINES any more. Leaving any of
 the three in `serve.py` would still have forced at least one column to import
 `serve` while `serve` imported it, which is the cycle this module exists to
 prevent — this module was the right first home for all three and the wrong
-last one for each. `serve.py` takes `hosted_index` and `hosted_ref_refused`
-from `serve_projection` and the three strings from this module's re-export, so
-`serve.hosted_ref_refused`, `serve.hosted_index` and `serve.JSON_CTYPE` all
-resolve exactly as they did for the suites that call them directly. What
+last one for each. `serve.py` took `hosted_index` and `hosted_ref_refused`
+from `serve_projection` and the three strings from this module's re-export.
+Since plan 034 T055 `serve.py` DEFINES `hosted_ref_refused` itself, over the
+snapshot registry seam's `is_publishable_ref`, which is the predicate's one
+dependency (see above), so `serve.hosted_ref_refused` and `serve.JSON_CTYPE`
+still resolve for the suites that call them directly. What
 remains here is this module's own stated remit: the shared wire vocabulary and
 pure envelope builders over already-validated inputs, plus fixed refusal prose
 BOTH columns read.
