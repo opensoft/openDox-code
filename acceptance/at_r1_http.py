@@ -1276,10 +1276,19 @@ def main(argv: list[str] | None = None) -> int:
                         help="report every failed assertion instead of "
                              "stopping at the first (still exits 1)")
     args = parser.parse_args(argv)
+    # Anything that stops the preparation is the harness's own failure, never
+    # a verdict on the product: a refusal it names, or an error it did not
+    # expect (a full disk under `tempfile.mkdtemp`, for one), and both exit 2
+    # (Copilot review of openDox-code#75, at b4fc637f).
     try:
         ctx = prepare()
     except HarnessError as error:
         print(f"AT-R1 HTTP half: ERROR: {error}", file=sys.stderr)
+        return 2
+    except Exception:
+        traceback.print_exc()
+        print("AT-R1 HTTP half: ERROR: the harness could not prepare its "
+              "directories", file=sys.stderr)
         return 2
     verdict = Verdict(args.keep_going)
     print(f"AT-R1, the HTTP half (plan 034 T095), over {ctx.checkout}")
