@@ -470,15 +470,34 @@ def write_authentication(data_dir: Path, user: str) -> None:
     Before EVERY launch, not only after `initdb`: a data directory an earlier
     build initialized, or a file edited by hand, is brought back to the one
     configuration this install runs with.
+
+    THE 0600 IS SET, NOT ASKED FOR (Copilot review of openDox-code#69). An
+    `open` mode is only a creation request: the umask filters it, and it
+    changes nothing about a file that exists already. So a temporary file an
+    interrupted start left at the same name (a 0644 one, or a symbolic link)
+    is removed first. The new one is created EXCLUSIVELY and without following
+    a link, and its descriptor is set to exactly 0600 before anything is
+    written into it.
     """
     for name, content in authentication_files(user).items():
         target = data_dir / name
         temporary = data_dir / f".{name}.opendox-{os.getpid()}"
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                             0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        os.replace(temporary, target)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)          # an interrupted start's; a link itself, never its target
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                descriptor = -1           # the handle closes it now
+                handle.write(content)
+            os.replace(temporary, target)
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+            raise
 
 
 def _unsafe_because(info: os.stat_result, *, uid: int, own: bool) -> str | None:
@@ -765,7 +784,18 @@ class BundledServer:
                  # port can stand in for this server, and nothing off this
                  # machine can reach it.
                  "-c", "listen_addresses=",
-                 "-c", "unix_socket_permissions=0700"],
+                 "-c", "unix_socket_permissions=0700",
+                 # THE CLUSTER'S OWN FILES, PINNED (Copilot review of
+                 # openDox-code#69). An existing cluster's
+                 # `postgresql.conf` can point `data_directory`, `hba_file`
+                 # and `ident_file` elsewhere: at an outside `trust` file
+                 # that the files just rewritten would never replace, or at
+                 # a cluster outside the state directory. The command line
+                 # outranks every configuration file, so these three are
+                 # the data directory and the two files written above.
+                 "-c", f"data_directory={self.bundle.data_dir}",
+                 "-c", f"hba_file={self.bundle.data_dir / 'pg_hba.conf'}",
+                 "-c", f"ident_file={self.bundle.data_dir / 'pg_ident.conf'}"],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 env=_child_environment(),
                 # ITS OWN SESSION, so a terminal's Ctrl-C reaches this process

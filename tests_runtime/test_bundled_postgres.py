@@ -561,6 +561,39 @@ def test_an_older_trust_cluster_is_brought_back_to_peer_on_start(
     assert method == f"peer:{bundle_mod.os_user()}", method
 
 
+def test_a_cluster_whose_configuration_points_elsewhere_runs_on_its_own_files(
+        state_dir: Path, tmp_path: Path) -> None:
+    """An existing cluster's `postgresql.conf` can point `hba_file` and
+    `ident_file` at outside files, a `trust` one say, and `data_directory`
+    at a cluster that is not this install's (Copilot review of #69). The
+    launch pins all three on the command line, which outranks the file. So
+    the server reads the two files this install wrote, from its own data
+    directory, and every connection is still peer."""
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    bundle_mod.BundledServer(settings).start().stop()
+    data = config.DatabaseBundle(state_dir).data_dir
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "trust_hba.conf").write_text("local all all trust\n", encoding="utf-8")
+    (outside / "ident.conf").write_text("", encoding="utf-8")
+    with (data / "postgresql.conf").open("a", encoding="utf-8") as conf:
+        conf.write(f"\nhba_file = '{outside / 'trust_hba.conf'}'\n"
+                   f"ident_file = '{outside / 'ident.conf'}'\n"
+                   f"data_directory = '{outside / 'no-such-cluster'}'\n")
+    with bundle_mod.BundledServer(settings) as server:
+        import psycopg
+
+        with _owner(server) as conn:
+            shown = {name: conn.execute(f"show {name}").fetchone()[0]
+                     for name in ("data_directory", "hba_file", "ident_file")}
+        with psycopg.connect(server.bundle.served_dsn) as conn:
+            method = conn.execute("select system_user").fetchone()[0]
+    assert shown == {"data_directory": str(data),
+                     "hba_file": str(data / "pg_hba.conf"),
+                     "ident_file": str(data / "pg_ident.conf")}, shown
+    assert method == f"peer:{bundle_mod.os_user()}", method
+
+
 def test_migrate_under_the_local_mode_uses_the_bundle_and_refuses_a_dsn(
         state_dir: Path) -> None:
     """`runtime migrate` is part of the same install: it reads the bundle's
