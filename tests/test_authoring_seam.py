@@ -357,15 +357,17 @@ def test_an_entry_point_registers_the_local_git_corpus_when_no_host_has() -> Non
 def test_build_server_registers_the_default_where_no_host_has() -> None:
     """`serve.build_server()`'s half of 4.1a, run from its own source lines.
 
-    `serve.build_server()` cannot be called directly today, unlike
-    `cli.build_parser()`: T011 only made `opendox.serve` IMPORTABLE, and
-    `build_server()`'s own body still reaches `openxdox.snapshot_registry`/
-    `openxdox.corpus_root` (unrelated, later tasks; plan 034 research R7), so
-    calling it whole fails for a reason that has nothing to do with this
-    registration (Copilot review of openDox-code#45, "Missing test coverage
-    for server default registration": the entry-point falsifier above
-    exercises only `cli.build_parser()`, so a regression removing `serve
-    .build_server()`'s own registration line would leave this suite green).
+    `serve.build_server()` could not be called directly when this case was
+    written, unlike `cli.build_parser()`: T011 only made `opendox.serve`
+    IMPORTABLE, and `build_server()`'s own body reached
+    `openxdox.snapshot_registry`/`openxdox.corpus_root` until plan 034 T055
+    routed both through declared seams (research R7), so calling it whole
+    failed for a reason that had nothing to do with this registration (Copilot
+    review of openDox-code#45, "Missing test coverage for server default
+    registration": the entry-point falsifier above exercises only
+    `cli.build_parser()`, so a regression removing `serve.build_server()`'s
+    own registration line would leave this suite green). It stays lifted,
+    because that isolates the one line under test.
 
     Lifted by AST instead, mirroring `test_profile_registration.py`'s own
     technique for the identical problem with `ROUTE_EXTENSIONS`: the module-
@@ -530,10 +532,10 @@ def test_the_default_can_actually_classify_a_proposal() -> None:
     (`_stage_as_a_repository_if_git_is_available`). This proves the fix
     through the REGISTERED default, not a mock of it.
 
-    Deliberately NOT asserting the exact `required_fields` tuple: T054
-    (phase 2) sets the neutral fields; today's bare default is `()`, and
-    hard-coding that would make this test wrong the day T054 lands rather
-    than testing what it actually claims to -- that the call SUCCEEDS.
+    Deliberately NOT asserting the exact `required_fields` tuple (T054 made
+    the default `NEUTRAL_FIELDS`, where it was `()`): hard-coding either would
+    test the field set rather than what this case claims -- that the call
+    SUCCEEDS.
 
     SKIPS WHERE `git` IS NOT ON PATH, like the falsifier above (Copilot
     review of openDox-code#45, "Skip Git-dependent integration test when

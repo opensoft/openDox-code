@@ -46,8 +46,12 @@ from opendox import doxbench_abstract_store
 from opendox import doxbench_knowledge
 from opendox import doxbench_packet
 from opendox import doxbench_threads
-from opendox import consumer_reach
-registry_mod = consumer_reach.snapshot_registry
+# THE SNAPSHOT REGISTRY, THROUGH ITS SEAM (plan 034 T055): each
+# `registry_mod.resolve_within` below resolves the registry registered at that
+# moment, openDox's own where no host has contributed one, so the workbench
+# routes confine by the same rule `/source` does, in a lone openDox too.
+from opendox import projection_seams
+registry_mod = projection_seams.registry.proxy
 from opendox.serve_wire import (
     DOXBENCH_ABSTRACT_REFUSED_PROSE_BYTES,
     DOXBENCH_ABSTRACT_REFUSED_SUBJECT_BYTES,
@@ -173,7 +177,7 @@ class WorkbenchRoutes:
     def _indexed_sources(self, projection):
         """This tile's staged set, as indexable sources.
 
-        Read through `snapshot_registry.resolve_within` — the SINGLE
+        Read through the registry's `resolve_within` — the SINGLE
         containment authority `/source` already uses — rather than through a
         second path check of this route's own, because two confinement rules
         are how one of them drifts. A path that does not resolve, is not a
