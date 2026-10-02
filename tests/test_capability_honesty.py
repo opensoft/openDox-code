@@ -340,3 +340,438 @@ def test_the_verdict_follows_the_bindings_and_keeps_the_other_conditions() -> No
         actor="a", route_bindings=both,
         **{**kwargs, "refresh_binding": None})
     assert unbound["actions"]["refresh"] is False
+
+
+# ---------------------------------------------------------------------------
+# 5 — the three sites that dropped a connection, and the chat turn
+# ---------------------------------------------------------------------------
+
+def _call(base: tuple[str, int], method: str, path: str, *,
+          body: bytes | None = None, token: str | None = None
+          ) -> tuple[int, dict, str]:
+    """One request carrying `body` and, where given, the console token, from
+    a same-origin JSON client. The status, the JSON body (`{}` where it is not
+    JSON) and the raw text. A dropped connection RAISES (`RemoteDisconnected`,
+    a reset), which fails the case: that is the failure this section exists
+    to rule out."""
+    from opendox import serve
+    connection = http.client.HTTPConnection(*base, timeout=30)
+    try:
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers[serve.CONSOLE_TOKEN_HEADER] = token
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        raw = response.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except ValueError:
+            parsed = {}
+        return (response.status, parsed if isinstance(parsed, dict) else {},
+                raw)
+    finally:
+        connection.close()
+
+
+def _json(payload: dict) -> bytes:
+    return json.dumps(payload).encode("utf-8")
+
+
+#: A scope no snapshot of the fixture's declares a document under: each
+#: request below is refused, and none is served a document.
+_SCOPE = {"repository": "fixture", "ref": "main", "tile_kind": "staged",
+          "tile_id": "honesty-topic"}
+
+#: A well-formed abstract request: the shape step 3 accepts.
+_ABSTRACT = {"scope": _SCOPE, "subject_path": "notes/one.md",
+             "model_id": "honesty-model"}
+
+
+def _chat_turn() -> dict:
+    """A well-formed v2 chat turn: the shape the body parser accepts, an
+    outline and one document, bound to the document."""
+    from opendox.serve_wire import DOXBENCH_CHAT_TURN_V2_KIND
+
+    def buffer(kind, path, content):
+        return {"kind": kind, "repository": "fixture", "path": path,
+                "base_ref": "main", "base_revision": "0" * 40,
+                "base_hash": "0" * 64, "content_hash": "0" * 64,
+                "content": content, "dirty": False}
+
+    return {"schema_version": 1, "kind": DOXBENCH_CHAT_TURN_V2_KIND,
+            "client_turn_id": "honesty-turn-1", "scope": _SCOPE,
+            "working_subject": "", "message": "What does this note claim?",
+            "model_id": "honesty-model", "transcript": [],
+            "bound_buffer": "notes/one.md",
+            "buffers": [buffer("outline", None, "# outline"),
+                        buffer("document", "notes/one.md", "# one")]}
+
+
+def _structured(answer: tuple[int, dict, str]) -> bool:
+    """An answer a client can read: a status, and a JSON body naming its
+    error, or a stated 404. Anything else (an empty 500, a reset) is not."""
+    status, body, raw = answer
+    if body.get("ok") is False and isinstance(body.get("error"), str):
+        return True
+    return status == 404 and bool(raw.strip())
+
+
+def _standalone(tmp_path, repo):
+    """`python -m opendox.serve` over `repo`, as section 1 runs it, with its
+    base address and its capabilities."""
+    out = _snapshot(tmp_path, repo)
+    child = Child(tmp_path, "opendox.serve", "--snapshot", str(out),
+                  "--checkout-root", str(repo), "--port", "0")
+    match = child.wait_for_line(_SERVE_URL)
+    base = (match.group(2), int(match.group(3)))
+    return child, base, _capabilities(base)
+
+
+def test_the_three_crash_sites_answer_a_standalone_server(
+        tmp_path, monkeypatch) -> None:
+    """#1144 batch L (RULED `5920216845`, item 1). At `047bb4fa` each of these
+    three ended a standalone request with a dropped connection, on a deferred
+    `openxdox` import: the document abstract's above its step-1 check, model
+    approval's past its only check, and the project register's with no check
+    at all. Each now gets a structured answer, and none reaches for openXdox.
+    Run with an identity, so `session` reads true and the abstract and the
+    approval pass the checks a plane with no actor would refuse at."""
+    from opendox import column_seams
+    from opendox.serve_wire import (DOXBENCH_ERR_APPROVAL_REFUSED,
+                                    DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE)
+    _clean_environment(monkeypatch)
+    repo = _repository(tmp_path, identity=True)
+    child, base, caps = _standalone(tmp_path, repo)
+    try:
+        token = caps.get("console_token")
+        assert caps["actions"]["session"] is True and token, caps
+        abstract = _call(base, "POST", "/actions/workbench/document-abstract",
+                         body=_json(_ABSTRACT), token=token)
+        approval = _call(base, "POST", "/actions/workbench/model-approval",
+                         body=_json({"binding": "honesty-binding"}),
+                         token=token)
+        register = _call(base, "GET", "/project-register.json")
+        for name, answer in (("document abstract", abstract),
+                             ("model approval", approval),
+                             ("project register", register)):
+            assert _structured(answer), f"{name}: {answer}"
+        # step 1 refuses once `gate` reads false (batch L)
+        assert abstract[1]["error"] == DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE
+        # the seam refuses by name: no host's gate, so no record is written
+        assert approval[1]["error"] == DOXBENCH_ERR_APPROVAL_REFUSED, approval
+        assert approval[1]["reason"] == column_seams.GATE_RECORDS_REFUSAL
+        # openDox's own kickoff discovers no register: today's 404
+        assert register[0] == 404 and "no project register" in register[2]
+        assert not (repo / "ideation" / "dashboard" / "gate-records").exists()
+        assert child.interrupt() == 0, child.stderr_text()
+    finally:
+        child.kill()
+    assert child.refused() == [], child.refused()
+
+
+#: The binding `opendox model-binding add` declares for the cases below, as
+#: `tests/test_model_provider_broker.py` declares its own. Nothing is spawned
+#: and nothing is contacted: no case dispatches a turn.
+_BINDING = ["--id", "honesty-binding", "--label", "Honesty binding",
+            "--provider", "honesty-provider",
+            "--credential-ref", "opref-4f2a91c07be3d5a8140b6e77",
+            "--auth-kind", "api_key",
+            "--credential-approver", "fixture@example.invalid",
+            "--endpoint", "https://provider.invalid/turn",
+            "--dialect", "xfactory-prompt-v1",
+            "--", "honesty-broker", "--home", "/srv/{binding_id}"]
+
+
+def test_a_chat_turn_with_a_binding_configured_is_answered_standalone(
+        tmp_path, monkeypatch) -> None:
+    """The chat-turn route over a standalone server whose checkout DECLARES a
+    model binding (`opendox model-binding add`), so the turn does not stop at
+    "no model configured" (T081) and runs on toward its scope step, which
+    reached for openXdox by a deferred import until this task. The answer is
+    structured, whichever step refuses it."""
+    _clean_environment(monkeypatch)
+    repo = _repository(tmp_path, identity=True)
+    added, status = run_module(tmp_path, "opendox.cli", "model-binding", "add",
+                               "--repo-root", str(repo), *_BINDING)
+    assert status == 0, added.stderr_text()
+    child, base, caps = _standalone(tmp_path, repo)
+    try:
+        token = caps.get("console_token")
+        assert caps["actions"]["session"] is True and token, caps
+        answer = _call(base, "POST", "/actions/workbench/chat-turn",
+                       body=_json(_chat_turn()), token=token)
+        assert _structured(answer), answer
+        assert child.interrupt() == 0, child.stderr_text()
+    finally:
+        child.kill()
+    assert child.refused() == [], child.refused()
+
+
+class _Conforms:
+    """A validator every instance conforms to."""
+
+    @staticmethod
+    def iter_errors(_instance):
+        return iter(())
+
+
+class _EveryKind(dict):
+    """The released validators, as a plane that can read its contract has
+    them: one for every kind, each of which every instance conforms to. So a
+    turn's own shape carries it to the scope step."""
+
+    def get(self, _kind, _default=None):
+        return _Conforms()
+
+
+class _Port:
+    """A model port. Never dispatched: every case is refused before."""
+
+
+def test_a_chat_turn_reaching_its_scope_step_is_refused_not_dropped(
+        composed_turns) -> None:
+    """A composed host with the released validators and a model port, so a
+    well-formed turn reaches step 5. At `047bb4fa` step 5 opened with a
+    deferred `from openxdox import doxbench_scope`, and the connection dropped.
+    The scope authority is now the one registered at `column_seams.scope`,
+    openDox's own default here, and the scope is refused in the released
+    failure envelope."""
+    from opendox.serve_wire import DOXBENCH_ERR_TURN_SCOPE_REFUSED
+    base, caps = composed_turns()
+    status, body, raw = _call(base, "POST", "/actions/workbench/chat-turn",
+                              body=_json(_chat_turn()),
+                              token=caps["console_token"])
+    assert body.get("error") == DOXBENCH_ERR_TURN_SCOPE_REFUSED, (status, raw)
+    assert body.get("client_turn_id") == "honesty-turn-1", body
+
+
+def test_a_document_abstract_past_step_one_is_refused_not_dropped(
+        composed_turns) -> None:
+    """A composed host that contributes the gate routes, so `gate` reads true
+    and an abstract request passes step 1 and reaches its scope step, which
+    reads the scope authority through its seam (batch L): refused, stated."""
+    from opendox.serve_wire import DOXBENCH_ERR_TURN_SCOPE_REFUSED
+    base, caps = composed_turns(_gate())
+    assert caps["actions"]["gate"] is True, caps
+    status, body, raw = _call(base, "POST",
+                              "/actions/workbench/document-abstract",
+                              body=_json(_ABSTRACT),
+                              token=caps["console_token"])
+    assert body.get("error") == DOXBENCH_ERR_TURN_SCOPE_REFUSED, (status, raw)
+
+
+@pytest.fixture()
+def composed_turns(tmp_path):
+    """`build(*contributions)`: `composed`'s host, with the released
+    validators and a model port declared, as a plane that can run a turn has
+    them. Yields `(base, capabilities)`."""
+    from opendox import serve
+
+    repo = _repository(tmp_path, identity=True)
+    out = _snapshot(tmp_path, repo)
+    servers = []
+
+    def build(*contributed):
+        bindings = [binding for binding, _mixin in contributed]
+        mixins = [mixin for _binding, mixin in contributed]
+        httpd = serve.build_server(
+            WEB, out, repo, port=0, actor="brett",
+            route_extensions=(_Contribution(bindings, mixins),)
+            if contributed else (),
+            schema_validator_factory=_EveryKind,
+            model_port_factory=_Port)
+        worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+        worker.start()
+        servers.append((httpd, worker))
+        base = httpd.server_address[:2]
+        return base, _capabilities(base)
+
+    try:
+        yield build
+    finally:
+        for httpd, worker in servers:
+            httpd.shutdown()
+            httpd.server_close()
+            worker.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# 6 — model intake and approval: not offered where no record can be written
+# ---------------------------------------------------------------------------
+#
+# RULED by Brett Heap, 2026-10-02, "Refuse by name, hide intake
+# (Recommended)". The enrolment ends in a recorded approval, a governed
+# gate-action record that only a HOST's gate writes; openDox's own default
+# writes none. So with no host's gate registered the surface answers
+# `offered: false` with a stated reason, even beside a hand-written broker
+# block, and the intake act and the approval refuse naming the seam, writing
+# nothing. A host that registers its gate is offered the flow, and its
+# approval is recorded.
+
+#: The pending declaration a hand-written document carries, for the binding
+#: `_BINDING` declares.
+_PENDING = {"binding_id": "honesty-binding", "status": "pending",
+            "install_posture": "single-operator", "proposed_by": "brett",
+            "proposed_at": "2026-10-02T00:00:00Z"}
+
+#: The intake act's declared facts, on its query string.
+_INTAKE = ("/actions/workbench/model-intake?binding=honesty-intake"
+           "&label=Honesty&provider=honesty-provider"
+           "&endpoint=https%3A%2F%2Fprovider.invalid%2Fturn"
+           "&dialect=xfactory-prompt-v1&kind=api_key")
+
+
+def _declare(tmp_path: Path, repo: Path) -> Path:
+    """A binding declared with `opendox model-binding add`, and a declarations
+    document written BY HAND beside it, naming a broker and the binding's
+    pending declaration. Returns the document's path."""
+    import yaml
+    from opendox import doxbench_intake
+
+    added, status = run_module(tmp_path, "opendox.cli", "model-binding", "add",
+                               "--repo-root", str(repo), *_BINDING)
+    assert status == 0, added.stderr_text()
+    path = doxbench_intake.declarations_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump({
+        "schema_version": doxbench_intake.SCHEMA_VERSION,
+        "kind": doxbench_intake.DECLARATIONS_KIND,
+        "broker": {"kind": doxbench_intake.BROKER_KIND,
+                   "argv": ["honesty-broker", "intake"]},
+        "declarations": [dict(_PENDING)],
+    }, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def test_a_standalone_server_does_not_offer_an_intake_it_could_not_approve(
+        tmp_path, monkeypatch) -> None:
+    from opendox import column_seams
+    from opendox.serve_wire import (DOXBENCH_ERR_APPROVAL_REFUSED,
+                                    DOXBENCH_ERR_INTAKE_REFUSED)
+    _clean_environment(monkeypatch)
+    repo = _repository(tmp_path, identity=True)
+    document = _declare(tmp_path, repo)
+    before = document.read_bytes()
+    child, base, caps = _standalone(tmp_path, repo)
+    try:
+        token = caps.get("console_token")
+        assert caps["actions"]["session"] is True and token, caps
+        status, surface, raw = _call(base, "GET", "/workbench/model-intake",
+                                     token=token)
+        assert status == 200, raw
+        # a broker block is declared, and still the flow is not offered
+        assert surface["offered"] is False, surface
+        assert surface["reason"] == column_seams.GATE_RECORDS_REFUSAL, surface
+        assert surface["auth_kinds"] == [] and surface["dialects"] == []
+        intake = _call(base, "POST", _INTAKE, body=b"not-a-real-credential",
+                       token=token)
+        assert intake[1].get("error") == DOXBENCH_ERR_INTAKE_REFUSED, intake
+        assert intake[1]["reason"] == column_seams.GATE_RECORDS_REFUSAL
+        approval = _call(base, "POST", "/actions/workbench/model-approval",
+                         body=_json({"binding": "honesty-binding"}),
+                         token=token)
+        assert approval[1].get("error") == DOXBENCH_ERR_APPROVAL_REFUSED
+        assert approval[1]["reason"] == column_seams.GATE_RECORDS_REFUSAL
+        assert child.interrupt() == 0, child.stderr_text()
+    finally:
+        child.kill()
+    assert child.refused() == [], child.refused()
+    # nothing was written: the declaration is still pending, no record exists
+    assert document.read_bytes() == before
+    assert not (repo / "ideation" / "dashboard" / "gate-records").exists()
+
+
+class _HostGate:
+    """A HOST's gate: openDox's own default for every name, except that it
+    WRITES the gate-action record the default refuses to, into a list."""
+
+    def __init__(self) -> None:
+        from opendox import column_seams, default_columns
+        for name in (*column_seams.GATE_CALLABLES, *column_seams.GATE_VALUES):
+            if name not in type(self).__dict__:
+                setattr(self, name, getattr(default_columns.GATE, name))
+        self.__name__ = "tests.test_capability_honesty._HostGate"
+        self.written: list[tuple[str, dict]] = []
+
+    def build_gate_action_record(self, **fields):
+        return dict(fields)
+
+    def validate_gate_action_record(self, record):
+        assert record["action"] and record["actor"], record
+
+    def HumanGate(self, root, prefixes, *, human_actor):  # noqa: N802
+        return (root, tuple(prefixes), human_actor)
+
+    def write_gate_action_record(self, human, records_dir, record):
+        self.written.append((records_dir, record))
+        return Path(human[0]) / records_dir / "honesty.gate-action.yaml"
+
+
+@pytest.fixture()
+def host_gate():
+    """A host's gate registered at `column_seams.gate` for the case, as a host
+    registers it at process start, and dropped afterwards. Whatever this
+    process registered before (a default an earlier case read) is dropped
+    first: the swap is deliberate."""
+    from opendox import column_seams
+    gate = _HostGate()
+    column_seams.gate.unregister()
+    column_seams.gate.register(gate)
+    try:
+        yield gate
+    finally:
+        column_seams.gate.unregister()
+
+
+def test_a_host_that_registers_its_gate_is_offered_intake_and_approves(
+        tmp_path, host_gate) -> None:
+    import yaml
+    from opendox import doxbench_intake, serve
+
+    repo = _repository(tmp_path, identity=True)
+    document = _declare(tmp_path, repo)
+    out = _snapshot(tmp_path, repo)
+    httpd = serve.build_server(WEB, out, repo, port=0, actor="brett")
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    try:
+        base = httpd.server_address[:2]
+        caps = _capabilities(base)
+        token = caps["console_token"]
+        status, surface, raw = _call(base, "GET", "/workbench/model-intake",
+                                     token=token)
+        assert status == 200, raw
+        assert surface["offered"] is True and "reason" not in surface, surface
+        assert surface["auth_kinds"], surface
+        status, approved, raw = _call(
+            base, "POST", "/actions/workbench/model-approval",
+            body=_json({"binding": "honesty-binding"}), token=token)
+        assert status == 200 and approved.get("ok") is True, raw
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join(timeout=10)
+    # the host's gate wrote the record, BEFORE the document moved
+    assert len(host_gate.written) == 1, host_gate.written
+    records_dir, record = host_gate.written[0]
+    assert record["action"] == doxbench_intake.GATE_ACTION_APPROVE_MODEL
+    assert record["model_declaration"] == "honesty-binding"
+    stored = yaml.safe_load(document.read_text(encoding="utf-8"))
+    assert stored["declarations"][0]["status"] == doxbench_intake.STATUS_APPROVED
+    assert stored["declarations"][0]["approved_by"] == "brett"
+
+
+def test_whether_a_gate_record_can_be_written_follows_the_registration(
+        host_gate) -> None:
+    """The predicate itself: a host's registration answers true; openDox's
+    own default, registered by an entry point, answers false; and asking reads
+    nothing, so it closes no default's window."""
+    from opendox import column_seams
+    assert column_seams.gate_records_writable() is True
+    column_seams.gate.unregister()
+    assert column_seams.gate_records_writable() is False
+    column_seams.register_defaults()
+    assert column_seams.gate_records_writable() is False
+    # still replaceable: asking did not read the default
+    column_seams.gate.register(host_gate)
+    assert column_seams.gate_records_writable() is True

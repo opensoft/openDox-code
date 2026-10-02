@@ -72,8 +72,14 @@ from opendox import authoring as authoring_mod  # noqa: E402
 from opendox import branch_session as branch_session_mod  # noqa: E402
 from opendox import doxbench_install as install_mod  # noqa: E402
 from opendox import doxbench_knowledge as knowledge_mod  # noqa: E402
-from opendox import consumer_reach  # noqa: E402
-gate_mod = consumer_reach.gate_console  # noqa: E402
+# THE GATE PRIMITIVES, THROUGH THEIR SEAM (plan 034 T084; #1144 4.3, R1Q10
+# (a)). This was `consumer_reach.gate_console`, a late stand-in over openXdox's
+# `gate_console` that still raised where openXdox was absent. `gate_mod.X` now
+# reads the registration current at `column_seams.gate` when it runs, a host's
+# or openDox's own default, which `build_parser()` and `main()` register.
+# Stdlib-only, so this adds no reach.
+from opendox import column_seams  # noqa: E402
+gate_mod = column_seams.gate.proxy  # noqa: E402
 from opendox import serve as serve_mod  # noqa: E402
 from opendox import workbench as workbench_mod  # noqa: E402
 # THE HOME-CORPUS SEAM'S DEFAULT (4.1a; plan 034 T022) -- see
@@ -110,7 +116,6 @@ from opendox.boundary import (  # noqa: E402
 # register the defaults where no host has. `is_rfc3339_datetime` is not a seam:
 # it is the neutral contract's own date-time rule, and openDox owns it.
 from opendox import projection_seams  # noqa: E402
-from opendox import column_seams  # noqa: E402
 from opendox.rfc3339 import is_rfc3339_datetime  # noqa: E402
 
 # THE COMPOSITION POINT, BOUND AT LAST (§ 4.3; RULED ASK-2 option (2),

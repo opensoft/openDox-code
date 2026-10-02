@@ -153,6 +153,14 @@ NEUTRAL_MODULES = (
     "opendox.default_registry",
     "opendox.default_projection",
     "opendox.rfc3339",
+    # Plan 034 T084 (#1144 4.3; R1Q10 (a)). The consumer columns' seams and
+    # openDox's own defaults behind them, which retired the last stand-in, the
+    # gate column's. As with T055's four: a seam whose whole job is to let a
+    # HOST hand openDox its gate, its scope authority, its commission reader
+    # and its register is where a reach into `openxdox` would look reasonable,
+    # and neither module makes one.
+    "opendox.column_seams",
+    "opendox.default_columns",
 )
 
 #: Modules that STILL require the consumer at import time, with the reason. They
@@ -815,208 +823,16 @@ def test_the_prefix_is_refused_rather_than_doubled() -> None:
 # 3 — the converted sites, and the blind spot that made this file necessary
 # --------------------------------------------------------------------------
 
-#: `module path -> the names this slice rebound to the late seam`. Each must be
-#: reachable ONLY from a function body: a default argument, an annotation, a
-#: decorator or a module-level expression would resolve the consumer at import
-#: time and make the conversion a census trick.
-CONVERTED_SITES = {
-    # RE-DERIVED BY PLAN 034 T034 from the tree, where phase 1's lanes joined:
-    # every module-level name bound to a `consumer_reach` stand-in, which
-    # `test_every_name_bound_to_the_seam_is_guarded` below now derives on every
-    # run. The table had fallen behind by five names in two files, and the
-    # guard never read them:
-    #   * `branch_session.py`'s `gate_console`. This is one of the two reverts
-    #     the guard is named for (the NINE default-argument sites this file's
-    #     docstring gives), and it was the one module the table left out;
-    #   * `cli.py`'s other four aliases, the two late callables BUILD slice 2b
-    #     bound for the generate verbs and the `--generated-at` check, and the
-    #     one late constant.
-    # None of the five is read at import time, so the tree was already right.
-    #
-    # NARROWED BY PLAN 034 T055 to the gate column alone. `cli.py`'s
-    # `snapshot_mod`, `corpus_root_refusal`, `generate_snapshot`,
-    # `is_rfc3339_datetime` and `SCANNED_ROOTS`, `serve.py`'s `registry_mod`
-    # and `hosted_ref_refused`, `serve_workbench.py`'s `registry_mod` and
-    # `workbench.py`'s `find_validator` bind no stand-in any more: the
-    # projection mechanism is read from declared seams
-    # (`opendox.projection_seams`, `opendox.generator_seam`), and the two
-    # `registry_mod`s are the registry seam's proxy, which
-    # `tests/test_projection_seams.py` holds to the same import-time rule.
-    # `serve.py` still names the two late COLUMNS as mixin bases, which a class
-    # statement needs before its first instance exists, so it binds no name
-    # here either.
-    "branch_session.py": ("gate_console",),
-    "cli.py": ("gate_mod",),
-}
-
-
-def _import_time_uses(path: Path, names: frozenset[str]) -> list[tuple[int, str]]:
-    """Every use of `names` that runs when the module is imported.
-
-    The module body, module-level `if`/`try`/`with`, CLASS bodies, and — the
-    case the openXdox-side census cannot see — a function's DEFAULTS,
-    ANNOTATIONS and DECORATORS, which are evaluated where the `def` sits and
-    not where it is called. Only a function BODY defers.
-    """
-    hits: list[tuple[int, str]] = []
-
-    def used(node: ast.AST, why: str) -> None:
-        for inner in ast.walk(node):
-            # READS only. The one module-level STORE of each of these names is
-            # the seam binding itself (`gate_mod = consumer_reach.gate_console`)
-            # — the line this slice wrote, which resolves nothing.
-            if isinstance(inner, ast.Name) and inner.id in names \
-                    and isinstance(inner.ctx, ast.Load):
-                hits.append((inner.lineno, f"{inner.id} ({why})"))
-
-    def walk(body: list[ast.stmt], at_import_time: bool) -> None:
-        for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if at_import_time:
-                    args = node.args
-                    for default in [*args.defaults, *(d for d in args.kw_defaults if d)]:
-                        used(default, "default argument")
-                    for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs,
-                                args.vararg, args.kwarg]:
-                        if arg is not None and arg.annotation is not None:
-                            used(arg.annotation, "annotation")
-                    for decorator in node.decorator_list:
-                        used(decorator, "decorator")
-                    if node.returns is not None:
-                        used(node.returns, "return annotation")
-                continue
-            if not at_import_time:
-                continue
-            nested: list[ast.stmt] = []
-            for _field, value in ast.iter_fields(node):
-                items = value if isinstance(value, list) else [value]
-                for item in items:
-                    if isinstance(item, ast.stmt):
-                        nested.append(item)
-                    elif isinstance(item, ast.AST):
-                        used(item, "module level")
-            walk(nested, True)
-
-    walk(ast.parse(path.read_text(encoding="utf-8")).body, True)
-    return sorted(set(hits))
-
-
-def _module_level_statements(body: list[ast.stmt]):
-    """The statements a module runs when it is imported, in source order: its
-    body, and the bodies of a module-level `if`, `try`, `with`, `for`,
-    `while` or `match`, with their handlers and `else` blocks. A function's
-    body and a class's are not the module's names."""
-    for node in body:
-        yield node
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        for _field, value in ast.iter_fields(node):
-            for item in value if isinstance(value, list) else []:
-                if isinstance(item, ast.stmt):
-                    yield from _module_level_statements([item])
-                elif isinstance(item, (ast.ExceptHandler, ast.match_case)):
-                    yield from _module_level_statements(item.body)
-
-
-def _names_bound_to_the_seam(path: Path) -> set[str]:
-    """Every name a module binds, at its top level, to a `consumer_reach`
-    stand-in.
-
-    Every spelling of the seam counts. `from .consumer_reach import X` (`..`
-    in a subpackage) and `from opendox.consumer_reach import X` bind one
-    directly. Once the seam itself is reachable, so do `Y = <seam>.X`, its
-    annotated form `Y: T = <seam>.X`, and `Y = <seam>.f(...)`, which mints one
-    (`module`, `function`, `constant`). `<seam>` is a name bound to the
-    module (`from . import consumer_reach`, `import opendox.consumer_reach as
-    cr`, or `cr = consumer_reach` after either), or the package's attribute
-    `opendox.consumer_reach`, once `import opendox` or `import
-    opendox.consumer_reach` has bound `opendox`. Each is read wherever the
-    module runs it at import time, a module-level `if` or `try` included."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    # The leading dots from this file to the `opendox` package: one for a
-    # module at the top of it, two in a subpackage, and so on.
-    level = len(path.relative_to(PACKAGE).parts)
-    seam_aliases: set[str] = set()
-    package_aliases: set[str] = set()
-    bound: set[str] = set()
-    statements = list(_module_level_statements(tree.body))
-    for node in statements:
-        if isinstance(node, ast.ImportFrom):
-            package = (node.level == level and node.module is None) or \
-                (node.level == 0 and node.module == "opendox")
-            seam = (node.level == level and node.module == "consumer_reach") or \
-                (node.level == 0 and node.module == "opendox.consumer_reach")
-            if package:
-                seam_aliases |= {a.asname or a.name for a in node.names
-                                 if a.name == "consumer_reach"}
-            if seam:
-                bound |= {a.asname or a.name for a in node.names}
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "opendox.consumer_reach" and alias.asname:
-                    seam_aliases.add(alias.asname)
-                elif alias.name == "opendox" or (
-                        alias.name.startswith("opendox.") and not alias.asname):
-                    package_aliases.add(alias.asname or "opendox")
-
-    def is_the_seam(expr: ast.expr | None) -> bool:
-        return (isinstance(expr, ast.Name) and expr.id in seam_aliases) or (
-            isinstance(expr, ast.Attribute) and expr.attr == "consumer_reach"
-            and isinstance(expr.value, ast.Name)
-            and expr.value.id in package_aliases)
-
-    for node in statements:
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-            continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        names = {t.id for t in targets if isinstance(t, ast.Name)}
-        if is_the_seam(node.value):
-            seam_aliases |= names
-            continue
-        value = node.value.func if isinstance(node.value, ast.Call) else node.value
-        if isinstance(value, ast.Attribute) and is_the_seam(value.value):
-            bound |= names
-    return bound
-
-
-def test_every_name_bound_to_the_seam_is_guarded() -> None:
-    """The guard's table is the tree's, name for name (plan 034 T034).
-
-    A name bound to the seam and missing from `CONVERTED_SITES` is a name the
-    import-time guard never reads. A name the table keeps and no module binds
-    any more is a guard over nothing. The seam's own module is left out: it
-    DEFINES the stand-ins."""
-    derived = {}
-    for path in sorted(PACKAGE.rglob("*.py")):
-        if path.name == "consumer_reach.py":
-            continue
-        bound = _names_bound_to_the_seam(path)
-        if bound:
-            derived[path.relative_to(PACKAGE).as_posix()] = bound
-    starred = sorted(module for module, names in derived.items() if "*" in names)
-    assert not starred, (
-        f"{starred} import the seam's stand-ins with a wildcard. The guard "
-        "reads each converted name by name, and a wildcard gives it none to "
-        "read: import each stand-in by its name")
-    declared = {module: set(names) for module, names in CONVERTED_SITES.items()}
-    assert derived == declared, (
-        f"the names each module binds to `consumer_reach` are {derived}, and "
-        f"CONVERTED_SITES guards {declared}. Add a new binding to the table, so "
-        "its import-time uses are refused, and take a retired one out")
-
-
-@pytest.mark.parametrize("module_file", sorted(CONVERTED_SITES))
-def test_a_converted_name_is_never_used_at_import_time(module_file: str) -> None:
-    """The guard that would have caught the two reverts before they were made."""
-    found = _import_time_uses(PACKAGE / module_file,
-                              frozenset(CONVERTED_SITES[module_file]))
-    assert found == [], (
-        f"src/opendox/{module_file} uses a late-bound consumer name where it "
-        f"runs AT IMPORT TIME: {found}. The stand-in would resolve `openxdox` "
-        "there, so removing the import statement would lower openXdox-code's "
-        "ratchet without removing the dependency — a census that reads better "
-        "than the tree. Defer the use, or leave the import alone and ask for "
-        "the declared-edit ruling")
+# RETIRED BY PLAN 034 T084 (#1144 4.3). This section held `CONVERTED_SITES`,
+# every module-level name bound to a `consumer_reach` stand-in, and refused any
+# read of one at import time: a default argument, an annotation, a decorator or
+# a module-level expression, the blind spot this file was written for. The last
+# two, `branch_session.py`'s `gate_console` and `cli.py`'s `gate_mod`, are now
+# proxies over `opendox.column_seams.gate`, so no name binds a stand-in. The
+# same rule holds them where every seam proxy is held:
+# `tests/test_projection_seams.py`'s
+# `test_no_proxy_over_a_seam_is_read_at_import_time`, which names both, with no
+# import-time read.
 
 
 def test_no_module_under_src_names_the_pre_carve_package_at_import_time() -> None:

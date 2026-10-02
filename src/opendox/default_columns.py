@@ -61,6 +61,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 from opendox import defaults
+from opendox.column_seams import GATE_RECORDS_REFUSAL
 from opendox.boundary import GATE_SIDE_EFFECT, BoundaryViolation, HumanGate, Refusal
 from opendox.doxbench_scope_types import (
     ScopeConfinementError,
@@ -105,20 +106,6 @@ class GateRefused(Exception):
     """A gate action refused on a precondition. openDox's default raises it
     for a refusal of its own, and `GateRecordsNotRegistered` below for the
     governed functions it does not carry."""
-
-
-#: The fixed sentence a surface puts on the wire, and the refusal's text, where
-#: a governed gate-action record is asked for and no host's gate is registered.
-#: It names the seam and the call that registers one (4.2).
-GATE_RECORDS_REFUSAL = (
-    "this install records no governed gate actions: no host's gate is "
-    "registered at openDox's gate seam (opendox.column_seams.gate), and "
-    "openDox's own default writes no gate-action record, because that record "
-    "is a shape only the governing host's pinned schema declares. A host that "
-    "records gate actions registers its gate at process start with "
-    "opendox.column_seams.gate.register(<the host's gate>). A model is "
-    "declared on this install with `opendox model-binding add`, which needs "
-    "no approval record.")
 
 
 class GateRecordsNotRegistered(GateRefused):
@@ -314,6 +301,19 @@ def _section(key: str, label: str, note: str, paths: Iterable[Any], *,
                         owned=False, documents=tuple(rows))
 
 
+def editable_paths(sections: Sequence[ScopeSection],
+                   context_paths: Sequence[str]) -> tuple[str, ...]:
+    """The paths a projected tile lets a turn edit: NONE. openDox's default
+    scope is READ-ONLY (the holder's reading of R1Q10 (a) for T084, put to
+    Brett on openxFactory#656's thread, 2026-10-02), so a tile grants no edit
+    authority, and openDox's own turn guard, which requires a turn's paths to
+    be in scope AND editable (`doxbench_turns._require_in_scope_and_editable`),
+    discloses none of them. It is ONE named function so that a ruling either way
+    is one change here: the readable paths a tile's own sections carry are
+    `context_paths`."""
+    return ()
+
+
 def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
                   source_root: Path, created_paths: Iterable[str] = ()
                   ) -> ScopeProjection | None:
@@ -323,8 +323,8 @@ def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
     A group (`cluster`) projects its members, a selection (`staged`) its files,
     and a candidate (`possible`) the members of the groups that claim it. Each
     path is confined to `source_root` by the registry seam's own
-    `resolve_within`, and NOTHING is editable: `editable_paths` and
-    `active_document_candidates` are empty, and there is no outline. A
+    `resolve_within`, and NOTHING is editable (`editable_paths`), so
+    `active_document_candidates` is empty too, and there is no outline. A
     `created_paths` entry is confined and readable, never editable."""
     if not isinstance(snapshot, Mapping):
         return None
@@ -389,10 +389,13 @@ def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
         if path not in context:
             context.append(path)
     revision = _text(_mapping(snapshot.get("generation")).get("source_revision"))
+    editable = editable_paths(sections, context)
     return ScopeProjection(
         key=key, title=title, keywords=keywords, source_revision=revision,
         sections=tuple(sections), context_paths=tuple(context),
-        editable_paths=(), outline_path=None, active_document_candidates=())
+        editable_paths=editable, outline_path=None,
+        # what the turn guard would accept: in scope AND editable
+        active_document_candidates=tuple(p for p in context if p in editable))
 
 
 def _normalize_ref(ref: Any) -> str:

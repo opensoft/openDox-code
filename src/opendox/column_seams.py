@@ -70,6 +70,7 @@ from opendox.projection_seams import (
 
 __all__ = [
     "GATE_CALLABLES",
+    "GATE_RECORDS_REFUSAL",
     "GATE_VALUES",
     "KICKOFF_CALLABLES",
     "ProjectionSeamError",
@@ -86,6 +87,19 @@ __all__ = [
 ]
 
 _MODULE = "opendox.column_seams"
+
+#: The fixed sentence a surface puts on the wire, and the refusal's text, where
+#: a governed gate-action record is asked for and no host's gate is registered.
+#: It names the seam and the call that registers one (4.2).
+GATE_RECORDS_REFUSAL = (
+    "this install records no governed gate actions: no host's gate is "
+    "registered at openDox's gate seam (opendox.column_seams.gate), and "
+    "openDox's own default writes no gate-action record, because that record "
+    "is a shape only the governing host's pinned schema declares. A host that "
+    "records gate actions registers its gate at process start with "
+    "opendox.column_seams.gate.register(<the host's gate>). A model is "
+    "declared on this install with `opendox model-binding add`, which needs "
+    "no approval record.")
 
 #: What a gate registration must carry as callables: the human-gate guard and
 #: the types it works with, the record functions, the session-ref target id,

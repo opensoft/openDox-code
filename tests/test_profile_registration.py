@@ -544,8 +544,8 @@ def _import_time_nodes(body: list[ast.stmt]):
     """Every node evaluated when the module is IMPORTED.
 
     A function's BODY defers; its decorators and default arguments do not, and a
-    class body runs outright. `tests/test_consumer_reach.py::_import_time_uses`
-    draws the line in the same place for the consumer seam, and for the same
+    class body runs outright. `tests/test_projection_seams.py::_import_time_reads`
+    draws the line in the same place for every seam proxy, and for the same
     reason: `ast.walk` over a module descends into function bodies and would
     call every deferred binding an import-time one.
     """

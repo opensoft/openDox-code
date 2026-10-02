@@ -1717,15 +1717,23 @@ def test_an_explicit_manifest_validator_script_still_runs(tmp_path) -> None:
 # 9 — no proxy over a seam is read at import time
 # ---------------------------------------------------------------------------
 
+#: The modules whose seams are `projection_seams._Seam`s, so whose proxies
+#: this rule holds: the projection mechanism's, and the consumer columns'
+#: (`opendox.column_seams`, plan 034 T084), which took over the import-time
+#: guard `tests/test_consumer_reach.py` kept over the `consumer_reach`
+#: stand-ins those proxies replace.
+SEAM_MODULES = ("projection_seams", "column_seams")
+
+
 def _proxy_bindings(tree: ast.Module) -> set[str]:
-    """Module-level names bound to `projection_seams.<seam>.proxy`."""
+    """Module-level names bound to `<seam module>.<seam>.proxy`."""
     bound = set()
     for node in tree.body:
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Attribute) \
                 and node.value.attr == "proxy" \
                 and isinstance(node.value.value, ast.Attribute) \
                 and isinstance(node.value.value.value, ast.Name) \
-                and node.value.value.value.id == "projection_seams":
+                and node.value.value.value.id in SEAM_MODULES:
             bound |= {t.id for t in node.targets if isinstance(t, ast.Name)}
     return bound
 
@@ -1783,7 +1791,9 @@ def test_no_proxy_over_a_seam_is_read_at_import_time() -> None:
         if names:
             found[path.relative_to(PACKAGE).as_posix()] = (
                 sorted(names), _import_time_reads(tree, names))
-    assert found == {"serve.py": (["registry_mod"], []),
+    assert found == {"branch_session.py": (["gate_console"], []),
+                     "cli.py": (["gate_mod"], []),
+                     "serve.py": (["registry_mod"], []),
                      "serve_workbench.py": (["registry_mod"], [])}, found
 
 
