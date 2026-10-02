@@ -1397,9 +1397,11 @@ def test_generate_and_open_refuses_an_empty_source_option_before_its_run_dir(
     _declaring_generator(calls)
     repo = _repository(tmp_path)
     run_dir = tmp_path / "run"
-    rc = cli.main(["generate-and-open", "--repo-root", str(repo), "--repository",
-                   "garden", "--run-dir", str(run_dir), "--no-open", "--no-serve",
-                   "--possibles", ""])
+    # `--local`: the single-user install. Since plan 034 T070 an unflagged run
+    # is HOSTED, and its issuer refusal would come first.
+    rc = cli.main(["generate-and-open", "--local", "--repo-root", str(repo),
+                   "--repository", "garden", "--run-dir", str(run_dir),
+                   "--no-open", "--no-serve", "--possibles", ""])
     assert rc == 1
     assert ("generate-and-open refused: --possibles was given an empty path"
             in capsys.readouterr().err)
