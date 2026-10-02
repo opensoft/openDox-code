@@ -13,10 +13,11 @@ request records every hit with its reason. At that tree:
   closed, each by its own phase-1 task: `authoring.py:318` (T021),
   `serve.py:713` (T012), `workbench.py:746` (T025), `workbench.py:1407-1409`
   (T026), and `serve_wire.py:1369` and `doxbench_packet.py:177` (T027).
-* Nineteen deferred reaches remain, every one of them into `openxdox` and
-  inside a function body. The release map routes them in phases 2 and 3
-  (T055, T084), and openXdox-code's `OPENDOX_BACK_IMPORTS` ratchet counts them
-  module by module.
+* Eleven deferred reaches remain, every one of them into `openxdox` and
+  inside a function body. Phase 2's T055 routed eight of the nineteen (the
+  snapshot registry and source, the corpus-root predicate and the change rows,
+  through declared seams); phase 3's T084 routes the rest, and openXdox-code's
+  `OPENDOX_BACK_IMPORTS` ratchet counts them module by module.
 
 THIS FILE HOLDS THE FIRST TWO FACTS, AND DOES NOT PIN THE THIRD'S COUNT. A
 deferred reach into `openxdox` is still lawful in release 1. Each one that a
@@ -108,7 +109,7 @@ from import_scan import (  # noqa: E402
     CONTEXT_NAMES, UNREADABLE, importer_escapes, importing_calls,
     names_a_forbidden_package, names_imported_by, rebinds, string_literals)
 
-#: The consumer. Its deferred reaches are phase 2's and 3's to route.
+#: The consumer. Its deferred reaches left are phase 3's to route (T084).
 CONSUMER = "openxdox"
 
 #: openxFactory's packages, spelled as F2.1 and F4.1 spell them. openDox can
@@ -283,7 +284,7 @@ def test_no_code_under_src_spells_an_openxfactory_package():
 
 
 def test_every_reach_the_sweep_finds_is_deferred_into_the_consumer():
-    """The positive form of the two above: what is left is phase 2's and 3's.
+    """The positive form of the two above: what is left is phase 3's (T084).
 
     Every reach names `openxdox` and sits in a function body. Their count is
     openXdox-code's ratchet's, and it is not pinned here."""

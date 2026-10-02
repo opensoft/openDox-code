@@ -22,8 +22,9 @@ HOW THIS MODULE REACHES THE SHARED SPINE: through `_core()`, resolved at CALL
 time and relative to this module's own package, never a module-level
 `from ideation_dashboard.cli import _report`. A frozen reference
 would still work and would silently stop honouring the module-level patch sites
-the existing tests rely on (`cli_mod._generate_and_write`,
-`cli_mod._locate_validator` behind `_validate`) — green, and wrong. The
+a test replaces (`cli_mod._generate_and_write`, or `cli_mod._validate_by_kind`
+behind `_validate`, which replaced `_locate_validator` at plan 034 T055) —
+green, and wrong. The
 accessor also keeps the two modules importable in either order.
 """
 
