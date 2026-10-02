@@ -759,6 +759,71 @@ def test_the_files_are_written_0600_and_replace_what_was_there(
     assert sorted(p.name for p in tmp_path.iterdir()) == ["pg_hba.conf", "pg_ident.conf"]
 
 
+@pytest.mark.parametrize("shape", ["umask", "stale-0644", "stale-link"])
+def test_the_files_are_exactly_0600_whatever_the_umask_or_a_stale_temporary(
+        tmp_path: Path, shape: str) -> None:
+    """The 0600 is SET, not asked for (Copilot review of #69). A umask that
+    takes the owner's write bit would leave a 0400 file. A temporary file an
+    interrupted start left at the same name would keep its own mode, 0644,
+    and a link left there would be written through to its target."""
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    outside = tmp_path / "outside.conf"
+    outside.write_text("untouched\n", encoding="utf-8")
+    outside.chmod(0o644)
+    for name in bundle_mod.authentication_files("alice"):
+        stale = data / f".{name}.opendox-{os.getpid()}"
+        if shape == "stale-0644":
+            stale.write_text("local all all trust\n", encoding="utf-8")
+            stale.chmod(0o644)
+        elif shape == "stale-link":
+            stale.symlink_to(outside)
+    previous = os.umask(0o277 if shape == "umask" else 0o022)
+    try:
+        bundle_mod.write_authentication(data, "alice")
+    finally:
+        os.umask(previous)
+    for name, content in bundle_mod.authentication_files("alice").items():
+        written = data / name
+        assert not written.is_symlink(), name
+        assert written.read_text(encoding="utf-8") == content, name
+        assert stat.S_IMODE(written.stat().st_mode) == 0o600, name
+    assert sorted(p.name for p in data.iterdir()) == ["pg_hba.conf", "pg_ident.conf"]
+    assert outside.read_text(encoding="utf-8") == "untouched\n"
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o644, "a stale link's target was re-moded"
+
+
+def test_a_link_put_at_the_temporary_name_after_its_removal_is_never_followed(
+        monkeypatch, tmp_path: Path) -> None:
+    """The temporary file is created EXCLUSIVELY and without following a
+    link, so a link that appears at its name between the removal and the
+    open is a refusal, never a file written through (Copilot review of
+    #69). The stand-in `unlink` plays that race once."""
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    outside = tmp_path / "outside.conf"
+    outside.write_text("untouched\n", encoding="utf-8")
+    outside.chmod(0o644)
+    real_unlink = os.unlink
+    raced: list = []
+
+    def _unlink(path, *args, **kwargs):
+        try:
+            real_unlink(path, *args, **kwargs)
+        finally:
+            if not raced and Path(path).name.startswith(".pg_hba.conf.opendox-"):
+                raced.append(path)
+                os.symlink(outside, path)
+
+    monkeypatch.setattr(bundle_mod.os, "unlink", _unlink)
+    with pytest.raises(FileExistsError):
+        bundle_mod.write_authentication(data, "alice")
+    assert raced, "the stand-in never ran"
+    assert outside.read_text(encoding="utf-8") == "untouched\n"
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o644, "the link's target was re-moded"
+    assert not (data / "pg_hba.conf").exists()
+
+
 @pytest.mark.parametrize("name", ["/regex", 'quo"te', "has space", "hash#tag", ""])
 def test_an_os_user_name_the_map_cannot_hold_plainly_is_refused(
         monkeypatch: pytest.MonkeyPatch, name: str) -> None:
