@@ -662,11 +662,17 @@ def _answer_of(child, received: list, *, source,
         _reap(child)
         return None, DIAG_BROKER_TIMEOUT
     child.stdout.close()
+    # A REFUSAL KILLS WHAT IS LEFT OF THE GROUP, here as at the timeout and
+    # the bound. The broker has exited, but a descendant still in its group
+    # would outlive it, one more for each such call (Copilot's review of
+    # openDox-code#64 at `a271d307`).
     if returncode != 0:
+        _reap(child)
         return None, DIAG_BROKER_REFUSED
     try:
         return b"".join(received).decode("utf-8"), None
     except UnicodeDecodeError:
+        _reap(child)
         return None, DIAG_BROKER_MALFORMED
 
 
