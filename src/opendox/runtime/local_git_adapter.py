@@ -3019,8 +3019,10 @@ class WorkingTreeCorpus(LocalGitCorpus):
     matches it instead of reading a commit a local session has since edited
     past.
 
-    `resolve()`, `check()` and `write_back()` are UNCHANGED, inherited from
-    `LocalGitCorpus` exactly. So is `classify()`: its header read
+    `resolve()` and `write_back()` are UNCHANGED, inherited from
+    `LocalGitCorpus` exactly. So is `check()`, except that a WHOLE-corpus
+    check leaves out the paths `excluded` names (see below). So is
+    `classify()`: its header read
     (`_header_of`) goes THROUGH `self.read()`, which is why overriding `read`
     alone is enough to make classification see the same bytes this adapter
     lists and serves. Only WHERE `list_documents`/`read` get their bytes
@@ -3125,6 +3127,22 @@ class WorkingTreeCorpus(LocalGitCorpus):
         if not self._excluded:
             return listed
         return tuple(d for d in listed if d.key not in self._excluded)
+
+    def check(self, corpus: ResolvedCorpus,
+              subjects: tuple[DocumentId, ...] | None = None) -> tuple[Finding, ...]:
+        """The parent's verdict, over the documents this corpus LISTS.
+
+        `subjects=None` means the whole corpus (`CorpusAdapter.check`), and
+        the whole corpus is what `list_documents` lists. So a finding on an
+        excluded path is left out of a whole-corpus check, and an edited,
+        committed bindings document is not reported as an uncommitted document
+        the corpus does not hold (Copilot at openDox-code#76, r4170556938). A
+        subject the caller NAMES is answered whether or not it is excluded:
+        asking about one file by name is not asking about the corpus."""
+        findings = super().check(corpus, subjects)
+        if subjects is not None or not self._excluded:
+            return findings
+        return tuple(f for f in findings if f.subject not in self._excluded)
 
     def _list_documents_bound(self, git: GitRunner, corpus: ResolvedCorpus,
                               scope: str) -> tuple[DocumentId, ...]:

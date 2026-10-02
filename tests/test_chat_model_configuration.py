@@ -1034,6 +1034,32 @@ def test_the_standalone_corpus_lists_neither_settings_document(entry, tmp_path) 
     assert _listed(adapter, root, head) == expected, "at a pinned revision"
 
 
+def test_a_whole_corpus_check_names_only_what_the_corpus_lists(tmp_path) -> None:
+    """A committed bindings document, edited after the commit, is not reported
+    by a whole-corpus check, since the corpus does not list it. A user's
+    edited document beside it is reported, and the bindings document is
+    reported when a caller names it (Copilot at openDox-code#76,
+    r4170556938)."""
+    from opendox import corpus_adapter
+    from opendox.runtime import local_git_adapter as lga
+    root = fresh_repository(PLAIN, tmp_path)
+    _declare(root)
+    _write(root, _USER_DOCUMENTS_BESIDE_SETTINGS[0], "title: mine\nsummary: v1\n")
+    _commit_all(root)
+    bindings = root / binding_mod.DEFAULT_BINDINGS_RELPATH
+    bindings.write_text(bindings.read_text(encoding="utf-8") + "# edited\n",
+                        encoding="utf-8")
+    _write(root, _USER_DOCUMENTS_BESIDE_SETTINGS[0], "title: mine\nsummary: v2\n")
+    adapter = lga.WorkingTreeCorpus()
+    corpus = adapter.resolve(corpus_adapter.CorpusRef(name="home", location=str(root)))
+    assert [f.subject for f in adapter.check(corpus)] == [
+        _USER_DOCUMENTS_BESIDE_SETTINGS[0]]
+    named = (corpus_adapter.DocumentId(corpus="home",
+                                       key=binding_mod.DEFAULT_BINDINGS_RELPATH),)
+    assert [f.subject for f in adapter.check(corpus, named)] == [
+        binding_mod.DEFAULT_BINDINGS_RELPATH]
+
+
 def test_a_corpus_told_to_leave_out_nothing_lists_every_file(tmp_path) -> None:
     from opendox.runtime import local_git_adapter as lga
     root = fresh_repository(PLAIN, tmp_path)
