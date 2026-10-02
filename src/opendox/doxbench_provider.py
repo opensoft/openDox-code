@@ -209,6 +209,13 @@ BROKER_TIMEOUT_SECONDS = 30.0
 #: How much of the credential is read from its source at a time.
 _STDIN_CHUNK = 8192
 
+#: How long a refusal waits for a broker it has killed. SIGKILL ends a broker
+#: at once unless it is stuck in uninterruptible I/O, so this is no second
+#: clock, as `runtime/local_git_adapter._stop_the_whole_group`'s bound is not.
+#: Past it the refusal goes on, and CPython reaps the broker once its `Popen`
+#: is collected (`subprocess._active`).
+_REAP_GRACE_SECONDS = 5.0
+
 #: The largest answer a broker may write. A bound, not a policy: an unbounded
 #: read of a child's stdout is a way to spend this process's memory by
 #: misconfiguring a binding.
@@ -530,12 +537,27 @@ def _reap(child) -> None:
     """Kill a child this runner is refusing, and its process group, wait for
     it, and close both of this process's ends of its pipes. Nothing is left
     reading them. A descendant that left the group keeps only its own copy
-    of the pipe, which nothing here waits on."""
-    _kill_the_group(child)
-    child.wait()
+    of the pipe, which nothing here waits on.
+
+    THE GROUP IS SIGNALLED ONLY WHILE THE BROKER IS UNREAPED (Copilot's
+    review of openDox-code#64 at `bbcb565e`). Its id is the broker's pid,
+    which can be reused once the broker is reaped, and a signal then could
+    reach an unrelated process group. A broker whose exit was read is
+    still unreaped (`_exit_status_unreaped`), so its group is killed here
+    first and the broker reaped after.
+
+    THE WAIT IS BOUNDED (the same review): a broker stuck in uninterruptible
+    I/O outlives SIGKILL, and the refusal does not wait on it past
+    `_REAP_GRACE_SECONDS`."""
+    if child.returncode is None:
+        _kill_the_group(child)
+    try:
+        child.wait(timeout=_REAP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
     _close_quietly(child.stdin)
     child.stdin = None
-    child.stdout.close()
+    _close_quietly(child.stdout)
 
 
 def _close_quietly(stream) -> None:
@@ -656,24 +678,72 @@ def _answer_of(child, received: list, *, source,
                 if size > MAX_BROKER_ANSWER_BYTES:
                     _reap(child)
                     return None, DIAG_BROKER_OVERSIZE
-    try:
-        returncode = child.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
+    return _settled(child, received, deadline)
+
+
+def _settled(child, received: list,
+             deadline: float) -> tuple[str | None, str | None]:
+    """The broker's answer once its output has ended. Its exit is read
+    without reaping it, so a refusal can still kill what is left of its
+    group (`_reap`). An answer is returned with the broker reaped.
+
+    A REFUSAL KILLS WHAT IS LEFT OF THE GROUP, here as at the timeout and
+    the bound. The broker has exited, but a descendant still in its group
+    would outlive it, one more for each such call (Copilot's review of
+    openDox-code#64 at `a271d307`)."""
+    returncode = _exit_status_unreaped(child, deadline)
+    if returncode is None:
         _reap(child)
         return None, DIAG_BROKER_TIMEOUT
-    child.stdout.close()
-    # A REFUSAL KILLS WHAT IS LEFT OF THE GROUP, here as at the timeout and
-    # the bound. The broker has exited, but a descendant still in its group
-    # would outlive it, one more for each such call (Copilot's review of
-    # openDox-code#64 at `a271d307`).
     if returncode != 0:
         _reap(child)
         return None, DIAG_BROKER_REFUSED
     try:
-        return b"".join(received).decode("utf-8"), None
+        # Decoded in place, so no other name holds what the broker wrote.
+        received[:] = [b"".join(received).decode("utf-8")]
     except UnicodeDecodeError:
         _reap(child)
         return None, DIAG_BROKER_MALFORMED
+    # It has exited, so this reaps it at once.
+    child.wait()
+    _close_quietly(child.stdout)
+    return received.pop(), None
+
+
+def _exit_status_unreaped(child, deadline: float) -> int | None:
+    """The broker's exit status once it has exited, read WITHOUT reaping
+    it, or None at `deadline`. It reads as `Popen.returncode` does: the
+    exit code, or the negated number of the signal that ended it.
+
+    NOT REAPED, SO ITS GROUP'S ID IS STILL ITS OWN (Copilot's review of
+    openDox-code#64 at `bbcb565e`). Read with `WNOWAIT`, the broker stays a
+    zombie and keeps its pid, which is its group's id, so `_reap` can kill
+    what is left of the group before the broker is reaped. Where `waitid`
+    does not exist, the broker is reaped as it is read, and `_reap` then
+    signals no group. So does a broker something else has reaped, which
+    `Popen` reads as an exit of 0."""
+    waitid = getattr(os, "waitid", None)
+    if waitid is None:
+        try:
+            return child.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            return None
+    delay = 0.0005
+    while True:
+        try:
+            state = waitid(os.P_PID, child.pid,
+                           os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return child.wait()
+        if state is not None:
+            if state.si_code == os.CLD_EXITED:
+                return state.si_status
+            return -state.si_status
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(delay, remaining, 0.05))
+        delay *= 2
 
 
 def broker_operation_argv(binding, operation: str, *,

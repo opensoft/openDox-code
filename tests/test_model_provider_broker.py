@@ -3647,17 +3647,40 @@ def test_a_broker_whose_descendant_holds_its_output_is_still_refused_in_time(
     assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
 
 
+def _process_state(pid: int) -> str | None:
+    """The state letter `/proc` gives `pid` (`Z` for a zombie, which has
+    exited and is not yet reaped), or None once it is gone."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    return stat.rsplit(")", 1)[1].split()[0]
+
+
 @pytest.mark.parametrize("misbehaviour", ["exits-non-zero",
                                           "answers-in-no-utf-8"])
 def test_a_refusal_after_the_broker_exits_kills_what_is_left_of_its_group(
-        tmp_path, misbehaviour):
+        tmp_path, monkeypatch, misbehaviour):
     """Copilot's review of openDox-code#64 at `a271d307`, a note it had
     missed before. A broker left a descendant in its group, holding none of
     its pipes, and then exited non-zero or answered in bytes that are not
     UTF-8. It was refused at once, but the descendant went on running, and
     each such call left one more. Every refusal of the runner now kills
     what is left of the broker's group, as the timeout and the bound
-    already did."""
+    already did.
+
+    Copilot's review at `bbcb565e`: the group's id is the broker's pid,
+    which can be reused once the broker is reaped. At `bbcb565e` the broker
+    was reaped first and its group signalled after. Now the group is
+    signalled while the broker is a zombie, exited and not yet reaped."""
+    signalled: list = []
+    killpg = os.killpg
+
+    def recording_killpg(pgid, sig):
+        signalled.append(_process_state(pgid))
+        return killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", recording_killpg)
     if misbehaviour == "exits-non-zero":
         last, expected = "sys.exit(3)\n", provider_mod.DIAG_BROKER_REFUSED
     else:
@@ -3680,11 +3703,81 @@ def test_a_refusal_after_the_broker_exits_kills_what_is_left_of_its_group(
     descendant = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
     try:
         assert caught.value.diagnostic == expected
+        assert signalled == ["Z"], \
+            "the group is signalled once, before the broker is reaped"
         assert not _still_running(descendant), \
             "the descendant was left running"
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(descendant, signal.SIGKILL)
+
+
+def test_where_an_exit_cannot_be_read_unreaped_no_group_is_signalled(
+        tmp_path, monkeypatch):
+    """Where `os.waitid` does not exist, the broker is reaped as its exit
+    is read, so its pid, which is its group's id, may already be reused.
+    Its refusal then signals no group at all. A descendant still in that
+    group is not reached there, which is the one cost."""
+    monkeypatch.delattr(os, "waitid")
+    signalled: list = []
+    killpg = os.killpg
+
+    def recording_killpg(pgid, sig):
+        signalled.append(pgid)
+        return killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", recording_killpg)
+    script = tmp_path / "descendant-leaving-broker.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "descendant = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(20)'],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL)\n"
+        "open(sys.argv[0] + '.pid', 'w').write(str(descendant.pid))\n"
+        "sys.exit(3)\n", encoding="utf-8")
+    argv = provider_mod.broker_operation_argv(
+        _broker_binding(script), provider_mod.OPERATION_MINT)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.subprocess_broker_runner(argv, timeout=5)
+    descendant = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
+    try:
+        assert caught.value.diagnostic == provider_mod.DIAG_BROKER_REFUSED
+        assert signalled == [], "no group is signalled after the reap"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(descendant, signal.SIGKILL)
+
+
+def test_a_refusal_waits_on_a_killed_broker_only_so_long(monkeypatch):
+    """Copilot's review of openDox-code#64 at `bbcb565e`. SIGKILL ends a
+    broker at once unless it is stuck in uninterruptible I/O. Then the
+    refusal's wait, unbounded at `bbcb565e`, never returned, and this
+    process's ends of the pipes stayed open. The wait is bounded, and the
+    pipes are closed past it. The stand-in here is a real broker whose
+    `wait` behaves as that one's would."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, process_group=0)
+    reap = child.wait
+    asked: list = []
+
+    def a_wait_sigkill_cannot_end(timeout=None):
+        asked.append(timeout)
+        if timeout is None:
+            raise AssertionError("an unbounded wait")
+        raise subprocess.TimeoutExpired(child.args, timeout)
+
+    monkeypatch.setattr(child, "wait", a_wait_sigkill_cannot_end)
+    try:
+        provider_mod._reap(child)
+        assert asked == [provider_mod._REAP_GRACE_SECONDS]
+        assert child.stdin is None
+        assert child.stdout.closed
+    finally:
+        monkeypatch.undo()
+        child.kill()
+        reap(timeout=10)
 
 
 def test_a_broker_that_never_reads_the_credential_is_refused_in_time(
