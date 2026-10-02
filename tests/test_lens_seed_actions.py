@@ -50,9 +50,12 @@ A CREATED file: no carve-manifest row (RULED OQ-C).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +68,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "src" / "opendox" / "web"
 VIEWS = WEB / "views"
 SERVE = ROOT / "src" / "opendox" / "serve.py"
+PLAIN_DOCUMENTS = ROOT / "tests" / "fixtures" / "plain-documents"
 NODE = shutil.which("node")
 
 DTN_SEED_ROUTE = "/actions/dtn-seed"
@@ -89,25 +93,31 @@ class _HostRoutes:
         return self._bindings
 
 
-def _payload(*bindings: RouteBinding) -> dict:
+def _payload(*bindings: RouteBinding, gate: bool = True) -> dict:
     """The `/capabilities` payload a serve publishes, with `bindings` contributed.
 
     `serve.build_server()` collects the contributed routes, hands the same
     collection to `view_manifest()`, and publishes the result under `views`
     beside the probe's `actions`. This does the same three things, with the
     real functions, so a change to how the manifest carries routes reaches
-    these cases and not only the server.
+    these cases and not only the server. (The case that reads a REAL serve's
+    payload is `test_the_lens_of_a_real_standalone_serve_...`, below.)
+
+    `gate` is the probe's gate verdict, which the lens does not read for its seed
+    actions. A local serve of a checkout with a resolved actor says it true. A
+    standalone serve says it false once T084 (batch L) turns `actions.gate` off
+    where no gate route answers, and so does a read-only project view (D10). The
+    cases below run both ways so that neither verdict decides the answer.
     """
     routes = route_extension.collect_bindings(
         (_HostRoutes(*bindings),) if bindings else ())
     payload = {
-        # a local, loopback serve of a real checkout with a resolved actor, as
-        # `compute_capabilities()` would say it. Not CALLED: it reads the
-        # consumer's snapshot registry, which a lone openDox does not have until
-        # T055, and this case is about the `views` block beside it.
-        "actions": {"notebook": False, "gate": True, "refresh": False,
-                    "session": True, "edit": True, "intent": False},
-        "actor": "Ada",
+        # the shape `compute_capabilities()` returns. Not CALLED: it reads the
+        # snapshot registry seam, which a bare process has not registered, and
+        # these cases are about the `views` block beside it.
+        "actions": {"notebook": False, "gate": gate, "refresh": False,
+                    "session": gate, "edit": gate, "intent": False},
+        "actor": "Ada" if gate else None,
         "refresh": {"binding": None, "loopback_only": True},
     }
     payload["views"] = view_extension.view_manifest(
@@ -255,6 +265,12 @@ function read(root) {
   };
 }
 
+function renderKeywords(payload, snapshot, checked) {
+  const root = new Node("div");
+  L.renderLens(root, snapshot, { caps: payload, checked });
+  return read(root);
+}
+
 function render(payload, vocabulary) {
   const root = new Node("div");
   if (vocabulary === "repositories") {
@@ -289,8 +305,26 @@ def _run(body: str, tmp_path: Path) -> Any:
 # AT-R1 step 6, and the other half of it.
 # ---------------------------------------------------------------------------
 
+def _assert_standalone_page(label, page):
+    """What AT-R1 step 6 asks of the lens a standalone serve renders."""
+    assert page["dots"] > 0, (label, "the radar drew no document")
+    assert not page["emptyRadar"], (label, "the radar reads as empty")
+    assert page["seedControls"] == [], (
+        label, "a seed action is offered where no binding answers it")
+    # nothing that exists only to feed a seed survives it: no pick bar, no
+    # checkbox column, no clickable dot, and no sentence sending the reader to a
+    # control that is not there
+    assert page["pickBars"] == 0, label
+    assert page["pickBoxes"] == 0, label
+    assert page["clickableDots"] == 0, label
+    assert page["pickColumns"] == 0, label
+    assert page["seedWords"] == [], (label, page["seedWords"])
+
+
 @needs_node
-def test_a_standalone_lens_draws_its_radar_and_offers_neither_seed_action(tmp_path):
+@pytest.mark.parametrize("gate", [True, False], ids=["gate-on", "gate-off"])
+def test_a_standalone_lens_draws_its_radar_and_offers_neither_seed_action(
+        tmp_path, gate):
     """AT-R1 step 6, driven through the real `views/lens.js`.
 
     The payload is the one a standalone serve publishes: no host has registered,
@@ -299,8 +333,12 @@ def test_a_standalone_lens_draws_its_radar_and_offers_neither_seed_action(tmp_pa
     the staging seed on either). On each, the radar has its dots, the empty-radar
     text is absent, and no seed control is offered, nor anything that exists only
     to feed one.
+
+    BOTH GATE VERDICTS. The lens reads which routes a binding answers, not
+    `actions.gate`: T084 (batch L) turns `actions.gate` off on a standalone serve
+    where no gate route answers, and the answer here must not move with it.
     """
-    standalone = _payload()
+    standalone = _payload(gate=gate)
     assert standalone["views"]["contributed_routes"] == [], (
         "the premise of the case: a serve with no host contributes no route")
     out = _run(f"""
@@ -311,31 +349,131 @@ console.log(JSON.stringify({{
 }}));
 """, tmp_path)
     for vocabulary, page in out.items():
-        assert page["dots"] > 0, (vocabulary, "the radar drew no document")
-        assert not page["emptyRadar"], (vocabulary, "the radar reads as empty")
-        assert page["seedControls"] == [], (
-            vocabulary, "a seed action is offered where no binding answers it")
-        # nothing that exists only to feed a seed survives it: no pick bar, no
-        # checkbox column, no clickable dot, and no sentence sending the reader
-        # to a control that is not there
-        assert page["pickBars"] == 0, vocabulary
-        assert page["pickBoxes"] == 0, vocabulary
-        assert page["clickableDots"] == 0, vocabulary
-        assert page["pickColumns"] == 0, vocabulary
-        assert page["seedWords"] == [], (vocabulary, page["seedWords"])
+        _assert_standalone_page(vocabulary, page)
     # the project view is the one whose drill rows would carry the register seed
     assert out["repositories"]["hasDrillPane"] is True
 
 
+_STANDALONE_SERVE = r"""
+import http.client, json, sys, threading
+from pathlib import Path
+from opendox import cli, serve
+
+repo, out, web, dump = (Path(a) for a in sys.argv[1:5])
+assert cli.main(["generate", "--repo-root", str(repo), "--repository", "garden",
+                 "--output", str(out)]) == 0
+httpd = serve.build_server(web, out, repo, port=0)
+worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+worker.start()
+host, port = httpd.server_address[:2]
+
+
+def get(path):
+    connection = http.client.HTTPConnection(host, port, timeout=10)
+    connection.request("GET", path)
+    response = connection.getresponse()
+    assert response.status == 200, (path, response.status)
+    return json.loads(response.read())
+
+
+dump.write_text(json.dumps({"capabilities": get("/capabilities"),
+                            "snapshot": get("/snapshot.json")}), encoding="utf-8")
+httpd.shutdown()
+httpd.server_close()
+"""
+
+
+def _standalone_serve(tmp_path: Path, *, actor: bool) -> dict:
+    """Serve a plain git repository with NOTHING registered and read it over HTTP.
+
+    A fresh process, so no registration made by another case is inherited, and
+    no git identity but the repository's own: with one configured the serve
+    resolves an actor and says `actions.gate` true, with none it says false.
+    Both are the standalone serve's real answers today.
+    """
+    repo = tmp_path / "repository"
+    shutil.copytree(PLAIN_DOCUMENTS, repo)
+    # Neither GIT_* nor XF_*: the suite itself exports a gate roster and a human
+    # console flag (XF_GATE_PRINCIPALS, XF_HUMAN_CONSOLE), and a roster of several
+    # names with no claim is ambiguous, which would resolve no actor whatever the
+    # repository's own identity says. The standalone serve's only identity here
+    # is the one the repository carries.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("GIT_", "XF_"))}
+    env.update({
+        "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+        "GIT_COMMITTER_NAME": "fixture",
+        "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+        "PYTHONPATH": os.pathsep.join(
+            [str(ROOT / "src"), *filter(None, [os.environ.get("PYTHONPATH")])]),
+    })
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(repo), *args], check=True,
+                       capture_output=True, env=env)
+
+    git("-c", "init.defaultBranch=main", "init", "-q")
+    if actor:
+        git("config", "user.name", "Ada Lovelace")
+        git("config", "user.email", "ada@example.invalid")
+    git("add", "-A")
+    git("commit", "-q", "-m", "fixture")
+    dump = tmp_path / "served.json"
+    proc = subprocess.run(
+        [sys.executable, "-c", _STANDALONE_SERVE, str(repo),
+         str(tmp_path / "run" / "snapshot.json"), str(WEB), str(dump)],
+        capture_output=True, text=True, env=env, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(dump.read_text(encoding="utf-8"))
+
+
 @needs_node
-def test_the_same_lens_offers_both_where_a_host_contributes_both_routes(tmp_path):
+@pytest.mark.parametrize("actor", [True, False], ids=["actor", "no-actor"])
+def test_the_lens_of_a_real_standalone_serve_offers_neither_seed_action(
+        tmp_path, actor):
+    """AT-R1 step 6 on the real thing: a served plain repository, over HTTP.
+
+    The `plain-documents` fixture (AT-R1 step 3 (a)) is generated and served by
+    a fresh process with nothing registered, and its `/capabilities` and
+    `/snapshot.json` are what the lens is handed. The radar draws that
+    repository's own documents as dots, and no seed action is offered. The same
+    run with and without a git identity covers both of `actions.gate`'s answers,
+    because the serve itself gives each.
+    """
+    served = _standalone_serve(tmp_path, actor=actor)
+    capabilities, snapshot = served["capabilities"], served["snapshot"]
+    assert capabilities["views"]["contributed_routes"] == [], (
+        "a serve with no host contributes no route")
+    assert capabilities["actions"]["gate"] is actor, (
+        "the serve's gate verdict follows the identity it can resolve")
+    # the keyword the most documents declare, so the radar has dots to draw
+    carriers = Counter(topic for doc in snapshot["documents"]
+                       for topic in doc.get("topics", []))
+    keyword, carried = carriers.most_common(1)[0]
+    assert carried >= 2, "the fixture must give the radar something to draw"
+    out = _run(f"""
+const payload = {json.dumps(capabilities)};
+const snapshot = {json.dumps(snapshot)};
+console.log(JSON.stringify(renderKeywords(payload, snapshot, [{json.dumps(keyword)}])));
+""", tmp_path)
+    _assert_standalone_page("real serve", out)
+    assert out["dots"] == carried, (
+        "one dot per document that declares the checked keyword")
+
+
+@needs_node
+@pytest.mark.parametrize("gate", [True, False], ids=["gate-on", "gate-off"])
+def test_the_same_lens_offers_both_where_a_host_contributes_both_routes(
+        tmp_path, gate):
     """The other half, so that "never offer them" cannot pass this file.
 
     A host that contributes the two lane routes, as openxFactory does, gets the
     register seed on a set two repositories share, the staging seed, and the
-    selection that feeds it.
+    selection that feeds it. Whatever the gate verdict: the seeds write nothing,
+    and a read-only project view, which has no gate, offers them (D10).
     """
-    bound = _payload(_dtn(), _staging())
+    bound = _payload(_dtn(), _staging(), gate=gate)
     out = _run(f"""
 const payload = {json.dumps(bound)};
 console.log(JSON.stringify({{
