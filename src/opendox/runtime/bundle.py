@@ -520,7 +520,14 @@ def authentication_files(user: str) -> dict[str, str]:
       * Every HOST connection is rejected. The server also listens on no TCP
         address at all (`listen_addresses` is empty), so these lines never
         match. They are written so that the file says what the install is.
-      * No replication line, so a replication connection is refused.
+      * No replication line, so a PHYSICAL replication connection matches
+        no rule and is refused. A LOGICAL one (`replication=database`)
+        names a database, so `pg_hba.conf` reads it as the ordinary local
+        connection it resembles, and no rule here can tell the two apart:
+        it was accepted as `peer:<user>` (adversarial review of
+        openDox-code#69). So the launch sets `max_wal_senders=0`, and the
+        server starts no WAL sender for either kind. A replication
+        connection is refused by the server, whatever the files say.
     """
     header = ("# Written by opendox.runtime.bundle before every start of this local\n"
               "# install's bundled server (plan 034 T072). Changes here are replaced.\n")
@@ -908,7 +915,11 @@ class BundledServer:
                  # the data directory and the two files written above.
                  "-c", f"data_directory={self.bundle.data_dir}",
                  "-c", f"hba_file={self.bundle.data_dir / 'pg_hba.conf'}",
-                 "-c", f"ident_file={self.bundle.data_dir / 'pg_ident.conf'}"],
+                 "-c", f"ident_file={self.bundle.data_dir / 'pg_ident.conf'}",
+                 # NO REPLICATION, physical or logical: see
+                 # `authentication_files`, whose rules cannot refuse a
+                 # logical one (adversarial review of openDox-code#69).
+                 "-c", "max_wal_senders=0"],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 env=_child_environment(),
                 # ITS OWN SESSION, so a terminal's Ctrl-C reaches this process

@@ -566,6 +566,31 @@ def test_a_role_outside_the_map_is_refused_even_for_this_os_user(
     assert "peer authentication failed" in str(caught.value).lower(), caught.value
 
 
+@pytest.mark.parametrize("mode", ["database", "true"])
+def test_a_replication_connection_is_refused_logical_or_physical(
+        state_dir: Path, mode: str) -> None:
+    """A PHYSICAL replication connection (`replication=true`) matches no
+    rule in `pg_hba.conf`. A LOGICAL one (`replication=database`) names a
+    database, and the one local rule admitted it as `peer:<user>`, where
+    `IDENTIFY_SYSTEM` answered (adversarial review of #69). The server
+    starts no WAL sender (`max_wal_senders=0`), so both are refused, as the
+    owner role and over the same socket."""
+    import psycopg
+    from psycopg.conninfo import make_conninfo
+
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    with bundle_mod.BundledServer(settings) as server:
+        with pytest.raises(psycopg.OperationalError) as caught:
+            psycopg.connect(make_conninfo(server.bundle.migration_dsn,
+                                          replication=mode)).close()
+        with _owner(server) as conn:                  # an ordinary one still is
+            senders = conn.execute("show max_wal_senders").fetchone()[0]
+    message = str(caught.value).lower()
+    assert ("max_wal_senders" in message if mode == "database"
+            else ("max_wal_senders" in message or "no pg_hba.conf entry" in message)), message
+    assert senders == "0", senders
+
+
 def test_an_older_trust_cluster_is_brought_back_to_peer_on_start(
         state_dir: Path) -> None:
     """A data directory an earlier build initialized with `trust` (or a file
