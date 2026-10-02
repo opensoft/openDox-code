@@ -224,14 +224,25 @@ def _fresh_repository(parent: Path) -> Path:
 @pytest.fixture()
 def state_dir():
     """A SHORT state directory (the socket's path is bounded by the kernel),
-    removed afterwards once any server on it is checked stopped."""
+    removed afterwards once any server on it is checked stopped.
+
+    THE REMOVAL IS RETRIED, BOUNDED. A server killed on a red path can leave a
+    backend still writing its WAL for a moment after the postmaster has gone,
+    and a single `rmtree` that races it leaves a data directory behind under
+    `/tmp` (seen once, on a mutant run, as `postgres/data/pg_wal/…`)."""
     base = "/tmp" if os.path.isdir("/tmp") else None
     path = Path(tempfile.mkdtemp(prefix="odx-t075-", dir=base))
     yield path
     pid = bundle_mod.running_pid(config.DatabaseBundle(path))
     if pid is not None:                                  # pragma: no cover
         os.kill(pid, signal.SIGKILL)
-    shutil.rmtree(path, ignore_errors=True)
+    deadline = time.monotonic() + STOP_SECONDS
+    while True:
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists() or time.monotonic() > deadline:
+            break
+        time.sleep(0.2)                                  # pragma: no cover
+    assert not path.exists(), f"the state directory outlived its test: {path}"
 
 
 def _served_url(child: subprocess.Popen, said: Path, seconds: float) -> str | None:
