@@ -51,6 +51,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -146,6 +147,14 @@ def entrypoint_server(tmp_path, monkeypatch):
     # from the shell would be refused beside the local mode, by design.
     for name in runtime_config.SETTING_NAMES:
         monkeypatch.delenv(name, raising=False)
+    # ITS OWN SHORT STATE DIRECTORY, so the configuration never reads the
+    # runner's: a local install's default is under `XDG_STATE_HOME` or the
+    # home directory, and one too long for a Unix socket is refused (13.1)
+    # before the entrypoint is reached. Nothing is made in it, because the
+    # database is stood in below, and it is removed after the case.
+    state = Path(tempfile.mkdtemp(prefix="odx-e-",
+                                  dir="/tmp" if os.path.isdir("/tmp") else None))
+    monkeypatch.setenv(runtime_config.PREFIX + "STATE_DIR", str(state))
     # AND THE LOCAL INSTALL'S DATABASE IS STOOD IN, with a tripwire of its own
     # (plan 034 T072). A local `generate-and-open` starts its bundled
     # PostgreSQL server before it serves, and these cases are about the model
@@ -182,11 +191,14 @@ def entrypoint_server(tmp_path, monkeypatch):
         "--model-session-root", str(session_root),
         "--no-validate", "--no-open", "--no-serve",
     ])
-    rc = cli_mod.cmd_generate_and_open(args, opener=lambda url: None)
-    assert rc == 0, "the entrypoint did not complete"
-    assert len(bundles) == 1, "a LOCAL entrypoint run must own one database"
-    assert built, "the entrypoint never reached build_server"
-    yield _handler_class(built[-1]), spawned, session_root
+    try:
+        rc = cli_mod.cmd_generate_and_open(args, opener=lambda url: None)
+        assert rc == 0, "the entrypoint did not complete"
+        assert len(bundles) == 1, "a LOCAL entrypoint run must own one database"
+        assert built, "the entrypoint never reached build_server"
+        yield _handler_class(built[-1]), spawned, session_root
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------

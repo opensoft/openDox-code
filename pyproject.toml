@@ -136,12 +136,19 @@ test = [
 #   * about 24.7 MB per wheel, because it carries the two server majors;
 #   * Apache-2.0 for the package; the PostgreSQL License for the server.
 # `>=0.6.0` is the release this package has been exercised against, the same
-# rule every floor in this file is set by. Its own requirements (fasteners,
-# platformdirs, psutil, typing-extensions) arrive with it and are imported by
-# nothing here.
+# rule every floor in this file is set by. `<0.7` IS A CEILING, which no other
+# requirement here carries, because this one is a DATABASE SERVER whose major
+# is a property of the user's data: `bundle.py` runs the PostgreSQL 16 under
+# `pginstall/`, and a cluster is opened only by the major that made it.
+# Upstream's own default is already 18, so a later release may move what
+# `pginstall/` holds; the ceiling keeps that a deliberate act of this package
+# (adversarial review of openDox-code#69), and `bundle.py` still refuses, by
+# name, a server whose major disagrees with the cluster's `PG_VERSION`. Its
+# own requirements (fasteners, platformdirs, psutil, typing-extensions) arrive
+# with it and are imported by nothing here.
 local = [
     "opendox[runtime]",
-    "pixeltable-pgserver>=0.6.0",
+    "pixeltable-pgserver>=0.6.0,<0.7",
 ]
 
 # THE RUNTIME EXTRA — `split-opendox-two-layer-product` § 3.5, RULED Q2

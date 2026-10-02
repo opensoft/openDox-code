@@ -70,6 +70,7 @@ import contextlib
 import ctypes
 import importlib.util
 import os
+import re
 import shutil
 import signal
 import stat
@@ -265,6 +266,62 @@ def _remove_a_proven_stale_lock(bundle: DatabaseBundle) -> None:
         (bundle.data_dir / "postmaster.pid").unlink(missing_ok=True)
 
 
+def refusal_before_connecting(bundle: DatabaseBundle) -> str | None:
+    """Why a local verb must not connect to `bundle`'s socket, or `None`.
+
+    `runtime status`, `migrate` and `reset` of a LOCAL install connect, as
+    the served role or as the OWNER, to whatever answers at the bundle's
+    socket path. A start judges that path, and these verbs did not: a state
+    directory every user could write, whose `postgres/run` was a link to
+    another bundle's socket directory, had `status` and `migrate` run as the
+    owner role against that other server while a start refused the same
+    tree (adversarial review of openDox-code#69). So before any client
+    connection, two things are asked, and neither writes anything:
+
+      * THE TREE CHECK a start asks, of what exists (`refuse_an_unsafe_tree`
+        with `existing_only`): a socket directory that is a link, or that
+        another user could replace, is refused here as it is there;
+      * A LIVE SERVER OF THIS DATA DIRECTORY behind the socket. The lock
+        file in this data directory, `postmaster.pid`, names a live process
+        that, where the platform can say (`_serves`), is a `postgres` whose
+        working directory is this data directory, and it names THIS socket
+        directory as the one the server listens on (its fifth line). Where
+        `/proc` cannot say what the pid is, the other answers still bind
+        the socket to this tree.
+    """
+    try:
+        refuse_an_unsafe_tree(bundle, existing_only=True)
+    except BundleRefused as exc:
+        return str(exc)
+    except OSError as exc:
+        return (f"the bundled server's path under {bundle.state_dir} could "
+                f"not be judged ({type(exc).__name__})")
+    lock = bundle.data_dir / "postmaster.pid"
+    try:
+        lines = lock.read_text(encoding="utf-8").splitlines()
+        pid = int(lines[0].strip())
+    except (OSError, IndexError, ValueError):
+        return (f"no bundled server is running on {bundle.data_dir}: it has no "
+                "readable postmaster.pid. A local install's server is started "
+                f"by `opendox generate-and-open {LOCAL_FLAG}`, which owns it")
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return (f"no bundled server is running on {bundle.data_dir}: its "
+                f"postmaster.pid names pid {pid}, which is not a live process "
+                "of this user")
+    if _serves(pid, bundle) is False:
+        return (f"pid {pid}, named by {lock}, is not the postgres serving "
+                f"{bundle.data_dir}, so what answers at {bundle.socket_dir} "
+                "is not this install's server")
+    listens = lines[4].strip() if len(lines) > 4 else ""
+    if listens != str(bundle.socket_dir):
+        return (f"the server on {bundle.data_dir} listens at "
+                f"{listens or 'no Unix socket'}, not at {bundle.socket_dir}, so "
+                "what answers there is not this install's server")
+    return None
+
+
 def report(bundle: DatabaseBundle) -> dict[str, Any]:
     """The `database_bundle` block `runtime status` prints (#1144 13.1)."""
     return {"data_dir": str(bundle.data_dir),
@@ -345,7 +402,7 @@ def _die_with_parent():
 BUNDLE_TREE = BUNDLE_SOCKET_DIR.parts
 
 
-def _make_private_directories(leaf: Path) -> None:
+def _make_private_directories(leaf: Path, *, state: Path) -> None:
     """`leaf` and every missing directory above it, each born exactly 0700.
 
     `Path.mkdir(parents=True)` gives the directories it creates on the way
@@ -368,6 +425,16 @@ def _make_private_directories(leaf: Path) -> None:
     or written through: a symbolic link, something that is not a directory,
     or a directory that is not this user's alone.
 
+    AND THE DIRECTORY IT STARTS FROM IS JUDGED BY ITS DESCRIPTOR, before
+    the first `mkdir` (adversarial review of openDox-code#69). Opening it
+    follows a link, which this install allows on the configured path, so
+    what the descriptor names is asked the tree check's own question
+    (`_unsafe_because`): this user's alone where it is the state directory
+    or under it, and otherwise this user's or root's, with any write by
+    others only behind the sticky bit. The path-wise check before it asks
+    the same question; this one asks it of the very directory that is
+    written into.
+
     THE UMASK IS PROCESS-WIDE, and it is narrowed only for these few
     `mkdir`s and then put back. A file another thread creates meanwhile can
     only come out more private than asked, never less.
@@ -381,6 +448,11 @@ def _make_private_directories(leaf: Path) -> None:
     if not missing:
         return
     descriptor = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    own = base == state or state in base.parents
+    reason = _unsafe_because(os.fstat(descriptor), uid=uid, own=own)
+    if reason is not None:
+        os.close(descriptor)
+        raise BundledServer._unsafe(base, reason)
     path = base
     previous = os.umask(0o077)
     try:
@@ -448,7 +520,14 @@ def authentication_files(user: str) -> dict[str, str]:
       * Every HOST connection is rejected. The server also listens on no TCP
         address at all (`listen_addresses` is empty), so these lines never
         match. They are written so that the file says what the install is.
-      * No replication line, so a replication connection is refused.
+      * No replication line, so a PHYSICAL replication connection matches
+        no rule and is refused. A LOGICAL one (`replication=database`)
+        names a database, so `pg_hba.conf` reads it as the ordinary local
+        connection it resembles, and no rule here can tell the two apart:
+        it was accepted as `peer:<user>` (adversarial review of
+        openDox-code#69). So the launch sets `max_wal_senders=0`, and the
+        server starts no WAL sender for either kind. A replication
+        connection is refused by the server, whatever the files say.
     """
     header = ("# Written by opendox.runtime.bundle before every start of this local\n"
               "# install's bundled server (plan 034 T072). Changes here are replaced.\n")
@@ -522,6 +601,75 @@ def _unsafe_because(info: os.stat_result, *, uid: int, own: bool) -> str | None:
         return (f"is writable by {'every user' if mode & 0o002 else 'its group'}"
                 f" and is not sticky (mode {stat.S_IMODE(mode):o})")
     return None
+
+
+def refuse_an_unsafe_tree(bundle: DatabaseBundle, *,
+                          existing_only: bool = False) -> None:
+    """The socket's whole path is this user's to change, or it is refused.
+
+    The socket's directory is how this install's clients find ITS
+    server, so the 0700 on it is worth only what the path above it is
+    worth. Peer authentication keeps other users out of the server, but
+    not a substitute socket out of the path: whoever could replace `run`
+    could stand up a server of their own for this install's clients to
+    talk to. A directory entry is controlled by its PARENT: a parent that
+    another user can write lets them rename `run` away, or put a symbolic
+    link in its place, after the mode is set. A symbolic link on the way there
+    can be pointed elsewhere by whoever owns it, or by whoever can write
+    the directory it sits in (Copilot review of openDox-code#69). So:
+
+      * THE INSTALL'S OWN TREE, as the configured path resolves: the
+        state directory, `postgres/` and `run/` must be real directories,
+        owned by this user and writable by no one else;
+      * EVERY DIRECTORY ABOVE IT, on the configured path and on the path
+        it resolves to, must be owned by this user or by root. One that
+        anyone else can write, a group included, must be sticky, as
+        `/tmp` is, so nobody can rename what is not theirs;
+      * EVERY SYMBOLIC LINK on the configured path must be this user's or
+        root's.
+
+    `OPENDOX_STATE_DIR` never holds `..` (`config.state_dir` refuses it),
+    so the configured path's components are the ones the kernel walks.
+
+    With `existing_only`, the same rules are asked of only what exists
+    yet. `_prepare_directories` asks that BEFORE it creates anything,
+    so the links are checked first, a broken one included (Copilot
+    review of openDox-code#69).
+    """
+    uid = os.getuid()
+    configured = bundle.state_dir
+
+    def present(path: Path) -> bool:
+        return not existing_only or os.path.lexists(path)
+
+    for component in (configured, *configured.parents):
+        if not present(component):
+            continue
+        info = os.lstat(component)
+        if stat.S_ISLNK(info.st_mode) and info.st_uid not in (uid, 0):
+            raise BundledServer._unsafe(
+                component, f"is a symbolic link owned by uid {info.st_uid}, "
+                "neither this user nor root, who could point it elsewhere")
+    state = configured.resolve()
+    tree = [state, state / BUNDLE_TREE[0], state / BUNDLE_TREE[0] / BUNDLE_TREE[1]]
+    # AND THE DATA DIRECTORY, where one exists already, a broken link
+    # included (Copilot review of openDox-code#69). A `data` placed there
+    # as a link to a cluster elsewhere would otherwise be launched, and
+    # given this install's authentication files, outside the state tree.
+    # A fresh one needs no check: `_initialize` renames it into place.
+    data = state / BUNDLE_DATA_DIR
+    if os.path.lexists(data):
+        tree.append(data)
+    checks = [(path, True) for path in tree] + [
+        (path, False) for path in dict.fromkeys(
+            [*state.parents, *configured.parents])]
+    for directory, mine in checks:
+        if not present(directory):
+            continue
+        info = os.lstat(directory) if mine else os.stat(directory)
+        reason = _unsafe_because(info, uid=uid, own=mine)
+        if reason is not None:
+            raise BundledServer._unsafe(directory, reason)
 
 
 class BundledServer:
@@ -621,76 +769,14 @@ class BundledServer:
         # BEFORE THE CHMOD, which follows a symbolic link: a `run` placed
         # there as a link would otherwise have its TARGET re-moded.
         self._refuse_an_unsafe_tree(existing_only=True)
-        _make_private_directories(self.bundle.socket_dir)
+        _make_private_directories(self.bundle.socket_dir,
+                                  state=self.bundle.state_dir)
         self._refuse_an_unsafe_tree()
         os.chmod(self.bundle.socket_dir, 0o700)
 
     def _refuse_an_unsafe_tree(self, *, existing_only: bool = False) -> None:
-        """The socket's whole path is this user's to change, or it is refused.
-
-        The socket's directory is how this install's clients find ITS
-        server, so the 0700 on it is worth only what the path above it is
-        worth. Peer authentication keeps other users out of the server, but
-        not a substitute socket out of the path: whoever could replace `run`
-        could stand up a server of their own for this install's clients to
-        talk to. A directory entry is controlled by its PARENT: a parent that
-        another user can write lets them rename `run` away, or put a symbolic
-        link in its place, after the mode is set. A symbolic link on the way there
-        can be pointed elsewhere by whoever owns it, or by whoever can write
-        the directory it sits in (Copilot review of openDox-code#69). So:
-
-          * THE INSTALL'S OWN TREE, as the configured path resolves: the
-            state directory, `postgres/` and `run/` must be real directories,
-            owned by this user and writable by no one else;
-          * EVERY DIRECTORY ABOVE IT, on the configured path and on the path
-            it resolves to, must be owned by this user or by root. One that
-            anyone else can write, a group included, must be sticky, as
-            `/tmp` is, so nobody can rename what is not theirs;
-          * EVERY SYMBOLIC LINK on the configured path must be this user's or
-            root's.
-
-        `OPENDOX_STATE_DIR` never holds `..` (`config.state_dir` refuses it),
-        so the configured path's components are the ones the kernel walks.
-
-        With `existing_only`, the same rules are asked of only what exists
-        yet. `_prepare_directories` asks that BEFORE it creates anything,
-        so the links are checked first, a broken one included (Copilot
-        review of openDox-code#69).
-        """
-        uid = os.getuid()
-        configured = self.bundle.state_dir
-
-        def present(path: Path) -> bool:
-            return not existing_only or os.path.lexists(path)
-
-        for component in (configured, *configured.parents):
-            if not present(component):
-                continue
-            info = os.lstat(component)
-            if stat.S_ISLNK(info.st_mode) and info.st_uid not in (uid, 0):
-                raise self._unsafe(
-                    component, f"is a symbolic link owned by uid {info.st_uid}, "
-                    "neither this user nor root, who could point it elsewhere")
-        state = configured.resolve()
-        tree = [state, state / BUNDLE_TREE[0], state / BUNDLE_TREE[0] / BUNDLE_TREE[1]]
-        # AND THE DATA DIRECTORY, where one exists already, a broken link
-        # included (Copilot review of openDox-code#69). A `data` placed there
-        # as a link to a cluster elsewhere would otherwise be launched, and
-        # given this install's authentication files, outside the state tree.
-        # A fresh one needs no check: `_initialize` renames it into place.
-        data = state / BUNDLE_DATA_DIR
-        if os.path.lexists(data):
-            tree.append(data)
-        checks = [(path, True) for path in tree] + [
-            (path, False) for path in dict.fromkeys(
-                [*state.parents, *configured.parents])]
-        for directory, mine in checks:
-            if not present(directory):
-                continue
-            info = os.lstat(directory) if mine else os.stat(directory)
-            reason = _unsafe_because(info, uid=uid, own=mine)
-            if reason is not None:
-                raise self._unsafe(directory, reason)
+        """`refuse_an_unsafe_tree`, for this server's own bundle."""
+        refuse_an_unsafe_tree(self.bundle, existing_only=existing_only)
 
     @staticmethod
     def _unsafe(directory: Path, reason: str) -> BundleRefused:
@@ -722,6 +808,7 @@ class BundledServer:
         """
         data = self.bundle.data_dir
         if (data / "PG_VERSION").is_file():
+            self._refuse_another_major(binaries)
             return
         if data.exists():
             try:
@@ -747,6 +834,39 @@ class BundledServer:
         except BaseException:
             shutil.rmtree(attempt, ignore_errors=True)
             raise
+
+    def _refuse_another_major(self, binaries: Path) -> None:
+        """An existing cluster is opened only by the major that made it.
+
+        PostgreSQL refuses another major's data directory itself, but only
+        from inside a launch, where the reason reaches nobody but the log.
+        The carrier's `pginstall/` is PostgreSQL 16 today, and upstream's
+        default is already 18 (adversarial review of openDox-code#69). So
+        the server's own `postgres --version` is asked first, against the
+        cluster's `PG_VERSION`, and a disagreement is the named refusal,
+        before anything is written into the data directory.
+        """
+        data = self.bundle.data_dir
+        cluster = (data / "PG_VERSION").read_text(encoding="utf-8").strip()
+        done = subprocess.run(
+            [str(binaries / "postgres"), "--version"], env=_child_environment(),
+            capture_output=True, text=True, timeout=START_TIMEOUT_SECONDS)
+        found = re.search(r"\(PostgreSQL\) (\d+)", done.stdout or "")
+        if found is None:
+            raise BundleRefused(
+                f"the bundled `postgres` under {binaries} does not say which "
+                f"PostgreSQL it is (`postgres --version` exited "
+                f"{done.returncode}), so it is not given {data}, a "
+                f"PostgreSQL {cluster} cluster; reinstall the `local` extra")
+        if found.group(1) != cluster:
+            raise BundleRefused(
+                f"{data} holds a PostgreSQL {cluster} cluster and the bundled "
+                f"server is PostgreSQL {found.group(1)}: a cluster is opened "
+                "only by the major version that made it. Reinstall the "
+                f"`local` extra this install was made with (`{SERVER_DISTRIBUTION}` "
+                "is pinned below 0.7 for this reason), or move the data "
+                "directory aside, and lose its coordination state, to start "
+                "a new one")
 
     def _remove_abandoned_attempts(self) -> None:
         """Every initialization attempt whose process no longer exists."""
@@ -795,7 +915,11 @@ class BundledServer:
                  # the data directory and the two files written above.
                  "-c", f"data_directory={self.bundle.data_dir}",
                  "-c", f"hba_file={self.bundle.data_dir / 'pg_hba.conf'}",
-                 "-c", f"ident_file={self.bundle.data_dir / 'pg_ident.conf'}"],
+                 "-c", f"ident_file={self.bundle.data_dir / 'pg_ident.conf'}",
+                 # NO REPLICATION, physical or logical: see
+                 # `authentication_files`, whose rules cannot refuse a
+                 # logical one (adversarial review of openDox-code#69).
+                 "-c", "max_wal_senders=0"],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 env=_child_environment(),
                 # ITS OWN SESSION, so a terminal's Ctrl-C reaches this process
