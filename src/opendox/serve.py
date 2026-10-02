@@ -452,6 +452,37 @@ WORKBENCH_MODEL_INTAKE_ROUTE = "/workbench/model-intake"
 ACTIONS_WORKBENCH_MODEL_INTAKE_ROUTE = "/actions/workbench/model-intake"
 ACTIONS_WORKBENCH_MODEL_APPROVAL_ROUTE = "/actions/workbench/model-approval"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+# THE TWO ROUTES THE `actions` MAP NAMES THAT A HOST CONTRIBUTES (plan 034
+# T084; #1144 4.3 as T007 batch L's addendum reads, RULED openxFactory#656
+# `5920216845`, item 1). Neither is a fixed core arm: a gate verb is
+# `POST /actions/gate/<verb>` and the refresh is `POST /actions/refresh`, and
+# each answers only where a route binding the assembly collected carries it.
+# Everything else `do_POST` reaches is core. So `gate` and `refresh` are true
+# only where such a binding is assembled (`compute_capabilities`), and a
+# standalone server, which carries neither, reports both false rather than
+# offering two affordances that would answer `404 unknown_action`.
+ACTIONS_GATE_PREFIX = "/actions/gate/"
+ACTIONS_REFRESH_ROUTE = "/actions/refresh"
+
+
+def answers_a_gate_verb(binding) -> bool:
+    """Whether a contributed route binding answers `POST /actions/gate/<verb>`
+    for some verb: a POST prefix at or under `ACTIONS_GATE_PREFIX`, or one that
+    covers it, or an exact POST naming one verb under it. The match rule is the
+    binding's own (`RouteBinding.matches`), read for a family of paths."""
+    if binding.method != "POST":
+        return False
+    pattern = binding.pattern
+    if binding.is_prefix:
+        return (pattern.startswith(ACTIONS_GATE_PREFIX)
+                or ACTIONS_GATE_PREFIX.startswith(pattern))
+    return (pattern.startswith(ACTIONS_GATE_PREFIX)
+            and len(pattern) > len(ACTIONS_GATE_PREFIX))
+
+
+def answers_the_refresh(binding) -> bool:
+    """Whether a contributed route binding answers `POST /actions/refresh`."""
+    return binding.matches("POST", ACTIONS_REFRESH_ROUTE)
 
 _DEFAULT_CAPABILITIES = {"actions": {"notebook": False, "gate": False, "refresh": False,
                                     "session": False, "edit": False,
@@ -463,7 +494,8 @@ _DEFAULT_CAPABILITIES = {"actions": {"notebook": False, "gate": False, "refresh"
 
 def compute_capabilities(*, nlm_present: bool, checkout_real: bool, loopback: bool,
                          actor: str | None = None,
-                         refresh_binding: str | None = None) -> dict:
+                         refresh_binding: str | None = None,
+                         route_bindings: tuple = ()) -> dict:
     """The startup capability verdict. The notebook action is available only on
     a loopback bind with `nlm` reachable and a real checkout — the served static
     image satisfies none of these, so the UI hides the affordance there. GATE
@@ -522,16 +554,39 @@ def compute_capabilities(*, nlm_present: bool, checkout_real: bool, loopback: bo
         corpus. (The committed-intent FEED does read the checkout, but a feed
         with nothing in it is an empty feed, not an absent capability.)
 
-    So the predicate is the plane itself, and nothing else."""
+    So the predicate is the plane itself, and nothing else.
+
+    A FLAG WHOSE AFFORDANCE IS A ROUTE THIS SERVER SERVES IS TRUE ONLY WHERE
+    SUCH A ROUTE ANSWERS (plan 034 T084; #1144 4.3 as T007 batch L's addendum
+    reads, RULED openxFactory#656 `5920216845`, item 1). `gate` and `refresh`
+    govern routes a HOST contributes, `POST /actions/gate/<verb>` and
+    `POST /actions/refresh`, so each is true only when `route_bindings`, the
+    bindings the assembly collected, carry a route it governs
+    (`answers_a_gate_verb`, `answers_the_refresh`), and otherwise its
+    conditions above stand as they were. Measured at openDox-code `047bb4fa`,
+    a standalone server answered both true while every such POST answered
+    `404 unknown_action`, and the gate flag followed the checkout's git
+    identity alone. Standalone both now read false, which also hides the
+    workbench's session controls (`sessionActionsLive` reads `actions.gate`),
+    and a composed host that contributes the routes reads as before.
+    `notebook`, `edit` and `session` govern core routes and keep their
+    conditions. `intent` governs a POST to ANOTHER plane's intent API, which
+    that plane answers, so its condition, the served plane, stands. The
+    `refresh` block below still names the plane's binding: it says which
+    binding a contributed refresh would use, and the flag says whether one is
+    offered."""
     binding = refresh_binding
     if binding == registry_mod.BINDING_REGENERATE and not (loopback and checkout_real):
         binding = None
     local_human = bool(actor and checkout_real and loopback)
+    bindings = tuple(route_bindings or ())
+    gate_routed = any(answers_a_gate_verb(b) for b in bindings)
+    refresh_routed = any(answers_the_refresh(b) for b in bindings)
     return {
         "actions": {
             "notebook": bool(nlm_present and checkout_real and loopback),
-            "gate": local_human,
-            "refresh": bool(binding),
+            "gate": local_human and gate_routed,
+            "refresh": bool(binding) and refresh_routed,
             "session": local_human,
             "edit": local_human,
             # THE HOSTED WRITE-REQUEST SEAM, and the only capability here that
@@ -1960,6 +2015,9 @@ def build_server(
         loopback=loopback,
         actor=resolved_actor,
         refresh_binding=source.refresh_binding,
+        # THE ROUTES THIS ASSEMBLY COLLECTED, so a flag whose affordance is a
+        # contributed route is true only where one answers (T084; batch L).
+        route_bindings=route_bindings,
     )
     # The human console's per-serve token (FR-019's third clause, review finding
     # 2). Minted only where session verbs exist at all, and published on
