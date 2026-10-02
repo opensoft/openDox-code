@@ -153,6 +153,20 @@ _APPROVAL_ONLY_FIELDS: tuple[str, ...] = (
 #: install has approved and which are still waiting on a human.
 DEFAULT_DECLARATIONS_RELPATH = "ideation/dashboard/model-declarations.yaml"
 
+#: openDox's OWN SETTINGS DOCUMENTS, at their default paths: the model bindings
+#: (`doxbench_binding.DEFAULT_BINDINGS_RELPATH`) and the declarations above.
+#: Each lives in the served checkout on purpose, where its operator can read
+#: and commit it. But each is a model's configuration and not one of the user's
+#: documents, so openDox's standalone corpus default lists neither: this is
+#: the default of `runtime.local_git_adapter.WorkingTreeCorpus`'s `excluded`.
+#: Configuring a model then changes no document, no generated snapshot and no
+#: view (#1144 16.5, "every other surface ... answers exactly as it does with a
+#: model configured"; plan 034 T082). Without this rule, `opendox model-binding
+#: add` added its own bindings document to the corpus as a `source` document. A
+#: host that brings its own corpus adapter decides for itself.
+SETTINGS_DOCUMENTS: tuple[str, ...] = (
+    binding_mod.DEFAULT_BINDINGS_RELPATH, DEFAULT_DECLARATIONS_RELPATH)
+
 #: How long an approval is good for. A POLICY CONSTANT, not an operator input:
 #: `credential-contracts` holds that a grant without `expires_at` is invalid, and
 #: an expiry a requester chooses is an expiry that is always far away. Ninety

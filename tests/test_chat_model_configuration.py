@@ -82,7 +82,7 @@ from opendox import serve_wire
 from opendox import validator as own
 from opendox.serve_workbench import WorkbenchRoutes
 from session_fixtures import GATE_TEST_PRINCIPALS
-from standalone_child import Child, fresh_repository
+from standalone_child import Child, fresh_repository, run_module
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAIN = ROOT / "tests" / "fixtures" / "plain-documents"
@@ -777,3 +777,422 @@ def test_the_line_shows_in_that_state_only(rail) -> None:
     assert rail["pure"] == {"emptyAdopted": doxbench_model.NO_MODEL_CONFIGURED_REMEDY,
                             "emptyThenUnreadable": None, "emptyThenStaleToken": None,
                             "onlyUnavailable": None}
+
+
+# ---------------------------------------------------------------------------
+# 6 — 16.5: every other surface works with no model (plan 034's T082)
+# ---------------------------------------------------------------------------
+#
+# #1144's 16.5: "Documents, generation, the views, sessions and saving answer
+# exactly as they do with a model configured." So each request below is sent
+# TWICE, to two standalone `generate-and-open` children over the SAME commit (the
+# second checkout is a byte copy of the first, `.git` included):
+#
+# * "no model": no binding, and no `omp` on the PATH;
+# * "a binding": the copy, after `opendox model-binding add` declared one, which
+#   is how a standalone user configures a model (the holder's binding states, at
+#   openDox-code#74).
+#
+# Each answer must be AN ANSWER: an HTTP response, never a dropped connection,
+# with no sibling import refused while it was made. And the two answers must be
+# EQUAL, once the one value that is per-process by design (the console token) is
+# set aside. A surface that only refuses standalone must refuse alike, and write
+# nothing.
+#
+# FIVE CASES NEED T084, which routes the reaches that still drop a connection
+# standalone (plan 034's T084; #1144 4.3's batch-L addendum, RULED `5920216845`
+# item 1; and `5961364221` item 1 for model approval). Each is marked
+# `xfail(strict=True)` and names T084, so CI stays green now and the marker turns
+# red the moment T084's code makes the case pass. When T084 lands, T082 merges
+# `main` and removes the markers in that merge.
+
+#: The two postures, in the order every case reports them.
+POSTURES = ("no model", "a binding")
+
+#: The binding the configured posture declares, field by field, through the CLI.
+_BINDING_ARGS = ("--id", "a-provider", "--label", "A provider",
+                 "--provider", "a-provider",
+                 "--credential-ref", "opref-0000000000000000",
+                 "--auth-kind", "api_key", "--credential-approver", ACTOR,
+                 "--endpoint", "https://provider.invalid/turn",
+                 "--dialect", binding_mod.DIALECT_XFACTORY_PROMPT_V1,
+                 "--", "a-broker")
+
+#: A fixture document both checkouts carry.
+_DOCUMENT = "notes-rain-barrel-leak.md"
+
+
+@dataclasses.dataclass(frozen=True)
+class _Answer:
+    """One request's answer, or the fact that the connection dropped."""
+
+    status: int | None          # None: no HTTP response at all
+    content_type: str | None
+    body: bytes
+    reached: tuple[str, ...]    # sibling imports the child refused meanwhile
+
+    @property
+    def dropped(self) -> bool:
+        return self.status is None
+
+    def comparable(self):
+        """What two postures must agree on. A JSON body is compared as data,
+        with the per-process console token set aside; any other body, byte for
+        byte."""
+        body = self.body
+        if (self.content_type or "").startswith("application/json"):
+            body = json.loads(self.body or b"null")
+            if isinstance(body, dict):
+                body = {k: v for k, v in body.items() if k != "console_token"}
+        return self.status, self.content_type, body
+
+
+@dataclasses.dataclass
+class _Posture:
+    name: str
+    repo: Path
+    child: Child
+    base: tuple[str, int]
+    token: str
+
+    def ask(self, method: str, path: str, body=None) -> _Answer:
+        before = len(self.child.refused())
+        headers = {"X-XF-Console-Token": self.token}
+        data = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(body).encode("utf-8")
+        connection = http.client.HTTPConnection(*self.base, timeout=30)
+        try:
+            connection.request(method, path, body=data, headers=headers)
+            response = connection.getresponse()
+            answer = (response.status, response.getheader("Content-Type"),
+                      response.read())
+        except (http.client.HTTPException, OSError):
+            answer = (None, None, b"")
+        finally:
+            connection.close()
+        return _Answer(*answer, tuple(self.child.refused()[before:]))
+
+    def checkout(self) -> tuple[str, str]:
+        """The checkout's HEAD and its full status, untracked files included."""
+        def run(*args):
+            return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                                  capture_output=True, text=True).stdout
+        return run("rev-parse", "HEAD"), run("status", "--porcelain",
+                                             "--untracked-files=all")
+
+
+@pytest.fixture(scope="module")
+def postures(tmp_path_factory):
+    """The two standalone children. The environment is set only while they
+    start, because each child copies it then."""
+    from opendox import actor_identity as actor_mod
+    work = tmp_path_factory.mktemp("no-model-surfaces")
+    started: dict[str, _Posture] = {}
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            for name in (actor_mod.GATEWAY_ENV, actor_mod.PRINCIPAL_ENV,
+                         actor_mod.ALLOWLIST_ENV):
+                patch.delenv(name, raising=False)
+            patch.setenv(actor_mod.ROSTER_ENV, ", ".join(GATE_TEST_PRINCIPALS))
+            patch.setenv("PATH", _no_omp_path(work))
+            # select-to-edit launches the editor; `true` exits at once
+            patch.setenv("EDITOR", "true")
+            no_model = fresh_repository(PLAIN, work / "no-model")
+            bound = work / "a-binding" / no_model.name
+            shutil.copytree(no_model, bound, symlinks=True)
+            added, status = run_module(work / "add", "opendox.cli", "model-binding",
+                                       "add", "--repo-root", str(bound),
+                                       *_BINDING_ARGS)
+            assert status == 0, added.stderr_text()
+            assert added.refused() == [], added.refused()
+            assert binding_mod.bindings_path(bound).is_file()
+            for name, repo in zip(POSTURES, (no_model, bound)):
+                slug = name.replace(" ", "-")
+                child = Child(work / f"child-{slug}", "opendox.cli",
+                              "generate-and-open", "--repo-root", str(repo),
+                              "--repository", "fixture", "--no-open", "--port", "0",
+                              "--run-dir", str(work / f"run-{slug}"),
+                              "--actor", ACTOR)
+                started[name] = _Posture(name, repo, child, ("", 0), "")
+                match = child.wait_for_line(_URL)
+                base = (match.group(2), int(match.group(3)))
+                status, capabilities = _request(base, "GET", "/capabilities")
+                assert status == 200 and capabilities["actions"]["session"] is True
+                started[name].base = base
+                started[name].token = capabilities["console_token"]
+        yield started
+        for posture in started.values():
+            assert posture.child.interrupt() == 0, posture.child.stderr_text()
+    finally:
+        for posture in started.values():
+            posture.child.kill()
+
+
+def _alike(postures, method: str, path: str, body=None) -> list[_Answer]:
+    """The same request, to both postures: each an answer, and equal."""
+    answers = [postures[name].ask(method, path, body) for name in POSTURES]
+    for name, answer in zip(POSTURES, answers):
+        assert not answer.dropped, f"{method} {path} dropped the connection ({name})"
+        assert answer.reached == (), f"{method} {path} reached {answer.reached} ({name})"
+    assert answers[0].comparable() == answers[1].comparable(), (method, path)
+    return answers
+
+
+def _a_refusal(answers, *, code: str | None = None) -> None:
+    for answer in answers:
+        assert 400 <= answer.status < 500, answer
+        body = json.loads(answer.body)
+        assert body.get("ok") is not True, body
+        if code is not None:
+            assert body["error"] == code, body
+
+
+def _needs_t084(why: str):
+    return pytest.mark.xfail(strict=True, reason=f"needs T084: {why}")
+
+
+# ---- openDox's own settings documents are not the user's documents ----
+#
+# `opendox model-binding add` writes its bindings document INTO the checkout
+# (`doxbench_binding.DEFAULT_BINDINGS_RELPATH`), where its operator can read and
+# commit it. openDox's standalone corpus reads the working tree, so until T082
+# that document joined the corpus as a `source` document, and every document,
+# generation and view answer changed the moment a model was configured
+# (measured at openDox-code#74 `9061b22a`). RULED by the holder, 2026-10-02,
+# option (a): openDox's standalone corpus default, `WorkingTreeCorpus`, leaves
+# out openDox's own settings documents, by exact path. Every assertion below is
+# over the FULL listing, written out, with nothing subtracted from it.
+
+#: A user's own documents under the same directory as the settings documents,
+#: one of them with the bindings document's very file name. Each IS listed: the
+#: rule names two paths, not a directory and not a file name.
+_USER_DOCUMENTS_BESIDE_SETTINGS = (
+    "ideation/dashboard/notes.md",
+    "ideation/dashboard/archive/model-provider-bindings.yaml",
+)
+
+
+def _fixture_keys(*extra: str) -> list[str]:
+    """The full listing a checkout of the fixture holds, plus `extra`."""
+    return sorted([p.name for p in PLAIN.iterdir() if p.is_file()] + list(extra))
+
+
+def _write(root: Path, relpath: str, text: str = "schema_version: 1\n") -> None:
+    (root / relpath).parent.mkdir(parents=True, exist_ok=True)
+    (root / relpath).write_text(text, encoding="utf-8")
+
+
+def _commit_all(root: Path) -> str:
+    from standalone_child import git
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "settings and notes")
+    return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _listed(adapter, root: Path, revision: str | None = None) -> list[str]:
+    from opendox import corpus_adapter
+    corpus = adapter.resolve(corpus_adapter.CorpusRef(
+        name="home", location=str(root), revision=revision))
+    return [d.key for d in adapter.list_documents(corpus)]
+
+
+def test_openDoxs_settings_documents_are_declared_once() -> None:
+    """The two default paths, by their own constants, and the very tuple the
+    standalone corpus's default reads."""
+    import inspect
+    from opendox.runtime import local_git_adapter as lga
+    assert intake_mod.SETTINGS_DOCUMENTS == (binding_mod.DEFAULT_BINDINGS_RELPATH,
+                                             intake_mod.DEFAULT_DECLARATIONS_RELPATH)
+    default = inspect.signature(lga.WorkingTreeCorpus).parameters["excluded"].default
+    assert default is intake_mod.SETTINGS_DOCUMENTS
+
+
+@pytest.mark.parametrize("entry", ["opendox.cli", "opendox.serve"])
+def test_the_standalone_corpus_lists_neither_settings_document(entry, tmp_path) -> None:
+    """Through each entry point's own default home factory: the bindings
+    document `model-binding add` writes, and the declarations document, are
+    not listed, untracked or COMMITTED, nor at a pinned revision. A user's
+    documents beside them are."""
+    import importlib
+    factory = importlib.import_module(entry)._default_home_factory
+    root = fresh_repository(PLAIN, tmp_path)
+    _declare(root)
+    _write(root, intake_mod.DEFAULT_DECLARATIONS_RELPATH)
+    for relpath in _USER_DOCUMENTS_BESIDE_SETTINGS:
+        _write(root, relpath, "title: mine\nsummary: a note of my own\n")
+    adapter, _ref = factory(root)
+    expected = _fixture_keys(*_USER_DOCUMENTS_BESIDE_SETTINGS)
+    assert _listed(adapter, root) == expected, "untracked"
+    head = _commit_all(root)
+    tracked = subprocess.run(["git", "-C", str(root), "ls-files"], check=True,
+                             capture_output=True, text=True).stdout.split()
+    assert binding_mod.DEFAULT_BINDINGS_RELPATH in tracked
+    assert _listed(adapter, root) == expected, "committed"
+    assert _listed(adapter, root, head) == expected, "at a pinned revision"
+
+
+def test_a_corpus_told_to_leave_out_nothing_lists_every_file(tmp_path) -> None:
+    from opendox.runtime import local_git_adapter as lga
+    root = fresh_repository(PLAIN, tmp_path)
+    _declare(root)
+    assert _listed(lga.WorkingTreeCorpus(excluded=()), root) == _fixture_keys(
+        binding_mod.DEFAULT_BINDINGS_RELPATH)
+
+
+# ---- documents ----
+
+@pytest.mark.parametrize(("method", "path", "body"), [
+    ("GET", "/snapshot.json", None),
+    ("GET", f"/source/{_DOCUMENT}", None),
+    ("GET", f"/source/fixture@main/{_DOCUMENT}", None),
+    ("GET", "/source", None),                                  # refused alike
+    ("POST", "/actions/edit",                                  # select-to-edit
+     {"path": _DOCUMENT, "repository": "fixture", "ref": "main"}),
+], ids=["snapshot", "source", "keyed-source", "bare-source", "select-to-edit"])
+def test_documents_answer_alike(postures, method, path, body) -> None:
+    _alike(postures, method, path, body)
+
+
+# ---- generation ----
+
+def test_generation_answers_alike(postures, tmp_path) -> None:
+    """The `generate` verb, run over each checkout as a lone openDox, writes the
+    same snapshot, and it is the one each posture serves."""
+    written = []
+    for name in POSTURES:
+        output = tmp_path / f"{name.replace(' ', '-')}.json"
+        child, status = run_module(tmp_path / f"generate-{name.replace(' ', '-')}",
+                                   "opendox.cli", "generate",
+                                   "--repo-root", str(postures[name].repo),
+                                   "--repository", "fixture", "--output", str(output))
+        assert status == 0, child.stderr_text()
+        assert child.refused() == [], child.refused()
+        written.append(output.read_bytes())
+    assert written[0] == written[1]
+    served = _alike(postures, "GET", "/snapshot.json")
+    assert json.loads(served[0].body) == json.loads(written[0])
+
+
+# ---- the views ----
+
+@pytest.mark.parametrize("path", [
+    "/index.html", "/app.js", "/styles.css", "/views/display.js",
+    "/views/wheel.js", "/views/wheel-model.js", "/views/doc-wheel.js",
+    "/views/lens.js", "/views/lens-model.js", "/capabilities",
+])
+def test_the_views_are_served_alike(postures, path) -> None:
+    _alike(postures, "GET", path)
+
+
+_VIEW_MODELS = r"""
+const W = await import(process.argv[2]);
+const L = await import(process.argv[3]);
+const snapshot = JSON.parse(await new Promise((resolve) => {
+  let text = ""; process.stdin.on("data", (c) => { text += c; });
+  process.stdin.on("end", () => resolve(text));
+}));
+process.stdout.write(JSON.stringify({
+  wheel: W.buildWheelModel(snapshot),
+  lens: L.buildLensModel(snapshot, ""),
+  documents: L.docSummaries(snapshot),
+}));
+"""
+
+
+def test_the_wheel_and_the_lens_render_alike(postures, tmp_path) -> None:
+    """The wheel's and the lens's view-models, built by the browser's own
+    modules from what each posture serves, are equal."""
+    if NODE is None:
+        pytest.skip("node not available for the wheel and lens models")
+    views = ROOT / "src" / "opendox" / "web" / "views"
+    script = tmp_path / "view-models.mjs"
+    script.write_text(_VIEW_MODELS, encoding="utf-8")
+    models = []
+    for answer in _alike(postures, "GET", "/snapshot.json"):
+        done = subprocess.run(
+            [NODE, str(script), (views / "wheel-model.js").as_uri(),
+             (views / "lens-model.js").as_uri()],
+            input=answer.body.decode("utf-8"), capture_output=True, text=True,
+            timeout=60)
+        assert done.returncode == 0, done.stderr
+        models.append(json.loads(done.stdout))
+    assert models[0]["wheel"]["wheels"], "the wheel built no reel"
+    assert models[0] == models[1]
+
+
+# ---- sessions ----
+
+@pytest.mark.parametrize("verb", ["share-session", "abandon-session", "open-pr"])
+def test_a_session_verb_is_refused_alike_and_writes_nothing(postures, verb) -> None:
+    """With no session there is nothing to share, abandon or open a pull
+    request for: each verb is refused alike, and neither checkout changes."""
+    before = [postures[name].checkout() for name in POSTURES]
+    _a_refusal(_alike(postures, "POST", f"/actions/gate/{verb}", {}))
+    assert [postures[name].checkout() for name in POSTURES] == before
+
+
+_THREAD = ("/workbench/thread?repository=fixture&ref=main&tile_kind=staged"
+           f"&tile_id=notes-rain-barrel-leak&document={_DOCUMENT}")
+
+
+@pytest.mark.parametrize(("path",), [
+    pytest.param("/project-register.json", marks=_needs_t084(
+        "the project register's openxdox reach (serve_project.py:271) answers "
+        "through its seam")),
+    pytest.param(_THREAD, marks=_needs_t084(
+        "the thread read's openxdox scope reach (serve_workbench.py:560) answers "
+        "through the doxBench scope seam")),
+], ids=["project-register", "thread"])
+def test_a_session_read_answers_alike(postures, path) -> None:
+    _alike(postures, "GET", path)
+
+
+@_needs_t084("capability honesty (5920216845 item 1): standalone, actions.gate and "
+             "actions.refresh read false, so the session controls are hidden")
+def test_the_session_controls_are_hidden_alike(postures) -> None:
+    for answer in _alike(postures, "GET", "/capabilities"):
+        actions = json.loads(answer.body)["actions"]
+        assert actions["gate"] is False and actions["refresh"] is False, actions
+
+
+# ---- saving ----
+
+@pytest.mark.parametrize("verb", ["first-edit", "edit-document", "create-document"])
+def test_saving_is_refused_alike_and_writes_nothing(postures, verb) -> None:
+    """Saving needs a live session, and standalone there is none (`5961651355`):
+    each save verb is refused alike, and neither checkout changes."""
+    before = [postures[name].checkout() for name in POSTURES]
+    _a_refusal(_alike(postures, "POST", f"/actions/gate/{verb}",
+                      {"path": _DOCUMENT, "content": "# changed\n"}))
+    assert [postures[name].checkout() for name in POSTURES] == before
+
+
+# ---- the model's own settings surfaces, which answer alike too ----
+
+def test_intake_is_not_offered_alike(postures) -> None:
+    """`5961364221` item 1: standalone, the intake surface answers `offered:
+    false` with the reason, whether or not a binding is declared."""
+    from opendox import doxbench_intake
+    for answer in _alike(postures, "GET", "/workbench/model-intake"):
+        surface = json.loads(answer.body)
+        assert surface["offered"] is False, surface
+        assert surface["reason"] == doxbench_intake.NO_BROKER_NOTICE, surface
+
+
+@_needs_t084("model approval (serve_workbench.py:1231) answers the gate seam's named "
+             "refusal standalone (5961364221 item 1)")
+def test_model_approval_is_refused_alike_and_writes_nothing(postures) -> None:
+    before = [postures[name].checkout() for name in POSTURES]
+    _a_refusal(_alike(postures, "POST", "/actions/workbench/model-approval",
+                      {"binding": "a-provider"}))
+    assert [postures[name].checkout() for name in POSTURES] == before
+
+
+@_needs_t084("the document abstract's openxdox reach (serve_workbench.py:2640) moves "
+             "below its step-one check, which refuses once actions.gate reads false")
+def test_the_document_abstract_is_refused_alike(postures) -> None:
+    _a_refusal(_alike(postures, "POST", "/actions/workbench/document-abstract", {}),
+               code=serve_wire.DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE)
