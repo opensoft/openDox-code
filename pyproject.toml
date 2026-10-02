@@ -296,8 +296,21 @@ where = ["src"]
 # honest — every file under `src/opendox/web/` carries a declared row with a
 # class, and an unrowed file fails immediately — so the glob here ships exactly
 # what that census counts rather than whatever happens to be on disk.
+#
+# AND `web/**/.*` BESIDE IT (plan 034 T075; #1144 10.2): "ships exactly what
+# that census counts" was not true of a wheel. setuptools expands each pattern
+# with the standard library's `glob`, and a `*` or `**` there never matches a
+# name that starts with a dot, so `web/**` alone shipped 41 of the census's 42
+# files: `vendor/.gitkeep`, a census row, never reached an install, and the
+# installed `opendox generate-and-open --local` answered it 404. A pattern
+# whose last part starts with the dot is the one that matches such a name, at
+# any depth under `web/`. Measured with both builds an install can run, pip's
+# isolated build and `--no-build-isolation` over the `test` extra's
+# setuptools: 41 files without it, all 42 with it.
+# `tests_runtime/test_served_bundle.py` holds the wheel to the tree's
+# `src/opendox/web/`, and fetches every file from the installed entry point.
 [tool.setuptools.package-data]
-opendox = ["web/**"]
+opendox = ["web/**", "web/**/.*"]
 # THE VALIDATOR'S PACKAGED COPIES (plan 034 T057; #1144 7.1, as T007's batch G
 # amends it; R1Q12 (a), openxFactory#656 comment 5850003126). openDox's own
 # validator reads its spec leg's four schemas from `opendox/contracts/`, and
