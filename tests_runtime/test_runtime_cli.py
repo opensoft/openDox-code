@@ -2264,6 +2264,34 @@ def test_a_non_postgresql_dsn_is_refused_naming_the_dialect_kept() -> None:
                               "host=h dbname=db user=m"})
 
 
+@pytest.mark.parametrize("dsn", ["postgresql:svc:hunter2@db.invalid/x",
+                                 "postgresql:/svc:hunter2@db.invalid/x",
+                                 "PostgreSQL://svc:hunter2@db.invalid/x",
+                                 "POSTGRES://svc:hunter2@db.invalid/x"])
+@pytest.mark.parametrize("setting", ["DATABASE_URL", "MIGRATION_DATABASE_URL"])
+def test_a_postgresql_scheme_libpq_would_not_read_as_a_uri_is_refused(
+        dsn: str, setting: str) -> None:
+    """`urlsplit` reads each of these as the PostgreSQL scheme. libpq reads
+    none of them as a URI: it knows only the exact, lower-case
+    `postgresql://` and `postgres://`, so it parses the rest as keyword/value
+    and refuses them with a message that repeats the whole value, password
+    and all. So each is refused at configuration, named, and the value is
+    not repeated (Copilot review of this PR, at its merge-from-main round).
+    The two spellings libpq does read stay accepted (the case above)."""
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    good = {PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+            PREFIX + "MIGRATION_DATABASE_URL": "postgresql://m:q@h/db"}
+    with pytest.raises(ConfigurationError) as refused:
+        load_settings({PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+                       PREFIX + "OIDC_AUDIENCE": "opendox",
+                       **good, PREFIX + setting: dsn})
+    message = str(refused.value)
+    assert PREFIX + setting in message, message
+    assert "postgresql://" in message, message
+    assert "hunter2" not in message and dsn not in message, message
+
+
 def test_an_unparseable_dsn_is_refused_and_never_raises_a_bare_valueerror(
 ) -> None:
     """`urlsplit` itself raises for a DSN it cannot parse, and this module's
