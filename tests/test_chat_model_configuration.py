@@ -421,7 +421,8 @@ const doc = { createElement: (tag) => new Node(tag), activeElement: null };
 const byClass = (root, cls) => root.walk().filter(
   (n) => String(n.className).split(' ').includes(cls));
 
-import { mountDoxBenchChatRail, NO_MODEL_CONFIGURED_REMEDY } from "./doxbench-chat.mjs";
+import { mountDoxBenchChatRail, NO_MODEL_CONFIGURED_REMEDY,
+         noModelConfiguredRemedy } from "./doxbench-chat.mjs";
 
 const KEY = { repository: "fixture", ref: "main", tile_kind: "staged",
               tile_id: "a-topic" };
@@ -469,6 +470,15 @@ const out = {
     kind: "workbench-model-catalog", models: [ENTRY] })),
   unreadable: await mount(() => null),
   intakeOffered: await mount(empty, { intake: true }),
+  // the pure verdict over states a mount does not reach in one shot: a
+  // failure recorded beside an adopted empty catalog keeps its own remedy
+  pure: {
+    emptyAdopted: noModelConfiguredRemedy({ models: [], catalogFailure: null }),
+    emptyThenUnreadable: noModelConfiguredRemedy(
+      { models: [], catalogFailure: "unreadable" }),
+    emptyThenStaleToken: noModelConfiguredRemedy(
+      { models: [], catalogFailure: "console_required" }),
+  },
 };
 process.stdout.write(JSON.stringify(out));
 """
@@ -516,3 +526,5 @@ def test_the_line_shows_in_that_state_only(rail) -> None:
     assert rail["available"]["shown"] is None
     assert rail["unreadable"]["shown"] is None
     assert rail["intakeOffered"]["shown"] is None
+    assert rail["pure"] == {"emptyAdopted": doxbench_model.NO_MODEL_CONFIGURED_REMEDY,
+                            "emptyThenUnreadable": None, "emptyThenStaleToken": None}
