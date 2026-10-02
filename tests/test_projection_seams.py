@@ -66,7 +66,6 @@ from opendox import rfc3339
 from opendox import serve
 from opendox import workbench
 from opendox import branch_session as bs
-from opendox import consumer_reach
 from opendox.boundary import BoundaryViolation, OutputBoundary
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1797,14 +1796,14 @@ def test_no_proxy_over_a_seam_is_read_at_import_time() -> None:
                      "serve_workbench.py": (["registry_mod"], [])}, found
 
 
-def test_the_retired_stand_ins_are_gone_from_consumer_reach() -> None:
-    for name in ("snapshot", "snapshot_registry", "corpus_root", "generator",
-                 "find_validator", "corpus_root_refusal", "generate_snapshot",
-                 "is_rfc3339_datetime", "hosted_ref_refused", "scanned_roots",
-                 "function", "constant"):
-        assert not hasattr(consumer_reach, name), name
-        assert name not in consumer_reach.__all__, name
-    assert consumer_reach.LateProjectionRoutes.LATE_COLUMN[2] == ("_serve_index",)
+def test_the_stand_ins_module_is_retired() -> None:
+    """T055 retired the projection mechanism's stand-ins, and T084 the last
+    three: the gate console's module stand-in and the gate and projection
+    columns' late bases. So `consumer_reach` itself is gone (F4.1 whole: "the
+    file is absent"), and nothing in the package can import it."""
+    import importlib.util
+    assert not (PACKAGE / "consumer_reach.py").exists()
+    assert importlib.util.find_spec("opendox.consumer_reach") is None
 
 
 # ---------------------------------------------------------------------------

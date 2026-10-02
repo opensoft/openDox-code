@@ -49,8 +49,9 @@ gate registration is `gate_console` with that one name beside it.
 
 `gate_records_writable()` answers whether a HOST's gate is registered, so the
 model-intake surface can decline to start a flow whose approval openDox's
-default would refuse (plan 034 T084, a holder reading under batch G and R1Q10
-(a) that Brett may overrule).
+default would refuse (plan 034 T084; RULED by Brett Heap, 2026-10-02, "Refuse
+by name, hide intake (Recommended)", confirmed at openxFactory#656 comment
+`5961364221`, item 1).
 
 IMPORT WEIGHT: `opendox.projection_seams` only, which is stdlib-only, so this
 module names no sibling in an import. `register_defaults()` imports

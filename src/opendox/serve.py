@@ -148,7 +148,6 @@ from opendox import doxbench_telemetry  # noqa: E402
 # evaluated where the `def` sits, at import time. openDox owns those two
 # values (`defaults.py`), and openXdox-code's drift guard holds the literals
 # together.
-from opendox import consumer_reach  # noqa: E402
 from opendox import defaults  # noqa: E402
 from opendox import projection_seams  # noqa: E402
 from opendox import column_seams  # noqa: E402
@@ -873,22 +872,19 @@ def _head_of(checkout_root: Path, git=None) -> str | None:
 
 class DashboardHandler(serve_workbench.WorkbenchRoutes,
                        serve_project.ProjectRoutes,
-                       # BUILD slice 2b: these two read `serve_gate.GateRoutes`
-                       # and `serve_projection.ProjectionRoutes` — openXdox
-                       # classes, and a base expression is evaluated when the
-                       # class statement runs, so these two lines alone made
-                       # `import opendox.serve` require the layer that PINS
-                       # openDox. The stand-ins carry the same method names and
-                       # forward to the same functions with the same `self` on
-                       # first call, so every contributed binding behaves
-                       # exactly as before. Since plan 034 T055 the core
-                       # `/snapshot.json` arm's handlers are THIS class's own
-                       # (`_serve_snapshot` below), and the projection stand-in
-                       # forwards one method, `_serve_index`, the one its
-                       # contributed `/snapshot-index.json` binding names
-                       # (T084 hands the column to the handler facet).
-                       consumer_reach.LateGateRoutes,
-                       consumer_reach.LateProjectionRoutes,
+                       # Plan 034 T084 (#1144 4.3; R1Q1 (a), openxFactory#656
+                       # comment 5817152735): openXdox's gate and projection
+                       # columns, `serve_gate.GateRoutes` and
+                       # `serve_projection.ProjectionRoutes`, stood here, as
+                       # `consumer_reach`'s late stand-ins since BUILD slice 2b
+                       # and as the classes themselves before it. They are a
+                       # HOST's columns, so they are composed in at build
+                       # time through the handler-contribution facet, beside
+                       # the route bindings that name their methods
+                       # (`_handle_gate_action`, `_serve_index`). A host that
+                       # contributes a binding without its column is refused
+                       # at wiring, before a socket (`route_extension.
+                       # resolve_handlers`). A lone openDox carries neither.
                        # Plan 034 T011 (#1144 task 2.2): openxFactory's
                        # `serve_openxfactory_lanes.LaneRoutes` stood here.
                        # It is a descendant's column in a package openDox
@@ -1252,12 +1248,12 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     # at § 2.4 PR 3, because it tests `path == self.snapshot_route`, a
     # per-server keyword a frozen `RouteBinding.pattern` cannot carry, while
     # its handlers travelled to openXdox's projection column and were reached
-    # through `consumer_reach.LateProjectionRoutes`. So a standalone server
-    # refused every `/snapshot.json`. The four methods below are that route's
-    # handlers, answering from the REGISTERED snapshot source: the query key,
-    # the active snapshot's bytes, the route itself, and FR-048's per-entry
-    # hosted refusal, which `_serve_source` asks too. The rules they consult
-    # are the registry's, through its seam.
+    # through a late stand-in for it (`consumer_reach`, retired at T084). So
+    # a standalone server refused every `/snapshot.json`. The four methods
+    # below are that route's handlers, answering from the REGISTERED snapshot
+    # source: the query key, the active snapshot's bytes, the route itself,
+    # and FR-048's per-entry hosted refusal, which `_serve_source` asks too.
+    # The rules they consult are the registry's, through its seam.
     def _query_key(self) -> tuple[str | None, str | None]:
         """The optional `?repository=&ref=` of a read route. No repository
         means the ACTIVE entry, which is what a query-less request asks for."""

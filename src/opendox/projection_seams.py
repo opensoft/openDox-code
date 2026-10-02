@@ -10,7 +10,7 @@ the corpus-root predicate (`openxdox.corpus_root`), the snapshot writer and its
 validator (`openxdox.snapshot`). With openXdox absent, which is the normal state
 of a neutral openDox, each of those reaches refused, so a server could not be
 BUILT standalone (plan 034, research R7) and a generate verb could not write.
-`consumer_reach` names the gap itself: the injection that would retire a reach,
+`consumer_reach` named the gap itself: the injection that would retire a reach,
 *"openDox naming a protocol and being handed an implementation"*, *"does not
 exist yet and is BUILD-arc work"*. This module is that injection for the four.
 
