@@ -68,16 +68,15 @@ def _get(base: tuple[str, int], path: str) -> tuple[int, dict]:
 # 1 — a hosted entry point reports a hosted install, and no bundled server
 # ---------------------------------------------------------------------------
 
-def test_a_hosted_entry_point_reports_its_hosted_shape(tmp_path, monkeypatch) -> None:
-    for name in runtime_config.SETTING_NAMES:
-        monkeypatch.delenv(name, raising=False)
-    for name, value in HOSTED.items():
-        monkeypatch.setenv(name, value)
-    monkeypatch.setenv(PREFIX + "INSTALL_MODE", runtime_config.INSTALL_MODE_HOSTED)
+def test_a_hosted_entry_point_reports_its_hosted_shape(tmp_path) -> None:
+    """The child inherits no runtime setting from the runner
+    (`standalone_child.Child`), and is given a hosted install's, on purpose."""
     repo = fresh_repository(PLAIN, tmp_path)
     child = Child(tmp_path, "opendox.cli", "generate-and-open",
                   "--repo-root", str(repo), "--repository", "fixture",
-                  "--no-open", "--port", "0", "--run-dir", str(tmp_path / "run"))
+                  "--no-open", "--port", "0", "--run-dir", str(tmp_path / "run"),
+                  extra_env={**HOSTED, PREFIX + "INSTALL_MODE":
+                             runtime_config.INSTALL_MODE_HOSTED})
     try:
         match = child.wait_for_line(_URL)
         base = (match.group(2), int(match.group(3)))
