@@ -59,6 +59,7 @@ from pathlib import Path
 import pytest
 
 from opendox.runtime import bundle as bundle_mod
+from opendox.runtime import cli
 from opendox.runtime import config
 from opendox.runtime.config import PREFIX
 
@@ -264,12 +265,16 @@ def test_the_local_extra_carries_the_runtime_and_the_server_and_test_joins_it(
     # the carrier RULED on openxFactory#656 `5916000030` item 2
     assert any(req.startswith("pixeltable-pgserver") for req in extras["local"])
     assert not any(req.startswith("pgserver") for req in extras["local"])
+    # WITH A CEILING (adversarial review of #69): the carrier's `pginstall/`
+    # major is a property of the user's data, so no later release moves it
+    # without this package's say. The lock's pin sits inside the range.
+    assert "pixeltable-pgserver>=0.6.0,<0.7" in extras["local"], extras["local"]
     assert "opendox[local]" in extras["test"], (
         "F9.1 installs `.[test]` alone; without the local extra there, this "
         "suite could not start the server it tests")
     lock = (ROOT / "constraints-cpython312-linux.txt").read_text()
-    assert re.search(r"(?m)^pixeltable-pgserver==", lock), \
-        "the lock does not pin pixeltable-pgserver"
+    assert re.search(r"(?m)^pixeltable-pgserver==0\.6\.\d+$", lock), \
+        "the lock does not pin pixeltable-pgserver inside >=0.6.0,<0.7"
     assert not re.search(r"(?m)^pgserver==", lock), "the lock still pins pgserver"
     files = project["tool"]["setuptools"]["data-files"]
     assert files == {"share/opendox/migrations": ["migrations/*.sql"]}
@@ -305,6 +310,28 @@ def test_a_state_dir_too_long_for_a_unix_socket_is_refused_naming_it() -> None:
     with pytest.raises(config.ConfigurationError) as caught:
         config.load_settings({MODE: "local", STATE: long})
     assert STATE in str(caught.value) and "socket" in str(caught.value)
+
+
+@pytest.mark.parametrize("variable", [STATE, "XDG_STATE_HOME", "HOME"])
+def test_a_comma_in_the_state_dir_is_refused_without_repeating_it(
+        monkeypatch, variable: str) -> None:
+    """PostgreSQL splits its socket directories, and libpq its hosts, on a
+    comma, so one would split the socket's one checked directory into two
+    unchecked ones (adversarial review of #69). Refused at configuration,
+    from whichever setting it came, and the value is not repeated."""
+    value = "/tmp/odx-c1,/tmp/odx-c2-secretish"
+    env = {MODE: "local"}
+    if variable == "HOME":
+        monkeypatch.setenv("HOME", value)        # `Path.home()` reads the process's
+    else:
+        env[variable] = value
+    with pytest.raises(config.ConfigurationError) as caught:
+        config.load_settings(env)
+    message = str(caught.value)
+    assert "`,`" in message and STATE in message, message
+    assert "secretish" not in message and value not in message, message
+    with pytest.raises(config.ConfigurationError):
+        config.load_migration_settings(env)
 
 
 def test_a_relative_state_dir_is_refused_naming_it() -> None:
@@ -586,6 +613,31 @@ def test_a_role_outside_the_map_is_refused_even_for_this_os_user(
     assert "peer authentication failed" in str(caught.value).lower(), caught.value
 
 
+@pytest.mark.parametrize("mode", ["database", "true"])
+def test_a_replication_connection_is_refused_logical_or_physical(
+        state_dir: Path, mode: str) -> None:
+    """A PHYSICAL replication connection (`replication=true`) matches no
+    rule in `pg_hba.conf`. A LOGICAL one (`replication=database`) names a
+    database, and the one local rule admitted it as `peer:<user>`, where
+    `IDENTIFY_SYSTEM` answered (adversarial review of #69). The server
+    starts no WAL sender (`max_wal_senders=0`), so both are refused, as the
+    owner role and over the same socket."""
+    import psycopg
+    from psycopg.conninfo import make_conninfo
+
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    with bundle_mod.BundledServer(settings) as server:
+        with pytest.raises(psycopg.OperationalError) as caught:
+            psycopg.connect(make_conninfo(server.bundle.migration_dsn,
+                                          replication=mode)).close()
+        with _owner(server) as conn:                  # an ordinary one still is
+            senders = conn.execute("show max_wal_senders").fetchone()[0]
+    message = str(caught.value).lower()
+    assert ("max_wal_senders" in message if mode == "database"
+            else ("max_wal_senders" in message or "no pg_hba.conf entry" in message)), message
+    assert senders == "0", senders
+
+
 def test_an_older_trust_cluster_is_brought_back_to_peer_on_start(
         state_dir: Path) -> None:
     """A data directory an earlier build initialized with `trust` (or a file
@@ -639,6 +691,62 @@ def test_a_cluster_whose_configuration_points_elsewhere_runs_on_its_own_files(
                      "hba_file": str(data / "pg_hba.conf"),
                      "ident_file": str(data / "pg_ident.conf")}, shown
     assert method == f"peer:{bundle_mod.os_user()}", method
+
+
+def _verb(state: Path, *verb: str) -> tuple[int, dict]:
+    """`OPENDOX_INSTALL_MODE=local opendox-runtime runtime <verb>`, a SECOND process."""
+    done = subprocess.run(
+        [sys.executable, "-m", "opendox.runtime.cli", "runtime", *verb],
+        env=_clean_env(**{MODE: "local", STATE: str(state)}), cwd=ROOT,
+        capture_output=True, text=True, timeout=60)
+    return done.returncode, json.loads(done.stdout)
+
+
+@pytest.mark.parametrize("shape", ["linked-run", "open-state", "no-server"])
+def test_the_local_verbs_connect_only_to_their_own_verified_server(
+        state_dir: Path, shape: str) -> None:
+    """The adversarial review of #69 (L2): a second state tree whose
+    `postgres/run` is a link to a RUNNING bundle's socket directory, in a
+    state directory every user could write. `status` and `migrate` ran on
+    it as the owner role, against the other bundle's server, while a start
+    refused the same tree. Each verb now asks the tree check and a live
+    server of its OWN data directory before any connection. A valid tree
+    with no server is answered the same way, by name and unconnected."""
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    other = Path(tempfile.mkdtemp(prefix="odx-o-", dir="/tmp" if os.path.isdir("/tmp") else None))
+    try:
+        (other / "postgres" / "data").mkdir(parents=True, mode=0o700)
+        (other / "postgres").chmod(0o700)
+        if shape == "no-server":
+            (other / "postgres" / "run").mkdir(mode=0o700)
+        else:
+            (other / "postgres" / "run").symlink_to(
+                config.DatabaseBundle(state_dir).socket_dir)
+        if shape == "open-state":
+            other.chmod(0o777)
+        with bundle_mod.BundledServer(settings):
+            status_code, status = _status(other)
+            migrate_code, migrate = _verb(other, "migrate")
+            reset_code, reset = _verb(other, "reset", "--confirm",
+                                      cli.RESET_CONFIRMATION)
+            # the positive control: the running bundle's own verbs connect,
+            # and its schema was not dropped through the other tree's link
+            own_code, own = _status(state_dir)
+    finally:
+        other.chmod(0o700)
+        shutil.rmtree(other, ignore_errors=True)
+    expected = {"linked-run": "is a symbolic link",
+                "open-state": "writable by every user",
+                "no-server": "no bundled server is running"}[shape]
+    assert status_code == 1 and status["database"].startswith("not probed: "), status
+    assert expected in status["database"], status
+    assert migrate_code == 1, migrate
+    assert migrate["refusal"] == "local-bundle-unverified", migrate
+    assert expected in migrate["message"], migrate
+    assert reset_code == 1 and reset["refusal"] == "local-bundle-unverified", reset
+    assert expected in reset["message"], reset
+    assert own["database"] == "reachable" and own_code == 0, own
+    assert own["applied_migrations"] and not own["pending_migrations"], own
 
 
 def test_migrate_under_the_local_mode_uses_the_bundle_and_refuses_a_dsn(

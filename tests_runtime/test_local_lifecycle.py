@@ -589,6 +589,36 @@ def test_nothing_is_made_through_a_path_the_tree_check_refuses(
     assert not os.path.lexists(made), f"{made} was made before the refusal"
 
 
+@pytest.mark.parametrize("shape", ["link-to-open", "open", "link-to-open-state",
+                                   "sticky-state"])
+def test_the_directory_creation_starts_from_judges_its_own_descriptor(
+        tmp_path: Path, short_state: Path, shape: str) -> None:
+    """`_make_private_directories` judges the directory it opens, by its
+    descriptor, before its first `mkdir` (adversarial review of #69). It is
+    asked here directly, with no path-wise check in front of it, so its own
+    guard is what is measured: a base that every user can write, reached
+    through a link or not, makes nothing beneath it. The state directory is
+    judged as the install's OWN, so even a sticky one is refused, where a
+    sticky ANCESTOR (`/tmp`'s shape) is accepted."""
+    watched = short_state / "open"
+    watched.mkdir()
+    watched.chmod(0o1777 if shape == "sticky-state" else 0o777)
+    if shape == "link-to-open":
+        (short_state / "link").symlink_to(watched)
+        state = short_state / "link" / "state"
+    elif shape == "open":
+        state = watched / "state"
+    elif shape == "link-to-open-state":
+        (short_state / "link").symlink_to(watched)
+        state = short_state / "link"
+    else:
+        state = watched
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        bundle_mod._make_private_directories(state / "postgres" / "run", state=state)
+    assert "writable by every user" in str(caught.value), caught.value
+    assert list(watched.iterdir()) == [], "made beneath an unsafe base"
+
+
 @pytest.mark.parametrize("shape", ["link", "foreign-directory"])
 def test_a_name_put_in_the_way_first_is_refused_never_followed(
         monkeypatch, tmp_path: Path, short_state: Path, shape: str) -> None:
@@ -888,6 +918,80 @@ def _server(monkeypatch, tmp_path: Path, state: Path, **scripts) -> bundle_mod.B
 def _target_of_initdb() -> str:
     """Shell: the directory `initdb -D <dir>` was told to initialize."""
     return 'while [ "$1" != "-D" ]; do shift; done; T="$2"'
+
+
+@pytest.mark.parametrize("says", ["17.2", "16.14", ""])
+def test_an_existing_cluster_is_opened_only_by_its_own_major(
+        monkeypatch, tmp_path: Path, short_state: Path, says: str) -> None:
+    """The server's `postgres --version` against the cluster's `PG_VERSION`
+    (adversarial review of #69). Another major, or a server that does not
+    say, is the named refusal, before anything is written into the data
+    directory. The same major goes on to the launch, which the stand-in
+    fails on purpose."""
+    data = short_state / "postgres" / "data"
+    data.mkdir(parents=True, mode=0o700)
+    (short_state / "postgres").chmod(0o700)
+    (data / "PG_VERSION").write_text("16\n", encoding="utf-8")
+    answer = f'echo "postgres (PostgreSQL) {says}"' if says else "true"
+    server = _server(monkeypatch, tmp_path, short_state, initdb="exit 1",
+                     postgres=f'if [ "$1" = --version ]; then {answer}; exit 0; fi\nexit 3')
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    message = str(caught.value)
+    if says == "17.2":
+        assert "PostgreSQL 16 cluster" in message and "PostgreSQL 17:" in message, message
+    elif says == "":
+        assert "does not say which PostgreSQL it is" in message, message
+    else:
+        assert "exited during start (exit 3)" in message, message
+    if says != "16.14":
+        assert not (data / "pg_hba.conf").exists(), "wrote into another major's cluster"
+
+
+def _a_tree(state: Path) -> config.DatabaseBundle:
+    """A valid bundle tree under `state`, every directory 0700, no server."""
+    bundle = config.DatabaseBundle(state)
+    for directory in (state / "postgres", bundle.data_dir, bundle.socket_dir):
+        directory.mkdir(mode=0o700, exist_ok=True)
+        directory.chmod(0o700)
+    return bundle
+
+
+@pytest.mark.parametrize("shape", ["no-lock", "dead-pid", "not-postgres",
+                                   "no-proc-other-socket", "no-proc-this-socket",
+                                   "open-state"])
+def test_a_local_verb_connects_only_behind_a_verified_server(
+        monkeypatch, short_state: Path, shape: str) -> None:
+    """`bundle.refusal_before_connecting` (adversarial review of #69, L2):
+    the tree a start checks, then a live server of THIS data directory,
+    named by its own lock file, listening at THIS socket directory. Where
+    `/proc` cannot say what the pid is, the lock file's socket line still
+    binds the socket to the tree."""
+    bundle = _a_tree(short_state)
+    live = os.getpid()                       # alive, and not a postgres
+    dead = 2 ** 22 + 17                      # above the default pid_max
+    lock = bundle.data_dir / "postmaster.pid"
+    socket_line = (str(bundle.socket_dir) if shape != "no-proc-other-socket"
+                   else "/tmp/somewhere-else")
+    if shape != "no-lock":
+        pid = dead if shape == "dead-pid" else live
+        lock.write_text(f"{pid}\n{bundle.data_dir}\n1\n5432\n{socket_line}\n\n",
+                        encoding="utf-8")
+    if shape.startswith("no-proc"):
+        monkeypatch.setattr(bundle_mod, "PROC", short_state / "no-proc")
+    if shape == "open-state":
+        short_state.chmod(0o777)
+    reason = bundle_mod.refusal_before_connecting(bundle)
+    expected = {"no-lock": "no readable postmaster.pid",
+                "dead-pid": "not a live process",
+                "not-postgres": "is not the postgres serving",
+                "no-proc-other-socket": "listens at /tmp/somewhere-else",
+                "no-proc-this-socket": None,
+                "open-state": "writable by every user"}[shape]
+    if expected is None:
+        assert reason is None, reason
+    else:
+        assert reason is not None and expected in reason, reason
 
 
 def test_an_initdb_that_dies_midway_leaves_no_data_directory(
