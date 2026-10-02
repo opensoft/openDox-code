@@ -258,12 +258,16 @@ def test_the_local_extra_carries_the_runtime_and_the_server_and_test_joins_it(
     # the carrier RULED on openxFactory#656 `5916000030` item 2
     assert any(req.startswith("pixeltable-pgserver") for req in extras["local"])
     assert not any(req.startswith("pgserver") for req in extras["local"])
+    # WITH A CEILING (adversarial review of #69): the carrier's `pginstall/`
+    # major is a property of the user's data, so no later release moves it
+    # without this package's say. The lock's pin sits inside the range.
+    assert "pixeltable-pgserver>=0.6.0,<0.7" in extras["local"], extras["local"]
     assert "opendox[local]" in extras["test"], (
         "F9.1 installs `.[test]` alone; without the local extra there, this "
         "suite could not start the server it tests")
     lock = (ROOT / "constraints-cpython312-linux.txt").read_text()
-    assert re.search(r"(?m)^pixeltable-pgserver==", lock), \
-        "the lock does not pin pixeltable-pgserver"
+    assert re.search(r"(?m)^pixeltable-pgserver==0\.6\.\d+$", lock), \
+        "the lock does not pin pixeltable-pgserver inside >=0.6.0,<0.7"
     assert not re.search(r"(?m)^pgserver==", lock), "the lock still pins pgserver"
     files = project["tool"]["setuptools"]["data-files"]
     assert files == {"share/opendox/migrations": ["migrations/*.sql"]}

@@ -890,6 +890,34 @@ def _target_of_initdb() -> str:
     return 'while [ "$1" != "-D" ]; do shift; done; T="$2"'
 
 
+@pytest.mark.parametrize("says", ["17.2", "16.14", ""])
+def test_an_existing_cluster_is_opened_only_by_its_own_major(
+        monkeypatch, tmp_path: Path, short_state: Path, says: str) -> None:
+    """The server's `postgres --version` against the cluster's `PG_VERSION`
+    (adversarial review of #69). Another major, or a server that does not
+    say, is the named refusal, before anything is written into the data
+    directory. The same major goes on to the launch, which the stand-in
+    fails on purpose."""
+    data = short_state / "postgres" / "data"
+    data.mkdir(parents=True, mode=0o700)
+    (short_state / "postgres").chmod(0o700)
+    (data / "PG_VERSION").write_text("16\n", encoding="utf-8")
+    answer = f'echo "postgres (PostgreSQL) {says}"' if says else "true"
+    server = _server(monkeypatch, tmp_path, short_state, initdb="exit 1",
+                     postgres=f'if [ "$1" = --version ]; then {answer}; exit 0; fi\nexit 3')
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    message = str(caught.value)
+    if says == "17.2":
+        assert "PostgreSQL 16 cluster" in message and "PostgreSQL 17:" in message, message
+    elif says == "":
+        assert "does not say which PostgreSQL it is" in message, message
+    else:
+        assert "exited during start (exit 3)" in message, message
+    if says != "16.14":
+        assert not (data / "pg_hba.conf").exists(), "wrote into another major's cluster"
+
+
 def test_an_initdb_that_dies_midway_leaves_no_data_directory(
         monkeypatch, tmp_path: Path, short_state: Path) -> None:
     """The half-built cluster: `PG_VERSION` written, then the run fails. The

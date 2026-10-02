@@ -70,6 +70,7 @@ import contextlib
 import ctypes
 import importlib.util
 import os
+import re
 import shutil
 import signal
 import stat
@@ -722,6 +723,7 @@ class BundledServer:
         """
         data = self.bundle.data_dir
         if (data / "PG_VERSION").is_file():
+            self._refuse_another_major(binaries)
             return
         if data.exists():
             try:
@@ -747,6 +749,39 @@ class BundledServer:
         except BaseException:
             shutil.rmtree(attempt, ignore_errors=True)
             raise
+
+    def _refuse_another_major(self, binaries: Path) -> None:
+        """An existing cluster is opened only by the major that made it.
+
+        PostgreSQL refuses another major's data directory itself, but only
+        from inside a launch, where the reason reaches nobody but the log.
+        The carrier's `pginstall/` is PostgreSQL 16 today, and upstream's
+        default is already 18 (adversarial review of openDox-code#69). So
+        the server's own `postgres --version` is asked first, against the
+        cluster's `PG_VERSION`, and a disagreement is the named refusal,
+        before anything is written into the data directory.
+        """
+        data = self.bundle.data_dir
+        cluster = (data / "PG_VERSION").read_text(encoding="utf-8").strip()
+        done = subprocess.run(
+            [str(binaries / "postgres"), "--version"], env=_child_environment(),
+            capture_output=True, text=True, timeout=START_TIMEOUT_SECONDS)
+        found = re.search(r"\(PostgreSQL\) (\d+)", done.stdout or "")
+        if found is None:
+            raise BundleRefused(
+                f"the bundled `postgres` under {binaries} does not say which "
+                f"PostgreSQL it is (`postgres --version` exited "
+                f"{done.returncode}), so it is not given {data}, a "
+                f"PostgreSQL {cluster} cluster; reinstall the `local` extra")
+        if found.group(1) != cluster:
+            raise BundleRefused(
+                f"{data} holds a PostgreSQL {cluster} cluster and the bundled "
+                f"server is PostgreSQL {found.group(1)}: a cluster is opened "
+                "only by the major version that made it. Reinstall the "
+                f"`local` extra this install was made with (`{SERVER_DISTRIBUTION}` "
+                "is pinned below 0.7 for this reason), or move the data "
+                "directory aside, and lose its coordination state, to start "
+                "a new one")
 
     def _remove_abandoned_attempts(self) -> None:
         """Every initialization attempt whose process no longer exists."""
