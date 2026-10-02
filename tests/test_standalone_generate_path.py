@@ -17,7 +17,7 @@ is what research R7 measured as refused, and this file holds the lifted limit:
    role keys, the verb reports it, naming the document, the value and the six
    keys, and the snapshot it writes reads that document as a source. T054
    tests the projection's half in process.
-3. `python -m opendox.cli generate-and-open --no-open` STARTS a server, which
+3. `python -m opendox.cli generate-and-open --local --no-open` STARTS a server, which
    answers `/index.html`, `/snapshot.json`, `/capabilities` and `/source/`,
    refuses `/source/.git/config`, and stops on an interrupt with status 0.
 4. `python -m opendox.serve`, the server's own entry point, starts and answers
@@ -46,8 +46,14 @@ server had started (measured at openDox-code#59 `e3ef506a`: zero lines in 20
 seconds). T056 flushes it in both entry points, and cases 3 and 4 fail
 without that.
 
-NOT HERE: F10.1's run through a plain install, with the console script and no
-`--local`, arrives in phase 3 (T070, and T077 as batch H amends it).
+`--local` (plan 034 T070; #1144 13.4, 13.5): case 3 is the single-user install,
+so it says so. Since T070, `generate-and-open` with neither `--local` nor
+`OPENDOX_INSTALL_MODE=local` is a HOSTED install, which refuses without its
+broker's issuer. That refusal is what an unflagged run of this case would now
+hit, and it is T070's own subject, held in `tests/test_install_mode_entrypoint.py`.
+
+NOT HERE: F10.1's run through a plain install, with the console script, arrives
+in phase 3 (T077, as batch H amends it).
 
 A CREATED FILE: no carve-manifest row (RULED OQ-C).
 """
@@ -260,9 +266,10 @@ def test_the_unedited_fixture_declares_that_document_a_candidate(tmp_path) -> No
 # ---------------------------------------------------------------------------
 
 def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path) -> None:
-    """`python -m opendox.cli generate-and-open --no-open`, with no
+    """`python -m opendox.cli generate-and-open --local --no-open`, with no
     `--no-serve`: the server starts, says where on a buffered pipe, answers
-    the core routes, and stops on an interrupt with status 0.
+    the core routes, and stops on an interrupt with status 0. `--local`
+    because this is the single-user install (T070).
 
     Both lines it prints before blocking in `serve_forever()`, the URL and
     "serving until interrupted", are read WHILE IT RUNS, before the
@@ -271,7 +278,7 @@ def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path
     e3574774, r4146289331)."""
     repo = _fresh_repository(tmp_path)
     run_dir = tmp_path / "run"
-    child = Child(tmp_path, "opendox.cli", "generate-and-open",
+    child = Child(tmp_path, "opendox.cli", "generate-and-open", "--local",
                    "--repo-root", str(repo), "--repository", "fixture",
                    "--no-open", "--port", "0", "--run-dir", str(run_dir))
     try:
@@ -281,11 +288,17 @@ def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path
         child.wait_for_line(_SERVING)
         assert child.process.poll() is None, "the server exited after saying it serves"
         _assert_the_server_answers(base, run_dir / "snapshot.json", repo)
+        # THE LOCAL INSTALL'S DATABASE IS THE CHILD'S OWN (plan 034 T072): its
+        # bundled server was started under the private state directory the
+        # harness gave this child, never under the user's.
+        assert (child.state_dir / "postgres" / "data" / "PG_VERSION").is_file(), \
+            "the bundled server was not started under the child's state dir"
         assert child.interrupt() == 0, child.stderr_text()
     finally:
         child.kill()
     _assert_the_port_is_closed(base)
     assert child.refused() == [], child.refused()
+    assert not child.state_dir.exists(), "the child's state dir outlived it"
 
 
 # ---------------------------------------------------------------------------

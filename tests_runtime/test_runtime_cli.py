@@ -206,6 +206,61 @@ def test_migrate_refuses_rather_than_borrowing_the_served_identity(
     assert PREFIX + "MIGRATION_DATABASE_URL" in evidence["message"]
 
 
+def test_serve_and_status_load_with_no_migration_dsn_configured(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Brett's ruling on #1144 13.3 ("Required only for migrate
+    (Recommended)"): `OPENDOX_MIGRATION_DATABASE_URL` stays OPTIONAL for the
+    served workload — `serve` and `status` both go through `load_settings`,
+    and this is the CLI-level proof that neither refuses at configuration
+    when only the served DSN is set. This is the shape
+    `deploy/compose/docker-compose.yaml`'s `opendox` service and
+    `docs/runtime.md` § 3 already document: the migration credential lives
+    only in the separate `migrate` service/profile.
+    """
+    monkeypatch.delenv(PREFIX + "MIGRATION_DATABASE_URL", raising=False)
+    monkeypatch.setenv(PREFIX + "DATABASE_URL",
+                       "postgresql://nobody@127.0.0.1:1/none")
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "status", "--probe-timeout", "0.2"]))
+    assert evidence.get("refusal") != "configuration", evidence
+    assert "settings" in evidence, evidence
+    assert evidence["settings"][PREFIX + "MIGRATION_DATABASE_URL"] is None
+
+    def _ok(self) -> None:
+        self.started = True
+
+    _stub_uvicorn(monkeypatch, _ok)
+    monkeypatch.delenv(PREFIX + "MIGRATION_DATABASE_URL", raising=False)
+    code, evidence = _run_serve()
+    assert code == 0, evidence
+    assert evidence["ok"] is True, evidence
+
+
+def test_the_collapse_is_refused_through_the_served_workload_too(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """13.3's collapse refusal is `load_settings`'s own, not the falsifier's
+    special case: it fires for `status` (and every other served verb) too,
+    the moment an operator gives BOTH DSNs and they happen to be the exact
+    same value — even though migration is optional here (Brett's ruling,
+    above).
+    """
+    same = "postgresql://opendox:hunter2@127.0.0.1:1/none"
+    monkeypatch.setenv(PREFIX + "DATABASE_URL", same)
+    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL", same)
+    monkeypatch.setenv(PREFIX + "OIDC_ISSUER", "https://broker/realms/x")
+    monkeypatch.setenv(PREFIX + "OIDC_AUDIENCE", "opendox-runtime")
+
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "status", "--probe-timeout", "0.2"]))
+    assert code == 1, evidence
+    assert evidence["refusal"] == "configuration", evidence
+    assert PREFIX + "MIGRATION_DATABASE_URL" in evidence["message"]
+    assert "hunter2" not in evidence["message"], evidence["message"]
+
+
 def test_init_creates_the_project_repository_root_and_touches_no_database(
         monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     root = tmp_path / "projects"
@@ -329,6 +384,29 @@ def test_migrate_and_reset_need_no_served_identity_and_no_broker(
     assert code == 1
     assert evidence["refusal"] != "configuration", evidence
     assert evidence["ok"] is False
+
+
+def test_migrate_refuses_a_non_postgresql_migration_dsn_at_configuration(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """13.2 covers `load_migration_settings` too, not only `load_settings`.
+
+    The test above shows an unreachable but VALID-dialect migration DSN
+    getting past configuration; this is its dialect-refused twin (Copilot
+    review of this PR): `load_migration_settings` read the DSN and handed it
+    straight to `Database` with no dialect check of its own, so a
+    non-PostgreSQL migration DSN reached the driver instead of being refused
+    by name here — the same un-named failure 13.2 exists to prevent for the
+    served loader.
+    """
+    for name in ("DATABASE_URL", "OIDC_ISSUER", "OIDC_AUDIENCE"):
+        monkeypatch.delenv(PREFIX + name, raising=False)
+    monkeypatch.setenv(PREFIX + "MIGRATION_DATABASE_URL", "sqlite:///x.db")
+    code, evidence = _run(cli.build_parser().parse_args(
+        ["runtime", "migrate", "--connect-timeout", "0.2"]))
+    assert code == 1, evidence
+    assert evidence["refusal"] == "configuration", evidence
+    assert "postgres" in evidence["message"].lower(), evidence
+    assert PREFIX + "MIGRATION_DATABASE_URL" in evidence["message"]
 
 
 def test_the_entrypoint_turns_an_escaped_exception_into_evidence(
@@ -2127,7 +2205,9 @@ def test_two_dsns_that_select_different_schemas_are_refused() -> None:
                           PREFIX + "MIGRATION_DATABASE_URL":
                               "postgresql://m:p@h/db"})
     # AND A MIGRATION DSN THAT IS SIMPLY ABSENT is the documented single-role
-    # deployment, not a mismatch.
+    # deployment, not a mismatch (RULED "required only for migrate",
+    # openxFactory#656, on the claim thread for plan 034's T071, 2026-09-28 —
+    # this assertion was briefly the opposite of itself, reverted here).
     assert load_settings({**base, PREFIX + "DATABASE_URL": served})
 
     # THE OTHER DIRECTION IS REFUSED TOO: a served DSN that names no schema
@@ -2138,6 +2218,126 @@ def test_two_dsns_that_select_different_schemas_are_refused() -> None:
                        PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
                        PREFIX + "MIGRATION_DATABASE_URL": migration})
     assert "the connection default" in str(either_way.value)
+
+
+def test_a_non_postgresql_dsn_is_refused_naming_the_dialect_kept() -> None:
+    """13.2: a second dialect is refused, not supported.
+
+    RULING Q1 keeps this database DOCUMENT-FREE, so a second dialect would
+    double every migration and every schema test forever for a database that
+    holds nothing. `_refuse_non_postgresql_dsn` asks it of both DSNs
+    `load_settings` holds, before either reaches the checks above that
+    compare them.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox"}
+    with pytest.raises(ConfigurationError) as served:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL": "sqlite:///x.db",
+                       PREFIX + "MIGRATION_DATABASE_URL":
+                           "postgresql://m:p@h/db"})
+    assert "postgres" in str(served.value).lower()
+    assert PREFIX + "DATABASE_URL" in str(served.value)
+
+    with pytest.raises(ConfigurationError) as migration:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+                       PREFIX + "MIGRATION_DATABASE_URL": "mysql://m:p@h/db"})
+    assert "postgres" in str(migration.value).lower()
+    assert PREFIX + "MIGRATION_DATABASE_URL" in str(migration.value)
+
+    # `postgres://` IS THE OTHER SPELLING LIBPQ ACCEPTS, not a second dialect.
+    assert load_settings({**base,
+                          PREFIX + "DATABASE_URL": "postgres://u:p@h/db",
+                          PREFIX + "MIGRATION_DATABASE_URL":
+                              "postgres://m:p@h/db"})
+
+    # AND THE KEYWORD/VALUE FORM NAMES NO DIALECT AT ALL, so it is not refused
+    # here: libpq's own conninfo grammar reaches no other driver, and this
+    # module already reads an empty scheme as "says nothing" the way
+    # `schema_selected_by` does for a DSN that names no schema.
+    assert load_settings({**base,
+                          PREFIX + "DATABASE_URL": "host=h dbname=db",
+                          PREFIX + "MIGRATION_DATABASE_URL":
+                              "host=h dbname=db user=m"})
+
+
+def test_an_unparseable_dsn_is_refused_and_never_raises_a_bare_valueerror(
+) -> None:
+    """`urlsplit` itself raises for a DSN it cannot parse, and this module's
+    whole contract is that a bad variable produces a named
+    `ConfigurationError`, never a bare exception the CLI's boundary does not
+    catch (Copilot review of this PR).
+
+    MEASURED: `urllib.parse.urlsplit("postgresql://u:p@[::1/db")` raises
+    `ValueError("Invalid IPv6 URL")` — an unbracketed IPv6 host, which
+    `tests_runtime/conftest.py`'s own `postgres_dsn` docstring names as "the
+    ordinary way to mis-set this variable". `_split_url` exists for exactly
+    this shape in the broker settings (Copilot review of openDox-code#25,
+    round 24); `_refuse_non_postgresql_dsn` is its own boundary for the two
+    DSNs, asked of both.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox"}
+    broken = "postgresql://opendox:hunter2@[::1/opendox"
+
+    with pytest.raises(ConfigurationError) as served:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL": broken,
+                       PREFIX + "MIGRATION_DATABASE_URL":
+                           "postgresql://m:p@h/db"})
+    message = str(served.value)
+    assert PREFIX + "DATABASE_URL" in message
+    assert "ValueError" in message
+    # THE VALUE IS NOT REPEATED: a DSN this runtime cannot parse can still
+    # carry a password.
+    assert "hunter2" not in message and "opendox:" not in message
+
+    with pytest.raises(ConfigurationError) as migration:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL": "postgresql://u:p@h/db",
+                       PREFIX + "MIGRATION_DATABASE_URL": broken})
+    assert PREFIX + "MIGRATION_DATABASE_URL" in str(migration.value)
+
+
+def test_the_same_dsn_in_both_settings_is_refused_naming_the_migration_one(
+) -> None:
+    """13.3: one credential pasted into both settings is refused.
+
+    `_refuse_the_same_dsn_in_both_settings` is asked only once the two DSNs
+    are known to AGREE on where they land
+    (`_refuse_two_dsns_that_select_different_schemas`, above it): agreement
+    bought by two DIFFERENT secrets for the one role is the accepted
+    single-role shape
+    (`test_a_dsn_that_names_no_database_still_reaches_one`'s last case);
+    agreement bought by writing the SAME value into both settings is this
+    refusal instead.
+    """
+    from opendox.runtime.config import ConfigurationError, load_settings
+
+    base = {PREFIX + "OIDC_ISSUER": "https://broker/realms/x",
+            PREFIX + "OIDC_AUDIENCE": "opendox"}
+    one = "postgresql://one:hunter2@h/opendox"
+    with pytest.raises(ConfigurationError) as collapsed:
+        load_settings({**base,
+                       PREFIX + "DATABASE_URL": one,
+                       PREFIX + "MIGRATION_DATABASE_URL": one})
+    message = str(collapsed.value)
+    assert PREFIX + "MIGRATION_DATABASE_URL" in message
+    assert PREFIX + "DATABASE_URL" in message
+    # THE VALUE IS NOT REPEATED: a DSN carries a password.
+    assert "hunter2" not in message and "one:" not in message
+
+    # DIFFERENT STRINGS THAT STILL AGREE are NOT this refusal, whether the
+    # difference is the secret alone (single-role) or the whole identity.
+    assert load_settings({**base,
+                          PREFIX + "DATABASE_URL": "postgresql://a:p@h/db",
+                          PREFIX + "MIGRATION_DATABASE_URL":
+                              "postgresql://b:p@h/db"})
 
 
 def test_two_dsns_naming_different_databases_are_refused_too() -> None:

@@ -62,6 +62,7 @@ from opendox import doxbench_bridge as br
 from opendox import doxbench_install as install_mod
 from opendox import doxbench_model
 from opendox import serve as serve_mod
+from opendox.runtime import config as runtime_config
 
 
 def _handler_class(httpd):
@@ -136,8 +137,43 @@ def entrypoint_server(tmp_path, monkeypatch):
 
     checkout = _checkout(tmp_path)
     session_root = tmp_path / "model-sessions"
+    # THE LOCAL INSTALL, SELECTED EXPLICITLY (plan 034 T070; #1144 13.4, as
+    # T007 batch H's addendum reads). With neither `--local` nor
+    # `OPENDOX_INSTALL_MODE=local` the install is HOSTED, and a hosted install
+    # with no issuer refuses (13.5) before `build_server` is ever reached. This
+    # fixture drives the single-user entrypoint a student runs, so it says so,
+    # and it scrubs every runtime setting first: a broker setting inherited
+    # from the shell would be refused beside the local mode, by design.
+    for name in runtime_config.SETTING_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    # AND THE LOCAL INSTALL'S DATABASE IS STOOD IN, with a tripwire of its own
+    # (plan 034 T072). A local `generate-and-open` starts its bundled
+    # PostgreSQL server before it serves, and these cases are about the model
+    # port the entrypoint declares, which reads nothing from the store (R1Q16
+    # (ii)). `tests_runtime/test_bundled_postgres.py` starts the real one, on
+    # this same entry point, and owns every assertion about it.
+    bundles = []
+
+    class _StandInBundle:
+        applied: list = []
+
+        def __init__(self, settings):
+            assert settings.install_mode == runtime_config.INSTALL_MODE_LOCAL
+            bundles.append(self)
+
+        def start(self):
+            return self
+
+        def stop(self):
+            pass
+
+        def report(self):
+            return {"data_dir": None, "socket_dir": "(stood in)", "pid": None}
+
+    monkeypatch.setattr(cli_mod.bundle_mod, "BundledServer", _StandInBundle)
     args = cli_mod.build_parser().parse_args([
         "generate-and-open",
+        runtime_config.LOCAL_FLAG,
         "--repo-root", str(checkout),
         "--repository", "fixture-repo",
         "--source-revision", PINNED_REVISION,
@@ -148,6 +184,7 @@ def entrypoint_server(tmp_path, monkeypatch):
     ])
     rc = cli_mod.cmd_generate_and_open(args, opener=lambda url: None)
     assert rc == 0, "the entrypoint did not complete"
+    assert len(bundles) == 1, "a LOCAL entrypoint run must own one database"
     assert built, "the entrypoint never reached build_server"
     yield _handler_class(built[-1]), spawned, session_root
 

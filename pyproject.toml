@@ -93,9 +93,55 @@ dependencies = [
 # (`tests_runtime/conftest.py`), and a skipped case does not make a whole
 # suite. `opendox[runtime]` names the extra below instead of copying its five
 # lines, so the runtime's dependency list is still declared once.
+#
+# AND THE LOCAL EXTRA, the same way and for the same reason (plan 034 T072;
+# R1Q16 (iii), `5850003126`): the local install's bundled PostgreSQL server is
+# what `tests_runtime/test_bundled_postgres.py` starts, so F9.1's `.[test]`
+# install still runs every case. `opendox[local]` carries `opendox[runtime]`;
+# both are named so the T036 reason above stays readable on its own.
+#
+# AND `setuptools`, the backend `[build-system]` names: the same test BUILDS
+# this package's wheel and installs it outside the checkout, to prove a wheel
+# carries its migrations (plan 034 T072). Declared here so that build runs
+# offline, with `--no-build-isolation`, in the environment the suite runs in.
+# `>=70.1` and not `[build-system]`'s `>=68`: 70.1 is the first release that
+# builds a wheel with no separate `wheel` package installed.
 test = [
     "pytest>=8,<9",
     "opendox[runtime]",
+    "opendox[local]",
+    "setuptools>=70.1",
+]
+
+# THE LOCAL EXTRA — the standalone install (plan 034 T072; #1144 13.1, as T007
+# batch H's addendum reads; RULED R1Q16 (iii), openxFactory#656 comment
+# `5850003126`): `pip install "opendox[local]"`, then
+# `opendox generate-and-open --local …`. It carries the runtime's packages and
+# the bundled server's own, and nothing else.
+#
+# `pixeltable-pgserver` IS THE SERVER'S CARRIER (RULED, openxFactory#656
+# comment `5916000030` item 2, Brett Heap 2026-09-30: "pixeltable-pgserver
+# (Recommended)"), and only its binaries are used (see `opendox/runtime/
+# bundle.py` for why its own manager is not). It is the maintained fork of
+# `pgserver`, and it ships PostgreSQL 16 as `initdb` and `postgres` inside the
+# wheel, built to link only libc and libz, so a host needs no system
+# PostgreSQL and no ICU. Measured 2026-09-30 on its 0.6.0 cp312 manylinux
+# wheel:
+#   * PostgreSQL 16.14 (`pginstall/bin/postgres --version`); the wheel also
+#     carries an 18.4 under `pginstall18/`, which this package does not use;
+#   * wheels for cp310 to cp314, so every interpreter `requires-python`
+#     admits today has one; `pgserver` 0.1.4 stopped at cp312 and 16.2;
+#   * linux wheels tagged manylinux_2_27/2_28 (glibc 2.27 and later), on
+#     x86_64 and aarch64, plus macOS and Windows;
+#   * about 24.7 MB per wheel, because it carries the two server majors;
+#   * Apache-2.0 for the package; the PostgreSQL License for the server.
+# `>=0.6.0` is the release this package has been exercised against, the same
+# rule every floor in this file is set by. Its own requirements (fasteners,
+# platformdirs, psutil, typing-extensions) arrive with it and are imported by
+# nothing here.
+local = [
+    "opendox[runtime]",
+    "pixeltable-pgserver>=0.6.0",
 ]
 
 # THE RUNTIME EXTRA — `split-opendox-two-layer-product` § 3.5, RULED Q2
@@ -205,6 +251,20 @@ py-modules = ["route_extension", "subcommand_extension"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# THE MIGRATIONS, SHIPPED IN THE WHEEL (plan 034 T072). `migrations/` stays at
+# the repository root, where the image copies it (`deploy/compose/Dockerfile`:
+# `COPY migrations ./migrations`, run from `/app`) and every checkout run finds
+# it; this maps the same files into the wheel's data directory, so an install
+# run OUTSIDE a checkout still has the migrations its bundled server applies.
+# `opendox.runtime.config.installation_migrations_dir` finds them through the
+# own record of the installed distribution that holds the running module
+# (after the source tree, for a checkout), and the canonical digest gate is
+# what proves the copy found is the pinned one. A data directory and not package
+# data because package data must live inside the package, and the one tree is
+# not moved.
+[tool.setuptools.data-files]
+"share/opendox/migrations" = ["migrations/*.sql"]
 
 # THE SERVED BUNDLE, PACKAGED — § 3.4 slice S5, and it is a gap this slice had
 # to close to make RULED Q5 true rather than true-in-a-source-checkout.
