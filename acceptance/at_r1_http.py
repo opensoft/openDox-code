@@ -36,13 +36,13 @@ A harness that breaks before a verdict exits 2, never 0.
     versions and adds no package.
  2. ASSERTS THE CLEAN MACHINE, in a fresh `OPENDOX_STATE_DIR` created empty
     for this run (and short, so the bundled server's socket path fits): none
-    of the four siblings (`openxdox`, `ideation_dashboard`,
-    `doc_health`, `corpus_adapter_openxfactory`) is importable; `omp` (the
-    harness the product names, `doxbench_bridge.HARNESS_COMMAND`) is not on
-    the PATH; no identity broker (`openprofiler-broker`, the one that exists)
-    is on the PATH and no issuer is set; no database answers on PostgreSQL's
-    default port or socket and no DSN is set; and neither repository holds a
-    model binding (`doxbench_binding.bindings_path`).
+    of the four siblings (`openxdox`, `ideation_dashboard`, `doc_health`,
+    `corpus_adapter_openxfactory`) is importable; `omp` (the harness the
+    product names, `doxbench_bridge.HARNESS_COMMAND`) is not on the PATH; no
+    identity broker (`openprofiler-broker`, the one that exists) is on the
+    PATH and no issuer is set; no database answers on PostgreSQL's default
+    port or on a distribution's socket, and no DSN is set; and neither
+    repository holds a model binding (`doxbench_binding.bindings_path`).
  3. COPIES BOTH PLAIN REPOSITORIES into fresh `git init`s (AT-R1 step 3):
     (a) 5.0's `tests/fixtures/plain-documents`, and (b) three ordinary
     Markdown notes with no front matter at all, quickstart.md § 2's. Each gets
@@ -93,19 +93,27 @@ the snapshot, and the harness fills them the same way:
    no snapshot index is the snapshot's repository at `main` (`app.js`,
    `sourceKeyFor`), `tile_kind` `cluster` (a grouping tile's kind,
    `views/wheel-model.js`) and `tile_id` the snapshot's first grouping tile,
-   whose first member is the `document`;
+   whose first member is the `document`.
 Every request carries the console token, as the doxBench transports do, so
 a guarded read answers from its handler rather than from the console check.
 
-Run it from an openDox-code checkout: `python3 acceptance/at_r1_http.py`.
+RUNNING IT. From an openDox-code checkout, `python3 acceptance/at_r1_http.py`
+installs and drives THAT checkout (the one this file is in); to measure
+another tree, copy this file into it. It takes no path or port: its scratch
+space and its `OPENDOX_STATE_DIR` are fresh temporary directories, so
+`TMPDIR` chooses where they go. Choose a short one that only you can write:
+the bundled server refuses a state directory below a directory any user can
+write without the sticky bit, and its socket path may not pass 107 bytes.
 It needs Linux (it reads `/proc`), `git`, and network access to the package
-index. `--help` lists its options. The standard library only: it runs before,
-and outside, the environment it builds.
+index. The standard library only: it runs before, and outside, the
+environment it builds.
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
+import dataclasses
 import html.parser
 import http.client
 import json
@@ -118,6 +126,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.parse
 from pathlib import Path
 
@@ -154,6 +163,8 @@ F53_WORDS = ["brainstorm", "staged", "draft", "ratified", "standard",
              "superseded", "retired", "record", "openspec", "proposal.md",
              "tasks.md", "design.md", "added requirements",
              "modified requirements"]
+F53_PATTERN = re.compile(r"\b(" + "|".join(re.escape(w) for w in F53_WORDS)
+                         + r")\b")
 
 #: The console-presence header the doxBench transports carry (`app.js`).
 CONSOLE_TOKEN_HEADER = "X-XF-Console-Token"
@@ -191,12 +202,17 @@ DATABASE_SETTINGS = ("OPENDOX_DATABASE_URL", "OPENDOX_MIGRATION_DATABASE_URL",
                      "PGUSER", "PGPASSWORD", "PGSERVICE")
 IDENTITY_SETTINGS = ("OPENDOX_OIDC_ISSUER", "OPENDOX_OIDC_AUDIENCE",
                      "OPENDOX_INSTALL_MODE")
+#: Where a distribution's PostgreSQL listens by default (Debian and Ubuntu,
+#: the runner's own family; the bundled server never listens there, its
+#: socket lives under the fresh state directory).
+DISTRIBUTION_SOCKETS = ("/var/run/postgresql/.s.PGSQL.5432",
+                        "/run/postgresql/.s.PGSQL.5432")
 
 #: The bundled server's socket is `<OPENDOX_STATE_DIR>/postgres/run/.s.PGSQL.5432`
 #: (`runtime/config.py`'s `BUNDLE_SOCKET_DIR` and `BUNDLE_PORT`), and Linux
 #: takes a socket path of at most 107 bytes (`UNIX_SOCKET_PATH_MAX`). The
-#: product refuses a longer one by name; the harness keeps its own state
-#: directory short, and refuses to start a run that could not fit.
+#: product refuses a longer one by name; the harness refuses to start a run
+#: whose state directory could not fit, before anything is installed.
 SOCKET_SUFFIX = "/postgres/run/.s.PGSQL.5432"
 SOCKET_PATH_MAX = 107
 
@@ -251,9 +267,43 @@ class Verdict:
         if not self.check(ident, condition, why):
             raise self.failures[-1]
 
+    def record(self, failure: Failed) -> None:
+        if failure not in self.failures:
+            self.failures.append(failure)
+
+    def report(self) -> int:
+        if not self.failures:
+            print(f"\nAT-R1 HTTP half: PASS ({self.passed} assertions held)")
+            return 0
+        first = self.failures[0]
+        print(f"\nAT-R1 HTTP half: FAIL [{first.ident}]: "
+              f"{first.why.splitlines()[0]}")
+        for later in self.failures[1:]:
+            print(f"      also FAIL [{later.ident}]: "
+                  f"{later.why.splitlines()[0]}")
+        print(f"      {len(self.failures)} failed, {self.passed} held")
+        return 1
+
 
 def note(text: str) -> None:
     print(f"      {text}", flush=True)
+
+
+@dataclasses.dataclass
+class Context:
+    """What one run holds: its directories, its environments, and every
+    process it started."""
+
+    checkout: Path
+    scratch: Path
+    state_dir: Path
+    git: str
+    base_env: dict[str, str]
+    env: dict[str, str] = dataclasses.field(default_factory=dict)
+    venv: Path | None = None
+    python: Path | None = None
+    server_package: Path | None = None
+    servers: list[subprocess.Popen] = dataclasses.field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -293,32 +343,37 @@ def _proc_state(pid: str) -> str:
     return stat.rsplit(")", 1)[-1].split()[0]
 
 
+def _process_identity(pid: str) -> tuple[str, str]:
+    """`(executable, command line)` of a process, empty where unreadable."""
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        exe = ""
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        argv = []
+    return exe, " ".join(a.decode("utf-8", "replace") for a in argv if a)
+
+
 def bundled_server_processes(server_dir: Path | None,
-                             state_dir: Path) -> list[str]:
+                             state_dir: Path) -> list[tuple[int, str]]:
     """Every live process that is this install's bundled server: its
     executable lies in the venv's server package, or its command line names
     the fresh state directory. Read at the operating system, not from the
     product's own report. A zombie has exited, so it is not running."""
-    found = []
     state = str(state_dir.resolve())
-    server = str(server_dir.resolve()) if server_dir else None
+    server = str(server_dir.resolve()) + os.sep if server_dir else None
+    found = []
     for entry in Path("/proc").iterdir():
         pid = entry.name
         if not pid.isdigit() or int(pid) == os.getpid():
             continue
         if _proc_state(pid) in ("Z", "X", "?"):
             continue
-        try:
-            exe = os.readlink(f"/proc/{pid}/exe")
-        except OSError:
-            exe = ""
-        try:
-            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-            command = " ".join(a.decode("utf-8", "replace") for a in argv if a)
-        except OSError:
-            command = ""
-        if (server and exe.startswith(server + os.sep)) or state in command:
-            found.append(f"pid {pid}: {command or exe}")
+        exe, command = _process_identity(pid)
+        if (server and exe.startswith(server)) or state in command:
+            found.append((int(pid), command or exe))
     return found
 
 
@@ -328,16 +383,13 @@ def stop_processes(pids: list[int]) -> None:
         for pid in pids:
             try:
                 os.kill(pid, sig)
-                alive.append(pid)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 continue
-            except PermissionError:
-                continue
+            alive.append(pid)
         if not alive:
             return
         time.sleep(3.0)
-        pids = [p for p in alive if Path(f"/proc/{p}").exists()
-                and _proc_state(str(p)) not in ("Z", "X")]
+        pids = [p for p in alive if _proc_state(str(p)) not in ("Z", "X", "?")]
 
 
 # ---------------------------------------------------------------------------
@@ -399,120 +451,130 @@ def free_port() -> int:
 # The served bundle, read as JavaScript well enough to find its strings.
 # ---------------------------------------------------------------------------
 
-_REGEX_AFTER_WORDS = {"return", "typeof", "instanceof", "in", "of", "new",
-                      "delete", "void", "throw", "case", "do", "else",
-                      "yield", "await"}
+#: A `/` after one of these words starts a regular expression, not a division.
+_REGEX_AFTER_WORDS = frozenset({
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+    "throw", "case", "do", "else", "yield", "await"})
+#: ... and so does a `/` after one of these characters, or at the start.
+_REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
 
 
-def js_strings(source: str) -> list[tuple[str, str, str]]:
-    """The string literals of a JavaScript module, comments and regular
-    expressions excluded: `(quote, value, preceding code)` for each, where
-    the preceding code is the last 40 characters of code before it, so an
-    import specifier can be told from an ordinary string. A template
-    literal's value is its leading static text, before any `${`."""
-    out: list[tuple[str, str, str]] = []
-    code: list[str] = []
-    i, n = 0, len(source)
-    last_significant = ""
+class JsStrings:
+    """The string literals of one JavaScript module, comments and regular
+    expressions excluded.
 
-    def recent() -> str:
-        return "".join(code[-40:])
+    `scan()` returns `(quote, value, preceding code)` for each literal, where
+    the preceding code is the last 40 characters of code before it (other
+    strings blanked), so an import specifier can be told from an ordinary
+    string. A template literal's value is its leading static text, before
+    any `${`. It is a lexer for this bundle's own idioms, not a parser."""
 
-    while i < n:
-        c = source[i]
-        if c == "/" and i + 1 < n and source[i + 1] == "/":
-            j = source.find("\n", i)
-            i = n if j < 0 else j
-            continue
-        if c == "/" and i + 1 < n and source[i + 1] == "*":
-            j = source.find("*/", i + 2)
-            i = n if j < 0 else j + 2
-            code.append(" ")
-            continue
-        if c == "/":
-            word = re.search(r"([A-Za-z_$][\w$]*)\s*$", recent())
-            prev = last_significant
-            regex = (prev == "" or prev in "(,=:[!&|?{};+-*%<>~^"
-                     or (word is not None and prev.isalnum()
-                         and word.group(1) in _REGEX_AFTER_WORDS))
-            if regex:
-                j, in_class = i + 1, False
-                while j < n:
-                    ch = source[j]
-                    if ch == "\\":
-                        j += 2
-                        continue
-                    if ch == "[":
-                        in_class = True
-                    elif ch == "]":
-                        in_class = False
-                    elif ch == "/" and not in_class:
-                        break
-                    elif ch == "\n":
-                        break
-                    j += 1
-                j += 1
-                while j < n and (source[j].isalnum() or source[j] == "_"):
-                    j += 1
-                code.append(" re ")
-                last_significant = "e"
-                i = j
+    def __init__(self, source: str) -> None:
+        self.src = source
+        self.i = 0
+        self.code: list[str] = []
+        self.last = ""
+        self.found: list[tuple[str, str, str]] = []
+
+    def scan(self) -> list[tuple[str, str, str]]:
+        while self.i < len(self.src):
+            self._step()
+        return self.found
+
+    def _step(self) -> None:
+        c = self.src[self.i]
+        if self.src.startswith("//", self.i):
+            end = self.src.find("\n", self.i)
+            self.i = len(self.src) if end < 0 else end
+        elif self.src.startswith("/*", self.i):
+            end = self.src.find("*/", self.i + 2)
+            self.i = len(self.src) if end < 0 else end + 2
+            self.code.append(" ")
+        elif c == "/" and self._regex_may_start():
+            self._skip_regex()
+        elif c in "\"'":
+            self._quoted(c)
+        elif c == "`":
+            self._template()
+        else:
+            self.code.append(c)
+            if not c.isspace():
+                self.last = c
+            self.i += 1
+
+    def _recent(self) -> str:
+        return "".join(self.code[-40:])
+
+    def _emit(self, quote: str, value: str, end: int) -> None:
+        self.found.append((quote, value, self._recent()))
+        self.code.append(" s ")
+        self.last = "s"
+        self.i = end
+
+    def _regex_may_start(self) -> bool:
+        if self.last == "" or self.last in _REGEX_AFTER_PUNCTUATION:
+            return True
+        word = re.search(r"([A-Za-z_$][\w$]*)\s*$", self._recent())
+        return word is not None and word.group(1) in _REGEX_AFTER_WORDS
+
+    def _skip_regex(self) -> None:
+        src, j, in_class = self.src, self.i + 1, False
+        while j < len(src) and src[j] != "\n":
+            ch = src[j]
+            if ch == "\\":
+                j += 2
                 continue
-        if c in "\"'":
-            j, buf = i + 1, []
-            while j < n and source[j] != c and source[j] != "\n":
-                if source[j] == "\\" and j + 1 < n:
-                    buf.append(source[j + 1])
-                    j += 2
-                    continue
-                buf.append(source[j])
-                j += 1
-            out.append((c, "".join(buf), recent()))
-            code.append(" s ")
-            last_significant = "s"
-            i = j + 1
-            continue
-        if c == "`":
-            j, buf, static = i + 1, [], True
-            depth = 0
-            while j < n:
-                ch = source[j]
-                if depth == 0 and ch == "\\" and j + 1 < n:
-                    if static:
-                        buf.append(source[j + 1])
-                    j += 2
-                    continue
-                if depth == 0 and ch == "`":
-                    break
-                if depth == 0 and source.startswith("${", j):
-                    static = False
-                    depth = 1
-                    j += 2
-                    continue
-                if depth > 0:
-                    if ch == "{":
-                        depth += 1
-                    elif ch == "}":
-                        depth -= 1
-                    j += 1
-                    continue
+            if ch == "/" and not in_class:
+                break
+            if ch in "[]":
+                in_class = ch == "["
+            j += 1
+        j += 1
+        while j < len(src) and (src[j].isalnum() or src[j] == "_"):
+            j += 1
+        self.code.append(" re ")
+        self.last = "e"
+        self.i = j
+
+    def _quoted(self, quote: str) -> None:
+        src, j, buf = self.src, self.i + 1, []
+        while j < len(src) and src[j] not in (quote, "\n"):
+            if src[j] == "\\" and j + 1 < len(src):
+                buf.append(src[j + 1])
+                j += 2
+                continue
+            buf.append(src[j])
+            j += 1
+        self._emit(quote, "".join(buf), j + 1)
+
+    def _template(self) -> None:
+        src, j, buf, static = self.src, self.i + 1, [], True
+        while j < len(src) and src[j] != "`":
+            if src[j] == "\\" and j + 1 < len(src):
                 if static:
-                    buf.append(ch)
+                    buf.append(src[j + 1])
+                j += 2
+            elif src.startswith("${", j):
+                static = False
+                j = self._after_braces(j + 2)
+            else:
+                if static:
+                    buf.append(src[j])
                 j += 1
-            out.append(("`", "".join(buf), recent()))
-            code.append(" s ")
-            last_significant = "s"
-            i = j + 1
-            continue
-        code.append(c)
-        if not c.isspace():
-            last_significant = c
-        i += 1
-    return out
+        self._emit("`", "".join(buf), j + 1)
+
+    def _after_braces(self, j: int) -> int:
+        depth = 1
+        while j < len(self.src) and depth:
+            if self.src[j] == "{":
+                depth += 1
+            elif self.src[j] == "}":
+                depth -= 1
+            j += 1
+        return j
 
 
-_STATIC_IMPORT_CONTEXT = re.compile(
-    r"(?:\bimport\s*|\bfrom\s*)$")
+_STATIC_IMPORT_CONTEXT = re.compile(r"(?:\bimport\s*|\bfrom\s*)$")
 _DYNAMIC_IMPORT_CONTEXT = re.compile(r"\bimport\s*\(\s*$")
 _PATH_LITERAL = re.compile(r"^\.?/[A-Za-z][\w\-./%@~]*(?:\?\S*)?$")
 _MODULE_OR_SHEET = re.compile(r"\.(?:m?js|css)(?:[?#].*)?$")
@@ -533,9 +595,53 @@ class _IndexLinks(html.parser.HTMLParser):
 
 
 def _resolve(base: str, ref: str) -> str:
-    path = urllib.parse.urljoin("http://loopback" + base, ref)
-    parts = urllib.parse.urlsplit(path)
+    parts = urllib.parse.urlsplit(
+        urllib.parse.urljoin("http://loopback" + base, ref))
     return parts.path + (f"?{parts.query}" if parts.query else "")
+
+
+def _graph_roots(index_html: str, capabilities: dict) -> tuple[list, list]:
+    links = _IndexLinks()
+    links.feed(index_html)
+    roots = [(_resolve("/", m), True, "/") for m in links.modules]
+    for view in ((capabilities.get("views") or {}).get("views") or []):
+        module = view.get("module") if isinstance(view, dict) else None
+        if isinstance(module, str) and module:
+            roots.append((_resolve("/", module), True, "/capabilities"))
+    return roots, [_resolve("/", sheet) for sheet in links.sheets]
+
+
+def _fetch_module(port: int, path: str, static: bool, importer: str,
+                  verdict: Verdict, label: str) -> Answer:
+    answer = get(port, path)
+    if static:
+        verdict.check(
+            f"{label}.bundle.module {path}", answer.status == 200,
+            f"{path}, imported statically by {importer}, answers "
+            f"{answer.describe()}; a failed static import is a module-load "
+            "pageerror (AT-R1 step 8)")
+        return answer
+    verdict.check(
+        f"{label}.bundle.dynamic {path}",
+        answer.status is not None and answer.status < 500,
+        f"{path}, imported dynamically by {importer}, answers "
+        f"{answer.describe()}")
+    if answer.status != 200:
+        note(f"{path} (dynamic, from {importer}) answers {answer.describe()}: "
+             "refused, and its importer degrades")
+    return answer
+
+
+def _scan_module(path: str, body: bytes, pending: collections.deque,
+                 routes: set[str]) -> None:
+    for _quote, value, before in JsStrings(
+            body.decode("utf-8", "replace")).scan():
+        if _DYNAMIC_IMPORT_CONTEXT.search(before):
+            pending.append((_resolve(path, value), False, path))
+        elif _STATIC_IMPORT_CONTEXT.search(before):
+            pending.append((_resolve(path, value), True, path))
+        elif _PATH_LITERAL.match(value) and not _MODULE_OR_SHEET.search(value):
+            routes.add(_resolve("/", value))
 
 
 def derive_bundle(port: int, index_html: str, capabilities: dict,
@@ -543,65 +649,33 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
     """Walk the module graph the served `/` loads, fetching each module from
     the server, and return `(routes, modules)`: every same-origin path
     literal the graph names, and how many modules it holds."""
-    links = _IndexLinks()
-    links.feed(index_html)
-    pending: list[tuple[str, bool, str]] = [
-        (_resolve("/", m), True, "/") for m in links.modules]
-    for view in ((capabilities.get("views") or {}).get("views") or []):
-        module = view.get("module") if isinstance(view, dict) else None
-        if isinstance(module, str) and module:
-            pending.append((_resolve("/", module), True, "/capabilities"))
-    for sheet in links.sheets:
-        answer = get(port, _resolve("/", sheet))
+    roots, sheets = _graph_roots(index_html, capabilities)
+    for sheet in sheets:
+        answer = get(port, sheet)
         verdict.check(f"{label}.bundle.sheet {sheet}", answer.status == 200,
                       f"the stylesheet `/` links answers {answer.describe()}")
+    pending = collections.deque(roots)
     seen: set[str] = set()
     routes: set[str] = set()
     modules = 0
     while pending:
-        path, static, importer = pending.pop(0)
+        path, static, importer = pending.popleft()
         if path in seen:
             continue
         seen.add(path)
-        answer = get(port, path)
-        if static:
-            verdict.check(
-                f"{label}.bundle.module {path}", answer.status == 200,
-                f"{path}, imported statically by {importer}, answers "
-                f"{answer.describe()}; a failed static import is a "
-                "module-load pageerror (AT-R1 step 8)")
-        else:
-            verdict.check(
-                f"{label}.bundle.dynamic {path}",
-                answer.status is not None and answer.status < 500,
-                f"{path}, imported dynamically by {importer}, answers "
-                f"{answer.describe()}")
-            if answer.status != 200:
-                note(f"{path} (dynamic, from {importer}) answers "
-                     f"{answer.describe()}: refused, and its importer "
-                     "degrades")
-        if answer.status != 200:
-            continue
-        modules += 1
-        source = answer.body.decode("utf-8", "replace")
-        for _quote, value, before in js_strings(source):
-            if _DYNAMIC_IMPORT_CONTEXT.search(before):
-                pending.append((_resolve(path, value), False, path))
-            elif _STATIC_IMPORT_CONTEXT.search(before):
-                pending.append((_resolve(path, value), True, path))
-            elif _PATH_LITERAL.match(value) and not _MODULE_OR_SHEET.search(value):
-                routes.add(_resolve("/", value))
+        answer = _fetch_module(port, path, static, importer, verdict, label)
+        if answer.status == 200:
+            modules += 1
+            _scan_module(path, answer.body, pending, routes)
     return sorted(routes), modules
 
 
 # ---------------------------------------------------------------------------
-# The steps.
+# Steps 1-3: the install, the clean machine, the repositories.
 # ---------------------------------------------------------------------------
 
 def copy_tracked_tree(checkout: Path, target: Path, git: str,
                       env: dict[str, str]) -> None:
-    if not checkout.is_dir():
-        raise HarnessError(f"--checkout {checkout} is not a directory")
     listed = run([git, "-C", str(checkout), "ls-files", "-z"], env=env,
                  cwd=target.parent)
     if listed.returncode != 0:
@@ -609,11 +683,10 @@ def copy_tracked_tree(checkout: Path, target: Path, git: str,
                            f"{tail(listed.stderr)}")
     for rel in filter(None, listed.stdout.split("\0")):
         src = checkout / rel
-        if not src.is_file():
-            continue
-        dst = target / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        if src.is_file():
+            dst = target / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
 
 
 def make_repository(root: Path, files: dict[Path, Path | str], git: str,
@@ -637,19 +710,12 @@ def make_repository(root: Path, files: dict[Path, Path | str], git: str,
                                f"{tail(done.stderr)}")
 
 
-def venv_python(venv: Path) -> Path:
-    return venv / "bin" / "python"
-
-
-def ask_the_install(python: Path, env: dict[str, str], cwd: Path) -> dict:
-    """What the installed product says about itself, read in the venv."""
-    program = r"""
+_ASK_THE_INSTALL = r"""
 import importlib.metadata as md, importlib.util as iu, json, sys
 siblings = sys.argv[1].split(",")
 out = {"importable": [s for s in siblings if iu.find_spec(s) is not None]}
 try:
-    meta = md.metadata("opendox")
-    out["extras"] = sorted(meta.get_all("Provides-Extra") or [])
+    out["extras"] = sorted(md.metadata("opendox").get_all("Provides-Extra") or [])
 except md.PackageNotFoundError:
     out["extras"] = None
 try:
@@ -667,12 +733,60 @@ out["server_package"] = (list(spec.submodule_search_locations)[0]
                          if spec and spec.submodule_search_locations else None)
 print(json.dumps(out))
 """
-    done = run([str(python), "-I", "-c", program, ",".join(SIBLINGS)],
-               env=env, cwd=cwd)
+
+
+def ask_the_install(ctx: Context) -> dict:
+    """What the installed product says about itself, read in the venv, in
+    isolated mode, from an empty directory."""
+    empty = ctx.scratch / "cwd"
+    empty.mkdir(exist_ok=True)
+    done = run([str(ctx.python), "-I", "-c", _ASK_THE_INSTALL,
+                ",".join(SIBLINGS)], env=ctx.env, cwd=empty)
     if done.returncode != 0:
         raise HarnessError(f"could not ask the install about itself: "
                            f"{tail(done.stderr)}")
     return json.loads(done.stdout)
+
+
+def install_opendox(ctx: Context, verdict: Verdict) -> dict:
+    """Step 1: openDox alone, into a fresh venv, as `opendox[local]`."""
+    source = ctx.scratch / "openDox-code"
+    copy_tracked_tree(ctx.checkout, source, ctx.git, ctx.base_env)
+    ctx.venv = ctx.scratch / "venv"
+    made = run([sys.executable, "-m", "venv", "--clear", str(ctx.venv)],
+               env=ctx.base_env, cwd=ctx.scratch)
+    verdict.require("install.venv", made.returncode == 0,
+                    f"python -m venv failed: {tail(made.stderr)}")
+    ctx.python = ctx.venv / "bin" / "python"
+    lock = source / "constraints-cpython312-linux.txt"
+    use_lock = (lock.is_file() and sys.platform.startswith("linux")
+                and sys.implementation.name == "cpython"
+                and sys.version_info[:2] == (3, 12))
+    install = [str(ctx.python), "-m", "pip", "install",
+               "--disable-pip-version-check", "--no-input"]
+    if use_lock:
+        install += ["-c", str(lock)]
+    install.append(f"{source}[local]")
+    note("$ " + " ".join(install[2:]) + (
+        "" if use_lock else "   (no lock: it pins CPython 3.12 on Linux)"))
+    installed = run(install, env=ctx.base_env, cwd=ctx.scratch,
+                    timeout=INSTALL_TIMEOUT_SECONDS)
+    verdict.require("install opendox[local]", installed.returncode == 0,
+                    f"the install failed (rc={installed.returncode}):\n"
+                    f"{tail(installed.stdout)}\n{tail(installed.stderr)}")
+    ctx.env = dict(ctx.base_env)
+    ctx.env["PATH"] = (str(ctx.venv / "bin") + os.pathsep
+                       + ctx.base_env.get("PATH", ""))
+    ctx.env["OPENDOX_STATE_DIR"] = str(ctx.state_dir)
+    about = ask_the_install(ctx)
+    verdict.require("install declares the local extra",
+                    "local" in (about.get("extras") or []),
+                    f"the installed opendox declares the extras "
+                    f"{about.get('extras')}, and no `local` (R1Q16 (iii)): the "
+                    "documented install has no bundled server to bring")
+    if about.get("server_package"):
+        ctx.server_package = Path(about["server_package"])
+    return about
 
 
 def no_database_answers(verdict: Verdict, env: dict[str, str]) -> None:
@@ -681,7 +795,7 @@ def no_database_answers(verdict: Verdict, env: dict[str, str]) -> None:
                       not listening(host, 5432),
                       f"a database already listens on {host}:5432, so the "
                       "bundled server would not be the only one")
-    for sock in ("/var/run/postgresql/.s.PGSQL.5432", "/tmp/.s.PGSQL.5432"):
+    for sock in DISTRIBUTION_SOCKETS:
         answered = False
         if os.path.exists(sock):
             try:
@@ -697,6 +811,77 @@ def no_database_answers(verdict: Verdict, env: dict[str, str]) -> None:
                   f"the child environment names a database: {present}")
 
 
+def assert_clean_machine(ctx: Context, about: dict, verdict: Verdict) -> None:
+    """Step 2: every absence AT-R1 step 1 names, asserted, not assumed."""
+    path = ctx.env["PATH"]
+    verdict.check("clean.siblings", not about["importable"],
+                  f"importable in the fresh venv: {about['importable']}")
+    harnesses = {HARNESS_COMMAND, about.get("harness_command") or HARNESS_COMMAND}
+    on_path = [h for h in sorted(harnesses) if shutil.which(h, path=path)]
+    verdict.check("clean.omp", not on_path,
+                  f"a harness is on the PATH ({on_path}), so no-model is not "
+                  "what this run measures")
+    brokers = [b for b in BROKER_COMMANDS if shutil.which(b, path=path)]
+    identity = [n for n in IDENTITY_SETTINGS if ctx.env.get(n)]
+    verdict.check("clean.identity-broker", not brokers and not identity,
+                  f"an identity broker is present: on the PATH {brokers}, "
+                  f"set {identity}")
+    no_database_answers(verdict, ctx.env)
+    verdict.check("clean.state-dir", not any(ctx.state_dir.iterdir()),
+                  f"OPENDOX_STATE_DIR {ctx.state_dir} is not empty")
+    verdict.check("clean.no-bundled-server-yet",
+                  not bundled_server_processes(ctx.server_package,
+                                               ctx.state_dir),
+                  "a process of this install's bundled server runs before "
+                  "anything started it")
+
+
+def make_repositories(ctx: Context, about: dict,
+                      verdict: Verdict) -> list[tuple[str, Path]]:
+    """Step 3: both plain repositories, each a fresh `git init` with a git
+    identity and no model binding."""
+    fixture = ctx.scratch / "openDox-code" / "tests" / "fixtures" / "plain-documents"
+    verdict.require("repos.fixture", fixture.is_dir(),
+                    f"5.0's fixture is missing at {fixture}")
+    repos = ctx.scratch / "repos"
+    a, b = repos / "plain-documents", repos / "plain-notes"
+    make_repository(a, {p.relative_to(fixture): p
+                        for p in sorted(fixture.rglob("*")) if p.is_file()},
+                    ctx.git, ctx.env, "fixture")
+    make_repository(b, {Path(k): v for k, v in PLAIN_NOTES.items()},
+                    ctx.git, ctx.env, "notes")
+    bindings = about.get("bindings_relpath") or BINDINGS_RELPATH_FALLBACK
+    for label, repo in (("a", a), ("b", b)):
+        verdict.check(f"clean.binding {label}", not (repo / bindings).exists(),
+                      f"{repo} holds a model binding at {bindings}")
+        name = run([ctx.git, "-C", str(repo), "config", "user.name"],
+                   env=ctx.env, cwd=repo)
+        verdict.check(f"repos.{label} git identity",
+                      name.stdout.strip() == "fixture",
+                      f"{repo} has no git identity, so no served actor")
+    return [("a", a), ("b", b)]
+
+
+# ---------------------------------------------------------------------------
+# Steps 4-8, once per repository.
+# ---------------------------------------------------------------------------
+
+class Server:
+    """One launched entry point, and what it has said."""
+
+    def __init__(self, label: str, proc: subprocess.Popen, port: int,
+                 out: Path, err: Path) -> None:
+        self.label = label
+        self.proc = proc
+        self.port = port
+        self.out = out
+        self.err = err
+
+    def said(self) -> str:
+        return (f"\n--- stdout ---\n{tail(self.out.read_text('utf-8', 'replace'))}"
+                f"\n--- stderr ---\n{tail(self.err.read_text('utf-8', 'replace'))}")
+
+
 def documented_prefix() -> list[str]:
     words = DOCUMENTED_START.split(" ")
     if words[-1] != "…":
@@ -704,52 +889,10 @@ def documented_prefix() -> list[str]:
     return words[:-1]
 
 
-def thread_query(snapshot: dict, grouping_field: str) -> str | None:
-    groups = snapshot.get(grouping_field) or []
-    for group in groups:
-        if not isinstance(group, dict) or not group.get("id"):
-            continue
-        members = [edge.get("document") for edge in
-                   (group.get("document_edges") or [])
-                   if isinstance(edge, dict) and edge.get("document")]
-        if not members:
-            continue
-        return urllib.parse.urlencode({
-            "repository": str(snapshot.get("repository") or ""),
-            "ref": "main",
-            "tile_kind": GROUPING_TILE_KIND,
-            "tile_id": str(group["id"]),
-            "document": str(members[0]),
-        })
-    return None
-
-
-def requests_for(routes: list[str], snapshot: dict,
-                 grouping_field: str) -> list[str]:
-    documents = [str(d.get("path")) for d in (snapshot.get("documents") or [])
-                 if isinstance(d, dict) and d.get("path")]
-    key = urllib.parse.quote(f"{snapshot.get('repository') or ''}@main",
-                             safe="")
-    targets: list[str] = []
-    for route in routes:
-        targets.append(route)
-        if route.endswith("/"):
-            for doc in documents:
-                quoted = urllib.parse.quote(doc)
-                targets.append(route + quoted)
-                targets.append(f"{route}{key}/{quoted}")
-        if route == THREAD_ROUTE:
-            query = thread_query(snapshot, grouping_field)
-            if query:
-                targets.append(f"{route}?{query}")
-    return targets
-
-
-def serve_one(label: str, repo: Path, ctx: dict, verdict: Verdict) -> None:
-    """Steps 4-8 for one repository: start, fetch, stop, and look for what
-    is left."""
-    env, venv, scratch = ctx["env"], ctx["venv"], ctx["scratch"]
-    port = ctx["port"] or free_port()
+def launch(label: str, repo: Path, ctx: Context,
+           verdict: Verdict) -> tuple[Server, Answer]:
+    """Step 4: the documented start, checked before and after it runs."""
+    port = free_port()
     for host in ("127.0.0.1", "::1"):
         verdict.require(f"{label}.start.port-free {host}:{port}",
                         not listening(host, port),
@@ -762,394 +905,340 @@ def serve_one(label: str, repo: Path, ctx: dict, verdict: Verdict) -> None:
                     argv[:len(prefix)] == prefix,
                     f"the harness would run {argv[:len(prefix)]}, not the "
                     f"documented `{DOCUMENTED_START}`")
-    program = shutil.which(argv[0], path=env["PATH"])
+    program = shutil.which(argv[0], path=ctx.env["PATH"])
     verdict.require(
         f"{label}.start.console-script",
         program is not None
-        and Path(program).resolve().is_relative_to(venv.resolve()),
+        and Path(program).resolve().is_relative_to(ctx.venv.resolve()),
         f"`{argv[0]}` resolves to {program!r}, not the fresh venv's console "
         "script")
     note("$ " + " ".join(argv))
-    log_out = scratch / f"{label}-server.out"
-    log_err = scratch / f"{label}-server.err"
-    with open(log_out, "wb") as out, open(log_err, "wb") as err:
-        proc = subprocess.Popen(argv, executable=program, env=env,
-                                cwd=str(scratch), stdout=out, stderr=err,
-                                stdin=subprocess.DEVNULL,
+    out, err = ctx.scratch / f"{label}-server.out", ctx.scratch / f"{label}-server.err"
+    with open(out, "wb") as stdout, open(err, "wb") as stderr:
+        proc = subprocess.Popen(argv, executable=program, env=ctx.env,
+                                cwd=str(ctx.scratch), stdout=stdout,
+                                stderr=stderr, stdin=subprocess.DEVNULL,
                                 start_new_session=True)
-    ctx["servers"].append(proc)
-
-    def server_said() -> str:
-        return (f"\n--- stdout ---\n{tail(log_out.read_text('utf-8', 'replace'))}"
-                f"\n--- stderr ---\n{tail(log_err.read_text('utf-8', 'replace'))}")
-
-    deadline = time.monotonic() + READY_TIMEOUT_SECONDS
-    index = None
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            break
-        answer = get(port, "/")
-        if answer.status == 200:
-            index = answer
-            break
-        time.sleep(0.5)
+    ctx.servers.append(proc)
+    server = Server(label, proc, port, out, err)
+    index = wait_until_ready(server)
     verdict.require(
         f"{label}.start.ready", index is not None,
         (f"the documented command exited (rc={proc.returncode}) before it "
          "answered" if proc.poll() is not None else
          f"no answer on 127.0.0.1:{port} within {READY_TIMEOUT_SECONDS:.0f}s")
-        + server_said())
+        + server.said())
     verdict.require(f"{label}.start.serving-process", proc.poll() is None,
                     "the launched server exited after it answered, so the "
-                    "answer may not have been its own" + server_said())
+                    "answer may not have been its own" + server.said())
+    return server, index
 
-    body = index.body.decode("utf-8", "replace")
+
+def wait_until_ready(server: Server) -> Answer | None:
+    deadline = time.monotonic() + READY_TIMEOUT_SECONDS
+    while time.monotonic() < deadline and server.proc.poll() is None:
+        answer = get(server.port, "/")
+        if answer.status == 200:
+            return answer
+        time.sleep(0.5)
+    return None
+
+
+def fetch_object(server: Server, route: str, verdict: Verdict) -> dict:
+    answer = get(server.port, route)
+    verdict.require(f"{server.label}.http {route}", answer.status == 200,
+                    f"{route} answers {answer.describe()}")
+    try:
+        body = answer.json()
+    except ValueError as exc:
+        body = exc
+    verdict.require(f"{server.label}.{route} is a JSON object",
+                    isinstance(body, dict),
+                    f"{route} is not a JSON object: {body!r:.300}")
+    return body
+
+
+def string_values(node):
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from string_values(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from string_values(value)
+    elif isinstance(node, str):
+        yield node
+
+
+def check_pages(server: Server, index: Answer,
+                verdict: Verdict) -> tuple[dict, dict]:
+    """Step 5: `/`, `/snapshot.json` and `/capabilities`."""
+    label = server.label
+    page = index.body.decode("utf-8", "replace")
     verdict.check(f"{label}.http / is HTML",
-                  "<html" in body.lower()
+                  "<html" in page.lower()
                   and "text/html" in index.headers.get("content-type", ""),
                   f"`/` answered {index.headers.get('content-type')!r} "
-                  f"without an <html> element")
-
-    snap_answer = get(port, "/snapshot.json")
-    verdict.require(f"{label}.http /snapshot.json", snap_answer.status == 200,
-                    f"/snapshot.json answers {snap_answer.describe()}")
-    try:
-        snapshot = snap_answer.json()
-    except ValueError as exc:
-        snapshot = exc
-    verdict.require(f"{label}.snapshot is a JSON object",
-                    isinstance(snapshot, dict),
-                    f"/snapshot.json is not a JSON object: {snapshot!r:.300}")
+                  "without an <html> element")
+    snapshot = fetch_object(server, "/snapshot.json", verdict)
     verdict.check(f"{label}.snapshot non-empty",
                   bool(snapshot.get("documents")), "the snapshot is empty")
-    pattern = re.compile(r"\b(" + "|".join(re.escape(w) for w in F53_WORDS)
-                         + r")\b")
-
-    def values(node):
-        if isinstance(node, dict):
-            for v in node.values():
-                yield from values(v)
-        elif isinstance(node, list):
-            for v in node:
-                yield from values(v)
-        elif isinstance(node, str):
-            yield node
-
-    leaks = sorted({m.group(1) for v in values(snapshot)
-                    for m in pattern.finditer(v.lower())})
+    leaks = sorted({m.group(1) for v in string_values(snapshot)
+                    for m in F53_PATTERN.finditer(v.lower())})
     verdict.check(f"{label}.snapshot neutral (F5.3)", not leaks,
                   f"openxFactory's vocabulary leaked into the neutral "
                   f"snapshot: {leaks}")
     note(f"snapshot kind={snapshot.get('kind')!r}, "
          f"{len(snapshot.get('documents') or [])} documents")
-
-    caps_answer = get(port, "/capabilities")
-    verdict.require(f"{label}.http /capabilities", caps_answer.status == 200,
-                    f"/capabilities answers {caps_answer.describe()}")
-    try:
-        caps = caps_answer.json()
-    except ValueError as exc:
-        caps = exc
-    verdict.require(f"{label}.capabilities is a JSON object",
-                    isinstance(caps, dict),
-                    f"/capabilities is not a JSON object: {caps!r:.300}")
-    install = caps.get("install") or {}
+    caps = fetch_object(server, "/capabilities", verdict)
+    install_block = caps.get("install") or {}
     verdict.check(f"{label}.capabilities install.mode == local",
-                  install.get("mode") == "local",
+                  install_block.get("mode") == "local",
                   f"the served install block is {caps.get('install')!r}")
-    bundle = install.get("database_bundle") or {}
-    if isinstance(bundle.get("pid"), int):
-        ctx["reported_pids"].append(bundle["pid"])
-        note(f"the served install reports its bundled server as pid "
-             f"{bundle['pid']}")
-    token = caps.get("console_token")
+    pid = (install_block.get("database_bundle") or {}).get("pid")
+    if isinstance(pid, int):
+        note(f"the served install reports its bundled server as pid {pid}")
     verdict.check(f"{label}.capabilities console_token",
-                  isinstance(token, str) and bool(token),
+                  isinstance(caps.get("console_token"), str)
+                  and bool(caps.get("console_token")),
                   "/capabilities carries no console token, so no guarded "
                   "route can be asked")
-    token = token if isinstance(token, str) else None
-    grouping_field = ((((caps.get("display") or {}).get("fields") or {})
-                       .get("grouping") or {}).get("field")) or "clusters"
-    groups = snapshot.get(grouping_field) or []
-    verdict.check(f"{label}.snapshot fills the grouping station",
-                  bool(groups),
-                  f"the snapshot's grouping station ({grouping_field!r}) is "
-                  "empty, so no grouping tile can open the chat pane "
-                  "(R1Q13 (a) with (c); AT-R1 fails and does not skip)")
+    return snapshot, caps
 
-    catalog = get(port, CATALOG_ROUTE, token=token)
+
+def grouping_field_of(caps: dict) -> str:
+    fields = (caps.get("display") or {}).get("fields") or {}
+    return (fields.get("grouping") or {}).get("field") or "clusters"
+
+
+def check_grouping(label: str, snapshot: dict, caps: dict,
+                   verdict: Verdict) -> None:
+    field = grouping_field_of(caps)
+    verdict.check(f"{label}.snapshot fills the grouping station",
+                  bool(snapshot.get(field)),
+                  f"the snapshot's grouping station ({field!r}) is empty, so "
+                  "no grouping tile can open the chat pane (R1Q13 (a) with "
+                  "(c); AT-R1 fails and does not skip)")
+
+
+def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
+    """Step 6: the catalog, asked as the console, offers nothing available."""
+    label = server.label
+    catalog = get(server.port, CATALOG_ROUTE, token=token)
     verdict.check(f"{label}.catalog answers", catalog.status == 200,
                   f"{CATALOG_ROUTE} with the console token answers "
                   f"{catalog.describe()}: {catalog.body[:300]!r}")
-    if catalog.status == 200:
-        try:
-            models = catalog.json().get("models")
-        except ValueError:
-            models = None
-        verdict.check(f"{label}.catalog is a catalog",
-                      isinstance(models, list),
-                      f"{CATALOG_ROUTE} answered no models[]: "
-                      f"{catalog.body[:300]!r}")
-        available = [m.get("model_id") for m in (models or [])
-                     if isinstance(m, dict) and m.get("available")]
-        verdict.check(f"{label}.catalog offers no available entry",
-                      not available,
-                      f"no model is configured, yet the catalog offers "
-                      f"{available}")
+    if catalog.status != 200:
+        return
+    try:
+        models = catalog.json().get("models")
+    except (ValueError, AttributeError):
+        models = None
+    verdict.check(f"{label}.catalog is a catalog", isinstance(models, list),
+                  f"{CATALOG_ROUTE} answered no models[]: "
+                  f"{catalog.body[:300]!r}")
+    available = [m.get("model_id") for m in (models or [])
+                 if isinstance(m, dict) and m.get("available")]
+    verdict.check(f"{label}.catalog offers no available entry", not available,
+                  f"no model is configured, yet the catalog offers {available}")
 
-    routes, modules = derive_bundle(port, body, caps, verdict, label)
+
+def thread_query(snapshot: dict, grouping_field: str) -> str | None:
+    """The query the chat rail sends on open, for the first grouping tile
+    that has a member document."""
+    for group in snapshot.get(grouping_field) or []:
+        if not isinstance(group, dict) or not group.get("id"):
+            continue
+        members = [edge.get("document") for edge in
+                   (group.get("document_edges") or [])
+                   if isinstance(edge, dict) and edge.get("document")]
+        if members:
+            return urllib.parse.urlencode({
+                "repository": str(snapshot.get("repository") or ""),
+                "ref": "main",
+                "tile_kind": GROUPING_TILE_KIND,
+                "tile_id": str(group["id"]),
+                "document": str(members[0]),
+            })
+    return None
+
+
+def requests_for(routes: list[str], snapshot: dict,
+                 grouping_field: str) -> list[str]:
+    documents = [urllib.parse.quote(str(d["path"]))
+                 for d in (snapshot.get("documents") or [])
+                 if isinstance(d, dict) and d.get("path")]
+    key = urllib.parse.quote(f"{snapshot.get('repository') or ''}@main",
+                             safe="")
+    query = thread_query(snapshot, grouping_field)
+    targets: list[str] = []
+    for route in routes:
+        targets.append(route)
+        if route.endswith("/"):
+            targets += [route + doc for doc in documents]
+            targets += [f"{route}{key}/{doc}" for doc in documents]
+        if route == THREAD_ROUTE and query:
+            targets.append(f"{route}?{query}")
+    return targets
+
+
+def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
+                 token: str | None, verdict: Verdict) -> None:
+    """Step 7: every route the served bundle names answers, below 5xx."""
+    label = server.label
+    routes, modules = derive_bundle(server.port,
+                                    index.body.decode("utf-8", "replace"),
+                                    caps, verdict, label)
     note(f"derived from the served bundle: {modules} modules, "
          f"{len(routes)} routes: {', '.join(routes)}")
     verdict.check(f"{label}.bundle names the catalog route",
                   CATALOG_ROUTE in routes,
                   f"the served bundle no longer names {CATALOG_ROUTE}, so "
                   "this harness's catalog step asks the wrong route")
-    for target in requests_for(routes, snapshot, grouping_field):
-        answer = get(port, target, token=token)
+    for target in requests_for(routes, snapshot, grouping_field_of(caps)):
+        answer = get(server.port, target, token=token)
         note(f"GET {target} -> {answer.describe()}")
-        verdict.check(
-            f"{label}.route {target}",
-            answer.status is not None and answer.status < 500,
-            f"GET {target} answers {answer.describe()}" + (
-                "; a dropped connection is a handler that raised"
-                if answer.status is None else "")
-            + server_said())
+        dropped = ("; a dropped connection is a handler that raised"
+                   if answer.status is None else "")
+        verdict.check(f"{label}.route {target}",
+                      answer.status is not None and answer.status < 500,
+                      f"GET {target} answers {answer.describe()}{dropped}"
+                      + server.said())
 
-    # Step 8: stop the entry point alone, as `kill` would, and look.
-    proc.send_signal(signal.SIGTERM)
+
+def stop_and_look(server: Server, ctx: Context, verdict: Verdict) -> None:
+    """Step 8: stop the entry point alone, as `kill` would, and look."""
+    label = server.label
+    server.proc.send_signal(signal.SIGTERM)
     try:
-        rc = proc.wait(timeout=STOP_TIMEOUT_SECONDS)
-        stopped = True
+        rc = server.proc.wait(timeout=STOP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        rc, stopped = None, False
-    verdict.check(f"{label}.stop exits", stopped,
+        rc = None
+    verdict.check(f"{label}.stop exits", rc is not None,
                   f"the server did not exit within {STOP_TIMEOUT_SECONDS:.0f}s "
                   "of SIGTERM")
     note(f"the entry point exited rc={rc}")
-    left = bundled_server_processes(ctx["server_package"], ctx["state_dir"])
+    left = bundled_server_processes(ctx.server_package, ctx.state_dir)
     verdict.check(f"{label}.stop leaves no bundled PostgreSQL process",
                   not left,
                   "still running after the entry point stopped: "
-                  + "; ".join(left))
+                  + "; ".join(f"pid {pid}: {what}" for pid, what in left))
+
+
+def serve_one(label: str, repo: Path, ctx: Context, verdict: Verdict) -> None:
+    """Steps 4-8 for one repository: start, fetch, stop, and look."""
+    server, index = launch(label, repo, ctx, verdict)
+    snapshot, caps = check_pages(server, index, verdict)
+    check_grouping(label, snapshot, caps, verdict)
+    token = caps.get("console_token")
+    token = token if isinstance(token, str) else None
+    check_catalog(server, token, verdict)
+    check_routes(server, index, snapshot, caps, token, verdict)
+    stop_and_look(server, ctx, verdict)
+
+
+# ---------------------------------------------------------------------------
+# The run.
+# ---------------------------------------------------------------------------
+
+def prepare() -> Context:
+    """The run's directories and its children's base environment, or a
+    HarnessError before anything is installed."""
+    if not Path("/proc/self/exe").exists():
+        raise HarnessError("this harness reads /proc; run it on Linux")
+    git = shutil.which("git")
+    if git is None:
+        raise HarnessError("git is not on the PATH")
+    scratch = Path(tempfile.mkdtemp(prefix="at-r1-http-")).resolve()
+    state_dir = Path(tempfile.mkdtemp(prefix="odx-")).resolve()
+    socket_path = len(os.fsencode(state_dir)) + len(SOCKET_SUFFIX)
+    if socket_path > SOCKET_PATH_MAX:
+        shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(state_dir, ignore_errors=True)
+        raise HarnessError(
+            f"OPENDOX_STATE_DIR {state_dir} would put the bundled server's "
+            f"socket at {socket_path} bytes, past {SOCKET_PATH_MAX}; set "
+            "TMPDIR to a shorter directory")
+    base_env, dropped = stripped_environment(dict(os.environ))
+    if dropped:
+        note(f"not inherited by any child: {', '.join(dropped)}")
+    for name in ("home", "tmp"):
+        (scratch / name).mkdir()
+    base_env.update(HOME=str(scratch / "home"), TMPDIR=str(scratch / "tmp"))
+    return Context(checkout=Path(__file__).resolve().parents[1],
+                   scratch=scratch, state_dir=state_dir, git=git,
+                   base_env=base_env)
+
+
+def cleanup(ctx: Context, keep: bool) -> None:
+    """However the run ended: stop what it started, then remove what it
+    made. A leftover bundled server is killed only here, after the verdict
+    on it has been taken."""
+    for proc in ctx.servers:
+        if proc.poll() is not None:
+            continue
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=STOP_TIMEOUT_SECONDS)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    stop_processes([pid for pid, _ in
+                    bundled_server_processes(ctx.server_package, ctx.state_dir)])
+    if keep:
+        note(f"kept {ctx.scratch} and {ctx.state_dir}")
+        return
+    shutil.rmtree(ctx.scratch, ignore_errors=True)
+    shutil.rmtree(ctx.state_dir, ignore_errors=True)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="AT-R1's HTTP half (plan 034 T095): install openDox "
-                    "alone, assert a clean machine, run the documented "
-                    "command over two plain repositories, and check what it "
-                    "serves.")
-    parser.add_argument("--checkout", type=Path,
-                        default=Path(__file__).resolve().parents[1],
-                        help="the openDox-code checkout to install (default: "
-                             "the one this file is in)")
-    parser.add_argument("--scratch", type=Path, default=None,
-                        help="an EMPTY directory for the venv, the repository "
-                             "copies and the logs (default: a new temporary "
-                             "directory)")
-    parser.add_argument("--state-base", type=Path, default=None,
-                        help="where the fresh OPENDOX_STATE_DIR is created "
-                             "(default: the system's temporary directory). "
-                             "Keep it short: the bundled server's socket "
-                             "path may not pass 107 bytes. And the server "
-                             "refuses a state directory below a directory "
-                             "any user can write without the sticky bit")
-    parser.add_argument("--port", type=int, default=0,
-                        help="the port to serve on (default: a free one, "
-                             "checked free before each start)")
+        description="AT-R1's HTTP half (plan 034 T095): install the openDox "
+                    "checkout this file is in, alone, assert a clean machine, "
+                    "run the documented command over two plain repositories, "
+                    "and check what it serves. TMPDIR chooses where its "
+                    "scratch and state directories go.")
     parser.add_argument("--keep", action="store_true",
                         help="keep the scratch and state directories")
     parser.add_argument("--keep-going", action="store_true",
                         help="report every failed assertion instead of "
                              "stopping at the first (still exits 1)")
     args = parser.parse_args(argv)
-
-    if not Path("/proc/self/exe").exists():
-        print("AT-R1 ERROR: this harness reads /proc; run it on Linux",
-              file=sys.stderr)
-        return 2
-    git = shutil.which("git")
-    if git is None:
-        print("AT-R1 ERROR: git is not on the PATH", file=sys.stderr)
-        return 2
-    checkout = args.checkout.resolve()
-    if args.scratch is not None:
-        args.scratch.mkdir(parents=True, exist_ok=True)
-        if any(args.scratch.iterdir()):
-            print(f"AT-R1 ERROR: --scratch {args.scratch} is not empty",
-                  file=sys.stderr)
-            return 2
-        scratch = args.scratch.resolve()
-    else:
-        scratch = Path(tempfile.mkdtemp(prefix="at-r1-http-"))
-    state_base = (args.state_base or Path(tempfile.gettempdir())).resolve()
-    state_base.mkdir(parents=True, exist_ok=True)
-    state_dir = Path(tempfile.mkdtemp(prefix="odx-", dir=state_base))
-    socket_path = len(os.fsencode(state_dir)) + len(SOCKET_SUFFIX)
-    if socket_path > SOCKET_PATH_MAX:
-        shutil.rmtree(state_dir, ignore_errors=True)
-        if args.scratch is None:
-            shutil.rmtree(scratch, ignore_errors=True)
-        print(f"AT-R1 ERROR: OPENDOX_STATE_DIR {state_dir} would put the "
-              f"bundled server's socket at {socket_path} bytes, past "
-              f"{SOCKET_PATH_MAX}; pass a shorter --state-base",
-              file=sys.stderr)
+    try:
+        ctx = prepare()
+    except HarnessError as error:
+        print(f"AT-R1 HTTP half: ERROR: {error}", file=sys.stderr)
         return 2
     verdict = Verdict(args.keep_going)
-    ctx: dict = {"scratch": scratch, "state_dir": state_dir, "servers": [],
-                 "reported_pids": [], "port": args.port,
-                 "server_package": None}
-    print(f"AT-R1, the HTTP half (plan 034 T095), over {checkout}")
+    print(f"AT-R1, the HTTP half (plan 034 T095), over {ctx.checkout}")
     print(f"      the documented install: {DOCUMENTED_INSTALL}")
     print(f"      the documented start:   {DOCUMENTED_START}")
-    print(f"      scratch {scratch}; OPENDOX_STATE_DIR {state_dir}", flush=True)
+    print(f"      scratch {ctx.scratch}; OPENDOX_STATE_DIR {ctx.state_dir}",
+          flush=True)
+    error = None
     try:
-        base_env, dropped = stripped_environment(dict(os.environ))
-        if dropped:
-            note(f"not inherited by any child: {', '.join(dropped)}")
-        home = scratch / "home"
-        home.mkdir()
-        tmp = scratch / "tmp"
-        tmp.mkdir()
-        base_env.update(HOME=str(home), TMPDIR=str(tmp))
-
-        # 1. openDox alone, into a fresh venv, as `opendox[local]`.
-        source = scratch / "openDox-code"
-        copy_tracked_tree(checkout, source, git, base_env)
-        venv = scratch / "venv"
-        made = run([sys.executable, "-m", "venv", "--clear", str(venv)],
-                   env=base_env, cwd=scratch)
-        verdict.require("install.venv", made.returncode == 0,
-                        f"python -m venv failed: {tail(made.stderr)}")
-        python = venv_python(venv)
-        lock = source / "constraints-cpython312-linux.txt"
-        use_lock = (lock.is_file() and sys.platform.startswith("linux")
-                    and sys.implementation.name == "cpython"
-                    and sys.version_info[:2] == (3, 12))
-        install = [str(python), "-m", "pip", "install",
-                   "--disable-pip-version-check", "--no-input"]
-        if use_lock:
-            install += ["-c", str(lock)]
-        install.append(f"{source}[local]")
-        note("$ " + " ".join(install[2:]) + (
-            "" if use_lock else "   (no lock: it pins CPython 3.12 on Linux)"))
-        installed = run(install, env=base_env, cwd=scratch,
-                        timeout=INSTALL_TIMEOUT_SECONDS)
-        verdict.require("install opendox[local]", installed.returncode == 0,
-                        f"the install failed (rc={installed.returncode}):\n"
-                        f"{tail(installed.stdout)}\n{tail(installed.stderr)}")
-        env = dict(base_env)
-        env["PATH"] = str(venv / "bin") + os.pathsep + base_env.get("PATH", "")
-        env["OPENDOX_STATE_DIR"] = str(state_dir)
-        ctx.update(env=env, venv=venv)
-        empty = scratch / "cwd"
-        empty.mkdir()
-        about = ask_the_install(python, env, empty)
-        verdict.require("install declares the local extra",
-                        "local" in (about.get("extras") or []),
-                        f"the installed opendox declares the extras "
-                        f"{about.get('extras')}, and no `local` (R1Q16 "
-                        "(iii)): the documented install has no bundled "
-                        "server to bring")
-        if about.get("server_package"):
-            ctx["server_package"] = Path(about["server_package"])
-
-        # 2. The clean machine, asserted.
-        verdict.check("clean.siblings", not about["importable"],
-                      f"importable in the fresh venv: {about['importable']}")
-        harnesses = {HARNESS_COMMAND, about.get("harness_command") or
-                     HARNESS_COMMAND}
-        on_path = [h for h in sorted(harnesses)
-                   if shutil.which(h, path=env["PATH"])]
-        verdict.check("clean.omp", not on_path,
-                      f"a harness is on the PATH ({on_path}), so no-model is "
-                      "not what this run measures")
-        brokers = [b for b in BROKER_COMMANDS
-                   if shutil.which(b, path=env["PATH"])]
-        identity = [n for n in IDENTITY_SETTINGS if env.get(n)]
-        verdict.check("clean.identity-broker", not brokers and not identity,
-                      f"an identity broker is present: on the PATH "
-                      f"{brokers}, set {identity}")
-        no_database_answers(verdict, env)
-        verdict.check("clean.state-dir", not any(state_dir.iterdir()),
-                      f"OPENDOX_STATE_DIR {state_dir} is not empty")
-        verdict.check("clean.no-bundled-server-yet",
-                      not bundled_server_processes(ctx["server_package"],
-                                                   state_dir),
-                      "a process of this install's bundled server runs "
-                      "before anything started it")
-
-        # 3. Two plain repositories, each a fresh `git init`.
-        fixture = source / "tests" / "fixtures" / "plain-documents"
-        verdict.require("repos.fixture", fixture.is_dir(),
-                        f"5.0's fixture is missing at {fixture}")
-        repos = scratch / "repos"
-        a = repos / "plain-documents"
-        make_repository(a, {p.relative_to(fixture): p
-                            for p in sorted(fixture.rglob("*")) if p.is_file()},
-                        git, env, "fixture")
-        b = repos / "plain-notes"
-        make_repository(b, {Path(k): v for k, v in PLAIN_NOTES.items()},
-                        git, env, "notes")
-        bindings = about.get("bindings_relpath") or BINDINGS_RELPATH_FALLBACK
-        for label, repo in (("a", a), ("b", b)):
-            verdict.check(f"clean.binding {label}",
-                          not (repo / bindings).exists(),
-                          f"{repo} holds a model binding at {bindings}")
-            ident = run([git, "-C", str(repo), "config", "user.name"],
-                        env=env, cwd=repo)
-            verdict.check(f"repos.{label} git identity",
-                          ident.stdout.strip() == "fixture",
-                          f"{repo} has no git identity, so no served actor")
-
-        # 4-8, once per repository.
-        for label, repo in (("a", a), ("b", b)):
+        about = install_opendox(ctx, verdict)
+        assert_clean_machine(ctx, about, verdict)
+        for label, repo in make_repositories(ctx, about, verdict):
             print(f"--- repository ({label}) {repo.name}", flush=True)
             serve_one(label, repo, ctx, verdict)
     except Failed as failure:
         # A fail-fast stop, or a `require` that ended a `--keep-going` run;
         # reported with the rest, after the cleanup below.
-        if failure not in verdict.failures:
-            verdict.failures.append(failure)
-    except HarnessError as error:
+        verdict.record(failure)
+    except HarnessError as exc:
+        error = str(exc)
+    except Exception:  # the harness itself broke: say so, never a PASS
+        traceback.print_exc()
+        error = "the harness raised before a verdict"
+    finally:
+        cleanup(ctx, args.keep)
+    if error is not None:
         print(f"\nAT-R1 HTTP half: ERROR: {error}", flush=True)
         return 2
-    except Exception:  # the harness itself broke: say so, never a PASS
-        import traceback
-        traceback.print_exc()
-        print("\nAT-R1 HTTP half: ERROR: the harness raised before a "
-              "verdict", flush=True)
-        return 2
-    finally:
-        for proc in ctx["servers"]:
-            if proc.poll() is None:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                    proc.wait(timeout=STOP_TIMEOUT_SECONDS)
-                except (ProcessLookupError, subprocess.TimeoutExpired):
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-        leftovers = [int(line.split()[1].rstrip(":")) for line in
-                     bundled_server_processes(ctx["server_package"], state_dir)]
-        stop_processes(leftovers)
-        if args.keep:
-            print(f"      kept {scratch} and {state_dir}")
-        else:
-            shutil.rmtree(scratch, ignore_errors=True)
-            shutil.rmtree(state_dir, ignore_errors=True)
-    if verdict.failures:
-        first = verdict.failures[0]
-        print(f"\nAT-R1 HTTP half: FAIL [{first.ident}]: "
-              f"{first.why.splitlines()[0]}")
-        for later in verdict.failures[1:]:
-            print(f"      also FAIL [{later.ident}]: "
-                  f"{later.why.splitlines()[0]}")
-        print(f"      {len(verdict.failures)} failed, {verdict.passed} held")
-        return 1
-    print(f"\nAT-R1 HTTP half: PASS ({verdict.passed} assertions held)")
-    return 0
+    return verdict.report()
 
 
 if __name__ == "__main__":

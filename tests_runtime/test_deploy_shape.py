@@ -238,9 +238,12 @@ def test_the_acceptance_job_runs_the_harness_on_a_clean_machine() -> None:
     (`test_every_install_of_this_package_reads_one_dependency_lock`)."""
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     job = jobs["acceptance"]
-    assert "services" not in job and "container" not in job, (
-        "the acceptance job declares a service or a container; the harness "
-        "asserts a clean machine, which a database service breaks")
+    assert "services" not in job, (
+        "the acceptance job declares a service; the harness asserts a clean "
+        "machine, which a database service breaks")
+    assert "container" not in job, (
+        "the acceptance job runs in a container; the harness asserts a clean "
+        "runner, and an image may carry a database or a sibling")
     scripts = [step.get("run", "") or "" for step in job["steps"]]
     assert [run for script in scripts for run in _pytest_runs(script)] == [], (
         f"the acceptance job runs pytest ({scripts}); AT-R1's harness is not "
