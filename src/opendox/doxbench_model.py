@@ -1062,6 +1062,66 @@ class WorkbenchModelPort(Protocol):
     def dispatch(self, prompt_envelope: object) -> object: ...
 
 
+# ---------------------------------------------------------------------------
+# "no model configured" (#1144's 16.4; plan 034's T081)
+# ---------------------------------------------------------------------------
+
+#: How to configure a model, said where the rail says that none is. The chat
+#: rail (`web/views/doxbench-chat.js`) restates it verbatim, and
+#: `tests/test_chat_model_configuration.py` holds the two spellings together.
+NO_MODEL_CONFIGURED_REMEDY = (
+    "No model configured. To configure one, declare a model binding with "
+    "\"opendox model-binding add\" (\"--help\" lists its fields), or put the "
+    "local harness \"omp\" on PATH, then restart this console.")
+
+
+class NoModelConfiguredError(RuntimeError):
+    """A turn was handed to the port an install declares when it has no model.
+    Nothing was spawned and nothing was contacted."""
+
+
+class NoModelConfigured:
+    """THE PORT AN INSTALL DECLARES WHEN IT HAS NO MODEL (#1144's 16.4).
+
+    16.4 measured the gap: with no binding, the entrypoints resolved the
+    harness declaration, whose catalog offers `omp-local` as AVAILABLE with no
+    `omp` on the PATH, so an install with no model read as one with a model
+    until a turn failed. `doxbench_install.declared_model_port_factory`
+    answers THIS port instead when no approved binding is declared and the
+    harness is absent, and every reader sees the state before any turn:
+
+    * `catalog()` is `EMPTY_CATALOG`, so the catalog offers no available
+      entry;
+    * `serve_workbench`'s model-port accessor answers this port as NO port, so
+      the served catalog is the editor-only posture and a turn or an abstract
+      is refused `model_capability_unavailable`, the fixed code a plane with
+      no model capability has always given;
+    * `dispatch()` refuses without spawning or contacting anything, for a
+      caller that reaches it directly.
+
+    One instance, `NO_MODEL_CONFIGURED`, which the accessor recognises by
+    identity, so no adapter can claim the posture by imitation."""
+
+    __slots__ = ()
+
+    @property
+    def timeout_seconds(self) -> float:
+        return 1.0
+
+    def catalog(self) -> ModelCatalog:
+        return EMPTY_CATALOG
+
+    def dispatch(self, prompt_envelope: object) -> object:
+        raise NoModelConfiguredError(NO_MODEL_CONFIGURED_REMEDY)
+
+    def __repr__(self) -> str:
+        return "<no model configured>"
+
+
+#: The one no-model port.
+NO_MODEL_CONFIGURED = NoModelConfigured()
+
+
 def validated_timeout_seconds(value: object) -> float:
     """Pure validator: accepts a real, non-bool number strictly greater than
     zero and no greater than ``MAX_ADAPTER_TIMEOUT_SECONDS``; refuses every

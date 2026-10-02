@@ -159,15 +159,27 @@ class WorkbenchRoutes:
         adapter is stateful -- the harness bridge the entrypoints declare holds
         per-document-thread sessions -- the factory returns ONE instance for
         the life of the process and this accessor hands back that same object
-        on every request. Nothing here may assume a per-request adapter."""
+        on every request. Nothing here may assume a per-request adapter.
+
+        "NO MODEL CONFIGURED" IS ABSENCE TOO (#1144's 16.4; plan 034's T081).
+        An install with no approved binding and no harness declares
+        `doxbench_model.NO_MODEL_CONFIGURED`, and this accessor answers that
+        one port, recognised by identity, as no port: so the catalog route
+        serves the editor-only posture and a turn or an abstract is refused
+        `model_capability_unavailable` before anything is spawned or
+        contacted."""
         if not self.capabilities.get("actions", {}).get("session"):
             return None
         if self.model_port_factory is None:
             return None
         try:
-            return self.model_port_factory()
+            port = self.model_port_factory()
         except Exception:  # noqa: BLE001 - absence is a capability verdict
             return None
+        from opendox import doxbench_model
+        if port is doxbench_model.NO_MODEL_CONFIGURED:
+            return None
+        return port
 
     # The largest corpus one tile's index is built from. A bound, not a
     # policy: a tile's staged set is a topic folder, and an index that grew

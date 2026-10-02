@@ -309,6 +309,34 @@ function unavailabilityNote(stateValue) {
   return CHAT_UNAVAILABLE_NOTE;
 }
 
+// "NO MODEL CONFIGURED" IS A STATE, SHOWN BEFORE ANY TURN, WITH HOW TO
+// CONFIGURE ONE (#1144's 16.4; plan 034's T081). The configured-none sentence
+// above stays byte for byte: add-doxchat-model-intake §1 keeps "the rail's
+// existing sentence" stating that no approved model is configured, as the
+// send button's stated reason. What it never said is HOW (plan 034's research
+// R15), and an install with no model and no intake flow, which is every
+// standalone one, had no other place that said it. So this is a SEPARATE,
+// VISIBLE line with the remedy, and it shows only when that is the state:
+// the catalog has ANSWERED, it offers no available entry, no catalog failure
+// is recorded (a stale token or an unreadable answer has its own remedy), and
+// no intake affordance is rendered (where intake is offered, the selector's
+// first option is the remedy's home, and a second statement of it would be the
+// "second, weaker statement" the intake requirement refuses). The Python twin
+// is `doxbench_model.NO_MODEL_CONFIGURED_REMEDY`, which
+// tests/test_chat_model_configuration.py holds to this spelling.
+export const NO_MODEL_CONFIGURED_REMEDY =
+  "No model configured. To configure one, declare a model binding with \"opendox model-binding add\" (\"--help\" lists its fields), or put the local harness \"omp\" on PATH, then restart this console.";
+
+export function noModelConfiguredRemedy(stateValue) {
+  if (stateValue.catalogFailure) return null;
+  if (stateValue.models === null) return null;
+  if ((stateValue.models || []).some((entry) => entry.available === true)) {
+    return null;
+  }
+  if (stateValue.intakeOffered === true) return null;
+  return NO_MODEL_CONFIGURED_REMEDY;
+}
+
 // T104 F10-2/4: the over-bound paste, refused VISIBLY. The pure model
 // refuses by returning the IDENTICAL state (refused, never truncated) and
 // render()'s unconditional value reassignment reverts the DOM — correct, but
@@ -1098,6 +1126,10 @@ export function mountDoxBenchChatRail(host, options = {}) {
   // unavailabilityNote derives from the state's own facts.
   const unavailableNote = el("div", "doxchat-unavailable doxchat-sronly",
                              CHAT_CATALOG_LOADING_NOTE);
+  // 16.4's visible line (`noModelConfiguredRemedy`): hidden until the catalog
+  // has answered with nothing available.
+  const noModelNote = el("div", "doxchat-no-model");
+  noModelNote.hidden = true;
   const transcriptList = el("ul", "doxchat-transcript");
   transcriptList.setAttribute("aria-label", "chat transcript");
   const failureNote = el("div", "doxchat-failure");
@@ -1154,8 +1186,9 @@ export function mountDoxBenchChatRail(host, options = {}) {
   sendBtn.setAttribute("aria-describedby", unavailableNote.id);
   host.append(loadedSelect, loadedNote, loadedEmpty,
               loadedFull, subjectInput,
-              unavailableNote, transcriptList, contextNote, retryNote,
-              cardsHost, announce, failureNote, composer, disclosure, sendrow);
+              unavailableNote, noModelNote, transcriptList, contextNote,
+              retryNote, cardsHost, announce, failureNote, composer,
+              disclosure, sendrow);
 
   // SELECTING IS IMMEDIATE, and it is not a state authority: the seam owns the
   // move, `state.active_buffer` remains the one answer, and this handler only
@@ -1467,6 +1500,9 @@ export function mountDoxBenchChatRail(host, options = {}) {
     // would trade a statement of posture for a call to action, and the posture is
     // the fact the human needs.
     unavailableNote.textContent = selectable ? "" : unavailabilityNote(state);
+    const remedy = noModelConfiguredRemedy(state);
+    noModelNote.textContent = remedy || "";
+    noModelNote.hidden = !remedy;
     selector.value = defaultSelectorValue(state);
     transcriptList.textContent = "";
     for (const turn of transcriptWindow(state)) {
