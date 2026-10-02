@@ -3,9 +3,13 @@ T007 batch H's addendum reads; RULED R1Q16 (i)-(iv), `5850003126`).
 
 T072's falsifier is F13.1's TCP-listener block, which reads the kernel's
 socket table at run time, and its `runtime status` block. Both are run here
-against a server the REAL entry point started: `generate-and-open --local`,
-launched in the background as F13.1 launches it, reached over HTTP, asked
-about by a second process, and stopped with a signal. Where F13.1 reads the
+against a server the REAL entry point started: `python -m opendox.cli
+generate-and-open --local` over a fresh repository copied from T050's
+`tests/fixtures/plain-documents`, launched in the background as F13.1 launches
+it, reached over HTTP, asked about by a second process, and stopped with a
+signal. Nothing is stood in: the corpus root check, the generation, the
+validator and the serve loop are phase 2's own, landed on this stack's base
+(T054 to T058), so the stand-in driver this module once launched is gone. Where F13.1 reads the
 server's pid from `caps.json`, these cases read the same pid from
 `runtime status`'s `database_bundle`. `/capabilities`' `install` block is
 T073's, and nothing here pretends it exists.
@@ -54,7 +58,8 @@ from opendox.runtime.config import PREFIX
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-DRIVER = Path(__file__).resolve().parent / "local_entrypoint_driver.py"
+#: T050's fixture, which F13.1's preamble copies into a fresh repository.
+PLAIN_DOCUMENTS = ROOT / "tests" / "fixtures" / "plain-documents"
 MODE = PREFIX + "INSTALL_MODE"
 STATE = PREFIX + "STATE_DIR"
 
@@ -174,10 +179,9 @@ def _launch(corpus: Path, state: Path, run_dir: Path,
             **extra: str) -> tuple[subprocess.Popen, str]:
     """`generate-and-open --local` in the BACKGROUND, and the URL it serves."""
     child = subprocess.Popen(
-        [sys.executable, str(DRIVER), "generate-and-open", config.LOCAL_FLAG,
-         "--repo-root", str(corpus), "--repository", "fixture",
-         "--run-dir", str(run_dir), "--no-open", "--no-validate",
-         "--port", "0"],
+        [sys.executable, "-m", "opendox.cli", "generate-and-open",
+         config.LOCAL_FLAG, "--repo-root", str(corpus), "--repository",
+         "fixture", "--run-dir", str(run_dir), "--no-open", "--port", "0"],
         env=_clean_env(**{STATE: str(state)}, **extra), cwd=ROOT,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     url = _first_url(child, 90)
@@ -225,9 +229,21 @@ def _status(state: Path, **extra: str) -> tuple[int, dict]:
 
 @pytest.fixture()
 def corpus(tmp_path: Path) -> Path:
-    root = tmp_path / "plain-documents"
-    root.mkdir()
-    (root / "note.md").write_text("# A note\n\nPlain text.\n", encoding="utf-8")
+    """F13.1's preamble: T050's `plain-documents` copied into a FRESH git
+    repository, committed under the fixture's own identity and none of the
+    user's git configuration."""
+    root = tmp_path / PLAIN_DOCUMENTS.name
+    shutil.copytree(PLAIN_DOCUMENTS, root)
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith("GIT_")}
+    env.update({"GIT_AUTHOR_NAME": "fixture",
+                "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                "GIT_COMMITTER_NAME": "fixture",
+                "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+    for argv in (["git", "-c", "init.defaultBranch=main", "init", "-q"],
+                 ["git", "add", "-A"], ["git", "commit", "-qm", "fixture"]):
+        subprocess.run(argv, cwd=root, env=env, check=True, capture_output=True)
     return root
 
 

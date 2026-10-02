@@ -1392,7 +1392,24 @@ def test_a_given_source_option_is_resolved_and_an_unset_one_is_not_passed(
 
 
 def test_generate_and_open_refuses_an_empty_source_option_before_its_run_dir(
-        tmp_path, capsys) -> None:
+        tmp_path, capsys, monkeypatch) -> None:
+    """And before the local install's bundled server (plan 034 T072): a
+    refused option costs no database start. A tripwire stands in for the
+    server, so a regression neither starts one nor passes."""
+    started: list = []
+
+    class _Tripwire:
+        def __init__(self, settings) -> None:
+            started.append(settings)
+
+        def start(self):
+            raise AssertionError("the bundled server was started for a "
+                                 "refused source option")
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli.bundle_mod, "BundledServer", _Tripwire)
     calls: list = []
     _declaring_generator(calls)
     repo = _repository(tmp_path)
@@ -1406,6 +1423,7 @@ def test_generate_and_open_refuses_an_empty_source_option_before_its_run_dir(
     assert ("generate-and-open refused: --possibles was given an empty path"
             in capsys.readouterr().err)
     assert calls == [] and not run_dir.exists()
+    assert started == [], "a bundled server was built for a refused option"
 
 
 def test_a_root_openDoxs_predicate_refuses_is_refused_with_its_message(tmp_path, capsys) -> None:

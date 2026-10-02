@@ -20,6 +20,13 @@ builds that child and reads it:
 * It is read on threads while it runs (`Child.wait_for_line`), so a server that
   never exits can still be asked where it serves, and then interrupted
   (`Child.interrupt`, SIGINT, as Ctrl-C sends).
+* ITS STATE DIRECTORY IS ITS OWN. A `generate-and-open --local` child starts
+  the local install's bundled PostgreSQL server (plan 034 T072) under
+  `OPENDOX_STATE_DIR`, whose default is the USER's own state directory. So
+  every child is given a fresh, short, private one (`Child.state_dir`, under
+  `/tmp` because a Unix socket's whole path is bounded), and it is removed
+  once the child is stopped. No case ever initializes a database in the home
+  directory of whoever runs the suite.
 * CTRL-C REACHES IT AS IT WOULD AT A TERMINAL, whatever the runner's own
   disposition. The same `sitecustomize` sets SIGINT back to Python's
   KeyboardInterrupt handler. A runner started as a background job
@@ -45,6 +52,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -145,6 +153,9 @@ class Child:
         env["PYTHONPATH"] = os.pathsep.join(
             [str(blocker), *filter(None, [env.get("PYTHONPATH")])])
         env[REFUSED_LOG_ENV] = str(self.refused_log)
+        self.state_dir = Path(tempfile.mkdtemp(
+            prefix="odx-child-", dir="/tmp" if os.path.isdir("/tmp") else None))
+        env["OPENDOX_STATE_DIR"] = str(self.state_dir)
         self.argv = [sys.executable, "-m", module, *args]
         verb = args[0] if args and not args[0].startswith("-") else ""
         self.label = f"python -m {module} {verb}".strip()
@@ -221,6 +232,7 @@ class Child:
         if self.process.poll() is None:
             self.process.kill()
             self.process.wait(timeout=STOP_DEADLINE_SECONDS)
+        shutil.rmtree(self.state_dir, ignore_errors=True)
 
     def _join(self) -> None:
         for pump in self._pumps:

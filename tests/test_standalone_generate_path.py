@@ -284,11 +284,17 @@ def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path
         child.wait_for_line(_SERVING)
         assert child.process.poll() is None, "the server exited after saying it serves"
         _assert_the_server_answers(base, run_dir / "snapshot.json", repo)
+        # THE LOCAL INSTALL'S DATABASE IS THE CHILD'S OWN (plan 034 T072): its
+        # bundled server was started under the private state directory the
+        # harness gave this child, never under the user's.
+        assert (child.state_dir / "postgres" / "data" / "PG_VERSION").is_file(), \
+            "the bundled server was not started under the child's state dir"
         assert child.interrupt() == 0, child.stderr_text()
     finally:
         child.kill()
     _assert_the_port_is_closed(base)
     assert child.refused() == [], child.refused()
+    assert not child.state_dir.exists(), "the child's state dir outlived it"
 
 
 # ---------------------------------------------------------------------------

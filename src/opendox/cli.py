@@ -642,9 +642,12 @@ def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -
     args.runtime_settings = settings
     if settings.install_mode != runtime_config.INSTALL_MODE_LOCAL:
         return _generate_and_open(args, opener=opener)
-    # THE CHEAP REFUSALS FIRST, so a mistyped root never costs a database start.
+    # THE CHEAP REFUSALS FIRST, so a mistyped root never costs a database
+    # start: every one `_generate_and_open` asks before it mints its run
+    # directory, main's empty-source-option refusal (T055) included.
     _refuse_non_corpus_repo_root(args)
     _refuse_malformed_generated_at(args)
+    _refuse_empty_source_options(args)
     server = bundle_mod.BundledServer(settings)
     args.database_bundle = server
     # NO `PG*` DEFAULT REACHES THE BUNDLE'S CONNECTIONS while this process
