@@ -301,6 +301,28 @@ def test_a_state_dir_too_long_for_a_unix_socket_is_refused_naming_it() -> None:
     assert STATE in str(caught.value) and "socket" in str(caught.value)
 
 
+@pytest.mark.parametrize("variable", [STATE, "XDG_STATE_HOME", "HOME"])
+def test_a_comma_in_the_state_dir_is_refused_without_repeating_it(
+        monkeypatch, variable: str) -> None:
+    """PostgreSQL splits its socket directories, and libpq its hosts, on a
+    comma, so one would split the socket's one checked directory into two
+    unchecked ones (adversarial review of #69). Refused at configuration,
+    from whichever setting it came, and the value is not repeated."""
+    value = "/tmp/odx-c1,/tmp/odx-c2-secretish"
+    env = {MODE: "local"}
+    if variable == "HOME":
+        monkeypatch.setenv("HOME", value)        # `Path.home()` reads the process's
+    else:
+        env[variable] = value
+    with pytest.raises(config.ConfigurationError) as caught:
+        config.load_settings(env)
+    message = str(caught.value)
+    assert "`,`" in message and STATE in message, message
+    assert "secretish" not in message and value not in message, message
+    with pytest.raises(config.ConfigurationError):
+        config.load_migration_settings(env)
+
+
 def test_a_relative_state_dir_is_refused_naming_it() -> None:
     with pytest.raises(config.ConfigurationError) as caught:
         config.load_settings({MODE: "local", STATE: "var/state"})
