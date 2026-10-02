@@ -1291,6 +1291,21 @@ def _default_home_factory(root):
             corpus_adapter.CorpusRef(name="home", location=str(root)))
 
 
+#: THE INSTALLED COMMAND'S OWN NAME AND WORDS (plan 034 T084; found by T099's
+#: PyPI writer). `opendox --help` is what a published install prints, so the
+#: usage line names the console script `pyproject.toml` installs, `opendox`,
+#: and the description and epilog name openDox only. They used to print
+#: `usage: ideation-dashboard` and this module's docstring, which is
+#: openxFactory's pre-carve history, not a user's help.
+PROG = "opendox"
+PARSER_DESCRIPTION = (
+    "openDox, a document workbench over a corpus of documents: regenerate "
+    "the corpus's deterministic snapshot, serve it locally and open it in a "
+    "browser, create and edit its documents, declare the model providers a "
+    "chat may use, and run the identity and coordination runtime.")
+PARSER_EPILOG = "Run `opendox <command> --help` for a command's own options."
+
+
 def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParser:
     """The command line, plus whatever this invocation was ASSEMBLED with.
 
@@ -1354,8 +1369,8 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
     # the cross-reference register, the same way.
     column_seams.register_defaults()
-    parser = argparse.ArgumentParser(prog="ideation-dashboard", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(prog=PROG, description=PARSER_DESCRIPTION,
+                                     epilog=PARSER_EPILOG)
     sub = parser.add_subparsers(dest="command", required=True)
 
     gen = sub.add_parser("generate", help="regenerate the deterministic snapshot")
@@ -1401,7 +1416,7 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     gao.set_defaults(func=cmd_generate_and_open)
 
     create = sub.add_parser(
-        "create", help="scaffold a new header-compliant ideation doc and open it for editing")
+        "create", help="scaffold a new header-compliant document and open it for editing")
     create.add_argument("--repo-root", required=True, help="repository to scaffold into")
     create.add_argument("--area", default=authoring_mod.DEFAULT_AREA,
                         help=f"target ideation area (default: {authoring_mod.DEFAULT_AREA})")
