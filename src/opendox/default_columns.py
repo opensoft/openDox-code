@@ -29,11 +29,15 @@ openxFactory#656's thread, 2026-10-02; Brett may overrule):
   openxFactory's pinned schema declares, and openDox writes no governed shape it
   does not own. With no host's gate registered they refuse, naming the seam and
   the call that registers one (4.2), as `GateRecordsNotRegistered`.
-* `SCOPE`, the doxBench scope authority, READ-ONLY. `resolve_scope` projects a
-  tile of the neutral snapshot (a group's members, a selection's files, a
-  candidate's claiming groups' members), each path confined to the selected
-  root by the registry seam's own `resolve_within`, and classifies nothing as
-  editable. `is_live_session_ref` keeps the governed authority's logic, which is
+* `SCOPE`, the doxBench scope authority. `resolve_scope` projects a tile of the
+  neutral snapshot (a group's members, a selection's files, a candidate's
+  claiming groups' members), each path confined to the selected root by the
+  registry seam's own `resolve_within`. A TILE'S OWN DOCUMENTS ARE EDITABLE
+  (RULED by Brett Heap, openxFactory#656 comment `5961651355`, "Tile's own
+  documents editable (Recommended)", superseding the holder's read-only
+  reading): those are exactly the three sections above, as openXdox's own
+  authority marks its owned sections, and the set is one named function,
+  `editable_paths`. `is_live_session_ref` keeps the governed authority's logic, which is
   openDox's own session layer (`branch_session.live_session_branches`).
   `session_created_paths_for_scope` answers no path: which documents a session
   CREATED is known only from governed gate-action records, which this default
@@ -253,7 +257,7 @@ GATE = _Registration("opendox.default_columns.GATE", {
 
 
 # ==========================================================================
-# SCOPE — a small, neutral, READ-ONLY projection of a tile
+# SCOPE — a small, neutral projection of a tile, its own documents editable
 # ==========================================================================
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -285,7 +289,7 @@ def _canonical(path: Any) -> str:
 
 def _section(key: str, label: str, note: str, paths: Iterable[Any], *,
              known: set[str], seen: set[str], root: Path,
-             inherited: bool) -> ScopeSection:
+             inherited: bool, owned: bool) -> ScopeSection:
     from opendox import projection_seams
 
     resolve_within = projection_seams.registry.current().resolve_within
@@ -298,34 +302,49 @@ def _section(key: str, label: str, note: str, paths: Iterable[Any], *,
         resolved = path in known and resolve_within(root, path) is not None
         rows.append(ScopeDocument(id=path, path=path, resolved=resolved))
     return ScopeSection(key=key, label=label, note=note, inherited=inherited,
-                        owned=False, documents=tuple(rows))
+                        owned=owned, documents=tuple(rows))
 
 
-def editable_paths(sections: Sequence[ScopeSection],
-                   context_paths: Sequence[str]) -> tuple[str, ...]:
-    """The paths a projected tile lets a turn edit: NONE. openDox's default
-    scope is READ-ONLY (the holder's reading of R1Q10 (a) for T084, put to
-    Brett on openxFactory#656's thread, 2026-10-02), so a tile grants no edit
-    authority, and openDox's own turn guard, which requires a turn's paths to
-    be in scope AND editable (`doxbench_turns._require_in_scope_and_editable`),
-    discloses none of them. It is ONE named function so that a ruling either way
-    is one change here: the readable paths a tile's own sections carry are
-    `context_paths`."""
-    return ()
+def editable_paths(sections: Sequence[ScopeSection]) -> tuple[str, ...]:
+    """The paths a projected tile lets a turn edit: THE TILE'S OWN DOCUMENTS.
+
+    RULED by Brett Heap, openxFactory#656 comment `5961651355`, "Tile's own
+    documents editable (Recommended)", which supersedes the holder's read-only
+    reading of R1Q10 (a). A tile's own documents are the resolved rows of its
+    OWNED sections, in order and once each, as openXdox's own authority derives
+    its editable set from its owned sections. In openDox's default every
+    section a tile projects is its own: a group's members, a selection's files
+    and a candidate's claiming groups' members. Nothing outside them is
+    editable, a row that does not resolve is not, and neither is a created path
+    (this default records none). openDox's turn guard requires a turn's paths
+    to be in scope AND editable (`doxbench_turns._require_in_scope_and_editable`),
+    so a turn over a tile's own document passes it, and one over any other
+    document is still refused. ONE named function, so the set is decided in
+    one place."""
+    editable: list[str] = []
+    for section in sections:
+        if not section.owned:
+            continue
+        for row in section.documents:
+            if row.resolved and row.path not in editable:
+                editable.append(row.path)
+    return tuple(editable)
 
 
 def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
                   source_root: Path, created_paths: Iterable[str] = ()
                   ) -> ScopeProjection | None:
-    """One tile of the neutral snapshot, read-only, or None where the snapshot
-    has no such tile.
+    """One tile of the neutral snapshot, or None where the snapshot has no
+    such tile.
 
     A group (`cluster`) projects its members, a selection (`staged`) its files,
     and a candidate (`possible`) the members of the groups that claim it. Each
     path is confined to `source_root` by the registry seam's own
-    `resolve_within`, and NOTHING is editable (`editable_paths`), so
-    `active_document_candidates` is empty too, and there is no outline. A
-    `created_paths` entry is confined and readable, never editable."""
+    `resolve_within`. Each of those sections is the tile's OWN, so its
+    resolved documents are editable (`editable_paths`, RULED `5961651355`),
+    `active_document_candidates` are the documents the turn guard would
+    accept, and there is no outline. A `created_paths` entry is confined and
+    readable, never editable."""
     if not isinstance(snapshot, Mapping):
         return None
     if isinstance(created_paths, (str, bytes, bytearray)):
@@ -357,7 +376,8 @@ def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
         keywords = tuple(_text(t) for t in _sequence(group.get("topics")) if _text(t))
         sections.append(_section(
             "members", "group documents", "the group's own document edges",
-            members(group), known=known, seen=seen, root=root, inherited=False))
+            members(group), known=known, seen=seen, root=root, inherited=False,
+            owned=True))
     elif key.tile_kind == "staged":
         selection = next((_mapping(s) for s in _sequence(snapshot.get("staged_topics"))
                           if _text(_mapping(s).get("staging_id")) == key.tile_id), None)
@@ -367,7 +387,7 @@ def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
         sections.append(_section(
             "files", "selection files", "the documents this selection names",
             _sequence(selection.get("files")), known=known, seen=seen, root=root,
-            inherited=False))
+            inherited=False, owned=True))
     elif key.tile_kind == "possible":
         candidate = next((_mapping(p) for p in _sequence(snapshot.get("possibles"))
                           if _text(_mapping(p).get("id")) == key.tile_id), None)
@@ -379,7 +399,8 @@ def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
         sections.append(_section(
             "claiming", "documents of the claiming groups",
             "membership inferred from the groups that claim this candidate",
-            claimed, known=known, seen=seen, root=root, inherited=True))
+            claimed, known=known, seen=seen, root=root, inherited=True,
+            owned=True))
     else:
         return None
     context = [row.path for section in sections for row in section.documents
@@ -389,7 +410,7 @@ def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
         if path not in context:
             context.append(path)
     revision = _text(_mapping(snapshot.get("generation")).get("source_revision"))
-    editable = editable_paths(sections, context)
+    editable = editable_paths(sections)
     return ScopeProjection(
         key=key, title=title, keywords=keywords, source_revision=revision,
         sections=tuple(sections), context_paths=tuple(context),

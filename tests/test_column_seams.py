@@ -270,15 +270,28 @@ def _key(kind: str, tile: str) -> ScopeKey:
     ("staged", "s1", ("sel.md",), "s1"),
     ("possible", "p1", ("a.md", "b.md", "c.md"), "A candidate"),
 ])
-def test_each_tile_projects_read_only(corpus, kind, tile, context, title) -> None:
+def test_each_tile_projects_its_own_documents_editable(
+        corpus, kind, tile, context, title) -> None:
+    """RULED `5961651355` ("Tile's own documents editable"): every section a
+    tile projects is its own, so its resolved documents are both readable and
+    editable, and the candidates are what the turn guard would accept."""
     projection = dc.resolve_scope(_snapshot(), _key(kind, tile), source_root=corpus)
     assert projection.title == title
     assert projection.context_paths == context
-    assert projection.editable_paths == ()
-    assert projection.active_document_candidates == ()
+    assert projection.editable_paths == context
+    assert projection.active_document_candidates == context
     assert projection.outline_path is None
     assert projection.source_revision == "abc123"
-    assert all(not section.owned for section in projection.sections)
+    assert all(section.owned for section in projection.sections)
+
+
+def test_nothing_outside_the_tile_is_editable(corpus) -> None:
+    """The group's own two, never the corpus's other documents."""
+    projection = dc.resolve_scope(_snapshot(), _key("cluster", "g1"), source_root=corpus)
+    assert set(projection.editable_paths) == {"a.md", "b.md"}
+    for other in ("c.md", "sel.md"):
+        assert other not in projection.editable_paths
+        assert other not in projection.context_paths
 
 
 def test_a_listed_document_missing_from_the_tree_is_not_resolved(corpus) -> None:
@@ -286,6 +299,33 @@ def test_a_listed_document_missing_from_the_tree_is_not_resolved(corpus) -> None
     rows = {row.path: row.resolved for row in projection.sections[0].documents}
     assert rows == {"c.md": True, "gone.md": False}
     assert projection.context_paths == ("c.md",)
+    assert projection.editable_paths == ("c.md",), "an unresolved row is not editable"
+
+
+def test_a_created_path_is_readable_and_never_editable(corpus) -> None:
+    projection = dc.resolve_scope(_snapshot(), _key("cluster", "g1"),
+                                  source_root=corpus, created_paths=["new.md"])
+    assert projection.context_paths == ("a.md", "b.md", "new.md")
+    assert projection.editable_paths == ("a.md", "b.md")
+
+
+def test_the_editable_set_is_the_owned_sections_resolved_rows() -> None:
+    """`editable_paths` itself: owned sections only, resolved rows only, once
+    each and in order."""
+    from opendox.doxbench_scope_types import ScopeDocument, ScopeSection
+
+    def section(owned, *rows):
+        return ScopeSection(
+            key="k", label="l", note="n", inherited=False, owned=owned,
+            documents=tuple(ScopeDocument(id=p, path=p, resolved=r)
+                            for p, r in rows))
+
+    assert dc.editable_paths([section(False, ("a.md", True))]) == ()
+    assert dc.editable_paths([
+        section(True, ("a.md", True), ("gone.md", False)),
+        section(False, ("b.md", True)),
+        section(True, ("c.md", True), ("a.md", True)),
+    ]) == ("a.md", "c.md")
 
 
 def test_an_unknown_tile_is_none(corpus) -> None:
