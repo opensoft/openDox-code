@@ -1027,12 +1027,15 @@ def test_the_bundle_glob_and_the_setuptools_floor_are_one_guarantee() -> None:
     except `vendor/.gitkeep`, which `glob` skips as a dotfile and which exists
     only to keep an otherwise-empty directory in git.
 
-    PLAN 034 T075 (#1144 10.2: the entry point serves the 42-file bundle)
+    Those figures are S5's, at its tree. PLAN 034 T075 (#1144 10.2: the
+    entry point serves the 42-file bundle) re-measured them, at the same
+    `setuptools 84.0.0`: `web/**` alone gave 41 entries, 37 of them under
+    `opendox/web/views/`, every census file but `vendor/.gitkeep` again. T075
     put `web/**/.*` beside the recursive pattern, because the census counts
-    that dotfile and an installed entry point answered it 404. The recursive
-    pattern is still first and still the one this guarantee is about; the
-    line is held verbatim as it now reads, and
-    `tests_runtime/test_served_bundle.py` holds the wheel to the tree."""
+    that dotfile and an installed entry point answered it 404; with both, the
+    wheel carries all 42. The recursive pattern is still first and still the
+    one this guarantee is about; the line is held verbatim as it now reads,
+    and `tests_runtime/test_served_bundle.py` holds the wheel to the tree."""
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'opendox = ["web/**", "web/**/.*"]' in text, (
         "the bundle ships by a RECURSIVE glob; a single `*` would package "

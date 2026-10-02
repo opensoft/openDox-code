@@ -271,7 +271,8 @@ def _essence(content_type: str) -> str:
 # What a browser fetches from the bundle on its own: the page's `src`/`href`
 # attributes, and each module's STATIC imports. A static import that names a
 # missing file fails the whole module graph; a dynamic `import()` is how the
-# bundle reaches what may be absent (10.2a), so those are read separately.
+# bundle reaches what may be absent (10.2a), so those are read separately, and
+# walked on only where the bundle carries the target.
 _PAGE_REFERENCE = re.compile(r"""\b(?:src|href)\s*=\s*["']([^"']+)["']""")
 _STATIC_IMPORT = re.compile(
     r"""^[ \t]*(?:import|export)\b[^;'"`]*?\bfrom[ \t]*(["'])([^"'\n]+)\1"""
@@ -291,19 +292,25 @@ def _resolve(importer: str, reference: str) -> str:
     return target
 
 
-def _module_graph(read) -> tuple[set[str], set[str]]:
-    """`(static, dynamic)`: every bundle path a browser fetches from `/` by the
-    page's references and the modules' static imports, and every relative
-    dynamic `import()` those modules name. `read(path)` answers a path's text."""
+def _module_graph(read, carried: set[str]) -> tuple[set[str], set[str]]:
+    """`(reached, dynamic)`: every bundle path a browser fetches from `/`, and
+    every relative dynamic `import()` target any reached module names.
+
+    The walk starts at the page's references and follows each module's static
+    imports. A dynamic target the bundle CARRIES is a module a browser can
+    load too, so it is walked like any other (Copilot review of
+    openDox-code#73: `views/repo-selector.js` loads `views/projection-index.js`
+    that way); one the bundle does not carry, 10.2a's, stays a leaf.
+    `read(path)` answers a path's text."""
     page = "index.html"
     queue = [_resolve(page, ref) for ref in _PAGE_REFERENCE.findall(read(page))
              if _local(ref)]
-    static, dynamic = {page}, set()
+    reached, dynamic = {page}, set()
     while queue:
         path = queue.pop()
-        if path in static:
+        if path in reached:
             continue
-        static.add(path)
+        reached.add(path)
         if not path.endswith(".js"):
             continue
         text = read(path)
@@ -311,9 +318,12 @@ def _module_graph(read) -> tuple[set[str], set[str]]:
             reference = match.group(2) or match.group(4)
             if reference.startswith((".", "/")):
                 queue.append(_resolve(path, reference))
-        dynamic.update(_resolve(path, m.group(2))
-                       for m in _DYNAMIC_IMPORT.finditer(text))
-    return static, dynamic
+        for match in _DYNAMIC_IMPORT.finditer(text):
+            target = _resolve(path, match.group(2))
+            dynamic.add(target)
+            if target in carried:
+                queue.append(target)
+    return reached, dynamic
 
 
 # ---------------------------------------------------------------------------
@@ -422,13 +432,15 @@ def test_F10_1_fetch_the_installed_local_entry_point_serves_every_bundle_file(
             assert status == 200, (path, status)
             return body.decode("utf-8")
 
-        static, dynamic = _module_graph(read)
-        assert static - _tree_files() == set(), sorted(static - _tree_files())
-        assert {"app.js", "styles.css", "views/intent-binding.js"} <= static
+        tree = _tree_files()
+        reached, dynamic = _module_graph(read, tree)
+        assert reached - tree == set(), sorted(reached - tree)
+        assert {"app.js", "styles.css", "views/intent-binding.js",
+                "views/projection-index.js"} <= reached
 
         # 10.2a: the one module the bundle reaches for and does not carry is
         # the declared one, reached only dynamically, and it is absent.
-        assert dynamic - _tree_files() == {NOT_OWED}, sorted(dynamic - _tree_files())
+        assert dynamic - tree == {NOT_OWED}, sorted(dynamic - tree)
         status, _kind, _body = _get(base, "/" + NOT_OWED)
         assert status == 404, status
 
