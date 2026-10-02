@@ -39,6 +39,13 @@ import sys
 from pathlib import Path
 
 from opendox import action_errors
+# THE CONTAINMENT RULE, THROUGH THE REGISTRY SEAM (plan 034 T055 follow-up):
+# `_resolved_listed_edit_entry` reads `projection_seams.registry.current()` per
+# call, so it confines by the registry registered at that moment, openDox's own
+# where no host has contributed one, as `serve.py`'s `/source` arm does. No
+# proxy is bound at module level here: `tests/test_projection_seams.py` holds
+# the set of modules that bind one, and this module reads the seam in a body.
+from opendox import projection_seams
 from opendox.serve_wire import (
     AGENT_INVOCATION_REFUSAL,
     JSON_CTYPE,
@@ -103,14 +110,32 @@ def _edit_request_fields(body) -> tuple[tuple[str, str, str] | None, str | None]
 
 def _resolved_listed_edit_entry(source, path: str, repository: str | None,
                                 ref: str | None):
-    """Return the selected entry only when its projected file is editable."""
+    """Return the selected entry only when its projected file is editable.
+
+    ONE ENTRY, FOR THE LOOKUP, THE LISTED-PATH CHECK AND THE CONFINEMENT
+    (Copilot at openDox-code#59 0c946f4e, "previously missed"). The registry is
+    asked ONCE, and the path is confined to THAT entry's own root. It used to
+    be asked for the path by the entry's `(repository, ref)` pair, a second
+    lookup, so a refresh on another thread that re-registered the key between
+    the two put another entry's root behind the path: the route accepted or
+    refused a file by the replacement's root, while the listing it read and
+    the root the editor was started over were the first entry's. `serve.py`'s
+    `/source` arm holds the same rule since #59.
+
+    The confinement is the seam's declared `resolve_within`, which every
+    registry registration carries, and never a method of the registry instance:
+    `resolve_source` is on no seam's list, so a contributed registry is never
+    asked for one. An entry with no root serves nothing."""
     registry = getattr(source, "registry", None) if source is not None else None
     if registry is None:
         return None
     entry = registry.resolve(repository, ref)
-    target = registry.resolve_source(repository, ref, path)
-    if (entry is None or entry.source_root is None or target is None
-            or not target.is_file() or path not in _listed_source_paths(entry)):
+    root = None if entry is None else entry.source_root
+    if root is None:
+        return None
+    target = projection_seams.registry.current().resolve_within(Path(root), path)
+    if (target is None or not target.is_file()
+            or path not in _listed_source_paths(entry)):
         return None
     return entry
 
