@@ -742,23 +742,88 @@ def test_both_classes_together_name_both_reasons() -> None:
     assert "hunter2" not in message
 
 
-@pytest.mark.parametrize("found", ["absent", "no-locations"])
+@pytest.mark.parametrize("found", ["absent", "no-binaries", "outside-it",
+                                   "dir-outside-it", "not-executable"])
 def test_a_missing_server_package_is_the_named_refusal(
-        monkeypatch: pytest.MonkeyPatch, found: str) -> None:
-    """No `pixeltable_pgserver` at all, or a spec with no location: both are
-    the one refusal naming the `local` extra, never an `IndexError`."""
-    import importlib.machinery
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, found: str) -> None:
+    """No `pixeltable-pgserver` distribution at all; one whose file list
+    names no binaries; or one whose listed binaries resolve outside it,
+    file by file or through a linked `bin` directory; or binaries that are
+    listed and inside it but cannot be executed.
+    Each is the one refusal naming the `local` extra, never a traceback,
+    and nothing is taken from anywhere but the distribution's own files
+    (Copilot review of #69)."""
+    root = tmp_path / "site"
+    bin_dir = root / bundle_mod.SERVER_PACKAGE / "pginstall" / "bin"
+    bin_dir.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name in ("initdb", "postgres"):
+        for directory in (bin_dir, elsewhere):
+            (directory / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (directory / name).chmod(0o755)
+    if found == "outside-it":
+        for name in ("initdb", "postgres"):
+            (bin_dir / name).unlink()
+            (bin_dir / name).symlink_to(elsewhere / name)
+    elif found == "dir-outside-it":
+        shutil.rmtree(bin_dir)
+        bin_dir.symlink_to(elsewhere)
+    elif found == "not-executable":
+        for name in ("initdb", "postgres"):
+            (bin_dir / name).chmod(0o644)
 
-    spec = None
-    if found == "no-locations":
-        spec = importlib.machinery.ModuleSpec(bundle_mod.SERVER_PACKAGE, None,
-                                              is_package=True)
-        spec.submodule_search_locations = []
-    monkeypatch.setattr(bundle_mod.importlib.util, "find_spec",
-                        lambda name: spec)
+    class _Distribution:
+        files = ([] if found == "no-binaries" else
+                 [f"{bundle_mod.SERVER_PACKAGE}/pginstall/bin/{name}"
+                  for name in ("initdb", "postgres")])
+
+        def locate_file(self, entry):
+            return root / str(entry)
+
+    monkeypatch.setattr(bundle_mod.metadata, "distributions",
+                        lambda **kwargs: [] if found == "absent" else [_Distribution()])
     with pytest.raises(bundle_mod.BundleRefused) as caught:
         bundle_mod.server_binaries()
-    assert 'opendox[local]' in str(caught.value), caught.value
+    message = str(caught.value)
+    assert ('opendox[local]' if found == "absent" else "reinstall the `local` extra") \
+        in message, message
+
+
+def test_the_server_is_never_taken_from_the_working_directory(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`python -m opendox.cli` puts the working directory first on
+    `sys.path`, and a corpus checkout is where it runs (Copilot review of
+    #69). A checkout holding an importable `pixeltable_pgserver` with
+    executable binaries, AND a forged `.dist-info` naming them, is still not
+    where the server comes from: the search path leaves the working
+    directory out, as `''` and as its own path."""
+    shadow = tmp_path / "checkout"
+    package = shadow / bundle_mod.SERVER_PACKAGE
+    bin_dir = package / "pginstall" / "bin"
+    bin_dir.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    for name in ("initdb", "postgres"):
+        (bin_dir / name).write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        (bin_dir / name).chmod(0o755)
+    info = shadow / "pixeltable_pgserver-99.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: pixeltable-pgserver\nVersion: 99.0\n",
+        encoding="utf-8")
+    (info / "RECORD").write_text("".join(
+        f"{bundle_mod.SERVER_PACKAGE}/pginstall/bin/{name},,\n"
+        for name in ("initdb", "postgres")), encoding="utf-8")
+    monkeypatch.chdir(shadow)
+    monkeypatch.syspath_prepend(str(shadow))
+    monkeypatch.setattr(bundle_mod.sys, "path", ["", *bundle_mod.sys.path])
+    assert str(shadow) not in bundle_mod._distribution_search_path()
+    assert "" not in bundle_mod._distribution_search_path()
+    try:
+        found = bundle_mod.server_binaries()
+    except bundle_mod.BundleRefused:
+        return                             # no carrier installed: nothing taken either
+    assert not found.resolve().is_relative_to(shadow.resolve()), found
 
 
 # -- peer authentication, hermetic ----------------------------------------------
