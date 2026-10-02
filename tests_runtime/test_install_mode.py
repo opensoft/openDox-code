@@ -377,10 +377,14 @@ def test_runtime_status_of_a_healthy_local_install_exits_zero(
                              "install, which has no broker")
 
     monkeypatch.setattr(oidc, "build_verifier", _no_broker)
-    joiner = "&" if "?" in postgres_dsn else "?"
-    scrubbed.setenv(PREFIX + "DATABASE_URL",
-                    f"{postgres_dsn}{joiner}options=-c%20search_path%3D"
-                    f"{database.schema}%2Cpublic")
+    # `make_conninfo`, NOT a `?options=` suffix: `OPENDOX_TEST_DATABASE_URL`
+    # may be libpq's keyword/value form as well as a URI, and a suffix on
+    # `… dbname=opendox` names the database `opendox?options=…` instead of
+    # selecting the schema (Copilot review of openDox-code#67).
+    from psycopg.conninfo import make_conninfo
+
+    scrubbed.setenv(PREFIX + "DATABASE_URL", make_conninfo(
+        postgres_dsn, options=f"-c search_path={database.schema},public"))
     scrubbed.setenv(MODE, "local")
     code, evidence = _run(["runtime", "status", "--probe-timeout", "5"])
     assert evidence["database"] == "reachable", evidence
