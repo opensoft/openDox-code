@@ -1778,8 +1778,27 @@ def state_dir(env: Mapping[str, str] | None = None) -> Path:
 
 
 def database_bundle(state: Path) -> DatabaseBundle:
-    """The bundle under `state`, refusing a socket path the kernel cannot bind."""
+    """The bundle under `state`, refusing a socket path the kernel cannot bind.
+
+    A COMMA IS REFUSED, wherever the state directory came from
+    (`OPENDOX_STATE_DIR`, `XDG_STATE_HOME` or the home directory), because
+    both ends read the socket directory as a LIST. PostgreSQL splits `-k`
+    (`unix_socket_directories`) on commas, and libpq splits a `host` on them
+    once the DSN's percent-encoding is decoded. So `…/a,…/b` made the server
+    put its sockets in two directories nothing here had checked, one of
+    them anyone could write, while the checked 0700 one stayed empty
+    (adversarial review of openDox-code#69). The value is not repeated:
+    the refusal names where it came from, and that is enough to find it.
+    """
     bundle = DatabaseBundle(state_dir=state)
+    if "," in str(state):
+        raise ConfigurationError(
+            "the state directory's path holds a `,`. PostgreSQL reads its "
+            "socket directories, and libpq its hosts, as comma-separated "
+            "lists, so a comma would split this install's one socket "
+            "directory into two it never checked. Choose a state directory "
+            f"without one: {PREFIX}STATE_DIR or, where that is unset, "
+            "XDG_STATE_HOME or HOME")
     length = len(os.fsencode(str(bundle.socket_path)))
     if length > UNIX_SOCKET_PATH_MAX:
         raise ConfigurationError(
