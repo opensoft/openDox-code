@@ -302,8 +302,12 @@ def register_status_exemption(rail: object) -> object:
     refused once one has (R1Q3 (ii))."""
     global _status_exemption_rail, _status_exemption_is_default
     global _status_exemption_default_read
-    if rail is not None and rail is _status_exemption_rail:
-        return rail
+    # The SAME rail is answered under the lock, as `projection_seams._Seam`
+    # answers it, so a teardown cannot empty the seam between the comparison
+    # and the return (Copilot at openDox-code#71 e0298cf4, r4169543783).
+    with _STATUS_EXEMPTION_LOCK:
+        if rail is not None and rail is _status_exemption_rail:
+            return rail
     _require_a_rail(rail, "register_status_exemption()", "the host's")
     with _STATUS_EXEMPTION_LOCK:
         held = _status_exemption_rail
@@ -346,8 +350,9 @@ def register_default_status_exemption(rail: object) -> object:
     it is openDox's own defect."""
     global _status_exemption_rail, _status_exemption_is_default
     global _status_exemption_default_read
-    if rail is not None and rail is _status_exemption_rail:
-        return rail
+    with _STATUS_EXEMPTION_LOCK:      # as in `register_status_exemption()`
+        if rail is not None and rail is _status_exemption_rail:
+            return rail
     _require_a_rail(rail, "register_default_status_exemption()", "openDox's own")
     with _STATUS_EXEMPTION_LOCK:
         if _status_exemption_rail is None:
