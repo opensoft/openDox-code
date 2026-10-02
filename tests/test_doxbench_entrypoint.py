@@ -24,44 +24,34 @@ these tests fail with that sentence rather than silently launching a harness.
 That is the same discipline `tests/hermeticity.py` now applies to the `omp`
 binary itself (§2.3): two independent layers, neither one's substitute.
 
-THE ENTRYPOINT RUNS FOR REAL, AND SIX OF ITS REACHES ARE STOOD IN (plan 034
-T035). `cmd_generate_and_open` is what these cases exist to drive, and they now
-drive it in a lone checkout. Before this, all four fixture cases errored in
-fixture setup at the first reach across the carve, `openxdox.corpus_root`
-(`ConsumerReachUnavailable`). The reaches are the ones plan 034 names as its
-phase-1 limit (plan.md, "Phase-1 limit"; research R7), and phase 2 gives
-openDox its own snapshot and generator. Until then each one is stood in here,
-and nothing else is:
+THE ENTRYPOINT RUNS FOR REAL, AND NOTHING OF IT IS STOOD IN (plan 034 T055).
+`cmd_generate_and_open` is what these cases exist to drive, and they drive it
+in a lone checkout. Plan 034 T035 first made them run here, by standing in for
+six reaches across the carve that phase 1 could not route (plan.md,
+"Phase-1 limit"; research R7): the corpus-root predicate, the generator and
+the writer in `cli`, and the snapshot source, `_checkout_real` and the
+registry's refresh bindings in `serve`. T055 routes every one of them through
+a declared seam where the entry points register openDox's own default, so the
+fixture below runs openDox's own generator over a real git checkout, writes
+through openDox's own writer, and builds the server over openDox's own
+snapshot registry and source.
 
-  * three in `cli`, the `consumer_reach` names `generate-and-open` calls:
-    `corpus_root_refusal`, `generate_snapshot` and
-    `snapshot_mod.write_snapshot`. A fourth, `SCANNED_ROOTS`, is read only to
-    warn about a snapshot with no document, and the stand-in snapshot carries
-    one, so it is never reached;
-  * three in `serve`, T011's `standalone` stand-ins
-    (`tests/test_route_handler_contribution.py`, section 6): the snapshot
-    source, through `build_server`'s own `snapshot_source=` seam;
-    `_checkout_real`; and `registry_mod`'s two `BINDING_*` constants.
-
-`_checkout_real` ANSWERS TRUE HERE, where T011's answers false. The model port
-is gated on the `session` verdict (`serve_workbench._workbench_model_port`):
-loopback, a real checkout, and a resolved human actor. The carve's `base-repo`
-fixture, which these cases used to serve, was a real corpus checkout, so the
-stand-in gives the answer that fixture gave. The predicate itself is
-openXdox's (`corpus_root.corpus_scan_defect`), and a lone checkout cannot ask
-it.
+`_checkout_real` IS TRUE HERE because the checkout is real: a git repository,
+which is what openDox's own corpus-root predicate asks for. The model port is
+gated on the `session` verdict (`serve_workbench._workbench_model_port`):
+loopback, a real checkout, and a resolved human actor.
 
 What these cases test is openDox's own: the port the entrypoint declares
 (`doxbench_install.declared_model_port_factory`), the one adapter it resolves
-to, and the session root it is handed. None of them reads the snapshot. The
-checkout is an empty scratch directory rather than the carve's `base-repo`
-fixture, which stayed in openxFactory and does not exist at this leg.
+to, and the session root it is handed. None of them reads the snapshot.
 """
 
 from __future__ import annotations
 
-import json
-import types
+import os
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -82,38 +72,36 @@ def _handler_class(httpd):
 
 
 # --------------------------------------------------------------------------
-# the phase-1 stand-ins (see the module docstring), and nothing else
+# a real git checkout to generate from and serve
 # --------------------------------------------------------------------------
 
-class _StandInSource:
-    """`build_server`'s snapshot source as T011's `standalone` fixture injects
-    it: nothing registered, nothing baked, so no session is re-derived."""
-
-    refresh_binding = None
-    baked_repository = None
-
-    class registry:
-        active = None
-
-    def bootstrap(self):
-        pass
+#: T050's plain-documents fixture: documents across the six stations.
+PLAIN_DOCUMENTS = Path(__file__).resolve().parent / "fixtures" / "plain-documents"
 
 
-def _stand_in_generate_snapshot(repo_root, repository, *, source_revision=None,
-                                **_ignored):
-    """`generate_snapshot`'s stand-in: exactly the fields `generate-and-open`
-    reads back when it reports the run. ONE document, so `_report` has no empty
-    projection to warn about and never reaches `SCANNED_ROOTS`."""
-    return {"repository": repository,
-            "generation": {"source_revision": source_revision},
-            "documents": [{"id": "stand-in.md"}]}
+def _git(root: Path, *args: str) -> None:
+    """`git` in `root`, with no inherited `GIT_*` variable and no user or
+    system configuration, as the fixture's own identity at a fixed date."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({
+        "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+        "GIT_COMMITTER_NAME": "fixture",
+        "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+        "GIT_AUTHOR_DATE": "2026-09-27T12:00:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-09-27T12:00:00+00:00",
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+    })
+    subprocess.run(["git", "-C", str(root), *args], check=True,
+                   capture_output=True, env=env)
 
 
-def _stand_in_write_snapshot(snapshot, output, boundary):
-    """`snapshot.write_snapshot`'s stand-in: the file `build_server` is handed,
-    which it opens only to read `generation.source_revision` back."""
-    output.write_text(json.dumps(snapshot), encoding="utf-8")
-    return output
+def _checkout(tmp_path: Path) -> Path:
+    root = tmp_path / "checkout"
+    shutil.copytree(PLAIN_DOCUMENTS, root)
+    _git(root, "-c", "init.defaultBranch=main", "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "fixture")
+    return root
 
 
 @pytest.fixture()
@@ -135,34 +123,19 @@ def entrypoint_server(tmp_path, monkeypatch):
 
     monkeypatch.setattr(br, "_spawn_child", _refuse_spawn)
 
-    monkeypatch.setattr(cli_mod, "corpus_root_refusal",
-                        lambda root, shape=None: None)
-    monkeypatch.setattr(cli_mod, "generate_snapshot", _stand_in_generate_snapshot)
-    monkeypatch.setattr(cli_mod, "snapshot_mod", types.SimpleNamespace(
-        write_snapshot=_stand_in_write_snapshot))
-    monkeypatch.setattr(serve_mod, "_checkout_real", lambda root: True)
-    monkeypatch.setattr(serve_mod, "registry_mod", types.SimpleNamespace(
-        BINDING_REGENERATE="regenerate", BINDING_REFETCH="refetch"))
-
     built = []
     real_build_server = serve_mod.build_server
 
     def _capture(*args, **kwargs):
-        # A TRIPWIRE, not only an injection: the day the entrypoint declares a
-        # snapshot source of its own (phase 2), this stand-in must go, and this
-        # line says so instead of silently standing in over it.
-        assert "snapshot_source" not in kwargs, (
-            "the entrypoint now declares its own snapshot source; drop the "
-            "phase-1 stand-in from this fixture")
-        httpd = real_build_server(*args, snapshot_source=_StandInSource(),
-                                  **kwargs)
+        # A CAPTURE, and nothing else: the server is the entrypoint's own,
+        # built over the snapshot source the registered registry makes.
+        httpd = real_build_server(*args, **kwargs)
         built.append(httpd)
         return httpd
 
     monkeypatch.setattr(serve_mod, "build_server", _capture)
 
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
+    checkout = _checkout(tmp_path)
     session_root = tmp_path / "model-sessions"
     # THE LOCAL INSTALL, SELECTED EXPLICITLY (plan 034 T070; #1144 13.4, as
     # T007 batch H's addendum reads). With neither `--local` nor
