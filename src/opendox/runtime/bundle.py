@@ -346,7 +346,7 @@ BUNDLE_TREE = BUNDLE_SOCKET_DIR.parts
 
 
 def _make_private_directories(leaf: Path) -> None:
-    """`leaf` and every missing directory above it, each created 0700.
+    """`leaf` and every missing directory above it, each born exactly 0700.
 
     `Path.mkdir(parents=True)` gives the directories it creates on the way
     the default mode less the umask, whatever mode the leaf is given. So
@@ -354,20 +354,59 @@ def _make_private_directories(leaf: Path) -> None:
     create `.local` and `state` group-writable, and the tree check would
     then refuse the directories this install had just made (Copilot review
     of openDox-code#69). Each missing component is created here, one at a
-    time, and set to exactly 0700, whatever the umask is. A directory that
-    already exists is left as it is, and the tree check judges it.
+    time, under a umask of 077, so it is born 0700, whatever the user's
+    umask is, with no `chmod` after it. A directory that already exists is
+    left as it is, and the tree check judges it.
+
+    NOTHING IS MADE THROUGH A PATH THAT WAS NOT JUDGED FIRST (Copilot review
+    of openDox-code#69). The caller has refused an unsafe EXISTING prefix
+    before this runs (`BundledServer._prepare_directories`), so the deepest
+    directory that exists is safe to open. Each missing component is then
+    made RELATIVE TO ITS PARENT'S DESCRIPTOR and opened with `O_NOFOLLOW`
+    before anything is made beneath it. A name that another user put there
+    first, in a sticky directory such as `/tmp`, is refused, never followed
+    or written through: a symbolic link, something that is not a directory,
+    or a directory that is not this user's alone.
+
+    THE UMASK IS PROCESS-WIDE, and it is narrowed only for these few
+    `mkdir`s and then put back. A file another thread creates meanwhile can
+    only come out more private than asked, never less.
     """
-    missing = []
-    for directory in (leaf, *leaf.parents):
-        if os.path.lexists(directory):
-            break
-        missing.append(directory)
-    for directory in reversed(missing):
-        try:
-            directory.mkdir(mode=0o700)
-        except FileExistsError:
-            continue                    # made by a concurrent start; judged below
-        os.chmod(directory, 0o700)
+    uid = os.getuid()
+    missing: list[str] = []
+    base = leaf
+    while not os.path.lexists(base):
+        missing.append(base.name)
+        base = base.parent
+    if not missing:
+        return
+    descriptor = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    path = base
+    previous = os.umask(0o077)
+    try:
+        for name in reversed(missing):
+            path = path / name
+            try:
+                os.mkdir(name, 0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass            # made first, by a concurrent start or by someone else: judged next
+            try:
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=descriptor)
+            except OSError:
+                info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                reason = _unsafe_because(info, uid=uid, own=True)
+                if reason is None:
+                    raise
+                raise BundledServer._unsafe(path, reason) from None
+            os.close(descriptor)
+            descriptor = child
+            reason = _unsafe_because(os.fstat(descriptor), uid=uid, own=True)
+            if reason is not None:
+                raise BundledServer._unsafe(path, reason)
+    finally:
+        os.umask(previous)
+        os.close(descriptor)
 
 
 def os_user() -> str:
@@ -555,13 +594,19 @@ class BundledServer:
         under its own state directory, and it is narrowed to 0700 whatever it
         was.
         """
+        # JUDGED BEFORE ANY WRITE, AND AGAIN AFTER (Copilot review of
+        # openDox-code#69). What exists already is checked first, so no
+        # directory is made through a link, or beneath a directory, that the
+        # tree check would refuse, and `_make_private_directories` refuses a
+        # name someone else put in its way. The whole tree is then checked
+        # BEFORE THE CHMOD, which follows a symbolic link: a `run` placed
+        # there as a link would otherwise have its TARGET re-moded.
+        self._refuse_an_unsafe_tree(existing_only=True)
         _make_private_directories(self.bundle.socket_dir)
-        # CHECKED BEFORE THE CHMOD, which follows a symbolic link: a `run`
-        # placed there as a link would otherwise have its TARGET re-moded.
         self._refuse_an_unsafe_tree()
         os.chmod(self.bundle.socket_dir, 0o700)
 
-    def _refuse_an_unsafe_tree(self) -> None:
+    def _refuse_an_unsafe_tree(self, *, existing_only: bool = False) -> None:
         """The socket's whole path is this user's to change, or it is refused.
 
         The socket's directory is how this install's clients find ITS
@@ -587,9 +632,26 @@ class BundledServer:
 
         `OPENDOX_STATE_DIR` never holds `..` (`config.state_dir` refuses it),
         so the configured path's components are the ones the kernel walks.
+
+        With `existing_only`, the same rules are asked of only what exists
+        yet. `_prepare_directories` asks that BEFORE it creates anything,
+        so the links are checked first, a broken one included (Copilot
+        review of openDox-code#69).
         """
         uid = os.getuid()
         configured = self.bundle.state_dir
+
+        def present(path: Path) -> bool:
+            return not existing_only or os.path.lexists(path)
+
+        for component in (configured, *configured.parents):
+            if not present(component):
+                continue
+            info = os.lstat(component)
+            if stat.S_ISLNK(info.st_mode) and info.st_uid not in (uid, 0):
+                raise self._unsafe(
+                    component, f"is a symbolic link owned by uid {info.st_uid}, "
+                    "neither this user nor root, who could point it elsewhere")
         state = configured.resolve()
         tree = [state, state / BUNDLE_TREE[0], state / BUNDLE_TREE[0] / BUNDLE_TREE[1]]
         # AND THE DATA DIRECTORY, where one exists already, a broken link
@@ -604,16 +666,12 @@ class BundledServer:
             (path, False) for path in dict.fromkeys(
                 [*state.parents, *configured.parents])]
         for directory, mine in checks:
+            if not present(directory):
+                continue
             info = os.lstat(directory) if mine else os.stat(directory)
             reason = _unsafe_because(info, uid=uid, own=mine)
             if reason is not None:
                 raise self._unsafe(directory, reason)
-        for component in (configured, *configured.parents):
-            info = os.lstat(component)
-            if stat.S_ISLNK(info.st_mode) and info.st_uid not in (uid, 0):
-                raise self._unsafe(
-                    component, f"is a symbolic link owned by uid {info.st_uid}, "
-                    "neither this user nor root, who could point it elsewhere")
 
     @staticmethod
     def _unsafe(directory: Path, reason: str) -> BundleRefused:
