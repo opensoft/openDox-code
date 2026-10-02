@@ -122,6 +122,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -203,8 +204,8 @@ DATABASE_SETTINGS = ("OPENDOX_DATABASE_URL", "OPENDOX_MIGRATION_DATABASE_URL",
 IDENTITY_SETTINGS = ("OPENDOX_OIDC_ISSUER", "OPENDOX_OIDC_AUDIENCE",
                      "OPENDOX_INSTALL_MODE")
 #: Where a distribution's PostgreSQL listens by default (Debian and Ubuntu,
-#: the runner's own family; the bundled server never listens there, its
-#: socket lives under the fresh state directory).
+#: the runner's own family). Probed even where `/proc/net/unix` cannot be
+#: read; every other PostgreSQL socket is found there (`postgres_sockets`).
 DISTRIBUTION_SOCKETS = ("/var/run/postgresql/.s.PGSQL.5432",
                         "/run/postgresql/.s.PGSQL.5432")
 
@@ -806,23 +807,63 @@ def install_opendox(ctx: Context, verdict: Verdict) -> dict:
     return about
 
 
+def postgres_sockets() -> list[str]:
+    """Every listening Unix socket the kernel lists (`/proc/net/unix`) whose
+    name is PostgreSQL's, `.s.PGSQL.<port>`, wherever it lies: `/tmp`
+    (libpq's upstream default), a distribution's directory, or any other."""
+    try:
+        rows = Path("/proc/net/unix").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    found = {row.split()[-1] for row in rows[1:]
+             if len(row.split()) >= 8
+             and Path(row.split()[-1]).name.startswith(".s.PGSQL.")}
+    return sorted(found)
+
+
+def _shared_directory(sock: str) -> bool:
+    """Whether other users can traverse the socket's directory, as they can
+    every default libpq consults (`/tmp`, `/var/run/postgresql`). A socket
+    in a private (0700) directory is another install's own, reachable only
+    by its owner through an explicit setting, and no child inherits one.
+    A directory that cannot be read is treated as shared: fail closed."""
+    try:
+        mode = os.stat(os.path.dirname(sock)).st_mode
+    except OSError:
+        return True
+    return bool(mode & stat.S_IXOTH)
+
+
+def _socket_answers(sock: str) -> bool:
+    if not os.path.exists(sock):
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(1.0)
+            return probe.connect_ex(sock) == 0
+    except OSError:
+        return False
+
+
 def no_database_answers(verdict: Verdict, env: dict[str, str]) -> None:
     for host in ("127.0.0.1", "::1"):
         verdict.check(f"clean.database tcp {host}:5432",
                       not listening(host, 5432),
                       f"a database already listens on {host}:5432, so the "
                       "bundled server would not be the only one")
-    for sock in DISTRIBUTION_SOCKETS:
-        answered = False
-        if os.path.exists(sock):
-            try:
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-                    probe.settimeout(1.0)
-                    answered = probe.connect_ex(sock) == 0
-            except OSError:
-                answered = False
-        verdict.check(f"clean.database socket {sock}", not answered,
-                      f"a database already answers on {sock}")
+    # EVERY PostgreSQL socket the kernel lists, not a list of directories
+    # kept here (Copilot review of openDox-code#75, r4170537350: a server on
+    # `/tmp`'s socket alone, with TCP off, passed a fixed list).
+    for sock in sorted(set(postgres_sockets()) | set(DISTRIBUTION_SOCKETS)):
+        if not _shared_directory(sock):
+            note(f"{sock} is another install's private socket (its "
+                 "directory admits no other user); no child is configured "
+                 "to reach it")
+            continue
+        verdict.check(f"clean.database socket {sock}",
+                      not _socket_answers(sock),
+                      f"a database already answers on {sock}, a directory "
+                      "every user's libpq can default to")
     present = [name for name in DATABASE_SETTINGS if env.get(name)]
     verdict.check("clean.database settings", not present,
                   f"the child environment names a database: {present}")
@@ -997,8 +1038,11 @@ def check_pages(server: Server, index: Answer,
                   f"`/` answered {index.headers.get('content-type')!r} "
                   "without an <html> element")
     snapshot = fetch_object(server, "/snapshot.json", verdict)
+    documents = snapshot.get("documents")
     verdict.check(f"{label}.snapshot non-empty",
-                  bool(snapshot.get("documents")), "the snapshot is empty")
+                  isinstance(documents, list) and bool(documents),
+                  f"the snapshot's documents are not a non-empty list: "
+                  f"{documents!r:.200}")
     leaks = sorted({m.group(1) for v in string_values(snapshot)
                     for m in F53_PATTERN.finditer(v.lower())})
     verdict.check(f"{label}.snapshot neutral (F5.3)", not leaks,
@@ -1030,12 +1074,16 @@ def grouping_field_of(caps: dict) -> str:
 
 def check_grouping(label: str, snapshot: dict, caps: dict,
                    verdict: Verdict) -> None:
+    """A grouping tile the chat pane can open on: an id and a member
+    document, which is also what the rail's thread read is built from
+    (Copilot review of openDox-code#75, at 32ef3e8c)."""
     field = grouping_field_of(caps)
     verdict.check(f"{label}.snapshot fills the grouping station",
-                  bool(snapshot.get(field)),
-                  f"the snapshot's grouping station ({field!r}) is empty, so "
-                  "no grouping tile can open the chat pane (R1Q13 (a) with "
-                  "(c); AT-R1 fails and does not skip)")
+                  thread_query(snapshot, field) is not None,
+                  f"the snapshot's grouping station ({field!r}) holds no "
+                  "tile with an id and a member document, so no grouping "
+                  "tile can open the chat pane (R1Q13 (a) with (c); AT-R1 "
+                  f"fails and does not skip): {snapshot.get(field)!r:.200}")
 
 
 def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
