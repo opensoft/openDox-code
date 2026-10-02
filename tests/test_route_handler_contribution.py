@@ -1028,20 +1028,21 @@ def test_a_name_the_bound_class_sets_is_refused_before_build_servers_side_effect
 # 6. THE CASE THROUGH `build_server` (T011). `opendox.serve` imports now.
 # ---------------------------------------------------------------------------
 #
-# THE PHASE-1 LIMIT, as measured (plan 034 plan.md, "Phase-1 limit"; research
-# R7). A standalone `build_server` still meets three reaches that phase 2
-# routes, and each case below stands in for exactly those three, no more:
-#   * the snapshot source, `serve.py`'s `registry_mod.SnapshotSource(...)`,
-#     through `build_server`'s own `snapshot_source=` seam;
-#   * `_checkout_real`, whose body imports `openxdox.corpus_root`;
-#   * `compute_capabilities`' two reads of `registry_mod.BINDING_*`, the late
-#     `openxdox.snapshot_registry` constants.
-# Everything else `build_server` does runs for real, the composition first
-# among it.
+# THE PHASE-1 LIMIT IS LIFTED (plan 034 T055; research R7 measured it). A
+# standalone `build_server` met three reaches into openXdox: the snapshot
+# source (`registry_mod.SnapshotSource(...)`), `_checkout_real` (which
+# imported `openxdox.corpus_root`), and `compute_capabilities`' two reads of
+# `registry_mod.BINDING_*`. Phase 1's cases stood in for all three. Since T055
+# each is read from a declared seam where `build_server` registers openDox's
+# own default, so the predicate and the capabilities below are the real ones.
+# The snapshot source stays injected, through `build_server`'s own
+# `snapshot_source=` seam, for one reason: the refusal-order case reads whether
+# its `bootstrap()` ran. Everything else `build_server` does runs for real, the
+# composition first among it.
 
 class _StandInSource:
-    """The snapshot source phase 1 injects: nothing registered, nothing baked.
-    It records whether `bootstrap()` ran, so a refusal can be shown to come
+    """An injected snapshot source: nothing registered, nothing baked. It
+    records whether `bootstrap()` ran, so a refusal can be shown to come
     BEFORE the expensive work does."""
 
     refresh_binding = None
@@ -1092,19 +1093,17 @@ class _HostProfile:
 
 
 @pytest.fixture()
-def standalone(monkeypatch, tmp_path):
-    """`build_server` with a stand-in host profile, the three phase-1 stand-ins
-    above, and the registry put back afterwards. The root conftest registers
-    its own empty profile at process start, and it must find it again."""
-    import types
-
+def standalone(tmp_path):
+    """`build_server` with a stand-in host profile, the injected source above,
+    and the registry put back afterwards. The root conftest registers its own
+    empty profile at process start, and it must find it again. The corpus-root
+    predicate and the registry's bindings are the registered defaults, and
+    `repo` is not a git repository, so the checkout is not real, as phase 1's
+    stand-in answered."""
     from opendox import domain_profile, serve
 
     previous = domain_profile.current() if domain_profile.is_registered() else None
     domain_profile.unregister()
-    monkeypatch.setattr(serve, "_checkout_real", lambda root: False)
-    monkeypatch.setattr(serve, "registry_mod", types.SimpleNamespace(
-        BINDING_REGENERATE="regenerate", BINDING_REFETCH="refetch"))
     (tmp_path / "web").mkdir()
     (tmp_path / "repo").mkdir()
     (tmp_path / "snapshot.json").write_text("{}", encoding="utf-8")

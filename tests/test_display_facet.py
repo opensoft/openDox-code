@@ -298,8 +298,9 @@ def test_two_roles_may_not_share_one_snapshot_enum_value():
         display_manifest({"values": {"register_state": {
             "captured": "same", "proposed": "same"}}})
     # the partial-override case: one declared value colliding with a shipped one
+    shipped = SNAPSHOT_VALUES["register_state"]["captured"]
     with pytest.raises(DisplayFacetError, match="BOTH"):
-        display_manifest({"values": {"register_state": {"proposed": "latent"}}})
+        display_manifest({"values": {"register_state": {"proposed": shipped}}})
     # …and distinct values are taken whole
     ok = display_manifest({"values": {"register_state": {
         "captured": "new", "proposed": "chosen"}}})
@@ -653,7 +654,8 @@ const D = await import(base + "display.js");
 const {{ renderBoard }} = await import(base + "board.js");
 const snap = {{
   documents: [{{ id: "a.md", path: "ideation/brainstorm/a.md", kind: "document",
-               stage: "brainstorm", summary: "a note", dates: {{ captured: "2026-01-01" }} }}],
+               stage: D.SNAPSHOT_VALUES.document_stage.captured, summary: "a note",
+               dates: {{ captured: "2026-01-01" }} }}],
   clusters: [], possibles: [],
   staged_topics: [{{ staging_id: "topic-x", files: ["a.md"] }}],
   changes: [{{ id: "ch-1", status: "active" }},
@@ -688,8 +690,8 @@ console.log(JSON.stringify({{
             f"declares no `.card.{emitted}` rule — the card renders with no "
             "stripe, which no assertion over its words would notice")
     # THE CLASS DOES NOT MOVE WITH THE HOST'S WORDS. `declared` renames the
-    # source station and keeps openxFactory's `brainstorm` enum; the classes are
-    # identical because they were never that word.
+    # source station and keeps openDox's shipped enum values; the classes are
+    # identical because they were never a word.
     assert sorted(out["declared"]) == sorted(out["neutral"])
 
 
@@ -1075,24 +1077,27 @@ def test_the_explorer_file_rows_show_the_declared_stage_word(tmp_path):
 const base = {views} + "/";
 const D = await import(base + "display.js");
 const {{ mountExplorer }} = await import(base + "explorer.js");
-const snap = {{
+// each facet is shown a document at ITS OWN captured enum value: the host's
+// declared `brainstorm`, and the value openDox ships
+const snapAt = (stage) => ({{
   staged_topics: [{{ staging_id: "topic-x", files: ["a.md"] }}],
-  documents: [{{ path: "a.md", stage: "brainstorm", kind: "note" }}],
+  documents: [{{ path: "a.md", stage, kind: "note" }}],
   changes: [],
-}};
+}});
 const declared = D.readDisplay({{ display: {{
   schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
   values: {{ document_stage: {{ captured: "brainstorm" }} }},
   statuses: {{ document: {{ captured: "jotted" }} }},
 }} }});
-function rowTexts(display) {{
+function rowTexts(display, stage) {{
   const host = new Node("div");
-  const explorer = mountExplorer(host, snap, {{ display }});
+  const explorer = mountExplorer(host, snapAt(stage), {{ display }});
   explorer.openTile(D.DRILL_KINDS.selection, "topic-x");
   return flatten(host).filter((n) => n.className === "where").map((n) => n.textContent);
 }}
 console.log(JSON.stringify({{
-  neutral: rowTexts(D.neutralDisplay()), declared: rowTexts(declared),
+  neutral: rowTexts(D.neutralDisplay(), D.SNAPSHOT_VALUES.document_stage.captured),
+  declared: rowTexts(declared, "brainstorm"),
 }}));
 """, tmp_path)
     assert out["declared"], "the tile rendered no file row at all"
@@ -1146,9 +1151,13 @@ console.log(JSON.stringify({{
     declared_state = [t for t in out["declared"] if t.startswith("state: ")]
     assert declared_state, out["declared"]
     assert declared_state[0] == "state: parked", declared_state
+    # The neutral install seeds openDox's own shipped value, and the line reads
+    # openDox's own word for that role (the two are spelled alike since T054,
+    # which made the neutral snapshot's values the defaults).
     neutral_state = [t for t in out["neutral"] if t.startswith("state: ")]
-    assert neutral_state[0] != "state: latent", (
-        "the confirmation still spells the register's enum value")
+    assert neutral_state == [
+        "state: " + NEUTRAL_DISPLAY["statuses"]["candidate"]["captured"]], (
+        "the neutral confirmation does not read openDox's word for the state")
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -1168,27 +1177,30 @@ globalThis.requestAnimationFrame = (fn) => fn();
 const base = {views} + "/";
 const D = await import(base + "display.js");
 const {{ renderFunnel }} = await import(base + "funnel.js");
-const snap = {{
-  documents: [{{ id: "a.md", path: "a.md", stage: "brainstorm", topics: [] }}],
+// each facet is shown a document at ITS OWN captured enum value
+const snapAt = (stage) => ({{
+  documents: [{{ id: "a.md", path: "a.md", stage, topics: [] }}],
   clusters: [], possibles: [], staged_topics: [], changes: [],
-}};
+}});
 const declared = D.readDisplay({{ display: {{
   schema_version: 1, kind: "opendox.display-facet", host_facet: "declared",
   values: {{ document_stage: {{ captured: "brainstorm" }} }},
   statuses: {{ document: {{ captured: "jotted" }} }},
 }} }});
-function hays(display) {{
+function hays(display, stage) {{
   const root = new Node("div");
-  renderFunnel(root, snap, {{ display }});
+  renderFunnel(root, snapAt(stage), {{ display }});
   return flatten(root).filter((n) => n.dataset && n.dataset.hay)
     .map((n) => n.dataset.hay);
 }}
 console.log(JSON.stringify({{
-  declared: hays(declared), neutral: hays(D.neutralDisplay()),
+  declared: hays(declared, "brainstorm"),
+  neutral: hays(D.neutralDisplay(), D.SNAPSHOT_VALUES.document_stage.captured),
+  shipped: D.SNAPSHOT_VALUES.document_stage.captured,
 }}));
 """, tmp_path)
     assert out["declared"] == ["a.md brainstorm jotted"]
-    assert out["neutral"] == ["a.md brainstorm captured"]
+    assert out["neutral"] == [f"a.md {out['shipped']} captured"]
 
 
 # ---------------------------------------------------------------------------
