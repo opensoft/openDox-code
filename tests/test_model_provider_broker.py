@@ -3508,8 +3508,9 @@ def test_a_misbehaving_broker_is_refused_naming_the_operation(
     script = _misbehaving_broker(tmp_path, misbehaviour)
     runner = functools.partial(provider_mod.subprocess_broker_runner,
                                timeout=_MISBEHAVING_TIMEOUT)
+    ask, binding = _OPERATIONS_ASKED[operation], _broker_binding(script)
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        _OPERATIONS_ASKED[operation](_broker_binding(script), runner)
+        ask(binding, runner)
     refusal = caught.value
     assert _wrote(script), "the broker wrote the token before it misbehaved"
     assert refusal.__cause__ is None
@@ -3528,9 +3529,9 @@ def test_a_broker_that_cannot_be_started_chains_nothing(tmp_path, operation):
     nothing either. At `788d764b` it chained the `FileNotFoundError`, by the
     runner and by the operation alike."""
     binding = _binding(broker_argv=(str(tmp_path / "no-such-broker"),))
+    argv = provider_mod.broker_operation_argv(binding, operation)
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.subprocess_broker_runner(
-            provider_mod.broker_operation_argv(binding, operation))
+        provider_mod.subprocess_broker_runner(argv)
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_UNREACHABLE
@@ -3710,8 +3711,9 @@ def test_a_failing_credential_source_escapes_with_no_broker_output(tmp_path):
         "sys.stdout.write(TOKEN)\nwrote()\ntime.sleep(30)\n",
         encoding="utf-8")
     source = _SourceFailingOnceMarked(Path(str(script) + ".wrote"))
+    binding = _broker_binding(script)
     with pytest.raises(UnicodeDecodeError) as caught:
-        provider_mod.hand_off_credential(_broker_binding(script), source)
+        provider_mod.hand_off_credential(binding, source)
     assert _wrote(script), "the broker wrote before the source failed"
     assert _kept_anywhere(caught.value, SENTINEL_TOKEN) == []
     pid = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
@@ -3726,8 +3728,9 @@ def test_an_injected_runners_refusal_is_named_too(tmp_path, operation):
     def refusing(argv, **_kwargs):
         raise provider_mod.BrokerRefused(provider_mod.DIAG_BROKER_REFUSED)
 
+    ask, binding = _OPERATIONS_ASKED[operation], _binding()
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        _OPERATIONS_ASKED[operation](_binding(), refusing)
+        ask(binding, refusing)
     assert caught.value.operation == operation
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_REFUSED
     assert caught.value.__context__ is None
