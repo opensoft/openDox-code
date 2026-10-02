@@ -1392,7 +1392,16 @@ def test_a_given_source_option_is_resolved_and_an_unset_one_is_not_passed(
 
 
 def test_generate_and_open_refuses_an_empty_source_option_before_its_run_dir(
-        tmp_path, capsys) -> None:
+        tmp_path, capsys, monkeypatch) -> None:
+    """In process, so the runtime settings the runner exports are scrubbed
+    first, as the doxBench entrypoint fixture does: an exported
+    `OPENDOX_INSTALL_MODE=hosted` or broker issuer would otherwise make
+    `--local` refuse before the empty option is reached (Copilot review of
+    openDox-code#67)."""
+    from opendox.runtime.config import SETTING_NAMES
+
+    for name in SETTING_NAMES:
+        monkeypatch.delenv(name, raising=False)
     calls: list = []
     _declaring_generator(calls)
     repo = _repository(tmp_path)
