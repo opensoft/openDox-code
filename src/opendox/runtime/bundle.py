@@ -19,8 +19,9 @@ addendum records it) names it:
 THE SERVER'S OWN PACKAGE IS `pixeltable-pgserver` (pyproject.toml's `local`
 extra; RULED openxFactory#656 `5916000030` item 2), and only its BINARIES are
 used: PostgreSQL 16's `initdb` and `postgres` from the wheel's `pginstall/bin`,
-found by `importlib.util.find_spec` without importing `pixeltable_pgserver` at
-all. Its Python manager is deliberately not used. It daemonizes the server
+found through the INSTALLED distribution's own file list
+(`importlib.metadata`), never by import precedence, and without importing
+`pixeltable_pgserver` at all (see `server_binaries`). Its Python manager is deliberately not used. It daemonizes the server
 through `pg_ctl`, which re-parents it away from this process (against (i)). It
 shares one server between processes by reference count and stops it from
 `atexit`, which a SIGTERM never runs (against (iv)). And it may put the socket
@@ -68,7 +69,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
-import importlib.util
+from importlib import metadata
 import os
 import re
 import shutil
@@ -125,32 +126,73 @@ class BundleRefused(Exception):
     """
 
 
+def _distribution_search_path() -> list[str]:
+    """`sys.path` without the working directory, which no install is.
+
+    `python -m opendox.cli` and `python -c` put the directory they were
+    started in at the front of `sys.path` (as `''`, or as its absolute
+    path), and a corpus repository is exactly where a user runs them from.
+    """
+    try:
+        here = Path.cwd().resolve()
+    except OSError:                       # a working directory since removed
+        here = None
+    kept = []
+    for entry in sys.path:
+        if not entry:
+            continue
+        try:
+            if here is not None and Path(entry).resolve() == here:
+                continue
+        except (OSError, RuntimeError):
+            continue
+        kept.append(entry)
+    return kept
+
+
 def server_binaries() -> Path:
     """The directory holding the bundled `initdb` and `postgres`, or a refusal.
 
     Found WITHOUT importing `pixeltable_pgserver`: its package initializer
     imports its manager, which this module does not use and which registers an
     `atexit` handler and reaches for the user's runtime directory.
+
+    AND FOUND AS THE INSTALLED DISTRIBUTION'S OWN FILES, never by import
+    precedence (Copilot review of openDox-code#69). `importlib.util.find_spec`
+    follows `sys.path`, whose first entry under `python -m opendox.cli` is
+    the working directory. So a checkout holding an executable
+    `pixeltable_pgserver/pginstall/bin/postgres` was run as this install's
+    database server. The distribution is now looked up by its name
+    (`importlib.metadata`), on `sys.path` WITHOUT the working directory, and
+    both binaries must be files its RECORD lists, located inside it.
     """
-    spec = importlib.util.find_spec(SERVER_PACKAGE)
-    # THE FIRST LOCATION, OR NONE, read without an index, so no path reaches
-    # a subscript that could raise (SonarCloud S6466 on openDox-code#69).
-    location = next(iter(spec.submodule_search_locations or ()), None) \
-        if spec else None
-    if location is None:
+    candidates = list(metadata.distributions(
+        name=SERVER_DISTRIBUTION, path=_distribution_search_path()))
+    if not candidates:
         raise BundleRefused(
             "the local install's PostgreSQL server is not installed: it "
             "arrives with the `local` extra, `pip install \"opendox[local]\"` "
             "(R1Q16 (iii)). A local install brings its own database and never "
             "borrows one")
-    binaries = Path(location) / "pginstall" / "bin"
-    missing = [name for name in ("initdb", "postgres")
-               if not os.access(binaries / name, os.X_OK)]
+    distribution = candidates[0]
+    suffix = ".exe" if os.name == "nt" else ""
+    listed = {str(entry).replace("\\", "/"): entry
+              for entry in (distribution.files or ())}
+    root = Path(distribution.locate_file("")).resolve()
+    binaries = Path(distribution.locate_file(f"{SERVER_PACKAGE}/pginstall/bin"))
+    missing = []
+    for name in ("initdb", "postgres"):
+        entry = listed.get(f"{SERVER_PACKAGE}/pginstall/bin/{name}{suffix}")
+        located = (Path(distribution.locate_file(entry)).resolve()
+                   if entry is not None else None)
+        if (located is None or not located.is_relative_to(root)
+                or not os.access(located, os.X_OK)):
+            missing.append(name)
     if missing:
         raise BundleRefused(
-            f"the `{SERVER_DISTRIBUTION}` package is installed but carries no "
-            f"executable {' or '.join(missing)} under {binaries}; reinstall "
-            "the `local` extra")
+            f"the `{SERVER_DISTRIBUTION}` package is installed but its own "
+            f"file list carries no executable {' or '.join(missing)} under "
+            f"{binaries}; reinstall the `local` extra")
     return binaries
 
 
