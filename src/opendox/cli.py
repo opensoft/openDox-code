@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 import webbrowser
@@ -478,16 +479,65 @@ def _warn_validator_could_not_run(result, validator) -> None:
         print(f"      {sys.executable} -m {remedy}", file=sys.stderr)
 
 
+#: One broken rule, as a validator's report names it: `[<rule>] <where>:
+#: <detail>`, the line `opendox.validator.Violation.line()` prints.
+_RULE_LINE = re.compile(r"^\[(?P<rule>[^\[\]\s]+)\] (?P<rest>.+)$")
+
+#: How many of a report's other lines (its summary, or a validator's own
+#: words where it names no rule) are printed.
+_REPORT_TAIL = 20
+
+#: How many places each broken rule is shown at: the first on the rule's own
+#: line, and the next ones beneath it. A rule broken at more places than this
+#: says how many more, so its count stays exact and the report stays short.
+_PLACES_SHOWN = 5
+
+
 def _report_non_conformance(written: Path, result) -> None:
     """NOT CONFORMANT — the validator ran, reached a verdict, and rejected the
     snapshot. The one thing this message must never be mistaken for is the
     warning above it, so it says whose fault it is out loud and prints the
     findings themselves; "1 error(s)" alone told a human nothing he could act
-    on."""
+    on.
+
+    EVERY BROKEN RULE, ONCE, WITH ITS COUNT (plan 034 T084; RULED
+    openxFactory#656 `5920216845`, item 3, *"Show every rule, grouped
+    (Recommended)"*). This printed the validator's LAST 20 LINES, so a
+    snapshot that broke one rule a hundred times and a second rule once
+    showed twenty copies of the first and never named the second. Now each
+    rule id the report names is printed ONCE, on a line of its own,
+    `<count> × [<rule>] <where>: <detail>`, in the order the validator found
+    them, with where it is first broken. The next places it is broken follow
+    beneath it, without the id, up to `_PLACES_SHOWN` in all, because one rule
+    can be broken in different ways (a missing key, then another), and a
+    count beside the first place alone would read as that place repeated.
+    The report's other lines (the validator's summary) follow. A validator
+    whose output names no rule id has nothing to group, so its own last lines
+    are printed, as before."""
     print(f"  validation FAILED — the pinned validator REJECTED {written}. This "
           f"is the SNAPSHOT, not the environment: the validator ran fine and "
           f"found the data non-conformant.", file=sys.stderr)
-    for line in (result.stdout or result.stderr).strip().splitlines()[-20:]:
+    lines = (result.stdout or result.stderr).strip().splitlines()
+    places: dict[str, list[str]] = {}
+    others: list[str] = []
+    for line in lines:
+        named = _RULE_LINE.match(line.strip())
+        if named is None:
+            others.append(line)
+            continue
+        places.setdefault(named["rule"], []).append(named["rest"])
+    if places:
+        total = sum(len(where) for where in places.values())
+        print(f"    {total} violation(s) of {len(places)} rule(s), each rule "
+              f"once, with its count and where it is broken:", file=sys.stderr)
+        for rule, where in places.items():
+            print(f"    {len(where)} × [{rule}] {where[0]}", file=sys.stderr)
+            for place in where[1:_PLACES_SHOWN]:
+                print(f"          {place}", file=sys.stderr)
+            if len(where) > _PLACES_SHOWN:
+                print(f"          … and {len(where) - _PLACES_SHOWN} more of "
+                      "this rule", file=sys.stderr)
+    for line in others[-_REPORT_TAIL:]:
         print(f"    {line}", file=sys.stderr)
 
 

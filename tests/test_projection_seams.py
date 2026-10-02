@@ -1510,7 +1510,12 @@ def test_openDoxs_own_kind_meets_openDoxs_own_validator(tmp_path, capsys) -> Non
     assert cli._validate(written, _validate_args(tmp_path)) == 1
     err = capsys.readouterr().err
     assert "REJECTED" in err and "This is the SNAPSHOT" in err
-    assert "[envelope-keys] <root>: 'documents' is required" in err, err
+    # ONE line per broken rule, with its count (T084; RULED 5920216845 item
+    # 3), and each further place it is broken beneath it, so every missing
+    # key is still named.
+    assert "6 × [envelope-keys] <root>: " in err, err
+    assert err.count("[envelope-keys]") == 1, err
+    assert "<root>: 'documents' is required" in err, err
     assert "6 violation(s) of the opendox-snapshot contract, by opendox.validator" in err
     assert "validation SKIPPED" not in err
 
