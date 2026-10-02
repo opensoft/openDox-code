@@ -133,11 +133,32 @@ KICKOFF_CALLABLES: tuple[str, ...] = (
 #: What a cross-reference register registration must carry.
 REGISTER_CALLABLES: tuple[str, ...] = ("CrossReferenceIndexAdapter",)
 
+def _gate_shape(registration) -> list[str]:
+    """`GateRefused` is CAUGHT (`except gate_console.GateRefused`), so it must
+    be an exception class: a callable that is not one would pass the name
+    probe and then raise `TypeError` from the first `except` that reads it."""
+    refused = getattr(registration, "GateRefused", None)
+    if isinstance(refused, type) and issubclass(refused, BaseException):
+        return []
+    return ["GateRefused must be an exception class, because openDox's verbs "
+            "catch it (`except <gate>.GateRefused`)"]
+
+
+def _register_shape(registration) -> list[str]:
+    """openDox calls `CrossReferenceIndexAdapter.discover(<root>)`, so the
+    adapter must carry a callable `discover`, not only be callable itself."""
+    adapter = getattr(registration, "CrossReferenceIndexAdapter", None)
+    if callable(getattr(adapter, "discover", None)):
+        return []
+    return ["CrossReferenceIndexAdapter must carry a callable `discover`, "
+            "because openDox calls CrossReferenceIndexAdapter.discover(<root>)"]
+
+
 gate = projection_seams._Seam(
     "gate", what="gate primitives", callables=GATE_CALLABLES,
     values=GATE_VALUES, default="opendox.default_columns.GATE",
     consequence="no gate action can be guarded, stamped or recorded",
-    module=_MODULE)
+    module=_MODULE, shape=_gate_shape)
 
 scope = projection_seams._Seam(
     "scope", what="doxBench scope authority", callables=SCOPE_CALLABLES,
@@ -156,7 +177,7 @@ register = projection_seams._Seam(
     "register", what="cross-reference register", callables=REGISTER_CALLABLES,
     default="opendox.default_columns.REGISTER",
     consequence="no cross-reference register can be read",
-    module=_MODULE)
+    module=_MODULE, shape=_register_shape)
 
 
 def register_defaults() -> None:

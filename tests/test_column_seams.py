@@ -18,9 +18,13 @@ These cases hold:
    refuses the governed record functions and `GateConsole` by name, as
    `GateRecordsNotRegistered` (a `GateRefused`). `gate_records_writable()` is
    true only with a host's gate.
-4. THE SCOPE DEFAULT projects each kind of tile read-only, confines every
-   path, and answers no session-created path; the kickoff and register defaults
-   answer nothing dispatched and no possibles.
+4. THE SCOPE DEFAULT projects each kind of tile with ITS OWN documents
+   editable and nothing else (RULED `5961651355`, "Tile's own documents
+   editable"), confines every path, and answers no session-created path; the
+   kickoff and register defaults answer nothing dispatched and no possibles.
+5. A REGISTRATION THAT HAS THE NAMES BUT NOT THEIR SHAPE is refused at
+   registration: a gate whose `GateRefused` is not an exception class, and a
+   register whose adapter carries no callable `discover`.
 
 A CREATED FILE: no carve-manifest row (RULED OQ-C).
 """
@@ -160,6 +164,27 @@ def test_a_registration_lacking_a_name_is_refused_naming_it(isolated) -> None:
     with pytest.raises(TypeError, match="is_live_session_ref") as caught:
         cs.scope.register(_Partial())
     assert "column_seams.scope.register()" in str(caught.value)
+
+
+def test_a_gate_whose_refusal_is_not_an_exception_class_is_refused(
+        isolated) -> None:
+    """`except gate.GateRefused` needs a class: a function would pass the name
+    probe and raise `TypeError` at the first refusal a verb catches."""
+    host = _HostGate()
+    host.GateRefused = lambda *args: None
+    with pytest.raises(TypeError, match="GateRefused must be an exception class"):
+        cs.gate.register(host)
+    assert cs.gate.is_registered() is False
+
+
+def test_a_register_whose_adapter_cannot_discover_is_refused(isolated) -> None:
+    class _NoDiscover:
+        CrossReferenceIndexAdapter = staticmethod(lambda *args: None)
+
+    with pytest.raises(TypeError, match="callable `discover`") as caught:
+        cs.register.register(_NoDiscover())
+    assert "column_seams.register.register()" in str(caught.value)
+    assert cs.register.is_registered() is False
 
 
 def test_gate_records_are_writable_only_with_a_hosts_gate(isolated) -> None:

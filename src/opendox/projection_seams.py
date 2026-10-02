@@ -83,7 +83,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 __all__ = [
     "CORPUS_ROOT_CALLABLES",
@@ -239,14 +239,23 @@ class _Seam:
     `module` names the module that declares the seam, in every refusal and in
     the call a host makes. It is this module's own by default, and
     `opendox.column_seams` declares its four seams through the same class
-    (plan 034 T084), so every seam of openDox's keeps one discipline."""
+    (plan 034 T084), so every seam of openDox's keeps one discipline.
+
+    `shape`, where a seam's consumers rely on more than a name being present
+    and callable, answers the registration's further defects as sentences, an
+    empty list for none. A registration with any is refused at registration,
+    as one lacking a name is, rather than at the first consumer that relies on
+    it (an exception class a consumer catches, say, or a member of a member it
+    calls)."""
 
     def __init__(self, name: str, *, what: str, callables: tuple[str, ...],
                  values: tuple[str, ...] = (), default: str,
                  consequence: str,
-                 module: str = "opendox.projection_seams") -> None:
+                 module: str = "opendox.projection_seams",
+                 shape: Callable[[Any], list[str]] | None = None) -> None:
         self.name = name
         self.module = module
+        self._shape = shape
         #: The module's own name without the package, as a refusal names a call.
         self._short = module.rsplit(".", 1)[-1]
         self.what = what
@@ -282,6 +291,8 @@ class _Seam:
                 return registration
         _probe(registration, self.callables, self.values,
                f"{self._short}.{self.name}.register()", f"the host's {self.what}")
+        self._probe_shape(registration, f"{self._short}.{self.name}.register()",
+                          f"the host's {self.what}")
         with self._lock:
             held = self._registered
             if held is registration:
@@ -326,10 +337,29 @@ class _Seam:
         _probe(registration, self.callables, self.values,
                f"{self._short}.{self.name}.register_default()",
                f"openDox's own default {self.what}")
+        self._probe_shape(registration,
+                          f"{self._short}.{self.name}.register_default()",
+                          f"openDox's own default {self.what}")
         with self._lock:
             if self._registered is None:
                 self._begin(registration, is_default=True)
             return self._registered
+
+    def _probe_shape(self, registration: Any, call: str, what: str) -> None:
+        """Refuse a registration whose `shape` answers a defect (see the class
+        docstring). Raised as `_probe` raises, a `TypeError` naming the call."""
+        if self._shape is None:
+            return
+        try:
+            defects = list(self._shape(registration))
+        except Exception as exc:  # noqa: BLE001 - a shape it cannot show is a defect
+            raise TypeError(
+                f"{call} takes {what}, and the shape of "
+                f"{name_of(registration)} could not be read: {exc}") from exc
+        if defects:
+            raise TypeError(
+                f"{call} takes {what}, and {name_of(registration)} "
+                f"carries the names but not their shape: {'; '.join(defects)}.")
 
     def unregister(self) -> None:
         """Drop the registration, a host's or the default, and its records.
