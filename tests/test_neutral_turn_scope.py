@@ -33,6 +33,14 @@ answer with a binding configured.
    `unknown_action`. And the record a Save writes is a governed gate-action
    record, which the gate seam's default refuses by name.
 
+4. STANDALONE, `python -m opendox.serve` as a child with neither sibling
+   importable, over the same checkout and binding: a turn over the tile's own
+   document is answered, never dropped, and is not refused at the guard.
+   Until T085's validators merge into this branch, the plane answers at its
+   validators step (`model_capability_unavailable`), before scope. Once they
+   do, the turn reaches the model step (`model_unavailable`) as case 1 does,
+   and the merge narrows this case to that one answer.
+
 A CREATED FILE: no carve-manifest row (RULED OQ-C).
 """
 
@@ -40,12 +48,14 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import re
 import threading
 from pathlib import Path
 
 import pytest
 
-from standalone_child import fresh_repository, git, run_module
+from standalone_child import Child, fresh_repository, git, run_module
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAIN = ROOT / "tests" / "fixtures" / "plain-documents"
@@ -220,3 +230,50 @@ def test_the_tiles_own_documents_are_exactly_the_editable_set(host) -> None:
     assert projection.editable_paths == own
     assert projection.active_document_candidates == own
     assert OUTSIDE not in projection.editable_paths
+
+
+_SERVE_URL = re.compile(r"^serving ideation dashboard at "
+                        r"(http://([0-9.]+):([0-9]+))/index\.html$")
+
+
+def test_a_standalone_turn_over_the_tiles_own_document_is_answered(
+        tmp_path, monkeypatch) -> None:
+    """Case 4. The child's environment carries no `GIT_*` and no `XF_*`, so
+    its actor is the one its repository's identity names (the suite's own
+    roster of several principals would resolve none)."""
+    from opendox.serve_wire import (DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
+                                    DOXBENCH_ERR_MODEL_UNAVAILABLE)
+    for name in list(os.environ):
+        if name.startswith(("GIT_", "XF_")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    repo = fresh_repository(PLAIN, tmp_path)
+    git(repo, "config", "user.name", "fixture")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    added, status = run_module(tmp_path, "opendox.cli", "model-binding", "add",
+                               "--repo-root", str(repo), *BINDING)
+    assert status == 0, added.stderr_text()
+    out = tmp_path / "out" / "snapshot.json"
+    generated, status = run_module(
+        tmp_path, "opendox.cli", "generate", "--repo-root", str(repo),
+        "--repository", "fixture", "--output", str(out), "--no-validate")
+    assert status == 0, generated.stderr_text()
+    child = Child(tmp_path, "opendox.serve", "--snapshot", str(out),
+                  "--checkout-root", str(repo), "--port", "0")
+    try:
+        match = child.wait_for_line(_SERVE_URL)
+        base = (match.group(2), int(match.group(3)))
+        status, caps, raw = _call(base, "GET", "/capabilities")
+        assert status == 200 and caps["actions"]["session"] is True, raw
+        status, body, raw = _call(base, "POST", "/actions/workbench/chat-turn",
+                                  body=_turn(repo, OWN),
+                                  token=caps["console_token"])
+        # the validators step until T085 merges in, the model step after it;
+        # never the guard's `turn_scope_refused`, never a dropped connection
+        assert body.get("error") in (DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
+                                     DOXBENCH_ERR_MODEL_UNAVAILABLE), (status, raw)
+        assert child.interrupt() == 0, child.stderr_text()
+    finally:
+        child.kill()
+    assert child.refused() == [], child.refused()

@@ -469,6 +469,39 @@ def test_the_three_crash_sites_answer_a_standalone_server(
     assert child.refused() == [], child.refused()
 
 
+def test_the_rails_thread_read_answers_a_standalone_server(
+        tmp_path, monkeypatch) -> None:
+    """The chat rail's thread read, with the exact query the rail sends on
+    opening a document (`views/staging-workbench.js` `loadThread`, called from
+    `views/doxbench-chat.js`): a group tile and one of its members. Found by
+    T095's AT-R1 harness (openDox-code#75): the route reached
+    `from openxdox import doxbench_scope` (`serve_workbench.py:548` at
+    `047bb4fa`) and dropped the connection. A query-less GET stops at the 400
+    check first, which is why batch L's measurement missed it. The live-session
+    question now goes through `column_seams.scope`, and a checkout with no open
+    session answers the stated no-session absence."""
+    from opendox import serve_workbench
+    from opendox.serve_wire import DOXBENCH_ERR_THREAD_CAPABILITY_UNAVAILABLE
+    _clean_environment(monkeypatch)
+    repo = _repository(tmp_path, identity=True)
+    child, base, caps = _standalone(tmp_path, repo)
+    try:
+        token = caps.get("console_token")
+        assert caps["actions"]["session"] is True and token, caps
+        status, body, raw = _call(
+            base, "GET",
+            "/workbench/thread?repository=fixture&ref=main&tile_kind=cluster"
+            "&tile_id=barrel-rain&document=notes-rain-barrel-leak.md",
+            token=token)
+        assert _structured((status, body, raw)), (status, raw)
+        assert body["error"] == DOXBENCH_ERR_THREAD_CAPABILITY_UNAVAILABLE, raw
+        assert body.get("cause") == serve_workbench.NO_LIVE_SESSION_CAUSE, body
+        assert child.interrupt() == 0, child.stderr_text()
+    finally:
+        child.kill()
+    assert child.refused() == [], child.refused()
+
+
 #: The binding `opendox model-binding add` declares for the cases below, as
 #: `tests/test_model_provider_broker.py` declares its own. Nothing is spawned
 #: and nothing is contacted: no case dispatches a turn.
