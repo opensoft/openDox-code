@@ -27,8 +27,8 @@ static route (`SimpleHTTPRequestHandler`'s, over `opendox/web/` beside the
 installed `opendox/cli.py`) served the other 41, each with the bytes the tree
 holds and a type a browser accepts.
 
-THE CASES, each against a wheel built from this checkout and installed
-OUTSIDE it (T072's own recipe, `tests_runtime/test_bundled_postgres.py`):
+THE CASES. The first two run against a wheel built from this checkout and
+installed OUTSIDE it (T072's own recipe, `tests_runtime/test_bundled_postgres.py`):
 
 1. the wheel carries every file the tree's `src/opendox/web/` holds, and
    nothing else there;
@@ -39,6 +39,9 @@ OUTSIDE it (T072's own recipe, `tests_runtime/test_bundled_postgres.py`):
    and a content type a browser accepts for it. The module graph a browser
    walks from `/` closes inside the bundle. It stops on SIGTERM, as F10.1's
    `kill "$SERVER"` stops it, and its bundled server stops with it.
+3. the walk's import reader, over the tree: it finds every relative static
+   import the modules declare, the same set an independent line-by-line
+   reading finds, and a specifier pointed at a missing module is caught.
 
 10.2a, A DECLARATION AND NOT A GAP. `views/intent-feed.js` stays at
 openxFactory (RULED OQ-F) and is not owed to openDox; `views/intent-binding.js`
@@ -283,13 +286,85 @@ def _essence(content_type: str) -> str:
 # attributes, and each module's STATIC imports. A static import that names a
 # missing file fails the whole module graph; a dynamic `import()` is how the
 # bundle reaches what may be absent (10.2a), so those are read separately, and
-# walked on only where the bundle carries the target.
+# walked on only where the bundle carries the target. Both are read from the
+# module with its COMMENTS removed (`_without_comments`): a multi-line import
+# clause carries comments of its own, and an apostrophe or a quotation mark in
+# one ended the clause before its `from` (Copilot review of openDox-code#73:
+# `views/doxbench-editor.js`'s import of `./doxbench-state.js` was missed).
 _PAGE_REFERENCE = re.compile(r"""\b(?:src|href)\s*=\s*["']([^"']+)["']""")
 _STATIC_IMPORT = re.compile(
     r"""^[ \t]*(?:import|export)\b[^;'"`]*?\bfrom[ \t]*(["'])([^"'\n]+)\1"""
     r"""|^[ \t]*import[ \t]*(["'])([^"'\n]+)\3""",
     re.MULTILINE)
 _DYNAMIC_IMPORT = re.compile(r"""\bimport\(\s*(["'])(\.{1,2}/[^"'\n]+)\1\s*\)""")
+
+
+#: Where a `/` opens a regular-expression literal rather than dividing: after
+#: one of these characters, or after one of these words (the usual reading).
+_REGEX_AFTER = frozenset("(,=:[!&|?{};+-*%<>~^")
+_REGEX_AFTER_WORDS = frozenset({"return", "typeof", "case", "do", "else",
+                                "in", "of", "void", "yield", "await", "delete",
+                                "instanceof", "new", "throw"})
+
+
+def _without_comments(source: str) -> str:
+    """`source` with every JavaScript comment replaced by blank space (its line
+    breaks kept), and every string, template and regular-expression literal
+    kept as it is, so a quote or slash inside one is never read as code."""
+    out: list[str] = []
+    i, n = 0, len(source)
+    previous, word, in_word = "", "", False
+    while i < n:
+        ch, two = source[i], source[i:i + 2]
+        if two in ("//", "/*"):
+            if two == "//":
+                end = source.find("\n", i)
+                end = n if end == -1 else end
+            else:
+                end = source.find("*/", i + 2)
+                end = n if end == -1 else end + 2
+            out.append("\n" * source.count("\n", i, end) or " ")
+            i = end
+            continue
+        regex = ch == "/" and (previous in _REGEX_AFTER or previous == ""
+                               or word in _REGEX_AFTER_WORDS)
+        if ch in "'\"`" or regex:
+            j, in_class = i + 1, False
+            while j < n and (source[j] != ch or in_class):
+                if source[j] == "\\":
+                    j += 1
+                elif regex and source[j] == "[":
+                    in_class = True
+                elif regex and source[j] == "]":
+                    in_class = False
+                elif regex and source[j] == "\n":
+                    break
+                j += 1
+            out.append(source[i:j + 1])
+            previous, word, in_word, i = ch, "", False, j + 1
+            continue
+        out.append(ch)
+        if ch.isalnum() or ch in "_$":
+            word = word + ch if in_word else ch
+            previous, in_word = ch, True
+        else:
+            in_word = False
+            if not ch.isspace():
+                previous, word = ch, ""
+        i += 1
+    return "".join(out)
+
+
+def _imports(path: str, text: str) -> tuple[set[str], set[str]]:
+    """`(static, dynamic)`: the bundle paths `path`'s module names in its static
+    imports and in its relative dynamic `import()` calls, comments removed."""
+    code = _without_comments(text)
+    static = {_resolve(path, match.group(2) or match.group(4))
+              for match in _STATIC_IMPORT.finditer(code)
+              if (match.group(2) or match.group(4)).startswith((".", "/"))}
+    dynamic = {_resolve(path, match.group(2))
+               for match in _DYNAMIC_IMPORT.finditer(code)}
+    return static, dynamic
 
 
 def _local(reference: str) -> bool:
@@ -303,9 +378,10 @@ def _resolve(importer: str, reference: str) -> str:
     return target
 
 
-def _module_graph(read, carried: set[str]) -> tuple[set[str], set[str]]:
-    """`(reached, dynamic)`: every bundle path a browser fetches from `/`, and
-    every relative dynamic `import()` target any reached module names.
+def _module_graph(read, carried: set[str]) -> tuple[set[str], set[str], set]:
+    """`(reached, dynamic, edges)`: every bundle path a browser fetches from
+    `/`, every relative dynamic `import()` target any reached module names,
+    and every `(importer, imported)` pair the walk followed.
 
     The walk starts at the page's references and follows each module's static
     imports. A dynamic target the bundle CARRIES is a module a browser can
@@ -316,7 +392,7 @@ def _module_graph(read, carried: set[str]) -> tuple[set[str], set[str]]:
     page = "index.html"
     queue = [_resolve(page, ref) for ref in _PAGE_REFERENCE.findall(read(page))
              if _local(ref)]
-    reached, dynamic = {page}, set()
+    reached, dynamic, edges = {page}, set(), set()
     while queue:
         path = queue.pop()
         if path in reached:
@@ -324,17 +400,12 @@ def _module_graph(read, carried: set[str]) -> tuple[set[str], set[str]]:
         reached.add(path)
         if not path.endswith(".js"):
             continue
-        text = read(path)
-        for match in _STATIC_IMPORT.finditer(text):
-            reference = match.group(2) or match.group(4)
-            if reference.startswith((".", "/")):
-                queue.append(_resolve(path, reference))
-        for match in _DYNAMIC_IMPORT.finditer(text):
-            target = _resolve(path, match.group(2))
-            dynamic.add(target)
-            if target in carried:
-                queue.append(target)
-    return reached, dynamic
+        static, named = _imports(path, read(path))
+        dynamic |= named
+        for target in static | (named & carried):
+            edges.add((path, target))
+            queue.append(target)
+    return reached, dynamic, edges
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +515,7 @@ def test_F10_1_fetch_the_installed_local_entry_point_serves_every_bundle_file(
             return body.decode("utf-8")
 
         tree = _tree_files()
-        reached, dynamic = _module_graph(read, tree)
+        reached, dynamic, _edges = _module_graph(read, tree)
         assert reached - tree == set(), sorted(reached - tree)
         assert {"app.js", "styles.css", "views/intent-binding.js",
                 "views/projection-index.js"} <= reached
@@ -464,3 +535,62 @@ def test_F10_1_fetch_the_installed_local_entry_point_serves_every_bundle_file(
             child.kill()
             child.wait(timeout=STOP_SECONDS)
     assert bundle_mod.running_pid(config.DatabaseBundle(state_dir)) is None
+
+
+# ---------------------------------------------------------------------------
+# 3 — the walk's import reader, over the tree, against an independent reading
+# ---------------------------------------------------------------------------
+
+#: A specifier a statement names at the end of a line of code: `from "./x"`,
+#: or a bare `import "./x"`. Read line by line, skipping comment lines, so it
+#: shares nothing with `_without_comments` and `_STATIC_IMPORT`.
+_LINE_SPECIFIER = re.compile(
+    r"""(?:\bfrom|^[ \t]*import)[ \t]*(["'])(\.{1,2}/[^"'\n]+)\1""")
+
+#: The edge Copilot's review of openDox-code#73 found the first reader missed:
+#: its import clause spans lines whose comments hold an apostrophe and quotes.
+_COMMENTED_CLAUSE_EDGE = ("views/doxbench-editor.js", "views/doxbench-state.js")
+
+
+def _line_specifiers(path: str, text: str) -> set[tuple[str, str]]:
+    found = set()
+    for line in text.splitlines():
+        if line.strip().startswith(("//", "*", "/*")):
+            continue
+        found.update((path, _resolve(path, match.group(2)))
+                     for match in _LINE_SPECIFIER.finditer(line))
+    return found
+
+
+def test_the_walk_reads_every_static_import_the_bundle_declares() -> None:
+    """The browser walk's reader finds every relative static import in the
+    tree's modules, the same set an independent line-by-line reading finds,
+    including the one a multi-line clause with commented quotes declares. A
+    mutant that points only that specifier at a missing module is caught by
+    the walk, so case 2's closure assertion would refuse it."""
+    tree = _tree_files()
+    read = {path: (WEB / path).read_text(encoding="utf-8")
+            for path in tree if path.endswith(".js")}
+    declared = set().union(*(_line_specifiers(p, t) for p, t in read.items()))
+    found = {(path, target) for path, text in read.items()
+             for target in _imports(path, text)[0]}
+    assert found == declared, (sorted(declared - found), sorted(found - declared))
+    assert _COMMENTED_CLAUSE_EDGE in found
+
+    def page_or(texts):
+        # a module the bundle does not carry reads as empty: the walk has
+        # already counted it as reached, which is what this case asserts
+        return lambda path: texts[path] if path in texts else (
+            (WEB / path).read_text(encoding="utf-8") if path in tree else "")
+
+    reached, _dynamic, edges = _module_graph(page_or(read), tree)
+    assert _COMMENTED_CLAUSE_EDGE in edges
+    assert reached - tree == set(), sorted(reached - tree)
+    importer, imported = _COMMENTED_CLAUSE_EDGE
+    missing = imported.replace(".js", "-missing.js")
+    mutated = dict(read)
+    mutated[importer] = read[importer].replace(
+        f'}} from "./{Path(imported).name}";', f'}} from "./{Path(missing).name}";')
+    assert mutated[importer] != read[importer], "the mutant changed nothing"
+    reached, _dynamic, _edges = _module_graph(page_or(mutated), tree)
+    assert reached - tree == {missing}, sorted(reached - tree)
