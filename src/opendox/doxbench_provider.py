@@ -1314,12 +1314,13 @@ def _post_to_provider(*, endpoint: str, dialect: str,
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
     try:
         document = json.loads(payload.decode("utf-8"))
-    # A RecursionError too: arrays nested past the interpreter's limit fit
-    # well inside MAX_PROVIDER_ANSWER_BYTES (30,000 of them take 60 KB). Such
-    # an answer is malformed, and must not escape as a crash whose traceback
-    # keeps this frame, and so the request and its authorization header
-    # (Copilot's review of openDox-code#64 at `e1a6cb0f`).
-    except (ValueError, UnicodeDecodeError, RecursionError) as error:
+    # A ValueError covers a UnicodeDecodeError, which is one. A RecursionError
+    # too: arrays nested past the interpreter's limit fit well inside
+    # MAX_PROVIDER_ANSWER_BYTES (30,000 of them take 60 KB). Such an answer
+    # is malformed, and must not escape as a crash whose traceback keeps this
+    # frame, and so the request and its authorization header (Copilot's
+    # review of openDox-code#64 at `e1a6cb0f`).
+    except (ValueError, RecursionError) as error:
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED) from error
     if not isinstance(document, dict):
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
