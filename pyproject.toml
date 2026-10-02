@@ -290,7 +290,7 @@ where = ["src"]
 # the hosted GET fallback by a packaging omission rather than by a deployment
 # choice.
 #
-# `web/**` and not a list: the bundle is 41 files across one subdirectory and
+# `web/**` and not a list: the bundle is 42 files across two subdirectories and
 # grows by feature, and a hand-kept list would drift the first time a view is
 # added. `tests/test_web_boundary.py`'s census is what holds the DIRECTORY
 # honest — every file under `src/opendox/web/` carries a declared row with a

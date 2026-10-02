@@ -102,6 +102,9 @@ NOT_OWED = "views/intent-feed.js"
 SIBLINGS = ("openxdox", "ideation_dashboard", "doc_health",
             "corpus_adapter_openxfactory")
 
+#: The probe's exit status when one of them is importable.
+SIBLING_PRESENT = 3
+
 #: The JavaScript MIME type essences the HTML standard lists. A module
 #: script served under any other type is refused by the browser.
 JAVASCRIPT_TYPES = frozenset({
@@ -353,11 +356,17 @@ def test_F10_1_fetch_the_installed_local_entry_point_serves_every_bundle_file(
         [sys.executable, "-c",
          "import importlib.util, sys\n"
          f"present = [n for n in {SIBLINGS!r} if importlib.util.find_spec(n)]\n"
+         "if present:\n"
+         "    print('importable siblings:', present, file=sys.stderr)\n"
+         f"    sys.exit({SIBLING_PRESENT})\n"
          "from opendox import cli\n"
-         "print(cli.WEB_DIR.resolve())\n"
-         "sys.exit(1 if present else 0)\n"],
+         "print(cli.WEB_DIR.resolve())\n"],
         cwd=elsewhere, env=env, capture_output=True, text=True, timeout=60)
-    assert probe.returncode == 0, f"a sibling is importable: {probe.stderr[-2000:]}"
+    # Named, so a red here says WHICH sibling, and an import that fails for
+    # another reason is not reported as one.
+    assert probe.returncode != SIBLING_PRESENT, (
+        f"a sibling is importable: {probe.stderr[-2000:]}")
+    assert probe.returncode == 0, probe.stderr[-2000:]
     served_dir = Path(probe.stdout.strip().splitlines()[-1])
     assert served_dir.is_relative_to(site.resolve()), served_dir
     helped = subprocess.run([str(script), "--help"], cwd=elsewhere, env=env,
