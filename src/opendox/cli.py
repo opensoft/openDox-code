@@ -700,6 +700,33 @@ def _run_the_local_lifecycle(args: argparse.Namespace, server, *, opener) -> int
         server.stop()
 
 
+def _install_report(args: argparse.Namespace):
+    """`/capabilities`' `install` block for THIS process, as a callable the
+    server asks on each request, or None where no install shape was resolved
+    (plan 034 T073; #1144 13.4a; RULED R1Q16 (i), `5850003126`).
+
+    It is read from the settings `cmd_generate_and_open` resolved and loaded
+    (`args.runtime_settings`) and from the bundled server it started as its
+    own child (`args.database_bundle`), so the served process reports its own
+    install shape: a status probe from a second process could be right about
+    the settings while the server ignored them. `mode` is the install mode
+    those settings carry. `database_bundle` is the bundled server's report,
+    `data_dir`, `socket_dir` and its `pid` while it lives
+    (`bundle.BundledServer.report`), and it is None for a hosted install,
+    which bundles no server, as `runtime status` reports it."""
+    settings = getattr(args, "runtime_settings", None)
+    if settings is None:
+        return None
+    server = getattr(args, "database_bundle", None)
+
+    def report() -> dict:
+        return {"mode": settings.install_mode,
+                "database_bundle": (server.report() if server is not None
+                                    else None)}
+
+    return report
+
+
 def _generate_and_open(args: argparse.Namespace, *, opener) -> int:
     """`generate-and-open`'s generate-then-serve half, once the install is known."""
     # Ahead of minting the run dir, so a refused root leaves not even an empty
@@ -774,7 +801,12 @@ def _generate_and_open(args: argparse.Namespace, *, opener) -> int:
                                    # the self-hosted half of the ratified
                                    # two-case principle
                                    knowledge_declaration=(
-                                       knowledge_mod.SELF_HOSTED_LOCAL_EMBEDDED))
+                                       knowledge_mod.SELF_HOSTED_LOCAL_EMBEDDED),
+                                   # and THIS process's own install shape, on
+                                   # `/capabilities` (plan 034 T073; #1144
+                                   # 13.4a): the settings it loaded, and the
+                                   # bundled server it started as its child.
+                                   install_report=_install_report(args))
     url = serve_mod.server_url(httpd, "/index.html")
     print(f"  serving {url}")
     print(f"  snapshot {serve_mod.server_url(httpd, '/snapshot.json')}")
