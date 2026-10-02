@@ -1393,9 +1393,18 @@ def test_a_given_source_option_is_resolved_and_an_unset_one_is_not_passed(
 
 def test_generate_and_open_refuses_an_empty_source_option_before_its_run_dir(
         tmp_path, capsys, monkeypatch) -> None:
-    """And before the local install's bundled server (plan 034 T072): a
-    refused option costs no database start. A tripwire stands in for the
-    server, so a regression neither starts one nor passes."""
+    """In process, so the runtime settings the runner exports are scrubbed
+    first, as the doxBench entrypoint fixture does: an exported
+    `OPENDOX_INSTALL_MODE=hosted` or broker issuer would otherwise make
+    `--local` refuse before the empty option is reached (Copilot review of
+    openDox-code#67). And the refusal comes before the local install's
+    bundled server (plan 034 T072): a refused option costs no database
+    start. A tripwire stands in for the server, so a regression neither
+    starts one nor passes."""
+    from opendox.runtime.config import SETTING_NAMES
+
+    for name in SETTING_NAMES:
+        monkeypatch.delenv(name, raising=False)
     started: list = []
 
     class _Tripwire:

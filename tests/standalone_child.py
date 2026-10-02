@@ -20,6 +20,12 @@ builds that child and reads it:
 * It is read on threads while it runs (`Child.wait_for_line`), so a server that
   never exits can still be asked where it serves, and then interrupted
   (`Child.interrupt`, SIGINT, as Ctrl-C sends).
+* IT INHERITS NO RUNTIME SETTING. Every `OPENDOX_*` name the runtime reads
+  (`opendox.runtime.config.SETTING_NAMES`) is taken out of the child's
+  environment, so an `OPENDOX_INSTALL_MODE=hosted` or a broker issuer the
+  runner happens to export cannot make a `generate-and-open --local` child
+  refuse before the case it exists for (plan 034 T070; Copilot review of
+  openDox-code#67). The one setting given back is the next one.
 * ITS STATE DIRECTORY IS ITS OWN. A `generate-and-open --local` child starts
   the local install's bundled PostgreSQL server (plan 034 T072) under
   `OPENDOX_STATE_DIR`, whose default is the USER's own state directory. So
@@ -141,14 +147,23 @@ def fresh_repository(fixture: Path, parent: Path, *,
 
 class Child:
     """One `python -m <module> ...` child, with the siblings refused and its
-    standard output a buffered pipe. `workdir` holds the blocker and the log."""
+    standard output a buffered pipe. `workdir` holds the blocker and the log.
 
-    def __init__(self, workdir: Path, module: str, *args: str) -> None:
+    `extra_env` names the settings a case gives its child ON PURPOSE (a hosted
+    install's issuer and DSNs, say). They are applied after the runner's own
+    runtime settings are taken out, so a case still inherits none by
+    accident (plan 034 T073)."""
+
+    def __init__(self, workdir: Path, module: str, *args: str,
+                 extra_env: dict[str, str] | None = None) -> None:
         blocker = workdir / "sibling-blocker"
         blocker.mkdir(parents=True, exist_ok=True)
         (blocker / "sitecustomize.py").write_text(_BLOCKER, encoding="utf-8")
         self.refused_log = workdir / "refused-imports.log"
-        env = dict(os.environ)
+        from opendox.runtime.config import SETTING_NAMES
+
+        env = {name: value for name, value in os.environ.items()
+               if name not in SETTING_NAMES}
         env.pop("PYTHONUNBUFFERED", None)
         env["PYTHONPATH"] = os.pathsep.join(
             [str(blocker), *filter(None, [env.get("PYTHONPATH")])])
@@ -156,6 +171,7 @@ class Child:
         self.state_dir = Path(tempfile.mkdtemp(
             prefix="odx-child-", dir="/tmp" if os.path.isdir("/tmp") else None))
         env["OPENDOX_STATE_DIR"] = str(self.state_dir)
+        env.update(extra_env or {})
         self.argv = [sys.executable, "-m", module, *args]
         verb = args[0] if args and not args[0].startswith("-") else ""
         self.label = f"python -m {module} {verb}".strip()
