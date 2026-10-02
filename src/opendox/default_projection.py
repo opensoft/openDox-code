@@ -63,14 +63,15 @@ it is registered under.
   is searched for, and no path can make the validator reachable or not. No
   subprocess runs, so there is no dependency remedy (`dependency_remedy` is
   None).
-* THE WORKBENCH MANIFEST'S TWO VALIDATOR RULES. Its schema says of two rules
-  that it cannot state them, and leaves them to the validator. The consumer's
-  script checked them in single-file mode, and they are carried here, under
-  its identifiers, so routing `validate_manifest` to openDox's validator drops
-  neither (the holder's decision, 2026-09-28). `workbench-pinned-not-checked`:
-  every `recipe.pinned` keyword is also in `recipe.checked`.
-  `workbench-candidate-overlap`: no `recipe.new_candidates` document is
-  already a member or excluded.
+* THE WORKBENCH MANIFEST'S TWO VALIDATOR RULES ARE THE VALIDATOR'S. Its
+  schema says of two rules that it cannot state them, and leaves them to the
+  validator. T058 carried them here, under the consumer script's
+  identifiers. Since plan 034's T085 (RULED `openxFactory#656` comment
+  `5920216845`, item 2, *"Move into openDox's validator (Recommended)"*),
+  `opendox.validator` owns them, as `pinned-keywords-are-checked` and
+  `new-candidates-are-disjoint`, and they reach this adapter's report
+  through `validator_for(kind).violations()` like every other rule of the
+  kind. This module checks neither.
 
 IMPORT WEIGHT. `opendox.generator_seam`, `opendox.projection_seams` and the
 standard library. So this module imports with no extra installed and no
@@ -97,7 +98,7 @@ from typing import Any
 from opendox import generator_seam, projection_seams
 
 __all__ = ["CORPUS_ROOT", "CorpusRoot", "OWN_KINDS", "OwnValidator",
-           "NUMBER_RULE", "SYNTAX_RULE", "SnapshotNotWritable", "VALIDATORS", "WORKBENCH_RULES",
+           "NUMBER_RULE", "SYNTAX_RULE", "SnapshotNotWritable", "VALIDATORS",
            "WRITER", "Writer"]
 
 #: The workbench manifest's kind, `opendox.workbench.KIND`, restated because
@@ -110,7 +111,8 @@ WORKBENCH_KIND = "ideation-workbench"
 #: generate verb writes with openDox's own generator, and the workbench
 #: manifest `workbench.save()` validates. `opendox.validator` validates the
 #: doxBench wire kinds too, and they reach it through their own seam
-#: (`serve_wire.register_doxbench_validators`, T085), not through this one.
+#: (`serve_wire`'s doxBench-validators seam, where the entry points register
+#: `opendox.doxbench_defaults`'s default, T085), not through this one.
 OWN_KINDS: tuple[str, ...] = (generator_seam.NEUTRAL_SNAPSHOT_KIND, WORKBENCH_KIND)
 
 #: How each own kind is written, and so how its document is read.
@@ -128,11 +130,6 @@ SYNTAX_RULE = "document-syntax"
 #: from `SYNTAX_RULE`, so the report does not call a valid document malformed
 #: (Copilot at openDox-code#68 c7768ed5, r4146428769).
 NUMBER_RULE = "document-number"
-
-#: The workbench manifest's two validator rules, which its schema leaves to
-#: the validator, under the identifiers the consumer's script gave them.
-WORKBENCH_RULES: tuple[str, ...] = ("workbench-pinned-not-checked",
-                                    "workbench-candidate-overlap")
 
 
 class CorpusRoot:
@@ -346,48 +343,6 @@ def _refuse_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return document
 
 
-def _names(value: Any) -> list[str]:
-    """A list's string entries, once each, in order. Anything else answers
-    none: its shape is the schema's to judge, and these rules only compare.
-
-    Linear: the schema bounds none of the three lists, so membership is a
-    set's, and the list only keeps the order (Copilot at openDox-code#68
-    09cd1e8a, r4139734444)."""
-    if not isinstance(value, list):
-        return []
-    names: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        if isinstance(item, str) and item not in seen:
-            seen.add(item)
-            names.append(item)
-    return names
-
-
-#: How many names a rule's detail quotes before it says how many more, and
-#: how much of each name it quotes.
-_QUOTED = 10
-_NAME_CHARS = 80
-
-
-def _quoted(names: list[str]) -> str:
-    """`names` as a detail quotes them: the first few, each cut to a readable
-    length, and a count of the rest, so one violation stays one readable line.
-    The schema bounds neither the lists nor their strings (Copilot at
-    openDox-code#68 21e4723f, r4139769791)."""
-    shown = repr([name if len(name) <= _NAME_CHARS else name[:_NAME_CHARS - 1] + "…"
-                  for name in names[:_QUOTED]])
-    return shown if len(names) <= _QUOTED else f"{shown[:-1]}, and {len(names) - _QUOTED} more]"
-
-
-def _documents(entries: Any) -> set[str]:
-    """The `document` of each entry of a members or excluded list."""
-    if not isinstance(entries, list):
-        return set()
-    return {entry["document"] for entry in entries
-            if isinstance(entry, dict) and isinstance(entry.get("document"), str)}
-
-
 class OwnValidator:
     """openDox's own validator for ONE of its kinds, behind the validator
     lookup's protocol (plan 034's T058; this module's docstring)."""
@@ -434,32 +389,6 @@ class OwnValidator:
         except yaml.YAMLError as exc:
             raise ValueError(" ".join(str(exc).split())) from exc
 
-    @staticmethod
-    def _workbench_rules(document: Any) -> list:
-        """The manifest's two validator rules (this module's docstring)."""
-        from opendox.validator import Violation
-
-        if not isinstance(document, dict) or not isinstance(document.get("recipe"), dict):
-            return []
-        recipe = document["recipe"]
-        found = []
-        checked = set(_names(recipe.get("checked")))
-        stray = [name for name in _names(recipe.get("pinned")) if name not in checked]
-        if stray:
-            found.append(Violation(
-                WORKBENCH_RULES[0], ("recipe", "pinned"), "workbench-rule",
-                f"pinned keyword(s) {_quoted(stray)} are not in checked: every pinned "
-                "keyword MUST also be checked"))
-        placed = _documents(document.get("members")) | _documents(document.get("excluded"))
-        overlap = [name for name in _names(recipe.get("new_candidates")) if name in placed]
-        if overlap:
-            found.append(Violation(
-                WORKBENCH_RULES[1], ("recipe", "new_candidates"), "workbench-rule",
-                f"new_candidates {_quoted(overlap)} already appear in members or "
-                "excluded: a new candidate is a document the set has not "
-                "placed yet"))
-        return found
-
     def validate(self, path: Path | str, *, strict: bool = False,
                  search_from: tuple = ()) -> projection_seams.ValidationResult:
         """Validate the document at `path` as this validator's kind. `strict`
@@ -505,8 +434,6 @@ class OwnValidator:
                 f"{' '.join(str(exc).split()) or type(exc).__name__}")]
         else:
             violations = kind_validator.violations(document)
-            if self.kind == WORKBENCH_KIND:
-                violations += self._workbench_rules(document)
         if not violations:
             return projection_seams.ValidationResult(
                 True, 0, f"{self.kind}: 0 violations, by {ran}\n", "", ran)

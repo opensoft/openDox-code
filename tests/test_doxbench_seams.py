@@ -72,10 +72,12 @@ FOREIGN = ("openxdox", "ideation_dashboard", "corpus_adapter_openxfactory",
 
 #: Each seam's own functions, and the readers that resolve through it.
 VALIDATOR_SEAM_FUNCTIONS = (
-    "register_doxbench_validators", "unregister_doxbench_validators",
-    "doxbench_validators_registered", "default_doxbench_validators")
+    "register_doxbench_validators", "register_default_doxbench_validators",
+    "unregister_doxbench_validators", "doxbench_validators_registered",
+    "default_doxbench_validators")
 RAIL_SEAM_FUNCTIONS = (
-    "register_status_exemption", "unregister_status_exemption",
+    "register_status_exemption", "register_default_status_exemption",
+    "_require_a_rail", "unregister_status_exemption",
     "status_exemption_registered", "_status_exemption", "exemption_rail",
     "__getattr__")
 
@@ -93,31 +95,38 @@ EXEMPT_TEXT = "Status: kept\n\nEXEMPT-ME: the stand-in rail exempts this.\n"
 @pytest.fixture(autouse=True)
 def _empty_seams():
     """Every test starts with NOTHING registered at either seam, and puts back
-    what it found.
+    EXACTLY what it found, records included.
 
     Both seams are process-global by design (ONE registration each, for the
     process), so a teardown that only unregistered would strip a registration
-    some other part of the process made at its start.
+    some other part of the process made at its start. And since plan 034's
+    T085 a seam's registration may be openDox's own DEFAULT, which an entry
+    point registered and a request may already have read, so the records go
+    back with it (`setattr`, never a host's `register()`): a default restored
+    as a host's would no longer give way to one.
 
     Read through `getattr` with a default, so that against a tree WITHOUT the
     seams each test fails on its own assertion rather than all of them erroring
     here, which is what makes this file's red run legible."""
     found = {
-        "validators": (serve_wire, "_doxbench_validators_factory",
-                       "unregister_doxbench_validators",
-                       "register_doxbench_validators"),
-        "rail": (pk, "_status_exemption_rail", "unregister_status_exemption",
-                 "register_status_exemption"),
+        "validators": (serve_wire, ("_doxbench_validators_factory",
+                                    "_doxbench_validators_is_default",
+                                    "_doxbench_validators_default_read"),
+                       "unregister_doxbench_validators"),
+        "rail": (pk, ("_status_exemption_rail", "_status_exemption_is_default",
+                      "_status_exemption_default_read"),
+                 "unregister_status_exemption"),
     }
-    previous = {key: getattr(module, slot, None)
-                for key, (module, slot, _u, _r) in found.items()}
-    for module, _slot, unregister, _register in found.values():
+    previous = {key: [(slot, getattr(module, slot)) for slot in slots
+                      if hasattr(module, slot)]
+                for key, (module, slots, _u) in found.items()}
+    for module, _slots, unregister in found.values():
         getattr(module, unregister, lambda: None)()
     yield
-    for key, (module, _slot, unregister, register) in found.items():
+    for key, (module, _slots, unregister) in found.items():
         getattr(module, unregister, lambda: None)()
-        if previous[key] is not None:
-            getattr(module, register)(previous[key])
+        for slot, value in previous[key]:
+            setattr(module, slot, value)
 
 
 class _TrapModule(types.ModuleType):

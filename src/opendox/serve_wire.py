@@ -85,6 +85,7 @@ this module uses ABSOLUTE `ideation_dashboard.*` imports, never `from . import`.
 from __future__ import annotations
 
 import json
+import threading
 
 from opendox import doxbench_knowledge
 from opendox import doxbench_packet
@@ -1368,13 +1369,30 @@ _UNSET_VALIDATOR_FACTORY = object()
 # (`opendox.domain_profile.register`). openDox names no implementation, so
 # nothing here imports the host's package.
 #
-# REFUSAL, NOT A DEFAULT. With nothing registered the factory refuses, naming
-# this seam and the registration call (`DoxbenchValidatorsNotRegistered`,
-# 4.2's discipline), and the two model routes refuse with their fixed codes,
-# because `_doxbench_validators` turns any factory failure into `None`.
-# openDox's own validators for its own copies of the doxBench schemas are a
-# later act (plan 034's T085); until then there is nothing for this seam to
-# fall back to, and "no validator" is never an implicit pass.
+# openDox's OWN DEFAULT, REGISTERED BY AN ENTRY POINT (plan 034's T085; R1Q10
+# (a), `openxFactory#656` comment `5850003126`, in R1Q3 (a)'s pattern,
+# `5817152735`). openDox's own validators over its packaged copies of the two
+# doxBench schemas (`opendox.validator.doxbench_validators`, R1Q12 (a)) are the
+# standalone default. `cli.build_parser()`, `cli.main()`,
+# `serve.build_server()` and `serve.main()` register it where no host has,
+# through `opendox.doxbench_defaults.register_defaults()`, with
+# `register_default_doxbench_validators(factory)`. The rules are the
+# projection seams' (`opendox.projection_seams`) and the profile's:
+#
+# * a process that runs none of them still REFUSES, naming this seam and its
+#   registration call (`DoxbenchValidatorsNotRegistered`, 4.2's discipline):
+#   the default is a registration an entry point makes, never a fallback
+#   inside this seam;
+# * a host's registration made BEFORE the default has been read replaces it;
+# * AFTER a request has read the default, a host's registration is refused,
+#   as a host's profile after a build is (R1Q3 (ii); RN-1 (a)): one process
+#   would otherwise verify its model routes against two factories;
+# * the same registration again is a no-op, and
+#   `unregister_doxbench_validators()` makes a deliberate swap explicit.
+#
+# With nothing registered the two model routes refuse with their fixed codes,
+# because `_doxbench_validators` turns any factory failure into `None`, and
+# "no validator" is never an implicit pass.
 
 #: The ONE call a host makes, quoted verbatim in the refusal so the refusal
 #: names its remedy rather than its symptom.
@@ -1387,19 +1405,23 @@ DOXBENCH_VALIDATORS_REGISTRATION_CALL = (
 DOXBENCH_VALIDATORS_NOT_REGISTERED = (
     "no doxBench schema validators are registered at openDox's "
     "doxBench-validators seam (opendox.serve_wire), so no model route can "
-    "verify what it would answer, and each refuses. A host registers its "
-    "validators factory at process start with "
-    + DOXBENCH_VALIDATORS_REGISTRATION_CALL + ".")
+    "verify what it would answer, and each refuses. openDox's own validators "
+    "are a registration an ENTRY POINT makes where no host has "
+    "(opendox.doxbench_defaults.register_defaults(), which cli.build_parser(), "
+    "cli.main(), serve.build_server() and serve.main() call), and never a "
+    "fallback here. A host registers its validators factory at process start "
+    "with " + DOXBENCH_VALIDATORS_REGISTRATION_CALL + ".")
 
 
 class DoxbenchValidatorsNotRegistered(RuntimeError):
     """The doxBench-validators seam has no registered factory.
 
     Raised by `default_doxbench_validators`, and so by every request that
-    reaches `build_server`'s default seam in a process no host registered.
-    `_doxbench_validators` swallows it into `None`, like every other factory
-    failure, so its text never reaches the wire: the routes answer their fixed
-    codes, and a direct caller reads the seam and the call it names."""
+    reaches `build_server`'s default seam in a process where neither a host nor
+    an entry point registered one. `_doxbench_validators` swallows it into
+    `None`, like every other factory failure, so its text never reaches the
+    wire: the routes answer their fixed codes, and a direct caller reads the
+    seam and the call it names."""
 
 
 class DoxbenchValidatorsAlreadyRegistered(RuntimeError):
@@ -1408,11 +1430,27 @@ class DoxbenchValidatorsAlreadyRegistered(RuntimeError):
     ONE registration: a process whose model routes verify against two
     factories, depending on which registration a request happened to reach, is
     the failure one registration exists to prevent. Registering the SAME
-    factory again is not refused. `unregister_doxbench_validators()` makes a
-    deliberate swap explicit."""
+    factory again is not refused, and neither is a host's factory over
+    openDox's own default before anything has read it.
+    `unregister_doxbench_validators()` makes a deliberate swap explicit."""
 
 
 _doxbench_validators_factory = None
+#: Whether the registration is openDox's own default (an entry point's), and
+#: whether a request has read that default since it was registered. The
+#: second closes the window in which a host's registration replaces it.
+_doxbench_validators_is_default = False
+_doxbench_validators_default_read = False
+_DOXBENCH_VALIDATORS_LOCK = threading.Lock()
+
+
+def _require_a_factory(factory, call: str, whose: str) -> None:
+    if not callable(factory):
+        raise TypeError(
+            f"{call} takes {whose} validators factory, a callable, not "
+            f"{type(factory).__name__}. A host with no validators does not "
+            "register one: it leaves the seam empty, and the model routes "
+            "refuse, naming this call.")
 
 
 def register_doxbench_validators(factory):
@@ -1422,34 +1460,80 @@ def register_doxbench_validators(factory):
     validators, a `dict` of wire kind to validator, as
     `ideation_dashboard.doxbench_contracts.validators` does for openxFactory.
     It is called PER REQUEST, never cached here, so a factory that re-verifies
-    its pin on every call keeps a mid-run repin observable."""
-    global _doxbench_validators_factory
-    if not callable(factory):
-        raise TypeError(
-            "register_doxbench_validators() takes the host's validators "
-            f"factory, a callable, not {type(factory).__name__}. A host with no "
-            "validators does not register one: it leaves the seam empty, and "
-            "the model routes refuse, naming this call.")
-    if (_doxbench_validators_factory is not None
-            and _doxbench_validators_factory is not factory):
+    its pin on every call keeps a mid-run repin observable.
+
+    The SAME factory again is a no-op. A different one over a host's is
+    refused. Over openDox's own default it REPLACES the default until a
+    request has read the default, and it is refused once one has."""
+    global _doxbench_validators_factory, _doxbench_validators_is_default
+    global _doxbench_validators_default_read
+    _require_a_factory(factory, "register_doxbench_validators()", "the host's")
+    with _DOXBENCH_VALIDATORS_LOCK:
+        held = _doxbench_validators_factory
+        if held is factory:
+            return factory
+        if held is None or (_doxbench_validators_is_default
+                            and not _doxbench_validators_default_read):
+            _doxbench_validators_factory = factory
+            _doxbench_validators_is_default = False
+            _doxbench_validators_default_read = False
+            return factory
+        over_a_host = not _doxbench_validators_is_default
+    if over_a_host:
         raise DoxbenchValidatorsAlreadyRegistered(
             "a validators factory is already registered at openDox's "
             "doxBench-validators seam, and a different one would replace it. "
             "Registration happens once, at process start. Call "
             "opendox.serve_wire.unregister_doxbench_validators() first if the "
             "swap is deliberate.")
-    _doxbench_validators_factory = factory
-    return factory
+    raise DoxbenchValidatorsAlreadyRegistered(
+        "openDox's own validators are registered at openDox's "
+        "doxBench-validators seam, because an entry point registered them "
+        "where no host had, and a request has already read them, so the "
+        "host's factory cannot replace them now. A swap would leave one "
+        "process verifying its model routes against two factories, as a "
+        "host's profile after a build would (R1Q3 (ii), openxFactory#656 "
+        "comment 5817152735; RN-1 (a), comment 5850003126). Register the "
+        "host's own at process start, ahead of cli.build_parser(), "
+        "cli.main(), serve.build_server() and serve.main(). Call "
+        "opendox.serve_wire.unregister_doxbench_validators() first if the "
+        "swap is deliberate.")
+
+
+def register_default_doxbench_validators(factory):
+    """AN ENTRY POINT's registration of openDox's own default (R1Q10 (a)).
+
+    Registers `factory` ONLY where nothing is registered, and leaves a host's
+    registration, or a default already registered, exactly as it is. Returns
+    whatever is registered afterwards. It is NOT for hosts. A default that is
+    not callable is refused whether or not anything is registered, because it
+    is openDox's own defect."""
+    global _doxbench_validators_factory, _doxbench_validators_is_default
+    global _doxbench_validators_default_read
+    _require_a_factory(factory, "register_default_doxbench_validators()",
+                       "openDox's own")
+    with _DOXBENCH_VALIDATORS_LOCK:
+        if _doxbench_validators_factory is None:
+            _doxbench_validators_factory = factory
+            _doxbench_validators_is_default = True
+            _doxbench_validators_default_read = False
+        return _doxbench_validators_factory
 
 
 def unregister_doxbench_validators() -> None:
-    """Drop the registration. For test isolation and for a host tearing down."""
-    global _doxbench_validators_factory
-    _doxbench_validators_factory = None
+    """Drop the registration, a host's or the default, and its records. For
+    test isolation and for a host tearing down."""
+    global _doxbench_validators_factory, _doxbench_validators_is_default
+    global _doxbench_validators_default_read
+    with _DOXBENCH_VALIDATORS_LOCK:
+        _doxbench_validators_factory = None
+        _doxbench_validators_is_default = False
+        _doxbench_validators_default_read = False
 
 
 def doxbench_validators_registered() -> bool:
-    """Is a validators factory registered, without calling it or refusing?"""
+    """Is a validators factory registered, a host's or the entry point's
+    default, without calling it or refusing?"""
     return _doxbench_validators_factory is not None
 
 
@@ -1460,18 +1544,26 @@ def default_doxbench_validators() -> dict:
     This is `build_server`'s default for the `schema_validator_factory` seam.
     It is a function, not an eager module-level load, so a server can be built
     on a plane with no registered factory and simply refuse the two model
-    routes rather than failing to start — and so the host's factory runs per
-    request rather than being cached at import, which is what makes a mid-run
-    repin observable.
+    routes rather than failing to start — and so the registered factory runs
+    per request rather than being cached at import, which is what makes a
+    mid-run repin observable.
 
     Refuses with `DoxbenchValidatorsNotRegistered`, naming the seam and its
     registration call, when nothing is registered. Otherwise raises whatever
     the factory raises (openxFactory's `ContractPinError` on an unreachable
     checkout, an absent schema, a digest mismatch, a manifest disagreement, or
-    a drifted `stack.yaml` ref). The caller (`_doxbench_validators`) turns any
-    of those into a fail-closed route refusal: "I could not read the contract"
-    is never an implicit pass."""
-    factory = _doxbench_validators_factory
+    a drifted `stack.yaml` ref; openDox's own `ValidatorUnavailable` for a
+    packaged copy that fails its proof). The caller (`_doxbench_validators`)
+    turns any of those into a fail-closed route refusal: "I could not read the
+    contract" is never an implicit pass.
+
+    Reading openDox's own default here is what closes its window: from this
+    call on, a host's registration over it is refused."""
+    global _doxbench_validators_default_read
+    with _DOXBENCH_VALIDATORS_LOCK:
+        factory = _doxbench_validators_factory
+        if factory is not None and _doxbench_validators_is_default:
+            _doxbench_validators_default_read = True
     if factory is None:
         raise DoxbenchValidatorsNotRegistered(DOXBENCH_VALIDATORS_NOT_REGISTERED)
     return factory()

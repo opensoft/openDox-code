@@ -36,8 +36,10 @@ The pipeline this module owns, in the order design §3.1 fixes:
      ``Status:`` vocabulary is that corpus's, and it is what made this file
      un-carveable; the MARKING, which is generic, stayed here. The read is
      now the one a HOST registers at the status-exemption seam
-     (``register_status_exemption``), and with none registered the assembler
-     refuses rather than marking nothing. Nothing about the rail's position
+     (``register_status_exemption``), or openDox's own, which marks nothing
+     exempt and which the entry points register where no host has (plan
+     034's T085). With none registered the assembler refuses rather than
+     marking nothing. Nothing about the rail's position
      in the pipeline changed: it still runs inside the assembler, before the
      packet exists.
   4. **THE BOUNDS CHECK** — refuse with the MEASURED DIMENSION. No truncation,
@@ -72,6 +74,7 @@ read, so nothing here names ``doc_health`` and a neutrality scan asserts it.
 from __future__ import annotations
 
 import dataclasses
+import threading
 import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
@@ -156,6 +159,18 @@ class PacketExpired(PacketRejected):
 # (`StatusExemptionNotRegistered`, 4.2's discipline): a packet assembled with
 # its sources unmarked would carry the exemption silently switched off.
 #
+# openDox's OWN DEFAULT IS NO EXEMPTION, REGISTERED BY AN ENTRY POINT (plan
+# 034's T085; R1Q10 (a), `openxFactory#656` comment `5850003126`, in R1Q3 (a)'s
+# pattern). `opendox.doxbench_defaults.NO_STATUS_EXEMPTION` marks no source
+# exempt, and `cli.build_parser()`, `cli.main()`, `serve.build_server()` and
+# `serve.main()` register it where no host has, through
+# `opendox.doxbench_defaults.register_defaults()`, with
+# `register_default_status_exemption(rail)`. A process that runs none of them
+# still refuses, as above: the default is a registration and never a fallback
+# here. A host's rail registered BEFORE the default has been read replaces it,
+# and one registered AFTER is refused (R1Q3 (ii); RN-1 (a)), so one process
+# never marks its packets by two readers.
+#
 # WHY A MODULE `__getattr__` AND NOT A TOP-LEVEL RE-EXPORT. The names are read
 # off this module by existing callers, and a registration happens after this
 # module is imported, so nothing can bind them at import time. Resolved lazily,
@@ -196,7 +211,11 @@ STATUS_EXEMPTION_REGISTRATION_CALL = (
 STATUS_EXEMPTION_NOT_REGISTERED = (
     "no status-exemption rail is registered at openDox's status-exemption "
     "seam (opendox.doxbench_packet), so no source can be marked and no packet "
-    "is assembled. A host registers its rail at process start with "
+    "is assembled. openDox's own rail, no exemption, is a registration an "
+    "ENTRY POINT makes where no host has "
+    "(opendox.doxbench_defaults.register_defaults(), which cli.build_parser(), "
+    "cli.main(), serve.build_server() and serve.main() call), and never a "
+    "fallback here. A host registers its rail at process start with "
     + STATUS_EXEMPTION_REGISTRATION_CALL + ".")
 
 
@@ -217,11 +236,44 @@ class StatusExemptionAlreadyRegistered(RuntimeError):
     ONE registration: a process whose packets are marked by two readers,
     depending on which registration an assembly happened to reach, is the
     failure one registration exists to prevent. Registering the SAME rail
-    again is not refused. `unregister_status_exemption()` makes a deliberate
-    swap explicit."""
+    again is not refused, and neither is a host's rail over openDox's own
+    default before anything has read it. `unregister_status_exemption()`
+    makes a deliberate swap explicit."""
 
 
 _status_exemption_rail: object | None = None
+#: Whether the rail is openDox's own default (an entry point's), and whether
+#: an assembly has read that default since it was registered. The second
+#: closes the window in which a host's rail replaces it.
+_status_exemption_is_default = False
+_status_exemption_default_read = False
+_STATUS_EXEMPTION_LOCK = threading.Lock()
+
+
+def _require_a_rail(rail: object, call: str, whose: str) -> None:
+    """Refuse, with `TypeError`, a rail that does not carry
+    `STATUS_EXEMPTION_REQUIRED` as callables, or cannot hand one over."""
+    missing: list[str] = []
+    probe_failure: Exception | None = None
+    for name in STATUS_EXEMPTION_REQUIRED:
+        try:
+            member = getattr(rail, name)
+        except Exception as exc:  # noqa: BLE001 - a name it cannot hand over is a name it lacks
+            probe_failure = probe_failure or exc
+            member = None
+        if not callable(member):
+            missing.append(name)
+    if rail is None or missing:
+        refusal = TypeError(
+            f"{call} takes {whose} status-exemption "
+            "rail, which must carry callable "
+            f"{', '.join(STATUS_EXEMPTION_REQUIRED)}; "
+            f"{type(rail).__name__} lacks {', '.join(missing) or 'them'}. A "
+            "host with no rail does not register one: it leaves the seam "
+            "empty, and the assembler refuses, naming this call.")
+        if probe_failure is None:
+            raise refusal
+        raise refusal from probe_failure
 
 
 def register_status_exemption(rail: object) -> object:
@@ -243,50 +295,87 @@ def register_status_exemption(rail: object) -> object:
     The SAME rail again is a no-op, and it is not probed a second time: it
     was validated when it was registered, and a lazy rail whose later lookup
     fails must not turn an idempotent host start into a refusal. Only a NEW
-    registration is validated."""
-    global _status_exemption_rail
-    if rail is not None and rail is _status_exemption_rail:
-        return rail
-    missing: list[str] = []
-    probe_failure: Exception | None = None
-    for name in STATUS_EXEMPTION_REQUIRED:
-        try:
-            member = getattr(rail, name)
-        except Exception as exc:  # noqa: BLE001 - a name it cannot hand over is a name it lacks
-            probe_failure = probe_failure or exc
-            member = None
-        if not callable(member):
-            missing.append(name)
-    if rail is None or missing:
-        refusal = TypeError(
-            "register_status_exemption() takes the host's status-exemption "
-            "rail, which must carry callable "
-            f"{', '.join(STATUS_EXEMPTION_REQUIRED)}; "
-            f"{type(rail).__name__} lacks {', '.join(missing) or 'them'}. A "
-            "host with no rail does not register one: it leaves the seam "
-            "empty, and the assembler refuses, naming this call.")
-        if probe_failure is None:
-            raise refusal
-        raise refusal from probe_failure
-    if _status_exemption_rail is not None and _status_exemption_rail is not rail:
+    registration is validated.
+
+    A different rail over a host's is refused. Over openDox's own default it
+    REPLACES the default until an assembly has read the default, and it is
+    refused once one has (R1Q3 (ii))."""
+    global _status_exemption_rail, _status_exemption_is_default
+    global _status_exemption_default_read
+    # The SAME rail is answered under the lock, as `projection_seams._Seam`
+    # answers it, so a teardown cannot empty the seam between the comparison
+    # and the return (Copilot at openDox-code#71 e0298cf4, r4169543783).
+    with _STATUS_EXEMPTION_LOCK:
+        if rail is not None and rail is _status_exemption_rail:
+            return rail
+    _require_a_rail(rail, "register_status_exemption()", "the host's")
+    with _STATUS_EXEMPTION_LOCK:
+        held = _status_exemption_rail
+        if held is rail:
+            return rail
+        if held is None or (_status_exemption_is_default
+                            and not _status_exemption_default_read):
+            _status_exemption_rail = rail
+            _status_exemption_is_default = False
+            _status_exemption_default_read = False
+            return rail
+        over_a_host = not _status_exemption_is_default
+    if over_a_host:
         raise StatusExemptionAlreadyRegistered(
             "a status-exemption rail is already registered at openDox's "
             "status-exemption seam, and a different one would replace it. "
             "Registration happens once, at process start. Call "
             "opendox.doxbench_packet.unregister_status_exemption() first if "
             "the swap is deliberate.")
-    _status_exemption_rail = rail
-    return rail
+    raise StatusExemptionAlreadyRegistered(
+        "openDox's own status-exemption rail (no exemption) is registered at "
+        "openDox's status-exemption seam, because an entry point registered it "
+        "where no host had, and an assembly has already read it, so the "
+        "host's rail cannot replace it now. A swap would leave one process "
+        "marking its packets by two readers, as a host's profile after a "
+        "build would (R1Q3 (ii), openxFactory#656 comment 5817152735; RN-1 "
+        "(a), comment 5850003126). Register the host's own at process start, "
+        "ahead of cli.build_parser(), cli.main(), serve.build_server() and "
+        "serve.main(). Call opendox.doxbench_packet.unregister_status_exemption() "
+        "first if the swap is deliberate.")
+
+
+def register_default_status_exemption(rail: object) -> object:
+    """AN ENTRY POINT's registration of openDox's own default rail (R1Q10 (a)).
+
+    Registers `rail` ONLY where nothing is registered, and leaves a host's
+    rail, or a default already registered, exactly as it is. Returns whatever
+    is registered afterwards. It is NOT for hosts. A default that could not
+    mark a source is refused whether or not anything is registered, because
+    it is openDox's own defect."""
+    global _status_exemption_rail, _status_exemption_is_default
+    global _status_exemption_default_read
+    with _STATUS_EXEMPTION_LOCK:      # as in `register_status_exemption()`
+        if rail is not None and rail is _status_exemption_rail:
+            return rail
+    _require_a_rail(rail, "register_default_status_exemption()", "openDox's own")
+    with _STATUS_EXEMPTION_LOCK:
+        if _status_exemption_rail is None:
+            _status_exemption_rail = rail
+            _status_exemption_is_default = True
+            _status_exemption_default_read = False
+        return _status_exemption_rail
 
 
 def unregister_status_exemption() -> None:
-    """Drop the registration. For test isolation and for a host tearing down."""
-    global _status_exemption_rail
-    _status_exemption_rail = None
+    """Drop the registration, a host's or the default, and its records. For
+    test isolation and for a host tearing down."""
+    global _status_exemption_rail, _status_exemption_is_default
+    global _status_exemption_default_read
+    with _STATUS_EXEMPTION_LOCK:
+        _status_exemption_rail = None
+        _status_exemption_is_default = False
+        _status_exemption_default_read = False
 
 
 def status_exemption_registered() -> bool:
-    """Is a rail registered, without resolving anything or refusing?"""
+    """Is a rail registered, a host's or the entry point's default, without
+    resolving anything or refusing?"""
     return _status_exemption_rail is not None
 
 
@@ -298,8 +387,15 @@ def _status_exemption():
     call, `__getattr__` once per name — so the dependence on the host's rail
     sits at one readable point, as it did when this function imported the
     publisher's module by name.
+
+    Reading openDox's own default here is what closes its window: from this
+    call on, a host's rail over it is refused.
     """
-    rail = _status_exemption_rail
+    global _status_exemption_default_read
+    with _STATUS_EXEMPTION_LOCK:
+        rail = _status_exemption_rail
+        if rail is not None and _status_exemption_is_default:
+            _status_exemption_default_read = True
     if rail is None:
         raise StatusExemptionNotRegistered(STATUS_EXEMPTION_NOT_REGISTERED)
     return rail
@@ -1529,8 +1625,9 @@ def __getattr__(name: str):
     With no rail registered these names raise `AttributeError` naming the
     missing attribute and the seam — a loud failure at the first assembly
     rather than a packet quietly assembled with every source unmarked.
-    openDox's own neutral default is a later act (plan 034's T085), and until
-    then there is none to fall back to.
+    openDox's own neutral default, no exemption, is not a fallback here either:
+    it is a registration the entry points make where no host has (plan 034's
+    T085), and these names then answer as that rail's own objects.
 
     THE SEAM'S REFUSAL IS TRANSLATED, NOT LET THROUGH RAW. `_status_exemption()`
     refuses with `StatusExemptionNotRegistered`, a `PacketError`, which
