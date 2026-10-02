@@ -317,22 +317,25 @@ function unavailabilityNote(stateValue) {
 // R15), and an install with no model and no intake flow, which is every
 // standalone one, had no other place that said it. So this is a SEPARATE,
 // VISIBLE line with the remedy, and it shows only when that is the state:
-// the catalog has ANSWERED, it offers no available entry, no catalog failure
-// is recorded (a stale token or an unreadable answer has its own remedy), and
-// no intake affordance is rendered (where intake is offered, the selector's
-// first option is the remedy's home, and a second statement of it would be the
-// "second, weaker statement" the intake requirement refuses). The Python twin
-// is `doxbench_model.NO_MODEL_CONFIGURED_REMEDY`, which
-// tests/test_chat_model_configuration.py holds to this spelling.
+// the catalog has ANSWERED, it is EMPTY, no catalog failure is recorded (a
+// stale token or an unreadable answer has its own remedy), and no intake
+// affordance is rendered (where intake is offered, the selector's first option
+// is the remedy's home, and a second statement of it would be the "second,
+// weaker statement" the intake requirement refuses). EMPTY, not "nothing
+// available": a configured model can be unavailable — after a broker refusal
+// `BrokeredProviderPort.catalog()` keeps the binding, `available: false` — and
+// telling that operator to declare a binding they already have would send them
+// to the wrong repair. The server's no-model port answers the empty catalog
+// (`doxbench_model.NO_MODEL_CONFIGURED`), so empty is exactly "no binding and
+// no harness". The Python twin is `doxbench_model.NO_MODEL_CONFIGURED_REMEDY`,
+// which tests/test_chat_model_configuration.py holds to this spelling.
 export const NO_MODEL_CONFIGURED_REMEDY =
   "No model configured. To configure one, declare a model binding with \"opendox model-binding add\" (\"--help\" lists its fields), or put the local harness \"omp\" on PATH, then restart this console.";
 
 export function noModelConfiguredRemedy(stateValue) {
   if (stateValue.catalogFailure) return null;
   if (stateValue.models === null) return null;
-  if ((stateValue.models || []).some((entry) => entry.available === true)) {
-    return null;
-  }
+  if ((stateValue.models || []).length !== 0) return null;
   if (stateValue.intakeOffered === true) return null;
   return NO_MODEL_CONFIGURED_REMEDY;
 }
@@ -1127,7 +1130,8 @@ export function mountDoxBenchChatRail(host, options = {}) {
   const unavailableNote = el("div", "doxchat-unavailable doxchat-sronly",
                              CHAT_CATALOG_LOADING_NOTE);
   // 16.4's visible line (`noModelConfiguredRemedy`): hidden until the catalog
-  // has answered with nothing available.
+  // has answered empty. It is not itself a live region; render() ANNOUNCES its
+  // text through `announce` below, once per change.
   const noModelNote = el("div", "doxchat-no-model");
   noModelNote.hidden = true;
   const transcriptList = el("ul", "doxchat-transcript");
@@ -1500,9 +1504,18 @@ export function mountDoxBenchChatRail(host, options = {}) {
     // would trade a statement of posture for a call to action, and the posture is
     // the fact the human needs.
     unavailableNote.textContent = selectable ? "" : unavailabilityNote(state);
-    const remedy = noModelConfiguredRemedy(state);
-    noModelNote.textContent = remedy || "";
-    noModelNote.hidden = !remedy;
+    // ANNOUNCED, ONCE PER CHANGE. The catalog settles asynchronously and with
+    // no focus change, so a line that only appears is a line a screen-reader
+    // user is never told about: its text goes to the polite `announce` region
+    // too. Same only-when-it-changes guard as the posture and retry notes
+    // below, for the same measured reason: render() runs on every keystroke,
+    // and re-writing a live region with the same sentence re-announces it.
+    const remedyText = noModelConfiguredRemedy(state) || "";
+    if (noModelNote.textContent !== remedyText) {
+      noModelNote.hidden = !remedyText;
+      noModelNote.textContent = remedyText;
+      if (remedyText) announce.textContent = remedyText;
+    }
     selector.value = defaultSelectorValue(state);
     transcriptList.textContent = "";
     for (const turn of transcriptWindow(state)) {

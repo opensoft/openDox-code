@@ -27,12 +27,19 @@ state 16.4 asks for:
    sibling importable (`tests/standalone_child.py`) answers the catalog route
    200 with no available entry. This is T085's falsifier's second half, and
    it needs T085's validators. The child also answers a schema-valid turn
-   `403 model_capability_unavailable`.
-5. THE CHAT RAIL. Mounted over an empty catalog with no intake flow, the rail
+   `403 model_capability_unavailable`, and the same turn without the console
+   token `console_required`.
+   THE TURN ROUTE'S ORDER (the holder's ruling on the hoist, option (a)): a
+   console, body, kind, schema or parse defect answers first in every
+   posture; with no port, the no-model refusal answers before a scope,
+   identity or limits defect and the scope is never read; with a port, every
+   defect answers what it answered before the hoist.
+5. THE CHAT RAIL. Mounted over an EMPTY catalog with no intake flow, the rail
    shows "No model configured" and how to configure one, visibly and before
-   any turn, while the send button keeps its existing sentence byte for byte.
-   The line shows in that state only. Its spelling is held to the Python
-   twin's.
+   any turn, and announces it once through its polite live region, while the
+   send button keeps its existing sentence byte for byte. The line shows in
+   that state only: a catalog of configured models that are unavailable is
+   not "no model configured". Its spelling is held to the Python twin's.
 
 `omp` is `doxbench_bridge.HARNESS_COMMAND`. A case that means "no harness"
 says so with `harness_present=lambda: False`, or with a PATH holding no `omp`,
@@ -47,6 +54,8 @@ A CREATED FILE: no carve-manifest row (RULED OQ-C).
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import http.client
 import json
 import os
@@ -55,16 +64,20 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from opendox import doxbench_binding as binding_mod
 from opendox import doxbench_bridge as bridge_mod
+from opendox import doxbench_hash
 from opendox import doxbench_install as inst
 from opendox import doxbench_intake as intake_mod
 from opendox import doxbench_model
+from opendox import doxbench_turns
 from opendox import serve_wire
 from opendox import validator as own
 from opendox.serve_workbench import WorkbenchRoutes
@@ -358,15 +371,28 @@ def test_the_served_catalog_offers_no_available_entry(standalone) -> None:
     assert [m for m in envelope["models"] if m["available"]] == []
 
 
+def _example_turn() -> dict:
+    return yaml.safe_load(
+        (EXAMPLES / "workbench-chat-turn-v2-loaded-set.example.yaml").read_text(
+            encoding="utf-8"))
+
+
 def test_a_turn_is_refused_model_capability_unavailable(standalone) -> None:
     """A schema-valid turn, which no rail sends with no model selected but any
     client can, is refused with the fixed code and the contract's failure
     envelope, and the child spawns no harness (none is on its PATH, and the
-    no-model port spawns nothing)."""
+    no-model port spawns nothing). The CONSOLE verdict still comes first: the
+    same turn without the console token is refused `console_required`, so an
+    unauthenticated caller learns nothing about the model posture."""
     base, token, _child = standalone
-    request = yaml.safe_load(
-        (EXAMPLES / "workbench-chat-turn-v2-loaded-set.example.yaml").read_text(
-            encoding="utf-8"))
+    request = _example_turn()
+    status, body = _request(
+        base, "POST", "/actions/workbench/chat-turn",
+        body=json.dumps(request).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    console = serve_wire.DOXBENCH_ERR_CONSOLE_REQUIRED
+    assert (status, body["error"]) == (serve_wire.doxbench_error_status(console),
+                                       console), body
     status, body = _request(
         base, "POST", "/actions/workbench/chat-turn",
         body=json.dumps(request).encode("utf-8"),
@@ -377,6 +403,186 @@ def test_a_turn_is_refused_model_capability_unavailable(standalone) -> None:
     assert body["kind"] == serve_wire.DOXBENCH_CHAT_TURN_V2_FAILURE_KIND
     assert body["client_turn_id"] == request["client_turn_id"]
     assert own.validate(body) == [], own.report(own.validate(body))
+
+
+# ---------------------------------------------------------------------------
+# 4b — the turn route's ORDER, with and without a port (the holder's ruling
+# on 0a12dc58: option (a), with an ordering test)
+# ---------------------------------------------------------------------------
+
+class _OfferingNothing:
+    """A CONFIGURED port whose catalog offers nothing: reaching its catalog is
+    step 7 (`model_unavailable`), and reaching `dispatch` would be a defect."""
+
+    timeout_seconds = 30.0
+
+    def catalog(self):
+        return doxbench_model.EMPTY_CATALOG
+
+    def dispatch(self, prompt_envelope):
+        raise AssertionError("a turn with a defect was dispatched")
+
+
+class _Registry:
+    """The server's scope truth for one key: found, or not. Every read is
+    recorded, so a case can assert the scope was never read."""
+
+    def __init__(self, found: bool, root: Path):
+        self.found, self.root, self.reads = found, root, []
+
+    def resolve(self, repository, ref):
+        self.reads.append((repository, ref))
+        if not self.found:
+            return None
+        return SimpleNamespace(source_root=str(self.root), repository=repository,
+                               ref=ref, session_base=None,
+                               read_bytes=lambda: b"{}")
+
+
+class _TurnRoute(WorkbenchRoutes):
+    """`_handle_workbench_chat_turn` itself, over openDox's real validators
+    (T085) and its real identity checks, with only the HTTP plumbing replaced:
+    the console verdict, the bounded body read, and the reply."""
+
+    loopback = True
+    capabilities = {"actions": {"session": True}}
+    actor = ACTOR
+
+    def __init__(self, payload, *, port_factory, root, console=None,
+                 body_bound=None, parsed=True, scope_found=True):
+        self.payload, self.console, self.body_bound = payload, console, body_bound
+        self.parsed = parsed
+        self.model_port_factory = port_factory
+        self.schema_validator_factory = own.doxbench_validators
+        self.source = SimpleNamespace(registry=_Registry(scope_found, root))
+        self.sent = []
+
+    def _not_the_human_console(self):
+        return self.console
+
+    def _read_bounded_json_body(self, max_bytes, dimension):
+        if self.body_bound is not None:
+            return None, self.body_bound
+        return self.payload, None
+
+    def _parse_workbench_chat_turn_v2_body(self, payload):
+        # "parse": a validator more permissive than the release would let a
+        # body through that the parser still refuses
+        if not self.parsed:
+            return None
+        return WorkbenchRoutes._parse_workbench_chat_turn_v2_body(payload)
+
+    def _send_json(self, status, obj):
+        self.sent.append((status, obj))
+
+
+@pytest.fixture
+def scope_stand_in(monkeypatch):
+    """openxdox's scope module, which openDox's suite does not install (T084
+    routes step 5 without it): a key type, the confinement error, and a scope
+    that resolves. Revalidation against that projection is a no-op here, so
+    step 5's verdict is exactly the registry's: found, or not."""
+    scope = types.ModuleType("openxdox.doxbench_scope")
+
+    @dataclasses.dataclass(frozen=True)
+    class ScopeKey:
+        repository: str
+        ref: str
+        tile_kind: str
+        tile_id: str
+
+    class ScopeConfinementError(ValueError):
+        pass
+
+    scope.ScopeKey = ScopeKey
+    scope.ScopeConfinementError = ScopeConfinementError
+    scope.session_created_paths_for_scope = lambda *args, **kwargs: ()
+    scope.resolve_scope = lambda *args, **kwargs: SimpleNamespace()
+    package = types.ModuleType("openxdox")
+    package.doxbench_scope = scope
+    monkeypatch.setitem(sys.modules, "openxdox", package)
+    monkeypatch.setitem(sys.modules, "openxdox.doxbench_scope", scope)
+    monkeypatch.setattr(doxbench_turns, "revalidate_scope", lambda **kwargs: None)
+
+
+def _defective(defect: str) -> tuple[dict | None, dict]:
+    """The example turn with one defect, and the route arguments it needs."""
+    turn = copy.deepcopy(_example_turn())
+    if defect == "console":
+        return turn, {"console": "no console token was presented"}
+    if defect == "not an object":
+        return None, {}
+    if defect == "body over its bound":
+        return turn, {"body_bound": {"dimension": "request_body_bytes",
+                                     "measured": 1_048_577, "maximum": 1_048_576}}
+    if defect == "kind":
+        turn["kind"] = "workbench-chat-turn"          # the retired v1 kind
+    elif defect == "schema":
+        del turn["message"]
+    elif defect == "parse":
+        return turn, {"parsed": False}
+    elif defect == "scope":
+        return turn, {"scope_found": False}
+    elif defect == "identity":
+        turn["buffers"][0]["content"] += "edited after hashing\n"
+    elif defect == "limits":
+        # within the schema's 1 MiB `maxLength`, past step 6's 400 000 bytes
+        big = "a" * (doxbench_hash.MAX_BUFFER_BYTES + 1)
+        digest = doxbench_hash.sha256_hex(big, max_bytes=None)
+        turn["buffers"][1].update(content=big, content_hash=digest, base_hash=digest)
+    else:
+        assert defect == "none", defect
+    return turn, {}
+
+
+#: Each defect's verdict WITH a configured port: today's order, unchanged.
+_WITH_A_PORT = {
+    "console": serve_wire.DOXBENCH_ERR_CONSOLE_REQUIRED,
+    "body over its bound": serve_wire.DOXBENCH_ERR_REQUEST_LIMIT_EXCEEDED,
+    "not an object": "invalid_body",
+    "kind": serve_wire.DOXBENCH_ERR_UNRECOGNIZED_TURN_KIND,
+    "schema": serve_wire.DOXBENCH_ERR_INVALID_TURN_REQUEST,
+    "parse": serve_wire.DOXBENCH_ERR_INVALID_TURN_REQUEST,
+    "scope": serve_wire.DOXBENCH_ERR_TURN_SCOPE_REFUSED,
+    "identity": serve_wire.DOXBENCH_ERR_CONTENT_IDENTITY_MISMATCH,
+    "limits": serve_wire.DOXBENCH_ERR_REQUEST_LIMIT_EXCEEDED,
+    "none": serve_wire.DOXBENCH_ERR_MODEL_UNAVAILABLE,     # step 7, after step 6
+}
+
+#: The defects that still answer FIRST with no port: the console, the body,
+#: the kind, the schema and the parse. Every later one yields to the
+#: no-model verdict.
+_BEFORE_THE_MODEL_VERDICT = ("console", "body over its bound", "not an object",
+                             "kind", "schema", "parse")
+
+_NO_PORT = {"no model configured": inst.no_model_port_factory, "no factory": None}
+
+
+@pytest.mark.parametrize("defect", sorted(_WITH_A_PORT))
+@pytest.mark.parametrize("posture", ["a port", *_NO_PORT])
+def test_the_turn_routes_order_with_and_without_a_port(
+        defect, posture, scope_stand_in, tmp_path) -> None:
+    """A console, body, kind, schema or parse defect answers first in every
+    posture. With no port (no model configured, or no factory), the no-model
+    refusal answers before a scope, identity or limits defect, and the scope
+    is never read. With a port, every defect answers what it answered before
+    the hoist, and a well-formed turn reaches step 7."""
+    payload, arguments = _defective(defect)
+    port = _OfferingNothing()
+    route = _TurnRoute(payload, root=tmp_path,
+                       port_factory=(lambda: port) if posture == "a port"
+                       else _NO_PORT[posture], **arguments)
+    route._handle_workbench_chat_turn()
+    assert len(route.sent) == 1, route.sent
+    status, body = route.sent[0]
+    expected = (_WITH_A_PORT[defect]
+                if posture == "a port" or defect in _BEFORE_THE_MODEL_VERDICT
+                else serve_wire.DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE)
+    assert body["error"] == expected, (posture, defect, body)
+    if expected != "invalid_body":
+        assert status == serve_wire.doxbench_error_status(expected)
+    if posture != "a port":
+        assert route.source.registry.reads == [], "the scope was read"
 
 
 # ---------------------------------------------------------------------------
@@ -400,12 +606,14 @@ class Node {
     this.tagName = String(tag).toUpperCase();
     this.children = []; this.attributes = {}; this.listeners = {};
     this.className = ''; this._text = ''; this.hidden = false;
-    this.disabled = false; this.value = '';
+    this.disabled = false; this.value = ''; this.writes = [];
   }
   get textContent() {
     return this._text + this.children.map((c) => c.textContent).join('');
   }
-  set textContent(value) { this.children = []; this._text = String(value); }
+  set textContent(value) {
+    this.children = []; this._text = String(value); this.writes.push(this._text);
+  }
   appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
   append(...kids) { for (const k of kids) this.appendChild(k); }
   setAttribute(name, value) { this.attributes[name] = String(value); }
@@ -438,7 +646,7 @@ const editorState = () => ({ active_buffer: "document", buffers: {
   outline: bufferOf("outline", "docs/outline.md"),
   document: bufferOf("document", "docs/detail.md") } });
 
-async function mount(catalog, { intake = null } = {}) {
+async function mount(catalog, { intake = null, intakeFirst = false } = {}) {
   const host = new Node("div"); host.ownerDocument = doc;
   let turns = 0;
   let release;
@@ -450,12 +658,26 @@ async function mount(catalog, { intake = null } = {}) {
     editorState });
   const line = () => byClass(host, "doxchat-no-model")[0] || null;
   const shown = () => (line() && !line().hidden) ? line().textContent : null;
+  const announce = byClass(host, "doxchat-announce")[0];
+  // how many times the polite region was written the remedy
+  const announced = () => announce.writes.filter(
+    (text) => text === NO_MODEL_CONFIGURED_REMEDY).length;
   const loading = shown();
+  if (intake !== null && intakeFirst) rail.intakeOffer(intake);
   release();
   await rail.ready;
-  if (intake !== null) rail.intakeOffer(intake);
+  if (intake !== null && !intakeFirst) rail.intakeOffer(intake);
+  const onArrival = announced();
+  // render() runs on every keystroke: type twice and count again
+  const composer = byClass(host, "doxchat-composer")[0];
+  for (const value of ["w", "wh"]) {
+    composer.value = value;
+    for (const fn of composer.listeners.input || []) fn({ target: composer });
+  }
   const send = byClass(host, "doxchat-send")[0];
   return { loading, shown: shown(), exists: Boolean(line()), turns,
+           announcePolite: announce.getAttribute("aria-live"),
+           announcedOnArrival: onArrival, announcedAfterTyping: announced(),
            sendDisabled: send.disabled === true, sendTitle: send.title,
            srNote: (byClass(host, "doxchat-unavailable")[0] || {}).textContent };
 }
@@ -470,6 +692,7 @@ const out = {
     kind: "workbench-model-catalog", models: [ENTRY] })),
   unreadable: await mount(() => null),
   intakeOffered: await mount(empty, { intake: true }),
+  intakeFirst: await mount(empty, { intake: true, intakeFirst: true }),
   // the pure verdict over states a mount does not reach in one shot: a
   // failure recorded beside an adopted empty catalog keeps its own remedy
   pure: {
@@ -478,6 +701,8 @@ const out = {
       { models: [], catalogFailure: "unreadable" }),
     emptyThenStaleToken: noModelConfiguredRemedy(
       { models: [], catalogFailure: "console_required" }),
+    // a configured model the broker refused: kept, `available: false`
+    onlyUnavailable: noModelConfiguredRemedy({ models: [OFF], catalogFailure: null }),
   },
 };
 process.stdout.write(JSON.stringify(out));
@@ -511,8 +736,29 @@ def test_the_rail_shows_no_model_configured_and_how_before_any_turn(rail) -> Non
     assert empty["sendTitle"] == CONFIGURED_NONE
 
 
-def test_a_catalog_of_unavailable_entries_is_no_model_too(rail) -> None:
-    assert rail["onlyUnavailable"]["shown"] == doxbench_model.NO_MODEL_CONFIGURED_REMEDY
+def test_a_configured_model_that_is_unavailable_is_not_no_model(rail) -> None:
+    """After a broker refusal `BrokeredProviderPort.catalog()` keeps the
+    binding with `available: false` (doxbench_provider.py). That operator HAS
+    a model configured, and telling them to declare a binding would send them
+    to the wrong repair: the line is for an EMPTY catalog only. The send
+    button's configured-none sentence still states the posture."""
+    only_unavailable = rail["onlyUnavailable"]
+    assert only_unavailable["shown"] is None
+    assert only_unavailable["announcedAfterTyping"] == 0
+    assert only_unavailable["sendDisabled"] is True
+    assert rail["pure"]["onlyUnavailable"] is None
+
+
+def test_the_remedy_is_announced_once_when_it_arrives(rail) -> None:
+    """The catalog settles asynchronously with no focus change, so the line's
+    text also goes to the rail's polite live region -- once: render() runs on
+    every keystroke, and a re-write of the same sentence would re-announce it."""
+    empty = rail["empty"]
+    assert empty["announcePolite"] == "polite"
+    assert empty["announcedOnArrival"] == 1
+    assert empty["announcedAfterTyping"] == 1, "typing re-announced the remedy"
+    for case in ("available", "onlyUnavailable", "unreadable", "intakeFirst"):
+        assert rail[case]["announcedAfterTyping"] == 0, case
 
 
 def test_the_line_shows_in_that_state_only(rail) -> None:
@@ -520,11 +766,14 @@ def test_the_line_shows_in_that_state_only(rail) -> None:
     model available, not when the catalog could not be read (that has its
     own remedy), and not where the intake flow is offered (its option is the
     remedy's home)."""
-    for case in ("empty", "onlyUnavailable", "available", "unreadable", "intakeOffered"):
+    for case in ("empty", "onlyUnavailable", "available", "unreadable",
+                 "intakeOffered", "intakeFirst"):
         assert rail[case]["exists"] is True, case
         assert rail[case]["loading"] is None, case
     assert rail["available"]["shown"] is None
     assert rail["unreadable"]["shown"] is None
     assert rail["intakeOffered"]["shown"] is None
+    assert rail["intakeFirst"]["shown"] is None
     assert rail["pure"] == {"emptyAdopted": doxbench_model.NO_MODEL_CONFIGURED_REMEDY,
-                            "emptyThenUnreadable": None, "emptyThenStaleToken": None}
+                            "emptyThenUnreadable": None, "emptyThenStaleToken": None,
+                            "onlyUnavailable": None}
