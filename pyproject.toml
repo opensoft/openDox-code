@@ -238,6 +238,18 @@ where = ["src"]
 # what that census counts rather than whatever happens to be on disk.
 [tool.setuptools.package-data]
 opendox = ["web/**"]
+# THE VALIDATOR'S PACKAGED COPIES (plan 034 T057; #1144 7.1, as T007's batch G
+# amends it; R1Q12 (a), openxFactory#656 comment 5850003126). openDox's own
+# validator reads its spec leg's four schemas from `opendox/contracts/`, and
+# 7.1 settles that they travel as PACKAGE DATA, "so `pip install openDox-code`
+# puts them on disk beside the validator". Without this line a wheel ships the
+# package's `__init__.py` and no record and no copy, and every installed
+# validator refuses, naming the absent file. The two patterns name the record
+# and the schema copies and nothing else, so no other file under the directory
+# ships as data. The bundle's line above stays as it is:
+# `test_gate_loop_contributed` holds it verbatim, and
+# `tests/test_validator_input_set.py` holds this one to the record.
+"opendox.contracts" = ["copies.yaml", "schemas/*.schema.yaml"]
 
 [tool.pytest.ini_options]
 # The ROOTDIR ANCHOR. With no pytest ini table anywhere, pytest infers a

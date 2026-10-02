@@ -67,12 +67,14 @@ from .path_slug import (  # noqa: F401  (re-export)
     slug,
 )
 from .boundary import OutputBoundary
-from . import consumer_reach
 # The home-corpus seam (4.1, 4.2): stdlib only, and it imports nothing back
 # from this package, so reading it at import time adds no edge a cycle or a
 # consumer could hang on.
 from . import corpus_adapter
-find_validator = consumer_reach.find_validator
+# The validator lookup (plan 034 T055): stdlib only, like the seam above. A
+# manifest is validated by the validator registered for its own kind,
+# openDox's own for `ideation-workbench`, and never through the consumer.
+from . import projection_seams
 
 # --------------------------------------------------------------------------
 # contract constants (mirror ideation-workbench.schema.yaml — the READ-ONLY
@@ -432,21 +434,45 @@ class ManifestValidation:
 
     def summary(self) -> str:
         if self.validator is None:
-            return "validator not found (no reachable openxFactory checkout)"
+            return ("validator not found (no validator registered for "
+                    f"{KIND!r} reached a verdict)")
         tail = (self.stdout or self.stderr).strip().splitlines()
         return tail[-1] if tail else f"returncode={self.returncode}"
 
 
 def validate_manifest(path: Path | str, *, validator: Path | None = None,
                       strict: bool = False, search_from: Path | None = None) -> ManifestValidation:
-    """Validate a written manifest with the pinned validator (single-file mode,
-    kind auto-detected). Single-file mode does NOT run the committed-manifest
-    guard (that is a repo scan) — so validating a manifest under a tmp/gitignored
-    path checks schema + workbench rules cleanly."""
+    """Validate a written manifest.
+
+    An EXPLICIT `validator` is a validator script, run on the manifest in
+    single-file mode (kind auto-detected), as it always was. Single-file mode
+    does NOT run the committed-manifest guard (that is a repo scan) — so
+    validating a manifest under a tmp/gitignored path checks schema + workbench
+    rules cleanly.
+
+    With none given, the manifest is validated by the validator REGISTERED for
+    its kind, `ideation-workbench` (`projection_seams.validators`, plan 034
+    T055), which is openDox's own where no host registered another, and never
+    by a reach into the consumer. A search starts at `search_from`, else at the
+    manifest's own directory. No validator registered for the kind, or one that
+    could not reach a verdict, is `ok=False` with no validator, which is the
+    answer "validator not found" always gave."""
     path = Path(path).resolve()
-    validator = validator or find_validator(search_from or path.parent)
     if validator is None:
-        return ManifestValidation(False, -1, "", "validator not found", None)
+        try:
+            registered = projection_seams.validators.for_kind(KIND)
+        except projection_seams.ValidatorNotRegistered as exc:
+            return ManifestValidation(False, -1, "", " ".join(str(exc).split()),
+                                      None)
+        result = registered.validate(path, strict=strict,
+                                     search_from=(search_from or path.parent,))
+        if not result.available:
+            return ManifestValidation(
+                False, result.returncode, result.stdout,
+                result.stderr or str(result.unavailable_reason or ""), None)
+        return ManifestValidation(bool(result.ok), result.returncode,
+                                  result.stdout, result.stderr,
+                                  result.validator)
     cmd = [sys.executable, str(validator), str(path)]
     if strict:
         cmd.append("--strict")

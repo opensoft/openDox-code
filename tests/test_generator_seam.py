@@ -37,11 +37,14 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE
    replaces it before a generation, and after one that wrote nothing. A host is
    refused while a generation runs, and after one that wrote a snapshot. A
    generator may register or generate from inside its own call without
-   deadlocking the seam. Until T054 lands, the default refuses, naming itself.
+   deadlocking the seam. What the default generates is T054's neutral
+   projection, and `tests/test_neutral_projection.py` holds it.
 7. EACH ENTRY POINT REGISTERS IT. `cli.build_parser()` and `cli.main()` run for
-   real. `serve.build_server()` and `serve.main()` still cannot run in a lone
-   checkout (research R7), so their registration is executed from their own
-   source lines, as `tests/test_authoring_seam.py` does for the home corpus.
+   real. `serve.build_server()`'s and `serve.main()`'s registration is executed
+   from their own source lines, as `tests/test_authoring_seam.py` does for the
+   home corpus, because that isolates the one statement under test. Since plan
+   034 T055 both also run whole in a lone checkout
+   (`tests/test_projection_seams.py`).
 8. `CorpusAdapter` STAYS CLOSED AT SIX MEMBERS.
 
 `--noconftest` SAFE. The autouse fixture below saves and restores the three
@@ -842,27 +845,6 @@ def test_a_host_that_registers_the_default_itself_holds_a_hosts_registration() -
     assert "a host's generator is already registered" in str(caught.value)
 
 
-def test_openDoxs_own_generator_refuses_until_its_projection_lands(tmp_path) -> None:
-    """Plan 034 orders the seam (T052) before the projection (T054). So the
-    default refuses, naming itself and T054, and generates nothing. It never
-    answers an empty snapshot. Because it wrote nothing, its refusal shuts no
-    host out: a host's generator still replaces it afterwards. T054 replaces
-    this case with its own tests."""
-    with pytest.raises(default_generator.NeutralProjectionNotBuilt) as caught:
-        default_generator.generate(tmp_path, "fixture")
-    message = str(caught.value)
-    for expected in (gs.NEUTRAL_SNAPSHOT_KIND, "T054", gs.REGISTRATION_CALL):
-        assert expected in message, f"the refusal no longer says {expected!r}"
-    assert isinstance(caught.value, gs.GeneratorSeamError)
-    gs.register_default(default_generator.GENERATOR)
-    with pytest.raises(default_generator.NeutralProjectionNotBuilt):
-        gs.generate(tmp_path, "fixture")
-    host, _ = _declared("host-snapshot")
-    assert gs.register(host) is host, (
-        "a refused generation from openDox's own generator wrote nothing, so "
-        "a host still replaces it")
-
-
 # --------------------------------------------------------------------------
 # 7 — each entry point registers openDox's own generator
 # --------------------------------------------------------------------------
@@ -939,10 +921,11 @@ def test_a_host_registered_first_is_kept_by_the_cli_entry_points() -> None:
 
 @pytest.mark.parametrize("function", ("build_server", "main"))
 def test_the_server_entry_points_register_openDoxs_own_generator(function: str) -> None:
-    """`serve.build_server()` and `serve.main()` cannot run in a lone checkout
-    until phase 2 routes their snapshot source (research R7). So the import
-    and the registration are lifted out of `serve.py` and executed: the tree's
-    own statements, not a paraphrase of them."""
+    """The import and the registration, lifted out of `serve.py` and executed:
+    the tree's own statements, not a paraphrase of them. They were lifted
+    because `serve.build_server()` and `serve.main()` could not run in a lone
+    checkout until plan 034 T055 routed their snapshot source (research R7);
+    they stay lifted because that isolates the one statement under test."""
     module_body, body = _module_and_function(SERVE, function)
     lifted = [stmt for stmt in module_body if _binds_the_seam(stmt)] + \
              [stmt for stmt in body if _is_the_registration(stmt)]
