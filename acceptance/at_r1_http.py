@@ -289,6 +289,17 @@ def note(text: str) -> None:
     print(f"      {text}", flush=True)
 
 
+def as_object(value) -> dict:
+    """A JSON object the product sent, or an empty one where it sent
+    anything else, so a malformed answer fails a named check instead of
+    raising inside the harness."""
+    return value if isinstance(value, dict) else {}
+
+
+def as_list(value) -> list:
+    return value if isinstance(value, list) else []
+
+
 @dataclasses.dataclass
 class Context:
     """What one run holds: its directories, its environments, and every
@@ -604,23 +615,22 @@ def _graph_roots(index_html: str, capabilities: dict) -> tuple[list, list]:
     links = _IndexLinks()
     links.feed(index_html)
     roots = [(_resolve("/", m), True, "/") for m in links.modules]
-    for view in ((capabilities.get("views") or {}).get("views") or []):
-        module = view.get("module") if isinstance(view, dict) else None
+    for view in as_list(as_object(capabilities.get("views")).get("views")):
+        module = as_object(view).get("module")
         if isinstance(module, str) and module:
             roots.append((_resolve("/", module), True, "/capabilities"))
     return roots, [_resolve("/", sheet) for sheet in links.sheets]
 
 
-def _fetch_module(port: int, path: str, static: bool, importer: str,
-                  verdict: Verdict, label: str) -> Answer:
-    answer = get(port, path)
+def _judge_module(answer: Answer, path: str, static: bool, importer: str,
+                  verdict: Verdict, label: str) -> None:
     if static:
         verdict.check(
             f"{label}.bundle.module {path}", answer.status == 200,
             f"{path}, imported statically by {importer}, answers "
             f"{answer.describe()}; a failed static import is a module-load "
             "pageerror (AT-R1 step 8)")
-        return answer
+        return
     verdict.check(
         f"{label}.bundle.dynamic {path}",
         answer.status is not None and answer.status < 500,
@@ -629,7 +639,6 @@ def _fetch_module(port: int, path: str, static: bool, importer: str,
     if answer.status != 200:
         note(f"{path} (dynamic, from {importer}) answers {answer.describe()}: "
              "refused, and its importer degrades")
-    return answer
 
 
 def _scan_module(path: str, body: bytes, pending: collections.deque,
@@ -654,19 +663,27 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
         answer = get(port, sheet)
         verdict.check(f"{label}.bundle.sheet {sheet}", answer.status == 200,
                       f"the stylesheet `/` links answers {answer.describe()}")
+    # Each path is FETCHED and scanned once, but JUDGED once per way it is
+    # imported: a module refused as a dynamic import must still answer 200
+    # where another module imports it statically (Copilot review of
+    # openDox-code#75, r4170450448).
     pending = collections.deque(roots)
-    seen: set[str] = set()
+    answers: dict[str, Answer] = {}
+    judged: set[tuple[str, bool]] = set()
     routes: set[str] = set()
-    modules = 0
     while pending:
         path, static, importer = pending.popleft()
-        if path in seen:
+        if (path, static) in judged:
             continue
-        seen.add(path)
-        answer = _fetch_module(port, path, static, importer, verdict, label)
-        if answer.status == 200:
-            modules += 1
+        judged.add((path, static))
+        first = path not in answers
+        if first:
+            answers[path] = get(port, path)
+        answer = answers[path]
+        _judge_module(answer, path, static, importer, verdict, label)
+        if first and answer.status == 200:
             _scan_module(path, answer.body, pending, routes)
+    modules = sum(1 for answer in answers.values() if answer.status == 200)
     return sorted(routes), modules
 
 
@@ -988,13 +1005,13 @@ def check_pages(server: Server, index: Answer,
                   f"openxFactory's vocabulary leaked into the neutral "
                   f"snapshot: {leaks}")
     note(f"snapshot kind={snapshot.get('kind')!r}, "
-         f"{len(snapshot.get('documents') or [])} documents")
+         f"{len(as_list(snapshot.get('documents')))} documents")
     caps = fetch_object(server, "/capabilities", verdict)
-    install_block = caps.get("install") or {}
+    install_block = as_object(caps.get("install"))
     verdict.check(f"{label}.capabilities install.mode == local",
                   install_block.get("mode") == "local",
                   f"the served install block is {caps.get('install')!r}")
-    pid = (install_block.get("database_bundle") or {}).get("pid")
+    pid = as_object(install_block.get("database_bundle")).get("pid")
     if isinstance(pid, int):
         note(f"the served install reports its bundled server as pid {pid}")
     verdict.check(f"{label}.capabilities console_token",
@@ -1006,8 +1023,9 @@ def check_pages(server: Server, index: Answer,
 
 
 def grouping_field_of(caps: dict) -> str:
-    fields = (caps.get("display") or {}).get("fields") or {}
-    return (fields.get("grouping") or {}).get("field") or "clusters"
+    fields = as_object(as_object(caps.get("display")).get("fields"))
+    field = as_object(fields.get("grouping")).get("field")
+    return field if isinstance(field, str) and field else "clusters"
 
 
 def check_grouping(label: str, snapshot: dict, caps: dict,
@@ -1029,15 +1047,19 @@ def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
                   f"{catalog.describe()}: {catalog.body[:300]!r}")
     if catalog.status != 200:
         return
+    # The payload's SHAPE is a named check, never a harness error: `[]`,
+    # `null` or `{"models": 1}` fail `catalog is a catalog` (Copilot review
+    # of openDox-code#75, r4170450491).
     try:
-        models = catalog.json().get("models")
-    except (ValueError, AttributeError):
-        models = None
+        payload = catalog.json()
+    except ValueError:
+        payload = None
+    models = as_object(payload).get("models")
     verdict.check(f"{label}.catalog is a catalog", isinstance(models, list),
                   f"{CATALOG_ROUTE} answered no models[]: "
                   f"{catalog.body[:300]!r}")
-    available = [m.get("model_id") for m in (models or [])
-                 if isinstance(m, dict) and m.get("available")]
+    available = [as_object(m).get("model_id") for m in as_list(models)
+                 if as_object(m).get("available")]
     verdict.check(f"{label}.catalog offers no available entry", not available,
                   f"no model is configured, yet the catalog offers {available}")
 
@@ -1045,12 +1067,12 @@ def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
 def thread_query(snapshot: dict, grouping_field: str) -> str | None:
     """The query the chat rail sends on open, for the first grouping tile
     that has a member document."""
-    for group in snapshot.get(grouping_field) or []:
-        if not isinstance(group, dict) or not group.get("id"):
+    for group in map(as_object, as_list(snapshot.get(grouping_field))):
+        if not group.get("id"):
             continue
         members = [edge.get("document") for edge in
-                   (group.get("document_edges") or [])
-                   if isinstance(edge, dict) and edge.get("document")]
+                   map(as_object, as_list(group.get("document_edges")))
+                   if edge.get("document")]
         if members:
             return urllib.parse.urlencode({
                 "repository": str(snapshot.get("repository") or ""),
@@ -1065,8 +1087,8 @@ def thread_query(snapshot: dict, grouping_field: str) -> str | None:
 def requests_for(routes: list[str], snapshot: dict,
                  grouping_field: str) -> list[str]:
     documents = [urllib.parse.quote(str(d["path"]))
-                 for d in (snapshot.get("documents") or [])
-                 if isinstance(d, dict) and d.get("path")]
+                 for d in map(as_object, as_list(snapshot.get("documents")))
+                 if d.get("path")]
     key = urllib.parse.quote(f"{snapshot.get('repository') or ''}@main",
                              safe="")
     query = thread_query(snapshot, grouping_field)
