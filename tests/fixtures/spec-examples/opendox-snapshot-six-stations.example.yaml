@@ -1,0 +1,164 @@
+# VALID: a plain repository whose documents sit in all six stations.
+#
+# Each document declares its station with the neutral `stage:` key (R1Q13 (a));
+# the three that declare `source` could as well have declared nothing. Three
+# groups form around shared topics. The candidates show all four states, and
+# the selected one's pick names the selection, whose target names the entry in
+# the submission station. Each changes entry lists its files, as the selection
+# does. keyword_index is present, which it need not be.
+{
+  "schema_version": 1,
+  "kind": "opendox-snapshot",
+  "repository": "community-garden",
+  "generation": {
+    "source_revision": "4f2b9c0d1e3a5b7c9d0e2f4a6b8c0d1e3f5a7b9c",
+    "generated_at": "2026-09-27T12:00:00Z",
+    "generator_version": "opendox-neutral-1"
+  },
+  "documents": [
+    {
+      "id": "notes/soil-test",
+      "path": "notes/soil-test.md",
+      "stage": "source",
+      "title": "Soil test results",
+      "summary": "pH and nutrient readings from the three beds.",
+      "topics": ["compost", "soil"]
+    },
+    {
+      "id": "notes/compost-bins",
+      "path": "notes/compost-bins.md",
+      "stage": "source",
+      "title": "Compost bins",
+      "summary": "How the two bins are turned, and when.",
+      "topics": ["compost", "reuse"]
+    },
+    {
+      "id": "notes/rain-barrels",
+      "path": "notes/rain-barrels.md",
+      "stage": "source",
+      "title": "Rain barrels",
+      "summary": null,
+      "topics": ["reuse", "water"]
+    },
+    {
+      "id": "notes/watering",
+      "path": "notes/watering.md",
+      "stage": "grouping",
+      "title": "Watering, gathered",
+      "summary": "Everything on watering, in one place.",
+      "topics": ["water"]
+    },
+    {
+      "id": "ideas/tool-library",
+      "path": "ideas/tool-library.md",
+      "stage": "candidate",
+      "title": "A shared tool library",
+      "summary": "Lend tools between plots instead of buying twice.",
+      "topics": ["reuse", "tools"]
+    },
+    {
+      "id": "plans/rain-harvest",
+      "path": "plans/rain-harvest.md",
+      "stage": "selection",
+      "title": "Rain harvest plan",
+      "summary": "Chosen: gutters to barrels to beds.",
+      "topics": ["water"]
+    },
+    {
+      "id": "submissions/rain-harvest-build",
+      "path": "submissions/rain-harvest-build.md",
+      "stage": "submission",
+      "title": "Build the rain harvest",
+      "summary": null,
+      "topics": ["water"]
+    },
+    {
+      "id": "done/compost-rota",
+      "path": "done/compost-rota.md",
+      "stage": "completion",
+      "title": "Compost turning rota",
+      "summary": "Adopted in the spring.",
+      "topics": ["compost"]
+    }
+  ],
+  "clusters": [
+    {
+      "id": "compost",
+      "name": "compost",
+      "topics": ["compost"],
+      "document_edges": [
+        {"document": "notes/soil-test", "matched_topics": ["compost"]},
+        {"document": "notes/compost-bins", "matched_topics": ["compost"]}
+      ]
+    },
+    {
+      "id": "reuse",
+      "name": "reuse",
+      "topics": ["reuse"],
+      "document_edges": [
+        {"document": "notes/compost-bins", "matched_topics": ["reuse"]},
+        {"document": "notes/rain-barrels", "matched_topics": ["reuse"]}
+      ]
+    },
+    {
+      "id": "watering",
+      "name": "Watering, gathered",
+      "topics": ["water"],
+      "document_edges": [
+        {"document": "notes/rain-barrels", "matched_topics": ["water"]},
+        {"document": "notes/watering", "matched_topics": ["water"]}
+      ]
+    }
+  ],
+  "possibles": [
+    {
+      "id": "tool-library",
+      "title": "A shared tool library",
+      "claim": "Lend tools between plots instead of buying twice.",
+      "state": "unselected",
+      "claiming_clusters": ["reuse"]
+    },
+    {
+      "id": "rain-harvest",
+      "title": "Harvest rain from the shed roof",
+      "state": "selected",
+      "claiming_clusters": ["watering"],
+      "pick": {"staging_id": "rain-harvest"}
+    },
+    {
+      "id": "paved-paths",
+      "title": "Pave the paths",
+      "state": "declined",
+      "reason": "Paving stops the rain soaking into the beds.",
+      "claiming_clusters": ["watering"]
+    },
+    {
+      "id": "bagged-compost",
+      "title": "Buy bagged compost",
+      "state": "replaced",
+      "reason": "The two bins make enough; the turning rota took its place."
+    }
+  ],
+  "staged_topics": [
+    {
+      "staging_id": "rain-harvest",
+      "files": ["plans/rain-harvest.md"],
+      "target_change": "rain-harvest-build"
+    }
+  ],
+  "changes": [
+    {
+      "id": "rain-harvest-build",
+      "status": "active",
+      "files": ["work/rain-harvest-build/plan.md", "work/rain-harvest-build/steps.md"]
+    },
+    {"id": "compost-rota", "status": "archived", "files": ["work/compost-rota/plan.md"]}
+  ],
+  "keyword_index": [
+    {"keyword": "compost", "declared_doc_count": 3},
+    {"keyword": "reuse", "declared_doc_count": 3},
+    {"keyword": "soil", "declared_doc_count": 1},
+    {"keyword": "tools", "declared_doc_count": 1},
+    {"keyword": "water", "declared_doc_count": 4}
+  ]
+}

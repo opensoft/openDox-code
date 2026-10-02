@@ -88,6 +88,13 @@ from .consumer_reach import gate_console
 # instead (`defaults.py`), and openXdox-code's drift guard holds the two literals
 # together.
 from .defaults import DEFAULT_RECORDS_DIR
+# THE SNAPSHOT REGISTRY AND THE CORPUS-ROOT PREDICATE, THROUGH THEIR SEAMS (plan
+# 034 T055). A session's entry, its snapshot's regenerate and the corpus's
+# change rows were deferred imports of openXdox's `snapshot_registry` and
+# `generator`. Each is now read from the seam registered at the moment it is
+# used, openDox's own where no host has contributed one. Stdlib only, so the
+# import adds no edge.
+from . import projection_seams
 # `SessionGitRefused` is re-exported (see __all__) so a caller catching session
 # refusals can catch both classes from one module: this module refuses on
 # identity/shape, `session_git` refuses on git discipline (a stage-everything
@@ -1564,15 +1571,13 @@ def _repo_reference(root: Path, path: Path) -> str:
 
 
 def _change_rows(checkout_root: Path | str):
-    """The shared active/archive enumeration plus declared staged origin."""
-    from openxdox import generator
-
-    root = Path(checkout_root)
-    return tuple(
-        (change_id, status, folder, *generator.declared_origin_state(folder))
-        for change_id, status, folder, _archive_date
-        in generator.iter_changes(root)
-    )
+    """The shared active/archive enumeration plus declared staged origin:
+    `(change id, status, folder, origin state, origin)` per change, as the
+    REGISTERED corpus-root predicate enumerates the corpus's changes
+    (`projection_seams.corpus_root`, plan 034 T055). openDox's own corpus
+    declares none, so it answers no row."""
+    return tuple(projection_seams.corpus_root.current().change_rows(
+        Path(checkout_root)))
 
 
 def _active_pick_fallbacks(
@@ -2101,8 +2106,11 @@ def session_entry(repository: str, branch: str, worktree: Path | str, *,
 
     `tile` records WHOSE session this is (finding 6). The ref cannot answer it — a
     `-2` branch is one tile's first session and another's second — so the caller
-    that OPENED the session, the only place the answer exists, states it here."""
-    from openxdox.snapshot_registry import SnapshotEntry   # lazy: keeps the import graph flat
+    that OPENED the session, the only place the answer exists, states it here.
+
+    The entry type is the REGISTERED registry's (`projection_seams.registry`,
+    plan 034 T055), so the entry fits the registry it is registered in."""
+    SnapshotEntry = projection_seams.registry.current().SnapshotEntry  # noqa: N806
 
     return SnapshotEntry(repository=repository, ref=branch,
                          source_root=Path(worktree),
@@ -2148,7 +2156,8 @@ def register_session_entry(registry: Any, *, repository: str, branch: str,
     (or the bootstrap's marker read) is where the branch point is known, and the
     chat-turn binding check reads it back off the entry. None degrades to the
     original name-equality binding — advisory, never a refusal."""
-    from openxdox.snapshot_registry import entry_from_snapshot_file
+    entry_from_snapshot_file = (
+        projection_seams.registry.current().entry_from_snapshot_file)
 
     snapshot_path = session_snapshot_path(checkout_root, branch)
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2224,15 +2233,20 @@ def refresh_session_snapshot(registry: Any, *, repository: str, branch: str,
 
     The ACTIVE entry is restored afterwards: `_regenerate` promotes what it
     regenerates, and a session snapshot must never become what the wheel, the
-    funnel, and the pipeline board render (FR-014a)."""
-    from openxdox.snapshot_registry import BINDING_REGENERATE, SnapshotSource
+    funnel, and the pipeline board render (FR-014a).
 
-    source = SnapshotSource(checkout_root=Path(worktree), generator=generator,
-                            project_register=project_register)
+    The source is the REGISTERED registry's (`projection_seams.registry`, plan
+    034 T055), so its regenerate runs the registered generator and writes
+    through the registered writer, as the serve's own refresh does."""
+    registry_mod = projection_seams.registry.current()
+
+    source = registry_mod.SnapshotSource(
+        checkout_root=Path(worktree), generator=generator,
+        project_register=project_register)
     # the shared registry IS the source's registry: the entry regenerated is the
     # one liveness is keyed on, never a copy of it
     source.registry = registry
-    if source.refresh_binding != BINDING_REGENERATE:
+    if source.refresh_binding != registry_mod.BINDING_REGENERATE:
         raise SessionRefused(
             f"the session worktree {worktree} is not a directory this process can "
             "regenerate from, so the session snapshot cannot be generated from the "
@@ -3569,20 +3583,20 @@ def refresh_main_view(registry: Any, *, repository: str,
     does for the worktree, so this is a CALLER of the one refresh mechanism and not
     a second one. Returns None when there is nothing regenerable (a served plane, a
     registry with no local `main` entry) — an absent shared snapshot is not an
-    error, and it must never be the reason a session cannot end."""
-    from openxdox.snapshot_registry import (
-        BINDING_REGENERATE, DEFAULT_REF, SnapshotSource,
-    )
+    error, and it must never be the reason a session cannot end. The source is
+    the REGISTERED registry's (`projection_seams.registry`, plan 034 T055)."""
+    registry_mod = projection_seams.registry.current()
 
-    target = ref or DEFAULT_REF
+    target = ref or registry_mod.DEFAULT_REF
     getter = getattr(registry, "get", None)
     entry = getter(repository, target) if getter is not None else None
     if entry is None or getattr(entry, "snapshot_path", None) is None:
         return None
-    source = SnapshotSource(checkout_root=Path(checkout_root), generator=generator,
-                            project_register=project_register)
+    source = registry_mod.SnapshotSource(
+        checkout_root=Path(checkout_root), generator=generator,
+        project_register=project_register)
     source.registry = registry
-    if source.refresh_binding != BINDING_REGENERATE:
+    if source.refresh_binding != registry_mod.BINDING_REGENERATE:
         return None
     return _preserving_active(
         registry, lambda: source.refresh(repository=repository, ref=target))

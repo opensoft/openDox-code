@@ -1,0 +1,54 @@
+# VALID: a plain repository whose documents carry no front matter at all.
+#
+# Every document is a source, and title and summary are null. The topics are
+# the ones a generator's topic rule derived (T054 names that rule; this
+# contract does not). One group forms around the topic two documents share,
+# which is the grouping tile AT-R1 opens the chat pane from. The other stations
+# are empty lists, keyword_index is absent, and so is generated_at: this is the
+# smallest shape the contract admits.
+{
+  "schema_version": 1,
+  "kind": "opendox-snapshot",
+  "repository": "plain-notes",
+  "generation": {"source_revision": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567"},
+  "documents": [
+    {
+      "id": "kitchen",
+      "path": "kitchen.md",
+      "stage": "source",
+      "title": null,
+      "summary": null,
+      "topics": ["bread", "oven"]
+    },
+    {
+      "id": "bakery-visit",
+      "path": "bakery-visit.md",
+      "stage": "source",
+      "title": null,
+      "summary": null,
+      "topics": ["bread", "flour"]
+    },
+    {
+      "id": "garden",
+      "path": "garden.md",
+      "stage": "source",
+      "title": null,
+      "summary": null,
+      "topics": ["herbs"]
+    }
+  ],
+  "clusters": [
+    {
+      "id": "bread",
+      "name": "bread",
+      "topics": ["bread"],
+      "document_edges": [
+        {"document": "kitchen", "matched_topics": ["bread"]},
+        {"document": "bakery-visit", "matched_topics": ["bread"]}
+      ]
+    }
+  ],
+  "possibles": [],
+  "staged_topics": [],
+  "changes": []
+}

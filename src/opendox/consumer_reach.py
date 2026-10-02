@@ -155,117 +155,6 @@ class _LateConsumerModule:
         return f"<late consumer module {self.name!r} ({state})>"
 
 
-class _LateConsumerCallable:
-    """One FUNCTION of a consumer module, resolved on first call.
-
-    The module stand-in above cannot serve a `from <module> import <function>`
-    site: that form binds the function object itself, and the call sites keep
-    spelling it as a bare name. This binds a callable that resolves the module,
-    fetches the attribute and forwards — so the call site is unchanged and the
-    import is gone.
-
-    Deliberately NOT a `functools.wraps` of the target: wrapping would have to
-    resolve the consumer at construction time, which is the import-time reach
-    this class exists to remove.
-    """
-
-    __slots__ = ("_module", "_attr")
-
-    def __init__(self, module: _LateConsumerModule, attr: str) -> None:
-        self._module = module
-        self._attr = attr
-
-    @property
-    def name(self) -> str:
-        return f"{self._module.name}.{self._attr}"
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return getattr(self._module.resolve(), self._attr)(*args, **kwargs)
-
-    def __repr__(self) -> str:
-        return f"<late consumer callable {self.name!r}>"
-
-
-class _LateConsumerValue:
-    """One CONSTANT of a consumer module, resolved on first use.
-
-    THE NARROWEST MEMBER OF THIS FAMILY, and the one that needs an argument for
-    existing at all. A constant cannot be deferred the way a module or a
-    function can: a module stand-in defers until an attribute is read and a
-    callable stand-in defers until it is called, but a name bound to a VALUE is
-    read by whatever the value is handed to. So this proxy defers to the first
-    OPERATION on the value — iteration, length, membership, subscript,
-    comparison, truthiness, `str()` — and forwards it to the resolved object.
-
-    IT IS HERE FOR ONE SITE AND IT SAYS WHICH. `cli.py` re-exports
-    `openxdox.corpus_root.SCANNED_ROOTS` and reads it at :228 inside a function
-    body (`for root in SCANNED_ROOTS`), which defers correctly — but :228 is
-    not a line openxFactory's carve manifest declares for `cli.py`'s row, so
-    the READ cannot be respelled `corpus_root.SCANNED_ROOTS` and the NAME has
-    to keep behaving like the tuple it used to be. `SCANNED_ROOTS` is itself
-    DERIVED at the consumer (`tuple(sorted({*corpus.GOVERNED_ROOTS,
-    "openspec"}))`, over openxFactory's doc-health corpus), so unlike the
-    values in `opendox/defaults.py` it cannot simply be owned here: openDox has
-    no corpus to derive it from.
-
-    NOT A GENERAL VALUE FACADE. `__getattr__` is deliberately NOT forwarded: an
-    attribute read on a constant is almost always a caller who wanted the
-    MODULE, and answering it here would turn this into the facade the module
-    docstring refuses. The operations below are the ones a re-exported
-    sequence constant is actually subjected to, and a site needing more is a
-    site that should be respelled instead.
-    """
-
-    __slots__ = ("_module", "_attr")
-
-    def __init__(self, module: _LateConsumerModule, attr: str) -> None:
-        self._module = module
-        self._attr = attr
-
-    @property
-    def name(self) -> str:
-        return f"{self._module.name}.{self._attr}"
-
-    def resolve(self) -> Any:
-        """The consumer's value, or `ConsumerReachUnavailable` naming the layering."""
-        return getattr(self._module.resolve(), self._attr)
-
-    def __iter__(self):
-        return iter(self.resolve())
-
-    def __len__(self) -> int:
-        return len(self.resolve())
-
-    def __contains__(self, item: Any) -> bool:
-        return item in self.resolve()
-
-    def __getitem__(self, key: Any) -> Any:
-        return self.resolve()[key]
-
-    def __eq__(self, other: Any) -> bool:
-        return self.resolve() == other
-
-    def __ne__(self, other: Any) -> bool:
-        return self.resolve() != other
-
-    def __hash__(self) -> int:
-        return hash(self.resolve())
-
-    def __bool__(self) -> bool:
-        return bool(self.resolve())
-
-    def __str__(self) -> str:
-        return str(self.resolve())
-
-    def __repr__(self) -> str:
-        # Deliberately does NOT resolve: `repr` is what a debugger, a pytest
-        # assertion rewrite and a logging call reach for, and resolving the
-        # consumer because something formatted a value would make the reach
-        # fire at a moment no verb chose — the same rule `_LateConsumerModule`
-        # applies to dunder lookups.
-        return f"<late consumer value {self.name!r}>"
-
-
 class _LateConsumerColumn:
     """The BASE-CLASS member of this family: one handler-method column of the
     consumer, reached on first CALL instead of at class-definition time.
@@ -275,16 +164,15 @@ class _LateConsumerColumn:
     BASES. A base expression is evaluated when the class statement runs, which
     is when the module loads, so those two lines alone made
     `import opendox.serve` require openXdox — and a base, unlike a call, cannot
-    be deferred by any of the stand-ins above: a class needs its bases to exist
+    be deferred by the module stand-in above: a class needs its bases to exist
     before its first instance does.
 
     So the column is replaced by a base openDox OWNS, carrying one method per
     name the consumer's column defines. Each forwards
     `getattr(<consumer class>, name)(self, *args, **kwargs)` — the SAME function
     object, with the SAME `self`, which is the live request handler — so the
-    handler behaves exactly as it did when it inherited: `serve.py`'s core
-    `/snapshot.json` arm still finds `self._serve_snapshot`, and a contributed
-    binding naming `_handle_gate_action` or `_serve_index` still resolves
+    handler behaves exactly as it did when it inherited: a contributed binding
+    naming `_handle_gate_action` or `_serve_index` still resolves
     against the bound class at wiring time
     (`route_extension.resolve_handlers`), which is the check that refuses a
     route that cannot be served BEFORE a socket.
@@ -356,16 +244,6 @@ def module(name: str, *, reason: str) -> _LateConsumerModule:
     return _LateConsumerModule(name, reason=reason)
 
 
-def function(holder: _LateConsumerModule, attr: str) -> _LateConsumerCallable:
-    """A late stand-in for one function of a consumer module."""
-    return _LateConsumerCallable(holder, attr)
-
-
-def constant(holder: _LateConsumerModule, attr: str) -> _LateConsumerValue:
-    """A late stand-in for one CONSTANT of a consumer module."""
-    return _LateConsumerValue(holder, attr)
-
-
 # --------------------------------------------------------------------------
 # The reaches this package still makes, each with the reason it still makes it
 # --------------------------------------------------------------------------
@@ -381,81 +259,43 @@ gate_console = module(
     reason="the gate-and-commission loop is openXdox's column (design.md § D3) "
            "and openDox contributes no gate of its own")
 
-#: The snapshot writer and validator — openXdox's projection mechanism.
-snapshot = module(
-    "snapshot",
-    reason="the snapshot projection mechanism is openXdox's column "
-           "(design.md § D3)")
+#: THE PROJECTION MECHANISM'S FOUR STAND-INS AND THEIR SIX NAMES ARE GONE
+#: (plan 034 T055; #1144 5.5 and 4.3 in part; R1Q10 (a), openxFactory#656
+#: comment 5850003126). `snapshot`, `snapshot_registry`, `corpus_root` and
+#: `generator` stood here as module stand-ins, with `find_validator`,
+#: `corpus_root_refusal`, `generate_snapshot`, `is_rfc3339_datetime`,
+#: `hosted_ref_refused` and the one constant stand-in, `scanned_roots`, bound
+#: over them. Each was a neutral verb of openDox's reaching the consumer's
+#: projection column, so a lone openDox could neither generate nor build a
+#: server (plan 034, research R7). They are now read from DECLARED SEAMS,
+#: `opendox.projection_seams` (the snapshot registry and source, the
+#: corpus-root predicate, the writer and the validator lookup) and
+#: `opendox.generator_seam` (the generate operation), each with openDox's own
+#: default, which the entry points register where no host has. The consumer
+#: contributes its governed mechanism through the same seams (T059).
+#: `is_rfc3339_datetime` is openDox's own (`opendox.rfc3339`), and
+#: `hosted_ref_refused` is `serve.py`'s own, over the registry seam's
+#: `is_publishable_ref`. With no binding left for them, the callable and value
+#: stand-ins (`function`, `constant`) went too.
 
-#: The snapshot registry — the projection's per-binding bookkeeping.
-snapshot_registry = module(
-    "snapshot_registry",
-    reason="the snapshot registry belongs to the projection mechanism, which "
-           "is openXdox's column (design.md § D3)")
-
-#: The corpus-root predicate — whether a checkout can be scanned as
-#: openxFactory's governed corpus at all. The SHAPE of a corpus is the
-#: consumer's business (`SCANNED_ROOTS` is derived from `doc_health.corpus`'s
-#: governed roots), and openDox's `cli` asks the question on the way into a
-#: generate verb.
-corpus_root = module(
-    "corpus_root",
-    reason="what counts as a scannable corpus checkout is derived from "
-           "openxFactory's governed document roots, which openDox does not "
-           "carry (design.md § D3)")
-
-#: The snapshot GENERATOR — the projection mechanism's writer half, beside
-#: `snapshot` (its validator half) above.
-generator = module(
-    "generator",
-    reason="the snapshot generator is the projection mechanism, which is "
-           "openXdox's column (design.md § D3)")
-
-#: The projection's HTTP column. openDox's `serve` core keeps one reach into it
-#: — `hosted_ref_refused`, below — after slice 2b stopped naming the column as
-#: a mixin base and stopped re-exporting its names.
+#: The projection's HTTP column. Named here only to carry
+#: `LateProjectionRoutes` below: `serve.py` holds no other reference to it
+#: since plan 034 T055.
 serve_projection = module(
     "serve_projection",
-    reason="the snapshot and index routes are openXdox's column "
-           "(design.md § D3); this core dispatches them through the § 2.4 "
-           "route extension point instead of inheriting them")
-
-#: `snapshot.find_validator`, bound as a callable because `workbench.py` and
-#: `cli.py` import the FUNCTION rather than the module.
-find_validator = function(snapshot, "find_validator")
-
-#: `corpus_root.corpus_root_refusal` — `cli.py:130` refuses a generate whose
-#: `--repo-root` is not a corpus checkout, and the refusal text is the whole
-#: message.
-corpus_root_refusal = function(corpus_root, "corpus_root_refusal")
-
-#: `generator.generate_snapshot` and `generator.is_rfc3339_datetime` —
-#: `cli.py`'s two generate verbs (:184, :501) and its `--generated-at` shape
-#: check (:156).
-generate_snapshot = function(generator, "generate_snapshot")
-is_rfc3339_datetime = function(generator, "is_rfc3339_datetime")
-
-#: `serve_projection.hosted_ref_refused` — `serve.py:760` must never NAME a
-#: session ref on a hosted response (FR-048), and the predicate that decides it
-#: travelled to the projection column with its neighbours.
-hosted_ref_refused = function(serve_projection, "hosted_ref_refused")
+    reason="the snapshot index route is openXdox's column (design.md § D3); "
+           "this core dispatches it through the § 2.4 route extension point "
+           "instead of inheriting it")
 
 #: `resolve_source_path` STOOD HERE and is `serve.py`'s own definition since
 #: § 3.4 slice S6 (RULED Q4, openxFactory#656 comment 5642758731). It is the
 #: single-root entry point to the `/source` pass-through's containment, and that
 #: pass-through is now a FIXED CORE ARM of the neutral product — so a stand-in
 #: forwarding into the layer that PINS openDox was the wrong shape for it. The
-#: RULE has not moved: `snapshot_registry.resolve_within` is still the consumer's
-#: and is still what the entry point calls, through `serve.py`'s `registry_mod`
-#: binding below — the same seam `serve_workbench.py` reaches it by at five
-#: sites. `notebook_action.py`:52 still imports the name `from .serve`, and now
-#: gets a real function rather than a forwarder.
-
-#: `corpus_root.SCANNED_ROOTS` — the one CONSTANT reach, and the family's
-#: narrowest member. `cli.py:228` iterates it to name the roots a rejected
-#: checkout is missing; that line is not one the carve manifest declares, so
-#: the NAME must keep behaving like the tuple it was. See `_LateConsumerValue`.
-scanned_roots = constant(corpus_root, "SCANNED_ROOTS")
+#: RULE is the snapshot registry's `resolve_within`, which the entry point
+#: calls through `serve.py`'s `registry_mod`, the registry seam's proxy since
+#: plan 034 T055. `notebook_action.py`:52 still imports the name `from .serve`,
+#: and gets a real function rather than a forwarder.
 
 #: The gate console's HTTP column — the door the gate verbs are posted through.
 #: Named here only to carry `LateGateRoutes` below; `serve.py` holds no other
@@ -473,43 +313,30 @@ LateGateRoutes = route_column(serve_gate, "GateRoutes",
                               ("_handle_gate_action", "_log_gate_failure"))
 
 #: `serve_projection.ProjectionRoutes` as a mixin base — `DashboardHandler`'s
-#: fourth base until slice 2b. FIVE methods since § 3.4 slice S6: the one the
-#: § 2.4 binding names (`_serve_index`), `_serve_snapshot` — which `serve.py`'s
-#: own CORE arm calls, because `/snapshot.json`'s handler travelled with its
-#: neighbours while its arm stayed core — and the three those two call between
-#: them.
+#: fourth base until slice 2b. ONE method since plan 034 T055: `_serve_index`,
+#: which the column's own § 2.4 binding for `/snapshot-index.json` names, and
+#: which T084 hands to the handler-contribution facet with the column.
 #:
-#: IT WAS EIGHT UNTIL S6 (RULED Q4, openxFactory#656 comment 5642758731).
-#: `_keyed_source`, `_serve_source` and `_refuse_bare_source` are `serve.py`'s
-#: own methods now, because the route they answer is the neutral product's own
-#: fixed core arm. `_hosted_entry_refused` stays HERE and is still forwarded:
-#: `_serve_snapshot` calls it too, and it is FR-048's hosted-plane confinement,
-#: which is the projection column's rule — the route moved, the rule did not.
+#: IT WAS EIGHT UNTIL § 3.4 SLICE S6 AND FIVE UNTIL T055. S6 (RULED Q4,
+#: openxFactory#656 comment 5642758731) made `_keyed_source`, `_serve_source`
+#: and `_refuse_bare_source` `serve.py`'s own, because the route they answer is
+#: the neutral product's fixed core arm. T055 did the same for the core
+#: `/snapshot.json` arm's four, `_query_key`, `_read_snapshot`,
+#: `_serve_snapshot` and `_hosted_entry_refused`: forwarded here, a standalone
+#: server refused every `/snapshot.json`. The rules they consult (FR-048's
+#: hosted-plane confinement, the registry's per-entry resolution) are the
+#: snapshot registry's, reached through its seam.
 LateProjectionRoutes = route_column(
-    serve_projection, "ProjectionRoutes",
-    ("_query_key", "_read_snapshot", "_serve_snapshot", "_hosted_entry_refused",
-     "_serve_index"))
+    serve_projection, "ProjectionRoutes", ("_serve_index",))
 
 __all__ = [
     "CONSUMER_PACKAGE",
     "ConsumerReachUnavailable",
-    "constant",
-    "corpus_root",
-    "corpus_root_refusal",
-    "find_validator",
-    "function",
     "gate_console",
-    "generate_snapshot",
-    "generator",
-    "hosted_ref_refused",
-    "is_rfc3339_datetime",
     "LateGateRoutes",
     "LateProjectionRoutes",
     "module",
     "route_column",
-    "scanned_roots",
     "serve_gate",
     "serve_projection",
-    "snapshot",
-    "snapshot_registry",
 ]
