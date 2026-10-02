@@ -346,7 +346,7 @@ def _die_with_parent():
 BUNDLE_TREE = BUNDLE_SOCKET_DIR.parts
 
 
-def _make_private_directories(leaf: Path) -> None:
+def _make_private_directories(leaf: Path, *, state: Path) -> None:
     """`leaf` and every missing directory above it, each born exactly 0700.
 
     `Path.mkdir(parents=True)` gives the directories it creates on the way
@@ -369,6 +369,16 @@ def _make_private_directories(leaf: Path) -> None:
     or written through: a symbolic link, something that is not a directory,
     or a directory that is not this user's alone.
 
+    AND THE DIRECTORY IT STARTS FROM IS JUDGED BY ITS DESCRIPTOR, before
+    the first `mkdir` (adversarial review of openDox-code#69). Opening it
+    follows a link, which this install allows on the configured path, so
+    what the descriptor names is asked the tree check's own question
+    (`_unsafe_because`): this user's alone where it is the state directory
+    or under it, and otherwise this user's or root's, with any write by
+    others only behind the sticky bit. The path-wise check before it asks
+    the same question; this one asks it of the very directory that is
+    written into.
+
     THE UMASK IS PROCESS-WIDE, and it is narrowed only for these few
     `mkdir`s and then put back. A file another thread creates meanwhile can
     only come out more private than asked, never less.
@@ -382,6 +392,11 @@ def _make_private_directories(leaf: Path) -> None:
     if not missing:
         return
     descriptor = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    own = base == state or state in base.parents
+    reason = _unsafe_because(os.fstat(descriptor), uid=uid, own=own)
+    if reason is not None:
+        os.close(descriptor)
+        raise BundledServer._unsafe(base, reason)
     path = base
     previous = os.umask(0o077)
     try:
@@ -622,7 +637,8 @@ class BundledServer:
         # BEFORE THE CHMOD, which follows a symbolic link: a `run` placed
         # there as a link would otherwise have its TARGET re-moded.
         self._refuse_an_unsafe_tree(existing_only=True)
-        _make_private_directories(self.bundle.socket_dir)
+        _make_private_directories(self.bundle.socket_dir,
+                                  state=self.bundle.state_dir)
         self._refuse_an_unsafe_tree()
         os.chmod(self.bundle.socket_dir, 0o700)
 

@@ -589,6 +589,36 @@ def test_nothing_is_made_through_a_path_the_tree_check_refuses(
     assert not os.path.lexists(made), f"{made} was made before the refusal"
 
 
+@pytest.mark.parametrize("shape", ["link-to-open", "open", "link-to-open-state",
+                                   "sticky-state"])
+def test_the_directory_creation_starts_from_judges_its_own_descriptor(
+        tmp_path: Path, short_state: Path, shape: str) -> None:
+    """`_make_private_directories` judges the directory it opens, by its
+    descriptor, before its first `mkdir` (adversarial review of #69). It is
+    asked here directly, with no path-wise check in front of it, so its own
+    guard is what is measured: a base that every user can write, reached
+    through a link or not, makes nothing beneath it. The state directory is
+    judged as the install's OWN, so even a sticky one is refused, where a
+    sticky ANCESTOR (`/tmp`'s shape) is accepted."""
+    watched = short_state / "open"
+    watched.mkdir()
+    watched.chmod(0o1777 if shape == "sticky-state" else 0o777)
+    if shape == "link-to-open":
+        (short_state / "link").symlink_to(watched)
+        state = short_state / "link" / "state"
+    elif shape == "open":
+        state = watched / "state"
+    elif shape == "link-to-open-state":
+        (short_state / "link").symlink_to(watched)
+        state = short_state / "link"
+    else:
+        state = watched
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        bundle_mod._make_private_directories(state / "postgres" / "run", state=state)
+    assert "writable by every user" in str(caught.value), caught.value
+    assert list(watched.iterdir()) == [], "made beneath an unsafe base"
+
+
 @pytest.mark.parametrize("shape", ["link", "foreign-directory"])
 def test_a_name_put_in_the_way_first_is_refused_never_followed(
         monkeypatch, tmp_path: Path, short_state: Path, shape: str) -> None:
