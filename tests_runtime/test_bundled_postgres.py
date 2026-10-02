@@ -53,6 +53,7 @@ from pathlib import Path
 import pytest
 
 from opendox.runtime import bundle as bundle_mod
+from opendox.runtime import cli
 from opendox.runtime import config
 from opendox.runtime.config import PREFIX
 
@@ -618,6 +619,62 @@ def test_a_cluster_whose_configuration_points_elsewhere_runs_on_its_own_files(
                      "hba_file": str(data / "pg_hba.conf"),
                      "ident_file": str(data / "pg_ident.conf")}, shown
     assert method == f"peer:{bundle_mod.os_user()}", method
+
+
+def _verb(state: Path, *verb: str) -> tuple[int, dict]:
+    """`OPENDOX_INSTALL_MODE=local opendox-runtime runtime <verb>`, a SECOND process."""
+    done = subprocess.run(
+        [sys.executable, "-m", "opendox.runtime.cli", "runtime", *verb],
+        env=_clean_env(**{MODE: "local", STATE: str(state)}), cwd=ROOT,
+        capture_output=True, text=True, timeout=60)
+    return done.returncode, json.loads(done.stdout)
+
+
+@pytest.mark.parametrize("shape", ["linked-run", "open-state", "no-server"])
+def test_the_local_verbs_connect_only_to_their_own_verified_server(
+        state_dir: Path, shape: str) -> None:
+    """The adversarial review of #69 (L2): a second state tree whose
+    `postgres/run` is a link to a RUNNING bundle's socket directory, in a
+    state directory every user could write. `status` and `migrate` ran on
+    it as the owner role, against the other bundle's server, while a start
+    refused the same tree. Each verb now asks the tree check and a live
+    server of its OWN data directory before any connection. A valid tree
+    with no server is answered the same way, by name and unconnected."""
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    other = Path(tempfile.mkdtemp(prefix="odx-o-", dir="/tmp" if os.path.isdir("/tmp") else None))
+    try:
+        (other / "postgres" / "data").mkdir(parents=True, mode=0o700)
+        (other / "postgres").chmod(0o700)
+        if shape == "no-server":
+            (other / "postgres" / "run").mkdir(mode=0o700)
+        else:
+            (other / "postgres" / "run").symlink_to(
+                config.DatabaseBundle(state_dir).socket_dir)
+        if shape == "open-state":
+            other.chmod(0o777)
+        with bundle_mod.BundledServer(settings):
+            status_code, status = _status(other)
+            migrate_code, migrate = _verb(other, "migrate")
+            reset_code, reset = _verb(other, "reset", "--confirm",
+                                      cli.RESET_CONFIRMATION)
+            # the positive control: the running bundle's own verbs connect,
+            # and its schema was not dropped through the other tree's link
+            own_code, own = _status(state_dir)
+    finally:
+        other.chmod(0o700)
+        shutil.rmtree(other, ignore_errors=True)
+    expected = {"linked-run": "is a symbolic link",
+                "open-state": "writable by every user",
+                "no-server": "no bundled server is running"}[shape]
+    assert status_code == 1 and status["database"].startswith("not probed: "), status
+    assert expected in status["database"], status
+    assert migrate_code == 1, migrate
+    assert migrate["refusal"] == "local-bundle-unverified", migrate
+    assert expected in migrate["message"], migrate
+    assert reset_code == 1 and reset["refusal"] == "local-bundle-unverified", reset
+    assert expected in reset["message"], reset
+    assert own["database"] == "reachable" and own_code == 0, own
+    assert own["applied_migrations"] and not own["pending_migrations"], own
 
 
 def test_migrate_under_the_local_mode_uses_the_bundle_and_refuses_a_dsn(

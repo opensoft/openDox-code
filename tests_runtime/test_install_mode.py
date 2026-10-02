@@ -334,8 +334,10 @@ def test_runtime_status_under_the_local_mode_probes_no_broker(
     assert evidence["settings"][PREFIX + "OIDC_JWKS_URL"] == ""
     # the database half is the ONLY reason `ok` is false: no bundled server
     # is running on this (nonexistent) state directory, and `status` reports
-    # that rather than starting one
-    assert evidence["database"].startswith("unreachable"), evidence
+    # that rather than starting one. It says so WITHOUT connecting: a local
+    # socket is judged before it is asked (adversarial review of #69).
+    assert evidence["database"].startswith(
+        "not probed: no bundled server is running"), evidence
     assert evidence["database_bundle"]["pid"] is None, evidence
     assert code == 1
 

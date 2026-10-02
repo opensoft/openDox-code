@@ -948,6 +948,52 @@ def test_an_existing_cluster_is_opened_only_by_its_own_major(
         assert not (data / "pg_hba.conf").exists(), "wrote into another major's cluster"
 
 
+def _a_tree(state: Path) -> config.DatabaseBundle:
+    """A valid bundle tree under `state`, every directory 0700, no server."""
+    bundle = config.DatabaseBundle(state)
+    for directory in (state / "postgres", bundle.data_dir, bundle.socket_dir):
+        directory.mkdir(mode=0o700, exist_ok=True)
+        directory.chmod(0o700)
+    return bundle
+
+
+@pytest.mark.parametrize("shape", ["no-lock", "dead-pid", "not-postgres",
+                                   "no-proc-other-socket", "no-proc-this-socket",
+                                   "open-state"])
+def test_a_local_verb_connects_only_behind_a_verified_server(
+        monkeypatch, short_state: Path, shape: str) -> None:
+    """`bundle.refusal_before_connecting` (adversarial review of #69, L2):
+    the tree a start checks, then a live server of THIS data directory,
+    named by its own lock file, listening at THIS socket directory. Where
+    `/proc` cannot say what the pid is, the lock file's socket line still
+    binds the socket to the tree."""
+    bundle = _a_tree(short_state)
+    live = os.getpid()                       # alive, and not a postgres
+    dead = 2 ** 22 + 17                      # above the default pid_max
+    lock = bundle.data_dir / "postmaster.pid"
+    socket_line = (str(bundle.socket_dir) if shape != "no-proc-other-socket"
+                   else "/tmp/somewhere-else")
+    if shape != "no-lock":
+        pid = dead if shape == "dead-pid" else live
+        lock.write_text(f"{pid}\n{bundle.data_dir}\n1\n5432\n{socket_line}\n\n",
+                        encoding="utf-8")
+    if shape.startswith("no-proc"):
+        monkeypatch.setattr(bundle_mod, "PROC", short_state / "no-proc")
+    if shape == "open-state":
+        short_state.chmod(0o777)
+    reason = bundle_mod.refusal_before_connecting(bundle)
+    expected = {"no-lock": "no readable postmaster.pid",
+                "dead-pid": "not a live process",
+                "not-postgres": "is not the postgres serving",
+                "no-proc-other-socket": "listens at /tmp/somewhere-else",
+                "no-proc-this-socket": None,
+                "open-state": "writable by every user"}[shape]
+    if expected is None:
+        assert reason is None, reason
+    else:
+        assert reason is not None and expected in reason, reason
+
+
 def test_an_initdb_that_dies_midway_leaves_no_data_directory(
         monkeypatch, tmp_path: Path, short_state: Path) -> None:
     """The half-built cluster: `PG_VERSION` written, then the run fails. The

@@ -491,6 +491,24 @@ def cmd_init(args: argparse.Namespace) -> int:
                   "next": "opendox-runtime runtime migrate"}, ok=True)
 
 
+def _local_bundle_refusal(settings) -> str | None:
+    """For a LOCAL install, why its socket must not be connected to, or `None`.
+
+    `bundle.refusal_before_connecting`: the tree check a start asks, and a
+    live server of THIS data directory behind the socket, both before any
+    client connection (adversarial review of openDox-code#69). A hosted
+    install's DSN is the operator's, and is not judged here.
+    """
+    if settings.install_mode != INSTALL_MODE_LOCAL:
+        return None
+    from opendox.runtime import bundle as bundle_mod
+    from opendox.runtime.config import database_bundle
+
+    reason = bundle_mod.refusal_before_connecting(
+        database_bundle(settings.state_dir))
+    return None if reason is None else _safe_message(reason)
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     """Apply the ordered SQL, or with `--plan` report what would be applied.
 
@@ -526,6 +544,10 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                                  "package with the `runtime` extra: "
                                  "pip install '.[runtime]'"},
                      ok=False)
+    refusal = _local_bundle_refusal(settings)
+    if refusal is not None:
+        return _emit({"verb": "migrate", "refusal": "local-bundle-unverified",
+                      "message": refusal}, ok=False)
     runner_db = Database(dsn, application_name="opendox-runtime-migrate",
                          checkout_timeout=args.connect_timeout)
     # THE OUTCOME IS COMPUTED INSIDE THE CONTEXT AND EMITTED OUTSIDE IT. A
@@ -742,76 +764,85 @@ def cmd_status(args: argparse.Namespace) -> int:
     report["runtime_extra"] = "present"
 
     connected = False
-    try:
-        # INSIDE the context, all of it. `runner.applied()` and `runner.plan()`
-        # each check a connection out of the pool, so calling them after the
-        # `with` had closed it raised `PoolClosed` and this verb reported a
-        # perfectly reachable database as unreachable (Copilot review of
-        # openDox-code#25, and it is the kind of defect only a live database
-        # shows — every unreachable-database test passed).
-        with Database(settings.database_url,
-                      checkout_timeout=args.probe_timeout) as db:
-            with db.connection() as conn:
-                conn.execute("select 1")
-            # THE CONNECTIVITY ANSWER IS RECORDED THE MOMENT IT IS TRUE, so a
-            # failure in the queries BELOW cannot rewrite it — see the generic
-            # handler at the end of this block.
-            connected = True
-            # THE SAME CANONICAL GATE `apply()` AND `/readyz` RUN. Without
-            # it an EMPTY migrations directory reports `pending: []` on a
-            # fresh database — nothing pending, nothing drifted, everything
-            # fine — for an install with no coordination schema at all
-            # (Copilot review of openDox-code#25, round 7). `status` is the
-            # verb an operator believes.
-            migrations.verify_canonical_digest(settings.migrations_dir)
-            runner = migrations.MigrationRunner(
-                db, migrations_dir=settings.migrations_dir)
-            applied = [row.version for row in runner.applied()]
-            pending = [m.version for m in runner.plan()]
-            drifted = runner.drift()
-        report["database"] = "reachable"
-        report["applied_migrations"] = applied
-        report["pending_migrations"] = pending
-        # NOTHING PENDING IS NOT THE SAME AS MATCHING THIS TREE: a migration
-        # whose file changed, or vanished, is invisible to `plan()` and is
-        # refused by `apply()`. See `MigrationRunner.drift`.
-        report["migration_drift"] = drifted
-        # PENDING IS UNHEALTHY, exactly as `/readyz` treats it. This reported
-        # the versions and left `ok` true, so a reachable but UNMIGRATED
-        # database exited 0 while the readiness probe on the same install
-        # refuses traffic — two answers to one question, and the CLI's was the
-        # comforting one (Copilot review of openDox-code#25, round 7).
-        if drifted or pending:
-            ok = False
-    # a status verb reports, never raises
-    except migrations.MigrationError as exc:
-        # THE DATABASE ANSWERED; THE TREE DID NOT. `select 1` has already
-        # succeeded by the time the runner is asked anything, so reporting
-        # `database: unreachable` for a missing or malformed migrations
-        # directory pointed the operator at the wrong dependency entirely
-        # (Copilot review of openDox-code#25, round 7).
-        report.setdefault("database", "reachable")
-        report["migrations"] = (
-            f"unreadable: {type(exc).__name__}: {_safe_message(exc)}")
+    # A LOCAL INSTALL'S SOCKET IS JUDGED BEFORE IT IS CONNECTED TO
+    # (adversarial review of openDox-code#69): the tree a start checks, and a
+    # live server of this data directory behind it. Otherwise `status` asks
+    # whatever answers at that path, as the served role.
+    refusal = _local_bundle_refusal(settings)
+    if refusal is not None:
+        report["database"] = f"not probed: {refusal}"
         ok = False
-    except Exception as exc:  # noqa: BLE001
-        # THE SAME DISTINCTION THE BRANCH ABOVE MAKES, for the failures that
-        # are not the runner's own. Once `select 1` has answered, the database
-        # IS reachable, and a later failure — the served role without `select`
-        # on the ledger, a schema the search path does not reach, a query that
-        # errors — is a privilege or schema problem reported as one. Reporting
-        # `database: unreachable` for it pointed the operator at the network
-        # and hid the real fault, which is the defect round 7 fixed for
-        # `MigrationError` and left in place one handler down (Copilot review
-        # of openDox-code#25, round 10, suppressed).
-        if connected:
+    else:
+        try:
+            # INSIDE the context, all of it. `runner.applied()` and `runner.plan()`
+            # each check a connection out of the pool, so calling them after the
+            # `with` had closed it raised `PoolClosed` and this verb reported a
+            # perfectly reachable database as unreachable (Copilot review of
+            # openDox-code#25, and it is the kind of defect only a live database
+            # shows — every unreachable-database test passed).
+            with Database(settings.database_url,
+                          checkout_timeout=args.probe_timeout) as db:
+                with db.connection() as conn:
+                    conn.execute("select 1")
+                # THE CONNECTIVITY ANSWER IS RECORDED THE MOMENT IT IS TRUE, so a
+                # failure in the queries BELOW cannot rewrite it — see the generic
+                # handler at the end of this block.
+                connected = True
+                # THE SAME CANONICAL GATE `apply()` AND `/readyz` RUN. Without
+                # it an EMPTY migrations directory reports `pending: []` on a
+                # fresh database — nothing pending, nothing drifted, everything
+                # fine — for an install with no coordination schema at all
+                # (Copilot review of openDox-code#25, round 7). `status` is the
+                # verb an operator believes.
+                migrations.verify_canonical_digest(settings.migrations_dir)
+                runner = migrations.MigrationRunner(
+                    db, migrations_dir=settings.migrations_dir)
+                applied = [row.version for row in runner.applied()]
+                pending = [m.version for m in runner.plan()]
+                drifted = runner.drift()
             report["database"] = "reachable"
-            report["schema_queries"] = (
-                f"failed: {type(exc).__name__}: {_safe_message(exc)}")
-        else:
-            report["database"] = (
-                f"unreachable: {type(exc).__name__}: {_safe_message(exc)}")
-        ok = False
+            report["applied_migrations"] = applied
+            report["pending_migrations"] = pending
+            # NOTHING PENDING IS NOT THE SAME AS MATCHING THIS TREE: a migration
+            # whose file changed, or vanished, is invisible to `plan()` and is
+            # refused by `apply()`. See `MigrationRunner.drift`.
+            report["migration_drift"] = drifted
+            # PENDING IS UNHEALTHY, exactly as `/readyz` treats it. This reported
+            # the versions and left `ok` true, so a reachable but UNMIGRATED
+            # database exited 0 while the readiness probe on the same install
+            # refuses traffic — two answers to one question, and the CLI's was the
+            # comforting one (Copilot review of openDox-code#25, round 7).
+            if drifted or pending:
+                ok = False
+        # a status verb reports, never raises
+        except migrations.MigrationError as exc:
+            # THE DATABASE ANSWERED; THE TREE DID NOT. `select 1` has already
+            # succeeded by the time the runner is asked anything, so reporting
+            # `database: unreachable` for a missing or malformed migrations
+            # directory pointed the operator at the wrong dependency entirely
+            # (Copilot review of openDox-code#25, round 7).
+            report.setdefault("database", "reachable")
+            report["migrations"] = (
+                f"unreadable: {type(exc).__name__}: {_safe_message(exc)}")
+            ok = False
+        except Exception as exc:  # noqa: BLE001
+            # THE SAME DISTINCTION THE BRANCH ABOVE MAKES, for the failures that
+            # are not the runner's own. Once `select 1` has answered, the database
+            # IS reachable, and a later failure — the served role without `select`
+            # on the ledger, a schema the search path does not reach, a query that
+            # errors — is a privilege or schema problem reported as one. Reporting
+            # `database: unreachable` for it pointed the operator at the network
+            # and hid the real fault, which is the defect round 7 fixed for
+            # `MigrationError` and left in place one handler down (Copilot review
+            # of openDox-code#25, round 10, suppressed).
+            if connected:
+                report["database"] = "reachable"
+                report["schema_queries"] = (
+                    f"failed: {type(exc).__name__}: {_safe_message(exc)}")
+            else:
+                report["database"] = (
+                    f"unreachable: {type(exc).__name__}: {_safe_message(exc)}")
+            ok = False
 
     # A LOCAL INSTALL HAS NO BROKER TO PROBE (plan 034 T070; #1144 13.4),
     # and that is its configuration rather than a fault: reported by name, and
@@ -865,6 +896,10 @@ def cmd_reset(args: argparse.Namespace) -> int:
     except ImportError as exc:  # pragma: no cover - the extra is absent
         return _emit({"verb": "reset", "refusal": "runtime-extra-missing",
                       "message": _safe_message(exc)}, ok=False)
+    refusal = _local_bundle_refusal(settings)
+    if refusal is not None:
+        return _emit({"verb": "reset", "refusal": "local-bundle-unverified",
+                      "message": refusal}, ok=False)
     try:
         with Database(dsn, application_name="opendox-runtime-reset",
                       checkout_timeout=args.connect_timeout) as db:
