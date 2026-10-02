@@ -498,6 +498,23 @@ def test_this_users_own_link_to_a_private_directory_is_accepted(
     assert "initdb" in str(caught.value), caught.value
 
 
+def _foreign_lstat(monkeypatch, *links: Path) -> None:
+    """`os.lstat` answers that each of `links` belongs to another user. A
+    non-root suite cannot create another user's link, so it is stood in for
+    those paths only."""
+    real_lstat = os.lstat
+
+    def _lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if Path(path) in links:
+            fields = list(info)
+            fields[4] = os.getuid() + 4242                     # st_uid
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(bundle_mod.os, "lstat", _lstat)
+
+
 def test_a_link_another_user_owns_is_refused(
         monkeypatch, tmp_path: Path, short_state: Path) -> None:
     """Another user's link could be pointed elsewhere after the check. A
@@ -507,17 +524,7 @@ def test_a_link_another_user_owns_is_refused(
     private.mkdir(mode=0o700)
     link = short_state / "link"
     link.symlink_to(private)
-    real_lstat = os.lstat
-
-    def _lstat(path, *args, **kwargs):
-        info = real_lstat(path, *args, **kwargs)
-        if Path(path) == link:
-            fields = list(info)
-            fields[4] = os.getuid() + 4242                     # st_uid
-            return os.stat_result(fields)
-        return info
-
-    monkeypatch.setattr(bundle_mod.os, "lstat", _lstat)
+    _foreign_lstat(monkeypatch, link)
     server = _prepared(monkeypatch, tmp_path, link / "state")
     with pytest.raises(bundle_mod.BundleRefused) as caught:
         server.start()
@@ -539,12 +546,99 @@ def test_missing_directories_are_created_0700_whatever_the_umask(
     try:
         with pytest.raises(bundle_mod.BundleRefused) as caught:
             server.start()
+        # The narrowed umask is the start's alone: the user's is put back.
+        assert os.umask(umask) == umask, "the start left its own umask in place"
     finally:
         os.umask(previous)
     assert "initdb" in str(caught.value), caught.value
     for directory in (short_state / "a", short_state / "a" / "b", state,
                       state / "postgres", state / "postgres" / "run"):
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700, directory
+
+
+@pytest.mark.parametrize("shape", ["foreign-link", "foreign-broken-link",
+                                   "open-ancestor", "link-in-open-dir"])
+def test_nothing_is_made_through_a_path_the_tree_check_refuses(
+        monkeypatch, tmp_path: Path, short_state: Path, shape: str) -> None:
+    """What exists is judged BEFORE anything is created (Copilot review of
+    #69). Before, the missing `postgres/run` was made through the path first
+    and refused only after, so it was created in a foreign link's target, or
+    beneath a directory every user can write."""
+    private = short_state / "private"
+    private.mkdir(mode=0o700)
+    open_dir = short_state / "open"
+    open_dir.mkdir()
+    open_dir.chmod(0o777)
+    if shape in {"foreign-link", "foreign-broken-link"}:
+        target = private if shape == "foreign-link" else private / "gone"
+        state = short_state / "link"
+        state.symlink_to(target)
+        _foreign_lstat(monkeypatch, state)
+        expected, made = "symbolic link owned by", target / "postgres"
+    elif shape == "open-ancestor":
+        state = open_dir / "state"
+        expected, made = "not sticky", state
+    else:
+        (open_dir / "link").symlink_to(private)
+        state = open_dir / "link" / "state"
+        expected, made = "not sticky", private / "state"
+    server = _prepared(monkeypatch, tmp_path, state)
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert expected in str(caught.value), caught.value
+    assert not os.path.lexists(made), f"{made} was made before the refusal"
+
+
+@pytest.mark.parametrize("shape", ["link", "foreign-directory"])
+def test_a_name_put_in_the_way_first_is_refused_never_followed(
+        monkeypatch, tmp_path: Path, short_state: Path, shape: str) -> None:
+    """The race in a sticky directory, `/tmp`'s shape (Copilot review of
+    #69): every user can create a name there, so another user can put the
+    state directory's name in place between the check and the `mkdir`. The
+    stand-in `mkdir` plays that user, once. The name is refused, and nothing
+    is made through it or beneath it, nor is it re-moded."""
+    sticky = short_state / "sticky"
+    sticky.mkdir()
+    sticky.chmod(0o1777)
+    state = sticky / "state"
+    target = tmp_path / "somewhere-else"
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
+    real_mkdir, real_fstat = os.mkdir, os.fstat
+    planted: dict = {}
+
+    def _mkdir(path, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None and path == state.name and not planted:
+            if shape == "link":
+                os.symlink(target, path, dir_fd=dir_fd)
+            else:
+                real_mkdir(path, 0o755, dir_fd=dir_fd)
+                os.chmod(state, 0o755)
+            planted["inode"] = os.lstat(state).st_ino
+            raise FileExistsError(path)
+        return real_mkdir(path, mode, dir_fd=dir_fd)
+
+    def _fstat(descriptor):
+        info = real_fstat(descriptor)
+        if info.st_ino == planted.get("inode"):
+            fields = list(info)
+            fields[4] = os.getuid() + 4242                     # st_uid
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(bundle_mod.os, "mkdir", _mkdir)
+    monkeypatch.setattr(bundle_mod.os, "fstat", _fstat)
+    server = _prepared(monkeypatch, tmp_path, state)
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert planted, "the stand-in never ran: the state directory was not made by descriptor"
+    message = str(caught.value)
+    assert str(state) in message, message
+    assert ("is a symbolic link" if shape == "link"
+            else "is owned by uid") in message, message
+    beneath = target if shape == "link" else state
+    assert not (beneath / "postgres").exists(), "made beneath the planted name"
+    assert stat.S_IMODE(os.stat(beneath).st_mode) == 0o755, "the planted name was re-moded"
 
 
 @pytest.mark.parametrize("shape", ["link", "broken-link", "open"])
