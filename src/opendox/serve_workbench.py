@@ -1676,6 +1676,23 @@ class WorkbenchRoutes:
         transcript_turns = fields["transcript_turns"]
         turn_buffers = fields["turn_buffers"]
 
+        # ---- the model verdict, AHEAD of step 5 (#1144's 16.4; plan 034's
+        # T081). A plane with NO model port refuses a well-formed turn here,
+        # with step 7's own code and envelope, before the scope is read: a
+        # plane-level verdict outranks any defect in the caller's request, the
+        # rule the validators refusal above keeps. It answers both an install
+        # with no model configured (`doxbench_model.NO_MODEL_CONFIGURED`, which
+        # the accessor answers as no port) and a plane with no factory at all,
+        # and it spawns nothing and contacts nothing. Step 7 keeps its own check
+        # for the port it then reads. Measured at openDox-code#71 `e0298cf4`,
+        # once T085's validators answered standalone: without this, a standalone
+        # turn reached step 5's scope import and the connection dropped. ----
+        if self._workbench_model_port() is None:
+            self._refuse_turn(validators,
+                              DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
+                              turn_id, failure_kind=failure_kind)
+            return
+
         from opendox import doxbench_hash
         from opendox import doxbench_model
         from openxdox import doxbench_scope

@@ -26,7 +26,8 @@ state 16.4 asks for:
 4. THE SERVED ROUTES, STANDALONE. A `generate-and-open` child with neither
    sibling importable (`tests/standalone_child.py`) answers the catalog route
    200 with no available entry. This is T085's falsifier's second half, and
-   it needs T085's validators.
+   it needs T085's validators. The child also answers a schema-valid turn
+   `403 model_capability_unavailable`.
 5. THE CHAT RAIL. Mounted over an empty catalog with no intake flow, the rail
    shows "No model configured" and how to configure one, visibly and before
    any turn, while the send button keeps its existing sentence byte for byte.
@@ -355,6 +356,27 @@ def test_the_served_catalog_offers_no_available_entry(standalone) -> None:
     assert envelope["kind"] == serve_wire.DOXBENCH_MODEL_CATALOG_KIND
     assert own.validate(envelope) == []
     assert [m for m in envelope["models"] if m["available"]] == []
+
+
+def test_a_turn_is_refused_model_capability_unavailable(standalone) -> None:
+    """A schema-valid turn, which no rail sends with no model selected but any
+    client can, is refused with the fixed code and the contract's failure
+    envelope, and the child spawns no harness (none is on its PATH, and the
+    no-model port spawns nothing)."""
+    base, token, _child = standalone
+    request = yaml.safe_load(
+        (EXAMPLES / "workbench-chat-turn-v2-loaded-set.example.yaml").read_text(
+            encoding="utf-8"))
+    status, body = _request(
+        base, "POST", "/actions/workbench/chat-turn",
+        body=json.dumps(request).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-XF-Console-Token": token})
+    code = serve_wire.DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE
+    assert status == serve_wire.doxbench_error_status(code) == 403, body
+    assert body["error"] == code, body
+    assert body["kind"] == serve_wire.DOXBENCH_CHAT_TURN_V2_FAILURE_KIND
+    assert body["client_turn_id"] == request["client_turn_id"]
+    assert own.validate(body) == [], own.report(own.validate(body))
 
 
 # ---------------------------------------------------------------------------
