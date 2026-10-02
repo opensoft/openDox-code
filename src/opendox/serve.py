@@ -151,6 +151,7 @@ from opendox import doxbench_telemetry  # noqa: E402
 from opendox import consumer_reach  # noqa: E402
 from opendox import defaults  # noqa: E402
 from opendox import projection_seams  # noqa: E402
+from opendox import column_seams  # noqa: E402
 # § 3.4 slice S5: `build_server()` publishes the VIEW MANIFEST on
 # `/capabilities`, the one line slice S3 built both ends of and left for the
 # slice at which a contribution first exists to deliver.
@@ -1881,6 +1882,10 @@ def build_server(
     # from the registered registry, which is what lets a server be BUILT with
     # nothing else installed (plan 034, research R7).
     projection_seams.register_defaults()
+    # AND the consumer columns' defaults (plan 034 T084; #1144 4.3,
+    # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
+    # the cross-reference register, the same way.
+    column_seams.register_defaults()
 
     from opendox import doxbench_turns
     # Imported HERE rather than at module scope, for the reason that is
@@ -2400,6 +2405,10 @@ def main(argv: list[str] | None = None) -> int:
     # BEFORE the parser: its option defaults below read the registered
     # registry (`registry_mod.DEFAULT_REF` and the data source's defaults).
     projection_seams.register_defaults()
+    # AND the consumer columns' defaults (plan 034 T084; #1144 4.3,
+    # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
+    # the cross-reference register, the same way.
+    column_seams.register_defaults()
     parser = argparse.ArgumentParser(prog="ideation-dashboard-serve", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--web-dir", default=str(Path(__file__).resolve().parent / "web"),

@@ -234,12 +234,21 @@ class _Seam:
     `callables` and `values` are the names a registration must carry.
     `default` names openDox's own default, for the refusal. The records a
     registration keeps are whether it is the entry point's default, and whether
-    a consumer has read that default since it was registered."""
+    a consumer has read that default since it was registered.
+
+    `module` names the module that declares the seam, in every refusal and in
+    the call a host makes. It is this module's own by default, and
+    `opendox.column_seams` declares its four seams through the same class
+    (plan 034 T084), so every seam of openDox's keeps one discipline."""
 
     def __init__(self, name: str, *, what: str, callables: tuple[str, ...],
                  values: tuple[str, ...] = (), default: str,
-                 consequence: str) -> None:
+                 consequence: str,
+                 module: str = "opendox.projection_seams") -> None:
         self.name = name
+        self.module = module
+        #: The module's own name without the package, as a refusal names a call.
+        self._short = module.rsplit(".", 1)[-1]
         self.what = what
         self.callables = callables
         self.values = values
@@ -247,7 +256,7 @@ class _Seam:
         self.consequence = consequence
         #: The ONE call a host makes, quoted verbatim in every refusal.
         self.registration_call = (
-            f"opendox.projection_seams.{name}.register(<the host's {what}>)")
+            f"{module}.{name}.register(<the host's {what}>)")
         self._registered: Any = None
         self._is_default = False
         self._default_read = False
@@ -272,7 +281,7 @@ class _Seam:
             if registration is not None and registration is self._registered:
                 return registration
         _probe(registration, self.callables, self.values,
-               f"projection_seams.{self.name}.register()", f"the host's {self.what}")
+               f"{self._short}.{self.name}.register()", f"the host's {self.what}")
         with self._lock:
             held = self._registered
             if held is registration:
@@ -289,7 +298,7 @@ class _Seam:
                 f"{name_of(registration)} would replace it. Registration "
                 "happens ONCE, at process start: one process holding two "
                 f"would split its consumers between them. Call "
-                f"opendox.projection_seams.{self.name}.unregister() first if "
+                f"{self.module}.{self.name}.unregister() first if "
                 "the swap is deliberate.")
         raise SeamAlreadyRegistered(
             f"openDox's own default {self.what} ({name_of(held)}) is "
@@ -300,7 +309,7 @@ class _Seam:
             "would (R1Q3 (ii), openxFactory#656 comment 5817152735; RN-1 (a), "
             "comment 5850003126). Register the host's own at process start, "
             f"ahead of {_ENTRY_POINTS}. Call "
-            f"opendox.projection_seams.{self.name}.unregister() first if the "
+            f"{self.module}.{self.name}.unregister() first if the "
             "swap is deliberate.")
 
     def register_default(self, registration: Any) -> Any:
@@ -315,7 +324,7 @@ class _Seam:
             if registration is not None and registration is self._registered:
                 return registration
         _probe(registration, self.callables, self.values,
-               f"projection_seams.{self.name}.register_default()",
+               f"{self._short}.{self.name}.register_default()",
                f"openDox's own default {self.what}")
         with self._lock:
             if self._registered is None:
@@ -332,6 +341,13 @@ class _Seam:
         """Is anything registered? Answers without reading or refusing."""
         return self._registered is not None
 
+    def holds_a_hosts(self) -> bool:
+        """Is a HOST's registration held here, not the entry point's default
+        and not nothing? Answers without reading, so it closes no default's
+        window, and without refusing."""
+        with self._lock:
+            return self._registered is not None and not self._is_default
+
     def current(self) -> Any:
         """The registration, or a refusal naming this seam and its call.
 
@@ -344,13 +360,13 @@ class _Seam:
         if registered is None:
             raise SeamNotRegistered(
                 f"no {self.what} is registered at openDox's {self.name} seam "
-                f"(opendox.projection_seams.{self.name}), so {self.consequence}. "
+                f"({self.module}.{self.name}), so {self.consequence}. "
                 f"openDox ships its own, {self.default}, but it is a "
                 "registration an ENTRY POINT makes and never a fallback here "
                 f"({_DEFAULTS_RULING}). {_ENTRY_POINTS} register it where no "
                 "host has. Nothing is registered now, so either nothing in "
                 "this process has run one of them, or "
-                f"opendox.projection_seams.{self.name}.unregister() has "
+                f"{self.module}.{self.name}.unregister() has "
                 "dropped the registration since. A host that contributes its "
                 "own registers it at process start with\n\n    "
                 + self.registration_call + "\n\nbefore anything reads it.")
