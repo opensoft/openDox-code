@@ -1395,6 +1395,26 @@ def _refuse_non_postgresql_dsn(name: str, dsn: str | None) -> None:
             "runtime keeps: a second one would double every migration and "
             "every schema test forever, for a database that holds no "
             "document (RULING Q1)")
+    # A POSTGRESQL SCHEME IS A URI ONLY IN LIBPQ'S OWN SPELLING (Copilot
+    # review of openDox-code#60, at its merge-from-main round). `urlsplit`
+    # reads `postgresql:` with no `//`, and any capitalized `PostgreSQL://`,
+    # as the PostgreSQL scheme. libpq does not: it recognizes a URI only by
+    # the exact, lower-case `postgresql://` or `postgres://`, and parses
+    # anything else as keyword/value, which it then refuses with a message
+    # that REPEATS THE WHOLE VALUE (measured, psycopg 3.3.6:
+    # `missing "=" after "postgresql:svc:hunter2@db/x" in connection info
+    # string`). That is the un-named failure at the driver that 13.2 exists to
+    # stop, and it carries the password with it. So it is refused here, named,
+    # and the value is not repeated.
+    if scheme in POSTGRESQL_SCHEMES and not dsn.startswith(
+            tuple(f"{known}://" for known in sorted(POSTGRESQL_SCHEMES))):
+        raise ConfigurationError(
+            f"{name} reads as the PostgreSQL scheme but is not a URI libpq "
+            "reads: libpq recognizes only the exact, lower-case "
+            "`postgresql://` or `postgres://` prefix, and would refuse any "
+            "other spelling with a message that repeats the whole value. "
+            "Write the scheme as one of those two (the value is not "
+            "repeated here, because it can carry a password)")
 
 
 def _refuse_the_same_dsn_in_both_settings(
