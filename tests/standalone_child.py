@@ -25,7 +25,14 @@ builds that child and reads it:
   environment, so an `OPENDOX_INSTALL_MODE=hosted` or a broker issuer the
   runner happens to export cannot make a `generate-and-open --local` child
   refuse before the case it exists for (plan 034 T070; Copilot review of
-  openDox-code#67).
+  openDox-code#67). The one setting given back is the next one.
+* ITS STATE DIRECTORY IS ITS OWN. A `generate-and-open --local` child starts
+  the local install's bundled PostgreSQL server (plan 034 T072) under
+  `OPENDOX_STATE_DIR`, whose default is the USER's own state directory. So
+  every child is given a fresh, short, private one (`Child.state_dir`, under
+  `/tmp` because a Unix socket's whole path is bounded), and it is removed
+  once the child is stopped. No case ever initializes a database in the home
+  directory of whoever runs the suite.
 * CTRL-C REACHES IT AS IT WOULD AT A TERMINAL, whatever the runner's own
   disposition. The same `sitecustomize` sets SIGINT back to Python's
   KeyboardInterrupt handler. A runner started as a background job
@@ -51,6 +58,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -139,9 +147,15 @@ def fresh_repository(fixture: Path, parent: Path, *,
 
 class Child:
     """One `python -m <module> ...` child, with the siblings refused and its
-    standard output a buffered pipe. `workdir` holds the blocker and the log."""
+    standard output a buffered pipe. `workdir` holds the blocker and the log.
 
-    def __init__(self, workdir: Path, module: str, *args: str) -> None:
+    `extra_env` names the settings a case gives its child ON PURPOSE (a hosted
+    install's issuer and DSNs, say). They are applied after the runner's own
+    runtime settings are taken out, so a case still inherits none by
+    accident (plan 034 T073)."""
+
+    def __init__(self, workdir: Path, module: str, *args: str,
+                 extra_env: dict[str, str] | None = None) -> None:
         blocker = workdir / "sibling-blocker"
         blocker.mkdir(parents=True, exist_ok=True)
         (blocker / "sitecustomize.py").write_text(_BLOCKER, encoding="utf-8")
@@ -154,6 +168,10 @@ class Child:
         env["PYTHONPATH"] = os.pathsep.join(
             [str(blocker), *filter(None, [env.get("PYTHONPATH")])])
         env[REFUSED_LOG_ENV] = str(self.refused_log)
+        self.state_dir = Path(tempfile.mkdtemp(
+            prefix="odx-child-", dir="/tmp" if os.path.isdir("/tmp") else None))
+        env["OPENDOX_STATE_DIR"] = str(self.state_dir)
+        env.update(extra_env or {})
         self.argv = [sys.executable, "-m", module, *args]
         verb = args[0] if args and not args[0].startswith("-") else ""
         self.label = f"python -m {module} {verb}".strip()
@@ -230,6 +248,7 @@ class Child:
         if self.process.poll() is None:
             self.process.kill()
             self.process.wait(timeout=STOP_DEADLINE_SECONDS)
+        shutil.rmtree(self.state_dir, ignore_errors=True)
 
     def _join(self) -> None:
         for pump in self._pumps:

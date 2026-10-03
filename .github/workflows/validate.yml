@@ -273,16 +273,13 @@ jobs:
           MIN_PASSED: "3163"
           # EXACT — the load-bearing number. Moves only with its reason.
           #
-          # MOVED 11 -> 16 BY plan 034 T082, for five strict xfails and no new
-          # skip. JUnit writes an xfail as a skip, so `skipped` counts them.
-          # They are `tests/test_chat_model_configuration.py`'s five 16.5
-          # cases that need T084 (each marker names it, and T082's pull
-          # request lists them). Each fails today because the request drops
-          # the connection standalone, or because the capability still
-          # reads true. When T084 lands, T082 merges `main`, removes the
-          # five markers in that merge, and this pin moves back to 11 in the
-          # same commit.
-          EXPECT_SKIPPED: "16"
+          # HELD AT 11 by plan 034 T082. While T082 was stacked ahead of T084
+          # this pin read 16: five of `tests/test_chat_model_configuration.py`'s
+          # 16.5 cases ran as strict xfails naming T084, and JUnit writes an
+          # xfail as a skip. T084 landed (openDox-code#77, `e49b17c3`), T082
+          # merged `main` and removed the five markers in that merge, and the
+          # five now pass. So T082 adds no skip.
+          EXPECT_SKIPPED: "11"
         run: |
           python3 - <<'PY' > triple.env
           import xml.etree.ElementTree as ET, pathlib

@@ -47,7 +47,8 @@ module a spread of anything else hides (`import_module(*names)`) is refused,
 because it could hide a reach into openxFactory. So is a star import from a
 package a sibling lives under (`from scripts import *`), which may import any
 submodule the package's `__all__` lists. A computed name is not refused,
-because `consumer_reach`'s seam imports one. A relative call is read against
+because a late seam may import one (`consumer_reach`'s did, until plan 034
+T084 retired it). A relative call is read against
 `globals()` or `__package__` as the module's own only where the module never
 rebinds either; where it does, the call is refused too. A name in a comment,
 a docstring or a string is not an import. The openxFactory ban goes one step
@@ -587,7 +588,8 @@ def test_a_deferred_reach_into_the_consumer_passes_all_three(monkeypatch, tmp_pa
 def test_an_importing_call_it_cannot_read_is_refused(monkeypatch, tmp_path):
     """A spread that hides an importing call's module could hide a reach
     into openxFactory, so the sweep refuses it. A computed name is another
-    matter (`consumer_reach`'s seam imports one), and is not refused."""
+    matter (a late seam may import one, as `consumer_reach`'s did until plan
+    034 T084), and is not refused."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "spreading.py").write_text(
         "import importlib\n\n\ndef verb(names):\n"

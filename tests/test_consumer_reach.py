@@ -59,9 +59,9 @@ from pathlib import Path
 
 import pytest
 
-#: The package openDox must not require. Spelled once here rather than
-#: imported from `opendox.consumer_reach`, because this file must hold even if
-#: that module is the thing that broke.
+#: The package openDox must not require. Spelled once here, and never imported
+#: from the package under test, because this file must hold even if that
+#: module is the thing that broke.
 CONSUMER_PACKAGE = "openxdox"
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -103,7 +103,8 @@ def _import_in_subprocess(module: str, *, consumer_blocked: bool,
 NEUTRAL_MODULES = (
     "opendox.workbench",
     "opendox.serve_workbench",
-    "opendox.consumer_reach",
+    # `opendox.consumer_reach` stood here, the late seam itself, until plan
+    # 034 T084 deleted it: no reach is left for it to stand in for.
     # BUILD slice 2b. NINE default-argument reads of
     # `gate_console.DEFAULT_RECORDS_DIR` (:1740, :1859, :1878, :4179, :4217,
     # :4254, :4287, :4504, :4991) — evaluated where the `def` sits, so no
@@ -153,6 +154,14 @@ NEUTRAL_MODULES = (
     "opendox.default_registry",
     "opendox.default_projection",
     "opendox.rfc3339",
+    # Plan 034 T084 (#1144 4.3; R1Q10 (a)). The consumer columns' seams and
+    # openDox's own defaults behind them, which retired the last stand-in, the
+    # gate column's. As with T055's four: a seam whose whole job is to let a
+    # HOST hand openDox its gate, its scope authority, its commission reader
+    # and its register is where a reach into `openxdox` would look reasonable,
+    # and neither module makes one.
+    "opendox.column_seams",
+    "opendox.default_columns",
 )
 
 #: Modules that STILL require the consumer at import time, with the reason. They
@@ -513,510 +522,33 @@ def test_the_runtime_extras_modules_are_the_runtimes_own() -> None:
 # 2 — the seam itself, exercised at run time
 # --------------------------------------------------------------------------
 
-def test_importing_the_seam_resolves_nothing() -> None:
-    """Constructing a stand-in performs no import.
-
-    The whole value of the module is that `import opendox.consumer_reach` is
-    free; a stand-in that resolved eagerly would be an import statement wearing
-    a different hat.
-    """
-    done = _import_in_subprocess("opendox.consumer_reach", consumer_blocked=True)
-    assert done.returncode == 0, done.stderr
-
-
-def test_first_attribute_access_refuses_naming_the_layering() -> None:
-    from opendox import consumer_reach
-
-    absent = consumer_reach.module("no_such_column", reason="a test's own")
-    with pytest.raises(consumer_reach.ConsumerReachUnavailable) as caught:
-        absent.anything
-    message = str(caught.value)
-    assert "openxdox.no_such_column" in message
-    assert "RULED OQ-2" in message, (
-        "the refusal must name the LAYERING — which way the pin runs — rather "
-        "than reading as a missing-module accident")
-    assert isinstance(caught.value.__cause__, ModuleNotFoundError), (
-        "the original ModuleNotFoundError is chained, so a reader still gets "
-        "the import machinery's own account beneath the layering one")
-
-
-def test_a_consumer_module_that_exists_and_raises_is_re_raised_untouched() -> None:
-    """`except ImportError` wholesale would blame the layering for a bug.
-
-    A consumer module that IS present and fails while executing — because one
-    of ITS dependencies is missing — must surface as that failure, not as
-    `ConsumerReachUnavailable`, or the reader is sent to the wrong repository.
-    """
-    from opendox import consumer_reach
-
-    reach = consumer_reach.module("cheerfully_broken", reason="a test's own")
-    broken = ModuleNotFoundError("No module named 'jsonschema'", name="jsonschema")
-
-    def _raise(_dotted: str):
-        raise broken
-
-    original = consumer_reach.importlib.import_module
-    consumer_reach.importlib.import_module = _raise
-    try:
-        with pytest.raises(ModuleNotFoundError) as caught:
-            reach.anything
-    finally:
-        consumer_reach.importlib.import_module = original
-    assert caught.value is broken
-    assert not isinstance(caught.value, consumer_reach.ConsumerReachUnavailable)
-
-
-def test_resolution_forwards_to_the_real_module_and_caches(tmp_path: Path) -> None:
-    from opendox import consumer_reach
-
-    module_object = type(sys)("openxdox.pretend")
-    module_object.ANSWER = 42
-    module_object.verb = lambda x: x * 2
-    reach = consumer_reach.module("pretend", reason="a test's own")
-    sys.modules["openxdox.pretend"] = module_object
-    # The fake PARENT is removed again below only if this test created it.
-    # Leaving an empty `openxdox` package in `sys.modules` would make every
-    # later test in the process see an importable-but-empty consumer instead
-    # of normal import behaviour — including this file's own seam tests.
-    parent_was_created = "openxdox" not in sys.modules
-    if parent_was_created:
-        sys.modules["openxdox"] = type(sys)("openxdox")
-    try:
-        assert reach.ANSWER == 42
-        assert reach.resolve() is module_object
-        assert reach.resolve() is module_object, "the resolved module is cached"
-        assert reach.verb(3) == 6, (
-            "a resolved module's function is the module's own, called through")
-    finally:
-        sys.modules.pop("openxdox.pretend", None)
-        if parent_was_created:
-            sys.modules.pop("openxdox", None)
-
-
-def test_a_dunder_lookup_does_not_resolve_the_consumer() -> None:
-    """`copy`, `pickle`, `inspect` and pytest all probe for dunders.
-
-    Resolving openXdox because something asked for `__wrapped__` would fire the
-    reach at a moment no verb chose — and, with the consumer absent, would turn
-    an innocuous introspection into `ConsumerReachUnavailable`.
-    """
-    from opendox import consumer_reach
-
-    reach = consumer_reach.module("never_resolved", reason="a test's own")
-    with pytest.raises(AttributeError):
-        reach.__wrapped__
-    assert "unresolved" in repr(reach)
-
-
-# THE VALUE AND CALLABLE STAND-INS ARE RETIRED (plan 034 T055). `constant`
-# stood for ONE site, `cli.py`'s `SCANNED_ROOTS`, and `function` for six
-# callables (`find_validator`, `corpus_root_refusal`, `generate_snapshot`,
-# `is_rfc3339_datetime`, `hosted_ref_refused` among them); every one of them is
-# read from a declared seam now, or is openDox's own, so the four cases that
-# held `_LateConsumerValue` to the tuple it stood for went with it.
-# `tests/test_projection_seams.py` holds the seams that replaced them.
-
-
-@pytest.fixture()
-def pretend_column():
-    """A stand-in for a consumer module carrying one handler-method COLUMN.
-
-    The methods are written the way the real columns are — plain functions on a
-    class, called with the live request handler as `self` — so what the test
-    exercises is the forwarding contract and not a mock's idea of it.
-    """
-    module_object = type(sys)("openxdox.pretend_routes")
-
-    class PretendRoutes:
-        def _serve_thing(self, path, *, keyed=False):
-            # Reads state off `self`, which is the whole point: the forwarder
-            # must pass the HANDLER, not the column, as `self`.
-            return f"{self.marker}:{path}:{keyed}"
-
-        def _refuse_thing(self):
-            return f"{self.marker}:refused"
-
-    module_object.PretendRoutes = PretendRoutes
-    sys.modules["openxdox.pretend_routes"] = module_object
-    parent_was_created = "openxdox" not in sys.modules
-    if parent_was_created:
-        sys.modules["openxdox"] = type(sys)("openxdox")
-    try:
-        yield module_object
-    finally:
-        sys.modules.pop("openxdox.pretend_routes", None)
-        if parent_was_created:
-            sys.modules.pop("openxdox", None)
-
-
-def _late_handler(consumer_reach, methods=("_serve_thing", "_refuse_thing")):
-    """A `DashboardHandler`-shaped class over a late column, as `serve.py` builds one."""
-    column = consumer_reach.route_column(
-        consumer_reach.module("pretend_routes", reason="a test's own"),
-        "PretendRoutes", methods)
-
-    class Handler(column):
-        marker = "handler"
-
-    return column, Handler
-
-
-def test_a_late_column_is_built_without_resolving_the_consumer() -> None:
-    """The class statement runs at IMPORT time — this is the whole reason the
-
-    column member exists. A base that resolved while being built would defer
-    nothing: `DashboardHandler`'s bases are evaluated when `serve.py` loads.
-    """
-    from opendox import consumer_reach
-
-    column, Handler = _late_handler(consumer_reach)
-    assert Handler.marker == "handler"
-    assert column.LATE_COLUMN == ("openxdox.pretend_routes", "PretendRoutes",
-                                  ("_serve_thing", "_refuse_thing")), (
-        "the triple openXdox-code's drift guard reads to hold the two surfaces "
-        "together must name the module, the class and the method list")
-    assert column._serve_thing.__name__ == "_serve_thing", (
-        "the forwarder keeps the method's NAME, because a contributed binding "
-        "is resolved against the bound class BY NAME at wiring time")
-
-
-def test_the_forwarders_call_the_consumer_with_the_handler_as_self(
-        pretend_column) -> None:
-    """The contract: same function object, same `self`, same arguments.
-
-    `route_extension.resolve_handlers` refuses a route that cannot be served
-    before a socket is opened, and it resolves the handler by name against the
-    BOUND CLASS — so a wrong method list or a forwarding signature that dropped
-    an argument would leave imports green and break requests, which is exactly
-    what this test is here to stop.
-    """
-    from opendox import consumer_reach
-
-    _column, Handler = _late_handler(consumer_reach)
-    handler = Handler()
-
-    assert handler._serve_thing("/a/b") == "handler:/a/b:False", (
-        "positional arguments forward, and `self` is the HANDLER — the column's "
-        "method reads `self.marker`, which only the handler has")
-    assert handler._serve_thing("/a/b", keyed=True) == "handler:/a/b:True", (
-        "keyword arguments forward too")
-    assert handler._refuse_thing() == "handler:refused"
-    assert handler._serve_thing.__func__ is not \
-        pretend_column.PretendRoutes._serve_thing, (
-        "the BOUND method is the forwarder, not the column's function")
-
-
-def test_a_late_column_answers_only_the_names_it_was_given(pretend_column) -> None:
-    """No `__getattr__`, deliberately, and the absence is asserted.
-
-    A handler instance is probed for absent attributes constantly — `http.server`
-    asks `hasattr(self, "do_PUT")`, and `copy`, `pickle` and pytest all probe —
-    so a base that answered those by importing openXdox would fire the reach at
-    a moment no verb chose, and would raise `ConsumerReachUnavailable` where the
-    caller was testing for `AttributeError`.
-    """
-    from opendox import consumer_reach
-
-    _column, Handler = _late_handler(consumer_reach, methods=("_serve_thing",))
-    handler = Handler()
-
-    assert handler._serve_thing("/x") == "handler:/x:False"
-    with pytest.raises(AttributeError):
-        handler.do_PUT
-    with pytest.raises(AttributeError):
-        # Present on the consumer's column, absent from the NAMED list: a name
-        # left out of the list is left out of the class, not silently proxied.
-        handler._refuse_thing
-    assert not hasattr(handler, "_refuse_thing")
-
-
-def test_a_late_column_with_no_consumer_refuses_at_the_call() -> None:
-    """Construction succeeds, the call refuses, and the refusal names the layering."""
-    from opendox import consumer_reach
-
-    column = consumer_reach.route_column(
-        consumer_reach.module("no_such_column", reason="a test's own"),
-        "NoRoutes", ("_serve_thing",))
-
-    class Handler(column):
-        marker = "handler"
-
-    with pytest.raises(consumer_reach.ConsumerReachUnavailable) as caught:
-        Handler()._serve_thing("/x")
-    message = str(caught.value)
-    assert "openxdox.no_such_column" in message
-    assert "RULED OQ-2" in message
-    assert isinstance(caught.value.__cause__, ModuleNotFoundError)
-
-
-def test_a_column_standing_in_for_nothing_is_refused() -> None:
-    """An empty method list would build a base that inherits nothing and hides it."""
-    from opendox import consumer_reach
-
-    with pytest.raises(ValueError, match="name the methods"):
-        consumer_reach.route_column(
-            consumer_reach.module("pretend_routes", reason="a test's own"),
-            "PretendRoutes", ())
-
-
-def test_the_two_live_columns_name_the_methods_serve_dispatches() -> None:
-    """The real bindings, held against the names `serve.py` and § 2.4 rely on.
-
-    `_serve_index` is the projection column's ONE forwarded method since plan
-    034 T055: the § 2.4 binding for `/snapshot-index.json` names it. The core
-    `/snapshot.json` arm's handlers, which travelled to the column at § 2.4
-    PR 3 while their dispatch ARM stayed core, are `serve.py`'s own again.
-    """
-    from opendox import consumer_reach
-
-    gate_module, gate_class, gate_methods = \
-        consumer_reach.LateGateRoutes.LATE_COLUMN
-    assert (gate_module, gate_class) == ("openxdox.serve_gate", "GateRoutes")
-    assert "_handle_gate_action" in gate_methods, (
-        "the route the § 2.4 gate binding declares")
-
-    proj_module, proj_class, proj_methods = \
-        consumer_reach.LateProjectionRoutes.LATE_COLUMN
-    assert (proj_module, proj_class) == ("openxdox.serve_projection",
-                                        "ProjectionRoutes")
-    assert proj_methods == ("_serve_index",), (
-        "the projection column forwards the ONE method its contributed "
-        "`/snapshot-index.json` binding names. The core `/snapshot.json` "
-        "arm's handlers are serve.py's own since plan 034 T055")
-    # § 3.4 SLICE S6, RULED Q4 (openxFactory#656 comment 5642758731): the
-    # `/source` pair is `serve.py`'s own FIXED CORE ARM now, so the three
-    # methods that answer it must NOT be forwarded into the consumer. Asserted
-    # as an ABSENCE and not left as silence: a forwarder left behind here would
-    # be invisible — the route would keep working wherever openXdox happens to
-    # be installed, which is every developer machine and neither claim this
-    # slice makes.
-    for departed in ("_keyed_source", "_serve_source", "_refuse_bare_source"):
-        assert departed not in proj_methods, (
-            f"{departed} answers /source, which RULED Q4 makes openDox's own "
-            "core arm; it must be defined in serve.py, not forwarded to "
-            "openxdox.serve_projection")
-    # PLAN 034 T055: the same for the core `/snapshot.json` arm. Forwarded,
-    # its four handlers refused every `/snapshot.json` of a standalone server.
-    for departed in ("_query_key", "_read_snapshot", "_serve_snapshot",
-                     "_hosted_entry_refused"):
-        assert departed not in proj_methods, (
-            f"{departed} answers /snapshot.json, the neutral product's own core "
-            "arm; since plan 034 T055 it is defined in serve.py")
-
-
-def test_the_prefix_is_refused_rather_than_doubled() -> None:
-    from opendox import consumer_reach
-
-    with pytest.raises(ValueError, match="WITHOUT"):
-        consumer_reach.module("openxdox.gate_console", reason="a test's own")
+# RETIRED BY PLAN 034 T084 (#1144 4.3, F4.1 whole). This section exercised
+# `opendox.consumer_reach`: the late module stand-in, its refusal naming the
+# layering, its caching, its dunder discipline, and the late route columns
+# `LateGateRoutes` and `LateProjectionRoutes` with the method names
+# `serve.py` dispatched through them. Every reach it stood in for is now read
+# from a declared seam (`opendox.projection_seams`, `opendox.generator_seam`,
+# `opendox.column_seams`), and the two columns are a host's, composed in
+# through the handler-contribution facet (R1Q1 (a)), so the module is deleted.
+# `tests/test_projection_seams.py`'s `test_the_stand_ins_module_is_retired`
+# holds its absence, and `tests/test_source_core_arm.py` holds the handler's
+# bases to openDox's own.
 
 
 # --------------------------------------------------------------------------
 # 3 — the converted sites, and the blind spot that made this file necessary
 # --------------------------------------------------------------------------
 
-#: `module path -> the names this slice rebound to the late seam`. Each must be
-#: reachable ONLY from a function body: a default argument, an annotation, a
-#: decorator or a module-level expression would resolve the consumer at import
-#: time and make the conversion a census trick.
-CONVERTED_SITES = {
-    # RE-DERIVED BY PLAN 034 T034 from the tree, where phase 1's lanes joined:
-    # every module-level name bound to a `consumer_reach` stand-in, which
-    # `test_every_name_bound_to_the_seam_is_guarded` below now derives on every
-    # run. The table had fallen behind by five names in two files, and the
-    # guard never read them:
-    #   * `branch_session.py`'s `gate_console`. This is one of the two reverts
-    #     the guard is named for (the NINE default-argument sites this file's
-    #     docstring gives), and it was the one module the table left out;
-    #   * `cli.py`'s other four aliases, the two late callables BUILD slice 2b
-    #     bound for the generate verbs and the `--generated-at` check, and the
-    #     one late constant.
-    # None of the five is read at import time, so the tree was already right.
-    #
-    # NARROWED BY PLAN 034 T055 to the gate column alone. `cli.py`'s
-    # `snapshot_mod`, `corpus_root_refusal`, `generate_snapshot`,
-    # `is_rfc3339_datetime` and `SCANNED_ROOTS`, `serve.py`'s `registry_mod`
-    # and `hosted_ref_refused`, `serve_workbench.py`'s `registry_mod` and
-    # `workbench.py`'s `find_validator` bind no stand-in any more: the
-    # projection mechanism is read from declared seams
-    # (`opendox.projection_seams`, `opendox.generator_seam`), and the two
-    # `registry_mod`s are the registry seam's proxy, which
-    # `tests/test_projection_seams.py` holds to the same import-time rule.
-    # `serve.py` still names the two late COLUMNS as mixin bases, which a class
-    # statement needs before its first instance exists, so it binds no name
-    # here either.
-    "branch_session.py": ("gate_console",),
-    "cli.py": ("gate_mod",),
-}
-
-
-def _import_time_uses(path: Path, names: frozenset[str]) -> list[tuple[int, str]]:
-    """Every use of `names` that runs when the module is imported.
-
-    The module body, module-level `if`/`try`/`with`, CLASS bodies, and — the
-    case the openXdox-side census cannot see — a function's DEFAULTS,
-    ANNOTATIONS and DECORATORS, which are evaluated where the `def` sits and
-    not where it is called. Only a function BODY defers.
-    """
-    hits: list[tuple[int, str]] = []
-
-    def used(node: ast.AST, why: str) -> None:
-        for inner in ast.walk(node):
-            # READS only. The one module-level STORE of each of these names is
-            # the seam binding itself (`gate_mod = consumer_reach.gate_console`)
-            # — the line this slice wrote, which resolves nothing.
-            if isinstance(inner, ast.Name) and inner.id in names \
-                    and isinstance(inner.ctx, ast.Load):
-                hits.append((inner.lineno, f"{inner.id} ({why})"))
-
-    def walk(body: list[ast.stmt], at_import_time: bool) -> None:
-        for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if at_import_time:
-                    args = node.args
-                    for default in [*args.defaults, *(d for d in args.kw_defaults if d)]:
-                        used(default, "default argument")
-                    for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs,
-                                args.vararg, args.kwarg]:
-                        if arg is not None and arg.annotation is not None:
-                            used(arg.annotation, "annotation")
-                    for decorator in node.decorator_list:
-                        used(decorator, "decorator")
-                    if node.returns is not None:
-                        used(node.returns, "return annotation")
-                continue
-            if not at_import_time:
-                continue
-            nested: list[ast.stmt] = []
-            for _field, value in ast.iter_fields(node):
-                items = value if isinstance(value, list) else [value]
-                for item in items:
-                    if isinstance(item, ast.stmt):
-                        nested.append(item)
-                    elif isinstance(item, ast.AST):
-                        used(item, "module level")
-            walk(nested, True)
-
-    walk(ast.parse(path.read_text(encoding="utf-8")).body, True)
-    return sorted(set(hits))
-
-
-def _module_level_statements(body: list[ast.stmt]):
-    """The statements a module runs when it is imported, in source order: its
-    body, and the bodies of a module-level `if`, `try`, `with`, `for`,
-    `while` or `match`, with their handlers and `else` blocks. A function's
-    body and a class's are not the module's names."""
-    for node in body:
-        yield node
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        for _field, value in ast.iter_fields(node):
-            for item in value if isinstance(value, list) else []:
-                if isinstance(item, ast.stmt):
-                    yield from _module_level_statements([item])
-                elif isinstance(item, (ast.ExceptHandler, ast.match_case)):
-                    yield from _module_level_statements(item.body)
-
-
-def _names_bound_to_the_seam(path: Path) -> set[str]:
-    """Every name a module binds, at its top level, to a `consumer_reach`
-    stand-in.
-
-    Every spelling of the seam counts. `from .consumer_reach import X` (`..`
-    in a subpackage) and `from opendox.consumer_reach import X` bind one
-    directly. Once the seam itself is reachable, so do `Y = <seam>.X`, its
-    annotated form `Y: T = <seam>.X`, and `Y = <seam>.f(...)`, which mints one
-    (`module`, `function`, `constant`). `<seam>` is a name bound to the
-    module (`from . import consumer_reach`, `import opendox.consumer_reach as
-    cr`, or `cr = consumer_reach` after either), or the package's attribute
-    `opendox.consumer_reach`, once `import opendox` or `import
-    opendox.consumer_reach` has bound `opendox`. Each is read wherever the
-    module runs it at import time, a module-level `if` or `try` included."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    # The leading dots from this file to the `opendox` package: one for a
-    # module at the top of it, two in a subpackage, and so on.
-    level = len(path.relative_to(PACKAGE).parts)
-    seam_aliases: set[str] = set()
-    package_aliases: set[str] = set()
-    bound: set[str] = set()
-    statements = list(_module_level_statements(tree.body))
-    for node in statements:
-        if isinstance(node, ast.ImportFrom):
-            package = (node.level == level and node.module is None) or \
-                (node.level == 0 and node.module == "opendox")
-            seam = (node.level == level and node.module == "consumer_reach") or \
-                (node.level == 0 and node.module == "opendox.consumer_reach")
-            if package:
-                seam_aliases |= {a.asname or a.name for a in node.names
-                                 if a.name == "consumer_reach"}
-            if seam:
-                bound |= {a.asname or a.name for a in node.names}
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "opendox.consumer_reach" and alias.asname:
-                    seam_aliases.add(alias.asname)
-                elif alias.name == "opendox" or (
-                        alias.name.startswith("opendox.") and not alias.asname):
-                    package_aliases.add(alias.asname or "opendox")
-
-    def is_the_seam(expr: ast.expr | None) -> bool:
-        return (isinstance(expr, ast.Name) and expr.id in seam_aliases) or (
-            isinstance(expr, ast.Attribute) and expr.attr == "consumer_reach"
-            and isinstance(expr.value, ast.Name)
-            and expr.value.id in package_aliases)
-
-    for node in statements:
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-            continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        names = {t.id for t in targets if isinstance(t, ast.Name)}
-        if is_the_seam(node.value):
-            seam_aliases |= names
-            continue
-        value = node.value.func if isinstance(node.value, ast.Call) else node.value
-        if isinstance(value, ast.Attribute) and is_the_seam(value.value):
-            bound |= names
-    return bound
-
-
-def test_every_name_bound_to_the_seam_is_guarded() -> None:
-    """The guard's table is the tree's, name for name (plan 034 T034).
-
-    A name bound to the seam and missing from `CONVERTED_SITES` is a name the
-    import-time guard never reads. A name the table keeps and no module binds
-    any more is a guard over nothing. The seam's own module is left out: it
-    DEFINES the stand-ins."""
-    derived = {}
-    for path in sorted(PACKAGE.rglob("*.py")):
-        if path.name == "consumer_reach.py":
-            continue
-        bound = _names_bound_to_the_seam(path)
-        if bound:
-            derived[path.relative_to(PACKAGE).as_posix()] = bound
-    starred = sorted(module for module, names in derived.items() if "*" in names)
-    assert not starred, (
-        f"{starred} import the seam's stand-ins with a wildcard. The guard "
-        "reads each converted name by name, and a wildcard gives it none to "
-        "read: import each stand-in by its name")
-    declared = {module: set(names) for module, names in CONVERTED_SITES.items()}
-    assert derived == declared, (
-        f"the names each module binds to `consumer_reach` are {derived}, and "
-        f"CONVERTED_SITES guards {declared}. Add a new binding to the table, so "
-        "its import-time uses are refused, and take a retired one out")
-
-
-@pytest.mark.parametrize("module_file", sorted(CONVERTED_SITES))
-def test_a_converted_name_is_never_used_at_import_time(module_file: str) -> None:
-    """The guard that would have caught the two reverts before they were made."""
-    found = _import_time_uses(PACKAGE / module_file,
-                              frozenset(CONVERTED_SITES[module_file]))
-    assert found == [], (
-        f"src/opendox/{module_file} uses a late-bound consumer name where it "
-        f"runs AT IMPORT TIME: {found}. The stand-in would resolve `openxdox` "
-        "there, so removing the import statement would lower openXdox-code's "
-        "ratchet without removing the dependency — a census that reads better "
-        "than the tree. Defer the use, or leave the import alone and ask for "
-        "the declared-edit ruling")
+# RETIRED BY PLAN 034 T084 (#1144 4.3). This section held `CONVERTED_SITES`,
+# every module-level name bound to a `consumer_reach` stand-in, and refused any
+# read of one at import time: a default argument, an annotation, a decorator or
+# a module-level expression, the blind spot this file was written for. The last
+# two, `branch_session.py`'s `gate_console` and `cli.py`'s `gate_mod`, are now
+# proxies over `opendox.column_seams.gate`, so no name binds a stand-in. The
+# same rule holds them where every seam proxy is held:
+# `tests/test_projection_seams.py`'s
+# `test_no_proxy_over_a_seam_is_read_at_import_time`, which names both, with no
+# import-time read.
 
 
 def test_no_module_under_src_names_the_pre_carve_package_at_import_time() -> None:

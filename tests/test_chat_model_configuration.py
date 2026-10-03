@@ -65,7 +65,6 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -547,31 +546,26 @@ class _TurnRoute(WorkbenchRoutes):
 
 @pytest.fixture
 def scope_stand_in(monkeypatch):
-    """openxdox's scope module, which openDox's suite does not install (T084
-    routes step 5 without it): a key type, the confinement error, and a scope
-    that resolves. Revalidation against that projection is a no-op here, so
-    step 5's verdict is exactly the registry's: found, or not."""
-    scope = types.ModuleType("openxdox.doxbench_scope")
-
-    @dataclasses.dataclass(frozen=True)
-    class ScopeKey:
-        repository: str
-        ref: str
-        tile_kind: str
-        tile_id: str
-
-    class ScopeConfinementError(ValueError):
-        pass
-
-    scope.ScopeKey = ScopeKey
-    scope.ScopeConfinementError = ScopeConfinementError
-    scope.session_created_paths_for_scope = lambda *args, **kwargs: ()
-    scope.resolve_scope = lambda *args, **kwargs: SimpleNamespace()
-    package = types.ModuleType("openxdox")
-    package.doxbench_scope = scope
-    monkeypatch.setitem(sys.modules, "openxdox", package)
-    monkeypatch.setitem(sys.modules, "openxdox.doxbench_scope", scope)
+    """A scope authority at openDox's scope seam (`opendox.column_seams.scope`,
+    plan 034 T084), standing in for openDox's own default and for any host's:
+    a scope that resolves, no live session, and no session-created path.
+    Revalidation against that projection is a no-op here, so step 5's verdict
+    is exactly the registry's: found, or not. The seam's state is restored
+    exactly afterwards, so a default another case registered and read is put
+    back as it was."""
+    from opendox import column_seams
+    seam = column_seams.scope
+    held = (seam._registered, seam._is_default, seam._default_read)
+    seam.unregister()
+    seam.register(SimpleNamespace(
+        resolve_scope=lambda *args, **kwargs: SimpleNamespace(),
+        is_live_session_ref=lambda *args, **kwargs: False,
+        session_created_paths_for_scope=lambda *args, **kwargs: ()))
     monkeypatch.setattr(doxbench_turns, "revalidate_scope", lambda **kwargs: None)
+    try:
+        yield
+    finally:
+        seam._registered, seam._is_default, seam._default_read = held
 
 
 def _defective(defect: str) -> tuple[dict | None, dict]:
@@ -878,16 +872,17 @@ def test_the_line_shows_in_that_state_only(rail) -> None:
 #
 # Each answer must be AN ANSWER: an HTTP response, never a dropped connection,
 # with no sibling import refused while it was made. And the two answers must be
-# EQUAL, once the one value that is per-process by design (the console token) is
-# set aside. A surface that only refuses standalone must refuse alike, and write
-# nothing.
+# EQUAL, once the values that are per-process by design are set aside: the
+# console token, and the paths and pid of each child's own bundled database
+# (`/capabilities`' `install.database_bundle`, plan 034 T073). A surface that
+# only refuses standalone must refuse alike, and write nothing.
 #
-# FIVE CASES NEED T084, which routes the reaches that still drop a connection
-# standalone (plan 034's T084; #1144 4.3's batch-L addendum, RULED `5920216845`
-# item 1; and `5961364221` item 1 for model approval). Each is marked
-# `xfail(strict=True)` and names T084, so CI stays green now and the marker turns
-# red the moment T084's code makes the case pass. When T084 lands, T082 merges
-# `main` and removes the markers in that merge.
+# Five of these cases needed T084, which routed the reaches that dropped a
+# connection standalone through openDox's seams (plan 034's T084, openDox-code#77;
+# #1144 4.3's batch-L addendum, RULED `5920216845` item 1; and `5961364221` item 1
+# for model approval): the session reads, the session controls, model approval
+# and the document abstract. They ran as `xfail(strict=True)` naming T084 until
+# it landed, and T082 removed the markers in its merge of `main`.
 
 #: The two postures, in the order every case reports them.
 POSTURES = ("no model", "a binding")
@@ -905,6 +900,10 @@ _BINDING_ARGS = ("--id", "a-provider", "--label", "A provider",
 _DOCUMENT = "notes-rain-barrel-leak.md"
 
 
+#: What `_Answer.comparable` puts in place of a per-process value.
+_PER_PROCESS = "<per-process>"
+
+
 @dataclasses.dataclass(frozen=True)
 class _Answer:
     """One request's answer, or the fact that the connection dropped."""
@@ -920,13 +919,23 @@ class _Answer:
 
     def comparable(self):
         """What two postures must agree on. A JSON body is compared as data,
-        with the per-process console token set aside; any other body, byte for
-        byte."""
+        with its per-process values set aside: the console token, and the
+        values of `/capabilities`' `install.database_bundle`, the data and
+        socket directories and pid of the bundled server each `--local` child
+        starts under its own state directory (plan 034 T073). The bundle's
+        SHAPE is still compared: the same keys, and a value on both sides or
+        on neither. Any other body, byte for byte."""
         body = self.body
         if (self.content_type or "").startswith("application/json"):
             body = json.loads(self.body or b"null")
             if isinstance(body, dict):
                 body = {k: v for k, v in body.items() if k != "console_token"}
+                install = body.get("install")
+                if (isinstance(install, dict)
+                        and isinstance(install.get("database_bundle"), dict)):
+                    bundle = {key: (_PER_PROCESS if value is not None else None)
+                              for key, value in install["database_bundle"].items()}
+                    body["install"] = {**install, "database_bundle": bundle}
         return self.status, self.content_type, body
 
 
@@ -1032,10 +1041,6 @@ def _a_refusal(answers, *, code: str | None = None) -> None:
         assert body.get("ok") is not True, body
         if code is not None:
             assert body["error"] == code, body
-
-
-def _needs_t084(why: str):
-    return pytest.mark.xfail(strict=True, reason=f"needs T084: {why}")
 
 
 # ---- openDox's own settings documents are not the user's documents ----
@@ -1249,21 +1254,17 @@ _THREAD = ("/workbench/thread?repository=fixture&ref=main&tile_kind=staged"
            f"&tile_id=notes-rain-barrel-leak&document={_DOCUMENT}")
 
 
-@pytest.mark.parametrize(("path",), [
-    pytest.param("/project-register.json", marks=_needs_t084(
-        "the project register's openxdox reach (serve_project.py:271) answers "
-        "through its seam")),
-    pytest.param(_THREAD, marks=_needs_t084(
-        "the thread read's openxdox scope reach (serve_workbench.py:560) answers "
-        "through the doxBench scope seam")),
-], ids=["project-register", "thread"])
+@pytest.mark.parametrize("path", ["/project-register.json", _THREAD],
+                         ids=["project-register", "thread"])
 def test_a_session_read_answers_alike(postures, path) -> None:
+    """The project register and a tile's thread are read through openDox's
+    seams (T084), so each answers standalone, alike."""
     _alike(postures, "GET", path)
 
 
-@_needs_t084("capability honesty (5920216845 item 1): standalone, actions.gate and "
-             "actions.refresh read false, so the session controls are hidden")
 def test_the_session_controls_are_hidden_alike(postures) -> None:
+    """Capability honesty (`5920216845` item 1): standalone, `actions.gate`
+    and `actions.refresh` read false, so the session controls are hidden."""
     for answer in _alike(postures, "GET", "/capabilities"):
         actions = json.loads(answer.body)["actions"]
         assert actions["gate"] is False and actions["refresh"] is False, actions
@@ -1285,25 +1286,30 @@ def test_saving_is_refused_alike_and_writes_nothing(postures, verb) -> None:
 
 def test_intake_is_not_offered_alike(postures) -> None:
     """`5961364221` item 1: standalone, the intake surface answers `offered:
-    false` with the reason, whether or not a binding is declared."""
-    from opendox import doxbench_intake
+    false`, whether or not a binding is declared, with the gate seam's named
+    reason (T084): no host gate is registered, so no approval can be recorded."""
+    from opendox import column_seams
     for answer in _alike(postures, "GET", "/workbench/model-intake"):
         surface = json.loads(answer.body)
         assert surface["offered"] is False, surface
-        assert surface["reason"] == doxbench_intake.NO_BROKER_NOTICE, surface
+        assert surface["reason"] == column_seams.GATE_RECORDS_REFUSAL, surface
 
 
-@_needs_t084("model approval (serve_workbench.py:1231) answers the gate seam's named "
-             "refusal standalone (5961364221 item 1)")
 def test_model_approval_is_refused_alike_and_writes_nothing(postures) -> None:
+    """`5961364221` item 1: standalone, model approval is refused by the gate
+    seam's named refusal (T084), alike, and neither checkout changes."""
+    from opendox import column_seams
     before = [postures[name].checkout() for name in POSTURES]
-    _a_refusal(_alike(postures, "POST", "/actions/workbench/model-approval",
-                      {"binding": "a-provider"}))
+    answers = _alike(postures, "POST", "/actions/workbench/model-approval",
+                     {"binding": "a-provider"})
+    _a_refusal(answers, code=serve_wire.DOXBENCH_ERR_APPROVAL_REFUSED)
+    for answer in answers:
+        assert json.loads(answer.body)["reason"] == column_seams.GATE_RECORDS_REFUSAL
     assert [postures[name].checkout() for name in POSTURES] == before
 
 
-@_needs_t084("the document abstract's openxdox reach (serve_workbench.py:2640) moves "
-             "below its step-one check, which refuses once actions.gate reads false")
 def test_the_document_abstract_is_refused_alike(postures) -> None:
+    """The document abstract's step-one check refuses once `actions.gate`
+    reads false, before any reach for a scope (T084)."""
     _a_refusal(_alike(postures, "POST", "/actions/workbench/document-abstract", {}),
                code=serve_wire.DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE)
