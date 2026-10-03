@@ -338,6 +338,31 @@ def test_nothing_outside_the_tile_is_editable(corpus) -> None:
         assert other not in projection.context_paths
 
 
+def test_a_group_edge_names_its_document_by_id(corpus) -> None:
+    """A group's `document_edges[].document` is a document ID, and a valid
+    snapshot's ids need not equal its paths (Copilot review of
+    openDox-code#77, r4171136778): `notes/a` is the id of `a.md`. The tile
+    projects the document by its PATH, resolved and editable, keeping the
+    id; a candidate's claiming group the same."""
+    snapshot = _snapshot()
+    snapshot["documents"] = [
+        {"id": "notes/" + p.removesuffix(".md"), "path": p}
+        for p in ("a.md", "b.md", "c.md", "sel.md", "gone.md")]
+    for group in snapshot["clusters"]:
+        for edge in group["document_edges"]:
+            edge["document"] = "notes/" + edge["document"].removesuffix(".md")
+    group = dc.resolve_scope(snapshot, _key("cluster", "g1"), source_root=corpus)
+    assert group.context_paths == ("a.md", "b.md")
+    assert group.editable_paths == ("a.md", "b.md")
+    assert [(row.id, row.path, row.resolved) for row in group.sections[0].documents] \
+        == [("notes/a", "a.md", True), ("notes/b", "b.md", True)]
+    candidate = dc.resolve_scope(snapshot, _key("possible", "p1"), source_root=corpus)
+    assert candidate.editable_paths == ("a.md", "b.md", "c.md")
+    # a selection's files are PATHS, and resolve as before
+    staged = dc.resolve_scope(snapshot, _key("staged", "s1"), source_root=corpus)
+    assert staged.editable_paths == ("sel.md",)
+
+
 def test_a_listed_document_missing_from_the_tree_is_not_resolved(corpus) -> None:
     projection = dc.resolve_scope(_snapshot(), _key("cluster", "g2"), source_root=corpus)
     rows = {row.path: row.resolved for row in projection.sections[0].documents}
