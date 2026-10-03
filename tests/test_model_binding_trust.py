@@ -1277,23 +1277,157 @@ def test_with_no_state_directory_nothing_is_trusted(tmp_path, monkeypatch):
         policy.record(_a_binding(), root=tmp_path)
 
 
-_RAIL = REPO_ROOT / "src" / "opendox" / "web" / "views" / "doxbench-chat.js"
+_VIEWS = REPO_ROOT / "src" / "opendox" / "web" / "views"
+_RAIL = _VIEWS / "doxbench-chat.js"
 _HAS_NO_MODEL_RAIL = "NO_MODEL_CONFIGURED_REMEDY" in _RAIL.read_text(
     encoding="utf-8")
+
+#: The rail, mounted under node over a minimal DOM (the shim
+#: openDox-code#74's tests/test_chat_model_configuration.py mounts it with),
+#: once per catalog posture.
+_TRUST_RAIL_HARNESS = r"""
+class Node {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = []; this.attributes = {}; this.listeners = {};
+    this.className = ''; this._text = ''; this.hidden = false;
+    this.disabled = false; this.value = ''; this.writes = [];
+  }
+  get textContent() {
+    return this._text + this.children.map((c) => c.textContent).join('');
+  }
+  set textContent(value) {
+    this.children = []; this._text = String(value); this.writes.push(this._text);
+  }
+  appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+  append(...kids) { for (const k of kids) this.appendChild(k); }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) {
+    return Object.prototype.hasOwnProperty.call(this.attributes, name)
+      ? this.attributes[name] : null;
+  }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  focus() {}
+  walk() { return this.children.reduce((a, c) => a.concat(c.walk()), [this]); }
+}
+const doc = { createElement: (tag) => new Node(tag), activeElement: null };
+const byClass = (root, cls) => root.walk().filter(
+  (n) => String(n.className).split(' ').includes(cls));
+
+import { mountDoxBenchChatRail, UNTRUSTED_BINDING_REMEDY,
+         untrustedBindingRemedy } from "./doxbench-chat.mjs";
+
+const KEY = { repository: "fixture", ref: "main", tile_kind: "staged",
+              tile_id: "a-topic" };
+const ENTRY = { model_id: "helpful-model", label: "Helpful model",
+  provider_class: "brokered", available: true, input_limit_bytes: 800000,
+  output_limit_bytes: 900000, data_handling: "sent to the provider" };
+const OFF = { ...ENTRY, available: false };
+const bufferOf = (kind, path) => ({ kind, path, base_ref: "main",
+  base_revision: "r1", base_hash: { algorithm: "sha256", hex: "c".repeat(64) },
+  current_hash: { algorithm: "sha256", hex: "d".repeat(64) },
+  hash_pending: false, content: "# " + kind, dirty: false });
+const editorState = () => ({ active_buffer: "document", buffers: {
+  outline: bufferOf("outline", "docs/outline.md"),
+  document: bufferOf("document", "docs/detail.md") } });
+const catalogOf = (models) => () => (models === null ? null
+  : { schema_version: 1, kind: "workbench-model-catalog", models });
+
+async function mount(catalog, { intake = null } = {}) {
+  const host = new Node("div"); host.ownerDocument = doc;
+  let turns = 0;
+  const rail = mountDoxBenchChatRail(host, {
+    scopeKey: KEY,
+    transports: { catalog: async () => catalog(),
+                  chatTurn: async () => { turns += 1; return null; } },
+    editorState });
+  await rail.ready;
+  if (intake !== null) rail.intakeOffer(intake);
+  const shownBy = (cls) => {
+    const line = byClass(host, cls)[0] || null;
+    return (line && !line.hidden) ? line.textContent : null;
+  };
+  const announce = byClass(host, "doxchat-announce")[0];
+  const composer = byClass(host, "doxchat-composer")[0];
+  for (const value of ["w", "wh"]) {
+    composer.value = value;
+    for (const fn of composer.listeners.input || []) fn({ target: composer });
+  }
+  return { shown: shownBy("doxchat-untrusted"),
+           noModel: shownBy("doxchat-no-model"), turns,
+           announced: announce.writes.filter(
+             (text) => text === UNTRUSTED_BINDING_REMEDY).length,
+           sendDisabled: byClass(host, "doxchat-send")[0].disabled === true };
+}
+
+const out = {
+  remedy: UNTRUSTED_BINDING_REMEDY,
+  onlyUnavailable: await mount(catalogOf([OFF])),
+  empty: await mount(catalogOf([])),
+  available: await mount(catalogOf([ENTRY])),
+  oneOfTwoAvailable: await mount(catalogOf([OFF, { ...ENTRY,
+    model_id: "another-model" }])),
+  unreadable: await mount(catalogOf(null)),
+  intakeOffered: await mount(catalogOf([OFF]), { intake: true }),
+  pure: {
+    loading: untrustedBindingRemedy({ models: null, catalogFailure: null }),
+    staleToken: untrustedBindingRemedy(
+      { models: [OFF], catalogFailure: "console_required" }),
+  },
+};
+process.stdout.write(JSON.stringify(out));
+"""
 
 
 @pytest.mark.xfail(not _HAS_NO_MODEL_RAIL, strict=True,
                    reason="the rail's visible no-model line is "
                           "openDox-code#74's (T081), which is not on this "
                           "base; the trust remedy sits beside it")
-def test_the_rail_says_how_to_trust_a_declared_binding():
-    """With a declared binding and none available, the rail must not say "no
-    model configured": it names `model-binding list` (which says why) and
-    `model-binding trust`."""
+def test_the_rail_says_how_to_trust_a_declared_binding(tmp_path):
+    """RULED "make the rail say how to trust" (5962785556, item 2). With a
+    declared model in the catalog and none available, the rail shows its own
+    visible line, announced once, naming `model-binding list` (which says why
+    for each binding) and `model-binding trust`; and 16.4's "no model
+    configured" line stays hidden, because a model IS configured. Not while
+    loading, not with any model available, not on a catalog failure (each has
+    its own remedy), and not where a host offers intake (its own remedy's
+    home, as for 16.4's line)."""
+    import re
+    import shutil as shutil_mod
+
     source = _RAIL.read_text(encoding="utf-8")
-    assert "UNTRUSTED_BINDING_REMEDY" in source
-    assert '\\"opendox model-binding list\\"' in source
-    assert '\\"opendox model-binding trust <id>\\"' in source
+    match = re.search(
+        r'export const UNTRUSTED_BINDING_REMEDY =\s*("(?:[^"\\]|\\.)*");',
+        source)
+    assert match, "the rail declares UNTRUSTED_BINDING_REMEDY as one literal"
+    assert json.loads(match.group(1)) == _trust_mod().UNTRUSTED_BINDING_REMEDY
+    node = shutil_mod.which("node")
+    if node is None:
+        pytest.skip("node not available for the chat rail's trust probe")
+    (tmp_path / "doxbench-chat.mjs").write_text(source.replace(
+        "./doxbench-chat-model.js", "./doxbench-chat-model.mjs"),
+        encoding="utf-8")
+    shutil_mod.copy(_VIEWS / "doxbench-chat-model.js",
+                    tmp_path / "doxbench-chat-model.mjs")
+    (tmp_path / "harness.mjs").write_text(_TRUST_RAIL_HARNESS,
+                                          encoding="utf-8")
+    done = subprocess.run([node, str(tmp_path / "harness.mjs")],
+                          capture_output=True, text=True, timeout=60,
+                          env=_clean_env())
+    assert done.returncode == 0, done.stderr
+    rail = json.loads(done.stdout)
+    remedy = _trust_mod().UNTRUSTED_BINDING_REMEDY
+    assert rail["remedy"] == remedy
+    shown = rail["onlyUnavailable"]
+    assert shown["shown"] == remedy
+    assert shown["noModel"] is None, "a declared model is not 'no model'"
+    assert shown["announced"] == 1, "announced once, not on every keystroke"
+    assert shown["sendDisabled"] is True and shown["turns"] == 0
+    for case in ("empty", "available", "oneOfTwoAvailable", "unreadable",
+                 "intakeOffered"):
+        assert rail[case]["shown"] is None, case
+        assert rail[case]["announced"] == 0, case
+    assert rail["pure"] == {"loading": None, "staleToken": None}
 
 
 _TURN_REACHES_ITS_MODEL_STEP = importlib.util.find_spec(

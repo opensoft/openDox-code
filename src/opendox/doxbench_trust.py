@@ -209,6 +209,22 @@ UNTRUSTED_TURN_MESSAGE = (
     "restart this console")
 
 
+#: What the chat rail says when the catalog lists a declared model and none is
+#: available (#1144 16.3a; RULED openxFactory#656 comment 5962785556, item 2,
+#: "make the rail say how to trust"). The catalog's wire shape is closed, so
+#: the rail cannot say WHICH binding or why: it sends the operator to
+#: `model-binding list`, which says why for each binding (not trusted here, or
+#: a broker refusal), and names the verb that trusts one. The rail's JavaScript
+#: twin, `UNTRUSTED_BINDING_REMEDY` in `web/views/doxbench-chat.js`, beside
+#: openDox-code#74's no-model line, is held to this spelling by
+#: `tests/test_model_binding_trust.py`.
+UNTRUSTED_BINDING_REMEDY = (
+    "No declared model is available. \"opendox model-binding list\" says why "
+    "for each binding; one read from this repository is used only once this "
+    "machine trusts it, which \"opendox model-binding trust <id>\" records "
+    "after showing what it runs and where its credential goes. Then restart "
+    "this console.")
+
 #: What the console intake's hand-off is refused with when the trust policy
 #: does not admit the binding it is declaring (#1144 16.3a, T007 batch M). A
 #: FIXED sentence: an intake refusal's reason never carries what the request
