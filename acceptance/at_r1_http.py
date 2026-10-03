@@ -205,6 +205,9 @@ CONSOLE_TOKEN_HEADER = "X-XF-Console-Token"
 CONSOLE_TOKEN_FIELD = "console_token"
 CONSOLE_DIRNAME = "console"
 CONSOLE_FRAGMENT_KEY = "console_token"
+#: The only token the page accepts from the fragment (T104's
+#: `web/views/notebook.js`, `CONSOLE_TOKEN_SHAPE`, `^[A-Za-z0-9_-]{16,512}$`).
+CONSOLE_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]{16,512}")
 CONSOLE_LINE = re.compile(r"^[ \t]*console (?P<where>(?:file:|/)\S*)", re.M)
 #: The opener's machine-readable record, "for a harness or a script"
 #: (`opendox.console_access`, T104): JSON in
@@ -1281,15 +1284,37 @@ def record_disagrees_because(records: list[str], port: int,
     return reason.replace(token, "<the console token>")
 
 
+_ASCII_WHITESPACE = " \t\n\f\r"
+
+
 def refresh_target(content: str) -> str | None:
-    """The URL a refresh's `content` names (`0;url=<target>`, quoted or not)."""
-    _delay, separator, rest = content.partition(";")
-    rest = rest.strip()
-    if not separator or rest[:4].lower() != "url=":
+    """The URL a browser's refresh follows from `content`, or `None` where a
+    browser follows none: the HTML standard's "shared declarative refresh
+    steps", for the forms a refresh takes (`0;url=<target>`, `0; URL='…'`,
+    `0,url=…`, `.5;url=…`, `0;<target>`).
+
+    A browser ABORTS the refresh when the first non-whitespace code point is
+    neither an ASCII digit nor `.`, so `invalid;url=…` and `-1;url=…` open
+    nothing, and a user is left on the opener (Copilot review of
+    openDox-code#75 at 5636eb8d, r4173894317). A `content` with no URL part
+    refreshes the opener itself, which opens no console either."""
+    rest = content.lstrip(_ASCII_WHITESPACE)
+    digits = len(rest) - len(rest.lstrip("0123456789"))
+    if digits == 0 and not rest.startswith("."):
         return None
-    target = rest[4:].strip()
-    if len(target) >= 2 and target[0] == target[-1] and target[0] in "'\"":
-        target = target[1:-1]
+    rest = rest[digits:].lstrip("0123456789.")
+    rest = rest.lstrip(_ASCII_WHITESPACE)
+    if rest[:1] in (";", ","):
+        rest = rest[1:]
+    rest = rest.lstrip(_ASCII_WHITESPACE)
+    if rest[:3].lower() == "url":
+        after = rest[3:].lstrip(_ASCII_WHITESPACE)
+        if after.startswith("="):
+            rest = after[1:].lstrip(_ASCII_WHITESPACE)
+    if rest[:1] in ("'", '"'):
+        quote, rest = rest[0], rest[1:]
+        rest = rest.split(quote, 1)[0]
+    target = rest.strip(_ASCII_WHITESPACE)
     return target or None
 
 
@@ -1379,7 +1404,8 @@ def token_in_fragment(targets: list[str | None],
     r4173842794)."""
     if len(targets) != 1 or targets[0] is None:
         return None, (f"the opener has {len(targets)} meta-refresh forwards, "
-                      "not one that names a URL")
+                      "not one a browser follows to a URL (a delay that "
+                      "does not start with a digit or `.` aborts it)")
     elsewhere = (f"the opener does not forward to this plane on loopback "
                  f"port {port} (its forward is not quoted, because it may "
                  "hold the token)")
@@ -1411,6 +1437,15 @@ def token_in_fragment(targets: list[str | None],
     if len(values) != 1 or not values[0]:
         return None, (f"the opener's forward carries no single "
                       f"`#{CONSOLE_FRAGMENT_KEY}=` in its fragment")
+    # THE TOKEN THE PAGE ACCEPTS, or the harness could authenticate where the
+    # user's page cannot: T104's `takeDeliveredConsoleToken`
+    # (`web/views/notebook.js`) discards any other value (Copilot review of
+    # openDox-code#75 at 5636eb8d, r4173894352).
+    if not CONSOLE_TOKEN_SHAPE.fullmatch(values[0]):
+        return None, ("the opener's forward carries a token the page "
+                      "discards: `takeDeliveredConsoleToken` accepts only "
+                      f"{CONSOLE_TOKEN_SHAPE.pattern} (the value is not "
+                      "quoted)")
     if values[0] in parts.path or values[0] in parts.query:
         return None, ("the opener's forward carries the token outside its "
                       "fragment too")

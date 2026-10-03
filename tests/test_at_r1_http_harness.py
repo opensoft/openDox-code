@@ -350,10 +350,11 @@ def _record_script(record) -> str:
             f"{text}</script>\n")
 
 
-def _opener_page(*targets: str, records: list | None = None) -> str:
+def _opener_page(*targets: str, records: list | None = None,
+                 delay: str = "0;url=") -> str:
     """An opener as T104 writes one: a meta-refresh to each target, and the
     record of the first (or `records`, as given)."""
-    metas = "".join(f'<meta http-equiv="refresh" content="0;url={t}">\n'
+    metas = "".join(f'<meta http-equiv="refresh" content="{delay}{t}">\n'
                     for t in targets)
     if records is None:
         records = [_record(targets[0].replace("&amp;", "&"))] if targets else []
@@ -396,6 +397,18 @@ PRIVATE = "t.console opener is private"
 FRAGMENT = "t.console opener forwards with the token in its fragment"
 
 
+@pytest.mark.parametrize("token", ["a" * 16, "Z_-9" * 128],
+                         ids=["shortest", "longest"])
+def test_a_token_at_the_page_s_bounds_is_delivered(tmp_path: Path,
+                                                   token: str) -> None:
+    target = f"http://127.0.0.1:{PORT}/index.html#console_token={token}"
+    state, opener = _opener(tmp_path, _opener_page(
+        target, records=[_record(target, console_token=token)]))
+    failures, _path, delivered = _read(state, _printed(opener))
+    assert failures == []
+    assert delivered == token
+
+
 def test_the_opener_t104_writes_delivers_its_token(tmp_path: Path) -> None:
     state, opener = _opener(tmp_path)
     failures, path, token = _read(state, _printed(opener))
@@ -409,7 +422,15 @@ def test_the_opener_t104_writes_delivers_its_token(tmp_path: Path) -> None:
     _opener_page(FORWARD).replace("0;url=", "0; URL="),
     _opener_page(FORWARD).replace(f"url={FORWARD}", f"url='{FORWARD}'"),
     _opener_page(FORWARD + "&amp;then=1"),
-], ids=["spaced-upper-URL", "quoted", "escaped-ampersand"])
+    # the refresh forms a browser follows (the HTML standard's shared
+    # declarative refresh steps)
+    _opener_page(FORWARD, delay=" 0 , url = "),
+    _opener_page(FORWARD, delay=".5;url="),
+    _opener_page(FORWARD, delay="0; "),
+    _opener_page(FORWARD).replace(f"url={FORWARD}",
+                                  f"url=\'{FORWARD}\' trailing"),
+], ids=["spaced-upper-URL", "quoted", "escaped-ampersand", "comma-spaced",
+        "fractional", "no-url-keyword", "quote-truncates"])
 def test_the_opener_is_read_as_a_browser_reads_its_refresh(
         tmp_path: Path, page: str) -> None:
     state, opener = _opener(tmp_path, page)
@@ -549,10 +570,26 @@ def test_a_hard_linked_opener_is_a_named_failure(tmp_path: Path) -> None:
     _opener_page(f"http://127.0.0.1:{PORT}/ index.html#console_token={TOKEN}"),
     _opener_page(f"http://[broken:{PORT}/index.html#console_token={TOKEN}"),
     _opener_page(f"http://127.0.0.1:99999/index.html#console_token={TOKEN}"),
+    # a delay that aborts the browser's refresh (Copilot review of #75 at
+    # 5636eb8d, r4173894317)
+    _opener_page(FORWARD, delay="invalid;url="),
+    _opener_page(FORWARD, delay="-1;url="),
+    _opener_page(FORWARD, delay="; url="),
+    _opener_page(FORWARD, delay="url="),
+    # a token the page's `takeDeliveredConsoleToken` discards (r4173894352)
+    _opener_page(f"http://127.0.0.1:{PORT}/index.html#console_token=short"),
+    _opener_page(f"http://127.0.0.1:{PORT}/index.html#console_token="
+                 + "a" * 513),
+    _opener_page(f"http://127.0.0.1:{PORT}/index.html#console_token="
+                 "token.with.dots.0123456789"),
+    _opener_page(f"http://127.0.0.1:{PORT}/index.html#console_token="
+                 "token%2Bplus%2B0123456789"),
 ], ids=["query", "query-and-fragment", "path", "other-port", "off-loopback",
         "https", "no-token", "empty-token", "two-tokens", "two-forwards",
         "no-forward", "backslash", "userinfo-token", "userinfo-password",
-        "tab", "space", "malformed-host", "port-out-of-range"])
+        "tab", "space", "malformed-host", "port-out-of-range",
+        "delay-word", "delay-negative", "delay-empty", "delay-absent",
+        "token-short", "token-oversized", "token-dots", "token-plus"])
 def test_a_forward_that_leaks_or_misses_the_token_is_a_named_failure(
         tmp_path: Path, page: str) -> None:
     state, opener = _opener(tmp_path, page)
