@@ -116,6 +116,10 @@ from opendox.boundary import (  # noqa: E402
 # register the defaults where no host has. `is_rfc3339_datetime` is not a seam:
 # it is the neutral contract's own date-time rule, and openDox owns it.
 from opendox import projection_seams  # noqa: E402
+# openDox's own defaults for the two doxBench seams (plan 034 T085), which
+# the entry points below register the same way. Importing it registers
+# nothing.
+from opendox import doxbench_defaults  # noqa: E402
 from opendox.rfc3339 import is_rfc3339_datetime  # noqa: E402
 
 # THE COMPOSITION POINT, BOUND AT LAST (§ 4.3; RULED ASK-2 option (2),
@@ -1365,6 +1369,10 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     # only where no host has registered its own. Registering reads nothing, so
     # a host that registers after this parser is built still replaces them.
     projection_seams.register_defaults()
+    # AND openDox's OWN doxBench validators and status-exemption rail (4.3,
+    # T085; R1Q10 (a) and R1Q12 (a), the same pattern), each only where no
+    # host has registered its own, and replaceable by a host until read.
+    doxbench_defaults.register_defaults()
     # AND the consumer columns' defaults (plan 034 T084; #1144 4.3,
     # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
     # the cross-reference register, the same way.
@@ -1487,6 +1495,8 @@ def main(argv: list[str] | None = None, *,
     generator_seam.register_default(default_generator.GENERATOR)
     # AND openDox's own projection defaults (5.5, T055), the same way.
     projection_seams.register_defaults()
+    # AND openDox's own doxBench defaults (4.3, T085), the same way.
+    doxbench_defaults.register_defaults()
     # AND the consumer columns' defaults (plan 034 T084; #1144 4.3,
     # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
     # the cross-reference register, the same way.

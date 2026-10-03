@@ -402,6 +402,7 @@ def _chat_turn() -> dict:
             "client_turn_id": "honesty-turn-1", "scope": _SCOPE,
             "working_subject": "", "message": "What does this note claim?",
             "model_id": "honesty-model", "transcript": [],
+            "last_assistant_turn_id": None,
             "bound_buffer": "notes/one.md",
             "buffers": [buffer("outline", None, "# outline"),
                         buffer("document", "notes/one.md", "# one")]}
@@ -412,6 +413,12 @@ def _structured(answer: tuple[int, dict, str]) -> bool:
     error, or a stated 404. Anything else (an empty 500, a reset) is not."""
     status, body, raw = answer
     if body.get("ok") is False and isinstance(body.get("error"), str):
+        return True
+    # THE RELEASED FAILURE ENVELOPE IS STRUCTURED TOO. Where openDox's own
+    # validators answer (plan 034 T085), a turn refusal arrives in
+    # `workbench-chat-turn-v2-failure`, which carries `error` but no `ok`.
+    if (str(body.get("kind", "")).endswith("-failure")
+            and isinstance(body.get("error"), str)):
         return True
     return status == 404 and bool(raw.strip())
 
@@ -534,6 +541,11 @@ def test_a_chat_turn_with_a_binding_configured_is_answered_standalone(
         answer = _call(base, "POST", "/actions/workbench/chat-turn",
                        body=_json(_chat_turn()), token=token)
         assert _structured(answer), answer
+        # past openDox's own validators (T085) to the scope step, which
+        # reached openXdox by a deferred import until this task: the scope
+        # names no tile of this snapshot, so it is refused, stated
+        from opendox.serve_wire import DOXBENCH_ERR_TURN_SCOPE_REFUSED
+        assert answer[1]["error"] == DOXBENCH_ERR_TURN_SCOPE_REFUSED, answer
         assert child.interrupt() == 0, child.stderr_text()
     finally:
         child.kill()

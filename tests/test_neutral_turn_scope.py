@@ -16,11 +16,9 @@ THE CASES run over a composed host in process: the plain fixture in a fresh
 repository, a loopback bind, an authenticated actor, the binding
 `opendox model-binding add` declares, and the port the entry points declare
 over it (`doxbench_install.declared_model_port_factory`). The host also has
-the released validators, as a plane with a readable contract has them. A
-standalone `python -m opendox.serve` has none until T085's defaults land
-(openDox-code#71), so its turn stops at the validators step, before scope.
-`tests/test_capability_honesty.py` holds that standalone turn to a structured
-answer with a binding configured.
+the released validators, as a plane with a readable contract has them. Case
+4 runs the same turn on a standalone `python -m opendox.serve`, which has
+openDox's own validators since T085 (openDox-code#71).
 
 1. A turn whose buffer names a document of the tile passes the guard and
    reaches the model step. It asks for a model the catalog does not carry, so
@@ -35,11 +33,8 @@ answer with a binding configured.
 
 4. STANDALONE, `python -m opendox.serve` as a child with neither sibling
    importable, over the same checkout and binding: a turn over the tile's own
-   document is answered, never dropped, and is not refused at the guard.
-   Until T085's validators merge into this branch, the plane answers at its
-   validators step (`model_capability_unavailable`), before scope. Once they
-   do, the turn reaches the model step (`model_unavailable`) as case 1 does,
-   and the merge narrows this case to that one answer.
+   document passes the guard and reaches the model step (`model_unavailable`)
+   as case 1 does, with openDox's own validators (T085) and no stand-in.
 
 A CREATED FILE: no carve-manifest row (RULED OQ-C).
 """
@@ -130,6 +125,7 @@ def _turn(repo: Path, document: str) -> bytes:
         "client_turn_id": f"scope-{document}", "scope": TILE,
         "working_subject": "", "message": "What does this note claim?",
         "model_id": "a-model-the-catalog-does-not-carry", "transcript": [],
+        "last_assistant_turn_id": None,
         "bound_buffer": document,
         "buffers": [buffer("outline", None, "# outline\n"),
                     buffer("document", document, text)],
@@ -241,8 +237,7 @@ def test_a_standalone_turn_over_the_tiles_own_document_is_answered(
     """Case 4. The child's environment carries no `GIT_*` and no `XF_*`, so
     its actor is the one its repository's identity names (the suite's own
     roster of several principals would resolve none)."""
-    from opendox.serve_wire import (DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
-                                    DOXBENCH_ERR_MODEL_UNAVAILABLE)
+    from opendox.serve_wire import DOXBENCH_ERR_MODEL_UNAVAILABLE
     for name in list(os.environ):
         if name.startswith(("GIT_", "XF_")):
             monkeypatch.delenv(name)
@@ -269,10 +264,10 @@ def test_a_standalone_turn_over_the_tiles_own_document_is_answered(
         status, body, raw = _call(base, "POST", "/actions/workbench/chat-turn",
                                   body=_turn(repo, OWN),
                                   token=caps["console_token"])
-        # the validators step until T085 merges in, the model step after it;
-        # never the guard's `turn_scope_refused`, never a dropped connection
-        assert body.get("error") in (DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
-                                     DOXBENCH_ERR_MODEL_UNAVAILABLE), (status, raw)
+        # past the validators, the guard and identity, answered by the model
+        # step: never `turn_scope_refused`, never a dropped connection
+        assert body.get("error") == DOXBENCH_ERR_MODEL_UNAVAILABLE, (status, raw)
+        assert body.get("client_turn_id") == f"scope-{OWN}", body
         assert child.interrupt() == 0, child.stderr_text()
     finally:
         child.kill()

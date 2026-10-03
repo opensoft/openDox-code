@@ -34,7 +34,10 @@ WHAT HAPPENS HERE, in the order a turn meets it:
     console process. Brett's ruling of 2026-08-08: the broker mints, doxBench
     calls, because a broker in the request path adds a hop to every turn and to
     every chunk of a streamed one. WHERE to call and WHAT GRAMMAR to speak are
-    the BINDING's — the broker's declaration emits neither, deliberately;
+    the BINDING's — the broker's declaration emits neither, deliberately. Each
+    grammar the binding may declare has one arm here (`_DIALECT_ARMS`): this
+    repository's own prompt grammar, and the OpenAI-compatible chat-completions
+    grammar (#1144 box 16.1);
   * EXPIRY is handled by the 2026-08-26 ruling: re-mint and retry ONCE, with the
     re-mint and the paid retry visibly recorded, and a second expiry inside one
     turn surfaces the standard refusal rather than buying a third call. The
@@ -175,8 +178,9 @@ REFERENCE_LIST_FIELDS: tuple[str, ...] = (
 #: it is the record that validates it). Aliased rather than respelled so the two
 #: modules cannot drift into two vocabularies. An unknown dialect is refused
 #: when an operator DECLARES the binding — earlier than a mint, and earlier than
-#: a paid call.
+#: a paid call. Each member has exactly one ARM below (`_DIALECT_ARMS`).
 DIALECT_XFACTORY_PROMPT_V1 = binding_mod.DIALECT_XFACTORY_PROMPT_V1
+DIALECT_OPENAI_CHAT_V1 = binding_mod.DIALECT_OPENAI_CHAT_V1
 DIALECTS: tuple[str, ...] = binding_mod.DIALECTS
 
 #: How long a broker invocation may take. A mint is a local process doing local
@@ -616,18 +620,88 @@ def list_references(binding, *, runner=subprocess_broker_runner) -> list:
 # the provider transport
 # ---------------------------------------------------------------------------
 
-#: The provider request's own field names, in the ONE dialect this client
-#: speaks. Named constants rather than inline literals so the boundary test can
-#: assert they exist only here.
+#: The provider request's own field names, per dialect. Named constants rather
+#: than inline literals so the boundary test can assert they exist only here.
+#: `model` is the one field both grammars share.
 PROVIDER_REQUEST_MODEL_FIELD = "model"
+
+#: `xfactory-prompt-v1`: a model and a prompt in, an `assistant_prose` out.
 PROVIDER_REQUEST_PROMPT_FIELD = "prompt"
 PROVIDER_RESPONSE_PROSE_FIELD = "assistant_prose"
+
+#: `openai-chat-v1` (#1144 box 16.1; plan 034 T078): the chat-completions
+#: request, a model and a list of messages, and its answer, the content of the
+#: first choice's message. The assembled prompt travels as ONE message in the
+#: user role. Prompt assembly is on the other side of the port (D14), so this
+#: arm carries the text it was given and composes no message of its own.
+PROVIDER_REQUEST_MESSAGES_FIELD = "messages"
+CHAT_MESSAGE_ROLE_FIELD = "role"
+CHAT_MESSAGE_CONTENT_FIELD = "content"
+CHAT_ROLE_USER = "user"
+CHAT_RESPONSE_CHOICES_FIELD = "choices"
+CHAT_RESPONSE_MESSAGE_FIELD = "message"
 
 #: The status a provider returns when the presented token is no longer good.
 #: 401 only: a 403 is an authorization verdict about what the token may do,
 #: which re-minting the same scope cannot change, and retrying it would buy a
 #: second refusal.
 PROVIDER_STATUS_TOKEN_EXPIRED = 401
+
+
+def _prompt_request(model: str, prompt: str) -> dict:
+    """`xfactory-prompt-v1`'s request, exactly as it has always been sent."""
+    return {PROVIDER_REQUEST_MODEL_FIELD: model,
+            PROVIDER_REQUEST_PROMPT_FIELD: prompt}
+
+
+def _prompt_answer(document: dict) -> str:
+    """`xfactory-prompt-v1`'s answer: its `assistant_prose`, a string."""
+    prose = document.get(PROVIDER_RESPONSE_PROSE_FIELD)
+    if not isinstance(prose, str):
+        raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
+    return prose
+
+
+def _chat_request(model: str, prompt: str) -> dict:
+    """`openai-chat-v1`'s request: the model, and the prompt as one message in
+    the user role."""
+    return {PROVIDER_REQUEST_MODEL_FIELD: model,
+            PROVIDER_REQUEST_MESSAGES_FIELD: [
+                {CHAT_MESSAGE_ROLE_FIELD: CHAT_ROLE_USER,
+                 CHAT_MESSAGE_CONTENT_FIELD: prompt}]}
+
+
+def _chat_answer(document: dict) -> str:
+    """`openai-chat-v1`'s answer: `choices[0].message.content`, a string.
+
+    Read at exactly that path and nowhere else. A body with no first choice, a
+    choice with no message, or a message whose content is not text (a tool-call
+    answer carries null there) is not an answer this seam can hand back as
+    prose. Each lands on the fixed `DIAG_PROVIDER_MALFORMED` that every other
+    unusable answer lands on. Nothing past the first choice is read: the
+    request asks for one."""
+    choices = document.get(CHAT_RESPONSE_CHOICES_FIELD)
+    if not isinstance(choices, list) or not choices:
+        raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
+    first = choices[0]
+    message = (first.get(CHAT_RESPONSE_MESSAGE_FIELD)
+               if isinstance(first, dict) else None)
+    content = (message.get(CHAT_MESSAGE_CONTENT_FIELD)
+               if isinstance(message, dict) else None)
+    if not isinstance(content, str):
+        raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
+    return content
+
+
+#: ONE ARM PER DECLARED DIALECT: the function that builds its request and the
+#: function that reads its answer. The record's closed vocabulary
+#: (`doxbench_binding.DIALECTS`) refuses any other member at declaration, and a
+#: test holds this table's keys equal to that vocabulary, so a member cannot
+#: join one without the other.
+_DIALECT_ARMS: dict[str, tuple] = {
+    DIALECT_XFACTORY_PROMPT_V1: (_prompt_request, _prompt_answer),
+    DIALECT_OPENAI_CHAT_V1: (_chat_request, _chat_answer),
+}
 
 
 def _post_to_provider(token: MintedToken, *, model_id: str, prompt: str,
@@ -638,6 +712,11 @@ def _post_to_provider(token: MintedToken, *, model_id: str, prompt: str,
     it is not in the URL (which a proxy logs), not in the body (which an error
     handler might echo), and not in this function's return value.
 
+    THE GRAMMAR IS THE BINDING'S DIALECT (#1144 box 16.1), which the token
+    carries from the binding. Its arm in `_DIALECT_ARMS` builds the request
+    body and reads the answer. The route, the header, the bound, the expiry
+    status and every refusal below are the same for both dialects.
+
     THE ANSWER IS BOUNDED (PR #392 review note b). `response.read()` with no
     argument reads until the peer stops sending, which makes the memory of this
     process a function of what a declared endpoint chooses to send — and the
@@ -645,10 +724,14 @@ def _post_to_provider(token: MintedToken, *, model_id: str, prompt: str,
     byte over `MAX_PROVIDER_ANSWER_BYTES` is read deliberately, so an answer
     that is exactly at the bound is still honoured while one past it is
     detected rather than truncated into a shorter document that would parse."""
-    body = json.dumps({
-        PROVIDER_REQUEST_MODEL_FIELD: model_id,
-        PROVIDER_REQUEST_PROMPT_FIELD: prompt,
-    }).encode("utf-8")
+    arm = _DIALECT_ARMS.get(token.dialect)
+    if arm is None:
+        raise AssertionError(
+            f"{token.dialect!r} is outside the declared dialect vocabulary "
+            f"{DIALECTS}; the binding refuses it at declaration, so no turn "
+            "can carry one")
+    build_request, read_answer = arm
+    body = json.dumps(build_request(model_id, prompt)).encode("utf-8")
     request = urllib.request.Request(  # noqa: S310 - endpoint declared on the binding by its operator, carried on the minted token
         token.endpoint, data=body, method="POST")
     request.add_header("Content-Type", "application/json")
@@ -680,10 +763,7 @@ def _post_to_provider(token: MintedToken, *, model_id: str, prompt: str,
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED) from error
     if not isinstance(document, dict):
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
-    prose = document.get(PROVIDER_RESPONSE_PROSE_FIELD)
-    if not isinstance(prose, str):
-        raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
-    return prose
+    return read_answer(document)
 
 
 # ---------------------------------------------------------------------------
