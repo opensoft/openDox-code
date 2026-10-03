@@ -2689,12 +2689,15 @@ def _refuse_impossible_checkout_root(value: Path | str) -> int:
 #: `cli.PROG`; adversarial review 2). `python -m opendox.serve --help` printed
 #: `usage: ideation-dashboard-serve` and this module's docstring, which is
 #: openxFactory's pre-carve history. It names how it is run and openDox only.
+#: Loopback is the DEFAULT bind, not a promise: `--host` takes any address, and
+#: a hosted install serves through this entry point (Copilot review of
+#: openDox-code#77, r4173844338).
 SERVE_PROG = "python -m opendox.serve"
 SERVE_DESCRIPTION = (
-    "Serve an openDox snapshot locally: the browser bundle, the snapshot and "
-    "the read-only source of the checkout it was generated from, on a "
-    "loopback address. `opendox generate-and-open` generates a snapshot and "
-    "serves it in one command.")
+    "Serve an openDox snapshot: the browser bundle, the snapshot and the "
+    "read-only source of the checkout it was generated from, on a loopback "
+    "address unless --host names another. `opendox generate-and-open` "
+    "generates a snapshot and serves it in one command.")
 
 
 def main(argv: list[str] | None = None) -> int:

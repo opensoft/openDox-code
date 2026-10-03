@@ -866,6 +866,12 @@ def test_the_authentication_files_admit_one_os_user_as_the_two_roles() -> None:
         [bundle_mod.IDENT_MAP, '"alice"', config.BUNDLE_OWNER_ROLE],
         [bundle_mod.IDENT_MAP, '"alice"', config.BUNDLE_SERVED_ROLE]]
     assert "trust" not in " ".join(" ".join(r) for rows in active.values() for r in rows)
+    # A BACKSLASH IS WRITTEN AS IT IS, never escaped: PostgreSQL 16 reads a
+    # quoted field's backslash literally (`test_bundled_postgres.py` asks
+    # the server's own reading; Copilot review of #69).
+    domain = bundle_mod.authentication_files("DOMAIN\\alice")["pg_ident.conf"]
+    assert f'{bundle_mod.IDENT_MAP}  "DOMAIN\\alice"  {config.BUNDLE_OWNER_ROLE}' \
+        in domain.splitlines(), domain
 
 
 def test_the_files_are_written_0600_and_replace_what_was_there(
@@ -1229,6 +1235,58 @@ def test_a_parent_death_signal_that_cannot_be_armed_starts_no_server(
     assert "parent-death signal" in str(caught.value), caught.value
     assert server.process is None
     assert not launched.exists(), "the server ran without its parent-death signal"
+
+
+def _withhold(monkeypatch, pid: int) -> None:
+    """`/proc/<pid>` exists and the kernel refuses to describe it, as a
+    procfs `hidepid` mount or a security module can for this user's own
+    live process. Only that pid's links are withheld."""
+    real_readlink = os.readlink
+    entry = str(bundle_mod.PROC / str(pid)) + os.sep
+
+    def _readlink(path, *args, **kwargs):
+        if str(path).startswith(entry):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(bundle_mod.os, "readlink", _readlink)
+
+
+@pytest.mark.skipif(not Path("/proc/self").exists(), reason="asks /proc")
+def test_a_live_pid_the_platform_will_not_describe_keeps_its_lock(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    """The lock file names a LIVE process of this user, and `/proc` withholds
+    what it is (Copilot review of #69). That is not proof it is something
+    other than this data directory's server, so the start FAILS CLOSED: the
+    lock is kept, the start is refused by name, and no second server is
+    launched. A pid that is gone is still "not ours", and a pid `/proc`
+    describes as something else still has its stale lock removed."""
+    launched = tmp_path / "launched"
+    data = short_state / "postgres" / "data"
+    data.mkdir(parents=True, mode=0o700)
+    (short_state / "postgres").chmod(0o700)
+    (data / "PG_VERSION").write_text("16\n", encoding="utf-8")
+    lock = data / "postmaster.pid"
+    live = os.getpid()                       # alive, this user's
+    lock.write_text(f"{live}\n{data}\n", encoding="utf-8")
+    bundle = config.DatabaseBundle(short_state)
+    server = _server(
+        monkeypatch, tmp_path, short_state, initdb="exit 1",
+        postgres=('if [ "$1" = --version ]; then echo "postgres (PostgreSQL) 16.14"; '
+                  f'exit 0; fi\ntouch "{launched}"\nexit 3'))
+    _withhold(monkeypatch, live)
+    assert bundle_mod._serves(live, bundle) is None       # unknown, not "not ours"
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    message = str(caught.value)
+    assert f"names pid {live}" in message and "will not describe" in message, message
+    assert lock.exists(), "the lock of a possibly live server was removed"
+    assert not launched.exists(), "a second server was launched beside it"
+    monkeypatch.undo()
+    # a pid that is gone reads as gone, and one /proc describes is still judged
+    assert bundle_mod._serves(2 ** 22 + 17, bundle) is False
+    bundle_mod._remove_a_proven_stale_lock(bundle)
+    assert not lock.exists(), "a lock /proc proves stale was kept"
 
 
 def test_directories_it_cannot_make_are_the_named_refusal(

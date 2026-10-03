@@ -1647,6 +1647,10 @@ BUNDLE_PORT = 5432
 BUNDLE_OWNER_ROLE = "opendox"
 BUNDLE_SERVED_ROLE = "opendox_runtime"
 BUNDLE_DATABASE = "opendox"
+#: The schema both bundle DSNs select, and the libpq `options` that select
+#: it, percent-encoded for a URI's query (`DatabaseBundle.dsn`).
+BUNDLE_SCHEMA = "public"
+BUNDLE_SEARCH_PATH_OPTION = f"-c%20search_path%3D{BUNDLE_SCHEMA}"
 
 #: The longest socket path the kernel takes, in bytes: `sizeof(sun_path)` less
 #: its terminating NUL — 108 on Linux, 104 on macOS and the BSDs. PostgreSQL
@@ -1694,10 +1698,20 @@ class DatabaseBundle:
         port, and a host connection is rejected outright. SonarCloud's S2115
         ("add password protection") is ACCEPTED on this line for that reason,
         with the same ruling as its authority.
+
+        THE SCHEMA IS NAMED, `public`, in both DSNs (Copilot review of
+        openDox-code#69). Left implicit, `search_path` is PostgreSQL's
+        default, `"$user", public`, and the two roles are different users:
+        a reused cluster holding a schema named `opendox` or
+        `opendox_runtime` would put the migration's ledger in one schema
+        and the served workload's reads in another, the split-schema fault
+        `_refuse_two_dsns_that_select_different_schemas` refuses for an
+        operator's DSNs. `public` is the schema `_bootstrap` grants in.
         """
         host = urllib.parse.quote(str(self.socket_dir), safe="/")
         return (f"postgresql://{role}@/{BUNDLE_DATABASE}"
-                f"?host={host}&port={BUNDLE_PORT}")
+                f"?host={host}&port={BUNDLE_PORT}"
+                f"&options={BUNDLE_SEARCH_PATH_OPTION}")
 
     @property
     def served_dsn(self) -> str:
