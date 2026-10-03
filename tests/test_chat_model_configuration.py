@@ -635,13 +635,27 @@ def test_the_turn_routes_order_with_and_without_a_port(
     posture. With no port (no model configured, or no factory), the no-model
     refusal answers before a scope, identity or limits defect, and the scope
     is never read. With a port, every defect answers what it answered before
-    the hoist, and a well-formed turn reaches step 7."""
+    the hoist, and a well-formed turn reaches step 7.
+
+    The declared model factory runs AT MOST ONCE per turn: once where the
+    turn reaches the model verdict, never where an earlier defect answers
+    (Copilot at openDox-code#74 8104fa6e, r4170882125)."""
     payload, arguments = _defective(defect)
     port = _OfferingNothing()
+    declared = (lambda: port) if posture == "a port" else _NO_PORT[posture]
+    resolved = []
+
+    def counted():
+        resolved.append(posture)
+        return declared()
+
     route = _TurnRoute(payload, root=tmp_path,
-                       port_factory=(lambda: port) if posture == "a port"
-                       else _NO_PORT[posture], **arguments)
+                       port_factory=None if declared is None else counted,
+                       **arguments)
     route._handle_workbench_chat_turn()
+    reaches_the_verdict = defect not in _BEFORE_THE_MODEL_VERDICT
+    assert len(resolved) == (1 if reaches_the_verdict and declared is not None
+                             else 0), (posture, defect, resolved)
     assert len(route.sent) == 1, route.sent
     status, body = route.sent[0]
     expected = (_WITH_A_PORT[defect]
