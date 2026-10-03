@@ -2012,9 +2012,37 @@ def refuse_what_a_local_install_cannot_be(env: Mapping[str, str]) -> None:
     two must not come to disagree about what a local install is.
     """
     _refuse_hosted_only_settings(env)
+    _refuse_another_identity_than_the_bundles(env)
     refuse_a_non_loopback_local_bind(
         PREFIX + "BIND_HOST",
         _optional(env, _by_name(PREFIX + "BIND_HOST")) or "127.0.0.1")
+
+
+def _refuse_another_identity_than_the_bundles(env: Mapping[str, str]) -> None:
+    """A LOCAL install's served role and database are the bundle's own.
+
+    The bundled server is bootstrapped with `BUNDLE_SERVED_ROLE` as the served
+    identity, granted the default DML, and its served DSN connects as that
+    role to `BUNDLE_DATABASE`. `OPENDOX_RUNTIME_PG_ROLE` names the role the
+    migration run NARROWS on the ledger. So a different one, the existing
+    `pg_read_all_data` say, let a start succeed while `opendox_runtime` kept
+    INSERT, UPDATE and DELETE on `opendox_schema_migrations`, and the
+    ledger's protection was broken (Copilot review of openDox-code#69).
+    `OPENDOX_SERVED_DATABASE` is the same kind of declaration about the same
+    identity. Each may be set only to the bundle's own name, and anything
+    else is refused by name.
+    """
+    for name, own in ((PREFIX + "RUNTIME_PG_ROLE", BUNDLE_SERVED_ROLE),
+                      (PREFIX + "SERVED_DATABASE", BUNDLE_DATABASE)):
+        given = env.get(name, "").strip()
+        if given and given != own:
+            raise ConfigurationError(
+                f"{name} is {given!r}, and a LOCAL install's is {own!r}: the "
+                "bundled server is bootstrapped with that served identity, its "
+                "served DSN connects as it, and the migration run narrows "
+                "exactly the one this names on the migration ledger. Another "
+                "would leave the bundle's own served role able to rewrite the "
+                f"ledger. Unset {name}, or set it to {own!r}")
 
 
 def _named(given: list[str]) -> str:

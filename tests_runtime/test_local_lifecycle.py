@@ -711,6 +711,30 @@ def test_parent_traversal_in_the_state_path_is_refused(variable: str) -> None:
 # -- the two refusal classes, each with its own reason --------------------------
 
 
+@pytest.mark.parametrize("setting, own, other", [
+    ("RUNTIME_PG_ROLE", config.BUNDLE_SERVED_ROLE, "pg_read_all_data"),
+    ("SERVED_DATABASE", config.BUNDLE_DATABASE, "postgres"),
+])
+@pytest.mark.parametrize("loader", ["load_settings", "load_migration_settings"])
+def test_a_served_identity_other_than_the_bundles_is_refused(
+        setting: str, own: str, other: str, loader: str) -> None:
+    """`OPENDOX_RUNTIME_PG_ROLE` names the role the migration run narrows on
+    the ledger, and a local install's served DSN connects as the bundle's own
+    (Copilot review of #69). Another role, `pg_read_all_data` say, left
+    `opendox_runtime` able to rewrite `opendox_schema_migrations`. So under
+    `local` each of the two identity settings may name only the bundle's
+    own, and the bundle's own name is accepted, as before."""
+    name = config.PREFIX + setting
+    load = getattr(config, loader)
+    base = {MODE: "local", STATE: "/tmp/odx-identity"}
+    with pytest.raises(config.ConfigurationError) as caught:
+        load({**base, name: other})
+    assert name in str(caught.value) and repr(own) in str(caught.value), caught.value
+    settings = load({**base, name: own})
+    assert (settings.runtime_pg_role if setting == "RUNTIME_PG_ROLE"
+            else settings.served_database) == own
+
+
 def test_a_dsn_beside_local_is_refused_for_the_database_not_a_broker() -> None:
     with pytest.raises(config.ConfigurationError) as caught:
         config.load_settings({MODE: "local",
