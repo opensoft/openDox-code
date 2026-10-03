@@ -655,7 +655,8 @@ def _verb(state: Path, *verb: str) -> tuple[int, dict]:
     return done.returncode, json.loads(done.stdout)
 
 
-@pytest.mark.parametrize("shape", ["linked-run", "open-state", "no-server"])
+@pytest.mark.parametrize("shape", ["linked-run", "linked-data", "open-state",
+                                   "no-server"])
 def test_the_local_verbs_connect_only_to_their_own_verified_server(
         state_dir: Path, shape: str) -> None:
     """The adversarial review of #69 (L2): a second state tree whose
@@ -664,13 +665,19 @@ def test_the_local_verbs_connect_only_to_their_own_verified_server(
     it as the owner role, against the other bundle's server, while a start
     refused the same tree. Each verb now asks the tree check and a live
     server of its OWN data directory before any connection. A valid tree
-    with no server is answered the same way, by name and unconnected."""
+    with no server is answered the same way, by name and unconnected. And
+    `status` reports no pid for a tree it refuses, a `data` linked to the
+    running bundle's included (Copilot review of #69)."""
     settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
     other = Path(tempfile.mkdtemp(prefix="odx-o-", dir="/tmp" if os.path.isdir("/tmp") else None))
     try:
-        (other / "postgres" / "data").mkdir(parents=True, mode=0o700)
-        (other / "postgres").chmod(0o700)
-        if shape == "no-server":
+        (other / "postgres").mkdir(mode=0o700)
+        if shape == "linked-data":
+            (other / "postgres" / "data").symlink_to(
+                config.DatabaseBundle(state_dir).data_dir)
+        else:
+            (other / "postgres" / "data").mkdir(mode=0o700)
+        if shape in {"no-server", "linked-data"}:
             (other / "postgres" / "run").mkdir(mode=0o700)
         else:
             (other / "postgres" / "run").symlink_to(
@@ -689,9 +696,11 @@ def test_the_local_verbs_connect_only_to_their_own_verified_server(
         other.chmod(0o700)
         shutil.rmtree(other, ignore_errors=True)
     expected = {"linked-run": "is a symbolic link",
+                "linked-data": "is a symbolic link",
                 "open-state": "writable by every user",
                 "no-server": "no bundled server is running"}[shape]
     assert status_code == 1 and status["database"].startswith("not probed: "), status
+    assert status["database_bundle"]["pid"] is None, status["database_bundle"]
     assert expected in status["database"], status
     assert migrate_code == 1, migrate
     assert migrate["refusal"] == "local-bundle-unverified", migrate
@@ -699,6 +708,7 @@ def test_the_local_verbs_connect_only_to_their_own_verified_server(
     assert reset_code == 1 and reset["refusal"] == "local-bundle-unverified", reset
     assert expected in reset["message"], reset
     assert own["database"] == "reachable" and own_code == 0, own
+    assert own["database_bundle"]["pid"] is not None, own["database_bundle"]
     assert own["applied_migrations"] and not own["pending_migrations"], own
 
 
