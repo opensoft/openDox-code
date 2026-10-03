@@ -443,6 +443,9 @@ def test_the_entry_point_owns_a_migrated_server_with_no_tcp_listener(
         "the data directory must survive a stop: it is the install's database"
 
 
+# `/proc` as above (Copilot review of openDox-code#72, r4173559498): the pid's
+# TCP listeners and its parent are the kernel's answers, read from it.
+@pytest.mark.skipif(not Path("/proc/self").exists(), reason="asks Linux's /proc")
 def test_the_serving_process_reports_its_own_install_shape(
         corpus: Path, state_dir: Path, tmp_path: Path) -> None:
     """F13.1's `caps.json` block (T073; #1144 13.4a): the server the user

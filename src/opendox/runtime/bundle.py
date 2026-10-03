@@ -839,10 +839,20 @@ class BundledServer:
         return self.bundle.data_dir.parent / "postgres.log"
 
     def report(self) -> dict[str, Any]:
-        live = self.process is not None and self.process.poll() is None
+        """The bundle's directories, and the server's pid while it lives.
+
+        Asked from a request thread of the document server (`/capabilities`'
+        `install` block, plan 034 T073) while the lifecycle thread may be in
+        `stop()`, which takes `self.process` away. So the process is read ONCE,
+        into a local, and every answer comes from that one snapshot: a report
+        racing a stop answers whole, for the process as it was when read, and
+        never dereferences a field another thread has just cleared (Copilot
+        review of openDox-code#72, r4171180402)."""
+        process = self.process
+        live = process is not None and process.poll() is None
         return {"data_dir": str(self.bundle.data_dir),
                 "socket_dir": str(self.bundle.socket_dir),
-                "pid": self.process.pid if live else None}
+                "pid": process.pid if live else None}
 
     # -- start -------------------------------------------------------------
 
