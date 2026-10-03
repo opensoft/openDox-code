@@ -170,6 +170,9 @@ from opendox import display_profile  # noqa: E402
 # `opendox.runtime.config` and `opendox.corpus_adapter` besides the stdlib.
 from opendox import corpus_adapter  # noqa: E402
 from opendox.runtime import local_git_adapter  # noqa: E402
+# THE CONSOLE TOKEN'S DELIVERY on a standalone plane (plan 034 T104): which
+# delivery a plane uses, and the private copy an entry point writes.
+from opendox import console_access  # noqa: E402
 # THE GENERATOR SEAM'S DEFAULT (5.4; plan 034 T052): openDox's own snapshot
 # generator, which `build_server()` and `main()` register where no host has.
 # Both modules are stdlib-only and name no sibling, so this adds no reach.
@@ -676,10 +679,15 @@ def hosted_ref_refused(loopback: bool, ref: str | None) -> bool:
 # The realization is a HUMAN CONSOLE test, applied to the session verbs before the
 # body is parsed, exactly where the other two clauses live:
 #
-#   1. a per-serve TOKEN, minted at start-up and published ONLY on
-#      `/capabilities`. The served page reads it same-origin; a cross-origin page
-#      cannot read a same-origin JSON response at all, so the drive-by class is
-#      structurally out.
+#   1. a per-serve TOKEN, minted at start-up. On a HOST's plane it is published
+#      ONLY on `/capabilities`: the served page reads it same-origin, and a
+#      cross-origin page cannot read a same-origin JSON response at all, so the
+#      drive-by class is structurally out. On a STANDALONE plane it is not on
+#      `/capabilities` at all (plan 034 T104; RULED openxFactory#656
+#      `5963851934`, adversarial review 2's M5): the page is opened with it in
+#      the URL's FRAGMENT, through a 0600 private copy in the state directory
+#      (`console_access`), so another OS user of the machine cannot simply ask
+#      this loopback server for it.
 #   2. a same-origin `Origin`/`Referer` when the caller sends one, so a browser
 #      that CAN reach the plane cannot borrow the human's session from another
 #      site.
@@ -687,7 +695,8 @@ def hosted_ref_refused(loopback: bool, ref: str | None) -> bool:
 #
 # What this HONESTLY does not do, stated so no reader over-reads it: a process
 # already running as the engineer, on the engineer's own machine, can `GET
-# /capabilities` and present the token. Hardening THAT is the xForge host's
+# /capabilities` on a host's plane, or read the private copy on a standalone
+# one, and present the token. Hardening THAT is the xForge host's
 # concern (the pre-existing ruling recorded at `cli.py`'s `_human_gate` and D22),
 # not this local console's. What the check removes is every caller that cannot
 # demonstrate it came from the console this serve started — which is the whole of
@@ -2088,12 +2097,22 @@ def build_server(
         route_bindings=route_bindings,
     )
     # The human console's per-serve token (FR-019's third clause, review finding
-    # 2). Minted only where session verbs exist at all, and published on
-    # `/capabilities` — the one route the served page reads same-origin and no
-    # cross-origin page can read.
+    # 2). Minted only where session verbs exist at all.
+    #
+    # WHERE IT IS DELIVERED depends on whose plane this is (plan 034 T104;
+    # RULED openxFactory#656 `5963851934`). On a HOST's plane it is published on
+    # `/capabilities`, the one route the served page reads same-origin and no
+    # cross-origin page can read, as it always was. On a STANDALONE plane,
+    # built from openDox's own default profile, it is NOT: any loopback caller
+    # can read `/capabilities`, other OS users of the machine included. The
+    # entry point writes it into a 0600 private copy instead and opens the page
+    # with it in the URL's fragment (`console_access.publish`). The routes that
+    # require it require it exactly as before; only the delivery differs.
     console_token = (mint_console_token()
                      if capabilities["actions"]["session"] else None)
-    if console_token:
+    console_delivery = (console_access.delivery_for(domain_profile.current())
+                        if console_token else None)
+    if console_token and console_delivery == console_access.DELIVERY_CAPABILITIES:
         capabilities[CONSOLE_TOKEN_FIELD] = console_token
     # THE ONE REPOSITORY THIS SERVE CAN WRITE TO. A plane reaching several
     # repositories serves them all for READING through per-entry source roots,
@@ -2273,7 +2292,13 @@ def build_server(
     # trace on the first live connection.
     route_extension.resolve_handlers(route_bindings, bound)
     factory = functools.partial(bound, directory=str(web_dir))
-    return http.server.ThreadingHTTPServer((host, port), factory)
+    httpd = http.server.ThreadingHTTPServer((host, port), factory)
+    # FOR THE ENTRY POINT, which delivers the token where `/capabilities` does
+    # not (`console_access.publish`): the token, and which delivery this plane
+    # uses. Both `None` where no token was minted.
+    httpd.console_token = console_token
+    httpd.console_token_delivery = console_delivery
+    return httpd
 
 
 def server_url(httpd: http.server.ThreadingHTTPServer, path: str = "/") -> str:
@@ -2346,18 +2371,33 @@ def serve(
             checkout_root=checkout_root))
     httpd = build_server(web_dir, snapshot_path, checkout_root, host=host,
                          port=port, quiet=quiet, actor=actor, **build_kwargs)
-    # FLUSHED before the process blocks (plan 034 T056): where standard
-    # output is a pipe or a file it is block-buffered, so an unflushed line
-    # never reaches a wrapper while the server runs, and the wrapper cannot
-    # learn an ephemeral port or tell that the server started.
-    print(f"serving ideation dashboard at {server_url(httpd, '/index.html')}",
-          flush=True)
+    page = server_url(httpd, "/index.html")
+    # THE CONSOLE TOKEN'S PRIVATE COPY on a standalone plane (plan 034 T104),
+    # as `cli.cmd_generate_and_open` writes it: its PATH is printed, never the
+    # token, and it goes when the server does. A copy that cannot be written
+    # safely refuses the start (`console_access.ConsoleAccessRefused`).
     try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
+        console = console_access.publish(httpd, page_url=page)
+    except BaseException:
         httpd.server_close()
+        raise
+    try:
+        if console is not None:
+            print(f"console {console.file_url} (this user's private copy, "
+                  "mode 0600: open it to open the console page)")
+        # FLUSHED before the process blocks (plan 034 T056): where standard
+        # output is a pipe or a file it is block-buffered, so an unflushed line
+        # never reaches a wrapper while the server runs, and the wrapper cannot
+        # learn an ephemeral port or tell that the server started.
+        print(f"serving ideation dashboard at {page}", flush=True)
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            httpd.server_close()
+    finally:
+        console_access.remove_private_copy(console)
 
 
 def _source_roots_from_args(values) -> dict:
@@ -2568,6 +2608,11 @@ def main(argv: list[str] | None = None) -> int:
         # local index rather than ignoring it, since only a host's registry
         # reads one. Reported on stderr with a non-zero status, as the
         # `--checkout-root` refusal above is.
+        print(f"serve refused: {exc}", file=sys.stderr)
+        return 1
+    except console_access.ConsoleAccessRefused as exc:
+        # NO SAFE PRIVATE COPY, NO SERVE (plan 034 T104): a standalone console
+        # whose token nobody can be handed is refused, before it serves.
         print(f"serve refused: {exc}", file=sys.stderr)
         return 1
     return 0

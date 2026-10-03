@@ -438,8 +438,10 @@ def _get(base: tuple[str, int], path: str, headers: dict | None = None):
 
 def served_catalog(child: Child) -> dict:
     """The served model catalog, read as the chat rail reads it: the console
-    token from `/capabilities`, then `GET /workbench/model-catalog`. Asserts
-    the route ANSWERS, with an envelope openDox's own validator accepts."""
+    token the page was opened with (on a standalone plane, its private copy,
+    plan 034 T104; never `/capabilities`), then `GET
+    /workbench/model-catalog`. Asserts the route ANSWERS, with an envelope
+    openDox's own validator accepts."""
     assert ACTOR in GATE_TEST_PRINCIPALS
     match = child.wait_for_line(_URL)
     base = (match.group(2), int(match.group(3)))
@@ -447,8 +449,9 @@ def served_catalog(child: Child) -> dict:
     assert status == 200, status
     capabilities = json.loads(body)
     assert capabilities["actions"]["session"] is True, capabilities
+    assert "console_token" not in capabilities, capabilities
     status, body = _get(base, "/workbench/model-catalog",
-                        {"X-XF-Console-Token": capabilities["console_token"]})
+                        {"X-XF-Console-Token": child.console_token(base[1])})
     assert status == 200, (status, body)
     envelope = json.loads(body)
     assert envelope["kind"] == serve_wire.DOXBENCH_MODEL_CATALOG_KIND

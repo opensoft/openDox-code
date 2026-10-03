@@ -266,6 +266,19 @@ class Child:
             return []
         return self.refused_log.read_text(encoding="utf-8").split()
 
+    def console_token(self, port: int) -> str:
+        """The console token this child's STANDALONE plane delivers (plan 034
+        T104; RULED openxFactory#656 `5963851934`), read as a user's browser
+        is handed it: from the 0600 private copy the entry point wrote in the
+        child's own state directory. `/capabilities` carries none on a
+        standalone plane, so this is the only place a case can take it from,
+        and reading it applies every check a real reader's does."""
+        from opendox import console_access
+
+        record = console_access.read_private_copy(
+            console_access.private_copy_path(self.state_dir, port))
+        return record[console_access.FRAGMENT_KEY]
+
 
 def run_module(workdir: Path, module: str, *args: str) -> tuple[Child, int]:
     """A child run to completion: `(child, exit status)`."""
