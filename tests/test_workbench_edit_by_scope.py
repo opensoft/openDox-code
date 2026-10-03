@@ -136,9 +136,11 @@ PARITY_TILES = [
 ]
 
 
-def _stage(tmp_path_factory, name: str, harness: str) -> dict:
+def _stage(tmp_path_factory, name: str, harness: str,
+           extra: dict[str, str] | None = None) -> dict:
     """Copy the bundle's views and vendor next to `harness`, run it under node
-    over the shared snapshot, and return the one JSON object it prints."""
+    over the shared snapshot, and return the one JSON object it prints.
+    `extra` names further modules to write beside the views."""
     if NODE is None:
         pytest.skip("node not available for the workbench edit-by-scope probe")
     root = tmp_path_factory.mktemp(name)
@@ -149,6 +151,8 @@ def _stage(tmp_path_factory, name: str, harness: str) -> dict:
                                                   encoding="utf-8")
     snapshot = root / "snapshot.json"
     snapshot.write_text(json.dumps(SNAPSHOT), encoding="utf-8")
+    for filename, text in (extra or {}).items():
+        (root / "views" / filename).write_text(text, encoding="utf-8")
     script = root / "views" / (name + ".mjs")
     script.write_text(harness, encoding="utf-8")
     done = subprocess.run([NODE, str(script), str(snapshot)],
@@ -547,7 +551,7 @@ const STANDALONE = { actions: { notebook: false, gate: false, refresh: false,
 const GOVERNED = { actions: { gate: true, session: true, edit: true },
   actor: 'brett' };
 
-async function mount({ caps, gate, kind, id, storage, snapshot }) {
+async function mount({ caps, gate, kind, id, storage, snapshot, thread }) {
   const container = document.createElement('div');
   const log = { turns: [], abstracts: [] };
   const doxbench = {
@@ -560,6 +564,9 @@ async function mount({ caps, gate, kind, id, storage, snapshot }) {
       return { ok: false, status: 403,
                payload: { error: 'model_capability_unavailable' } }; },
     save: gatelessSave,
+    // the rail's thread read, where a caller composes one (the T102 follow-on's
+    // module, tests/test_thread_read_by_session.py, composes it as app.js does)
+    ...(thread ? { thread } : {}),
     documentAbstract: async (request) => { log.abstracts.push(request);
       return { ok: false, payload: { error: 'model_capability_unavailable' } }; },
   };
