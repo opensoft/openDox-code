@@ -1630,7 +1630,14 @@ export function mountStagingWorkbench(container, snapshot,
   // the whole editing posture exactly as it always did; where none is, which
   // is every standalone install, openDox's own default answers editing BY
   // SCOPE (RULED `5963618568`). See `editingPosture` in the model.
-  const governed = createColumn !== NO_CREATE_COLUMN;
+  // EITHER HALF counts (Copilot review of #81, r4174293974): the two bindings
+  // resolve independently, and `app.js` sends Save through a contributed
+  // session column's `firstEditTransport` whenever one exists. A host that
+  // registers only that half is therefore governed, so its Save is not the
+  // by-scope refusal; with no create column its gate reads off, so it stays
+  // read-only exactly as before T102.
+  const governed = createColumn !== NO_CREATE_COLUMN
+    || sessionColumn !== NO_SESSION_COLUMN;
   // THE VOCABULARY, INSTALLED BEFORE ANYTHING RENDERS (slice S7) — into this
   // module AND into the pure model it derives through, which is why the model
   // exports `setDisplay` rather than taking the facet on every signature.

@@ -957,7 +957,8 @@ function ensurePageOverlayHost(doc) {
 // `5963618568`: "only creating documents and Save stay behind the gate, so Save
 // is refused by name"). A standalone workbench now offers its editors by scope,
 // so a human really does press Save here, and the refusal is the model's one
-// sentence: what is missing and which binding would supply it. It used to end
+// sentence: what is missing and which binding would supply it. It is picked on
+// the session half alone, so the sentence names only that half. It used to end
 // "Run the CLI verb in your pinned checkout", a remedy a standalone install
 // does not have.
 function refusalTransport() {

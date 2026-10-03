@@ -788,6 +788,17 @@ await scenario('s8', async (o) => {
   }
 });
 
+// ---- S9: A HOST THAT REGISTERS ONLY THE SESSION HALF (Copilot review of #81,
+// r4174293974): app.js sends its Save through that column's transport, so it
+// is governed, not standalone. With no create column its gate reads off, so it
+// is read-only exactly as before T102, even with `edit` true.
+await scenario('s9', async (o) => {
+  const ctx = await mount({ caps: STANDALONE,
+                            gate: { create: null, session: contributedGate().column.session },
+                            kind: 'cluster', id: 'g1' });
+  Object.assign(o, survey(ctx));
+});
+
 out.notes = { scope: model.scopeEditingNote(), nothing: model.nothingEditableNote(),
               gateless: model.GATELESS_SAVE_REFUSAL };
 console.log(JSON.stringify(out));
@@ -860,6 +871,18 @@ def test_standalone_save_is_present_and_refused_by_name(shell) -> None:
     assert "the governed Save did not land" in s1["tileSaveNote"]
     assert shell["notes"]["gateless"] in s1["tileSaveNote"]
     assert "`gate.workbench.session`" in shell["notes"]["gateless"]
+
+
+def test_the_save_refusal_names_only_the_missing_session_transport(shell) -> None:
+    """Copilot review of #81 (r4174293950): `app.js` picks the refusal
+    transport on the SESSION half alone, so a host with a live create column
+    and no session column reaches the same sentence. It must name the
+    first-edit transport and never claim the install has no create gate."""
+    gateless = shell["notes"]["gateless"]
+    assert gateless.startswith("Save needs the first-edit transport")
+    assert "`gate.workbench.session`" in gateless
+    assert "create" not in gateless
+    assert gateless.endswith("Your edits stay in this browser's buffers, unsaved.")
 
 
 def test_the_edit_verb_is_offered_on_exactly_the_scopes_documents(shell) -> None:
@@ -948,6 +971,18 @@ def test_by_scope_the_outline_tab_states_why_no_section_is_added(shell) -> None:
         assert control["title"].startswith(
             "adding a section writes into an outline buffer"), control["title"]
         assert "edit verb" in control["title"]
+
+
+def test_a_host_with_only_the_session_half_is_governed_and_read_only(shell) -> None:
+    """Copilot review of #81 (r4174293974): either contributed gate half makes
+    the install governed, so the by-scope arm is limited to installs with no
+    gate column at all. Session-only, the create gate reads off: read-only,
+    with the governed host's old note, and no Save offered."""
+    s9 = _ran(shell, "s9")
+    assert s9["canvasHidden"] is True and s9["textareas"] == 0
+    assert s9["railHidden"] is True
+    assert s9["pill"] == "read-only"
+    assert s9["note"] == GATE_OFF_NOTE
 
 
 def test_app_composes_the_standalone_save_from_the_named_refusal() -> None:

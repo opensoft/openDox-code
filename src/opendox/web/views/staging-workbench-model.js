@@ -1712,11 +1712,14 @@ export function documentEditable(posture, path) {
 // what is missing, which binding would supply it, and what happened to the
 // human's text. It stood there as "run the CLI verb in your pinned checkout",
 // a remedy a standalone install does not have.
+// It names ONLY the missing session transport (Copilot review of #81,
+// r4174293950): `app.js` picks this fallback on the session half alone, so a
+// host that registers a live create column but no session column reaches it
+// too, and there "this install has no create gate" would be false.
 export const GATELESS_SAVE_REFUSAL =
-  "Save needs the create gate, and this install has none: no column "
-  + "contributes the first-edit transport (`gate.workbench.session`), so a "
-  + "governed Save cannot be sent. Your edits stay in this browser's buffers, "
-  + "unsaved.";
+  "Save needs the first-edit transport, and no column on this install "
+  + "contributes it (`gate.workbench.session`), so a governed Save cannot be "
+  + "sent. Your edits stay in this browser's buffers, unsaved.";
 
 // The plane note the by-scope posture stands on, beside whatever the chat rung
 // says on the send button. Written through the facet: the tile's own items are
