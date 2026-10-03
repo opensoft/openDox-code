@@ -120,7 +120,11 @@ def _no_omp_path(tmp_path: Path, path: str | None = None) -> str:
             continue
         mirror = mirrors / str(index)
         mirror.mkdir()
-        for item in sorted(Path(entry).iterdir()):
+        # ABSOLUTE targets: a relative PATH entry names a directory relative
+        # to the current directory, and a relative link would resolve from
+        # the mirror instead (Copilot at openDox-code#74 4ef7575a,
+        # r4170839174).
+        for item in sorted(Path(os.path.abspath(entry)).iterdir()):
             if item.name != harness:
                 (mirror / item.name).symlink_to(item)
         kept.append(str(mirror))
@@ -148,6 +152,26 @@ def test_a_path_without_omp_keeps_every_other_command(tmp_path) -> None:
     assert shutil.which(bridge_mod.HARNESS_COMMAND, path=os.pathsep.join(without)) is None
     found = shutil.which("fixture-git", path=os.pathsep.join(without))
     assert found is not None and Path(found).parent == Path(without[1]), found
+    assert Path(found).resolve() == (shared / "fixture-git").resolve()
+
+
+def test_a_relative_path_entry_without_omp_keeps_its_commands(
+        tmp_path, monkeypatch) -> None:
+    """A RELATIVE PATH entry holding `omp`: its other commands still resolve,
+    from anywhere, to the same files."""
+    shared = tmp_path / "shared-bin"
+    shared.mkdir()
+    for name in (bridge_mod.HARNESS_COMMAND, "fixture-git"):
+        tool = shared / name
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    assert shutil.which("fixture-git", path="shared-bin") is not None
+    without = _no_omp_path(tmp_path, "shared-bin")
+    monkeypatch.chdir(ROOT)                      # a child's own directory
+    assert shutil.which(bridge_mod.HARNESS_COMMAND, path=without) is None
+    found = shutil.which("fixture-git", path=without)
+    assert found is not None, without
     assert Path(found).resolve() == (shared / "fixture-git").resolve()
 
 
