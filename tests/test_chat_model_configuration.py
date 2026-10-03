@@ -1090,14 +1090,18 @@ def _listed(adapter, root: Path, revision: str | None = None) -> list[str]:
 
 
 def test_openDoxs_settings_documents_are_declared_once() -> None:
-    """The two default paths, by their own constants, and the very tuple the
-    standalone corpus's default reads."""
+    """The two default paths, by their own constants: the very tuple the
+    standalone corpus's default reads, and the set the scope default keeps
+    out of every owned section (T084's `default_columns.SETTINGS_DOCUMENTS`,
+    built from it)."""
     import inspect
+    from opendox import default_columns
     from opendox.runtime import local_git_adapter as lga
     assert intake_mod.SETTINGS_DOCUMENTS == (binding_mod.DEFAULT_BINDINGS_RELPATH,
                                              intake_mod.DEFAULT_DECLARATIONS_RELPATH)
     default = inspect.signature(lga.WorkingTreeCorpus).parameters["excluded"].default
     assert default is intake_mod.SETTINGS_DOCUMENTS
+    assert default_columns.SETTINGS_DOCUMENTS == frozenset(intake_mod.SETTINGS_DOCUMENTS)
 
 
 @pytest.mark.parametrize("entry", ["opendox.cli", "opendox.serve"])
