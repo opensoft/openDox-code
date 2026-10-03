@@ -414,15 +414,16 @@ def test_the_package_data_ships_the_record_and_every_copy() -> None:
     """7.1 settles that the copies travel as PACKAGE DATA, so an install has
     them beside the validator. The package-data table names, under
     `opendox.contracts`, exactly the record and every schema copy the record
-    pins, and the bundle's own line is unchanged. (A wheel built without it
+    pins, and the bundle's own line is unchanged by 7.1. (A wheel built without it
     carries `opendox/contracts/__init__.py` alone, and its validator refuses,
-    naming the absent record.)"""
+    naming the absent record.) The bundle's line is the one plan 034 T075
+    left it as: the recursive pattern and the dotfile one beside it."""
     import fnmatch
     import tomllib
 
     table = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     data = table["tool"]["setuptools"]["package-data"]
-    assert data["opendox"] == ["web/**"]
+    assert data["opendox"] == ["web/**", "web/**/.*"]
     patterns = data["opendox.contracts"]
     shipped = sorted(
         relative for relative in (p.relative_to(PACKAGE).as_posix()
