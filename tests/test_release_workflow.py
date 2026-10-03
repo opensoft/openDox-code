@@ -392,7 +392,8 @@ version = "0.1.0"
 dependencies = ["PyYAML>=6.0", "colorama>=0.4; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
-runtime = ["fastapi>=0.115", "uvloop>=0.19; sys_platform != 'win32' or python_version < '3.13'"]
+runtime = ["fastapi>=0.115", "uvloop>=0.19; sys_platform != 'win32' or python_version < '3.13'",
+           "demo-plugin @ https://example.invalid/demo_plugin-1.0-py3-none-any.whl"]
 local = ["opendox[runtime]", "pixeltable-pgserver>=0.6.0"]
 """
 
@@ -402,6 +403,7 @@ local = ["opendox[runtime]", "pixeltable-pgserver>=0.6.0"]
 REQUIRES = ["PyYAML>=6.0", 'colorama>=0.4; sys_platform == "win32"',
             'fastapi>=0.115; extra == "runtime"',
             'uvloop>=0.19; (sys_platform != "win32" or python_version < "3.13") and extra == "runtime"',
+            'demo-plugin@ https://example.invalid/demo_plugin-1.0-py3-none-any.whl ; extra == "runtime"',
             'opendox[runtime]; extra == "local"', 'pixeltable-pgserver>=0.6.0; extra == "local"']
 
 
@@ -489,6 +491,11 @@ ARTIFACT_CASES = {
     "a direct URL in place of the version": (
         dict(requires=_requires('fastapi>=0.115; extra == "runtime"',
                                 'fastapi @ https://example.invalid/fastapi.whl ; extra == "runtime"')),
+        "are not pyproject.toml's"),
+    "a direct URL changed": (
+        dict(requires=_requires(
+            'demo-plugin@ https://example.invalid/demo_plugin-1.0-py3-none-any.whl ; extra == "runtime"',
+            'demo-plugin@ https://example.invalid/demo_plugin-6.6-py3-none-any.whl ; extra == "runtime"')),
         "are not pyproject.toml's"),
     "the extra's clause first, unparenthesized": (
         dict(requires=_requires(UVLOOP, 'uvloop>=0.19; extra == "runtime" and (sys_platform != "win32" '
