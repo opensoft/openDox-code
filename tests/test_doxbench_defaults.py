@@ -462,7 +462,10 @@ def test_the_served_catalog_route_answers_from_generate_and_open(tmp_path) -> No
     """`python -m opendox.cli generate-and-open`, the documented command, with
     neither sibling importable. At `047bb4fa` it answered `500
     catalog_unavailable`."""
-    child = Child(tmp_path, "opendox.cli", "generate-and-open",
+    # `--local`: the single-user install. Since plan 034 T070 an unflagged
+    # `generate-and-open` is HOSTED, and with no issuer it refuses (13.5)
+    # before it serves anything.
+    child = Child(tmp_path, "opendox.cli", "generate-and-open", "--local",
                   "--repo-root", str(_repository(tmp_path)), "--repository", "fixture",
                   "--no-open", "--port", "0", "--run-dir", str(tmp_path / "run"),
                   "--actor", ACTOR)

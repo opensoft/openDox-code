@@ -90,6 +90,8 @@ from typing import Any
 
 from opendox.runtime import identity, migrations
 from opendox.runtime.config import (
+    INSTALL_MODE_LOCAL,
+    LOCAL_FLAG,
     SECRET_NAMES,
     SETTINGS,
     ConfigurationError,
@@ -341,6 +343,11 @@ def _redacted_settings(settings: RuntimeSettings) -> dict[str, Any]:
     values = {
         "OPENDOX_DATABASE_URL": settings.database_url,
         "OPENDOX_MIGRATION_DATABASE_URL": settings.migration_database_url,
+        # THE INSTALL SHAPE this process loaded (plan 034 T070): a name and
+        # never a credential, and the first thing an operator reading `status`
+        # needs to know, because it decides whether the broker lines below
+        # mean anything at all.
+        "OPENDOX_INSTALL_MODE": settings.install_mode,
         # THE BROKER URLS ARE REDACTED HERE TOO. `load_settings` refuses
         # userinfo in the issuer and in an explicit JWKS URL — but this report
         # prints a DERIVED value, and a settings object can also be built by
@@ -565,10 +572,31 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    """Run the API. The pool is opened by the application's lifespan."""
+    """Run the API. The pool is opened by the application's lifespan.
+
+    NOT IN A LOCAL INSTALL (plan 034 T070; a holder reading on
+    openxFactory#656 that Brett may overrule). Every `/api/v1` route verifies
+    a token the BROKER signed (`oidc.build_verifier`), and the local mode has
+    no broker (#1144 13.4), so there is no identity this API could serve
+    with: started anyway, it would either refuse every request or, worse,
+    stand a local principal up that no task text defines. A local install is
+    served by `opendox generate-and-open --local`, and in release 1 its
+    document surface reads nothing from the store (R1Q16 (ii)). Refused
+    BEFORE anything is imported or bound, as evidence like every refusal.
+    """
     settings = _settings_or_refusal(args)
     if isinstance(settings, int):
         return settings
+    if settings.install_mode == INSTALL_MODE_LOCAL:
+        return _emit({"verb": "serve", "refusal": "local-mode-has-no-broker",
+                      "message": "the runtime API authenticates every request "
+                                 "with a token its identity broker signed, "
+                                 "and a LOCAL install has no broker, so this "
+                                 "API has no identity to serve with. A local "
+                                 "install is served by `opendox "
+                                 f"generate-and-open {LOCAL_FLAG}`; the "
+                                 "runtime API is a HOSTED install's surface "
+                                 "(13.4)"}, ok=False)
     try:
         import uvicorn
 
@@ -636,6 +664,19 @@ def cmd_serve(args: argparse.Namespace) -> int:
                              "exiting normally"}, ok=True)
 
 
+def _report_the_local_broker(report: dict[str, Any]) -> None:
+    """What `status` says of a LOCAL install's broker, on every path.
+
+    Its broker is NOT CONFIGURED (plan 034 T070; #1144 13.4): a statement
+    about the install's configuration rather than a probe's result, so there
+    is no discovery URL to report and nothing counts against `ok`. `status`
+    returns from two places, and both write it here, so the two answers
+    cannot drift apart (Copilot review of openDox-code#67).
+    """
+    report["broker_keys"] = "not configured (local mode)"
+    report["broker_discovery"] = None
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Report, never change: configuration, the schema pin, the ledger, the broker.
 
@@ -665,10 +706,18 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     try:
         from opendox.runtime.db import Database
-    except ImportError as exc:  # pragma: no cover - the extra is absent
+    except ImportError as exc:
         report["runtime_extra"] = f"absent: {_safe_message(exc)}"
         report["database"] = "not probed"
-        report["broker_keys"] = "not probed"
+        # A LOCAL INSTALL'S BROKER IS NOT CONFIGURED WHETHER OR NOT THE EXTRA
+        # IS PRESENT (plan 034 T070; Copilot review of openDox-code#67). That
+        # answer comes from its configuration, not from a probe, so this early
+        # return gives the same one the full report gives below. A hosted
+        # install's broker was never probed, and says so, as before.
+        if settings.install_mode == INSTALL_MODE_LOCAL:
+            _report_the_local_broker(report)
+        else:
+            report["broker_keys"] = "not probed"
         return _emit(report, ok=False)
     report["runtime_extra"] = "present"
 
@@ -744,6 +793,14 @@ def cmd_status(args: argparse.Namespace) -> int:
                 f"unreachable: {type(exc).__name__}: {_safe_message(exc)}")
         ok = False
 
+    # A LOCAL INSTALL HAS NO BROKER TO PROBE (plan 034 T070; #1144 13.4),
+    # and that is its configuration rather than a fault: reported by name, and
+    # NOT counted against `ok`, so a healthy local install's `status` exits 0
+    # — F13.1 runs it under `set -e`, and a verdict of "unhealthy" for a
+    # broker the install was never meant to have would be false.
+    if settings.install_mode == INSTALL_MODE_LOCAL:
+        _report_the_local_broker(report)
+        return _emit(report, ok=ok)
     try:
         from opendox.runtime.oidc import build_verifier
 

@@ -384,7 +384,10 @@ def standalone(tmp_path, monkeypatch):
     assert ACTOR in GATE_TEST_PRINCIPALS
     repo = fresh_repository(PLAIN, tmp_path)
     monkeypatch.setenv("PATH", _no_omp_path(tmp_path))   # the child inherits it
-    child = Child(tmp_path, "opendox.cli", "generate-and-open",
+    # `--local`: the single-user install. Since plan 034 T070 an unflagged
+    # `generate-and-open` is HOSTED, and with no issuer it refuses (13.5)
+    # before it serves anything.
+    child = Child(tmp_path, "opendox.cli", "generate-and-open", "--local",
                   "--repo-root", str(repo), "--repository", "fixture",
                   "--no-open", "--port", "0", "--run-dir", str(tmp_path / "run"),
                   "--actor", ACTOR)

@@ -157,11 +157,13 @@ def test_F7_2_the_malformed_fixture_is_refused_without_strict_too(tmp_path) -> N
 
 @pytest.mark.parametrize("fixture,expected", [(PLAIN, 0), (MALFORMED, 1)])
 def test_generate_and_open_gives_the_same_verdicts(tmp_path, fixture, expected) -> None:
-    """`generate-and-open --no-open --no-serve --strict`: the good fixture
-    builds its server and prints its URL, and the malformed one stops before
-    a server is built, naming the rule."""
+    """`generate-and-open --local --no-open --no-serve --strict`: the good
+    fixture builds its server and prints its URL, and the malformed one stops
+    before a server is built, naming the rule. `--local` because this is the
+    single-user install: since plan 034 T070, an unflagged run is HOSTED and
+    refuses without its broker's issuer, before the validator is reached."""
     repo = fresh_repository(fixture, tmp_path)
-    child, status = run_module(tmp_path, "opendox.cli", "generate-and-open",
+    child, status = run_module(tmp_path, "opendox.cli", "generate-and-open", "--local",
                                "--repo-root", str(repo), "--repository", "fixture",
                                "--no-open", "--no-serve", "--strict",
                                "--run-dir", str(tmp_path / "run"))
