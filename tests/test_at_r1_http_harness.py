@@ -279,6 +279,42 @@ def test_a_page_link_from_outside_the_plane_is_a_named_failure() -> None:
     assert modules == 0
 
 
+@pytest.mark.parametrize("importer, expected", [
+    ('import "child.js";\n', "t.bundle.bare child.js"),
+    ('import("child.js").catch(() => null);\n', "t.bundle.bare child.js"),
+    ('export { x } from "lib/child.js";\n', "t.bundle.bare lib/child.js"),
+    ('import { x } from "child";\n', "t.bundle.bare child"),
+], ids=["static", "dynamic", "export-from", "package-name"])
+def test_a_bare_specifier_is_a_named_failure(importer: str,
+                                             expected: str) -> None:
+    """With no import map, a browser refuses a specifier that is neither a
+    URL nor `/`, `./` or `../`-led, though `/child.js` is served (Copilot
+    review of #75 at 27479495, r4174411680)."""
+    files = {"/app.js": (JS, importer),
+             "/child.js": (JS, "export const x = 1;\n"),
+             "/lib/child.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(
+            port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == [expected]
+    assert modules == 1                 # never fetched by its path
+
+
+@pytest.mark.parametrize("specifier", ["./child.js", "../views/child.js",
+                                       "/views/child.js"],
+                         ids=["dot-slash", "dot-dot-slash", "absolute-path"])
+def test_every_relative_specifier_resolves(specifier: str) -> None:
+    files = {"/views/app.js": (JS, f'import "{specifier}";\n'),
+             "/views/child.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(
+            port, _page("/views/app.js"), {}, verdict, "t")
+    assert _failures(verdict) == []
+    assert modules == 2
+
+
 def test_a_dynamic_refusal_alone_is_not_a_failure() -> None:
     """10.2a's case: `intent-feed.js` is not owed, its importer degrades."""
     files = {"/app.js": (JS, 'import("./intent-feed.js").catch(() => null);\n')}
@@ -600,6 +636,51 @@ def test_a_linked_opener_is_a_named_failure(tmp_path: Path) -> None:
     failures, _path, token = _read(state, _printed(opener))
     assert failures == [PRIVATE, FRAGMENT]     # and never followed to read
     assert token is None
+
+
+def test_a_fifo_opener_is_a_named_failure_and_never_hangs(
+        tmp_path: Path) -> None:
+    """A FIFO with no writer would block a plain `open` for ever, before the
+    verdict and the cleanup (Copilot review of #75 at 27479495, previously
+    missed). It is refused as not private, and is not read."""
+    state, opener = _opener(tmp_path)
+    opener.unlink()
+    os.mkfifo(opener, 0o600)
+    outcome: dict = {}
+
+    def read() -> None:
+        outcome["result"] = _read(state, _printed(opener))
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(timeout=10)
+    if reader.is_alive():
+        # Release the blocked reader so the run can end, then fail.
+        with open(os.open(opener, os.O_WRONLY | os.O_NONBLOCK), "wb"):
+            pass
+        reader.join(timeout=5)
+        pytest.fail("reading a FIFO opener blocked")
+    failures, _path, token = outcome["result"]
+    assert failures == [PRIVATE, FRAGMENT]
+    assert token is None
+
+
+def test_a_fifo_with_a_writer_is_never_read(tmp_path: Path) -> None:
+    """Only a regular file is read: a FIFO that a writer has filled is
+    refused by its descriptor, not read as the opener's page."""
+    fifo = tmp_path / "opener.html"
+    os.mkfifo(fifo, 0o600)
+    holder = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)   # lets a writer open
+    try:
+        # A whole page waits in the pipe, and its writer has gone, so a
+        # reader would get the page and then an end of file.
+        writer = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.write(writer, _opener_page(FORWARD).encode("utf-8"))
+        os.close(writer)
+        with pytest.raises(OSError):
+            harness._read_without_following(fifo)
+    finally:
+        os.close(holder)
 
 
 def test_a_hard_linked_opener_is_a_named_failure(tmp_path: Path) -> None:

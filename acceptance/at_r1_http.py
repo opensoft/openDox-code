@@ -138,6 +138,7 @@ from __future__ import annotations
 import argparse
 import collections
 import dataclasses
+import errno
 import html.parser
 import http.client
 import json
@@ -753,6 +754,23 @@ def _judge_module(answer: Answer, path: str, static: bool, importer: str,
             "refuses for a module script")
 
 
+#: A bare module specifier (`import "child.js"`), marked so: with no import
+#: map, a browser resolves only a specifier that starts with `/`, `./` or
+#: `../`, or one that is an absolute URL, and throws on any other (the HTML
+#: standard's "resolve a module specifier"). The served page has no import
+#: map (Copilot review of openDox-code#75 at 27479495, r4174411680).
+BARE_PREFIX = "bare:"
+_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def _specifier(importer: str, value: str) -> str:
+    """A module specifier as a browser with no import map resolves it: the
+    resolved path or URL, or `bare:<specifier>` where it throws."""
+    if value.startswith(("/", "./", "../")) or _URL_SCHEME.match(value):
+        return _resolve(importer, value)
+    return BARE_PREFIX + value
+
+
 def _scan_module(path: str, body: bytes, pending: collections.deque,
                  routes: set[str], literals: set[str] | None = None) -> None:
     for _quote, value, before in JsStrings(
@@ -760,9 +778,9 @@ def _scan_module(path: str, body: bytes, pending: collections.deque,
         if literals is not None:
             literals.add(value)
         if _DYNAMIC_IMPORT_CONTEXT.search(before):
-            pending.append((_resolve(path, value), False, path))
+            pending.append((_specifier(path, value), False, path))
         elif _STATIC_IMPORT_CONTEXT.search(before):
-            pending.append((_resolve(path, value), True, path))
+            pending.append((_specifier(path, value), True, path))
         elif _PATH_LITERAL.match(value) and not _MODULE_OR_SHEET.search(value):
             routes.add(_resolve("/", value))
 
@@ -807,6 +825,14 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
         if (path, static) in judged:
             continue
         judged.add((path, static))
+        if path.startswith(BARE_PREFIX):
+            verdict.check(
+                f"{label}.bundle.bare {path[len(BARE_PREFIX):]}", False,
+                f"{importer} imports {path[len(BARE_PREFIX):]!r} "
+                f"{'statically' if static else 'dynamically'} as a bare "
+                "specifier, which a browser with no import map refuses; a "
+                "relative one starts with `./` or `../`")
+            continue
         if _external(path):
             # Never fetched from loopback by its path, where a local file of
             # the same name would answer for it.
@@ -1402,8 +1428,15 @@ def opener_unsafe_because(path: Path) -> str | None:
 
 
 def _read_without_following(path: Path, limit: int = 64 * 1024) -> str:
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    """The file at `path`, opened without following a link and WITHOUT
+    BLOCKING, and read only if what opened is a regular file: a FIFO with no
+    writer would otherwise hang the harness before its verdict and its
+    cleanup (Copilot review of openDox-code#75 at 27479495, previously
+    missed)."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file")
         chunks, size = [], 0
         while size < limit:
             chunk = os.read(descriptor, limit - size)
