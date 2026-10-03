@@ -22,8 +22,10 @@ Five layers, each proving a different thing about the same machinery:
       UNCONFIGURED posture is byte-for-byte what it was before this change.
 
 A SIXTH LAYER, (f), holds #1144 Group 16's binding and provider boxes (plan
-034 phase 3, slice P3-B). 16.1 is the OpenAI-compatible dialect (T078), and
-16.2 is the model name the provider receives (T079).
+034 phase 3, slice P3-B). 16.1 is the OpenAI-compatible dialect (T078), 16.2
+is the model name the provider receives (T079), and 16.3 is the credential
+staying a reference: a key in the URL or an extra field refused, the built-in
+`env:` and keyring resolver, and the auth kind `none` (T080).
 
 THE FAKE BROKER SPEAKS THE DECLARED CONTRACT (task 2.6). It was this
 repository's own invented stdin/stdout protocol until the reconciliation, which
@@ -44,16 +46,21 @@ are scriptable and no test depends on timing).
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import dataclasses
+import http.client
 import http.server
 import io
 import json
+import socket
 import subprocess
 import sys
 import threading
 import time
+import types
 import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -64,8 +71,11 @@ from conftest import REPO_ROOT  # noqa: F401  (path setup)
 from opendox import cli as cli_mod
 from opendox import doxbench_binding as binding_mod
 from opendox import doxbench_install as install_mod
+from opendox import doxbench_intake as intake_mod
 from opendox import doxbench_model as model_mod
 from opendox import doxbench_provider as provider_mod
+from opendox.runtime import config as runtime_config
+from opendox.runtime import local_git_adapter as git_adapter_mod
 
 # The credential a human types. A SENTINEL: long, unique, and impossible to
 # produce by accident, so a sweep that finds it has found the real thing.
@@ -137,9 +147,14 @@ def test_no_secret_field_exists_in_the_shape_to_populate(secret_field):
 
 
 def test_the_auth_kind_vocabulary_is_closed():
-    assert binding_mod.AUTH_KINDS == ("api_key", "oauth")
-    for kind in binding_mod.AUTH_KINDS:
+    """THREE KINDS since #1144 box 16.3 (RULED R1Q18 (a)), in a pinned order:
+    `none` joins after the two that take a credential. A `none` binding names
+    no reference and no broker, which is why it is built apart here."""
+    assert binding_mod.AUTH_KINDS == ("api_key", "oauth", "none")
+    for kind in (binding_mod.AUTH_KIND_API_KEY, binding_mod.AUTH_KIND_OAUTH):
         assert _binding(auth_kind=kind).auth_kind == kind
+    assert _binding(auth_kind=binding_mod.AUTH_KIND_NONE, credential_ref=None,
+                    broker_argv=()).auth_kind == "none"
     with pytest.raises(binding_mod.BindingRefused):
         _binding(auth_kind="whatever_the_broker_likes")
 
@@ -1127,8 +1142,14 @@ def test_a_refusal_cannot_be_composed_from_what_a_broker_said():
 def test_the_fixed_diagnostics_are_all_reachable_and_no_more():
     """The closed set shed the dialect sentence when the dialect became a
     declaration-time refusal; keeping an unraisable sentence would be a refusal
-    nobody can trigger."""
-    assert len(provider_mod.FIXED_DIAGNOSTICS) == 8
+    nobody can trigger. ELEVEN since #1144 box 16.3: the built-in resolver's
+    two joined, and so did the redirect a built-in credential declines.
+    Section (f) below reaches each of the three."""
+    assert len(provider_mod.FIXED_DIAGNOSTICS) == 11
+    assert {provider_mod.DIAG_REFERENCE_UNRESOLVED,
+            provider_mod.DIAG_KEYRING_UNAVAILABLE,
+            provider_mod.DIAG_PROVIDER_REDIRECTED} <= \
+        provider_mod.FIXED_DIAGNOSTICS
     assert not hasattr(provider_mod, "DIAG_DIALECT_UNKNOWN")
 
 
@@ -1789,3 +1810,1514 @@ def test_a_stand_in_chat_server_receives_the_declared_model(tmp_path):
     assert _ChatCompletionsHandler.seen["body"] == {
         "model": DECLARED_MODEL,
         "messages": [{"role": "user", "content": "assembled prompt"}]}
+
+
+# 16.3, the credential stays a reference (T080).
+#
+#   * A key in the endpoint URL or in an extra field is refused when the
+#     binding is declared. The URL check is the product's own detector,
+#     `runtime/local_git_adapter.carries_a_credential`.
+#   * The built-in resolver takes `env:NAME` and OS-keyring references, at call
+#     time and inside `doxbench_provider` only (RULED R1Q17 (b)). Such a record
+#     needs no broker, and one given beside it is refused. That refusal is the
+#     plan's fail-closed reading (analyze round 2, V2-21), which no answer
+#     rules. The tests below hold both halves.
+#   * An endpoint that takes no credential declares the auth kind `none`,
+#     under which `broker_argv` and `credential_ref` are forbidden (RULED
+#     R1Q18 (a)). It joins after the two kinds that exist.
+#
+# Every key here is an obvious fake.
+
+KEY_SENTINEL = "sk-stand-in-7c1e5a90d3b24f68-NOT-A-KEY"
+ENV_NAME = "STAND_IN_PROVIDER_KEY"
+KEYRING_SERVICE = "https://api.example.invalid"
+KEYRING_USER = "brett"
+
+
+def _f16_1_record():
+    """F16.1's clean control record, built as #1144's falsifier builds it."""
+    rec = {f: "stand-in" for f in binding_mod.BINDING_FIELDS}
+    rec.update(auth_kind=binding_mod.AUTH_KINDS[0], dialect="openai-chat-v1",
+               endpoint="http://127.0.0.1:9/v1/chat/completions")
+    if "broker_argv" in rec:
+        rec["broker_argv"] = ["stand-in-broker"]
+    return rec
+
+
+def test_f16_1_a_raw_key_is_refused_in_a_field_and_in_the_url():
+    """F16.1's refusal block, as #1144 writes it: the clean control record is
+    accepted, and each of its three raw keys is refused."""
+    rec = _f16_1_record()
+    binding_mod.ModelProviderBinding.from_record(rec)   # the control
+    for bad in (dict(rec, endpoint="https://user:sk-stand-in@api.example.invalid/v1"),
+                dict(rec, endpoint="https://api.example.invalid/v1?api_key=sk-stand-in"),
+                dict(rec, api_key="sk-stand-in")):
+        with pytest.raises(binding_mod.BindingRefused):
+            binding_mod.ModelProviderBinding.from_record(bad)
+
+
+def test_f16_1_the_first_auth_kind_still_takes_a_credential():
+    """`none` joined AFTER the two kinds that exist (R1Q18 (a)), so the
+    `AUTH_KINDS[0]` F16.1 builds its control from is unchanged."""
+    assert binding_mod.AUTH_KINDS[0] == binding_mod.AUTH_KIND_API_KEY
+    assert binding_mod.AUTH_KINDS[-1] == binding_mod.AUTH_KIND_NONE == "none"
+
+
+def test_the_console_flow_offers_every_kind_a_broker_enrols():
+    """The console's intake flow hands a credential to a broker, so it offers
+    every member of `AUTH_KINDS` but `none`, in the vocabulary's order. A
+    `none` binding holds no credential and is declared at the operator door."""
+    offered = [entry["kind"] for entry in intake_mod.auth_kind_disclosure()]
+    assert offered == [kind for kind in binding_mod.AUTH_KINDS
+                       if kind != binding_mod.AUTH_KIND_NONE]
+
+
+@pytest.mark.parametrize("endpoint", [
+    f"https://user:{KEY_SENTINEL}@api.example.invalid/v1",
+    f"https://{KEY_SENTINEL}@api.example.invalid/v1",
+    f"https://api.example.invalid/v1?api_key={KEY_SENTINEL}",
+    f"https://api.example.invalid/v1?key={KEY_SENTINEL}",
+    f"https://api.example.invalid/v1?token={KEY_SENTINEL}",
+    f"https://api.example.invalid/v1?%61pi_key={KEY_SENTINEL}",
+    f"https://api.example.invalid/v1#token={KEY_SENTINEL}",
+    f"ftp://user:{KEY_SENTINEL}@api.example.invalid/v1",
+], ids=["userinfo", "bare-userinfo", "query-api-key", "query-key",
+        "query-token", "percent-encoded-name", "fragment", "keyed-bad-scheme"])
+def test_a_key_in_the_endpoint_is_refused_and_never_repeated(endpoint):
+    """The refusal is FIXED, so the URL it refused is repeated nowhere. The
+    detector runs before the scheme check, which would have echoed it."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=endpoint)
+    assert str(caught.value) == binding_mod.ENDPOINT_CARRIES_A_CREDENTIAL
+    assert KEY_SENTINEL not in str(caught.value)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://127.0.0.1:9/v1/chat/completions",
+    "http://localhost:11434/v1/chat/completions",
+    "https://api.example.invalid/v1/chat/completions",
+    "https://api.example.invalid/v1?model=stand-in&stream=false",
+])
+def test_a_clean_endpoint_is_accepted(endpoint):
+    assert _binding(endpoint=endpoint, dialect=OPENAI_CHAT).endpoint == endpoint
+
+
+def _endpoint_of_length(length: int, head: str) -> str:
+    endpoint = head + "a" * (length - len(head))
+    assert len(endpoint) == length
+    return endpoint
+
+
+def test_an_endpoint_past_the_url_bound_is_refused_before_the_detector(
+        monkeypatch):
+    """Copilot's overview of openDox-code#63. The detector is quadratic in a
+    parameter name's length, so the endpoint's length is checked first,
+    against the product's own bound, and the detector is not asked. The
+    refusal repeats nothing of the endpoint, and so nothing of a key in it."""
+    bound = runtime_config.MAX_REMOTE_URL_CHARS
+    endpoint = _endpoint_of_length(
+        bound + 1,
+        f"https://api.example.invalid/v1?api_key={KEY_SENTINEL}&pad=")
+
+    def _not_asked(_text):
+        raise AssertionError("the detector was asked about an endpoint past "
+                             "the bound")
+
+    monkeypatch.setattr(git_adapter_mod, "carries_a_credential", _not_asked)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=endpoint)
+    message = str(caught.value)
+    assert message == binding_mod.ENDPOINT_TOO_LONG.format(bound=bound)
+    assert KEY_SENTINEL not in message
+    assert "api.example.invalid" not in message
+
+
+def test_an_endpoint_at_the_url_bound_is_declared():
+    bound = runtime_config.MAX_REMOTE_URL_CHARS
+    endpoint = _endpoint_of_length(
+        bound, "https://api.example.invalid/v1/chat/completions?pad=")
+    binding = _binding(endpoint=endpoint, dialect=OPENAI_CHAT)
+    assert binding.endpoint == endpoint
+
+
+def test_the_url_bound_is_the_products_own_read_when_it_is_asked(
+        monkeypatch):
+    """The number is `runtime/config`'s, read at declaration, so the record
+    and the repository act cannot come to hold different bounds."""
+    monkeypatch.setattr(runtime_config, "MAX_REMOTE_URL_CHARS", 40)
+    head = "https://api.example.invalid/"
+    at_the_bound = _endpoint_of_length(40, head)
+    past_the_bound = _endpoint_of_length(41, head)
+    assert _binding(endpoint=at_the_bound).endpoint == at_the_bound
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=past_the_bound)
+    assert str(caught.value) == binding_mod.ENDPOINT_TOO_LONG.format(bound=40)
+
+
+def test_a_key_in_an_extra_field_is_refused_as_it_always_was():
+    for field in ("api_key", "secret", "token", "password", "key"):
+        record = dict(_binding().as_record(), **{field: KEY_SENTINEL})
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            binding_mod.ModelProviderBinding.from_record(record)
+        assert KEY_SENTINEL not in str(caught.value)
+
+
+def test_a_stored_document_whose_endpoint_carries_a_key_does_not_read(
+        tmp_path):
+    """A record written before 16.3 with a key in its URL no longer reads,
+    and the entry point's fallback still resolves the harness declaration.
+    The key is not in the refusal it prints."""
+    record = _binding().as_record()
+    record["endpoint"] = f"https://user:{KEY_SENTINEL}@api.example.invalid/v1"
+    path = tmp_path / "bindings.yaml"
+    path.write_text(json.dumps({"schema_version": 1,
+                                "kind": binding_mod.BINDINGS_KIND,
+                                "bindings": [record]}), encoding="utf-8")
+    store = binding_mod.BindingStore(path)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        store.list()
+    assert KEY_SENTINEL not in str(caught.value)
+
+
+# --- a raw key's shape (the adversarial review of openDox-code#63) -------
+#
+# The adversarial review at `4948e6dd` found three ways a key still reached
+# the record or a refusal. M2: a key given as a broker's reference was taken
+# as one, stored, printed by `list`, and put in the broker's argv at each
+# mint. M3: the scheme refusal repeated the endpoint, key and all. M5: a key
+# in the endpoint's path or fragment passed the detector, which reads a URL's
+# userinfo and its parameters' names. Every value below is an obvious fake,
+# built from fragments, so no line of this file holds a key's format whole.
+
+_STAND_IN_BASE62 = "StandIn0NotAKey0" * 2   # 32 characters, all three classes
+_STAND_IN_HEX = "0123456789abcdef" * 2      # 32 characters, two classes
+
+#: Each holds a raw key's shape by one rule of `has_a_raw_key_shape` alone,
+#: so a rule that is dropped or narrowed is a case that fails.
+RAW_KEY_SHAPES = {
+    "base62-run-of-32": _STAND_IN_BASE62,
+    "hex-run-of-40": _STAND_IN_HEX + "01234567",
+    "prefix-and-hex": "sk" + "-" + _STAND_IN_HEX,
+    "prefix-and-a-tail-of-16": "sk" + "-" + _STAND_IN_HEX[:16],
+    "prefix-and-letters": "hf" + "_" + "StandInNotAKeyStandIn",
+    "prefix-glued-to-a-word": "bot" + "sk" + "-" + "Stand-In-0000-NOT-A-KEY",
+    "google-api-key": "AIza" + "-stand-in-NOT-a-KEY-0000-0000-00000",
+    "aws-access-key-id": "AKIA" + "STANDIN0NOTAKEY0",
+    "json-web-token": "eyJ" + "hbGciOiJub25lIn0" + "." + "e30" + ".",
+}
+
+#: The shapes references and endpoints are known to take, and each rule's
+#: edge. None of them is refused.
+NOT_RAW_KEY_SHAPES = {
+    "opendox-reference": FAKE_REFERENCE,
+    "zeroed-reference": "opref-" + "0" * 24,
+    "console-placeholder": "pending-broker-intake",
+    "uuid": "123e4567-e89b-12d3-a456-426614174000",
+    "model-name-under-32": "GPT4oMiniProduction2024",
+    "hex-run-of-32": _STAND_IN_HEX,
+    "hex-run-of-39": (_STAND_IN_HEX + "01234567")[:39],
+    "base62-run-of-31": _STAND_IN_BASE62[:31],
+    "a-word-ending-in-a-prefix": "benchmark-runner-" + _STAND_IN_HEX[:16],
+    "prefix-and-a-tail-of-15": "sk" + "-" + _STAND_IN_HEX[:15],
+    "secret-manager-reference": "op://dev/5vtmcbtqbkxhvdl3ezm2l3lvsa/password",
+}
+
+#: A key as a provider issues one: a prefix, and a base62 body.
+_STAND_IN_PROVIDER_KEY = "sk" + "-proj-" + _STAND_IN_BASE62
+
+
+@pytest.mark.parametrize("shape", sorted(RAW_KEY_SHAPES))
+def test_a_raw_keys_shape_is_read_by_each_rule(shape):
+    assert binding_mod.has_a_raw_key_shape(RAW_KEY_SHAPES[shape]) is True
+    assert binding_mod.carries_a_raw_key(RAW_KEY_SHAPES[shape]) is True
+
+
+@pytest.mark.parametrize("shape", sorted(NOT_RAW_KEY_SHAPES))
+def test_the_shapes_references_take_are_not_a_raw_keys(shape):
+    """The other side, at each rule's edge: a run one character short, a
+    tail one short, a prefix that only ends a word, and the ids gateways and
+    secret managers use."""
+    assert binding_mod.has_a_raw_key_shape(NOT_RAW_KEY_SHAPES[shape]) is False
+    assert binding_mod.carries_a_raw_key(NOT_RAW_KEY_SHAPES[shape]) is False
+
+
+def test_only_text_has_a_raw_keys_shape():
+    for value in (None, 0, _STAND_IN_BASE62.encode("ascii"),
+                  [_STAND_IN_BASE62]):
+        assert binding_mod.has_a_raw_key_shape(value) is False
+        assert binding_mod.carries_a_raw_key(value) is False
+
+
+@pytest.mark.parametrize("shape", sorted(RAW_KEY_SHAPES))
+def test_a_reference_with_a_raw_keys_shape_is_refused_and_never_repeated(
+        shape):
+    """M2. A reference is never a raw key (#1144 box 16.3), so a value with
+    a raw key's shape is refused as a broker's reference and inside each
+    built-in form, and the refusal is a fixed sentence."""
+    key = RAW_KEY_SHAPES[shape]
+    for declare in (lambda: _binding(credential_ref=key),
+                    lambda: _built_in_binding(f"env:{key}"),
+                    lambda: _built_in_binding(
+                        f"keyring:{KEYRING_SERVICE}/{key}")):
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            declare()
+        assert str(caught.value) == binding_mod.CREDENTIAL_REF_IS_A_RAW_KEY
+        assert key not in str(caught.value)
+
+
+@pytest.mark.parametrize("shape", sorted(
+    name for name, value in NOT_RAW_KEY_SHAPES.items()
+    if not binding_mod.names_a_built_in_form(value)))
+def test_a_reference_shaped_value_is_still_a_brokers_reference(shape):
+    reference = NOT_RAW_KEY_SHAPES[shape]
+    assert _binding(credential_ref=reference).credential_ref == reference
+
+
+def test_a_reference_past_the_url_bound_is_refused_before_the_detector(
+        monkeypatch):
+    """Asking the detector of a reference (M2) asks a quadratic check of a
+    value that had no bound, so a reference is held to the endpoint's bound
+    first, and the detector is never asked of a longer one. The refusal
+    repeats nothing of it."""
+    bound = runtime_config.MAX_REMOTE_URL_CHARS
+    at_the_bound = "opref-" + "0" * (bound - len("opref-"))
+    past_the_bound = at_the_bound + "0"
+    asked = []
+    detector = git_adapter_mod.carries_a_credential
+
+    def _recording(text):
+        asked.append(text)
+        return detector(text)
+
+    monkeypatch.setattr(git_adapter_mod, "carries_a_credential", _recording)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(credential_ref=past_the_bound)
+    assert str(caught.value) == binding_mod.CREDENTIAL_REF_TOO_LONG.format(
+        bound=bound)
+    assert past_the_bound not in asked
+    assert _binding(credential_ref=at_the_bound).credential_ref == (
+        at_the_bound)
+    assert at_the_bound in asked
+
+
+def test_a_text_past_the_url_bound_carries_a_key_unasked(monkeypatch):
+    """The predicate's own floor, for a caller that does not bound what it
+    asks about, as `doxbench_provider` asks of a broker's reference."""
+    def _not_asked(_text):
+        raise AssertionError("the detector was asked about a text past the "
+                             "bound")
+
+    monkeypatch.setattr(git_adapter_mod, "carries_a_credential", _not_asked)
+    past_the_bound = "x" * (runtime_config.MAX_REMOTE_URL_CHARS + 1)
+    assert binding_mod.has_a_raw_key_shape(past_the_bound) is False
+    assert binding_mod.carries_a_raw_key(past_the_bound) is True
+
+
+def test_a_stored_document_whose_reference_is_a_raw_key_does_not_read(
+        tmp_path):
+    """M2 for a record written before the rule: it no longer reads, as one
+    whose endpoint carries a key does not, and the refusal does not repeat
+    the key."""
+    record = _binding().as_record()
+    record["credential_ref"] = _STAND_IN_PROVIDER_KEY
+    path = tmp_path / "bindings.yaml"
+    path.write_text(json.dumps({"schema_version": 1,
+                                "kind": binding_mod.BINDINGS_KIND,
+                                "bindings": [record]}), encoding="utf-8")
+    store = binding_mod.BindingStore(path)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        store.list()
+    assert str(caught.value) == binding_mod.CREDENTIAL_REF_IS_A_RAW_KEY
+    assert _STAND_IN_PROVIDER_KEY not in str(caught.value)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "provider.invalid/turn",
+    "file:///etc/passwd",
+    "ftp://provider.invalid/turn",
+    " https://provider.invalid/turn",
+    # a short key in the wrong field, which no shape rule knows
+    "sk" + "-" + "stand-in",
+])
+def test_the_scheme_refusal_is_a_fixed_sentence_that_repeats_nothing(
+        endpoint):
+    """M3. The scheme refusal repeated the endpoint, and a value in the
+    wrong field can be a key, a key no shape rule knows among them. It is a
+    fixed sentence now, composed from `ENDPOINT_SCHEMES` alone."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=endpoint)
+    message = str(caught.value)
+    assert message == binding_mod.ENDPOINT_SCHEME_REFUSED
+    assert endpoint.strip() not in message
+    for scheme in binding_mod.ENDPOINT_SCHEMES:
+        assert scheme in message
+
+
+def test_the_scheme_refusal_is_route_neutral():
+    """Copilot's review of openDox-code#63 at `abbb05d4`. Every resolver
+    meets the scheme refusal, and only a built-in credential is held to a
+    private route (`ENDPOINT_NOT_PRIVATE`), so the refusal names the schemes
+    and nothing about hosts: a broker's or a `none` binding may still name
+    an `http://` endpoint on another host."""
+    for declare in (_binding, _built_in_binding, _none_binding):
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            declare(endpoint="ftp://provider.invalid/turn")
+        assert str(caught.value) == binding_mod.ENDPOINT_SCHEME_REFUSED
+    for word in ("host", "loopback", "localhost", "127.0.0.1"):
+        assert word not in binding_mod.ENDPOINT_SCHEME_REFUSED
+    for declare in (_binding, _none_binding):
+        endpoint = "http://api.example.invalid/v1/chat/completions"
+        assert declare(endpoint=endpoint).endpoint == endpoint
+
+
+#: Where a key was carried past the detector (M5), and the reviewer's M3
+#: examples, where a key in the endpoint field reached the scheme refusal.
+_KEYED_ENDPOINTS = {
+    "a-path-segment": "https://api.example.invalid/v1/{key}/chat/completions",
+    "glued-to-a-path-word": "https://api.example.invalid/bot{key}/v1",
+    "the-fragment": "https://api.example.invalid/v1/chat/completions#{key}",
+    "a-query-value": "https://api.example.invalid/v1/chat/completions?q={key}",
+    "the-whole-field": "{key}",
+    "behind-another-scheme": "ftp://{key}",
+    "behind-a-space": " https://api.example.invalid/v1?q={key}",
+}
+
+
+@pytest.mark.parametrize("key", [_STAND_IN_BASE62, _STAND_IN_PROVIDER_KEY],
+                         ids=["base62-run", "provider-key"])
+@pytest.mark.parametrize("place", sorted(_KEYED_ENDPOINTS))
+def test_a_key_anywhere_in_the_endpoint_is_refused_and_never_repeated(
+        place, key):
+    """M5, and M3's examples. The shape is checked with the detector, before
+    the scheme, so a key in the path, glued to a path word, in the fragment,
+    in a parameter with an innocent name, or in place of the URL, is refused
+    with the fixed sentence."""
+    endpoint = _KEYED_ENDPOINTS[place].format(key=key)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=endpoint)
+    assert str(caught.value) == binding_mod.ENDPOINT_CARRIES_A_CREDENTIAL
+    assert key not in str(caught.value)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://stand-in.openai.azure.invalid/openai/deployments/GPT4oMini2024"
+    "/chat/completions?api-version=2024-02-01",
+    "https://gateway.ai.cloudflare.invalid/v1/" + _STAND_IN_HEX
+    + "/stand-in/openai/chat/completions",
+    "https://api.example.invalid/v1/projects/"
+    "123e4567-e89b-12d3-a456-426614174000/chat/completions",
+    "https://api.example.invalid/v1/chat/completions#section-2",
+], ids=["deployment-name", "gateway-account-id", "uuid", "fragment"])
+def test_the_ids_an_endpoint_carries_are_not_keys(endpoint):
+    binding = _binding(endpoint=endpoint, dialect=OPENAI_CHAT)
+    assert binding.endpoint == endpoint
+
+
+# --- one resolver per record ---------------------------------------------
+
+
+def _none_binding(**overrides):
+    fields = dict(auth_kind=binding_mod.AUTH_KIND_NONE, credential_ref=None,
+                  broker_argv=(), endpoint="http://127.0.0.1:9/v1/chat/completions",
+                  dialect=OPENAI_CHAT, model=DECLARED_MODEL)
+    fields.update(overrides)
+    return _binding(**fields)
+
+
+def _built_in_binding(credential_ref=f"env:{ENV_NAME}", **overrides):
+    fields = dict(credential_ref=credential_ref, broker_argv=(),
+                  dialect=OPENAI_CHAT, model=DECLARED_MODEL)
+    fields.update(overrides)
+    return _binding(**fields)
+
+
+def test_the_none_kind_forbids_the_reference_and_the_broker():
+    """R1Q18 (a), both halves: declared explicitly, and both fields
+    forbidden under it. A blank reference is still a reference given."""
+    binding = _none_binding()
+    assert binding.credential_ref is None
+    assert binding.broker_argv == ()
+    assert binding.credential_source() == binding_mod.NO_CREDENTIAL
+    for given in (FAKE_REFERENCE, f"env:{ENV_NAME}", ""):
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            _none_binding(credential_ref=given)
+        assert "credential_ref is forbidden" in str(caught.value)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _none_binding(broker_argv=("openprofiler-broker",))
+    assert "broker_argv is forbidden" in str(caught.value)
+
+
+@pytest.mark.parametrize("kind", [binding_mod.AUTH_KIND_API_KEY,
+                                  binding_mod.AUTH_KIND_OAUTH])
+def test_a_kind_that_takes_a_credential_must_name_its_reference(kind):
+    """Never "no credential" by a field left out: the kind says it."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(auth_kind=kind, credential_ref=None)
+    assert "'none'" in str(caught.value)
+
+
+@pytest.mark.parametrize("reference", [
+    f"env:{ENV_NAME}", f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"])
+def test_a_built_in_reference_needs_no_broker_and_refuses_one_beside_it(
+        reference):
+    """BOTH HALVES, in one test, as T080's text asks. R1Q17 (b): a record
+    whose reference the built-in resolver takes needs no broker. The plan's
+    fail-closed reading: a broker given beside it is refused, so the record
+    has one resolver."""
+    binding = _built_in_binding(reference)
+    assert binding.broker_argv == ()
+    assert binding.credential_source() == \
+        binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _built_in_binding(reference, broker_argv=("openprofiler-broker",))
+    assert "two resolvers" in str(caught.value)
+
+
+def test_a_brokers_reference_still_needs_its_broker():
+    binding = _binding()
+    assert binding.credential_source() == binding_mod.CREDENTIAL_FROM_BROKER
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(broker_argv=())
+    assert "must name the broker command" in str(caught.value)
+
+
+def test_the_reference_forms_are_parsed_once():
+    """One parser and ONE SHAPE for both forms, so no caller has to count
+    what it was given before it reads it."""
+    parts = binding_mod.built_in_reference_parts
+    env = parts(f"env:{ENV_NAME}")
+    assert env == binding_mod.BuiltInReference("env:", ENV_NAME, None)
+    keyring = parts(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}")
+    # the split is at the LAST `/`, so a service may carry one
+    assert keyring == binding_mod.BuiltInReference(
+        "keyring:", KEYRING_SERVICE, KEYRING_USER)
+    assert (keyring.form, keyring.name, keyring.user) == (
+        "keyring:", KEYRING_SERVICE, KEYRING_USER)
+    assert len(env) == len(keyring)
+    assert parts(FAKE_REFERENCE) is None
+    assert binding_mod.BUILT_IN_REFERENCE_FORMS == ("env:", "keyring:")
+
+
+@pytest.mark.parametrize("reference", [
+    "env:", "env:1BAD", "env:A-B", "env: SPACED", "env:NAME\n",
+    # `\w` is held to ASCII: a letter or a digit of another script is not a
+    # portable variable name
+    "env:NAM\u00c9", "env:KEY\u0661",
+    f"env:{KEY_SENTINEL}",
+    "keyring:", "keyring:service-only", "keyring:/user", "keyring:service/",
+    "keyring: /user", f"keyring:{KEY_SENTINEL}",
+])
+def test_a_malformed_built_in_reference_is_refused_and_never_repeated(
+        reference):
+    """Refused at declaration, and the refusal names the FORM, not the value:
+    a key pasted where its reference belongs is not printed back."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _built_in_binding(reference)
+    message = str(caught.value)
+    after_the_form = reference.split(":", 1)[1]
+    if after_the_form.strip():
+        assert after_the_form not in message
+    assert KEY_SENTINEL not in message
+
+
+def test_a_none_record_round_trips_and_may_leave_its_forbidden_fields_out():
+    binding = _none_binding()
+    record = binding.as_record()
+    assert list(record) == ["kind", *binding_mod.BINDING_FIELDS]
+    assert record["credential_ref"] is None
+    assert record["broker_argv"] == []
+    assert binding_mod.ModelProviderBinding.from_record(record) == binding
+    del record["credential_ref"], record["broker_argv"]
+    assert binding_mod.ModelProviderBinding.from_record(record) == binding
+    for key, given in (("credential_ref", FAKE_REFERENCE),
+                       ("broker_argv", ["openprofiler-broker"])):
+        with pytest.raises(binding_mod.BindingRefused):
+            binding_mod.ModelProviderBinding.from_record(
+                dict(record, **{key: given}))
+
+
+def test_a_built_in_record_may_leave_out_its_broker_argv():
+    binding = _built_in_binding()
+    record = binding.as_record()
+    assert record["broker_argv"] == []
+    for absent in ("deleted", None):
+        candidate = dict(record)
+        if absent == "deleted":
+            del candidate["broker_argv"]
+        else:
+            candidate["broker_argv"] = None
+        assert binding_mod.ModelProviderBinding.from_record(candidate) == \
+            binding
+    with pytest.raises(binding_mod.BindingRefused):
+        binding_mod.ModelProviderBinding.from_record(
+            dict(record, broker_argv=["openprofiler-broker"]))
+
+
+def test_each_read_back_states_the_custody_that_is_true_of_it(tmp_path):
+    store = _store(tmp_path)
+    store.add(_binding())
+    store.add(_built_in_binding(id="env-bound", label="Env"))
+    store.add(_none_binding(id="local", label="Local"))
+    custody = {record["id"]: record["credential_custody"]
+               for record in store.read_back()["bindings"]}
+    assert custody == {
+        "openprofiler-demo": binding_mod.CUSTODY_NOTICE,
+        "env-bound": binding_mod.BUILT_IN_CUSTODY_NOTICE,
+        "local": binding_mod.NO_CREDENTIAL_NOTICE,
+    }
+    assert [store.get(i).removal_notice()
+            for i in ("openprofiler-demo", "env-bound", "local")] == [
+        binding_mod.REMOVAL_NOTICE, binding_mod.BUILT_IN_REMOVAL_NOTICE,
+        binding_mod.NO_CREDENTIAL_REMOVAL_NOTICE]
+
+
+def test_the_consoles_intake_shaped_binding_still_builds():
+    """`serve_workbench`'s intake route builds its binding by keyword, with a
+    placeholder reference and the declared broker. That construction is
+    unchanged and still valid. A `none` binding cannot be enrolled that way,
+    because the placeholder is a reference and `none` forbids one."""
+    shaped = dict(id="enrolled", label="Enrolled", provider="p",
+                  credential_ref="pending-broker-intake",
+                  approved_by="brett", endpoint=ENDPOINT,
+                  dialect=binding_mod.DIALECT_XFACTORY_PROMPT_V1,
+                  broker_argv=("openprofiler-broker",))
+    for kind in (binding_mod.AUTH_KIND_API_KEY, binding_mod.AUTH_KIND_OAUTH):
+        assert binding_mod.ModelProviderBinding(auth_kind=kind, **shaped)
+    with pytest.raises(binding_mod.BindingRefused):
+        binding_mod.ModelProviderBinding(auth_kind=binding_mod.AUTH_KIND_NONE,
+                                         **shaped)
+
+
+def test_a_binding_no_broker_answers_has_no_broker_operation():
+    for binding in (_none_binding(), _built_in_binding()):
+        for operation in provider_mod.OPERATIONS:
+            with pytest.raises(AssertionError):
+                provider_mod.broker_operation_argv(binding, operation)
+        stdin = io.StringIO("x")
+        with pytest.raises(AssertionError):
+            provider_mod.hand_off_credential(binding, stdin)
+
+
+# --- a built-in credential travels by a private route --------------------
+# Brett Heap's ruling of 2026-09-28 on this PR's question, "Refuse unless
+# loopback": a credential the built-in resolver reads is sent only over
+# https://, or over http:// to 127.0.0.1, ::1 or localhost.
+
+BUILT_IN_REFERENCES = (f"env:{ENV_NAME}",
+                       f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}")
+BACKSLASH = chr(92)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://api.example.invalid/v1/chat/completions",
+    "http://127.0.0.1:8080/v1/chat/completions",
+    "http://[::1]:8080/v1/chat/completions",
+    "http://localhost:11434/v1/chat/completions",
+    "http://LOCALHOST:11434/v1/chat/completions",
+    "http://localhost",
+], ids=["https", "ipv4-loopback", "ipv6-loopback", "localhost",
+        "localhost-in-capitals", "no-path"])
+def test_a_built_in_credential_is_declared_on_a_private_route(endpoint):
+    for reference in BUILT_IN_REFERENCES:
+        binding = _built_in_binding(reference, endpoint=endpoint)
+        assert binding.endpoint == endpoint
+        assert binding.credential_source() == (
+            binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://api.example.invalid/v1/chat/completions",
+    "http://localhost.evil.com/v1/chat/completions",
+    "http://127.0.0.1.evil.com/v1/chat/completions",
+    "http://evil.com/localhost",
+    "http://127.0.0.2:8080/v1",
+    "http://[0:0:0:0:0:0:0:1]:8080/v1",
+    "http://localhost./v1",
+    "http://localhost%2eevil.com/v1",
+    "http://0.0.0.0:8080/v1",
+], ids=["another-host", "resembles-localhost", "resembles-127",
+        "localhost-only-in-the-path", "a-loopback-address-not-named",
+        "another-spelling-of-ipv6-loopback", "trailing-dot",
+        "percent-encoded-dot", "unspecified-address"])
+def test_a_built_in_credential_over_http_to_another_host_is_refused(endpoint):
+    """Refused when it is declared, by the constructor and from a stored
+    record alike, with the one fixed sentence."""
+    for reference in BUILT_IN_REFERENCES:
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            _built_in_binding(reference, endpoint=endpoint)
+        assert str(caught.value) == binding_mod.ENDPOINT_NOT_PRIVATE
+        record = dict(_built_in_binding(reference).as_record(),
+                      endpoint=endpoint)
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            binding_mod.ModelProviderBinding.from_record(record)
+        assert str(caught.value) == binding_mod.ENDPOINT_NOT_PRIVATE
+
+
+@pytest.mark.parametrize("endpoint,private", [
+    ("HTTP://api.example.invalid/v1", False),
+    ("Http://localhost.evil.com/v1", False),
+    ("hTTp://127.0.0.1:8080/v1", True),
+    ("HTTP://[::1]:8080/v1", True),
+    ("http://LocalHost:11434/v1", True),
+    ("HTTPS://api.example.invalid/v1", True),
+    ("hTtPs://api.example.invalid/v1", True),
+    (f"http://evil.example{BACKSLASH}@localhost/v1", False),
+    (" http://localhost/v1", False),
+    ("ftp://localhost/v1", False),
+], ids=["capital-http-to-another-host", "mixed-case-http-to-a-lookalike",
+        "mixed-case-http-to-127", "capital-http-to-ipv6-loopback",
+        "mixed-case-localhost", "capital-https", "mixed-case-https",
+        "backslash-before-localhost", "leading-space", "another-scheme"])
+def test_a_private_route_is_read_case_blind_and_as_written(endpoint,
+                                                           private):
+    """A scheme and a host name are case-blind, so `HTTP://` to another host
+    is not private and `HTTP://` to this one is. The route is read AS
+    WRITTEN: a URL parser reads the backslash case's host as `localhost`, and
+    the HTTP client reads it as the whole authority."""
+    assert binding_mod.is_a_private_route(endpoint) is private
+
+
+class _RecordingEnviron(dict):
+    """An environment that records every name read from it."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.read: list[str] = []
+
+    def get(self, name, default=None):
+        self.read.append(name)
+        return super().get(name, default)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://api.example.invalid/v1", "HTTP://api.example.invalid/v1",
+    "http://localhost.evil.com/v1",
+    f"http://evil.example{BACKSLASH}@localhost/v1",
+], ids=["another-host", "mixed-case-scheme", "resembles-localhost",
+        "backslash"])
+def test_the_resolver_reads_nothing_for_a_route_that_is_not_private(
+        endpoint):
+    """BEFORE RESOLUTION, in the resolver itself. The record refuses such a
+    binding when it is declared, so this is a binding-shaped object that was
+    never declared, and it still cannot make the resolver read a key."""
+    for reference in BUILT_IN_REFERENCES:
+        shaped = types.SimpleNamespace(id="undeclared",
+                                       credential_ref=reference,
+                                       endpoint=endpoint)
+        environ = _RecordingEnviron({ENV_NAME: KEY_SENTINEL})
+        backend = _FakeKeyring({(KEYRING_SERVICE, KEYRING_USER): KEY_SENTINEL})
+        with pytest.raises(AssertionError) as caught:
+            provider_mod.resolve_credential_reference(
+                shaped, environ=environ, keyring_backend=backend)
+        assert "nothing was read" in str(caught.value)
+        assert environ.read == []
+        assert backend.asked == []
+
+
+def test_the_resolver_reads_a_key_for_a_private_route():
+    """The control for the case above: the same shape on IPv6 loopback is
+    read."""
+    shaped = types.SimpleNamespace(id="undeclared",
+                                   credential_ref=f"env:{ENV_NAME}",
+                                   endpoint="http://[::1]:8080/v1")
+    environ = _RecordingEnviron({ENV_NAME: KEY_SENTINEL})
+    assert provider_mod.resolve_credential_reference(
+        shaped, environ=environ) == KEY_SENTINEL
+    assert environ.read == [ENV_NAME]
+
+
+def test_a_broker_reference_in_a_built_in_form_is_malformed(tmp_path):
+    """The built-in forms are reserved. A broker's reference in one would
+    make the record read it as the built-in resolver's, beside the broker
+    that holds the credential: two resolvers, refused where neither entry
+    point expects a refusal (Copilot's overview of openDox-code#63 at
+    `286655f3`). So the broker's answer is malformed, and it is refused as
+    one, which both entry points already catch."""
+    for index, reserved in enumerate(BUILT_IN_REFERENCES):
+        script = tmp_path / f"reserved-broker-{index}.py"
+        script.write_text(
+            "import json,sys\nsys.stdin.read()\n"
+            "print(json.dumps({'schema_version':1,"
+            "'kind':'openprofiler_broker_intake','reference':"
+            + repr(reserved) + ","
+            "'binding':'b','provider':'p','auth_kind':'api_key','label':None,"
+            "'created_at':'x','max_lifetime_seconds':300,'issued_by':'i',"
+            "'approved_by':'a','audit_ref':'opaud-x'}))\n",
+            encoding="utf-8")
+        binding = _broker_binding(script)
+        stdin = io.StringIO("x")
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            provider_mod.hand_off_credential(binding, stdin)
+        assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+
+@pytest.mark.parametrize("which", ["raw-key-shape", "past-the-url-bound"])
+def test_a_broker_reference_the_record_would_refuse_is_malformed(tmp_path,
+                                                                 which):
+    """M2 at the hand-off: the reference a broker hands back is held to the
+    record's rule before anything stores it, a key's shape and the length
+    bound alike, so one that breaks it is a malformed answer, which both
+    entry points already catch. Nothing of it is repeated."""
+    reference = (_STAND_IN_PROVIDER_KEY if which == "raw-key-shape"
+                 else "opref-" + "0" * runtime_config.MAX_REMOTE_URL_CHARS)
+    script = tmp_path / "keyed-reference-broker.py"
+    script.write_text(
+        "import json,sys\nsys.stdin.read()\n"
+        "print(json.dumps({'schema_version':1,"
+        "'kind':'openprofiler_broker_intake','reference':"
+        + repr(reference) + ","
+        "'binding':'b','provider':'p','auth_kind':'api_key','label':None,"
+        "'created_at':'x','max_lifetime_seconds':300,'issued_by':'i',"
+        "'approved_by':'a','audit_ref':'opaud-x'}))\n",
+        encoding="utf-8")
+    binding = _broker_binding(script)
+    source = io.StringIO("x")
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.hand_off_credential(binding, source)
+    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    assert reference not in str(caught.value)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://api.example.invalid/turn", "http://localhost.evil.com/turn"])
+def test_the_loopback_rule_is_the_built_in_resolvers_alone(endpoint):
+    """The ruling leaves the broker path as it is today: a broker's minted
+    token may still be declared over plain http:// to any host, which is the
+    pre-existing gap the PR notes. The auth kind `none` presents no
+    credential, so it keeps its route too."""
+    assert _binding(endpoint=endpoint).credential_source() == (
+        binding_mod.CREDENTIAL_FROM_BROKER)
+    assert _none_binding(endpoint=endpoint).credential_source() == (
+        binding_mod.NO_CREDENTIAL)
+
+
+# --- the built-in resolver, at call time ---------------------------------
+
+
+class _FakeKeyring:
+    """A stand-in for the `keyring` package: the one call the resolver makes,
+    recorded."""
+
+    def __init__(self, entries=None, error=None):
+        self.entries = dict(entries or {})
+        self.error = error
+        self.asked: list[tuple[str, str]] = []
+
+    def get_password(self, service, username):
+        self.asked.append((service, username))
+        if self.error is not None:
+            raise self.error
+        return self.entries.get((service, username))
+
+
+def _refusing_runner(argv, **_kwargs):
+    raise AssertionError(f"a binding no broker answers spawned {argv!r}")
+
+
+def _unbrokered_port(binding, *outcomes, environ=None, keyring_backend=None,
+                     notice=None):
+    opener = _Opener(*outcomes)
+    port = provider_mod.BrokeredProviderPort(
+        binding, install_mod.brokered_catalog(binding),
+        runner=_refusing_runner, opener=opener,
+        notice=notice if notice is not None else (lambda _text: None),
+        environ=environ, keyring_backend=keyring_backend)
+    return port, opener
+
+
+def test_an_env_reference_is_read_at_call_time_and_presented_as_the_bearer():
+    """R1Q17 (b): no broker, no mint, and the value read for each request, so
+    a rotated value is the one the next request presents."""
+    environ = {ENV_NAME: KEY_SENTINEL}
+    port, opener = _unbrokered_port(_built_in_binding(),
+                                    _chat_completion("a"),
+                                    _chat_completion("b"), environ=environ)
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    environ[ENV_NAME] = "sk-rotated-stand-in-NOT-A-KEY"
+    assert port.dispatch(_Envelope())["assistant_prose"] == "b"
+    assert [request.get_header("Authorization")
+            for request in opener.requests] == [
+        f"Bearer {KEY_SENTINEL}", "Bearer sk-rotated-stand-in-NOT-A-KEY"]
+    for request in opener.requests:
+        assert KEY_SENTINEL not in request.get_full_url()
+        assert KEY_SENTINEL not in request.data.decode("utf-8")
+    assert port.ledger == [], "nothing was minted"
+
+
+def test_production_reads_the_serving_process_environment(monkeypatch):
+    monkeypatch.setenv(ENV_NAME, KEY_SENTINEL)
+    port, opener = _unbrokered_port(_built_in_binding(),
+                                    _chat_completion("a"))
+    port.dispatch(_Envelope())
+    assert opener.requests[0].get_header("Authorization") == \
+        f"Bearer {KEY_SENTINEL}"
+
+
+@pytest.mark.parametrize("environ", [
+    {}, {ENV_NAME: ""}, {ENV_NAME: "   "}, {ENV_NAME: "sk-stand-in\nX-Other: 1"},
+    {ENV_NAME: "sk-stand-in\x00"},
+    # a bearer credential is printable ASCII with no whitespace (Copilot's
+    # overview of openDox-code#63), so nothing else is presented
+    {ENV_NAME: f"{KEY_SENTINEL}\u20ac"}, {ENV_NAME: f"{KEY_SENTINEL}\u00e9"},
+    {ENV_NAME: "sk-stand-in NOT-A-KEY"}, {ENV_NAME: "sk-stand-in\tNOT-A-KEY"},
+    {ENV_NAME: f"{KEY_SENTINEL} "}, {ENV_NAME: f"{KEY_SENTINEL}\x7f"}],
+    ids=["unset", "empty", "blank", "line-break", "nul", "outside-latin-1",
+         "latin-1-not-ascii", "embedded-space", "tab", "trailing-space",
+         "delete"])
+def test_an_unusable_env_value_refuses_before_any_request(environ):
+    port, opener = _unbrokered_port(_built_in_binding(), _chat_completion(),
+                                    environ=environ)
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_REFERENCE_UNRESOLVED
+    assert opener.requests == [], "no provider was contacted"
+    assert port.catalog().entries[0].available is False
+
+
+def test_a_value_outside_latin_1_is_refused_before_any_header_is_built(
+        monkeypatch):
+    """Over a real socket, because the failure was `urllib`'s. Before the
+    check, such a value failed while the header was encoded: the refusal read
+    `DIAG_PROVIDER_UNREACHABLE`, and it chained a `UnicodeEncodeError` whose
+    `object` held the whole header, credential included (measured). Now it is
+    the resolver's own fixed refusal, nothing is chained, and no request is
+    sent."""
+    monkeypatch.setattr(_ChatCompletionsHandler, "seen", {})
+    with _stand_in_provider(_ChatCompletionsHandler) as base:
+        binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None,
+            environ={ENV_NAME: f"{KEY_SENTINEL}\u20ac"})
+        envelope = _Envelope()
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_REFERENCE_UNRESOLVED
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert _ChatCompletionsHandler.seen == {}, "no request reached the server"
+
+
+def test_a_value_of_printable_ascii_is_presented_as_it_is():
+    """The check refuses what a bearer credential cannot be and nothing more:
+    every printable ASCII character but the space is presented unchanged."""
+    value = "sk-" + "".join(chr(code) for code in range(0x21, 0x7F))
+    port, opener = _unbrokered_port(_built_in_binding(),
+                                    _chat_completion("a"),
+                                    environ={ENV_NAME: value})
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    assert opener.requests[0].get_header("Authorization") == f"Bearer {value}"
+
+
+def test_a_reference_that_resolves_again_makes_the_entry_available_again():
+    environ: dict[str, str] = {}
+    port, _opener = _unbrokered_port(_built_in_binding(),
+                                     _chat_completion("a"), environ=environ)
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused):
+        port.dispatch(envelope)
+    assert port.catalog().entries[0].available is False
+    environ[ENV_NAME] = KEY_SENTINEL
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    assert port.catalog().entries[0].available is True
+
+
+def test_a_keyring_reference_reads_the_os_keyring_at_call_time():
+    backend = _FakeKeyring({(KEYRING_SERVICE, KEYRING_USER): KEY_SENTINEL})
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion("a"), _chat_completion("b"), keyring_backend=backend)
+    port.dispatch(_Envelope())
+    port.dispatch(_Envelope())
+    assert backend.asked == [(KEYRING_SERVICE, KEYRING_USER)] * 2, \
+        "read for each request, and nothing cached"
+    assert opener.requests[0].get_header("Authorization") == \
+        f"Bearer {KEY_SENTINEL}"
+
+
+@pytest.mark.parametrize("stored", [
+    None, b"sk-stand-in-NOT-A-KEY", "", f"{KEY_SENTINEL}\u20ac"],
+    ids=["absent", "not-text", "empty", "outside-latin-1"])
+def test_an_absent_or_unusable_keyring_entry_refuses_unresolved(stored):
+    entries = ({} if stored is None
+               else {(KEYRING_SERVICE, KEYRING_USER): stored})
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion(), keyring_backend=_FakeKeyring(entries))
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_REFERENCE_UNRESOLVED
+    assert opener.requests == []
+
+
+def test_a_keyring_that_cannot_be_read_refuses_and_says_nothing_of_its_own():
+    backend = _FakeKeyring(error=RuntimeError("backend detail that leaks"))
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion(), keyring_backend=backend)
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_KEYRING_UNAVAILABLE
+    assert "leaks" not in str(caught.value)
+    assert caught.value.__cause__ is None
+    # no context either: the backend's own frames are not kept (Copilot's
+    # overview of openDox-code#63 at `286655f3`)
+    assert caught.value.__context__ is None
+    assert opener.requests == []
+
+
+def test_without_the_keyring_package_a_keyring_reference_refuses(monkeypatch):
+    """`keyring` is not a dependency of this package. Without it, the
+    production path refuses with the fixed sentence, not an import error."""
+    monkeypatch.setitem(sys.modules, "keyring", None)
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion())
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_KEYRING_UNAVAILABLE
+    assert opener.requests == []
+
+
+def test_a_keyring_package_that_fails_as_it_is_imported_refuses_the_same_way(
+        monkeypatch):
+    """Copilot's review of openDox-code#63 at `82ec9a20`. An import runs the
+    package's own code, and a backend can fail there as it can when it is
+    read. Whatever it raises, the reference refuses with the fixed sentence,
+    before any request, and the refusal carries none of what was raised."""
+    importing = builtins.__import__
+
+    def _failing_import(name, *args, **kwargs):
+        if name == "keyring":
+            raise RuntimeError(f"a backend failed at import: {KEY_SENTINEL}")
+        return importing(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _failing_import)
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion())
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_KEYRING_UNAVAILABLE
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert opener.requests == []
+    assert _locals_holding(caught.value, KEY_SENTINEL) == []
+
+
+def test_the_production_keyring_path_imports_the_package_at_call_time(
+        monkeypatch):
+    backend = _FakeKeyring({(KEYRING_SERVICE, KEYRING_USER): KEY_SENTINEL})
+    monkeypatch.setitem(sys.modules, "keyring", backend)
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion("a"))
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    assert backend.asked == [(KEYRING_SERVICE, KEYRING_USER)]
+
+
+def test_a_none_binding_presents_no_credential_and_spawns_no_broker():
+    port, opener = _unbrokered_port(_none_binding(), _chat_completion("a"))
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    request = opener.requests[0]
+    assert not request.has_header("Authorization")
+    assert json.loads(request.data.decode("utf-8"))["model"] == DECLARED_MODEL
+    assert port.ledger == []
+
+
+@pytest.mark.parametrize("which", ["built-in", "none"])
+def test_a_401_without_a_broker_is_a_refusal_not_a_retry(which):
+    """The 2026-08-26 retry ruling is about a MINTED token. Here there is
+    nothing to re-mint, so a retry would buy a second paid call for the same
+    refusal."""
+    binding = _built_in_binding() if which == "built-in" else _none_binding()
+    port, opener = _unbrokered_port(binding, _expired_error(),
+                                    _chat_completion("never reached"),
+                                    environ={ENV_NAME: KEY_SENTINEL})
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_REFUSED
+    assert len(opener.requests) == 1, "no second paid call"
+    assert port.ledger == []
+
+
+def test_the_resolved_credential_reaches_no_response_log_repr_or_disk(
+        tmp_path):
+    printed: list[str] = []
+    port, _opener = _unbrokered_port(_built_in_binding(),
+                                     _chat_completion("the answer"),
+                                     environ={ENV_NAME: KEY_SENTINEL},
+                                     notice=printed.append)
+    answer = port.dispatch(_Envelope())
+    assert KEY_SENTINEL not in json.dumps(answer)
+    assert KEY_SENTINEL not in repr(port)
+    assert KEY_SENTINEL not in "".join(printed)
+    assert KEY_SENTINEL not in repr(port.ledger)
+    port_state = {name: getattr(port, name) for name in dir(port)
+                  if name.startswith("_") and not name.startswith("__")
+                  and name != "_environ"}
+    assert KEY_SENTINEL not in repr(port_state), \
+        "the port keeps no credential between turns"
+    assert not [path for path in tmp_path.rglob("*") if path.is_file()
+                and KEY_SENTINEL in path.read_text(encoding="utf-8",
+                                                   errors="replace")]
+
+
+def test_an_unresolved_reference_maps_onto_the_seams_fixed_model_failed():
+    port, _opener = _unbrokered_port(_built_in_binding(), environ={})
+    entry = port.catalog().entries[0]
+    ticks = iter([0.0, 0.1])
+    outcome = model_mod.dispatch_turn(port, _Envelope(), entry=entry,
+                                      clock=lambda: next(ticks))
+    assert isinstance(outcome, model_mod.TurnDispatchFailure)
+    assert outcome.error == model_mod.DISPATCH_ERR_MODEL_FAILED
+    assert KEY_SENTINEL not in json.dumps(str(outcome))
+
+
+@pytest.mark.parametrize("which,expected", [
+    ("built-in", f"Bearer {KEY_SENTINEL}"), ("none", None)])
+def test_a_stand_in_server_sees_the_resolved_bearer_or_no_header(which,
+                                                                 expected):
+    with _stand_in_provider(_ChatCompletionsHandler) as base:
+        endpoint = f"{base}/v1/chat/completions"
+        binding = (_built_in_binding(endpoint=endpoint) if which == "built-in"
+                   else _none_binding(endpoint=endpoint))
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None,
+            environ={ENV_NAME: KEY_SENTINEL})
+        assert port.dispatch(_Envelope())["assistant_prose"] == \
+            "answered in the chat grammar"
+    assert _ChatCompletionsHandler.seen["authorization"] == expected
+    assert _ChatCompletionsHandler.seen["body"]["model"] == DECLARED_MODEL
+
+
+class _ElsewhereHandler(http.server.BaseHTTPRequestHandler):
+    """A second stand-in, where a redirect or a proxy would lead. It records
+    every request it is sent, of any method."""
+
+    seen: list = []
+
+    def _record(self):
+        _ElsewhereHandler.seen.append(
+            (self.command, self.headers.get("Authorization")))
+        _answer_json(self, _chat_completion("answered from elsewhere"))
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+        self._record()
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+        self._record()
+
+    def log_message(self, *_args):
+        return
+
+
+class _RedirectingHandler(http.server.BaseHTTPRequestHandler):
+    """A stand-in provider that answers every request with a redirect."""
+
+    code = 302
+    location = ""
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.send_response(_RedirectingHandler.code)
+        self.send_header("Location", _RedirectingHandler.location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *_args):
+        return
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_a_built_in_credential_follows_no_redirect(monkeypatch, code):
+    """Copilot's review of openDox-code#63 at `4abc6d4d`, over real sockets.
+    `urllib`'s default opener answers a POST's 301, 302 or 303 by sending a
+    GET to the `Location`, with the credential header still on it (measured).
+    A request that carries a built-in credential declines the redirect, and
+    the second server hears nothing at all."""
+    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
+    monkeypatch.setattr(_RedirectingHandler, "code", code)
+    with _stand_in_provider(_ElsewhereHandler) as elsewhere, \
+            _stand_in_provider(_RedirectingHandler) as base:
+        monkeypatch.setattr(_RedirectingHandler, "location",
+                            f"{elsewhere}/v1/chat/completions")
+        binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None,
+            environ={ENV_NAME: KEY_SENTINEL})
+        envelope = _Envelope()
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_REDIRECTED
+    assert _ElsewhereHandler.seen == [], "the credential went nowhere else"
+
+
+def test_a_built_in_credential_over_http_to_this_host_uses_no_proxy(
+        monkeypatch):
+    """Copilot's review of openDox-code#63 at `1b0fb3f4`, over real sockets.
+    A plain-http route is private only because it stays on this host. With
+    `http_proxy` set, urllib's default opener sends a request addressed to
+    `127.0.0.1` to the proxy, credential header and all (measured). This
+    request goes direct, and the stand-in proxy hears nothing."""
+    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
+    monkeypatch.setattr(_ChatCompletionsHandler, "seen", {})
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    with _stand_in_provider(_ElsewhereHandler) as proxy, \
+            _stand_in_provider(_ChatCompletionsHandler) as base:
+        for name in ("http_proxy", "HTTP_PROXY"):
+            monkeypatch.setenv(name, proxy)
+        binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None,
+            environ={ENV_NAME: KEY_SENTINEL})
+        answer = port.dispatch(_Envelope())
+    assert answer["assistant_prose"] == "answered in the chat grammar"
+    assert _ChatCompletionsHandler.seen["authorization"] == (
+        f"Bearer {KEY_SENTINEL}")
+    assert _ElsewhereHandler.seen == [], "the proxy heard nothing"
+
+
+def _safe_repr(value) -> str:
+    try:
+        return repr(value)
+    # A repr that fails discloses nothing, whatever it raised.
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _frames_kept_by(exception):
+    """Every frame a refusal's tracebacks keep, through its causes and its
+    contexts, suppressed or not, except this test file's own frames."""
+    seen: set[int] = set()
+    pending = [exception]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        traceback = current.__traceback__
+        while traceback is not None:
+            if traceback.tb_frame.f_code.co_filename != __file__:
+                yield traceback.tb_frame
+            traceback = traceback.tb_next
+        pending.extend((current.__cause__, current.__context__))
+
+
+def _locals_holding(exception, secret: str) -> list[str]:
+    """The frame locals, by their repr, that disclose `secret`, which is what
+    an error reporter that records locals would send on."""
+    return sorted({f"{frame.f_code.co_name}.{name}"
+                   for frame in _frames_kept_by(exception)
+                   for name, value in list(frame.f_locals.items())
+                   if secret in _safe_repr(value)})
+
+
+@contextlib.contextmanager
+def _a_closed_loopback_port():
+    """A loopback port that nothing listens on. It is held for the test, so
+    no other process can take it."""
+    holder = socket.socket()
+    try:
+        holder.bind(("127.0.0.1", 0))
+        yield holder.getsockname()[1]
+    finally:
+        holder.close()
+
+
+def test_a_refused_connection_keeps_no_frame_that_holds_the_key(monkeypatch):
+    """Copilot's review of openDox-code#63 at `d240fd50`, over the real
+    transport. A cause chained from inside `urllib` keeps frames whose locals
+    hold the request's headers, and so the key. The refusal chains nothing,
+    and no frame it keeps holds the key."""
+    monkeypatch.setenv(ENV_NAME, KEY_SENTINEL)
+    with _a_closed_loopback_port() as closed:
+        binding = _built_in_binding(
+            endpoint=f"http://127.0.0.1:{closed}/v1/chat/completions")
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None)
+        envelope = _Envelope()
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert _locals_holding(caught.value, KEY_SENTINEL) == []
+
+
+class _UnreadableAnswerHandler(http.server.BaseHTTPRequestHandler):
+    """A stand-in provider that reads one whole request and answers it with
+    `answer`, bytes `http.client` cannot read as a response."""
+
+    answer = b""
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.wfile.write(self.answer)
+        self.close_connection = True
+
+    def log_message(self, *_args):
+        return
+
+
+#: The answers of the adversarial review of openDox-code#63 (L4), each under
+#: the `http.client.HTTPException` it raises, with the path it is asked at.
+#: `InvalidURL` needs no answer: `http.client` raises it for a path it cannot
+#: send, a path the record accepts, before anything is sent.
+UNREADABLE_ANSWERS = {
+    "BadStatusLine": (b"GARBAGE\r\n\r\n", "/v1/chat/completions"),
+    "UnknownProtocol": (b"HTTP/2.0 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+                        "/v1/chat/completions"),
+    "LineTooLong": (b"HTTP/1.1 200 OK\r\nX-Stand-In: " + b"a" * 70_000
+                    + b"\r\n\r\n", "/v1/chat/completions"),
+    "HTTPException": (b"HTTP/1.1 200 OK\r\n"
+                      + b"".join(b"X-Stand-In-%d: y\r\n" % number
+                                 for number in range(120)) + b"\r\n",
+                      "/v1/chat/completions"),
+    "IncompleteRead": (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                       b"\r\n10\r\n{\"choices\":", "/v1/chat/completions"),
+    "InvalidURL": (b"", "/v1/chat completions"),
+}
+
+
+def _read_by_urllib_alone(url: str) -> None:
+    request = urllib.request.Request(url, data=b"{}", method="POST")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=10) as response:
+        response.read()
+
+
+@pytest.mark.parametrize("resolver", ["built-in", "none", "broker"])
+@pytest.mark.parametrize("raised", sorted(UNREADABLE_ANSWERS))
+def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
+        tmp_path, raised, resolver):
+    """The adversarial review of openDox-code#63 at `4948e6dd`, L4. A status
+    line, a protocol, a header, a body or a path that `http.client` cannot
+    read or send raises an `http.client.HTTPException`, which is no
+    `OSError`. So it escaped `dispatch`, with the request's headers, and the
+    key, in `do_open`'s frame. Each is the fixed unreachable refusal now,
+    raised afresh where a built-in credential was presented.
+
+    THE TRANSPORT IS SHARED, so a broker's turn lands on the same sentence
+    (Copilot's review of openDox-code#63 at `44582f8f`), where it escaped
+    before. That is the one change this PR makes to the broker path's
+    failure. Raising it afresh there is openDox-code#64's, as the ruling
+    leaves that path to it."""
+    answer, path = UNREADABLE_ANSWERS[raised]
+    handler = type(f"_{raised}Answer", (_UnreadableAnswerHandler,),
+                   {"answer": answer})
+    with _stand_in_provider(handler) as base:
+        # the case is what it is named for: urllib alone raises exactly it
+        with pytest.raises(http.client.HTTPException) as unread:
+            _read_by_urllib_alone(base + path)
+        assert type(unread.value) is getattr(http.client, raised)
+        runner = _refusing_runner
+        if resolver == "built-in":
+            binding = _built_in_binding(endpoint=base + path)
+        elif resolver == "none":
+            binding = _none_binding(endpoint=base + path)
+        else:
+            binding = _broker_binding(_write_broker(tmp_path),
+                                      endpoint=base + path)
+            runner = provider_mod.subprocess_broker_runner
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=runner, notice=lambda _text: None,
+            environ={ENV_NAME: KEY_SENTINEL})
+        envelope = _Envelope()
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
+    if resolver == "built-in":
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert _locals_holding(caught.value, KEY_SENTINEL) == []
+
+
+def test_an_unpresentable_value_leaves_no_frame_that_holds_it(monkeypatch):
+    """A value refused as unpresentable can still be most of a key, such as
+    a key with a line break after it. The frame that read it lets it go
+    before the refusal is raised."""
+    monkeypatch.setenv(ENV_NAME, KEY_SENTINEL + "\n")
+    port, opener = _unbrokered_port(_built_in_binding(), _chat_completion())
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_REFERENCE_UNRESOLVED
+    assert opener.requests == []
+    assert _locals_holding(caught.value, KEY_SENTINEL) == []
+
+
+def test_a_broker_refusal_keeps_no_frame_that_holds_the_token(tmp_path):
+    """The minted token travels as the same wrapper, so the provider-call
+    frame holds no raw token, as it held none when that frame took a
+    `MintedToken`."""
+    port, _opener = _port(tmp_path, OSError("unreachable"))
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
+    assert _locals_holding(caught.value, SENTINEL_TOKEN) == []
+
+
+def test_the_resolver_lives_in_the_provider_module_alone():
+    """R1Q17 (b): "inside `doxbench_provider.py` only". The record parses a
+    reference's FORM and reads no environment and no keyring. No other module
+    of the package reads the OS keyring."""
+    package = REPO_ROOT / "src" / "opendox"
+    binding_source = (package / "doxbench_binding.py").read_text(
+        encoding="utf-8")
+    for reach in ("os.environ", "getenv", "get_password", "import keyring",
+                  "import os"):
+        assert reach not in binding_source, reach
+    holders = sorted(path.relative_to(package).as_posix()
+                     for path in package.rglob("*.py")
+                     if "get_password" in path.read_text(encoding="utf-8")
+                     or "import keyring" in path.read_text(encoding="utf-8"))
+    assert holders == [provider_mod.PROVIDER_CLIENT_MODULE], holders
+
+
+# --- the operator door ----------------------------------------------------
+
+
+def test_the_cli_declares_a_binding_for_each_resolver(tmp_path, capsys):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    parser = cli_mod.build_parser()
+
+    def run(*argv) -> int:
+        args = parser.parse_args(list(argv))
+        return args.func(args)
+
+    root = ["--repo-root", str(checkout)]
+    route = ["--label", "L", "--provider", "local",
+             "--credential-approver", "brett@opensoft.one",
+             "--endpoint", "http://127.0.0.1:9/v1/chat/completions",
+             "--dialect", OPENAI_CHAT, "--model", DECLARED_MODEL]
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+
+    # an endpoint that takes no credential: no reference, and no broker
+    assert run("model-binding", "add", *root, "--id", "local", *route,
+               "--auth-kind", "none") == 0
+    assert binding_mod.NO_CREDENTIAL_NOTICE in capsys.readouterr().out
+    assert store.get("local").credential_source() == binding_mod.NO_CREDENTIAL
+
+    # a reference the built-in resolver takes: no broker
+    assert run("model-binding", "add", *root, "--id", "env-bound", *route,
+               "--auth-kind", "api_key",
+               "--credential-ref", f"env:{ENV_NAME}") == 0
+    assert binding_mod.BUILT_IN_CUSTODY_NOTICE in capsys.readouterr().out
+
+    # ...and one given a broker beside it is refused, through the verb
+    assert run("model-binding", "add", *root, "--id", "two-resolvers", *route,
+               "--auth-kind", "api_key", "--credential-ref", f"env:{ENV_NAME}",
+               "--", "openprofiler-broker") == 1
+    assert "two resolvers" in capsys.readouterr().err
+
+    # a kind that takes a credential, with no reference, is refused
+    assert run("model-binding", "add", *root, "--id", "no-ref", *route,
+               "--auth-kind", "api_key") == 1
+    assert "'none'" in capsys.readouterr().err
+
+    # a key inside the URL is refused, and the refusal does not repeat it
+    keyed = list(route)
+    keyed[keyed.index("--endpoint") + 1] = (
+        f"https://user:{KEY_SENTINEL}@api.example.invalid/v1")
+    assert run("model-binding", "add", *root, "--id", "keyed", *keyed,
+               "--auth-kind", "none") == 1
+    captured = capsys.readouterr()
+    assert binding_mod.ENDPOINT_CARRIES_A_CREDENTIAL in captured.err
+    assert KEY_SENTINEL not in captured.err + captured.out
+    assert store.get("keyed") is None, "nothing is stored"
+
+    # a built-in credential over http:// to another host is refused (the
+    # 2026-09-28 loopback ruling), and a `none` binding to it is declared
+    cleartext = list(route)
+    cleartext[cleartext.index("--endpoint") + 1] = (
+        "http://api.example.invalid/v1/chat/completions")
+    assert run("model-binding", "add", *root, "--id", "cleartext",
+               *cleartext, "--auth-kind", "api_key",
+               "--credential-ref", f"env:{ENV_NAME}") == 1
+    assert binding_mod.ENDPOINT_NOT_PRIVATE in capsys.readouterr().err
+    assert store.get("cleartext") is None, "nothing is stored"
+    assert run("model-binding", "add", *root, "--id", "cleartext-none",
+               *cleartext, "--auth-kind", "none") == 0
+    capsys.readouterr()
+
+    assert run("model-binding", "list", *root) == 0
+    listed = capsys.readouterr().out
+    from opendox import cli_model_binding as cmb
+    assert f"credential ref   {cmb.NOT_DECLARED}" in listed
+    assert f"broker argv      {cmb.NOT_DECLARED}" in listed
+    assert f"credential ref   env:{ENV_NAME}" in listed
+
+    assert run("model-binding", "remove", *root, "--id", "env-bound") == 0
+    assert binding_mod.BUILT_IN_REMOVAL_NOTICE in capsys.readouterr().out
+
+
+def test_the_cli_refuses_a_raw_key_as_a_reference_and_repeats_nothing(
+        tmp_path, capsys):
+    """M2 at the operator door: `model-binding add --credential-ref <key>`
+    stores nothing, so `list` has nothing of it to print, and neither stream
+    repeats it."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    parser = cli_mod.build_parser()
+
+    def run(*argv) -> int:
+        args = parser.parse_args(list(argv))
+        return args.func(args)
+
+    root = ["--repo-root", str(checkout)]
+    assert run("model-binding", "add", *root, "--id", "keyed", "--label", "L",
+               "--provider", "p", "--credential-approver",
+               "brett@opensoft.one",
+               "--endpoint", "https://api.example.invalid/v1/chat/completions",
+               "--dialect", OPENAI_CHAT, "--auth-kind", "api_key",
+               "--credential-ref", _STAND_IN_PROVIDER_KEY,
+               "--", "openprofiler-broker") == 1
+    captured = capsys.readouterr()
+    assert binding_mod.CREDENTIAL_REF_IS_A_RAW_KEY in captured.err
+    assert _STAND_IN_PROVIDER_KEY not in captured.err + captured.out
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+    assert store.list() == ()
+    assert run("model-binding", "list", *root) == 0
+    assert _STAND_IN_PROVIDER_KEY not in capsys.readouterr().out
+
+
+class _UnreadableSource:
+    """A standard input that must never be read."""
+
+    def read(self, *_args):
+        raise AssertionError("set-credential read a credential it had no "
+                             "custodian for")
+
+    readline = read
+
+
+@pytest.mark.parametrize("binding_factory", [_none_binding, _built_in_binding],
+                         ids=["none", "built-in"])
+def test_set_credential_refuses_a_binding_no_broker_answers(tmp_path, capsys,
+                                                            binding_factory):
+    checkout = tmp_path / "checkout"
+    (checkout / "ideation" / "dashboard").mkdir(parents=True)
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+    binding = binding_factory()
+    store.add(binding)
+    args = cli_mod.build_parser().parse_args([
+        "model-binding", "set-credential", "--repo-root", str(checkout),
+        "--id", binding.id])
+    assert cli_mod.cmd_model_binding_set_credential(
+        args, source=_UnreadableSource()) == 1
+    assert "names no broker" in capsys.readouterr().err
+    assert store.get(binding.id) == binding, "nothing changed"
