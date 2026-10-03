@@ -559,6 +559,38 @@ def test_a_real_local_serve_binds_ipv6_loopback(tmp_path, monkeypatch) -> None:
     assert not child.state_dir.exists(), "the child's state dir outlived it"
 
 
+@pytest.mark.parametrize("bound,announced", [
+    (("127.0.0.1", 8123), "http://127.0.0.1:8123/index.html"),
+    (("0.0.0.0", 8123), "http://127.0.0.1:8123/index.html"),
+    (("", 8123), "http://127.0.0.1:8123/index.html"),
+    (("::1", 8123, 0, 0), "http://[::1]:8123/index.html"),
+    (("::", 8123, 0, 0), "http://[::1]:8123/index.html"),
+])
+def test_server_url_announces_each_bind_at_its_own_familys_loopback(
+        bound, announced) -> None:
+    """An IPv6 literal is bracketed, and a wildcard bind is announced at its
+    own family's loopback: an `AF_INET6` socket can be IPv6-only, so `::`
+    printed as `127.0.0.1` could name nothing that answers (Copilot at
+    openDox-code#80, r4173481146)."""
+    class _Bound:
+        server_address = bound
+
+    assert serve.server_url(_Bound(), "/index.html") == announced
+
+
+def test_an_ipv6_wildcard_bind_answers_at_the_url_it_announces(
+        in_process) -> None:
+    """`host="::"` is a hosted plane (not `LOOPBACK_HOSTS`), so no loopback
+    gate applies; what this holds is that the URL it prints answers."""
+    base, caps = in_process(identity=False, host="::")
+    url = in_process.urls[-1]
+    assert url == f"http://[::1]:{base[1]}/index.html", url
+    assert caps["actions"]["intent"] is True
+    status, _headers, payload, _response = _raw(
+        ("::1", base[1]), "GET", "/index.html", (f"[::1]:{base[1]}",))
+    assert status == 200 and b"<html" in payload.lower()
+
+
 # ---------------------------------------------------------------------------
 # 4 — the browser path still works
 # ---------------------------------------------------------------------------

@@ -2445,7 +2445,14 @@ def _server_class_for(host: str) -> type[http.server.ThreadingHTTPServer]:
 
 def server_url(httpd: http.server.ThreadingHTTPServer, path: str = "/") -> str:
     host, port = httpd.server_address[:2]
-    if host in ("0.0.0.0", "", "::"):
+    # A WILDCARD BIND IS ANNOUNCED AT ITS OWN FAMILY'S LOOPBACK (Copilot at
+    # openDox-code#80, r4173481146). Since T103's fix round 1 `::` binds an
+    # `AF_INET6` socket, which is IPv6-only on some platforms, so announcing
+    # it at `127.0.0.1` could print a URL nothing answers. `::` is `::1`;
+    # the IPv4 wildcard stays `127.0.0.1`.
+    if host == "::":
+        host = "::1"
+    elif host in ("0.0.0.0", ""):
         host = "127.0.0.1"
     # AN IPv6 LITERAL IS BRACKETED in a URL (RFC 3986 § 3.2.2): `::1` is
     # `http://[::1]:<port>/`, and `[::1]:<port>` is also the `Host` a browser
