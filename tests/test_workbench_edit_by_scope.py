@@ -153,6 +153,11 @@ def _stage(tmp_path_factory, name: str, harness: str) -> dict:
 _MODEL_HARNESS = r"""
 import { readFileSync } from 'node:fs';
 const m = await import('./staging-workbench-model.js');
+// the shell's OWN outline derivation (staging-workbench.js canvasProjection),
+// so a tile-mode projection that kept an outline would show it here
+const { primaryFragmentPath } = await import('./wheel-model.js');
+const realOutlinePathFor = (outline) =>
+  primaryFragmentPath(outline.stagingId, outline.files);
 const SNAP = JSON.parse(readFileSync(process.argv[2], 'utf-8'));
 const out = {};
 
@@ -228,11 +233,16 @@ out.parityProjection = {};
 for (const [kind, id] of JSON.parse(process.argv[3] || '[]')) {
   out.parity[kind + '/' + id] = m.tileOwnEditablePaths(SNAP, kind, id);
   const p = m.doxbenchScopeProjection(SNAP, kind, id, { repository: 'fixture',
-    ref: 'main', outlinePathFor: () => null, editableBy: 'tile' });
+    ref: 'main', outlinePathFor: realOutlinePathFor, editableBy: 'tile' });
   out.parityProjection[kind + '/' + id] = p && {
     context: p.context_paths, editable: p.editable_paths,
-    candidates: p.active_document_candidates };
+    candidates: p.active_document_candidates, outline: p.outline_path };
 }
+// the SAME tile under a governed host keeps its outline, which is what makes
+// the tile-mode null above a decision rather than an accident of the fixture
+const hostS1 = m.doxbenchScopeProjection(SNAP, 'staged', 's1', {
+  repository: 'fixture', ref: 'main', outlinePathFor: realOutlinePathFor });
+out.hostOutline = { s1: hostS1 && hostS1.outline_path };
 out.settingsDocuments = m.OWN_SETTINGS_DOCUMENTS;
 console.log(JSON.stringify(out));
 """
@@ -423,12 +433,19 @@ def test_the_browser_set_is_the_servers_set(model, corpus, kind, tile) -> None:
     browser = model["parityProjection"][f"{kind}/{tile}"]
     if projection is None:
         assert browser is None or (refused and browser == {
-            "context": [], "editable": [], "candidates": []}), browser
+            "context": [], "editable": [], "candidates": [],
+            "outline": None}), browser
     else:
+        # the neutral scope projects NO outline (Copilot review of #81,
+        # r4173502649): the turn guard's `_require_buffer_binding` requires the
+        # outline buffer's path to equal it, so a browser that sent one would
+        # have every turn on a staged or candidate tile refused
+        assert projection.outline_path is None
         assert browser == {
             "context": list(projection.context_paths),
             "editable": list(projection.editable_paths),
-            "candidates": list(projection.active_document_candidates)}
+            "candidates": list(projection.active_document_candidates),
+            "outline": projection.outline_path}
 
 
 def test_the_settings_documents_are_spelled_as_the_server_spells_them(model) -> None:
@@ -452,6 +469,11 @@ def test_the_parity_fixture_reaches_every_branch(model, corpus) -> None:
     assert parity["cluster/g5"] == ["notes/soil-test.md", "b.md"]
     assert parity["possible/p4"] == ["notes/soil-test.md", "b.md"]
     assert parity["staged/s2"] == ["notes/soil-test.md"]
+    # a governed host's projection of s1 keeps its outline (the shell's own
+    # derivation finds one), so the by-scope null is reached, not vacuous
+    assert model["hostOutline"]["s1"] == "sel.md"
+    assert model["parityProjection"]["staged/s1"]["outline"] is None
+    assert "sel.md" in model["parityProjection"]["staged/s1"]["candidates"]
     with pytest.raises(ScopeConfinementError):
         dc.resolve_scope(SNAPSHOT, ScopeKey(repository="fixture", ref="main",
                                             tile_kind="cluster", tile_id="gbad"),
@@ -511,12 +533,12 @@ const STANDALONE = { actions: { notebook: false, gate: false, refresh: false,
 const GOVERNED = { actions: { gate: true, session: true, edit: true },
   actor: 'brett' };
 
-async function mount({ caps, gate, kind, id }) {
+async function mount({ caps, gate, kind, id, storage, snapshot }) {
   const container = document.createElement('div');
   const log = { turns: [], abstracts: [] };
   const doxbench = {
     loadSource: async (path) => ({ content: '# ' + path + '\n\nbody\n', ref: 'main' }),
-    storage: new FakeStorage(),
+    storage: storage || new FakeStorage(),
     // no model is configured anywhere in this module
     catalog: async () => ({ schema_version: 1, kind: 'workbench-model-catalog',
                             models: [] }),
@@ -527,7 +549,7 @@ async function mount({ caps, gate, kind, id }) {
     documentAbstract: async (request) => { log.abstracts.push(request);
       return { ok: false, payload: { error: 'model_capability_unavailable' } }; },
   };
-  const workbench = mountStagingWorkbench(container, SNAP, {
+  const workbench = mountStagingWorkbench(container, snapshot || SNAP, {
     caps, gate, onOpenDoc: () => null, fetcher: async () => ({ ok: false }),
     active: { repository: 'fixture', ref: 'main' }, index: { entries: [] },
     doxbench, sourceBase: '/source/', edit: null,
@@ -699,6 +721,73 @@ await scenario('s6', async (o) => {
   Object.assign(o, survey(ctx));
 });
 
+// ---- S7: STANDALONE, a RESTORE the scope no longer owns (Copilot review of
+// #81, r4173470792). The first mount loads both of g1's members and types into
+// b.md; the snapshot is then regenerated with g1 holding c.md alone, and the
+// same browser storage restores the session into it.
+await scenario('s7', async (o) => {
+  const storage = new FakeStorage();
+  const first = await mount({ caps: STANDALONE, gate: { create: null, session: null },
+                              kind: 'cluster', id: 'g1', storage });
+  await until(() => first.byClass('doxbench-textarea').length >= 2, 'the canvas');
+  await quiesce(40);
+  for (const path of ['a.md', 'b.md']) {
+    const v = await expand(first, path);
+    await fire(v.load.node, 'click');
+    await quiesce(60);
+  }
+  const areas = first.byClass('doxbench-textarea');
+  const typed = areas[areas.length - 1];
+  typed.value = typed.value + 'kept by the human\n';
+  await fire(typed, 'input');
+  await quiesce(40);
+  o.before = first.byClass('doxbench-textarea').filter((t) => !t.disabled).length;
+  first.workbench.close();
+  await quiesce(20);
+  const regenerated = JSON.parse(JSON.stringify(SNAP));
+  regenerated.clusters.find((c) => c.id === 'g1').document_edges =
+    [{ document: 'c.md' }];
+  const again = await mount({ caps: STANDALONE, gate: { create: null, session: null },
+                              kind: 'cluster', id: 'g1', storage,
+                              snapshot: regenerated });
+  await until(() => again.byClass('doxbench-textarea').length >= 2, 'the canvas');
+  await quiesce(80);
+  Object.assign(o, survey(again));
+  o.live = again.byClass('doxbench-textarea').filter((t) => !t.disabled)
+    .map((t) => String(t.value));
+  o.typedKept = o.live.some((v) => v.endsWith('kept by the human\n'));
+  o.cleanGone = !o.live.some((v) => v.startsWith('# a.md'));
+});
+
+// ---- S8: STANDALONE, the outline tab of a selection: no outline buffer by
+// scope, so the add-section controls state why (Copilot review of #81,
+// r4173502649) instead of offering an insert with nowhere to land.
+await scenario('s8', async (o) => {
+  const asked = [];
+  const previous = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    asked.push(String(url));
+    return { ok: true, status: 200, headers: { get: () => 'aligned' },
+             text: async () => '# s1\n\n## Problem\n\nwhy\n' };
+  };
+  try {
+    const ctx = await mount({ caps: STANDALONE, gate: { create: null, session: null },
+                              kind: 'staged', id: 's1' });
+    const tab = ctx.byClass('swb-tab').find(
+      (b) => String(b.textContent).toLowerCase().includes('outline'));
+    await fire(tab, 'click');
+    await until(() => ctx.byClass('swb-outlineadd').length > 0, 'the add controls');
+    await quiesce(20);
+    o.pill = survey(ctx).pill;
+    o.controls = ctx.byClass('swb-outlineadd').map((b) => ({
+      disabled: b.disabled === true, title: String(b.title),
+      listeners: ((b.listeners || {}).click || []).length }));
+    o.fetched = asked;
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
+
 out.notes = { scope: model.scopeEditingNote(), nothing: model.nothingEditableNote(),
               gateless: model.GATELESS_SAVE_REFUSAL };
 console.log(JSON.stringify(out));
@@ -826,6 +915,39 @@ def test_a_governed_host_with_the_gate_off_stays_read_only(shell) -> None:
     assert s6["railHidden"] is True
     assert s6["pill"] == "read-only"
     assert s6["note"] == GATE_OFF_NOTE
+
+
+def test_a_restored_buffer_the_scope_no_longer_owns_is_reconciled(shell) -> None:
+    """Copilot review of #81 (r4173470792): the restore is the one route into
+    the loaded set that bypasses the scope, so it is reconciled with the
+    projection once the canvas is ready. The clean buffer leaves; the dirty
+    one stays, because unloading it would lose the human's text, and the
+    posture note names it and says what to do."""
+    s7 = _ran(shell, "s7")
+    assert s7["before"] == 3, "the outline buffer plus both loaded members"
+    assert s7["cleanGone"] is True, s7["live"]
+    assert s7["typedKept"] is True, s7["live"]
+    assert len(s7["live"]) == 2, "the outline buffer and the kept dirty one"
+    assert "no longer one of this tile's own" in s7["note"]
+    assert "b.md" in s7["note"] and "a.md" not in s7["note"]
+    assert "a chat turn that carries it is refused" in s7["note"]
+    assert s7["pill"] == "editing by scope"
+
+
+def test_by_scope_the_outline_tab_states_why_no_section_is_added(shell) -> None:
+    """Copilot review of #81 (r4173502649): the neutral scope projects no
+    outline, so there is no outline buffer for an insert to land in. Every
+    add-section control is inert, with no listener, and says so."""
+    s8 = _ran(shell, "s8")
+    assert s8["pill"] == "editing by scope"
+    assert s8["fetched"] == ["/source/sel.md"]
+    assert s8["controls"], "the tab mounted its add-section controls"
+    for control in s8["controls"]:
+        assert control["disabled"] is True
+        assert control["listeners"] == 0
+        assert control["title"].startswith(
+            "adding a section writes into an outline buffer"), control["title"]
+        assert "edit verb" in control["title"]
 
 
 def test_app_composes_the_standalone_save_from_the_named_refusal() -> None:

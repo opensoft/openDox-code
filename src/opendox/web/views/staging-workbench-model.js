@@ -441,8 +441,16 @@ export function doxbenchScopeProjection(snapshot, kind, id, options = {}) {
     for (const path of options.createdDocuments || []) pushContext(path);
   }
 
+  // NO OUTLINE BY TILE (Copilot review of #81, r4173502649). The neutral
+  // scope projects no outline at all (`resolve_scope` returns
+  // `outline_path=None`), and the turn's binding check requires the outline
+  // buffer's path to EQUAL the projection's (`doxbench_turns.
+  // _require_buffer_binding`). Deriving one here from the richer workbench
+  // scope kept a staged tile's primary file as the outline, and the server
+  // refused every chat turn from that tile. By tile the file is simply one of
+  // the tile's own documents, loadable like the rest.
   let outlinePath = null;
-  if (scope.outline && typeof options.outlinePathFor === "function") {
+  if (!byTile && scope.outline && typeof options.outlinePathFor === "function") {
     outlinePath = asId(options.outlinePathFor(scope.outline)) || null;
   }
   const editablePaths = byTile

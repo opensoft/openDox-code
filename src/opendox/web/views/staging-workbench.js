@@ -1341,12 +1341,19 @@ async function runAddSection(seam, path, note, title, after, required) {
 // authority teaches the reader nothing, but there is no write path to reach —
 // the same posture viewer.js's "open in editor" button and the docs tile's
 // load/save verbs already take where the capability is absent.
-function mountAddSection(host, model, path, seam) {
+//
+// T102: `seam` may also be `{ absent: sentence }`, a stated absence with its
+// own reason. By scope there IS an editing capability but no outline buffer
+// (the neutral scope projects none), so the generic sentence below would be
+// false there.
+function mountAddSection(host, model, path, given) {
   const note = el("div", "swb-outlinenote");
   note.setAttribute("aria-live", "polite");
   note.hidden = true;
-  const absent = "adding a section needs the local human console's editing "
-    + "capability — this plane has none, so no write path is offered";
+  const seam = given && typeof given.absent === "string" ? null : given;
+  const absent = given && typeof given.absent === "string" ? given.absent
+    : "adding a section needs the local human console's editing "
+      + "capability — this plane has none, so no write path is offered";
 
   // `intent()` is read at CLICK time, never closed over at build time: the
   // free-form control's two values are whatever the human has typed and chosen
@@ -2595,6 +2602,15 @@ export function mountStagingWorkbench(container, snapshot,
   // listener bound.
   function outlineSectionSeam() {
     if (!canvasOffered()) return null;
+    // BY SCOPE THERE IS NO OUTLINE BUFFER (T102): the neutral scope projects
+    // none, so the selection's primary file is one of its own documents, edited
+    // through its tile's `edit` verb. The add-section controls say so instead
+    // of offering an insert that would find no outline to land in.
+    if (editingNow().mode === EDITING_MODES.scope) {
+      return { absent: "adding a section writes into an outline buffer, and "
+        + "here this tile's own " + vocab.many(SOURCE) + " are edited directly, "
+        + "with no outline buffer: open the file with its edit verb instead" };
+    }
     return {
       actor: (caps && caps.actor) || "local",
       // Read at CLICK time, never cached: "what the outline buffer holds" is a
@@ -2769,12 +2785,56 @@ export function mountStagingWorkbench(container, snapshot,
   // refused by name"), so it stands beside whatever a chat rung moved onto the
   // send button. A governed host's postures carry none, so its note is what it
   // was.
+  let lastPlane = null;
   function showPostureNote(plane) {
+    lastPlane = plane;
     const stands = !!plane.note && plane.chat !== true;
-    const lines = [stands ? plane.note : null, plane.scopeNote || null]
-      .filter(Boolean);
+    const stale = outOfScopeLoaded();
+    const lines = [stands ? plane.note : null, plane.scopeNote || null,
+      stale.length ? outOfScopeNote(stale) : null].filter(Boolean);
     postureNote.textContent = lines.join(" ");
     postureNote.hidden = lines.length === 0;
+  }
+
+  // A RESTORED BUFFER THE SCOPE NO LONGER OWNS (T102; Copilot review of #81,
+  // r4173470792). The canvas restores a persisted record verbatim, and every
+  // other route into the loaded set is gated by scope: the tile's `edit` verb,
+  // and the canvas's own in-scope check. So by scope the RESTORE is the one way
+  // a document the scope no longer makes editable can still be loaded, for
+  // example after a regenerated snapshot drops it from the group. Once the
+  // canvas is ready it is reconciled with the projection it was mounted over:
+  //   * a CLEAN one leaves the loaded set, since nothing of the human's is in it;
+  //   * a DIRTY one stays, because unloading it would discard unsaved text,
+  //     and the posture note names it, says why, and says what to do. A chat
+  //     turn that carries it is refused by the server's own scope check, which
+  //     is why the note asks for it to be unloaded once the text is safe.
+  // By scope only: under the gate the projection, ownership and restore are
+  // exactly as before.
+  function outOfScopeLoaded() {
+    if (!canvasController || editingNow().mode !== EDITING_MODES.scope) return [];
+    const live = canvasController.state();
+    if (!live || !live.buffers) return [];
+    const editable = new Set(editingNow().editablePaths || []);
+    const out = [];
+    for (const key of Object.keys(live.buffers)) {
+      const buffer = live.buffers[key];
+      if (!buffer || buffer.kind !== "document" || !buffer.path) continue;
+      if (!editable.has(buffer.path)) out.push({ key, path: buffer.path,
+                                                 dirty: buffer.dirty === true });
+    }
+    return out;
+  }
+  function outOfScopeNote(stale) {
+    return "restored with unsaved text, but no longer one of this tile's own "
+      + vocab.many(SOURCE) + ": " + stale.map((b) => b.path).join(", ")
+      + ". It stays loaded so nothing is lost; copy the text out, then unload "
+      + "it, because a chat turn that carries it is refused.";
+  }
+  function reconcileRestoredScope() {
+    for (const buffer of outOfScopeLoaded()) {
+      if (!buffer.dirty) canvasController.unloadDocument(buffer.key);
+    }
+    if (lastPlane) showPostureNote(lastPlane);
   }
 
   // THE EDITING POSTURE (T102, RULED `5963618568`), read off the facts this
@@ -2876,6 +2936,8 @@ export function mountStagingWorkbench(container, snapshot,
       onLoadedSetChanged: () => {
         syncContextFromCanvas();
         refreshDocTiles();
+        // an unload of a restored out-of-scope buffer retires its note (T102)
+        if (lastPlane) showPostureNote(lastPlane);
       },
     });
     // T055: the chat rail mounts ONLY when the seam bundle carries BOTH
@@ -3051,6 +3113,7 @@ export function mountStagingWorkbench(container, snapshot,
     const mounted = canvasController;
     if (mounted && mounted.ready && typeof mounted.ready.then === "function") {
       mounted.ready.then(() => {
+        if (canvasController === mounted) reconcileRestoredScope();
         if (canvasController === mounted) syncContextFromCanvas();
       });
     }
