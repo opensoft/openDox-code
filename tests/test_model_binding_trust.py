@@ -23,10 +23,10 @@ case fails there because nothing it names exists.
 THE SHAPE F16.1 GIVES THE REST. Each case serves its own fresh `git init`
 with its own fresh `OPENDOX_STATE_DIR` (`served`), so no case reads or writes
 the operator's own trust. The store is registered over that directory
-explicitly, because this change's base predates openDox-code#69's
-`config.state_dir`, which is what reads the setting. The one case that reads
-the setting itself is strict-xfail until #69 is on the base. Most cases run
-over three bindings in turn (`KINDS`):
+explicitly as well as through the setting, so a case never depends on where
+openDox-code#69's `config.state_dir` would put it; one case reads the setting
+itself (`test_the_default_store_lives_in_the_settings_state_directory`).
+Most cases run over three bindings in turn (`KINDS`):
 
   * `broker`: its broker writes a marker file whenever it runs;
   * `env`: its `env:` reference names a variable set to a known value, and the
@@ -1239,17 +1239,10 @@ def test_a_governed_host_policy_keeps_the_governed_flow(served, declared):
 
 
 # ===========================================================================
-# 5. the store's default home, the rail, and a served turn (#69 and #77 still
-#    wait: strict, naming each)
+# 5. the store's default home, the rail, and a served turn (#77's case
+#    still waits: strict, naming it)
 # ===========================================================================
 
-_HAS_STATE_DIR = hasattr(runtime_config, "state_dir")
-
-
-@pytest.mark.xfail(not _HAS_STATE_DIR, strict=True,
-                   reason="openDox's state directory (config.state_dir, "
-                          "OPENDOX_STATE_DIR and its default) is "
-                          "openDox-code#69's, which is not on this base")
 def test_the_default_store_lives_in_the_settings_state_directory(tmp_path,
                                                                  monkeypatch):
     trust_mod = _trust_mod()

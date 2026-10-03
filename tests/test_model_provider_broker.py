@@ -3206,9 +3206,10 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
 
     THE TRANSPORT IS SHARED, so a broker's turn lands on the same sentence
     (Copilot's review of openDox-code#63 at `44582f8f`), where it escaped
-    before. That is the one change this PR makes to the broker path's
-    failure. Raising it afresh there is openDox-code#64's, as the ruling
-    leaves that path to it."""
+    before. On this branch it is raised afresh there too, as every refusal
+    of a request that carried a credential is (`_call_provider`), so no
+    frame it keeps holds the minted token (the adversarial review's L4, for
+    openDox-code#64)."""
     answer, path = UNREADABLE_ANSWERS[raised]
     handler = type(f"_{raised}Answer", (_UnreadableAnswerHandler,),
                    {"answer": answer})
@@ -3234,10 +3235,11 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
         with pytest.raises(provider_mod.BrokerRefused) as caught:
             port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
-    if resolver == "built-in":
+    if resolver != "none":
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None
         assert _locals_holding(caught.value, KEY_SENTINEL) == []
+        assert _locals_holding(caught.value, SENTINEL_TOKEN) == []
 
 
 def test_an_unpresentable_value_leaves_no_frame_that_holds_it(monkeypatch):
@@ -4217,6 +4219,96 @@ def test_where_an_exit_cannot_be_read_unreaped_no_group_is_signalled(
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(descendant, signal.SIGKILL)
+
+
+def _a_broker_that_leaves_a_helper(tmp_path, then: str) -> Path:
+    """A broker that starts a helper in its own process group, holding none
+    of its pipes, records the helper's pid beside itself, and then runs
+    `then`."""
+    script = tmp_path / "helper-leaving-broker.py"
+    script.write_text(
+        "import os, subprocess, sys\n"
+        "helper = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(20)'],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL)\n"
+        "open(sys.argv[0] + '.pid', 'w').write(str(helper.pid))\n" + then,
+        encoding="utf-8")
+    return script
+
+
+def _recording_killpg(monkeypatch) -> list:
+    """`os.killpg`, recording the state of each group's leader as it is
+    signalled (`_process_state`)."""
+    signalled: list = []
+    killpg = os.killpg
+
+    def recording(pgid, sig):
+        signalled.append(_process_state(pgid))
+        return killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", recording)
+    return signalled
+
+
+@pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
+def test_a_refused_answer_kills_what_is_left_of_the_brokers_group(
+        tmp_path, monkeypatch, operation):
+    """The holder's answer on openDox-code#64 (2026-10-02): EVERY refusal
+    kills what is left of the broker's group, a refusal of the answer of a
+    broker that exited 0 among them. Measured at `f8bc8aca`: such a broker,
+    leaving a helper in its group, was reaped as it answered, its answer
+    was refused after, and the helper went on running. Its answer is read
+    now while the broker is unreaped, and the group is signalled once,
+    while the broker is a zombie."""
+    signalled = _recording_killpg(monkeypatch)
+    answer = json.dumps({"schema_version": 1, "kind": "no-declared-kind",
+                         "token": SENTINEL_TOKEN})
+    script = _a_broker_that_leaves_a_helper(
+        tmp_path, f"sys.stdin.read()\nsys.stdout.write({answer!r})\n")
+    binding = _broker_binding(script)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        _OPERATIONS_ASKED[operation](binding,
+                                     provider_mod.subprocess_broker_runner)
+    helper = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
+    try:
+        refusal = caught.value
+        assert refusal.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+        assert refusal.operation == operation
+        assert refusal.__cause__ is None
+        assert refusal.__context__ is None
+        assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
+        assert signalled == ["Z"], \
+            "the group is signalled once, before the broker is reaped"
+        assert not _still_running(helper), "the helper was left running"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(helper, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
+def test_a_successful_answer_leaves_the_brokers_group_alone(
+        tmp_path, monkeypatch, operation):
+    """The other half of the holder's answer: a broker may leave a helper
+    running on purpose, so an answer that is read without a refusal
+    signals no group. The broker here starts a helper and then becomes the
+    fake broker, in the same process and the same group."""
+    signalled = _recording_killpg(monkeypatch)
+    broker = _write_broker(tmp_path)
+    script = _a_broker_that_leaves_a_helper(
+        tmp_path, f"os.execv(sys.executable, [sys.executable, "
+                  f"{str(broker)!r}, *sys.argv[1:]])\n")
+    binding = _broker_binding(script, credential_ref=FAKE_REFERENCE)
+    _OPERATIONS_ASKED[operation](binding,
+                                 provider_mod.subprocess_broker_runner)
+    helper = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
+    try:
+        assert signalled == [], "a successful answer signals no group"
+        assert _process_state(helper) not in (None, "Z"), \
+            "the helper still runs"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(helper, signal.SIGKILL)
 
 
 def test_a_refusal_waits_on_a_killed_broker_only_so_long(monkeypatch):

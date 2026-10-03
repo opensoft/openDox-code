@@ -571,12 +571,13 @@ def _close_quietly(stream) -> None:
         pass
 
 
-def _run_broker(argv, *, source,
-                timeout: float) -> tuple[str | None, str | None]:
+def _run_broker(argv, *, source, timeout: float,
+                read=None) -> tuple[object | None, str | None]:
     """The work of `subprocess_broker_runner`: `(answer, None)`, or
     `(None, sentence)` for a refusal. It raises no refusal itself, so no
     refusal keeps its frame, which holds the child and what the child
-    wrote.
+    wrote. Given `read`, the answer is `read`'s reading of it, made while
+    the broker is still unreaped (`_settled`).
 
     THE BOUND IS A BOUND ON WHAT IS READ (Copilot's review of
     openDox-code#64 at `25788f91`). At most one byte past
@@ -614,7 +615,8 @@ def _run_broker(argv, *, source,
         return None, DIAG_BROKER_UNREACHABLE
     received: list[bytes] = []
     try:
-        return _answer_of(child, received, source=source, timeout=timeout)
+        return _answer_of(child, received, source=source, timeout=timeout,
+                          read=read)
     except BaseException:
         # Anything else that escapes, such as the credential's own source
         # failing while it is copied (the operator's input, not the broker's
@@ -626,8 +628,8 @@ def _run_broker(argv, *, source,
         raise
 
 
-def _answer_of(child, received: list, *, source,
-               timeout: float) -> tuple[str | None, str | None]:
+def _answer_of(child, received: list, *, source, timeout: float,
+               read=None) -> tuple[object | None, str | None]:
     """`_run_broker`'s work once the child is running: the credential, if
     any, streamed to its standard input, and its answer read, within the
     bound and the timeout."""
@@ -680,11 +682,11 @@ def _answer_of(child, received: list, *, source,
                 if size > MAX_BROKER_ANSWER_BYTES:
                     _reap(child)
                     return None, DIAG_BROKER_OVERSIZE
-    return _settled(child, received, deadline)
+    return _settled(child, received, deadline, read=read)
 
 
-def _settled(child, received: list,
-             deadline: float) -> tuple[str | None, str | None]:
+def _settled(child, received: list, deadline: float,
+             read=None) -> tuple[object | None, str | None]:
     """The broker's answer once its output has ended. Its exit is read
     without reaping it, so a refusal can still kill what is left of its
     group (`_reap`). An answer is returned with the broker reaped.
@@ -692,7 +694,15 @@ def _settled(child, received: list,
     A REFUSAL KILLS WHAT IS LEFT OF THE GROUP, here as at the timeout and
     the bound. The broker has exited, but a descendant still in its group
     would outlive it, one more for each such call (Copilot's review of
-    openDox-code#64 at `a271d307`)."""
+    openDox-code#64 at `a271d307`).
+
+    EVERY REFUSAL DOES, a refused answer from a broker that exited 0 among
+    them (the holder's answer on openDox-code#64, 2026-10-02). So `read`,
+    when it is given, reads the answer here, while the broker is still
+    unreaped and its group's id still its own. A refusal of the answer
+    kills what is left of the group before the broker is reaped. A
+    successful answer leaves the group alone, since a broker may leave a
+    helper running on purpose."""
     returncode = _exit_status_unreaped(child, deadline)
     if returncode is None:
         _reap(child)
@@ -706,10 +716,23 @@ def _settled(child, received: list,
     except UnicodeDecodeError:
         _reap(child)
         return None, DIAG_BROKER_MALFORMED
+    answer = received.pop()
+    if read is not None:
+        try:
+            answer = read(answer)
+        except BrokerRefused as refusal:
+            failure = refusal.diagnostic
+        else:
+            failure = None
+        if failure is not None:
+            # What the broker wrote leaves this frame before the reap.
+            del answer
+            _reap(child)
+            return None, failure
     # It has exited, so this reaps it at once.
     child.wait()
     _close_quietly(child.stdout)
-    return received.pop(), None
+    return answer, None
 
 
 def _exit_status_unreaped(child, deadline: float) -> int | None:
@@ -860,16 +883,29 @@ def _broker_operation(binding, operation: str, read, *, runner, trust,
     `source` is given to the runner only when there is one, which is
     `intake`'s case. Every other operation reads no standard input.
 
+    THE SUBPROCESS RUNNER READS THE ANSWER BEFORE THE BROKER IS REAPED (the
+    holder's answer on openDox-code#64, 2026-10-02), so a refusal of the
+    answer kills what is left of the broker's group too (`_settled`). A
+    runner injected in its place, such as a test's, is given the argv alone
+    and its answer is read here, as before.
+
     NO BROKER RUNS FOR A BINDING THE TRUST VERDICT DOES NOT COVER (#1144
     16.3a; plan 034 T100; RULED openxFactory#656 comment 5962785556, item
     2). All four operations come through here, whichever runner was
     injected, so this is where every broker spawn asks: `trust` must be a
     `doxbench_trust.TrustVerdict` trusting exactly this binding, or the
-    binding is refused by name before its invocation is even assembled.
-    `doxbench_install` asks the policy first. This is the defence beneath
-    it."""
+    binding is refused by name before its invocation is even assembled,
+    and before either runner's branch below. `doxbench_install` asks the
+    policy first. This is the defence beneath it."""
     trust_mod.require_admitted(binding, trust)
     argv = broker_operation_argv(binding, operation, retry_of=retry_of)
+    if runner is subprocess_broker_runner:
+        result, failure = _run_broker(argv, source=source,
+                                      timeout=BROKER_TIMEOUT_SECONDS,
+                                      read=read)
+        if failure is None:
+            return result
+        raise BrokerRefused(failure, operation=operation)
     answer = None
     try:
         if source is None:
