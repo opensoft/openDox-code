@@ -476,21 +476,37 @@ def _die_with_parent():
     `prctl` is RESOLVED HERE, in the parent, so the forked child only calls
     it; and the child re-checks its parent afterwards, because a parent that
     died between the fork and the `prctl` would never deliver the signal.
+
+    ON LINUX THE SIGNAL IS ARMED OR THE SERVER IS NOT STARTED (Copilot review
+    of openDox-code#69). `ctypes` reports a failed `prctl` by its `-1`
+    return, never by raising (a seccomp filter that denies it, say), and
+    ignoring that left a server that outlives an entry point killed
+    outright. So a nonzero return raises in the child, which `subprocess`
+    raises in this process as `SubprocessError` (`_launch` names it), and a
+    Linux C library with no `prctl` at all is the same refusal here.
     """
     if not sys.platform.startswith("linux"):
         return None
     try:
         prctl = ctypes.CDLL(None, use_errno=True).prctl
     except (OSError, AttributeError):  # pragma: no cover - a libc without it
-        return None
+        raise BundleRefused(_UNARMED) from None
     parent = os.getpid()
 
     def _preexec() -> None:  # pragma: no cover - runs in the child
-        prctl(_PR_SET_PDEATHSIG, int(signal.SIGINT))
+        if prctl(_PR_SET_PDEATHSIG, int(signal.SIGINT)) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
         if os.getppid() != parent:
             os._exit(1)
 
     return _preexec
+
+
+#: The refusal when the parent-death signal cannot be armed on Linux.
+_UNARMED = ("the bundled PostgreSQL server could not be given its "
+            "parent-death signal (prctl PR_SET_PDEATHSIG failed), so it would "
+            "outlive an entry point killed outright (R1Q16 (iv)); it is not "
+            "started")
 
 
 #: The install's own two directories under its state directory, the socket's
@@ -1026,6 +1042,9 @@ class BundledServer:
                 # in order, after the document server has closed.
                 start_new_session=True,
                 preexec_fn=_die_with_parent())
+        except subprocess.SubprocessError:
+            # `_die_with_parent`'s child refused to run unarmed: nothing started
+            raise BundleRefused(_UNARMED) from None
         finally:
             log.close()
 

@@ -1180,6 +1180,33 @@ def test_a_launch_that_cannot_exec_is_the_named_refusal(
     assert server.process is None
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="PR_SET_PDEATHSIG is Linux's")
+def test_a_parent_death_signal_that_cannot_be_armed_starts_no_server(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    """`ctypes` reports a failed `prctl` by returning `-1` (a seccomp denial,
+    say), never by raising, and a server started anyway would outlive an
+    entry point killed outright (Copilot review of #69). The stand-in C
+    library's `prctl` fails; the launch is the named refusal, and no server
+    process exists."""
+    launched = tmp_path / "launched"
+
+    class _Libc:
+        @staticmethod
+        def prctl(*args):
+            return -1
+
+    monkeypatch.setattr(bundle_mod.ctypes, "CDLL", lambda *a, **k: _Libc())
+    server = _server(monkeypatch, tmp_path, short_state,
+                     initdb=f'{_target_of_initdb()}\necho 16 > "$T/PG_VERSION"',
+                     postgres=f'touch "{launched}"\nsleep 30')
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert "parent-death signal" in str(caught.value), caught.value
+    assert server.process is None
+    assert not launched.exists(), "the server ran without its parent-death signal"
+
+
 def test_directories_it_cannot_make_are_the_named_refusal(
         monkeypatch, tmp_path: Path, short_state: Path) -> None:
     if hasattr(os, "geteuid") and os.geteuid() == 0:        # pragma: no cover
