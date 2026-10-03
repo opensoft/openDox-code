@@ -9,7 +9,8 @@ reach an install. They ship as PACKAGE DATA, *"so `pip install openDox-code`
 puts them on disk beside the validator and the assembly root remains their
 source of truth for editing"*. So a code-leg checkout with no assembly root
 around it still has them, and so does an install. `opendox.validator` reads
-them from here, and T085's doxBench validators will read the same copies.
+them from here, and so do its doxBench validators
+(`opendox.validator.doxbench_validators`, the default T085 registers).
 
 WHAT IS HERE.
 
