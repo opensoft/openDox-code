@@ -62,6 +62,7 @@ from opendox import doxbench_bridge as br
 from opendox import doxbench_install as install_mod
 from opendox import doxbench_model
 from opendox import serve as serve_mod
+from opendox.runtime import config as runtime_config
 
 
 def _handler_class(httpd):
@@ -136,8 +137,18 @@ def entrypoint_server(tmp_path, monkeypatch):
 
     checkout = _checkout(tmp_path)
     session_root = tmp_path / "model-sessions"
+    # THE LOCAL INSTALL, SELECTED EXPLICITLY (plan 034 T070; #1144 13.4, as
+    # T007 batch H's addendum reads). With neither `--local` nor
+    # `OPENDOX_INSTALL_MODE=local` the install is HOSTED, and a hosted install
+    # with no issuer refuses (13.5) before `build_server` is ever reached. This
+    # fixture drives the single-user entrypoint a student runs, so it says so,
+    # and it scrubs every runtime setting first: a broker setting inherited
+    # from the shell would be refused beside the local mode, by design.
+    for name in runtime_config.SETTING_NAMES:
+        monkeypatch.delenv(name, raising=False)
     args = cli_mod.build_parser().parse_args([
         "generate-and-open",
+        runtime_config.LOCAL_FLAG,
         "--repo-root", str(checkout),
         "--repository", "fixture-repo",
         "--source-revision", PINNED_REVISION,
