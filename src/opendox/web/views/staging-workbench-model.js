@@ -409,7 +409,7 @@ export function doxbenchScopeProjection(snapshot, kind, id, options = {}) {
   // in context. Absent, which is every governed host, the projection is
   // byte-for-byte what it was.
   const byTile = options.editableBy === "tile";
-  const tileOwn = byTile ? tileOwnEditablePaths(snapshot, kind, id) : null;
+  const tileOwn = byTile ? tileOwnScope(snapshot, kind, id) : null;
 
   const contextPaths = [];
   const contextSeen = new Set();
@@ -421,8 +421,10 @@ export function doxbenchScopeProjection(snapshot, kind, id, options = {}) {
   };
   if (byTile) {
     // the neutral scope's context IS its own sections' resolved rows, which
-    // are exactly the editable set: a section it projects is the tile's own
-    for (const path of tileOwn) pushContext(path);
+    // are exactly the editable set, then the settings documents the tile
+    // names, readable in a trailing section nothing owns (M1)
+    for (const path of tileOwn.editable) pushContext(path);
+    for (const path of tileOwn.settings) pushContext(path);
   } else {
     for (const section of scope.sections || []) {
       for (const row of section.documents || []) {
@@ -444,7 +446,7 @@ export function doxbenchScopeProjection(snapshot, kind, id, options = {}) {
     outlinePath = asId(options.outlinePathFor(scope.outline)) || null;
   }
   const editablePaths = byTile
-    ? [...tileOwn]
+    ? [...tileOwn.editable]
     : rewritableDocuments(scope, options.createdDocuments || []);
   const editableSeen = new Set(editablePaths);
   // T104 F2, byte-for-byte the server's own rule (doxbench_scope._projection --
@@ -1543,6 +1545,18 @@ function scopeText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+// OPENDOX'S OWN SETTINGS DOCUMENTS (T084's adversarial review 2, M1), which
+// the server never lets a tile edit: `default_columns.SETTINGS_DOCUMENTS`,
+// the model-provider bindings (`doxbench_binding.DEFAULT_BINDINGS_RELPATH`)
+// and the model declarations (`doxbench_intake.DEFAULT_DECLARATIONS_RELPATH`).
+// A tile that names one keeps it READABLE, in a trailing section nothing owns,
+// and never editable. Spelled here because this module imports nothing from
+// the server; the parity test holds the two spellings equal.
+export const OWN_SETTINGS_DOCUMENTS = Object.freeze([
+  "ideation/dashboard/model-provider-bindings.yaml",
+  "ideation/dashboard/model-declarations.yaml",
+]);
+
 // THE TILE'S OWN DOCUMENTS, as openDox's neutral scope default answers them.
 //
 // This MIRRORS `opendox.default_columns.resolve_scope` and `editable_paths`,
@@ -1560,9 +1574,17 @@ function scopeText(value) {
 // is therefore offered here and refused there, by the server's own scope
 // refusal.
 export function tileOwnEditablePaths(snapshot, kind, id) {
+  return tileOwnScope(snapshot, kind, id).editable;
+}
+
+// The neutral projection's two path lists, as `resolve_scope` builds them:
+// `editable`, the tile's own documents; and `settings`, the resolved settings
+// documents the tile names, which trail the context and are never editable.
+function tileOwnScope(snapshot, kind, id) {
+  const none = { editable: [], settings: [] };
   const s = snapshot || {};
   const wanted = asId(id);
-  if (!wanted) return [];
+  if (!wanted) return none;
   const known = new Set();
   for (const d of Array.isArray(s.documents) ? s.documents : []) {
     const path = scopeText(d && d.path);
@@ -1578,35 +1600,37 @@ export function tileOwnEditablePaths(snapshot, kind, id) {
     .map((edge) => (edge && typeof edge === "object" ? edge.document : undefined));
   let refs = null;
   if (kind === SCOPE_KINDS.grouping) {
-    if (!groups.has(wanted)) return [];
+    if (!groups.has(wanted)) return none;
     refs = members(groups.get(wanted));
   } else if (kind === SCOPE_KINDS.selection) {
     const selection = (Array.isArray(s.staged_topics) ? s.staged_topics : [])
       .find((t) => scopeText(t && t.staging_id) === wanted);
-    if (!selection) return [];
+    if (!selection) return none;
     refs = Array.isArray(selection.files) ? selection.files : [];
   } else if (kind === SCOPE_KINDS.candidate) {
     const candidate = (Array.isArray(s.possibles) ? s.possibles : [])
       .find((p) => scopeText(p && p.id) === wanted);
-    if (!candidate) return [];
+    if (!candidate) return none;
     refs = [];
     for (const groupId of Array.isArray(candidate.claiming_clusters)
       ? candidate.claiming_clusters : []) {
       refs.push(...members(groups.get(scopeText(groupId)) || {}));
     }
   } else {
-    return [];
+    return none;
   }
-  const out = [];
+  const editable = [];
+  const settings = [];
   const seen = new Set();
   for (const raw of refs) {
     const path = canonicalScopePath(raw);
-    if (path === null) return [];   // the server refuses the whole tile
+    if (path === null) return none;   // the server refuses the whole tile
     if (seen.has(path)) continue;
     seen.add(path);
-    if (known.has(path)) out.push(path);
+    if (!known.has(path)) continue;
+    (OWN_SETTINGS_DOCUMENTS.includes(path) ? settings : editable).push(path);
   }
-  return out;
+  return { editable, settings };
 }
 
 // THE ONE ANSWER TO "MAY THIS SURFACE EDIT, AND BY WHOSE AUTHORITY". Pure:

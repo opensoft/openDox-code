@@ -63,6 +63,10 @@ VENDOR = WEB / "vendor"
 #   p2     a candidate that only cites: nothing of its own to edit
 #   p3     a candidate claimed by a group that does not exist
 #   s1     a selection naming one catalogued file and one that is not
+#   g4     a group naming openDox's own settings documents (T084's M1): the
+#          catalogued one stays readable and is never editable
+BINDINGS = "ideation/dashboard/model-provider-bindings.yaml"
+DECLARATIONS = "ideation/dashboard/model-declarations.yaml"
 SNAPSHOT = {
     "repository": "fixture",
     "generation": {"source_revision": "1" * 40},
@@ -70,7 +74,8 @@ SNAPSHOT = {
         {"id": p, "path": p, "topics": ["barrel"]}
         for p in ("a.md", "b.md", "c.md", "sel.md", "cited.md", "both.md")
     ] + [{"id": "decl.md", "path": "decl.md", "topics": ["barrel"],
-          "destinations": {"staged_topics": ["s1"]}}],
+          "destinations": {"staged_topics": ["s1"]}},
+         {"id": BINDINGS, "path": BINDINGS, "topics": []}],
     "clusters": [
         {"id": "g1", "name": "Group one", "topics": ["barrel"],
          "document_edges": [{"document": "a.md"}, {"document": "b.md"}]},
@@ -80,6 +85,9 @@ SNAPSHOT = {
         {"id": "g3", "name": "Group three", "topics": [], "document_edges": []},
         {"id": "gbad", "name": "Group bad", "topics": [],
          "document_edges": [{"document": "a.md"}, {"document": "../escape.md"}]},
+        {"id": "g4", "name": "Group four", "topics": [],
+         "document_edges": [{"document": BINDINGS}, {"document": "a.md"},
+                            {"document": DECLARATIONS}]},
     ],
     "possibles": [
         {"id": "p1", "title": "Candidate one",
@@ -96,11 +104,12 @@ SNAPSHOT = {
 
 # Every file the scope resolves inside the checkout. `gone.md` is listed by g2
 # and catalogued by nothing, so it is neither here nor in `documents`.
-ON_DISK = ("a.md", "b.md", "c.md", "sel.md", "cited.md", "both.md", "decl.md")
+ON_DISK = ("a.md", "b.md", "c.md", "sel.md", "cited.md", "both.md", "decl.md",
+           BINDINGS, DECLARATIONS)
 
 PARITY_TILES = [
     ("cluster", "g1"), ("cluster", "g2"), ("cluster", "g3"),
-    ("cluster", "gbad"), ("cluster", "nope"),
+    ("cluster", "gbad"), ("cluster", "g4"), ("cluster", "nope"),
     ("possible", "p1"), ("possible", "p2"), ("possible", "p3"),
     ("possible", "nope"),
     ("staged", "s1"), ("staged", "nope"),
@@ -206,9 +215,16 @@ out.entries = {
     .map((e) => ({ path: e.path, keys: Object.keys(e).sort() })),
 };
 out.parity = {};
+out.parityProjection = {};
 for (const [kind, id] of JSON.parse(process.argv[3] || '[]')) {
   out.parity[kind + '/' + id] = m.tileOwnEditablePaths(SNAP, kind, id);
+  const p = m.doxbenchScopeProjection(SNAP, kind, id, { repository: 'fixture',
+    ref: 'main', outlinePathFor: () => null, editableBy: 'tile' });
+  out.parityProjection[kind + '/' + id] = p && {
+    context: p.context_paths, editable: p.editable_paths,
+    candidates: p.active_document_candidates };
 }
+out.settingsDocuments = m.OWN_SETTINGS_DOCUMENTS;
 console.log(JSON.stringify(out));
 """
 
@@ -370,6 +386,7 @@ def test_each_docs_tile_says_whether_it_is_the_tiles_own(model) -> None:
 @pytest.fixture()
 def corpus(tmp_path):
     for name in ON_DISK:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text("# x\n", encoding="utf-8")
     ps.register_defaults()          # the registry seam's containment rule
     return tmp_path
@@ -386,10 +403,28 @@ def test_the_browser_set_is_the_servers_set(model, corpus, kind, tile) -> None:
     try:
         projection = dc.resolve_scope(SNAPSHOT, key, source_root=corpus)
     except ScopeConfinementError:
-        server = ()
+        projection, refused = None, True
     else:
-        server = () if projection is None else projection.editable_paths
+        refused = False
+    server = () if projection is None else projection.editable_paths
     assert tuple(model["parity"][f"{kind}/{tile}"]) == tuple(server)
+    # …and the projection the canvas mounts over, list for list: what is in
+    # context (the settings documents trail it, readable), what is editable,
+    # and what the turn guard would accept
+    browser = model["parityProjection"][f"{kind}/{tile}"]
+    if projection is None:
+        assert browser is None or (refused and browser == {
+            "context": [], "editable": [], "candidates": []}), browser
+    else:
+        assert browser == {
+            "context": list(projection.context_paths),
+            "editable": list(projection.editable_paths),
+            "candidates": list(projection.active_document_candidates)}
+
+
+def test_the_settings_documents_are_spelled_as_the_server_spells_them(model) -> None:
+    assert set(model["settingsDocuments"]) == set(dc.SETTINGS_DOCUMENTS)
+    assert len(model["settingsDocuments"]) == len(dc.SETTINGS_DOCUMENTS)
 
 
 def test_the_parity_fixture_reaches_every_branch(model, corpus) -> None:
@@ -401,6 +436,9 @@ def test_the_parity_fixture_reaches_every_branch(model, corpus) -> None:
     assert parity["possible/p1"] == ["a.md", "b.md", "c.md", "both.md"]
     assert parity["staged/s1"] == ["sel.md"]
     assert parity["cluster/gbad"] == [], "one unnameable path refuses the tile"
+    # T084's M1: the catalogued settings document is readable, never editable
+    assert parity["cluster/g4"] == ["a.md"]
+    assert model["parityProjection"]["cluster/g4"]["context"] == ["a.md", BINDINGS]
     with pytest.raises(ScopeConfinementError):
         dc.resolve_scope(SNAPSHOT, ScopeKey(repository="fixture", ref="main",
                                             tile_kind="cluster", tile_id="gbad"),
