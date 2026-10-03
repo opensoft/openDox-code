@@ -46,6 +46,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import types
@@ -1397,24 +1398,52 @@ def test_generate_and_open_refuses_an_empty_source_option_before_its_run_dir(
     first, as the doxBench entrypoint fixture does: an exported
     `OPENDOX_INSTALL_MODE=hosted` or broker issuer would otherwise make
     `--local` refuse before the empty option is reached (Copilot review of
-    openDox-code#67)."""
-    from opendox.runtime.config import SETTING_NAMES
+    openDox-code#67). And the refusal comes before the local install's
+    bundled server (plan 034 T072): a refused option costs no database
+    start. A tripwire stands in for the server, so a regression neither
+    starts one nor passes."""
+    from opendox.runtime.config import PREFIX, SETTING_NAMES
 
     for name in SETTING_NAMES:
         monkeypatch.delenv(name, raising=False)
+    # Its own short state directory, so the configuration never reads the
+    # runner's state home, whose default may be too long for a Unix socket
+    # (13.1) and refused before the option is reached. The tripwire below
+    # means nothing is made in it.
+    state = Path(tempfile.mkdtemp(prefix="odx-e-",
+                                  dir="/tmp" if os.path.isdir("/tmp") else None))
+    monkeypatch.setenv(PREFIX + "STATE_DIR", str(state))
+    started: list = []
+
+    class _Tripwire:
+        def __init__(self, settings) -> None:
+            started.append(settings)
+
+        def start(self):
+            raise AssertionError("the bundled server was started for a "
+                                 "refused source option")
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli.bundle_mod, "BundledServer", _Tripwire)
     calls: list = []
     _declaring_generator(calls)
     repo = _repository(tmp_path)
     run_dir = tmp_path / "run"
     # `--local`: the single-user install. Since plan 034 T070 an unflagged run
     # is HOSTED, and its issuer refusal would come first.
-    rc = cli.main(["generate-and-open", "--local", "--repo-root", str(repo),
-                   "--repository", "garden", "--run-dir", str(run_dir),
-                   "--no-open", "--no-serve", "--possibles", ""])
+    try:
+        rc = cli.main(["generate-and-open", "--local", "--repo-root", str(repo),
+                       "--repository", "garden", "--run-dir", str(run_dir),
+                       "--no-open", "--no-serve", "--possibles", ""])
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
     assert rc == 1
     assert ("generate-and-open refused: --possibles was given an empty path"
             in capsys.readouterr().err)
     assert calls == [] and not run_dir.exists()
+    assert started == [], "a bundled server was built for a refused option"
 
 
 def test_a_root_openDoxs_predicate_refuses_is_refused_with_its_message(tmp_path, capsys) -> None:
