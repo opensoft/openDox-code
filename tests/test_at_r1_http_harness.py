@@ -429,8 +429,12 @@ def test_the_opener_t104_writes_delivers_its_token(tmp_path: Path) -> None:
     _opener_page(FORWARD, delay="0; "),
     _opener_page(FORWARD).replace(f"url={FORWARD}",
                                   f"url=\'{FORWARD}\' trailing"),
+    # the console page at `/` as well as `/index.html`
+    _opener_page(f"http://127.0.0.1:{PORT}/#console_token={TOKEN}"),
+    _opener_page(f"http://127.0.0.1:{PORT}#console_token={TOKEN}"),
 ], ids=["spaced-upper-URL", "quoted", "escaped-ampersand", "comma-spaced",
-        "fractional", "no-url-keyword", "quote-truncates"])
+        "fractional", "no-url-keyword", "quote-truncates", "root-page",
+        "empty-path"])
 def test_the_opener_is_read_as_a_browser_reads_its_refresh(
         tmp_path: Path, page: str) -> None:
     state, opener = _opener(tmp_path, page)
@@ -584,12 +588,18 @@ def test_a_hard_linked_opener_is_a_named_failure(tmp_path: Path) -> None:
                  "token.with.dots.0123456789"),
     _opener_page(f"http://127.0.0.1:{PORT}/index.html#console_token="
                  "token%2Bplus%2B0123456789"),
+    # a page of this plane that is not the console, its record agreeing
+    # (Copilot review of #75 at 486e426e, previously missed)
+    _opener_page(f"http://127.0.0.1:{PORT}/missing.html#console_token={TOKEN}"),
+    _opener_page(f"http://127.0.0.1:{PORT}/snapshot.json#console_token={TOKEN}"),
+    _opener_page(f"http://127.0.0.1:{PORT}//index.html#console_token={TOKEN}"),
 ], ids=["query", "query-and-fragment", "path", "other-port", "off-loopback",
         "https", "no-token", "empty-token", "two-tokens", "two-forwards",
         "no-forward", "backslash", "userinfo-token", "userinfo-password",
         "tab", "space", "malformed-host", "port-out-of-range",
         "delay-word", "delay-negative", "delay-empty", "delay-absent",
-        "token-short", "token-oversized", "token-dots", "token-plus"])
+        "token-short", "token-oversized", "token-dots", "token-plus",
+        "page-missing", "page-snapshot", "page-double-slash"])
 def test_a_forward_that_leaks_or_misses_the_token_is_a_named_failure(
         tmp_path: Path, page: str) -> None:
     state, opener = _opener(tmp_path, page)

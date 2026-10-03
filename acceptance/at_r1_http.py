@@ -218,6 +218,9 @@ CONSOLE_RECORD_KIND = "opendox-console-access"
 CONSOLE_RECORD_SCHEMA_VERSION = 1
 OPENER_MODE = 0o600
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+#: The paths that serve the console page, `/` and the `/index.html` T104's
+#: entry points open (`serve_mod.server_url(httpd, "/index.html")`).
+CONSOLE_PAGES = ("/", "/index.html")
 
 #: The model-catalog route (`app.js` `CATALOG_ROUTE`), which the derived list
 #: must also name, so this constant cannot drift from the bundle unseen.
@@ -1427,6 +1430,16 @@ def token_in_fragment(targets: list[str | None],
     if (parts.scheme != "http" or parts.hostname not in LOOPBACK_HOSTS
             or target_port != port):
         return None, elsewhere
+    # THE CONSOLE PAGE, and no other page of this plane: a forward to
+    # `/missing.html` or `/snapshot.json` opens no console, though every
+    # later check asks `/` and the catalog itself (Copilot review of
+    # openDox-code#75 at 486e426e, previously missed).
+    # (An empty path is `/` to a browser, as the URL standard reads it.)
+    if (parts.path or "/") not in CONSOLE_PAGES:
+        return None, (f"the opener's forward opens a page other than the "
+                      f"console ({' or '.join(CONSOLE_PAGES)}) of this plane "
+                      "(the path is not quoted, because it may hold the "
+                      "token)")
     if CONSOLE_FRAGMENT_KEY in urllib.parse.parse_qs(parts.query,
                                                      keep_blank_values=True):
         return None, ("the opener's forward carries the token in its QUERY, "
