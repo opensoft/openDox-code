@@ -261,9 +261,12 @@ def test_a_standalone_turn_over_the_tiles_own_document_is_answered(
         base = (match.group(2), int(match.group(3)))
         status, caps, raw = _call(base, "GET", "/capabilities")
         assert status == 200 and caps["actions"]["session"] is True, raw
+        # a standalone plane delivers its token in the opened URL, through
+        # its private copy, and never on `/capabilities` (plan 034 T104)
+        assert "console_token" not in caps, caps
         status, body, raw = _call(base, "POST", "/actions/workbench/chat-turn",
                                   body=_turn(repo, OWN),
-                                  token=caps["console_token"])
+                                  token=child.console_token(base[1]))
         # past the validators, the guard and identity, answered by the model
         # step: never `turn_scope_refused`, never a dropped connection
         assert body.get("error") == DOXBENCH_ERR_MODEL_UNAVAILABLE, (status, raw)

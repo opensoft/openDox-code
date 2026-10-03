@@ -418,7 +418,10 @@ def standalone(tmp_path, monkeypatch):
         base = (match.group(2), int(match.group(3)))
         status, capabilities = _request(base, "GET", "/capabilities")
         assert status == 200 and capabilities["actions"]["session"] is True
-        yield base, capabilities["console_token"], child
+        # a standalone plane delivers its token through the private copy, and
+        # never on `/capabilities` (plan 034 T104)
+        assert "console_token" not in capabilities, sorted(capabilities)
+        yield base, child.console_token(base[1]), child
         assert child.interrupt() == 0, child.stderr_text()
         assert child.refused() == [], child.refused()
         assert "Traceback" not in child.stderr_text(), child.stderr_text()
