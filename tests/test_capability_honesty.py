@@ -515,6 +515,56 @@ def test_the_rails_thread_read_answers_a_standalone_server(
     assert child.refused() == [], child.refused()
 
 
+def test_an_unknown_tile_kind_on_the_thread_read_is_refused_not_dropped(
+        tmp_path, monkeypatch) -> None:
+    """Adversarial review 2, L1: `ScopeKey` refuses a `tile_kind` outside
+    its closed vocabulary with a `ValueError`, which escaped the thread read
+    and dropped the connection. It is a malformed query, answered so."""
+    from opendox.serve_wire import DOXBENCH_ERR_INVALID_TURN_REQUEST
+    _clean_environment(monkeypatch)
+    repo = _repository(tmp_path, identity=True)
+    child, base, caps = _standalone(tmp_path, repo)
+    try:
+        status, body, raw = _call(
+            base, "GET",
+            "/workbench/thread?repository=fixture&ref=main&tile_kind=bogus"
+            "&tile_id=barrel-rain&document=notes-rain-barrel-leak.md",
+            # a standalone plane's token, from its private copy (T104)
+            token=child.console_token(base[1]))
+        assert body.get("error") == DOXBENCH_ERR_INVALID_TURN_REQUEST, (status, raw)
+        assert child.interrupt() == 0, child.stderr_text()
+    finally:
+        child.kill()
+    assert child.refused() == [], child.refused()
+
+
+def test_an_unknown_tile_kind_on_the_abstract_is_refused_not_dropped(
+        composed_turns) -> None:
+    """L1 on the document abstract, past step 1 (a host contributing the gate
+    routes, so `gate` reads true)."""
+    from opendox.serve_wire import DOXBENCH_ERR_INVALID_ABSTRACT_REQUEST
+    base, caps = composed_turns(_gate())
+    status, body, raw = _call(
+        base, "POST", "/actions/workbench/document-abstract",
+        body=_json({**_ABSTRACT, "scope": {**_SCOPE, "tile_kind": "bogus"}}),
+        token=caps["console_token"])
+    assert body.get("error") == DOXBENCH_ERR_INVALID_ABSTRACT_REQUEST, (status, raw)
+
+
+def test_an_unknown_tile_kind_on_the_chat_turn_is_refused_not_dropped(
+        composed_turns) -> None:
+    """L1 on the chat turn, where validators that admit the shape carry it to
+    the scope step: refused in the released envelope."""
+    from opendox.serve_wire import DOXBENCH_ERR_INVALID_TURN_REQUEST
+    base, caps = composed_turns()
+    turn = _chat_turn()
+    turn["scope"] = {**_SCOPE, "tile_kind": "bogus"}
+    status, body, raw = _call(base, "POST", "/actions/workbench/chat-turn",
+                              body=_json(turn), token=caps["console_token"])
+    assert body.get("error") == DOXBENCH_ERR_INVALID_TURN_REQUEST, (status, raw)
+    assert body.get("client_turn_id") == "honesty-turn-1", body
+
+
 #: The binding `opendox model-binding add` declares for the cases below, as
 #: `tests/test_model_provider_broker.py` declares its own. Nothing is spawned
 #: and nothing is contacted: no case dispatches a turn.

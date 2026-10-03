@@ -22,7 +22,8 @@ Five layers, each proving a different thing about the same machinery:
       UNCONFIGURED posture is byte-for-byte what it was before this change.
 
 A SIXTH LAYER, (f), holds #1144 Group 16's binding and provider boxes (plan
-034 phase 3, slice P3-B). 16.1 is the OpenAI-compatible dialect (T078).
+034 phase 3, slice P3-B). 16.1 is the OpenAI-compatible dialect (T078), and
+16.2 is the model name the provider receives (T079).
 
 THE FAKE BROKER SPEAKS THE DECLARED CONTRACT (task 2.6). It was this
 repository's own invented stdin/stdout protocol until the reconciliation, which
@@ -120,8 +121,9 @@ def test_the_binding_declares_exactly_the_fields_the_seam_needs():
     "secret", "api_key", "token", "credential", "value", "password"])
 def test_no_secret_field_exists_in_the_shape_to_populate(secret_field):
     """NOT OPTIONAL — ABSENT. The dataclass is slotted and frozen, so a secret
-    cannot be passed in and cannot be attached afterwards. Nine fields now
-    rather than five, and the absence of a tenth is the same claim."""
+    cannot be passed in and cannot be attached afterwards. Ten fields now
+    rather than five (#1144 box 16.2 added `model`), and the absence of an
+    eleventh is the same claim."""
     with pytest.raises(TypeError):
         _binding(**{secret_field: SENTINEL_CREDENTIAL})
     binding = _binding()
@@ -388,8 +390,12 @@ def test_a_hosted_install_with_a_bindings_document_still_serves(tmp_path,
     monkeypatch.setattr(builtins, "__import__", poisoned)
     monkeypatch.delitem(sys.modules, "yaml", raising=False)
 
+    # The harness is PRESENT here (plan 034 T081): with it absent, a document
+    # read as declaring nothing resolves the no-model port instead, which
+    # tests/test_chat_model_configuration.py holds.
     resolve = install_mod.declared_model_port_factory(
-        tmp_path / "sessions", checkout_root=checkout)
+        tmp_path / "sessions", checkout_root=checkout,
+        harness_present=lambda: True)
     from opendox import doxbench_bridge as bridge_mod
     assert isinstance(resolve(), bridge_mod.OmpHarnessBridge)
     assert "bindings document could not be read" in capsys.readouterr().err
@@ -874,9 +880,11 @@ def _expired_error():
 
 
 def _port(tmp_path, *outcomes, expires=None, notice=None, clock=time.time,
-          endpoint=ENDPOINT, dialect=binding_mod.DIALECT_XFACTORY_PROMPT_V1):
+          endpoint=ENDPOINT, dialect=binding_mod.DIALECT_XFACTORY_PROMPT_V1,
+          model=None):
     script = _write_broker(tmp_path, expires=expires)
-    binding = _broker_binding(script, endpoint=endpoint, dialect=dialect)
+    binding = _broker_binding(script, endpoint=endpoint, dialect=dialect,
+                              model=model)
     opener = _Opener(*outcomes)
     port = provider_mod.BrokeredProviderPort(
         binding, install_mod.brokered_catalog(binding),
@@ -1167,11 +1175,14 @@ def test_the_port_satisfies_the_seam_without_growing_a_fourth_verb(tmp_path):
 def test_a_checkout_with_no_bindings_resolves_exactly_the_harness_declaration(
         tmp_path):
     """TASK 3.3. Not "a port of the same kind" — the SAME construction the
-    entrypoints have always made."""
+    entrypoints have always made, WHERE THE HARNESS IS INSTALLED (plan 034
+    T081, #1144's 16.4). With it absent, there is no model, and
+    tests/test_chat_model_configuration.py holds that state."""
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     resolve = install_mod.declared_model_port_factory(
-        tmp_path / "sessions", checkout_root=checkout)
+        tmp_path / "sessions", checkout_root=checkout,
+        harness_present=lambda: True)
     port = resolve()
     from opendox import doxbench_bridge as bridge_mod
     assert isinstance(port, bridge_mod.OmpHarnessBridge)
@@ -1199,8 +1210,10 @@ def test_an_unreadable_bindings_document_falls_back_and_says_so(tmp_path,
     path.parent.mkdir(parents=True)
     path.write_text("schema_version: 9\nkind: something-else\n",
                     encoding="utf-8")
+    # The harness is PRESENT here (plan 034 T081), as in the case above.
     resolve = install_mod.declared_model_port_factory(
-        tmp_path / "sessions", checkout_root=checkout)
+        tmp_path / "sessions", checkout_root=checkout,
+        harness_present=lambda: True)
     from opendox import doxbench_bridge as bridge_mod
     assert isinstance(resolve(), bridge_mod.OmpHarnessBridge)
     assert "bindings document could not be read" in capsys.readouterr().err
@@ -1582,3 +1595,197 @@ def test_the_cli_declares_a_chat_binding(tmp_path, capsys):
     capsys.readouterr()
     store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
     assert store.get("local-chat").dialect == OPENAI_CHAT
+
+
+# 16.2, the model name the provider receives (T079). The record gains `model`,
+# sent as the request's model and set by `model-binding add|edit --model`. The
+# field list grows from nine to ten, and still no field can hold a secret. A
+# binding that declares no model sends the catalog handle, its `id`, exactly as
+# every request did before the field existed.
+
+DECLARED_MODEL = "stand-in-model-7b"
+
+
+def test_f16_1_the_record_names_a_model():
+    """F16.1's field assertion, as #1144 writes it:
+    `assert "model" in b.BINDING_FIELDS`. Ten fields, in their declared order,
+    with `model` beside the route it belongs to."""
+    assert "model" in binding_mod.BINDING_FIELDS, (
+        f"the record names no model: {binding_mod.BINDING_FIELDS}")
+    assert binding_mod.BINDING_FIELDS == (
+        "id", "label", "provider", "credential_ref", "auth_kind",
+        "approved_by", "endpoint", "dialect", "model", "broker_argv")
+    assert binding_mod.OPTIONAL_BINDING_FIELDS == ("model",)
+
+
+def test_the_model_is_keyword_only_and_undeclared_by_default():
+    """Every construction written before the field existed builds the
+    binding it built, which declares no model."""
+    import inspect
+    parameter = inspect.signature(
+        binding_mod.ModelProviderBinding).parameters["model"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is None
+    assert _binding().model is None
+    assert _binding(model=DECLARED_MODEL).model == DECLARED_MODEL
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 7, ["a-model"]])
+def test_a_declared_model_is_non_blank_text(bad):
+    with pytest.raises(binding_mod.BindingRefused):
+        _binding(model=bad)
+
+
+@pytest.mark.parametrize("dialect,answer,grammar_key", [
+    (binding_mod.DIALECT_XFACTORY_PROMPT_V1, {"assistant_prose": "a"}, "prompt"),
+    (OPENAI_CHAT, _chat_completion("a"), "messages"),
+])
+def test_the_declared_model_is_what_the_provider_receives(tmp_path, dialect,
+                                                         answer, grammar_key):
+    port, opener = _port(tmp_path, answer, dialect=dialect,
+                         model=DECLARED_MODEL)
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    body = json.loads(opener.requests[0].data.decode("utf-8"))
+    assert body["model"] == DECLARED_MODEL
+    assert set(body) == {"model", grammar_key}
+
+
+@pytest.mark.parametrize("dialect,answer", [
+    (binding_mod.DIALECT_XFACTORY_PROMPT_V1, {"assistant_prose": "a"}),
+    (OPENAI_CHAT, _chat_completion("a")),
+])
+def test_a_binding_with_no_model_still_sends_the_catalog_handle(tmp_path,
+                                                                dialect,
+                                                                answer):
+    """What every request sent before #1144 box 16.2, byte for byte."""
+    port, opener = _port(tmp_path, answer, dialect=dialect)
+    port.dispatch(_Envelope())
+    assert json.loads(opener.requests[0].data.decode("utf-8"))["model"] == \
+        "openprofiler-demo"
+
+
+def test_the_catalog_handle_stays_the_bindings_id(tmp_path):
+    """The model is what the PROVIDER receives. The menu's handle is still the
+    binding's id, so a chosen entry still resolves back to its binding."""
+    binding = _binding(model=DECLARED_MODEL)
+    entries = install_mod.brokered_catalog(binding).entries
+    assert [entry.model_id for entry in entries] == [binding.id]
+
+
+def test_a_declared_model_survives_the_expiry_retry(tmp_path):
+    port, opener = _port(tmp_path, _expired_error(), _chat_completion("b"),
+                         dialect=OPENAI_CHAT, model=DECLARED_MODEL)
+    assert port.dispatch(_Envelope())["assistant_prose"] == "b"
+    assert [json.loads(request.data.decode("utf-8"))["model"]
+            for request in opener.requests] == [DECLARED_MODEL] * 2
+
+
+def test_the_model_is_not_an_argv_placeholder():
+    """A broker's invocation is about custody, never about the model a turn
+    asks for, so the closed placeholder vocabulary does not grow."""
+    assert "model" not in binding_mod.ARGV_PLACEHOLDERS
+    with pytest.raises(binding_mod.BindingRefused):
+        _binding(model=DECLARED_MODEL,
+                 broker_argv=("openprofiler-broker", "--for", "{model}"))
+
+
+def test_a_stored_record_carries_its_model_and_round_trips(tmp_path):
+    store = _store(tmp_path)
+    store.add(_binding(model=DECLARED_MODEL))
+    store.add(_binding(id="undeclared", label="No model"))
+    import yaml
+    document = yaml.safe_load(store.path.read_text(encoding="utf-8"))
+    first, second = document["bindings"]
+    assert list(first) == ["kind", *binding_mod.BINDING_FIELDS]
+    assert first["model"] == DECLARED_MODEL
+    assert second["model"] is None, "an undeclared model is written as null"
+    assert store.get("openprofiler-demo").model == DECLARED_MODEL
+    assert store.get("undeclared").model is None
+    assert store.read_back()["bindings"][0]["model"] == DECLARED_MODEL
+
+
+def test_a_record_declared_before_the_field_existed_still_reads(tmp_path):
+    """A nine-field record, as every stored document held until #1144 box
+    16.2, reads as a binding that declares no model."""
+    record = _binding().as_record()
+    del record["model"]
+    assert set(record) == {"kind", *binding_mod.BINDING_FIELDS} - {"model"}
+    path = tmp_path / "bindings.yaml"
+    path.write_text(json.dumps({"schema_version": 1,
+                                "kind": binding_mod.BINDINGS_KIND,
+                                "bindings": [record]}), encoding="utf-8")
+    (binding,) = binding_mod.BindingStore(path).list()
+    assert binding.model is None
+    assert binding == _binding()
+
+
+def test_a_record_missing_a_required_field_still_refuses():
+    """`model` is the one field a record may leave out, and only that one."""
+    for field in binding_mod.BINDING_FIELDS:
+        if field in binding_mod.OPTIONAL_BINDING_FIELDS:
+            continue
+        record = _binding().as_record()
+        del record[field]
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            binding_mod.ModelProviderBinding.from_record(record)
+        assert field in str(caught.value)
+
+
+def test_the_cli_sets_the_model_on_add_and_edit(tmp_path, capsys):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    parser = cli_mod.build_parser()
+
+    def run(*argv) -> int:
+        args = parser.parse_args(list(argv))
+        return args.func(args)
+
+    root = ["--repo-root", str(checkout)]
+    declaration = ["--id", "local-chat", "--label", "Local chat",
+                   "--provider", "local", "--credential-ref", FAKE_REFERENCE,
+                   "--auth-kind", "api_key",
+                   "--credential-approver", "brett@opensoft.one",
+                   "--endpoint", "http://127.0.0.1:9/v1/chat/completions",
+                   "--dialect", OPENAI_CHAT]
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+
+    assert run("model-binding", "add", *root, *declaration,
+               "--model", DECLARED_MODEL, "--", "openprofiler-broker") == 0
+    capsys.readouterr()
+    assert store.get("local-chat").model == DECLARED_MODEL
+    assert run("model-binding", "list", *root) == 0
+    assert f"model            {DECLARED_MODEL}" in capsys.readouterr().out
+
+    assert run("model-binding", "edit", *root, *declaration,
+               "--model", "another-model", "--", "openprofiler-broker") == 0
+    capsys.readouterr()
+    assert store.get("local-chat").model == "another-model"
+
+    # `edit` replaces the whole binding, so an edit without `--model` declares
+    # none, and the list says what the request then names
+    assert run("model-binding", "edit", *root, *declaration,
+               "--", "openprofiler-broker") == 0
+    capsys.readouterr()
+    assert store.get("local-chat").model is None
+    assert run("model-binding", "list", *root) == 0
+    from opendox import cli_model_binding as cmb
+    assert cmb.NO_MODEL_DECLARED in capsys.readouterr().out
+
+    # a blank model refuses THROUGH THE VERB, not only through the record
+    assert run("model-binding", "edit", *root, *declaration,
+               "--model", " ", "--", "openprofiler-broker") == 1
+    capsys.readouterr()
+    assert store.get("local-chat").model is None
+
+
+def test_a_stand_in_chat_server_receives_the_declared_model(tmp_path):
+    with _stand_in_provider(_ChatCompletionsHandler) as base:
+        binding = _broker_binding(
+            _write_broker(tmp_path), endpoint=f"{base}/v1/chat/completions",
+            dialect=OPENAI_CHAT, model=DECLARED_MODEL)
+        provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            notice=lambda _text: None).dispatch(_Envelope())
+    assert _ChatCompletionsHandler.seen["body"] == {
+        "model": DECLARED_MODEL,
+        "messages": [{"role": "user", "content": "assembled prompt"}]}

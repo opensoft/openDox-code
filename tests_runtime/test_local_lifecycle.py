@@ -711,6 +711,30 @@ def test_parent_traversal_in_the_state_path_is_refused(variable: str) -> None:
 # -- the two refusal classes, each with its own reason --------------------------
 
 
+@pytest.mark.parametrize("setting, own, other", [
+    ("RUNTIME_PG_ROLE", config.BUNDLE_SERVED_ROLE, "pg_read_all_data"),
+    ("SERVED_DATABASE", config.BUNDLE_DATABASE, "postgres"),
+])
+@pytest.mark.parametrize("loader", ["load_settings", "load_migration_settings"])
+def test_a_served_identity_other_than_the_bundles_is_refused(
+        setting: str, own: str, other: str, loader: str) -> None:
+    """`OPENDOX_RUNTIME_PG_ROLE` names the role the migration run narrows on
+    the ledger, and a local install's served DSN connects as the bundle's own
+    (Copilot review of #69). Another role, `pg_read_all_data` say, left
+    `opendox_runtime` able to rewrite `opendox_schema_migrations`. So under
+    `local` each of the two identity settings may name only the bundle's
+    own, and the bundle's own name is accepted, as before."""
+    name = config.PREFIX + setting
+    load = getattr(config, loader)
+    base = {MODE: "local", STATE: "/tmp/odx-identity"}
+    with pytest.raises(config.ConfigurationError) as caught:
+        load({**base, name: other})
+    assert name in str(caught.value) and repr(own) in str(caught.value), caught.value
+    settings = load({**base, name: own})
+    assert (settings.runtime_pg_role if setting == "RUNTIME_PG_ROLE"
+            else settings.served_database) == own
+
+
 def test_a_dsn_beside_local_is_refused_for_the_database_not_a_broker() -> None:
     with pytest.raises(config.ConfigurationError) as caught:
         config.load_settings({MODE: "local",
@@ -1059,6 +1083,59 @@ def test_a_local_verb_connects_only_behind_a_verified_server(
         assert reason is not None and expected in reason, reason
 
 
+@pytest.mark.parametrize("lacking", ["O_NOFOLLOW", "getuid", "AF_UNIX", "dir_fd"])
+def test_a_platform_without_the_posix_primitives_is_the_named_refusal(
+        monkeypatch, tmp_path: Path, short_state: Path, lacking: str) -> None:
+    """The bundle rests on POSIX primitives, and the carrier ships Windows
+    wheels too (Copilot review of #69). Lacking any one, a start and the
+    local verbs' socket check both name the gap, never an `AttributeError`."""
+    import socket as socket_mod
+
+    if lacking == "AF_UNIX":
+        monkeypatch.delattr(socket_mod, "AF_UNIX")
+    elif lacking == "dir_fd":
+        monkeypatch.setattr(bundle_mod, "MKDIR_TAKES_DIR_FD", False)
+    else:
+        monkeypatch.delattr(bundle_mod.os, lacking)
+    expected = {"dir_fd": "mkdir with dir_fd", "AF_UNIX": "socket.AF_UNIX"}.get(
+        lacking, f"os.{lacking}")
+    server = _prepared(monkeypatch, tmp_path, short_state)
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert "needs a POSIX platform" in str(caught.value), caught.value
+    assert expected in str(caught.value), caught.value
+    assert not (short_state / "postgres").exists(), "made directories first"
+    reason = bundle_mod.refusal_before_connecting(config.DatabaseBundle(short_state))
+    assert reason is not None and expected in reason, reason
+
+
+def test_a_symlink_loop_in_the_state_path_is_a_reason_not_a_traceback(
+        tmp_path: Path, short_state: Path) -> None:
+    """`Path.resolve()` raises for a symbolic-link loop (`RuntimeError` on
+    Python 3.12), and the local verbs' socket check must still answer with
+    a reason (Copilot review of #69)."""
+    loop = short_state / "loop"
+    loop.symlink_to(loop)
+    reason = bundle_mod.refusal_before_connecting(
+        config.DatabaseBundle(loop / "state"))
+    assert reason is not None, reason
+    assert "could not be judged" in reason or "symbolic link" in reason, reason
+
+
+def test_status_reports_no_pid_behind_a_tree_it_refuses(
+        monkeypatch, short_state: Path) -> None:
+    """A pid is reported only behind a verified tree (Copilot review of
+    #69): `running_pid` alone would answer for whatever `postgres/data` is,
+    another live bundle's included."""
+    bundle = _a_tree(short_state)
+    monkeypatch.setattr(bundle_mod, "running_pid", lambda b: 4242)
+    monkeypatch.setattr(bundle_mod, "refusal_before_connecting",
+                        lambda b: "refused, for the case")
+    assert bundle_mod.report(bundle)["pid"] is None
+    monkeypatch.setattr(bundle_mod, "refusal_before_connecting", lambda b: None)
+    assert bundle_mod.report(bundle)["pid"] == 4242
+
+
 def test_an_initdb_that_dies_midway_leaves_no_data_directory(
         monkeypatch, tmp_path: Path, short_state: Path) -> None:
     """The half-built cluster: `PG_VERSION` written, then the run fails. The
@@ -1125,6 +1202,33 @@ def test_a_launch_that_cannot_exec_is_the_named_refusal(
         server.start()
     assert "launching it: FileNotFoundError" in str(caught.value), caught.value
     assert server.process is None
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="PR_SET_PDEATHSIG is Linux's")
+def test_a_parent_death_signal_that_cannot_be_armed_starts_no_server(
+        monkeypatch, tmp_path: Path, short_state: Path) -> None:
+    """`ctypes` reports a failed `prctl` by returning `-1` (a seccomp denial,
+    say), never by raising, and a server started anyway would outlive an
+    entry point killed outright (Copilot review of #69). The stand-in C
+    library's `prctl` fails; the launch is the named refusal, and no server
+    process exists."""
+    launched = tmp_path / "launched"
+
+    class _Libc:
+        @staticmethod
+        def prctl(*args):
+            return -1
+
+    monkeypatch.setattr(bundle_mod.ctypes, "CDLL", lambda *a, **k: _Libc())
+    server = _server(monkeypatch, tmp_path, short_state,
+                     initdb=f'{_target_of_initdb()}\necho 16 > "$T/PG_VERSION"',
+                     postgres=f'touch "{launched}"\nsleep 30')
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert "parent-death signal" in str(caught.value), caught.value
+    assert server.process is None
+    assert not launched.exists(), "the server ran without its parent-death signal"
 
 
 def test_directories_it_cannot_make_are_the_named_refusal(

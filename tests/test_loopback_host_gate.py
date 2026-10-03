@@ -30,7 +30,9 @@ where the socket is bound to `::1`. The refusal is one fixed status and body
    one. A large refused body is drained, so the refusal arrives whole.
 3. The table across every route class of a REAL standalone
    `python -m opendox.cli generate-and-open --local` serve, a child with
-   neither sibling importable, with no identity and with one.
+   neither sibling importable, with no identity and with one. And an IPv6
+   loopback bind (`--host ::1`), in process and as that real child: it binds,
+   prints a bracketed URL, and accepts `[::1]:<port>` as its own authority.
 4. The browser path still works: every file the bundle ships, the JSON routes
    and a console request carrying the token and the page's own `Origin`, under
    both `Host` spellings a browser sends.
@@ -399,11 +401,16 @@ def in_process(corpora, monkeypatch):
         worker = threading.Thread(target=httpd.serve_forever, daemon=True)
         worker.start()
         servers.append((httpd, worker))
-        base = ("127.0.0.1", httpd.server_address[1])
+        ipv6 = ":" in host
+        base = ("::1" if ipv6 else "127.0.0.1", httpd.server_address[1])
+        own = f"[::1]:{base[1]}" if ipv6 else f"127.0.0.1:{base[1]}"
         status, _headers, payload, _raw_response = _raw(
-            base, "GET", "/capabilities", (f"127.0.0.1:{base[1]}",))
+            base, "GET", "/capabilities", (own,))
         assert status == 200, (status, payload[:200])
+        build.urls.append(serve.server_url(httpd, "/index.html"))
         return base, json.loads(payload)
+
+    build.urls = []
 
     try:
         yield build
@@ -507,18 +514,107 @@ def test_every_route_class_refuses_a_foreign_host_on_a_real_local_serve(
 
 
 # ---------------------------------------------------------------------------
+# 3a — an IPv6 loopback bind: `[::1]` is its authority, and only there
+# ---------------------------------------------------------------------------
+
+def ipv6_bind_tables(port: int):
+    """The table as an `::1` bind reads it: `[::1]:<port>` joins the accepted
+    rows, and the one refused row it answers is replaced by its other-port
+    form."""
+    accepted = accepted_hosts(port) + [("ipv6-literal", (f"[::1]:{port}",))]
+    refused = [row for row in refused_hosts(port)
+               if row[0] != "ipv6-loopback-on-an-ipv4-bind"]
+    refused.append(("ipv6-other-port", (f"[::1]:{_other_port(port)}",)))
+    return accepted, refused
+
+
+def test_an_ipv6_loopback_bind_serves_and_gates_in_process(in_process) -> None:
+    """`host="::1"` binds (it used to fail with `gaierror`: the standard
+    server class is `AF_INET` only), announces a bracketed URL, and answers
+    the table on every route class (Copilot at openDox-code#80,
+    r4171161548)."""
+    base, caps = in_process(identity=False, host="::1")
+    assert "console_token" not in caps
+    assert in_process.urls[-1] == f"http://[::1]:{base[1]}/index.html"
+    accepted, refused = ipv6_bind_tables(base[1])
+    violations = table_violations(base, route_classes(contributed=True),
+                                  accepted=accepted, refused=refused)
+    assert violations == [], "\n".join(violations)
+
+
+def test_a_real_local_serve_binds_ipv6_loopback(tmp_path, monkeypatch) -> None:
+    """`generate-and-open --local --host ::1`, which the local install's
+    `LOCAL_BIND_HOSTS` admits, starts and prints `http://[::1]:<port>/`
+    instead of ending in a traceback, and its every route class answers the
+    `::1` table."""
+    _clean_environment(monkeypatch)
+    repo = fresh_repository(PLAIN, tmp_path)
+    child = Child(tmp_path, "opendox.cli", "generate-and-open", "--local",
+                  "--repo-root", str(repo), "--repository", "fixture",
+                  "--no-open", "--port", "0", "--host", "::1",
+                  "--run-dir", str(tmp_path / "run"))
+    try:
+        match = child.wait_for_line(
+            re.compile(r"^http://\[::1\]:([0-9]+)/index\.html$"))
+        base = ("::1", int(match.group(1)))
+        accepted, refused = ipv6_bind_tables(base[1])
+        violations = table_violations(base, route_classes(contributed=False),
+                                      accepted=accepted, refused=refused)
+        assert violations == [], "\n".join(violations)
+        assert child.interrupt() == 0, child.stderr_text()
+    finally:
+        child.kill()
+    assert child.refused() == [], child.refused()
+    assert not child.state_dir.exists(), "the child's state dir outlived it"
+
+
+@pytest.mark.parametrize("bound,announced", [
+    (("127.0.0.1", 8123), "http://127.0.0.1:8123/index.html"),
+    (("0.0.0.0", 8123), "http://127.0.0.1:8123/index.html"),
+    (("", 8123), "http://127.0.0.1:8123/index.html"),
+    (("::1", 8123, 0, 0), "http://[::1]:8123/index.html"),
+    (("::", 8123, 0, 0), "http://[::1]:8123/index.html"),
+])
+def test_server_url_announces_each_bind_at_its_own_familys_loopback(
+        bound, announced) -> None:
+    """An IPv6 literal is bracketed, and a wildcard bind is announced at its
+    own family's loopback: an `AF_INET6` socket can be IPv6-only, so `::`
+    printed as `127.0.0.1` could name nothing that answers (Copilot at
+    openDox-code#80, r4173481146)."""
+    class _Bound:
+        server_address = bound
+
+    assert serve.server_url(_Bound(), "/index.html") == announced
+
+
+def test_an_ipv6_wildcard_bind_answers_at_the_url_it_announces(
+        in_process) -> None:
+    """`host="::"` is a hosted plane (not `LOOPBACK_HOSTS`), so no loopback
+    gate applies; what this holds is that the URL it prints answers."""
+    base, caps = in_process(identity=False, host="::")
+    url = in_process.urls[-1]
+    assert url == f"http://[::1]:{base[1]}/index.html", url
+    assert caps["actions"]["intent"] is True
+    status, _headers, payload, _response = _raw(
+        ("::1", base[1]), "GET", "/index.html", (f"[::1]:{base[1]}",))
+    assert status == 200 and b"<html" in payload.lower()
+
+
+# ---------------------------------------------------------------------------
 # 4 — the browser path still works
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("spelling", ["127.0.0.1", "localhost"])
-def test_the_browser_path_still_works(in_process, spelling) -> None:
+@pytest.mark.parametrize("bind,spelling", [
+    ("127.0.0.1", "127.0.0.1"), ("127.0.0.1", "localhost"), ("::1", "::1")])
+def test_the_browser_path_still_works(in_process, bind, spelling) -> None:
     """What a browser opened at `http://<spelling>:<port>/` sends: `http.client`
     writes `Host` from the address it connects to, exactly as a browser writes
-    it from the URL. Every file the bundle ships answers 200, the JSON routes
-    answer, and a console request with the token and the page's own `Origin`
-    reaches its route rather than the gate."""
-    base, _caps = in_process(identity=True)
+    it from the URL (bracketing an IPv6 literal). Every file the bundle ships
+    answers 200, the JSON routes answer, and a console request with the token
+    and the page's own `Origin` reaches its route rather than the gate."""
+    base, _caps = in_process(identity=True, host=bind)
     connect = (spelling, base[1])
+    authority = f"[{spelling}]" if ":" in spelling else spelling
 
     def get(path, headers=None):
         connection = http.client.HTTPConnection(*connect, timeout=30)
@@ -547,7 +643,7 @@ def test_the_browser_path_still_works(in_process, spelling) -> None:
     assert status == 200 and payload == (PLAIN / DOCUMENT).read_bytes()
     status, payload = get(serve.WORKBENCH_MODEL_CATALOG_ROUTE, {
         serve.CONSOLE_TOKEN_HEADER: token,
-        "Origin": f"http://{spelling}:{base[1]}"})
+        "Origin": f"http://{authority}:{base[1]}"})
     assert payload != serve.FOREIGN_HOST_BODY
     assert status == 200, payload[:300]
 

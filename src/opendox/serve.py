@@ -106,6 +106,7 @@ import functools
 import http.server
 import json
 import secrets
+import socket
 import subprocess
 import sys
 import urllib.parse
@@ -2436,7 +2437,7 @@ def build_server(
     # trace on the first live connection.
     route_extension.resolve_handlers(route_bindings, bound)
     factory = functools.partial(bound, directory=str(web_dir))
-    httpd = http.server.ThreadingHTTPServer((host, port), factory)
+    httpd = _server_class_for(host)((host, port), factory)
     # FOR THE ENTRY POINT, which delivers the token where `/capabilities` does
     # not (`console_access.publish`): the token, and which delivery this plane
     # uses. Both `None` where no token was minted.
@@ -2448,10 +2449,44 @@ def build_server(
     return httpd
 
 
+class _IPv6ThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    """`ThreadingHTTPServer` over `AF_INET6`, for a bind to an IPv6 literal
+    (plan 034 T103; Copilot at openDox-code#80, r4171161548).
+
+    The standard class is `AF_INET` only, so `host="::1"`, which
+    `LOOPBACK_HOSTS` and the local install's `LOCAL_BIND_HOSTS` both name,
+    failed at the bind with `gaierror`, and `generate-and-open --local --host
+    ::1` ended in a traceback. The loopback Host gate accepts `[::1]:<port>`
+    exactly where the socket is bound to `::1`, so the bind it names has to
+    be one this module can make."""
+
+    address_family = socket.AF_INET6
+
+
+def _server_class_for(host: str) -> type[http.server.ThreadingHTTPServer]:
+    """The server class a bind to `host` takes: `AF_INET6` for an IPv6
+    literal (the one spelling of a host that contains a colon), and the
+    standard `AF_INET` class for everything else, exactly as before."""
+    return (_IPv6ThreadingHTTPServer if ":" in str(host)
+            else http.server.ThreadingHTTPServer)
+
+
 def server_url(httpd: http.server.ThreadingHTTPServer, path: str = "/") -> str:
     host, port = httpd.server_address[:2]
-    if host in ("0.0.0.0", "", "::"):
+    # A WILDCARD BIND IS ANNOUNCED AT ITS OWN FAMILY'S LOOPBACK (Copilot at
+    # openDox-code#80, r4173481146). Since T103's fix round 1 `::` binds an
+    # `AF_INET6` socket, which is IPv6-only on some platforms, so announcing
+    # it at `127.0.0.1` could print a URL nothing answers. `::` is `::1`;
+    # the IPv4 wildcard stays `127.0.0.1`.
+    if host == "::":
+        host = "::1"
+    elif host in ("0.0.0.0", ""):
         host = "127.0.0.1"
+    # AN IPv6 LITERAL IS BRACKETED in a URL (RFC 3986 § 3.2.2): `::1` is
+    # `http://[::1]:<port>/`, and `[::1]:<port>` is also the `Host` a browser
+    # then sends, which the loopback gate accepts on that bind (T103).
+    if ":" in str(host):
+        host = f"[{host}]"
     # plain-HTTP by design (S5332): a loopback-only local dev server — TLS adds
     # nothing on 127.0.0.1; the scheme is composed so no insecure-URL literal
     # exists for a copy-paste into non-loopback code.
@@ -2611,6 +2646,18 @@ def _refuse_impossible_checkout_root(value: Path | str) -> int:
     return 0
 
 
+#: THE SERVER ENTRY POINT'S OWN NAME AND WORDS (plan 034 T084, with
+#: `cli.PROG`; adversarial review 2). `python -m opendox.serve --help` printed
+#: `usage: ideation-dashboard-serve` and this module's docstring, which is
+#: openxFactory's pre-carve history. It names how it is run and openDox only.
+SERVE_PROG = "python -m opendox.serve"
+SERVE_DESCRIPTION = (
+    "Serve an openDox snapshot locally: the browser bundle, the snapshot and "
+    "the read-only source of the checkout it was generated from, on a "
+    "loopback address. `opendox generate-and-open` generates a snapshot and "
+    "serves it in one command.")
+
+
 def main(argv: list[str] | None = None) -> int:
     # The process entry point registers openDox's own default where no host has
     # (R1Q3 (a)), exactly where a host would register its own. Nothing is BUILT
@@ -2636,8 +2683,8 @@ def main(argv: list[str] | None = None) -> int:
     # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
     # the cross-reference register, the same way.
     column_seams.register_defaults()
-    parser = argparse.ArgumentParser(prog="ideation-dashboard-serve", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(prog=SERVE_PROG,
+                                     description=SERVE_DESCRIPTION)
     parser.add_argument("--web-dir", default=str(Path(__file__).resolve().parent / "web"),
                         help="static bundle directory (default: the packaged web/)")
     parser.add_argument("--snapshot", required=True,

@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import signal
 import sys
 import tempfile
@@ -791,16 +792,39 @@ def _install_report(args: argparse.Namespace):
     return report
 
 
+#: The prefix of the temporary run directory `generate-and-open` mints when
+#: no `--run-dir` is given: the installed command's own name (plan 034 T084,
+#: adversarial review 2, G7), not openxFactory's pre-carve one.
+RUN_DIR_PREFIX = "opendox-"
+
+
 def _generate_and_open(args: argparse.Namespace, *, opener) -> int:
-    """`generate-and-open`'s generate-then-serve half, once the install is known."""
+    """`generate-and-open`'s generate-then-serve half, once the install is known.
+
+    A RUN DIRECTORY THIS PROCESS MINTED IS REMOVED WHEN IT IS DONE WITH IT
+    (plan 034 T084, adversarial review 2, G7): when the server stops, on a
+    `--no-serve` run, on a refusal and on a failure. It used to be left under
+    the system's temporary directory on every run. A `--run-dir` the caller
+    names is the caller's, and is left exactly as this run wrote it."""
     # Ahead of minting the run dir, so a refused root leaves not even an empty
     # temp directory behind. `_generate_and_write` is still the guard that MATTERS
     # (it is the one no caller can skip); these are the same checks, earlier.
     _refuse_non_corpus_repo_root(args)
     _refuse_malformed_generated_at(args)
     _refuse_empty_source_options(args)
-    run_dir = Path(args.run_dir).resolve() if args.run_dir else Path(
-        tempfile.mkdtemp(prefix="ideation-dashboard-"))
+    if args.run_dir:
+        return _generate_and_serve(args, Path(args.run_dir).resolve(),
+                                   opener=opener)
+    minted = Path(tempfile.mkdtemp(prefix=RUN_DIR_PREFIX))
+    try:
+        return _generate_and_serve(args, minted, opener=opener)
+    finally:
+        shutil.rmtree(minted, ignore_errors=True)
+
+
+def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
+                        opener) -> int:
+    """Generate into `run_dir`, serve it, and stop, for `_generate_and_open`."""
     run_dir.mkdir(parents=True, exist_ok=True)
     output = run_dir / "snapshot.json"
 
@@ -989,9 +1013,14 @@ def _commission_cli(verb: str, args: argparse.Namespace, target: str,
     engine, same guards. The CLI adds nothing of its own except the printing —
     which is exactly what makes the two surfaces equivalent."""
     repo_root = Path(args.repo_root).resolve()
-    console = gate_mod.GateConsole(_human_gate(repo_root, args),
-                                   records_dir=args.records_dir)
+    human = _human_gate(repo_root, args)
     try:
+        # INSIDE the refusal boundary (plan 034 T084): openDox's own gate
+        # default refuses the governed `GateConsole` at construction
+        # (`GateRecordsNotRegistered`, a `GateRefused`), so a contributed gate
+        # verb that reaches it with no host's gate registered answers
+        # "<verb> refused: ..." rather than a traceback.
+        console = gate_mod.GateConsole(human, records_dir=args.records_dir)
         res = getattr(console, verb.replace("-", "_"))(
             target, outline=args.outline, workflow=args.workflow,
             note=args.note, provenance=cli_provenance(), **engine_kwargs)

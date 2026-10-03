@@ -50,7 +50,14 @@ def _declared_binding(args: argparse.Namespace) -> "binding_mod.ModelProviderBin
         id=args.id, label=args.label, provider=args.provider,
         credential_ref=args.credential_ref, auth_kind=args.auth_kind,
         approved_by=args.approved_by, endpoint=args.endpoint,
-        dialect=args.dialect, broker_argv=tuple(args.broker_argv))
+        dialect=args.dialect, model=args.model,
+        broker_argv=tuple(args.broker_argv))
+
+
+#: What `list` prints for a binding that declares no model (#1144 box 16.2).
+#: The request then names the binding's id, as every request did before the
+#: field existed, and the operator reading the list should see that.
+NO_MODEL_DECLARED = "(none declared: the request names this binding's id)"
 
 
 def cmd_model_binding_list(args: argparse.Namespace) -> int:
@@ -77,6 +84,9 @@ def cmd_model_binding_list(args: argparse.Namespace) -> int:
         print(f"    credential ref   {record['credential_ref']}")
         print(f"    endpoint         {record['endpoint']}")
         print(f"    dialect          {record['dialect']}")
+        model = record["model"]
+        print(f"    model            "
+              f"{model if model is not None else NO_MODEL_DECLARED}")
         print(f"    broker argv      {record['broker_argv']}")
         print(f"    custody          {record['credential_custody']}")
     return 0
@@ -203,6 +213,15 @@ def _add_binding_declaration_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dialect", required=True,
                         choices=list(binding_mod.DIALECTS),
                         help="the request grammar that endpoint speaks")
+    # THE MODEL THE PROVIDER RECEIVES (#1144 box 16.2), the route's third fact.
+    # OPTIONAL, and that keeps a binding declared without it meaning what it
+    # always meant: the request names the binding's id. `edit` replaces the
+    # whole binding, as it always has, so an edit that omits `--model` declares
+    # none.
+    parser.add_argument("--model", default=None,
+                        help="the model name the provider receives in each "
+                             "request (default: none declared, and the "
+                             "request names this binding's id)")
     # A POSITIONAL, taken after a bare `--`, and that is the fix for a real
     # trap rather than a style choice: a broker invocation is full of
     # option-shaped members (`--binding`, `--ref`), and as a flag's value they
