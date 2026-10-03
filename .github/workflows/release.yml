@@ -776,12 +776,21 @@ jobs:
       # `pip install --index-url https://test.pypi.org/simple/
       # --extra-index-url https://pypi.org/simple/ "opendox[local]"`. The
       # requirement is the install line as written, unversioned. The step adds
-      # this package's lock for the dependencies and wheels only, and then
-      # requires the installed opendox to be the version just uploaded, so an
-      # index that lags, or an older release, cannot pass for it. The simple
-      # index can lag the JSON API, so each try is a fresh venv, up to ten
-      # tries, 30 seconds apart, and each try is cut off after 300 seconds,
-      # so the job's budget holds.
+      # this package's lock for the dependencies, wheels only (so no package's
+      # code runs at install time), and `--report`. The simple index can lag
+      # the JSON API, so each try is a fresh venv, up to ten tries, 30 seconds
+      # apart, and each try is cut off after 300 seconds, so the job's budget
+      # holds.
+      #
+      # THE INSTALLED opendox IS THE VERIFIED WHEEL, proven before anything
+      # from it runs. pip merges candidates from both indexes, and `opendox`
+      # is not reserved on PyPI before its first release, so the line could
+      # resolve an `opendox` PyPI serves. This job's own Python, never the
+      # venv's, reads pip's report: the `opendox` installed must come from
+      # TestPyPI's file host, at VERSION, with the sha256 of the wheel the
+      # build job verified. An `opendox` from any other host, or at VERSION
+      # or above with another digest, refuses at once; an older one (an index
+      # that lags) is tried again. Only then does `opendox --help` run.
       #
       # THE TRADE, stated: with two indexes, pip may take a dependency from
       # either. The lock pins every dependency's version, and this job holds no
@@ -793,19 +802,60 @@ jobs:
         run: |
           installed=0
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            rm -rf "$RUNNER_TEMP/fresh"
+            rm -rf "$RUNNER_TEMP/fresh" "$RUNNER_TEMP/report.json"
             python -m venv "$RUNNER_TEMP/fresh"
             if timeout 300 "$RUNNER_TEMP/fresh/bin/python" -m pip install --disable-pip-version-check \
                 --no-cache-dir --only-binary :all: -c constraints-cpython312-linux.txt \
+                --report "$RUNNER_TEMP/report.json" \
                 --index-url https://test.pypi.org/simple/ \
                 --extra-index-url https://pypi.org/simple/ \
                 "opendox[local]"; then
-              got="$("$RUNNER_TEMP/fresh/bin/python" -c 'import importlib.metadata; print(importlib.metadata.version("opendox"))')"
-              if [ "$got" = "$VERSION" ]; then
+              verdict=0
+              python3 - "$RUNNER_TEMP/report.json" <<'PY' || verdict=$?
+          # 0: the verified TestPyPI wheel; 1: an older opendox, try again;
+          # 2: anything else, which refuses at once.
+          import json, os, sys, urllib.parse
+          from pip._vendor.packaging.utils import canonicalize_name
+          from pip._vendor.packaging.version import InvalidVersion, Version
+
+          version, wheel_sha256 = os.environ["VERSION"], os.environ["WHEEL_SHA256"]
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              report = json.load(handle)
+          items = [item for item in report.get("install", [])
+                   if canonicalize_name(item["metadata"]["name"]) == "opendox"]
+          if len(items) != 1:
+              print(f"::error::pip's report names {len(items)} opendox distributions, not one")
+              sys.exit(2)
+          item = items[0]
+          got = item["metadata"]["version"]
+          info = item.get("download_info") or {}
+          host = urllib.parse.urlsplit(info.get("url", "")).hostname
+          digest = ((info.get("archive_info") or {}).get("hashes") or {}).get("sha256")
+          try:
+              newer = Version(got) >= Version(version)
+          except InvalidVersion:
+              newer = True
+          if host == "test-files.pythonhosted.org" and got == version and digest == wheel_sha256:
+              print(f"opendox {got} is the verified wheel, from {host}, sha256 {digest}")
+              sys.exit(0)
+          if host == "test-files.pythonhosted.org" and not newer:
+              print(f"TestPyPI resolved opendox {got} so far, not {version}")
+              sys.exit(1)
+          if host != "test-files.pythonhosted.org" and not newer:
+              print(f"opendox {got} came from {host}, older than {version}; TestPyPI lags")
+              sys.exit(1)
+          print(f"::error::the install line installed opendox {got} from {host}, sha256 "
+                f"{digest}, which is not the verified wheel (opendox {version}, sha256 "
+                f"{wheel_sha256}, from TestPyPI); nothing from it is run")
+          sys.exit(2)
+          PY
+              if [ "$verdict" = 0 ]; then
                 installed=1
                 break
               fi
-              echo "attempt $attempt: the install line resolved opendox $got, not $VERSION"
+              if [ "$verdict" != 1 ]; then
+                exit 1
+              fi
             fi
             echo "attempt $attempt: opendox $VERSION is not installed yet; retrying in 30 seconds"
             sleep 30

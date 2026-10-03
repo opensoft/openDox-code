@@ -772,3 +772,76 @@ def test_the_preflight(index: str, case: str, tmp_path: Path) -> None:
     else:
         assert result.returncode != 0, result.stdout
         assert refusal in result.stdout + result.stderr, result.stdout + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# The dry run installs the verified TestPyPI wheel, proven before it runs
+# (Copilot's review of openDox-code#78: with PyPI as the extra index, the
+# unversioned line could resolve an `opendox` that PyPI serves).
+
+INSTALL_STEP = "install opendox[local] from TestPyPI into a fresh venv, and run it"
+
+
+def _verdict_script() -> str:
+    run = _step("testpypi-install", INSTALL_STEP)["run"]
+    found = re.search(r"python3 - \"\$RUNNER_TEMP/report\.json\" <<'PY' \|\| verdict=\$\?\n(.*?)\nPY\n", run, re.S)
+    assert found, run
+    return found.group(1)
+
+
+def test_the_install_line_is_the_falsifiers_and_reports_what_it_installed() -> None:
+    run = _step("testpypi-install", INSTALL_STEP)["run"]
+    install = run[run.index("-m pip install"):run.index('"opendox[local]"') + len('"opendox[local]"')]
+    for part in ("--index-url https://test.pypi.org/simple/", "--extra-index-url https://pypi.org/simple/",
+                 "--only-binary :all:", '--report "$RUNNER_TEMP/report.json"'):
+        assert part in install, part
+    assert '"opendox[local]"' in install and "opendox[local]==" not in run
+    # Nothing from the venv runs but pip, until the report has been read by
+    # this job's own Python; `opendox --help` comes after the verdict.
+    venv_calls = re.findall(r'"\$RUNNER_TEMP/fresh/bin/[^"]+"[^\n]*', run)
+    assert [call.split('"')[1] for call in venv_calls] == [
+        "$RUNNER_TEMP/fresh/bin/python", "$RUNNER_TEMP/fresh/bin/opendox"], venv_calls
+    assert venv_calls[0].startswith('"$RUNNER_TEMP/fresh/bin/python" -m pip install')
+    assert run.index("<<'PY' || verdict=$?") < run.index('"$RUNNER_TEMP/fresh/bin/opendox" --help')
+
+
+def _report(*items: tuple[str, str, str, str]) -> dict:
+    return {"version": "1", "install": [
+        {"metadata": {"name": name, "version": version},
+         "download_info": {"url": f"https://{host}/packages/aa/bb/{name}-{version}-py3-none-any.whl",
+                           "archive_info": {"hash": f"sha256={digest}", "hashes": {"sha256": digest}}}}
+        for name, version, host, digest in items]}
+
+
+TEST_FILES, PYPI_FILES = "test-files.pythonhosted.org", "files.pythonhosted.org"
+VERDICT_CASES = {
+    "the verified TestPyPI wheel": ([("opendox", "0.1.0", TEST_FILES, "a" * 64),
+                                     ("pyyaml", "6.0.2", PYPI_FILES, "e" * 64)], 0, "is the verified wheel"),
+    "an opendox PyPI serves, at the version": ([("opendox", "0.1.0", PYPI_FILES, "f" * 64)], 2,
+                                               "which is not the verified wheel"),
+    "an opendox PyPI serves, above the version": ([("opendox", "9.9.9", PYPI_FILES, "f" * 64)], 2,
+                                                  "which is not the verified wheel"),
+    "the verified digest, served from PyPI": ([("opendox", "0.1.0", PYPI_FILES, "a" * 64)], 2,
+                                              "which is not the verified wheel"),
+    "an older opendox from PyPI": ([("opendox", "0.0.9", PYPI_FILES, "f" * 64)], 1, "TestPyPI lags"),
+    "an older opendox from TestPyPI": ([("opendox", "0.0.9", TEST_FILES, "f" * 64)], 1, "so far"),
+    "TestPyPI's wheel at another digest": ([("opendox", "0.1.0", TEST_FILES, "c" * 64)], 2,
+                                           "which is not the verified wheel"),
+    "a newer opendox from TestPyPI": ([("opendox", "0.2.0", TEST_FILES, "c" * 64)], 2,
+                                      "which is not the verified wheel"),
+    "no opendox at all": ([("pyyaml", "6.0.2", PYPI_FILES, "e" * 64)], 2, "names 0 opendox"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(VERDICT_CASES))
+def test_the_install_verdict(case: str, tmp_path: Path) -> None:
+    pytest.importorskip("pip._vendor.packaging.version")
+    items, code, said = VERDICT_CASES[case]
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps(_report(*items)), encoding="utf-8")
+    result = subprocess.run((sys.executable, "-", str(report)), input=_verdict_script(),
+                            capture_output=True, text=True,
+                            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
+                                 "VERSION": "0.1.0", "WHEEL_SHA256": "a" * 64})
+    assert result.returncode == code, result.stdout + result.stderr
+    assert said in result.stdout, result.stdout + result.stderr
