@@ -1336,13 +1336,17 @@ const catalogOf = (models) => () => (models === null ? null
 async function mount(catalog, { intake = null } = {}) {
   const host = new Node("div"); host.ownerDocument = doc;
   let turns = 0;
+  let release;
+  const gate = new Promise((res) => { release = res; });
   const rail = mountDoxBenchChatRail(host, {
     scopeKey: KEY,
-    transports: { catalog: async () => catalog(),
+    transports: { catalog: async () => { await gate; return catalog(); },
                   chatTurn: async () => { turns += 1; return null; } },
     editorState });
-  await rail.ready;
+  // a host offering intake offers it before the catalog answers
   if (intake !== null) rail.intakeOffer(intake);
+  release();
+  await rail.ready;
   const shownBy = (cls) => {
     const line = byClass(host, cls)[0] || null;
     return (line && !line.hidden) ? line.textContent : null;
