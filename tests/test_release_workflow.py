@@ -686,21 +686,33 @@ def _seconds(text: str, pattern: str) -> int:
 
 def test_each_job_timeout_covers_the_retries_it_promises() -> None:
     """A job cut off by its timeout would break a promised retry (Copilot's
-    review of openDox-code#78), so each budget is recomputed from the steps."""
+    review of openDox-code#78). Every bound is read from the workflow: each
+    step of the jobs after the build declares its own timeout, each job's
+    timeout covers the sum of its steps', and each retrying step's timeout
+    covers the retries its script promises. So an upload can never take the
+    time the JSON check after it is owed."""
     jobs = _workflow()["jobs"]
-    check = _step(*INDEX_STEPS["TestPyPI"])
-    per_read = _seconds(check["run"], r"urlopen\(url, timeout=(\d+)\)")
-    reads, pause = int(check["env"]["READS"]), int(check["env"]["PAUSE"])
-    json_budget = reads * (per_read + pause)
-    install = _step("testpypi-install", "install opendox[local] from TestPyPI into a fresh venv, and run it")["run"]
-    tries = len(re.search(r"for attempt in ((?:\d+ ?)+); do", install).group(1).split())
-    per_try = _seconds(install, r"timeout (\d+) \"\$RUNNER_TEMP/fresh/bin/python\" -m pip install")
-    wait = _seconds(install, r"sleep (\d+)")
-    setup = 5 * 60
-    assert jobs["testpypi-install"]["timeout-minutes"] * 60 >= (
-        json_budget + tries * (per_try + wait) + setup)
-    upload = 10 * 60
-    assert jobs["pypi"]["timeout-minutes"] * 60 >= upload + json_budget + setup
+    for job in ("testpypi", "testpypi-install", "pypi"):
+        steps = jobs[job]["steps"]
+        bounds = [step.get("timeout-minutes") for step in steps]
+        assert all(isinstance(bound, int) and bound > 0 for bound in bounds), (job, bounds)
+        assert jobs[job]["timeout-minutes"] >= sum(bounds), (job, jobs[job]["timeout-minutes"], bounds)
+        for step in steps:
+            if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@"):
+                assert step["timeout-minutes"] <= 10, (job, step)
+
+    for index, (job, name) in INDEX_STEPS.items():
+        check = _step(job, name)
+        per_read = _seconds(check["run"], r"urlopen\(url, timeout=(\d+)\)")
+        reads, pause = int(check["env"]["READS"]), int(check["env"]["PAUSE"])
+        assert check["timeout-minutes"] * 60 >= reads * (per_read + pause) + 30, index
+
+    install = _step("testpypi-install", "install opendox[local] from TestPyPI into a fresh venv, and run it")
+    tries = len(re.search(r"for attempt in ((?:\d+ ?)+); do", install["run"]).group(1).split())
+    per_try = _seconds(install["run"], r"timeout (\d+) \"\$RUNNER_TEMP/fresh/bin/python\" -m pip install")
+    wait = _seconds(install["run"], r"sleep (\d+)")
+    venvs = 30 * tries  # a venv, the version read and `opendox --help`, per try
+    assert install["timeout-minutes"] * 60 >= tries * (per_try + wait) + venvs
 
 
 # ---------------------------------------------------------------------------

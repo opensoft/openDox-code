@@ -150,6 +150,7 @@ jobs:
       # fetch of `main`, depth 1, with every credential helper cleared and no
       # prompt, in a repository of its own under `$RUNNER_TEMP`.
       - name: the dispatched commit is the one the openDox root pins
+        timeout-minutes: 3
         run: |
           root="$RUNNER_TEMP/opendox-root"
           rm -rf "$root"
@@ -572,7 +573,10 @@ jobs:
     name: publish to TestPyPI (the dry run)
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # THE BUDGET: every step declares its own timeout, and the job's covers
+    # their sum (5 + 2 + 2 + 3 + 10 = 22 min); the upload's is 10 minutes.
+    # tests/test_release_workflow.py reads each bound from this file.
+    timeout-minutes: 25
     environment:
       name: testpypi
       url: https://test.pypi.org/project/opendox/${{ inputs.version }}/
@@ -580,6 +584,7 @@ jobs:
       id-token: write # trusted publishing: the OIDC token TestPyPI accepts
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        timeout-minutes: 5
         with:
           name: dist
           path: dist
@@ -587,6 +592,7 @@ jobs:
       # The files about to be uploaded are the two the build job verified,
       # byte for byte, and nothing else.
       - name: the files are the ones the build job verified
+        timeout-minutes: 2
         env:
           WHEEL: ${{ needs.build.outputs.wheel }}
           WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
@@ -609,6 +615,7 @@ jobs:
       # index never replaces a file. A 404 is a version with no file yet. A
       # re-run after a partial upload passes, and uploads only what is missing.
       - name: TestPyPI holds no file of this version but the verified ones
+        timeout-minutes: 2
         env:
           INDEX: TestPyPI
           JSON_BASE: https://test.pypi.org/pypi/opendox/
@@ -648,6 +655,7 @@ jobs:
       # may pin another commit meanwhile. An upload cannot be taken back, so a
       # moved pin stops it here.
       - name: the dispatched commit is the one the openDox root pins
+        timeout-minutes: 3
         run: |
           root="$RUNNER_TEMP/opendox-root"
           rm -rf "$root"
@@ -687,6 +695,7 @@ jobs:
       # its verified digest, and the JSON step after the upload requires the
       # index to serve exactly the build job's two digests.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        timeout-minutes: 10
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
@@ -695,12 +704,13 @@ jobs:
     name: install opendox[local] from TestPyPI
     needs: [build, testpypi]
     runs-on: ubuntu-latest
-    # THE BUDGET, in full, so no retry this job promises is cut short:
-    #   the JSON step: 20 reads, each up to 30 s, 15 s apart   15 min
-    #   the install:   10 tries, each up to 300 s, 30 s apart  55 min
-    #   checkout, setup-python, the venvs and --help           5 min
-    # tests/test_release_workflow.py recomputes it from the steps.
-    timeout-minutes: 75
+    # THE BUDGET, in full, so no retry this job promises is cut short. Every
+    # step declares its own timeout, each retrying step's covers its retries,
+    # and the job's covers their sum (5 + 5 + 16 + 60 = 86 min):
+    #   the JSON step: 20 reads, each up to 30 s, 15 s apart   15 min  (16)
+    #   the install:   10 tries, each up to 300 s, 30 s apart  55 min  (60)
+    # tests/test_release_workflow.py reads each bound from this file.
+    timeout-minutes: 90
     permissions:
       contents: read
     env:
@@ -711,10 +721,12 @@ jobs:
     steps:
       # For `constraints-cpython312-linux.txt` alone.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
         with:
           persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        timeout-minutes: 5
         with:
           python-version: '3.12'
 
@@ -724,6 +736,7 @@ jobs:
       # serves exactly those two files, before this step refuses. The `pypi`
       # job runs the same script against PyPI after its upload.
       - name: TestPyPI serves the files the build job verified
+        timeout-minutes: 16
         env:
           INDEX: TestPyPI
           JSON_BASE: https://test.pypi.org/pypi/opendox/
@@ -776,6 +789,7 @@ jobs:
       # spoil is its own verdict, and the files PyPI receives are still the
       # build job's, checked by digest in the `pypi` job.
       - name: install opendox[local] from TestPyPI into a fresh venv, and run it
+        timeout-minutes: 60
         run: |
           installed=0
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -808,9 +822,13 @@ jobs:
     name: publish to PyPI
     needs: [build, testpypi-install]
     runs-on: ubuntu-latest
-    # THE BUDGET: the upload (10 min), then the JSON step, 20 reads, each up
-    # to 30 s, 15 s apart (15 min), and the download (5 min).
-    timeout-minutes: 30
+    # THE BUDGET: every step declares its own timeout, and the job's covers
+    # their sum (5 + 2 + 2 + 3 + 10 + 16 = 38 min). The upload is bounded at
+    # 10 minutes, so the JSON step after it always has its 20 reads, each up
+    # to 30 s, 15 s apart (15 min, bounded at 16). A cut-off upload stays
+    # recoverable: a re-run's preflight and skip-existing upload the rest.
+    # tests/test_release_workflow.py reads each bound from this file.
+    timeout-minutes: 40
     environment:
       name: pypi
       url: https://pypi.org/project/opendox/${{ inputs.version }}/
@@ -818,11 +836,13 @@ jobs:
       id-token: write # trusted publishing: the OIDC token PyPI accepts
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        timeout-minutes: 5
         with:
           name: dist
           path: dist
 
       - name: the files are the ones the build job verified
+        timeout-minutes: 2
         env:
           WHEEL: ${{ needs.build.outputs.wheel }}
           WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
@@ -845,6 +865,7 @@ jobs:
       # index never replaces a file. A 404 is a version with no file yet. A
       # re-run after a partial upload passes, and uploads only what is missing.
       - name: PyPI holds no file of this version but the verified ones
+        timeout-minutes: 2
         env:
           INDEX: PyPI
           JSON_BASE: https://pypi.org/pypi/opendox/
@@ -884,6 +905,7 @@ jobs:
       # may pin another commit meanwhile. An upload cannot be taken back, so a
       # moved pin stops it here.
       - name: the dispatched commit is the one the openDox root pins
+        timeout-minutes: 3
         run: |
           root="$RUNNER_TEMP/opendox-root"
           rm -rf "$root"
@@ -923,12 +945,14 @@ jobs:
       # its verified digest, and the JSON step after the upload requires the
       # index to serve exactly the build job's two digests.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        timeout-minutes: 10
         with:
           skip-existing: true
 
       # PyPI serves exactly the two files the build job verified: the same
       # script as the TestPyPI check, against PyPI.
       - name: PyPI serves the files the build job verified
+        timeout-minutes: 16
         env:
           INDEX: PyPI
           JSON_BASE: https://pypi.org/pypi/opendox/
