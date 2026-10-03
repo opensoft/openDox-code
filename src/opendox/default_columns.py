@@ -62,7 +62,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping, NamedTuple, Sequence
+from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from opendox import defaults
 from opendox.column_seams import GATE_RECORDS_REFUSAL
@@ -364,8 +364,9 @@ def _section(key: str, label: str, note: str, references: Iterable[Any], *,
 #: talks to, or approve a pending declaration, through a proposal. So
 #: `resolve_scope` keeps them out of every owned section, into a section of
 #: their own that is readable and owned by nothing, and `editable_paths`
-#: refuses them whatever section carries them. The corpus scan's own exclusion
-#: (openDox-code#76) is a second layer, not this one.
+#: refuses them whatever section carries them. An in-root symlink that reaches
+#: one is treated as the document it reaches (`_settings_test`). The corpus
+#: scan's own exclusion (openDox-code#76) is a second layer, not this one.
 SETTINGS_DOCUMENTS: frozenset[str] = frozenset({
     DEFAULT_BINDINGS_RELPATH, DEFAULT_DECLARATIONS_RELPATH})
 
@@ -374,18 +375,46 @@ _SETTINGS_SECTION = ("settings", "openDox's own settings documents",
                      "editable through a tile")
 
 
-def _without_settings(sections: Sequence[ScopeSection]) -> list[ScopeSection]:
-    """`sections` with every settings document moved out of an OWNED section
-    into one trailing section that nothing owns, in the order they appeared."""
+def _settings_test(root: Path) -> Callable[[str], bool]:
+    """Whether a row's path IS one of openDox's settings documents, by its
+    spelling or by the file it reaches under `root`.
+
+    A SYMLINK ALIAS IS ONE (Copilot review of openDox-code#77, r4173903232).
+    `resolve_within` follows links to the canonical file, but a row keeps the
+    spelling it was named by, so `alias.md -> ideation/dashboard/
+    model-provider-bindings.yaml` (or a directory link on the way) compared
+    unequal to every settings path and stayed owned and editable. So the
+    file a row resolves to is compared with the files the settings documents
+    resolve to, and an alias is moved out of the owned sections under its own
+    name, like the document it reaches."""
+    from opendox import projection_seams
+
+    resolve_within = projection_seams.registry.current().resolve_within
+    targets = {target for target in (resolve_within(root, name)
+                                     for name in SETTINGS_DOCUMENTS)
+               if target is not None}
+
+    def is_settings(path: str) -> bool:
+        return path in SETTINGS_DOCUMENTS or (
+            bool(targets) and resolve_within(root, path) in targets)
+
+    return is_settings
+
+
+def _without_settings(sections: Sequence[ScopeSection], *,
+                      root: Path) -> list[ScopeSection]:
+    """`sections` with every settings document, or an alias that reaches one
+    (`_settings_test`), moved out of an OWNED section into one trailing
+    section that nothing owns, in the order they appeared."""
+    is_settings = _settings_test(root)
     kept: list[ScopeSection] = []
     moved: list[ScopeDocument] = []
     for section in sections:
         if not section.owned:
             kept.append(section)
             continue
-        rows = [row for row in section.documents if row.path not in SETTINGS_DOCUMENTS]
-        moved.extend(row for row in section.documents
-                     if row.path in SETTINGS_DOCUMENTS)
+        rows = [row for row in section.documents if not is_settings(row.path)]
+        moved.extend(row for row in section.documents if is_settings(row.path))
         kept.append(ScopeSection(key=section.key, label=section.label,
                                  note=section.note, inherited=section.inherited,
                                  owned=True, documents=tuple(rows)))
@@ -497,7 +526,7 @@ def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
             owned=True))
     else:
         return None
-    sections = _without_settings(sections)
+    sections = _without_settings(sections, root=root)
     context = [row.path for section in sections for row in section.documents
                if row.resolved]
     for raw in created:
