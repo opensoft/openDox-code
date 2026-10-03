@@ -94,7 +94,9 @@ openxFactory and never what a destination assembles (RULED OQ-C).
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import errno
 import hashlib
 import json
 import os
@@ -106,6 +108,11 @@ from pathlib import Path
 from typing import Any
 
 from opendox import doxbench_binding as binding_mod
+
+try:                    # POSIX; where it is absent, nothing is recorded
+    import fcntl
+except ImportError:     # pragma: no cover - exercised through _lock_exclusively
+    fcntl = None
 
 __all__ = [
     "BASIS_HOST",
@@ -146,6 +153,13 @@ TRUST_KIND = "opendox-model-binding-trust"
 
 #: The store's file name, directly under the state directory.
 TRUST_FILENAME = "model-binding-trust.json"
+
+#: The lock file beside the store. Every process that records trust holds an
+#: exclusive lock on it across its read, its change and its replace of the
+#: store, so two processes recording at once cannot lose either's trust, nor
+#: restore a form another process replaced (Copilot at openDox-code#82,
+#: r4173513761).
+TRUST_LOCK_FILENAME = "model-binding-trust.lock"
 
 #: The largest store this reads. A bound, not a policy: a store is a few
 #: hundred bytes a binding, and an unbounded read of a file is a way to spend
@@ -188,6 +202,23 @@ REASON_NO_VERDICT = "no trust verdict was given for it"
 REASON_NOT_COVERED = (
     "the trust verdict given for it covers another binding, or another form "
     "of it")
+
+#: Why `MachineTrust` never admits the console intake's broker (#1144 16.3a,
+#: T007 batch M; Copilot at openDox-code#82, r4173513782). The intake asks its
+#: own question (`intake_verdict_for`), and no binding's trust answers it, so
+#: a repository that declares a binding with the intake's very fields gains
+#: nothing by having it trusted.
+REASON_INTAKE_NOT_ADMITTED = (
+    "the console intake runs a broker the served repository's declarations "
+    "document names, and openDox's per-machine trust admits no intake; only "
+    "a host's own policy can, by answering intake_verdict")
+
+
+def reason_policy_failed(error: BaseException) -> str:
+    """Why a binding a policy failed to judge is untrusted. It names the class
+    of what the policy raised and never its words, which may hold anything."""
+    return f"the trust policy failed ({type(error).__name__})"
+
 
 #: What the store refusal says when the runtime defines no state directory.
 #: That is this change's base before openDox-code#69 lands. Nothing can be
@@ -251,6 +282,12 @@ class TrustStoreRefused(binding_mod.BindingRefused):
     """The trust store cannot be used: it is a link, another user could write
     it, it does not read, or there is no state directory to keep it in.
     Nothing is trusted through it."""
+
+
+class TrustNotRecorded(binding_mod.BindingRefused):
+    """The registered policy did not record trust for the binding asked
+    about: it declined, answered for another binding, or failed. `add`,
+    `edit` and `trust` refuse with it before they write anything."""
 
 
 class TrustPolicyNotRegistered(RuntimeError):
@@ -399,42 +436,145 @@ def require_admitted(binding, trust: TrustVerdict | None) -> None:
         trust.binding_id, trust.root, trust.reason or REASON_NEVER_TRUSTED))
 
 
+def _held_to(binding, verdict: Any, *, root: Path | str | None) -> TrustVerdict:
+    """`verdict`, held to `binding`. A verdict that admits exactly `binding` is
+    returned. So is an UNTRUSTED one for exactly this record, which carries
+    the policy's own reason. Anything else (a verdict for another binding, or
+    another form of this one, trusted or not, or something that is not a
+    verdict) is replaced by an untrusted verdict for THIS binding, so a
+    refusal never names the wrong binding or its command (Copilot at
+    openDox-code#82, r4173513795)."""
+    if isinstance(verdict, TrustVerdict):
+        if verdict.admits(binding):
+            return verdict
+        if (not verdict.trusted and verdict.binding_id == binding.id
+                and verdict.digest == binding_digest(binding)):
+            return verdict
+    return TrustVerdict.untrusted_for(binding, root=root, basis=BASIS_HOST,
+                                      reason=REASON_NOT_COVERED)
+
+
+def verdict_for(binding, *, root: Path | str) -> TrustVerdict:
+    """The registered policy's verdict on `binding` at `root`, held to it.
+
+    What every consumer asks before it uses a binding read from a repository.
+    A policy that raises trusts nothing, and its words are not repeated
+    (`reason_policy_failed`)."""
+    try:
+        verdict = policy().verdict(binding, root=root)
+    except Exception as error:  # noqa: BLE001 - a policy that fails trusts nothing
+        return TrustVerdict.untrusted_for(binding, root=root, basis=BASIS_HOST,
+                                          reason=reason_policy_failed(error))
+    return _held_to(binding, verdict, root=root)
+
+
+def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
+    """Ask the registered policy to RECORD trust for `binding` at `root`, and
+    return the verdict, which admits exactly `binding`.
+
+    A policy may decline, as a governed host's does for a binding whose
+    declaration is pending. So an answer that does not admit exactly this
+    binding is refused BY NAME (`TrustNotRecorded`), and so is a policy that
+    raises, naming what it raised and never its words. `add`, `edit` and
+    `trust` ask this before they write anything (Copilot at
+    openDox-code#82, r4173513738)."""
+    try:
+        verdict = policy().record(binding, root=root)
+    except binding_mod.BindingRefused:
+        raise
+    except Exception as error:  # noqa: BLE001 - a policy that fails records nothing
+        verdict = TrustVerdict.untrusted_for(
+            binding, root=root, basis=BASIS_HOST,
+            reason=reason_policy_failed(error))
+    verdict = _held_to(binding, verdict, root=root)
+    if verdict.admits(binding):
+        return verdict
+    raise TrustNotRecorded(
+        f"the trust policy did not record trust for model binding "
+        f"{shown(binding.id)} in the repository at {shown(verdict.root)} "
+        f"({verdict.reason or REASON_NEVER_TRUSTED}), so it is not trusted "
+        "on this machine and nothing was written")
+
+
+def intake_verdict_for(binding, *, root: Path | str) -> TrustVerdict:
+    """The console intake's OWN question (#1144 16.3a, T007 batch M; Copilot
+    at openDox-code#82, r4173513782): may the intake hand a credential to the
+    broker the served repository's declarations document names, for the
+    binding it is declaring?
+
+    It is a DISTINCT purpose. No binding's trust answers it, so a repository
+    that declares a binding with the intake's very fields, and has it
+    trusted, admits nothing here. A policy answers it only through its own
+    `intake_verdict`. `MachineTrust` always answers no; a policy without one
+    admits no intake; one that raises admits nothing."""
+    try:
+        ask = getattr(policy(), "intake_verdict", None)
+        if not callable(ask):
+            return TrustVerdict.untrusted_for(
+                binding, root=root, basis=BASIS_HOST,
+                reason=REASON_INTAKE_NOT_ADMITTED)
+        verdict = ask(binding, root=root)
+    except Exception as error:  # noqa: BLE001 - a policy that fails admits nothing
+        return TrustVerdict.untrusted_for(binding, root=root, basis=BASIS_HOST,
+                                          reason=reason_policy_failed(error))
+    return _held_to(binding, verdict, root=root)
+
+
 # ---------------------------------------------------------------------------
 # the store's tree (the discipline of openDox-code#69's bundle tree)
 # ---------------------------------------------------------------------------
 
 
-def _unsafe_because(info: os.stat_result, *, uid: int, own: bool,
-                    directory: bool = True) -> str | None:
-    """Why one path of the store's tree is unsafe, or None.
-
-    The rules are #69's (`runtime/bundle._unsafe_because`). The store's OWN
-    file and directory are this user's alone and writable by no one else. An
-    ancestor is this user's or root's, and one that others can write is
-    sticky, so nobody can rename what is not theirs. A link is refused
-    outright."""
-    mode = info.st_mode
+def _unsafe_kind(mode: int, *, directory: bool) -> str | None:
+    """Why a path is the wrong KIND of thing for its place, or None. A link
+    is refused outright."""
     if stat.S_ISLNK(mode):
         return "is a symbolic link"
     if directory and not stat.S_ISDIR(mode):
         return "is not a directory"
     if not directory and not stat.S_ISREG(mode):
         return "is not a regular file"
-    if own:
-        if info.st_uid != uid:
-            return f"is owned by uid {info.st_uid}, not by this user"
-        if mode & 0o022:
-            return (f"is writable by "
-                    f"{'every user' if mode & 0o002 else 'its group'}"
-                    f" (mode {stat.S_IMODE(mode):o})")
-        return None
+    return None
+
+
+def _who_can_write(mode: int) -> str:
+    return "every user" if mode & 0o002 else "its group"
+
+
+def _unsafe_own(info: os.stat_result, *, uid: int) -> str | None:
+    """The store's OWN file and directory: this user's alone, and writable
+    by no one else."""
+    mode = info.st_mode
+    if info.st_uid != uid:
+        return f"is owned by uid {info.st_uid}, not by this user"
+    if mode & 0o022:
+        return (f"is writable by "
+                f"{_who_can_write(mode)}"
+                f" (mode {stat.S_IMODE(mode):o})")
+    return None
+
+
+def _unsafe_ancestor(info: os.stat_result, *, uid: int) -> str | None:
+    """A directory above the store: this user's or root's, and sticky where
+    others can write it, so nobody can rename what is not theirs."""
+    mode = info.st_mode
     if info.st_uid not in (uid, 0):
         return f"is owned by uid {info.st_uid}, neither this user nor root"
     if mode & 0o022 and not mode & stat.S_ISVTX:
-        return (f"is writable by "
-                f"{'every user' if mode & 0o002 else 'its group'}"
-                f" and is not sticky (mode {stat.S_IMODE(mode):o})")
+        return (f"is writable by {_who_can_write(mode)} and is not sticky "
+                f"(mode {stat.S_IMODE(mode):o})")
     return None
+
+
+def _unsafe_because(info: os.stat_result, *, uid: int, own: bool,
+                    directory: bool = True) -> str | None:
+    """Why one path of the store's tree is unsafe, or None. The rules are
+    #69's (`runtime/bundle._unsafe_because`)."""
+    kind = _unsafe_kind(info.st_mode, directory=directory)
+    if kind is not None:
+        return kind
+    return (_unsafe_own(info, uid=uid) if own
+            else _unsafe_ancestor(info, uid=uid))
 
 
 def _store_refused(path: Path | str, reason: str) -> TrustStoreRefused:
@@ -446,13 +586,10 @@ def _store_refused(path: Path | str, reason: str) -> TrustStoreRefused:
         "it")
 
 
-def _refuse_an_unsafe_tree(state: Path, *, existing_only: bool) -> None:
-    """The store's directory, and every directory above it, are this user's
-    to change, or the store is refused (#69's `_refuse_an_unsafe_tree`).
-
-    With `existing_only`, only what exists is judged, which is what is asked
-    before anything is created."""
-    uid = os.getuid()
+def _refuse_foreign_links(state: Path, *, existing_only: bool,
+                          uid: int) -> None:
+    """No link on the way to the store belongs to anyone but this user or
+    root, who alone could point it elsewhere."""
     for component in (state, *state.parents):
         if existing_only and not os.path.lexists(component):
             continue
@@ -461,15 +598,31 @@ def _refuse_an_unsafe_tree(state: Path, *, existing_only: bool) -> None:
             raise _store_refused(
                 component, f"is a symbolic link owned by uid {info.st_uid}, "
                 "neither this user nor root, who could point it elsewhere")
+
+
+def _tree_to_judge(state: Path, *,
+                   existing_only: bool) -> list[tuple[Path, bool]]:
+    """The directories to judge, each with whether it is the store's own:
+    the state directory as it resolves, and every directory above it, by its
+    resolved and its spelled path."""
     if existing_only and not os.path.lexists(state):
-        resolved_parents = [p for p in state.parents if os.path.lexists(p)]
-        checks = [(path, False) for path in resolved_parents]
-    else:
-        real = state.resolve()
-        checks = [(real, True)] + [
-            (path, False) for path in dict.fromkeys(
-                [*real.parents, *state.parents])]
-    for directory, mine in checks:
+        return [(path, False) for path in state.parents
+                if os.path.lexists(path)]
+    real = state.resolve()
+    return [(real, True)] + [
+        (path, False) for path in dict.fromkeys([*real.parents,
+                                                 *state.parents])]
+
+
+def _refuse_an_unsafe_tree(state: Path, *, existing_only: bool) -> None:
+    """The store's directory, and every directory above it, are this user's
+    to change, or the store is refused (#69's `_refuse_an_unsafe_tree`).
+
+    With `existing_only`, only what exists is judged, which is what is asked
+    before anything is created."""
+    uid = os.getuid()
+    _refuse_foreign_links(state, existing_only=existing_only, uid=uid)
+    for directory, mine in _tree_to_judge(state, existing_only=existing_only):
         if existing_only and not os.path.lexists(directory):
             continue
         info = os.lstat(directory) if mine else os.stat(directory)
@@ -521,6 +674,53 @@ def _make_private_directories(leaf: Path) -> None:
         os.close(descriptor)
 
 
+def _lock_exclusively(descriptor: int) -> None:
+    """Block until this process holds the exclusive lock on the open lock file.
+    It is released when the descriptor is closed. Where the platform has no
+    advisory lock, an `OSError` says so, and the caller refuses."""
+    if fcntl is None:
+        raise OSError(errno.ENOSYS, "this platform offers no file lock")
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+
+@contextlib.contextmanager
+def _store_locked(state: Path):
+    """Hold the store's lock file, exclusively, for the body. The file is
+    opened without following a link, created owner-only, and held to the
+    store's own rules; a lock that cannot be taken refuses BY NAME, and
+    nothing is recorded."""
+    path = state / TRUST_LOCK_FILENAME
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+                             | getattr(os, "O_CLOEXEC", 0), 0o600)
+    except OSError:
+        if os.path.lexists(path):
+            reason = _unsafe_because(os.lstat(path), uid=os.getuid(),
+                                     own=True, directory=False)
+            if reason is not None:
+                raise _store_refused(path, reason) from None
+        raise _store_refused(path, "cannot be opened") from None
+    try:
+        reason = _unsafe_because(os.fstat(descriptor), uid=os.getuid(),
+                                 own=True, directory=False)
+        if reason is not None:
+            raise _store_refused(path, reason)
+        try:
+            _lock_exclusively(descriptor)
+        except OSError as error:
+            raise TrustStoreRefused(
+                f"the model-binding trust store cannot lock {shown(str(path))}"
+                f" ({error.strerror or type(error).__name__}). Without that "
+                "lock another openDox process recording at the same moment "
+                "could lose a trust, or restore one it replaced, so nothing "
+                "is recorded. Keep openDox's state directory "
+                f"({STATE_DIR_SETTING}) on a file system that supports file "
+                "locks") from None
+        yield
+    finally:
+        os.close(descriptor)
+
+
 # ---------------------------------------------------------------------------
 # openDox's neutral default: the per-machine store
 # ---------------------------------------------------------------------------
@@ -540,8 +740,14 @@ class MachineTrust:
     `runtime.config.state_dir(env)`, which openDox-code#69 defines. Where the
     runtime defines none, nothing can be trusted (`NO_STATE_DIR`).
 
-    A read-modify-write race between two processes loses one record at worst,
-    which can only untrust a binding, never trust one."""
+    EVERY RECORD HOLDS THE STORE'S LOCK across its read, its change and its
+    replace (`TRUST_LOCK_FILENAME`), so two processes recording at once keep
+    both trusts, and neither restores a form the other replaced. A reader
+    takes no lock: the replace is atomic, so it reads one whole store or the
+    other.
+
+    IT NEVER ADMITS THE CONSOLE INTAKE (`intake_verdict`): no binding's trust
+    is the intake's."""
 
     def __init__(self, *, state_dir: Path | str | None = None,
                  env: Mapping[str, str] | None = None) -> None:
@@ -574,9 +780,9 @@ class MachineTrust:
                     f"{error}") from None
         if not path.is_absolute() or ".." in path.parts:
             raise TrustStoreRefused(
-                f"the model-binding trust store's state directory {path} is "
-                "not an absolute path free of '..', so it is not the one "
-                "another process would find")
+                "the model-binding trust store's state directory "
+                f"{shown(str(path))} is not an absolute path free of '..', so "
+                "it is not the one another process would find")
         return path
 
     def store_path(self) -> Path:
@@ -639,11 +845,19 @@ class MachineTrust:
             _refuse_an_unsafe_tree(state, existing_only=True)
             _make_private_directories(state)
             _refuse_an_unsafe_tree(state, existing_only=False)
-            entries = self._read(state)
-            entries[(key_root, binding.id)] = digest
-            self._write(state, entries)
+            with _store_locked(state):
+                entries = self._read(state)
+                entries[(key_root, binding.id)] = digest
+                self._write(state, entries)
         return TrustVerdict.trusted_for(binding, root=key_root,
                                         basis=BASIS_MACHINE_TRUST)
+
+    def intake_verdict(self, binding, *, root: Path | str) -> TrustVerdict:
+        """The console intake's own question, which this policy always
+        answers NO (`REASON_INTAKE_NOT_ADMITTED`), whatever it trusts."""
+        return TrustVerdict.untrusted_for(
+            binding, root=root, basis=BASIS_MACHINE_TRUST,
+            reason=REASON_INTAKE_NOT_ADMITTED)
 
     # -- the document --------------------------------------------------------
 
@@ -812,7 +1026,8 @@ class UntrustedBindingPort:
 # the seam
 # ---------------------------------------------------------------------------
 
-#: The two names a policy carries.
+#: The two names a policy carries. A third, `intake_verdict`, is OPTIONAL: a
+#: policy without it admits no console intake (`intake_verdict_for`).
 POLICY_CALLABLES: tuple[str, ...] = ("verdict", "record")
 
 #: The ONE call a host makes, quoted in every refusal.

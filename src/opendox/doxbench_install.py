@@ -328,25 +328,16 @@ def trust_gated_model_port_factory(binding, *, checkout_root: Path | str):
     name, and nothing is spawned, read or contacted. The refusal is said on
     stderr, naming the binding and the command that trusts it.
 
-    A policy that raises trusts nothing. Its words are not repeated: only the
-    class of what it raised is named."""
+    The verdict is HELD TO THIS BINDING (`doxbench_trust.verdict_for`): a
+    policy that raises trusts nothing, and its words are not repeated; one
+    that answers for another binding, trusted or not, covers nothing, and the
+    refusal names THIS binding and its command."""
     from opendox import doxbench_trust as trust_mod
     from opendox.doxbench_model import EMPTY_CATALOG, ModelCatalogError
 
-    try:
-        verdict = trust_mod.policy().verdict(binding, root=checkout_root)
-    except Exception as error:  # noqa: BLE001 - a policy that fails trusts nothing
-        verdict = trust_mod.TrustVerdict.untrusted_for(
-            binding, root=checkout_root, basis=trust_mod.BASIS_HOST,
-            reason=f"the trust policy failed ({type(error).__name__})")
-    if isinstance(verdict, trust_mod.TrustVerdict) and verdict.admits(binding):
+    verdict = trust_mod.verdict_for(binding, root=checkout_root)
+    if verdict.admits(binding):
         return brokered_model_port_factory(binding, trust=verdict)
-    if not isinstance(verdict, trust_mod.TrustVerdict) or verdict.trusted:
-        # A verdict for another binding, or another form of it, covers
-        # nothing here.
-        verdict = trust_mod.TrustVerdict.untrusted_for(
-            binding, root=checkout_root, basis=trust_mod.BASIS_HOST,
-            reason=trust_mod.REASON_NOT_COVERED)
     sys.stderr.write("[model-provider] " + trust_mod.refusal_message(
         verdict.binding_id, verdict.root,
         verdict.reason or trust_mod.REASON_NEVER_TRUSTED) + "\n")

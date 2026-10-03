@@ -56,11 +56,14 @@ def _record_trust(binding: "binding_mod.ModelProviderBinding",
                   args: argparse.Namespace):
     """Record trust for the binding this act writes (#1144 16.3a; RULED
     openxFactory#656 comment 5962785556, item 2): the operator declares it
-    here, so the operator trusts it. Returns the verdict. A store that cannot
-    record refuses (`doxbench_trust.TrustStoreRefused`, a `BindingRefused`),
-    and `add`, `edit` and `trust` ask BEFORE they write anything, so a refusal
-    leaves nothing written (T007 batch M)."""
-    return trust_mod.policy().record(binding, root=_repo_root(args))
+    here, so the operator trusts it. Returns the verdict, which admits
+    exactly this binding. A store that cannot record, a policy that DECLINES
+    (as a governed host's does for a pending declaration) or answers for
+    another binding, and a policy that raises, are each refused by name, as
+    a `BindingRefused` (`doxbench_trust.recorded_for`). `add`, `edit` and
+    `trust` ask BEFORE they write anything, so a refusal leaves nothing
+    written (T007 batch M)."""
+    return trust_mod.recorded_for(binding, root=_repo_root(args))
 
 
 def _trusted_line(binding: "binding_mod.ModelProviderBinding", verdict) -> str:
@@ -146,18 +149,11 @@ def _trust_lines(store: "binding_mod.BindingStore",
     root = _repo_root(args)
     lines: dict[str, str] = {}
     for binding in store.list():
-        try:
-            verdict = trust_mod.policy().verdict(binding, root=root)
-        except Exception as exc:  # noqa: BLE001 - a policy that fails trusts nothing
-            lines[binding.id] = (f"NOT trusted on this machine (the trust "
-                                 f"policy failed: {type(exc).__name__})")
-            continue
-        if isinstance(verdict, trust_mod.TrustVerdict) and verdict.admits(
-                binding):
+        verdict = trust_mod.verdict_for(binding, root=root)
+        if verdict.admits(binding):
             lines[binding.id] = "trusted on this machine"
         else:
-            reason = (getattr(verdict, "reason", None)
-                      or trust_mod.REASON_NOT_COVERED)
+            reason = verdict.reason or trust_mod.REASON_NEVER_TRUSTED
             lines[binding.id] = (
                 f"NOT trusted on this machine ({reason}); trust it with: "
                 f"{trust_mod.trust_command(binding.id, str(root))}")
@@ -255,7 +251,7 @@ def cmd_model_binding_set_credential(args: argparse.Namespace, *,
                 != binding_mod.CREDENTIAL_FROM_BROKER):
             raise binding_mod.BindingRefused(NO_BROKER_TO_HAND_TO.format(
                 binding_id=binding.id, custody=binding.custody_notice()))
-        verdict = trust_mod.policy().verdict(binding, root=_repo_root(args))
+        verdict = trust_mod.verdict_for(binding, root=_repo_root(args))
         trust_mod.require_admitted(binding, verdict)
         reference = provider_mod.hand_off_credential(
             binding, source if source is not None else sys.stdin,
@@ -313,8 +309,8 @@ def _trust_disclosure(binding: "binding_mod.ModelProviderBinding",
         resolved_by = "nothing: this endpoint takes no credential"
         runs = []
     goes = (f"to {shown(binding.endpoint)} alone, in each request's "
-            "authorization header, never through a redirect, and over "
-            "http:// through no proxy"
+            "authorization header, never through a redirect, and through no "
+            "proxy where the endpoint is plain HTTP"
             if source != binding_mod.NO_CREDENTIAL
             else "nowhere: the auth kind none presents no credential")
     reference = (shown(binding.credential_ref)

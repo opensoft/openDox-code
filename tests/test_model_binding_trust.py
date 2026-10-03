@@ -844,7 +844,10 @@ def test_the_store_is_one_private_file_created_by_descriptor(served):
     assert victim.read_text(encoding="utf-8") == "untouched"
     path = served.state_dir / _trust_mod().TRUST_FILENAME
     assert stat.S_IMODE(os.lstat(path).st_mode) == 0o600
-    assert sorted(p.name for p in served.state_dir.iterdir()) == [path.name]
+    lock = served.state_dir / _trust_mod().TRUST_LOCK_FILENAME
+    assert stat.S_IMODE(os.lstat(lock).st_mode) == 0o600
+    assert sorted(p.name for p in served.state_dir.iterdir()) == sorted(
+        [path.name, lock.name])
     assert json.loads(path.read_text(encoding="utf-8"))["entries"] == [{
         "root": str(served.repo.resolve()), "binding_id": BINDING_ID,
         "digest": _trust_mod().binding_digest(served.declared())}]
@@ -876,6 +879,111 @@ def test_a_link_planted_between_the_unlink_and_the_create_is_never_followed(
     assert victim.read_text(encoding="utf-8") == "untouched"
     assert not served.trust.verdict(served.declared(),
                                     root=served.repo).trusted
+
+
+_RACING_WRITER = r"""
+import json, os, sys, time
+from pathlib import Path
+from opendox import doxbench_binding as binding_mod
+from opendox import doxbench_trust as trust_mod
+
+state, root, binding_id, role, flags = sys.argv[1:6]
+flags = Path(flags)
+binding = binding_mod.ModelProviderBinding(
+    id=binding_id, label="Racing", provider="anyone",
+    credential_ref="env:T100_RACE", auth_kind="api_key",
+    approved_by="repo-author", endpoint="http://127.0.0.1:9/v1",
+    dialect="openai-chat-v1", broker_argv=())
+store = trust_mod.MachineTrust(state_dir=state)
+if role == "first":
+    real = trust_mod.MachineTrust._read
+
+    def held(self, where):
+        entries = real(self, where)
+        (flags / "first-read").write_text("1")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if (flags / "second-done").exists():
+                break
+            time.sleep(0.02)
+        return entries
+
+    trust_mod.MachineTrust._read = held
+    store.record(binding, root=root)
+else:
+    deadline = time.monotonic() + 20
+    while not (flags / "first-read").exists():
+        if time.monotonic() > deadline:
+            sys.exit("the first writer never read the store")
+        time.sleep(0.02)
+    store.record(binding, root=root)
+    (flags / "second-done").write_text("1")
+"""
+
+
+def test_two_processes_recording_at_once_lose_neither_trust(served):
+    """Copilot at openDox-code#82 (r4173513761). The first process reads
+    the store and then pauses inside its record; a second process records
+    another binding meanwhile. Without a lock held across the read, the
+    change and the replace, the first writes its stale snapshot and the
+    second's trust is lost. With it, the second waits, and both are kept."""
+    flags = served.tmp / "flags"
+    flags.mkdir()
+    env = {**_clean_env(), "PYTHONPATH": str(REPO_ROOT / "src")}
+    common = [str(served.state_dir), str(served.repo)]
+    first = subprocess.Popen(
+        [sys.executable, "-c", _RACING_WRITER, *common, "first-binding",
+         "first", str(flags)], env=env)
+    second = subprocess.Popen(
+        [sys.executable, "-c", _RACING_WRITER, *common, "second-binding",
+         "second", str(flags)], env=env)
+    assert first.wait(timeout=60) == 0
+    assert second.wait(timeout=60) == 0
+    path = served.state_dir / _trust_mod().TRUST_FILENAME
+    kept = sorted(entry["binding_id"] for entry in json.loads(
+        path.read_text(encoding="utf-8"))["entries"])
+    assert kept == ["first-binding", "second-binding"], kept
+
+
+@pytest.mark.parametrize("plant", ["link", "0666"])
+def test_a_lock_file_another_user_could_change_records_nothing(served,
+                                                               plant):
+    """The lock file is held to the store's own rules: a link in its place
+    is never followed, and one another user could write is refused by
+    name, with nothing recorded."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    served.state_dir.mkdir(mode=0o700)
+    lock = served.state_dir / trust_mod.TRUST_LOCK_FILENAME
+    victim = served.tmp / "victim"
+    victim.write_text("untouched", encoding="utf-8")
+    os.chmod(victim, 0o600)
+    if plant == "link":
+        lock.symlink_to(victim)
+    else:
+        lock.write_text("", encoding="utf-8")
+        os.chmod(lock, 0o666)
+    with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+        served.trust.record(served.declared(), root=served.repo)
+    assert json.dumps(str(lock)) in str(refused.value)
+    assert victim.read_text(encoding="utf-8") == "untouched"
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+
+
+def test_a_store_that_cannot_be_locked_records_nothing(served, monkeypatch):
+    """Where the platform or the file system offers no lock, `record` is
+    refused by name and writes nothing, rather than risk losing a trust."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+
+    def no_lock(*_args, **_kwargs):
+        raise OSError(37, "No locks available")
+
+    monkeypatch.setattr(trust_mod, "_lock_exclusively", no_lock)
+    with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+        served.trust.record(served.declared(), root=served.repo)
+    assert "lock" in str(refused.value)
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
 
 
 # --- the console intake ------------------------------------------------------
@@ -945,18 +1053,168 @@ def test_the_console_intake_refuses_a_broker_the_repository_declares(served):
     assert not binding_mod.bindings_path(served.repo).exists()
 
 
+class _TrustsEveryBinding:
+    """A host policy that trusts every BINDING, and says nothing of the
+    console intake: it has no `intake_verdict`."""
+
+    def verdict(self, binding, *, root):
+        return _trust_mod().TrustVerdict.trusted_for(
+            binding, root=root, basis=_trust_mod().BASIS_HOST)
+
+    def record(self, binding, *, root):
+        return self.verdict(binding, root=root)
+
+
+class _AdmitsTheIntake(_TrustsEveryBinding):
+    """A host policy that also admits the console intake, explicitly."""
+
+    def intake_verdict(self, binding, *, root):
+        return self.verdict(binding, root=root)
+
+
 def test_a_hosts_own_policy_may_admit_the_console_intake(served):
-    class _AdmitsTheIntake:
-        def verdict(self, binding, *, root):
-            return _trust_mod().TrustVerdict.trusted_for(
-                binding, root=root, basis=_trust_mod().BASIS_HOST)
-
-        def record(self, binding, *, root):
-            return self.verdict(binding, root=root)
-
+    """Only by answering the intake's OWN question (`intake_verdict`): the
+    intake is a distinct purpose, so a host that trusts every binding still
+    does not admit it unless it says so."""
+    _caps, answer = _served_intake(served, host_policy=_TrustsEveryBinding())
+    assert answer.get("error") == "intake_refused", answer
+    assert answer.get("reason") == _trust_mod().INTAKE_BROKER_UNTRUSTED
+    assert not served.marker.exists()
+    served.marker.unlink(missing_ok=True)
+    shutil.rmtree(served.tmp / "out")
+    intake_mod.declarations_path(served.repo).unlink()
     _caps, answer = _served_intake(served, host_policy=_AdmitsTheIntake())
     assert answer.get("error") is None, answer
     assert served.marker.read_text().startswith("intake ")
+
+
+def test_trusting_a_lookalike_binding_never_admits_the_console_intake(
+        served):
+    """Copilot at openDox-code#82 (r4173513782). A repository can declare a
+    NORMAL binding with exactly the fields the intake's hand-off is judged
+    by: its id, label, provider and endpoint, the placeholder reference, the
+    serving actor as approver, and the declarations document's broker. Once
+    the operator trusts that binding, the strict default must still refuse
+    the intake, because no binding's trust is the intake's."""
+    lookalike = served.record(
+        "broker", label="Helpful", credential_ref="pending-broker-intake",
+        approved_by="brett", endpoint="https://provider.invalid/v1",
+        broker_argv=[sys.executable, str(served.broker)])
+    path = served.hand_write(lookalike)
+    trusted = served.trust.record(served.declared(), root=served.repo)
+    assert trusted.trusted
+    # The repository then drops the binding (a later commit): the trust
+    # stays recorded for that root, id and digest, as direnv's does.
+    path.unlink()
+    _caps, answer = _served_intake(served)
+    assert answer.get("error") == "intake_refused", answer
+    assert answer.get("reason") == _trust_mod().INTAKE_BROKER_UNTRUSTED
+    assert not served.marker.exists()
+
+
+# --- what a policy answers is held to the binding asked about ---------------
+
+
+class _Declines:
+    """A host policy whose `record` DECLINES, by answering an untrusted
+    verdict, as openxFactory's governed policy does for a binding whose
+    declaration is pending."""
+
+    def verdict(self, binding, *, root):
+        return _trust_mod().TrustVerdict.untrusted_for(
+            binding, root=root, basis=_trust_mod().BASIS_HOST,
+            reason="its declaration is pending")
+
+    def record(self, binding, *, root):
+        return self.verdict(binding, root=root)
+
+
+class _RecordsAnother(_Declines):
+    """A host policy whose `record` answers a TRUSTED verdict for another
+    binding."""
+
+    def record(self, binding, *, root):
+        return _trust_mod().TrustVerdict.trusted_for(
+            _a_binding(id="other-binding"), root=root,
+            basis=_trust_mod().BASIS_HOST)
+
+
+class _RecordRaises(_Declines):
+    def record(self, binding, *, root):
+        raise RuntimeError(SECRET)
+
+
+RECORDING_POLICIES = {"declines": _Declines, "records-another": _RecordsAnother,
+                      "raises": _RecordRaises}
+
+
+@pytest.mark.parametrize("policy", sorted(RECORDING_POLICIES))
+def test_add_edit_and_trust_refuse_when_the_policy_does_not_record_trust(
+        served, capsys, policy):
+    """Copilot at openDox-code#82 (r4173513738). A policy may decline to
+    record trust; then `add`, `edit` and `trust` are refused by name, write
+    nothing, and never print that the binding is trusted. A policy that
+    raises is refused the same way, naming what it raised and never its
+    words."""
+    trust_mod = _trust_mod()
+    trust_mod.unregister()
+    trust_mod.register(RECORDING_POLICIES[policy]())
+    assert _cli(*served.add_argv("env")) == 1
+    captured = capsys.readouterr()
+    assert not binding_mod.bindings_path(served.repo).exists()
+    assert "trusted " not in captured.out
+    assert json.dumps(BINDING_ID) in captured.err
+    assert SECRET not in captured.out + captured.err
+    path = served.hand_write(served.record("env"))
+    written = path.read_bytes()
+    edit = served.add_argv("env")
+    edit[1] = "edit"
+    edit[edit.index("--label") + 1] = "Renamed"
+    assert _cli(*edit) == 1
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    captured = capsys.readouterr()
+    assert path.read_bytes() == written
+    assert "  trusted " not in captured.out
+    assert SECRET not in captured.out + captured.err
+    if policy == "raises":
+        assert "RuntimeError" in captured.err
+
+
+@pytest.mark.parametrize("other", ["untrusted", "trusted"])
+def test_a_verdict_for_another_binding_is_refused_naming_this_one(
+        served, capsys, other):
+    """Copilot at openDox-code#82 (r4173513795). A policy that answers a
+    verdict for ANOTHER binding, untrusted or trusted, covers nothing here,
+    and the refusal, the notice and `list` name the binding that was asked
+    about and the command that trusts it, never the other one."""
+    trust_mod = _trust_mod()
+
+    class _AnswersAnother(_Declines):
+        def verdict(self, binding, *, root):
+            if other == "trusted":
+                return trust_mod.TrustVerdict.trusted_for(
+                    _a_binding(id="other-binding"), root=root,
+                    basis=trust_mod.BASIS_HOST)
+            return trust_mod.TrustVerdict.untrusted_for(
+                _a_binding(id="other-binding"), root=root,
+                basis=trust_mod.BASIS_HOST, reason="it is another binding")
+
+    trust_mod.unregister()
+    trust_mod.register(_AnswersAnother())
+    served.hand_write(served.record("env"))
+    port = served.port()
+    notice = capsys.readouterr().err
+    assert isinstance(port, trust_mod.UntrustedBindingPort)
+    with pytest.raises(trust_mod.BindingUntrusted) as refused:
+        port.dispatch(_Envelope())
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    listed = capsys.readouterr().out
+    for text in (notice, str(refused.value), listed):
+        assert _command(served.repo) in text
+        assert "other-binding" not in text
+    assert trust_mod.REASON_NOT_COVERED in notice
+    served.nothing_was_touched()
 
 
 # --- the policy seam ---------------------------------------------------------

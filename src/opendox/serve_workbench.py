@@ -1122,22 +1122,21 @@ class WorkbenchRoutes:
             self._intake_refusal(DOXBENCH_ERR_INVALID_INTAKE_REQUEST,
                                  str(error))
             return
-        # THE BROKER IS THE SERVED REPOSITORY'S, SO IT RUNS ONLY IF TRUSTED
+        # THE BROKER IS THE SERVED REPOSITORY'S, SO IT RUNS ONLY IF ADMITTED
         # (#1144 16.3a, T007 batch M; RULED openxFactory#656 comment
         # 5962785556, item 2). The broker above comes from the repository's
-        # declarations document, which no binding's trust admits, so the
-        # registered trust policy is asked about the binding being declared.
-        # openDox's strict default refuses it; a host's own policy may admit
-        # it. Refused here, before any byte of the body is read, and the
-        # body is drained unread.
+        # declarations document, which NO BINDING'S TRUST admits: the
+        # registered policy is asked the intake's OWN question
+        # (`intake_verdict_for`), so a repository that declares a binding
+        # with these very fields and has it trusted gains nothing here
+        # (Copilot at openDox-code#82, r4173513782). openDox's strict default
+        # always refuses it; a host's own policy may admit it. Refused here,
+        # before any byte of the body is read, and the body is drained
+        # unread.
         from opendox import doxbench_trust
-        try:
-            verdict = doxbench_trust.policy().verdict(
-                binding, root=Path(self.checkout_root))
-        except Exception:  # noqa: BLE001 - a policy that fails admits nothing
-            verdict = None
-        if not (isinstance(verdict, doxbench_trust.TrustVerdict)
-                and verdict.admits(binding)):
+        verdict = doxbench_trust.intake_verdict_for(
+            binding, root=Path(self.checkout_root))
+        if not verdict.admits(binding):
             if length > 0:
                 _drain_refused_body(self.rfile, length)
             self._intake_refusal(DOXBENCH_ERR_INTAKE_REFUSED,
