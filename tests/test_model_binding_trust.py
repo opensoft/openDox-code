@@ -1440,19 +1440,32 @@ def test_a_policy_that_fails_or_answers_another_binding_trusts_nothing(
 
 
 class _GovernedHostPolicy:
-    """WHAT T094 REGISTERS AS openxFactory's OWN POLICY, so the governed flow
-    is unchanged in release 1: a binding is trusted when the declarations
-    document records its declaration APPROVED by the gate, and when it
-    records no declaration for it at all, which is the operator's own binding
-    in the operator's own governed checkout, as today. A PENDING declaration
-    is not trusted (the factory already passes over it). Nothing is recorded:
-    the governed record is the gate's."""
+    """WHAT T094 REGISTERS AS openxFactory's OWN POLICY (RULED by Brett Heap,
+    openxFactory#656 comment 5970369724, "Governance approval
+    (Recommended)"), as a test-local stand-in, so the governed flow is
+    unchanged in release 1:
+
+    - a binding whose declaration the governance flow APPROVED is trusted;
+    - a binding whose declaration is still PENDING is refused;
+    - a binding with NO declaration is trusted: the operator's own, or the
+      console intake's new binding while its broker runs;
+    - where the declarations document cannot be read, nothing is admitted;
+    - `record` writes nothing.
+
+    The console intake asks its own question (`intake_verdict`), so the
+    policy answers it too, as it answers for a binding with no declaration.
+    Without it, the governed host's intake would be refused."""
 
     def verdict(self, binding, *, root):
         from opendox import doxbench_trust
 
-        declaration = intake_mod.DeclarationStore(
-            intake_mod.declarations_path(root)).get(binding.id)
+        try:
+            declaration = intake_mod.DeclarationStore(
+                intake_mod.declarations_path(root)).get(binding.id)
+        except Exception:  # noqa: BLE001 - an unreadable document admits nothing
+            return doxbench_trust.TrustVerdict.untrusted_for(
+                binding, root=root, basis=doxbench_trust.BASIS_HOST,
+                reason="the declarations document cannot be read")
         if declaration is None or declaration.status == \
                 intake_mod.STATUS_APPROVED:
             return doxbench_trust.TrustVerdict.trusted_for(
@@ -1462,6 +1475,9 @@ class _GovernedHostPolicy:
             reason="its declaration is not approved")
 
     def record(self, binding, *, root):
+        return self.verdict(binding, root=root)
+
+    def intake_verdict(self, binding, *, root):
         return self.verdict(binding, root=root)
 
 
@@ -1494,6 +1510,41 @@ def test_a_governed_host_policy_keeps_the_governed_flow(served, declared):
     trust_mod.unregister()
     trust_mod.register(served.trust)
     assert isinstance(served.port(), trust_mod.UntrustedBindingPort)
+
+
+def test_a_governed_host_policy_keeps_the_console_intake(served):
+    """5970369724: under openxFactory's policy the console intake stays as it
+    is today. Its new binding has no declaration while its broker runs, and
+    the policy answers the intake's own question as it answers for such a
+    binding, so the hand-off runs the declared broker. The strict default
+    refuses the same intake (above)."""
+    _caps, answer = _served_intake(served, host_policy=_GovernedHostPolicy())
+    assert answer.get("error") is None, answer
+    assert served.marker.read_text().startswith("intake ")
+
+
+def test_a_governed_host_policy_refuses_a_pending_declaration(served):
+    """5970369724: a binding a repository declared that is still PENDING is
+    refused, and an unreadable declarations document admits nothing."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    store = intake_mod.DeclarationStore(intake_mod.declarations_path(
+        served.repo))
+    store.propose(intake_mod.ModelDeclaration(
+        binding_id=BINDING_ID, status=intake_mod.STATUS_PENDING,
+        install_posture=intake_mod.POSTURE_SINGLE_OPERATOR,
+        proposed_by="brett@opensoft.one", proposed_at=intake_mod.stamp()))
+    policy = _GovernedHostPolicy()
+    assert not policy.verdict(served.declared(), root=served.repo).trusted
+    intake_mod.declarations_path(served.repo).write_text(
+        "{not: [a, document", encoding="utf-8")
+    refused = policy.verdict(served.declared(), root=served.repo)
+    assert not refused.trusted
+    assert "cannot be read" in refused.reason
+    trust_mod.unregister()
+    trust_mod.register(policy)
+    with pytest.raises(trust_mod.TrustNotRecorded):
+        trust_mod.recorded_for(served.declared(), root=served.repo)
 
 
 # ===========================================================================
