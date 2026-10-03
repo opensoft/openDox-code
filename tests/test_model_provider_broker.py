@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import http.client
 import http.server
 import io
 import json
@@ -58,6 +59,7 @@ import threading
 import time
 import types
 import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1967,6 +1969,221 @@ def test_a_stored_document_whose_endpoint_carries_a_key_does_not_read(
     assert KEY_SENTINEL not in str(caught.value)
 
 
+# --- a raw key's shape (the adversarial review of openDox-code#63) -------
+#
+# The adversarial review at `4948e6dd` found three ways a key still reached
+# the record or a refusal. M2: a key given as a broker's reference was taken
+# as one, stored, printed by `list`, and put in the broker's argv at each
+# mint. M3: the scheme refusal repeated the endpoint, key and all. M5: a key
+# in the endpoint's path or fragment passed the detector, which reads a URL's
+# userinfo and its parameters' names. Every value below is an obvious fake,
+# built from fragments, so no line of this file holds a key's format whole.
+
+_STAND_IN_BASE62 = "StandIn0NotAKey0" * 2   # 32 characters, all three classes
+_STAND_IN_HEX = "0123456789abcdef" * 2      # 32 characters, two classes
+
+#: Each holds a raw key's shape by one rule of `has_a_raw_key_shape` alone,
+#: so a rule that is dropped or narrowed is a case that fails.
+RAW_KEY_SHAPES = {
+    "base62-run-of-32": _STAND_IN_BASE62,
+    "hex-run-of-40": _STAND_IN_HEX + "01234567",
+    "prefix-and-hex": "sk" + "-" + _STAND_IN_HEX,
+    "prefix-and-a-tail-of-16": "sk" + "-" + _STAND_IN_HEX[:16],
+    "prefix-and-letters": "hf" + "_" + "StandInNotAKeyStandIn",
+    "prefix-glued-to-a-word": "bot" + "sk" + "-" + "Stand-In-0000-NOT-A-KEY",
+    "google-api-key": "AIza" + "-stand-in-NOT-a-KEY-0000-0000-00000",
+    "aws-access-key-id": "AKIA" + "STANDIN0NOTAKEY0",
+    "json-web-token": "eyJ" + "hbGciOiJub25lIn0" + "." + "e30" + ".",
+}
+
+#: The shapes references and endpoints are known to take, and each rule's
+#: edge. None of them is refused.
+NOT_RAW_KEY_SHAPES = {
+    "opendox-reference": FAKE_REFERENCE,
+    "zeroed-reference": "opref-" + "0" * 24,
+    "console-placeholder": "pending-broker-intake",
+    "uuid": "123e4567-e89b-12d3-a456-426614174000",
+    "model-name-under-32": "GPT4oMiniProduction2024",
+    "hex-run-of-32": _STAND_IN_HEX,
+    "hex-run-of-39": (_STAND_IN_HEX + "01234567")[:39],
+    "base62-run-of-31": _STAND_IN_BASE62[:31],
+    "a-word-ending-in-a-prefix": "benchmark-runner-" + _STAND_IN_HEX[:16],
+    "prefix-and-a-tail-of-15": "sk" + "-" + _STAND_IN_HEX[:15],
+    "secret-manager-reference": "op://dev/5vtmcbtqbkxhvdl3ezm2l3lvsa/password",
+}
+
+#: A key as a provider issues one: a prefix, and a base62 body.
+_STAND_IN_PROVIDER_KEY = "sk" + "-proj-" + _STAND_IN_BASE62
+
+
+@pytest.mark.parametrize("shape", sorted(RAW_KEY_SHAPES))
+def test_a_raw_keys_shape_is_read_by_each_rule(shape):
+    assert binding_mod.has_a_raw_key_shape(RAW_KEY_SHAPES[shape]) is True
+    assert binding_mod.carries_a_raw_key(RAW_KEY_SHAPES[shape]) is True
+
+
+@pytest.mark.parametrize("shape", sorted(NOT_RAW_KEY_SHAPES))
+def test_the_shapes_references_take_are_not_a_raw_keys(shape):
+    """The other side, at each rule's edge: a run one character short, a
+    tail one short, a prefix that only ends a word, and the ids gateways and
+    secret managers use."""
+    assert binding_mod.has_a_raw_key_shape(NOT_RAW_KEY_SHAPES[shape]) is False
+    assert binding_mod.carries_a_raw_key(NOT_RAW_KEY_SHAPES[shape]) is False
+
+
+def test_only_text_has_a_raw_keys_shape():
+    for value in (None, 0, _STAND_IN_BASE62.encode("ascii"),
+                  [_STAND_IN_BASE62]):
+        assert binding_mod.has_a_raw_key_shape(value) is False
+        assert binding_mod.carries_a_raw_key(value) is False
+
+
+@pytest.mark.parametrize("shape", sorted(RAW_KEY_SHAPES))
+def test_a_reference_with_a_raw_keys_shape_is_refused_and_never_repeated(
+        shape):
+    """M2. A reference is never a raw key (#1144 box 16.3), so a value with
+    a raw key's shape is refused as a broker's reference and inside each
+    built-in form, and the refusal is a fixed sentence."""
+    key = RAW_KEY_SHAPES[shape]
+    for declare in (lambda: _binding(credential_ref=key),
+                    lambda: _built_in_binding(f"env:{key}"),
+                    lambda: _built_in_binding(
+                        f"keyring:{KEYRING_SERVICE}/{key}")):
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            declare()
+        assert str(caught.value) == binding_mod.CREDENTIAL_REF_IS_A_RAW_KEY
+        assert key not in str(caught.value)
+
+
+@pytest.mark.parametrize("shape", sorted(
+    name for name, value in NOT_RAW_KEY_SHAPES.items()
+    if not binding_mod.names_a_built_in_form(value)))
+def test_a_reference_shaped_value_is_still_a_brokers_reference(shape):
+    reference = NOT_RAW_KEY_SHAPES[shape]
+    assert _binding(credential_ref=reference).credential_ref == reference
+
+
+def test_a_reference_past_the_url_bound_is_refused_before_the_detector(
+        monkeypatch):
+    """Asking the detector of a reference (M2) asks a quadratic check of a
+    value that had no bound, so a reference is held to the endpoint's bound
+    first, and the detector is never asked of a longer one. The refusal
+    repeats nothing of it."""
+    bound = runtime_config.MAX_REMOTE_URL_CHARS
+    at_the_bound = "opref-" + "0" * (bound - len("opref-"))
+    past_the_bound = at_the_bound + "0"
+    asked = []
+    detector = git_adapter_mod.carries_a_credential
+
+    def _recording(text):
+        asked.append(text)
+        return detector(text)
+
+    monkeypatch.setattr(git_adapter_mod, "carries_a_credential", _recording)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(credential_ref=past_the_bound)
+    assert str(caught.value) == binding_mod.CREDENTIAL_REF_TOO_LONG.format(
+        bound=bound)
+    assert past_the_bound not in asked
+    assert _binding(credential_ref=at_the_bound).credential_ref == (
+        at_the_bound)
+    assert at_the_bound in asked
+
+
+def test_a_text_past_the_url_bound_carries_a_key_unasked(monkeypatch):
+    """The predicate's own floor, for a caller that does not bound what it
+    asks about, as `doxbench_provider` asks of a broker's reference."""
+    def _not_asked(_text):
+        raise AssertionError("the detector was asked about a text past the "
+                             "bound")
+
+    monkeypatch.setattr(git_adapter_mod, "carries_a_credential", _not_asked)
+    past_the_bound = "x" * (runtime_config.MAX_REMOTE_URL_CHARS + 1)
+    assert binding_mod.has_a_raw_key_shape(past_the_bound) is False
+    assert binding_mod.carries_a_raw_key(past_the_bound) is True
+
+
+def test_a_stored_document_whose_reference_is_a_raw_key_does_not_read(
+        tmp_path):
+    """M2 for a record written before the rule: it no longer reads, as one
+    whose endpoint carries a key does not, and the refusal does not repeat
+    the key."""
+    record = _binding().as_record()
+    record["credential_ref"] = _STAND_IN_PROVIDER_KEY
+    path = tmp_path / "bindings.yaml"
+    path.write_text(json.dumps({"schema_version": 1,
+                                "kind": binding_mod.BINDINGS_KIND,
+                                "bindings": [record]}), encoding="utf-8")
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        binding_mod.BindingStore(path).list()
+    assert str(caught.value) == binding_mod.CREDENTIAL_REF_IS_A_RAW_KEY
+    assert _STAND_IN_PROVIDER_KEY not in str(caught.value)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "provider.invalid/turn",
+    "file:///etc/passwd",
+    "ftp://provider.invalid/turn",
+    " https://provider.invalid/turn",
+    # a short key in the wrong field, which no shape rule knows
+    "sk" + "-" + "stand-in",
+])
+def test_the_scheme_refusal_is_a_fixed_sentence_that_repeats_nothing(
+        endpoint):
+    """M3. The scheme refusal repeated the endpoint, and a value in the
+    wrong field can be a key, a key no shape rule knows among them. It is a
+    fixed sentence now, composed from `ENDPOINT_SCHEMES` alone."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=endpoint)
+    message = str(caught.value)
+    assert message == binding_mod.ENDPOINT_SCHEME_REFUSED
+    assert endpoint.strip() not in message
+    for scheme in binding_mod.ENDPOINT_SCHEMES:
+        assert scheme in message
+
+
+#: Where a key was carried past the detector (M5), and the reviewer's M3
+#: examples, where a key in the endpoint field reached the scheme refusal.
+_KEYED_ENDPOINTS = {
+    "a-path-segment": "https://api.example.invalid/v1/{key}/chat/completions",
+    "glued-to-a-path-word": "https://api.example.invalid/bot{key}/v1",
+    "the-fragment": "https://api.example.invalid/v1/chat/completions#{key}",
+    "a-query-value": "https://api.example.invalid/v1/chat/completions?q={key}",
+    "the-whole-field": "{key}",
+    "behind-another-scheme": "ftp://{key}",
+    "behind-a-space": " https://api.example.invalid/v1?q={key}",
+}
+
+
+@pytest.mark.parametrize("key", [_STAND_IN_BASE62, _STAND_IN_PROVIDER_KEY],
+                         ids=["base62-run", "provider-key"])
+@pytest.mark.parametrize("place", sorted(_KEYED_ENDPOINTS))
+def test_a_key_anywhere_in_the_endpoint_is_refused_and_never_repeated(
+        place, key):
+    """M5, and M3's examples. The shape is checked with the detector, before
+    the scheme, so a key in the path, glued to a path word, in the fragment,
+    in a parameter with an innocent name, or in place of the URL, is refused
+    with the fixed sentence."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=_KEYED_ENDPOINTS[place].format(key=key))
+    assert str(caught.value) == binding_mod.ENDPOINT_CARRIES_A_CREDENTIAL
+    assert key not in str(caught.value)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://stand-in.openai.azure.invalid/openai/deployments/GPT4oMini2024"
+    "/chat/completions?api-version=2024-02-01",
+    "https://gateway.ai.cloudflare.invalid/v1/" + _STAND_IN_HEX
+    + "/stand-in/openai/chat/completions",
+    "https://api.example.invalid/v1/projects/"
+    "123e4567-e89b-12d3-a456-426614174000/chat/completions",
+    "https://api.example.invalid/v1/chat/completions#section-2",
+], ids=["deployment-name", "gateway-account-id", "uuid", "fragment"])
+def test_the_ids_an_endpoint_carries_are_not_keys(endpoint):
+    binding = _binding(endpoint=endpoint, dialect=OPENAI_CHAT)
+    assert binding.endpoint == endpoint
+
+
 # --- one resolver per record ---------------------------------------------
 
 
@@ -2303,6 +2520,31 @@ def test_a_broker_reference_in_a_built_in_form_is_malformed(tmp_path):
         with pytest.raises(provider_mod.BrokerRefused) as caught:
             provider_mod.hand_off_credential(binding, stdin)
         assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+
+@pytest.mark.parametrize("which", ["raw-key-shape", "past-the-url-bound"])
+def test_a_broker_reference_the_record_would_refuse_is_malformed(tmp_path,
+                                                                 which):
+    """M2 at the hand-off: the reference a broker hands back is held to the
+    record's rule before anything stores it, a key's shape and the length
+    bound alike, so one that breaks it is a malformed answer, which both
+    entry points already catch. Nothing of it is repeated."""
+    reference = (_STAND_IN_PROVIDER_KEY if which == "raw-key-shape"
+                 else "opref-" + "0" * runtime_config.MAX_REMOTE_URL_CHARS)
+    script = tmp_path / "keyed-reference-broker.py"
+    script.write_text(
+        "import json,sys\nsys.stdin.read()\n"
+        "print(json.dumps({'schema_version':1,"
+        "'kind':'openprofiler_broker_intake','reference':"
+        + repr(reference) + ","
+        "'binding':'b','provider':'p','auth_kind':'api_key','label':None,"
+        "'created_at':'x','max_lifetime_seconds':300,'issued_by':'i',"
+        "'approved_by':'a','audit_ref':'opaud-x'}))\n",
+        encoding="utf-8")
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.hand_off_credential(_broker_binding(script),
+                                         io.StringIO("x"))
+    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    assert reference not in str(caught.value)
 
 
 @pytest.mark.parametrize("endpoint", [
@@ -2756,6 +2998,82 @@ def test_a_refused_connection_keeps_no_frame_that_holds_the_key(monkeypatch):
     assert _locals_holding(caught.value, KEY_SENTINEL) == []
 
 
+class _UnreadableAnswerHandler(http.server.BaseHTTPRequestHandler):
+    """A stand-in provider that reads one whole request and answers it with
+    `answer`, bytes `http.client` cannot read as a response."""
+
+    answer = b""
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.wfile.write(self.answer)
+        self.close_connection = True
+
+    def log_message(self, *_args):
+        return
+
+
+#: The answers of the adversarial review of openDox-code#63 (L4), each under
+#: the `http.client.HTTPException` it raises, with the path it is asked at.
+#: `InvalidURL` needs no answer: `http.client` raises it for a path it cannot
+#: send, a path the record accepts, before anything is sent.
+UNREADABLE_ANSWERS = {
+    "BadStatusLine": (b"GARBAGE\r\n\r\n", "/v1/chat/completions"),
+    "UnknownProtocol": (b"HTTP/2.0 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+                        "/v1/chat/completions"),
+    "LineTooLong": (b"HTTP/1.1 200 OK\r\nX-Stand-In: " + b"a" * 70_000
+                    + b"\r\n\r\n", "/v1/chat/completions"),
+    "HTTPException": (b"HTTP/1.1 200 OK\r\n"
+                      + b"".join(b"X-Stand-In-%d: y\r\n" % number
+                                 for number in range(120)) + b"\r\n",
+                      "/v1/chat/completions"),
+    "IncompleteRead": (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                       b"\r\n10\r\n{\"choices\":", "/v1/chat/completions"),
+    "InvalidURL": (b"", "/v1/chat completions"),
+}
+
+
+def _read_by_urllib_alone(url: str) -> None:
+    request = urllib.request.Request(url, data=b"{}", method="POST")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=10) as response:
+        response.read()
+
+
+@pytest.mark.parametrize("resolver", ["built-in", "none"])
+@pytest.mark.parametrize("raised", sorted(UNREADABLE_ANSWERS))
+def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
+        raised, resolver):
+    """The adversarial review of openDox-code#63 at `4948e6dd`, L4. A status
+    line, a protocol, a header, a body or a path that `http.client` cannot
+    read or send raises an `http.client.HTTPException`, which is no
+    `OSError`. So it escaped `dispatch`, with the request's headers, and the
+    key, in `do_open`'s frame. Each is the fixed unreachable refusal now,
+    raised afresh where a built-in credential was presented."""
+    answer, path = UNREADABLE_ANSWERS[raised]
+    handler = type(f"_{raised}Answer", (_UnreadableAnswerHandler,),
+                   {"answer": answer})
+    with _stand_in_provider(handler) as base:
+        # the case is what it is named for: urllib alone raises exactly it
+        with pytest.raises(http.client.HTTPException) as unread:
+            _read_by_urllib_alone(base + path)
+        assert type(unread.value) is getattr(http.client, raised)
+        binding = (_built_in_binding(endpoint=base + path)
+                   if resolver == "built-in"
+                   else _none_binding(endpoint=base + path))
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            runner=_refusing_runner, notice=lambda _text: None,
+            environ={ENV_NAME: KEY_SENTINEL})
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            port.dispatch(_Envelope())
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
+    if resolver == "built-in":
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert _locals_holding(caught.value, KEY_SENTINEL) == []
+
+
 def test_an_unpresentable_value_leaves_no_frame_that_holds_it(monkeypatch):
     """A value refused as unpresentable can still be most of a key, such as
     a key with a line break after it. The frame that read it lets it go
@@ -2875,6 +3193,36 @@ def test_the_cli_declares_a_binding_for_each_resolver(tmp_path, capsys):
 
     assert run("model-binding", "remove", *root, "--id", "env-bound") == 0
     assert binding_mod.BUILT_IN_REMOVAL_NOTICE in capsys.readouterr().out
+
+
+def test_the_cli_refuses_a_raw_key_as_a_reference_and_repeats_nothing(
+        tmp_path, capsys):
+    """M2 at the operator door: `model-binding add --credential-ref <key>`
+    stores nothing, so `list` has nothing of it to print, and neither stream
+    repeats it."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    parser = cli_mod.build_parser()
+
+    def run(*argv) -> int:
+        args = parser.parse_args(list(argv))
+        return args.func(args)
+
+    root = ["--repo-root", str(checkout)]
+    assert run("model-binding", "add", *root, "--id", "keyed", "--label", "L",
+               "--provider", "p", "--credential-approver",
+               "brett@opensoft.one",
+               "--endpoint", "https://api.example.invalid/v1/chat/completions",
+               "--dialect", OPENAI_CHAT, "--auth-kind", "api_key",
+               "--credential-ref", _STAND_IN_PROVIDER_KEY,
+               "--", "openprofiler-broker") == 1
+    captured = capsys.readouterr()
+    assert binding_mod.CREDENTIAL_REF_IS_A_RAW_KEY in captured.err
+    assert _STAND_IN_PROVIDER_KEY not in captured.err + captured.out
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+    assert store.list() == ()
+    assert run("model-binding", "list", *root) == 0
+    assert _STAND_IN_PROVIDER_KEY not in capsys.readouterr().out
 
 
 class _UnreadableSource:

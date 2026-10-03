@@ -98,6 +98,7 @@ What that means in practice, and where the line falls:
 from __future__ import annotations
 
 import dataclasses
+import http.client
 import json
 import os
 import shutil
@@ -603,7 +604,11 @@ def hand_off_credential(binding, source, *,
                     source=source)
     document = _answer_document(answer, BROKER_INTAKE_KIND, INTAKE_FIELDS)
     reference = _declared_string(document, "reference")
-    if binding_mod.names_a_built_in_form(reference):
+    # A reference with a raw key's shape is malformed too, for the same
+    # reason: the record refuses it (the adversarial review of
+    # openDox-code#63, M2), where neither entry point expects a refusal.
+    if (binding_mod.names_a_built_in_form(reference)
+            or binding_mod.carries_a_raw_key(reference)):
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
     return reference
 
@@ -1005,7 +1010,12 @@ def _post_to_provider(*, endpoint: str, dialect: str,
         if status == PROVIDER_STATUS_TOKEN_EXPIRED:
             raise _TokenExpired from None
         raise BrokerRefused(DIAG_PROVIDER_REFUSED) from None
-    except (urllib.error.URLError, OSError, ValueError) as error:
+    # An `http.client.HTTPException` too: a status line, a protocol or a
+    # header line `http.client` cannot read raises one, which is no OSError,
+    # and it escaped with the request's headers in `do_open`'s frame (the
+    # adversarial review of openDox-code#63, L4).
+    except (urllib.error.URLError, http.client.HTTPException, OSError,
+            ValueError) as error:
         raise BrokerRefused(DIAG_PROVIDER_UNREACHABLE) from error
     if not isinstance(payload, (bytes, bytearray)):
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
