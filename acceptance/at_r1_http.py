@@ -57,13 +57,15 @@ A harness that breaks before a verdict exits 2, never 0.
     per F5.3: none of openxFactory's declared governance words in any string
     value; and it fills the grouping station, so the chat pane can open, R1Q13
     (a) with (c)) and `/capabilities` (`install.mode == "local"`, and NO
-    `console_token`: a standalone plane hands its token to no loopback
-    caller, T104).
+    console token: a standalone plane hands its token to no loopback
+    caller, T104). As quickstart.md § 3 asserts it (T007 batch N), the RAW
+    payload carries the token neither by name, at any depth, nor by value,
+    which step 6 checks once the opener has handed the harness the token.
  6. READS THE CONSOLE TOKEN THE WAY THE USER'S BROWSER IS HANDED IT (plan 034
     T104; RULED openxFactory#656 `5963851934`). The start prints the PATH of
     a private opener file, `<OPENDOX_STATE_DIR>/console/<port>.html`, and
     never the token. The file must be this user's regular file, mode 0600,
-    with one link, in a directory no one else can enter, under a state
+    with one link, in a directory of mode 0700, under a state
     directory and ancestors no other user can change (T104's own rules for
     that tree), and outside the served repository. Its one LIVE
     meta-refresh (none inside a `<template>`, a `<noscript>` or a raw-text
@@ -229,6 +231,8 @@ CONSOLE_RECORD_ID = "opendox-console"
 CONSOLE_RECORD_KIND = "opendox-console-access"
 CONSOLE_RECORD_SCHEMA_VERSION = 1
 OPENER_MODE = 0o600
+#: The opener's directory, `console/`, exactly (quickstart.md § 3; T104).
+OPENER_DIRECTORY_MODE = 0o700
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 #: The paths that serve the console page, `/` and the `/index.html` T104's
 #: entry points open (`serve_mod.server_url(httpd, "/index.html")`).
@@ -1221,7 +1225,9 @@ def wait_until_ready(server: Server) -> Answer | None:
     return None
 
 
-def fetch_object(server: Server, route: str, verdict: Verdict) -> dict:
+def fetch_object(server: Server, route: str,
+                 verdict: Verdict) -> tuple[dict, str]:
+    """`route`'s JSON object, and its RAW payload as text."""
     answer = get(server.port, route)
     verdict.require(f"{server.label}.http {route}", answer.status == 200,
                     f"{route} answers {answer.describe()}")
@@ -1232,7 +1238,7 @@ def fetch_object(server: Server, route: str, verdict: Verdict) -> dict:
     verdict.require(f"{server.label}.{route} is a JSON object",
                     isinstance(body, dict),
                     f"{route} is not a JSON object: {body!r:.300}")
-    return body
+    return body, answer.body.decode("utf-8", "replace")
 
 
 def string_values(node):
@@ -1247,8 +1253,9 @@ def string_values(node):
 
 
 def check_pages(server: Server, index: Answer,
-                verdict: Verdict) -> tuple[dict, dict]:
-    """Step 5: `/`, `/snapshot.json` and `/capabilities`."""
+                verdict: Verdict) -> tuple[dict, dict, str]:
+    """Step 5: `/`, `/snapshot.json` and `/capabilities`, whose RAW payload
+    is returned with it, for step 6's by-value check."""
     label = server.label
     page = index.body.decode("utf-8", "replace")
     verdict.check(f"{label}.http / is HTML",
@@ -1256,7 +1263,7 @@ def check_pages(server: Server, index: Answer,
                   and "text/html" in index.headers.get("content-type", ""),
                   f"`/` answered {index.headers.get('content-type')!r} "
                   "without an <html> element")
-    snapshot = fetch_object(server, "/snapshot.json", verdict)
+    snapshot, _raw = fetch_object(server, "/snapshot.json", verdict)
     documents = snapshot.get("documents")
     verdict.check(f"{label}.snapshot non-empty",
                   isinstance(documents, list) and bool(documents),
@@ -1282,7 +1289,7 @@ def check_pages(server: Server, index: Answer,
                   f"snapshot: {leaks}")
     verdict.note(f"snapshot kind={snapshot.get('kind')!r}, "
                  f"{len(as_list(snapshot.get('documents')))} documents")
-    caps = fetch_object(server, "/capabilities", verdict)
+    caps, caps_raw = fetch_object(server, "/capabilities", verdict)
     # A token `/capabilities` publishes is never printed either, though the
     # check below fails on it (T104).
     verdict.keep_secret(caps.get(CONSOLE_TOKEN_FIELD))
@@ -1294,20 +1301,54 @@ def check_pages(server: Server, index: Answer,
     if isinstance(pid, int):
         verdict.note(f"the served install reports its bundled server as "
                      f"pid {pid}")
-    check_no_published_token(label, caps, verdict)
-    return snapshot, caps
+    check_no_published_token(label, caps, caps_raw, verdict)
+    return snapshot, caps, caps_raw
 
 
-def check_no_published_token(label: str, caps: dict, verdict: Verdict) -> None:
+def keys_at_any_depth(node):
+    """Every key of every JSON object in `node`, however deep."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield key
+            yield from keys_at_any_depth(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from keys_at_any_depth(value)
+
+
+def check_no_published_token(label: str, caps: dict, caps_raw: str,
+                             verdict: Verdict) -> None:
     """A standalone plane does not publish its console token on
     `/capabilities` (plan 034 T104): any loopback caller, another OS user of
-    the machine included, can read that route."""
+    the machine included, can read that route. BY NAME, at any depth, as
+    quickstart.md § 3 asserts it (T007 batch N): `console_token` nowhere in
+    the RAW payload, and in no key of the parsed one, however deep or
+    however escaped."""
+    named = (CONSOLE_TOKEN_FIELD in caps_raw
+             or any(CONSOLE_TOKEN_FIELD in key
+                    for key in keys_at_any_depth(caps)))
     verdict.check(f"{label}.capabilities carries no console token",
-                  CONSOLE_TOKEN_FIELD not in caps,
+                  not named,
                   f"/capabilities publishes `{CONSOLE_TOKEN_FIELD}` to any "
                   "loopback caller; a standalone plane delivers it only "
                   "through the 0600 opener file (T104, adversarial review "
                   "2's M5)")
+
+
+def check_no_token_value(label: str, caps: dict, caps_raw: str, token: str,
+                         verdict: Verdict) -> None:
+    """Step 6's by-value half of step 5's check (T007 batch N; quickstart.md
+    § 3): the token the opener delivers is nowhere in `/capabilities`' RAW
+    payload, nor in any key or string value of the parsed one, under
+    whatever name. Neither the token nor the payload is quoted."""
+    carried = (token in caps_raw
+               or any(token in text for text in string_values(caps))
+               or any(token in key for key in keys_at_any_depth(caps)))
+    verdict.check(f"{label}.capabilities carries the opener's token nowhere",
+                  not carried,
+                  "/capabilities carries the console token the opener "
+                  "delivers, under another name or inside a value, to any "
+                  "loopback caller (T104; T007 batch N)")
 
 
 def grouping_field_of(caps: dict) -> str:
@@ -1568,7 +1609,7 @@ def tree_unsafe_because(state: Path) -> tuple[Path, str] | None:
 def opener_unsafe_because(path: Path) -> tuple[Path, str] | None:
     """`(where, why)` for the first reason `path` is not a private opener,
     or `None`: this user's regular file, mode exactly 0600, with one link,
-    in this user's own directory, which no one else can enter, under a
+    in this user's own directory, mode exactly 0700, under a
     state directory and ancestors no other user can change. `where` is the
     file or the directory at fault, and no reason quotes a path, so a
     caller decides whether it may quote `where`."""
@@ -1594,9 +1635,10 @@ def opener_unsafe_because(path: Path) -> tuple[Path, str] | None:
         return path, reason
     if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != uid:
         return path.parent, "is not this user's own directory"
-    if directory.st_mode & 0o077:
+    if stat.S_IMODE(directory.st_mode) != OPENER_DIRECTORY_MODE:
         return path.parent, (f"has mode {stat.S_IMODE(directory.st_mode):o}, "
-                             "which others can enter")
+                             f"not {OPENER_DIRECTORY_MODE:o}, as quickstart.md "
+                             "§ 3 checks it")
     return tree_unsafe_because(path.parent.parent)
 
 
@@ -1992,11 +2034,13 @@ def check_console_gone(label: str, opener: Path | None, token: str | None,
 def serve_one(label: str, repo: Path, ctx: Context, verdict: Verdict) -> None:
     """Steps 4-9 for one repository: start, fetch, stop, and look."""
     server, index = launch(label, repo, ctx, verdict)
-    snapshot, caps = check_pages(server, index, verdict)
+    snapshot, caps, caps_raw = check_pages(server, index, verdict)
     check_grouping(label, snapshot, caps, verdict)
     opener, token = check_console_opener(
         label, server.port, server.printed(), ctx.state_dir, repo, verdict,
         hosts=served_loopback_hosts(server.port))
+    if token is not None:
+        check_no_token_value(label, caps, caps_raw, token, verdict)
     check_catalog(server, token, verdict)
     check_routes(server, index, snapshot, caps, token, verdict)
     stop_and_look(server, ctx, verdict, opener, token)

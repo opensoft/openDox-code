@@ -599,12 +599,52 @@ def test_a_record_escaped_as_t104_writes_it_agrees(tmp_path: Path) -> None:
     assert token == TOKEN
 
 
-def test_a_published_token_is_a_named_failure() -> None:
+#: The token with every character written as a JSON `\u` escape: the
+#: parsed payload holds it, and the raw text never spells it.
+_ESCAPED = "".join(f"\\u{ord(c):04x}" for c in TOKEN)
+BY_NAME = "t.capabilities carries no console token"
+BY_VALUE = "t.capabilities carries the opener's token nowhere"
+
+
+@pytest.mark.parametrize("raw, named", [
+    ('{"install": {"mode": "local"}}', False),
+    ('{"console_token": "%s"}' % TOKEN, True),
+    ('{"install": {"mode": "local", "console_token": "x"}}', True),
+    ('{"views": {"views": [{"console_token": "x"}]}}', True),
+    ('{"console\\u005ftoken": "x"}', True),
+    ('{"fields": ["console_token"]}', True),
+    ('{"console_token_hint": "x"}', True),
+], ids=["absent", "top-level", "nested", "in-a-list", "escaped-key",
+        "as-a-value", "in-a-longer-key"])
+def test_a_published_token_name_anywhere_in_the_raw_payload_is_a_named_failure(
+        raw: str, named: bool) -> None:
+    """By name, at any depth, as quickstart.md § 3 asserts it on the RAW
+    payload (T007 batch N), and in every parsed key, however escaped."""
     verdict = harness.Verdict(keep_going=True)
-    harness.check_no_published_token("t", {"console_token": TOKEN}, verdict)
-    harness.check_no_published_token("u", {"install": {"mode": "local"}},
-                                     verdict)
-    assert _failures(verdict) == ["t.capabilities carries no console token"]
+    harness.check_no_published_token("t", json.loads(raw), raw, verdict)
+    assert _failures(verdict) == ([BY_NAME] if named else [])
+
+
+@pytest.mark.parametrize("raw, carried", [
+    ('{"install": {"mode": "local"}}', False),
+    ('{"session": "%s"}' % TOKEN, True),
+    ('{"install": {"note": "the token is %s"}}' % TOKEN, True),
+    ('{"%s": 1}' % TOKEN, True),
+    ('{"views": ["%s"]}' % TOKEN, True),
+    ('{"session": "%s"}' % _ESCAPED, True),
+    ('{"%s": 1}' % _ESCAPED, True),
+    ('{"session": "%s"}' % TOKEN[::-1], False),
+], ids=["absent", "another-key", "inside-a-value", "as-a-key", "in-a-list",
+        "escaped-value", "escaped-key", "another-token"])
+def test_the_opener_s_token_anywhere_in_the_raw_payload_is_a_named_failure(
+        raw: str, carried: bool, capsys) -> None:
+    """By value, under whatever name: neither the token nor the payload is
+    quoted."""
+    verdict = harness.Verdict(keep_going=True)
+    verdict.keep_secret(TOKEN)
+    harness.check_no_token_value("t", json.loads(raw), raw, TOKEN, verdict)
+    assert _failures(verdict) == ([BY_VALUE] if carried else [])
+    assert TOKEN not in capsys.readouterr().out
 
 
 def test_no_opener_named_is_a_named_failure(tmp_path: Path) -> None:
@@ -636,7 +676,9 @@ def test_an_opener_inside_the_served_repository_is_a_named_failure(
     (0o400, 0o700),     # not exactly 0600
     (0o600, 0o755),     # in a directory others can enter
     (0o600, 0o750),
-], ids=["file-0644", "file-0640", "file-0400", "dir-0755", "dir-0750"])
+    (0o600, 0o500),     # quickstart.md § 3 checks 0700 exactly
+], ids=["file-0644", "file-0640", "file-0400", "dir-0755", "dir-0750",
+        "dir-0500"])
 def test_an_opener_others_can_reach_is_a_named_failure(
         tmp_path: Path, mode: int, dir_mode: int) -> None:
     state, opener = _opener(tmp_path, mode=mode, dir_mode=dir_mode)
