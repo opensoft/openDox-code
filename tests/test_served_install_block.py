@@ -16,6 +16,9 @@ holds the rest, none of which starts a database:
    nothing handed in, the payload carries no `install` block at all.
 3. `cli._install_report` reads the settings the verb loaded and the bundled
    server it started, and answers None where nothing was resolved.
+4. A `/capabilities` request racing the bundled server's `stop()` answers
+   whole: the report reads the process ONCE (Copilot review of
+   openDox-code#72, r4171180402).
 
 A CREATED FILE: no carve-manifest row (RULED OQ-C).
 """
@@ -70,7 +73,8 @@ def _get(base: tuple[str, int], path: str) -> tuple[int, dict]:
 
 def test_a_hosted_entry_point_reports_its_hosted_shape(tmp_path) -> None:
     """The child inherits no runtime setting from the runner
-    (`standalone_child.Child`), and is given a hosted install's, on purpose."""
+    (`standalone_child.Child`), and is given a hosted install's settings, on
+    purpose."""
     repo = fresh_repository(PLAIN, tmp_path)
     child = Child(tmp_path, "opendox.cli", "generate-and-open",
                   "--repo-root", str(repo), "--repository", "fixture",
@@ -175,3 +179,44 @@ def test_a_local_run_reports_the_server_it_started() -> None:
         "data_dir": "/s/d", "socket_dir": "/s/r", "pid": 7}}
     server.pid = None                   # it stopped: asked again, it says so
     assert report()["database_bundle"]["pid"] is None
+
+
+# ---------------------------------------------------------------------------
+# 4 — a report racing the bundled server's stop answers whole
+# ---------------------------------------------------------------------------
+
+def test_a_capabilities_request_racing_the_bundles_stop_answers_whole(
+        served) -> None:
+    """`/capabilities` asks the bundled server's `report()` on a request
+    thread while the lifecycle thread may be in `stop()`, which clears
+    `process` (Copilot review of openDox-code#72, r4171180402). The race is
+    driven here deterministically: the process's `poll()`, inside `report()`,
+    is where `stop()` takes the process away. A report that read the field a
+    second time dereferenced `None`, and the request ended in a dropped
+    connection. From one snapshot it answers whole, for the process as read."""
+    from opendox.runtime import bundle as bundle_mod
+
+    # A SHORT state path, and never created: `report()` only names the
+    # bundle's directories, and `tmp_path` grows past the kernel's socket
+    # bound with this case's name (`config.database_bundle` refuses it).
+    settings = types.SimpleNamespace(
+        install_mode=runtime_config.INSTALL_MODE_LOCAL,
+        state_dir=Path("/odx-never-created/state"))
+    server = bundle_mod.BundledServer(settings)
+
+    class _StoppedMidReport:
+        pid = 4242
+
+        def poll(self):
+            server.process = None     # `stop()`, on the lifecycle thread
+            return None               # ...after the process was read as live
+
+    server.process = _StoppedMidReport()
+    base = served(install_report=cli_mod._install_report(argparse.Namespace(
+        runtime_settings=settings, database_bundle=server)))
+    status, caps = _get(base, "/capabilities")
+    assert status == 200, caps
+    assert caps["install"]["mode"] == runtime_config.INSTALL_MODE_LOCAL
+    assert caps["install"]["database_bundle"]["pid"] == 4242, caps
+    # and once it has stopped, the next request says so
+    assert _get(base, "/capabilities")[1]["install"]["database_bundle"]["pid"] is None
