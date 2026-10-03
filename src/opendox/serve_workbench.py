@@ -554,10 +554,20 @@ class WorkbenchRoutes:
                 doxbench_error_status(DOXBENCH_ERR_INVALID_TURN_REQUEST),
                 doxbench_error_body(DOXBENCH_ERR_INVALID_TURN_REQUEST))
             return
-        # openDox's OWN scope type (`doxbench_scope_types`), no seam (T084)
-        key = ScopeKey(
-            repository=fields["repository"], ref=fields["ref"],
-            tile_kind=fields["tile_kind"], tile_id=fields["tile_id"])
+        # openDox's OWN scope type (`doxbench_scope_types`), no seam (T084).
+        # It refuses a `tile_kind` outside its closed vocabulary with a
+        # `ValueError`, which used to escape and drop the connection
+        # (adversarial review 2, L1). An unknown kind is a malformed query,
+        # answered as a missing field is.
+        try:
+            key = ScopeKey(
+                repository=fields["repository"], ref=fields["ref"],
+                tile_kind=fields["tile_kind"], tile_id=fields["tile_id"])
+        except ValueError:
+            self._send_json(
+                doxbench_error_status(DOXBENCH_ERR_INVALID_TURN_REQUEST),
+                doxbench_error_body(DOXBENCH_ERR_INVALID_TURN_REQUEST))
+            return
         worktree = self._session_worktree_for(key)
         if worktree is None:
             # No live session on this scope. A DISTINCT cause (adversarial
@@ -1729,10 +1739,19 @@ class WorkbenchRoutes:
         scope_authority = column_seams.scope.current()
         from opendox import doxbench_turns
 
-        key = ScopeKey(repository=scope_fields["repository"],
-                       ref=scope_fields["ref"],
-                       tile_kind=scope_fields["tile_kind"],
-                       tile_id=scope_fields["tile_id"])
+        try:
+            key = ScopeKey(repository=scope_fields["repository"],
+                           ref=scope_fields["ref"],
+                           tile_kind=scope_fields["tile_kind"],
+                           tile_id=scope_fields["tile_id"])
+        except ValueError:
+            # A scope outside `ScopeKey`'s closed vocabulary (an unknown
+            # `tile_kind`, an empty field) is a malformed request, refused in
+            # the released envelope, never a dropped connection (adversarial
+            # review 2, L1). The released schema refuses most of these first.
+            self._refuse_turn(validators, DOXBENCH_ERR_INVALID_TURN_REQUEST,
+                              turn_id, failure_kind=failure_kind)
+            return
         # ---- step 5: scope, all from SERVER truth ----
         projection = None
         session_base = None
@@ -2722,7 +2741,16 @@ class WorkbenchRoutes:
         subject_path = fields["subject_path"]
         model_id = fields["model_id"]
         refresh = fields["refresh"]
-        key = ScopeKey(**fields["scope"])
+        try:
+            key = ScopeKey(**fields["scope"])
+        except ValueError:
+            # An unknown `tile_kind` is outside `ScopeKey`'s closed vocabulary:
+            # the request is malformed, and is answered so rather than with a
+            # dropped connection (adversarial review 2, L1).
+            self._send_json(
+                doxbench_error_status(DOXBENCH_ERR_INVALID_ABSTRACT_REQUEST),
+                doxbench_error_body(DOXBENCH_ERR_INVALID_ABSTRACT_REQUEST))
+            return
 
         # ---- step 4: scope, all from SERVER truth ----
         # THE SCOPE AUTHORITY IS READ HERE, BELOW STEP 1 (plan 034 T084; #1144
