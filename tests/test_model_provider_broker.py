@@ -3155,9 +3155,10 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
 
     THE TRANSPORT IS SHARED, so a broker's turn lands on the same sentence
     (Copilot's review of openDox-code#63 at `44582f8f`), where it escaped
-    before. That is the one change this PR makes to the broker path's
-    failure. Raising it afresh there is openDox-code#64's, as the ruling
-    leaves that path to it."""
+    before. On this branch it is raised afresh there too, as every refusal
+    of a request that carried a credential is (`_call_provider`), so no
+    frame it keeps holds the minted token (the adversarial review's L4, for
+    openDox-code#64)."""
     answer, path = UNREADABLE_ANSWERS[raised]
     handler = type(f"_{raised}Answer", (_UnreadableAnswerHandler,),
                    {"answer": answer})
@@ -3183,10 +3184,11 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
         with pytest.raises(provider_mod.BrokerRefused) as caught:
             port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
-    if resolver == "built-in":
+    if resolver != "none":
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None
         assert _locals_holding(caught.value, KEY_SENTINEL) == []
+        assert _locals_holding(caught.value, SENTINEL_TOKEN) == []
 
 
 def test_an_unpresentable_value_leaves_no_frame_that_holds_it(monkeypatch):
