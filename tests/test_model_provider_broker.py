@@ -390,8 +390,12 @@ def test_a_hosted_install_with_a_bindings_document_still_serves(tmp_path,
     monkeypatch.setattr(builtins, "__import__", poisoned)
     monkeypatch.delitem(sys.modules, "yaml", raising=False)
 
+    # The harness is PRESENT here (plan 034 T081): with it absent, a document
+    # read as declaring nothing resolves the no-model port instead, which
+    # tests/test_chat_model_configuration.py holds.
     resolve = install_mod.declared_model_port_factory(
-        tmp_path / "sessions", checkout_root=checkout)
+        tmp_path / "sessions", checkout_root=checkout,
+        harness_present=lambda: True)
     from opendox import doxbench_bridge as bridge_mod
     assert isinstance(resolve(), bridge_mod.OmpHarnessBridge)
     assert "bindings document could not be read" in capsys.readouterr().err
@@ -1171,11 +1175,14 @@ def test_the_port_satisfies_the_seam_without_growing_a_fourth_verb(tmp_path):
 def test_a_checkout_with_no_bindings_resolves_exactly_the_harness_declaration(
         tmp_path):
     """TASK 3.3. Not "a port of the same kind" — the SAME construction the
-    entrypoints have always made."""
+    entrypoints have always made, WHERE THE HARNESS IS INSTALLED (plan 034
+    T081, #1144's 16.4). With it absent, there is no model, and
+    tests/test_chat_model_configuration.py holds that state."""
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     resolve = install_mod.declared_model_port_factory(
-        tmp_path / "sessions", checkout_root=checkout)
+        tmp_path / "sessions", checkout_root=checkout,
+        harness_present=lambda: True)
     port = resolve()
     from opendox import doxbench_bridge as bridge_mod
     assert isinstance(port, bridge_mod.OmpHarnessBridge)
@@ -1203,8 +1210,10 @@ def test_an_unreadable_bindings_document_falls_back_and_says_so(tmp_path,
     path.parent.mkdir(parents=True)
     path.write_text("schema_version: 9\nkind: something-else\n",
                     encoding="utf-8")
+    # The harness is PRESENT here (plan 034 T081), as in the case above.
     resolve = install_mod.declared_model_port_factory(
-        tmp_path / "sessions", checkout_root=checkout)
+        tmp_path / "sessions", checkout_root=checkout,
+        harness_present=lambda: True)
     from opendox import doxbench_bridge as bridge_mod
     assert isinstance(resolve(), bridge_mod.OmpHarnessBridge)
     assert "bindings document could not be read" in capsys.readouterr().err
