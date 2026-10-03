@@ -147,9 +147,15 @@ def fresh_repository(fixture: Path, parent: Path, *,
 
 class Child:
     """One `python -m <module> ...` child, with the siblings refused and its
-    standard output a buffered pipe. `workdir` holds the blocker and the log."""
+    standard output a buffered pipe. `workdir` holds the blocker and the log.
 
-    def __init__(self, workdir: Path, module: str, *args: str) -> None:
+    `extra_env` names the settings a case gives its child ON PURPOSE (a hosted
+    install's issuer and DSNs, say). They are applied after the runner's own
+    runtime settings are taken out, so a case still inherits none by
+    accident (plan 034 T073)."""
+
+    def __init__(self, workdir: Path, module: str, *args: str,
+                 extra_env: dict[str, str] | None = None) -> None:
         blocker = workdir / "sibling-blocker"
         blocker.mkdir(parents=True, exist_ok=True)
         (blocker / "sitecustomize.py").write_text(_BLOCKER, encoding="utf-8")
@@ -165,6 +171,7 @@ class Child:
         self.state_dir = Path(tempfile.mkdtemp(
             prefix="odx-child-", dir="/tmp" if os.path.isdir("/tmp") else None))
         env["OPENDOX_STATE_DIR"] = str(self.state_dir)
+        env.update(extra_env or {})
         self.argv = [sys.executable, "-m", module, *args]
         verb = args[0] if args and not args[0].startswith("-") else ""
         self.label = f"python -m {module} {verb}".strip()
