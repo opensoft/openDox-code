@@ -267,10 +267,14 @@ jobs:
           # (openDox-code#77's scope seam). JUnit reports an xfail as a skip.
           # Each turns into a pass when T100 merges `main` after that draft has
           # landed, so this moves back by one with each, WITH the reason, and
-          # is 11 again once all three are in. The floors are not moved: CI
-          # read 3327 / 3316 on this change's base (#64, run 37072154936),
-          # already 851 above them.
-          EXPECT_SKIPPED: "14"
+          # is 11 again once all three are in.
+          # BACK FROM 14 TO 13: #74 landed on `main` (`9a490405`) and reached
+          # this branch through #64's merge of `main` `1130e996` (`63e534cb`),
+          # so the rail case runs and passes, with the rail's trust line it
+          # waited on. Two remain: #69's and #77's. The floors are not moved:
+          # CI read 3327 / 3316 on this change's first base (#64, run
+          # 37072154936), already 851 above them.
+          EXPECT_SKIPPED: "13"
         run: |
           python3 - <<'PY' > triple.env
           import xml.etree.ElementTree as ET, pathlib

@@ -1239,7 +1239,8 @@ def test_a_governed_host_policy_keeps_the_governed_flow(served, declared):
 
 
 # ===========================================================================
-# 5. cases that wait on another draft (strict, naming it)
+# 5. the store's default home, the rail, and a served turn (#69 and #77 still
+#    wait: strict, naming each)
 # ===========================================================================
 
 _HAS_STATE_DIR = hasattr(runtime_config, "state_dir")
@@ -1279,8 +1280,6 @@ def test_with_no_state_directory_nothing_is_trusted(tmp_path, monkeypatch):
 
 _VIEWS = REPO_ROOT / "src" / "opendox" / "web" / "views"
 _RAIL = _VIEWS / "doxbench-chat.js"
-_HAS_NO_MODEL_RAIL = "NO_MODEL_CONFIGURED_REMEDY" in _RAIL.read_text(
-    encoding="utf-8")
 
 #: The rail, mounted under node over a minimal DOM (the shim
 #: openDox-code#74's tests/test_chat_model_configuration.py mounts it with),
@@ -1383,10 +1382,6 @@ process.stdout.write(JSON.stringify(out));
 """
 
 
-@pytest.mark.xfail(not _HAS_NO_MODEL_RAIL, strict=True,
-                   reason="the rail's visible no-model line is "
-                          "openDox-code#74's (T081), which is not on this "
-                          "base; the trust remedy sits beside it")
 def test_the_rail_says_how_to_trust_a_declared_binding(tmp_path):
     """RULED "make the rail say how to trust" (5962785556, item 2). With a
     declared model in the catalog and none available, the rail shows its own

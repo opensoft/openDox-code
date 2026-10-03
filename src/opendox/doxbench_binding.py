@@ -280,10 +280,52 @@ ENDPOINT_NOT_PRIVATE = (
 #: repeated the URL would print the key to a terminal, a log, or, through the
 #: console's intake route, a browser.
 ENDPOINT_CARRIES_A_CREDENTIAL = (
-    "the endpoint carries a credential (a user name or password in the URL, or "
-    "a credential-shaped query or fragment parameter), and a binding is safe to "
-    "commit only because it holds none; declare the endpoint without it, and "
-    "name the credential by its reference in credential_ref")
+    "the endpoint carries a credential (a user name or password in the URL, a "
+    "credential-shaped query or fragment parameter, or a run with a raw key's "
+    "shape anywhere in it), and a binding is safe to commit only because it "
+    "holds none; declare the endpoint without it, and name the credential by "
+    "its reference in credential_ref")
+
+#: The refusal an endpoint outside `ENDPOINT_SCHEMES` earns. FIXED, like the
+#: two around it, because a value in the wrong field can be a key: at T080's
+#: `4948e6dd` this refusal repeated the endpoint, so `--endpoint <key>`,
+#: `ftp://<key>` and `" https://…?q=<key>"` each printed the key to the
+#: terminal, to startup's standard error and, through the console's intake
+#: route, to a browser (the adversarial review of openDox-code#63, M3). It is
+#: composed from `ENDPOINT_SCHEMES` alone. AND IT SAYS NOTHING OF HOSTS
+#: (Copilot's review of openDox-code#63 at `abbb05d4`): every resolver meets
+#: it, and only a credential is held to a private route, the built-in
+#: resolver's key or a broker's minted token, which `ENDPOINT_NOT_PRIVATE`
+#: says, so a `none` binding may still name an `http://` endpoint on another
+#: host.
+ENDPOINT_SCHEME_REFUSED = (
+    "the endpoint does not begin with one of " + " or ".join(ENDPOINT_SCHEMES)
+    + ", and it is not repeated here, since a value in the wrong field can be "
+    "a key; declare the endpoint's URL with one of those schemes")
+
+#: The refusal a reference with a raw key's shape earns (#1144 box 16.3: a
+#: reference is never a raw key). At T080's `4948e6dd` any value that was not
+#: a built-in form was taken as a broker's reference, so
+#: `--credential-ref <key>` stored the key in the bindings file, `list` printed
+#: it, and each mint put it in the broker's argv, which `/proc/<pid>/cmdline`
+#: shows to every local user (the adversarial review of openDox-code#63, M2).
+#: FIXED, so the refusal does not print the key either.
+CREDENTIAL_REF_IS_A_RAW_KEY = (
+    "credential_ref has the shape of a raw key, not of a reference, and it is "
+    "not repeated here; give the key to its custodian (the broker's intake, "
+    "through model-binding set-credential, or the environment or keyring the "
+    "built-in resolver reads), and declare the reference it is known by")
+
+#: The refusal a reference longer than the product's URL bound earns. Asking
+#: the detector of a reference (M2 above) asks a quadratic check of a value
+#: that was unbounded: measured locally, an `opref-` reference of 65,536
+#: characters took the detector 4.3 s. So a reference is held to the
+#: endpoint's bound, for the endpoint's reason, before it is asked. Like the
+#: two above, this refusal repeats nothing of the value.
+CREDENTIAL_REF_TOO_LONG = (
+    "credential_ref is longer than {bound} characters and is refused unread: "
+    "the credential check is quadratic in what it is given, and a reference "
+    "names a credential in fewer")
 
 #: The refusal an endpoint longer than the product's URL bound earns (#1144 box
 #: 16.3; Copilot's overview of openDox-code#63). The detector below is
@@ -308,6 +350,81 @@ def _endpoint_bound() -> int:
     from opendox.runtime import config
 
     return config.MAX_REMOTE_URL_CHARS
+
+
+#: A RAW KEY'S SHAPE (the adversarial review of openDox-code#63 at `4948e6dd`,
+#: M2 and M5). The detector below reads a URL's userinfo and its parameters'
+#: names, and nothing else. So a key pasted as a broker's reference, or
+#: carried in an endpoint's path or fragment, passed it and was stored. A key
+#: has no grammar, so this is a SHAPE, and it errs toward refusing. A text has
+#: one if any of these is in it:
+#:   * a run of 32 or more letters and digits that mixes upper case, lower
+#:     case and digits, as a base62 secret does;
+#:   * a run of 40 or more letters and digits that mixes two of those
+#:     three, as a long hex secret does;
+#:   * a widely used key prefix (`sk-`, `ghp_`, `xoxb-`, `hf_` and the rest of
+#:     `_KEY_PREFIXED`) with 16 or more key characters after it, which mix
+#:     all three, or two where the prefix begins a word. So `bot` and a key
+#:     glued together are still refused, and a word that merely ends in a
+#:     prefix, as `benchmark-` ends in `rk-`, is not;
+#:   * a Google API key, an AWS access key id, or a JSON Web Token.
+#: It passes the shapes references and endpoints are known to take: this
+#: product's own `opref-` references (24 lowercase hex), UUIDs, model and
+#: deployment names under 32 characters, and the 32-character lowercase hex
+#: ids that gateways put in their paths and key vaults in their secrets'
+#: versions. The tests list both sides.
+_KEY_RUN = re.compile(r"[A-Za-z0-9]{32,}", re.ASCII)
+_KEY_PREFIXED = re.compile(
+    r"(?:sk|rk|ghp|gho|ghu|ghs|ghr|github_pat|glpat|xox[abprs]|hf|gsk|pplx"
+    r"|nvapi|xai)[-_](?P<tail>[A-Za-z0-9_-]{16,})", re.ASCII)
+_KEY_FORMATS = tuple(re.compile(pattern, re.ASCII) for pattern in (
+    r"AIza[A-Za-z0-9_-]{35}",                       # a Google API key
+    r"(?:AKIA|ASIA)[A-Z0-9]{16}",                   # an AWS access key id
+    r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{2,}\.",  # a JSON Web Token
+))
+
+
+def _character_classes(text: str) -> int:
+    """How many of upper case, lower case and digits `text` holds."""
+    return sum(any(test(c) for c in text)
+               for test in (str.isupper, str.islower, str.isdigit))
+
+
+def _begins_a_word(text: str, at: int) -> bool:
+    return at == 0 or not text[at - 1].isalnum()
+
+
+def has_a_raw_key_shape(text: object) -> bool:
+    """Whether `text` holds a raw key's shape (the rules above `_KEY_RUN`)."""
+    if not isinstance(text, str):
+        return False
+    for match in _KEY_RUN.finditer(text):
+        classes = _character_classes(match.group())
+        if classes == 3 or (classes == 2 and len(match.group()) >= 40):
+            return True
+    for match in _KEY_PREFIXED.finditer(text):
+        needed = 2 if _begins_a_word(text, match.start()) else 3
+        if _character_classes(match.group("tail")) >= needed:
+            return True
+    return any(pattern.search(text) for pattern in _KEY_FORMATS)
+
+
+def carries_a_raw_key(text: object) -> bool:
+    """Whether `text` carries a credential by either test the record asks:
+    the product's URL detector (`_carries_a_credential`), or a raw key's
+    shape anywhere in it (`has_a_raw_key_shape`). The record asks it of the
+    endpoint and of the reference, and `doxbench_provider` asks it of a
+    reference a broker hands back.
+
+    A TEXT PAST THE PRODUCT'S URL BOUND IS TAKEN TO CARRY ONE, and the
+    detector is not asked: its work grows with the square of what it is
+    given (`CREDENTIAL_REF_TOO_LONG`). The record refuses such a value with
+    its own sentence first, so this is the floor for any other caller."""
+    if not isinstance(text, str):
+        return False
+    if len(text) > _endpoint_bound():
+        return True
+    return _carries_a_credential(text) or has_a_raw_key_shape(text)
 
 
 def _carries_a_credential(text: str) -> bool:
@@ -556,17 +673,17 @@ class ModelProviderBinding:
 
         The length is checked first, because the detector's work grows with
         the square of what it is given. A KEY INSIDE THE URL IS REFUSED NEXT,
-        so no later refusal, the scheme's among them, can repeat a URL that
-        carries one."""
+        whether the detector finds it or its shape does, in the path and the
+        fragment as well (the adversarial review of openDox-code#63, M5).
+        Every refusal here is a fixed sentence, the scheme's too (M3), so
+        none can repeat a URL that carries one."""
         if len(self.endpoint) > _endpoint_bound():
             raise BindingRefused(ENDPOINT_TOO_LONG.format(
                 bound=_endpoint_bound()))
-        if _carries_a_credential(self.endpoint):
+        if carries_a_raw_key(self.endpoint):
             raise BindingRefused(ENDPOINT_CARRIES_A_CREDENTIAL)
         if not self.endpoint.startswith(ENDPOINT_SCHEMES):
-            raise BindingRefused(
-                f"endpoint {self.endpoint!r} does not name one of "
-                f"{ENDPOINT_SCHEMES}")
+            raise BindingRefused(ENDPOINT_SCHEME_REFUSED)
 
     def _require_a_private_route(self) -> None:
         """A CREDENTIAL TRAVELS ONLY BY A PRIVATE ROUTE (`is_a_private_route`),
@@ -609,6 +726,14 @@ class ModelProviderBinding:
                 f"takes no credential declares the auth kind "
                 f"{AUTH_KIND_NONE!r} instead")
         _require_non_blank_str("credential_ref", self.credential_ref)
+        # A REFERENCE IS NEVER A RAW KEY (the adversarial review of
+        # openDox-code#63, M2), in either form. Its length is checked first,
+        # as the endpoint's is, and both refusals are fixed.
+        if len(self.credential_ref) > _endpoint_bound():
+            raise BindingRefused(CREDENTIAL_REF_TOO_LONG.format(
+                bound=_endpoint_bound()))
+        if carries_a_raw_key(self.credential_ref):
+            raise BindingRefused(CREDENTIAL_REF_IS_A_RAW_KEY)
         if built_in_reference_parts(self.credential_ref) is not None:
             if argv:
                 raise BindingRefused(

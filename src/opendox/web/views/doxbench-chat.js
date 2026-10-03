@@ -309,6 +309,78 @@ function unavailabilityNote(stateValue) {
   return CHAT_UNAVAILABLE_NOTE;
 }
 
+// "NO MODEL CONFIGURED" IS A STATE, SHOWN BEFORE ANY TURN, WITH HOW TO
+// CONFIGURE ONE (#1144's 16.4; plan 034's T081). The configured-none sentence
+// above stays byte for byte: add-doxchat-model-intake §1 keeps "the rail's
+// existing sentence" stating that no approved model is configured, as the
+// send button's stated reason. What it never said is HOW (plan 034's research
+// R15), and an install with no model and no intake flow, which is every
+// standalone one, had no other place that said it. So this is a SEPARATE,
+// VISIBLE line with the remedy, and it shows only when that is the state:
+// the catalog has ANSWERED, it is EMPTY, no catalog failure is recorded (a
+// stale token or an unreadable answer has its own remedy), and no intake
+// affordance is rendered (where intake is offered, the selector's first option
+// is the remedy's home, and a second statement of it would be the "second,
+// weaker statement" the intake requirement refuses). EMPTY, not "nothing
+// available": a configured model can be unavailable — after a broker refusal
+// `BrokeredProviderPort.catalog()` keeps the binding, `available: false` — and
+// telling that operator to declare a binding they already have would send them
+// to the wrong repair. The server's no-model port answers the empty catalog
+// (`doxbench_model.NO_MODEL_CONFIGURED`), so empty is exactly "no binding and
+// no harness". The Python twin is `doxbench_model.NO_MODEL_CONFIGURED_REMEDY`,
+// which tests/test_chat_model_configuration.py holds to this spelling.
+export const NO_MODEL_CONFIGURED_REMEDY =
+  "No model configured. To configure one, declare a model binding with \"opendox model-binding add\" (\"--help\" lists its fields), or put the local harness \"omp\" on PATH, then restart this console.";
+
+export function noModelConfiguredRemedy(stateValue) {
+  if (stateValue.catalogFailure) return null;
+  if (stateValue.models === null) return null;
+  // EMPTY READS AS openDox's OWN NO-MODEL STATE, and that is a stated limit
+  // (RULED by the holder, 2026-10-03, on Copilot's r4170956940 at
+  // openDox-code#74). The remedy names openDox's OWN ways to configure a
+  // model. Every openDox entry point declares openDox's own model port
+  // (`doxbench_install.declared_model_port_factory`), whose empty catalog is
+  // exactly no binding and no harness. A programmatic embedder that injects
+  // its own port, and serves an empty catalog from it, supplies its own intake
+  // offer, and where intake is offered this line is hidden (the check below).
+  // The server cannot say more within the released contract:
+  // `xfactory-workbench-model-catalog` is closed (`additionalProperties:
+  // false`: `schema_version`, `kind`, `models`), and `/capabilities` and the
+  // intake surface are held EQUAL with and without a model by #1144's 16.5
+  // (plan 034 T082), so neither may carry a model posture.
+  if ((stateValue.models || []).length !== 0) return null;
+  if (stateValue.intakeOffered === true) return null;
+  return NO_MODEL_CONFIGURED_REMEDY;
+}
+
+// A DECLARED MODEL, NONE OF IT AVAILABLE, SAYS HOW TO TRUST IT (#1144 16.3a;
+// plan 034 T100; RULED openxFactory#656 comment 5962785556, item 2: "make the
+// rail say how to trust"). A binding read from the served repository is used
+// only once this machine trusts it, and until then the catalog keeps it,
+// `available: false`. The catalog's shape is closed, so the rail cannot say
+// WHICH binding or why; this line sends the operator to `model-binding list`,
+// which says why for each binding (not trusted here, or a broker refusal),
+// and names the verb that trusts one. Its OWN visible line, beside 16.4's:
+// that one is for an EMPTY catalog, and an operator with a binding declared
+// has a model configured. It shows only when the catalog has ANSWERED, is
+// NOT EMPTY, offers nothing available, no catalog failure is recorded (each
+// has its own remedy), and no intake affordance is rendered (where a host
+// offers intake it supplies its own remedy, as for 16.4's line). The Python
+// twin is `doxbench_trust.UNTRUSTED_BINDING_REMEDY`, which
+// tests/test_model_binding_trust.py holds to this spelling.
+export const UNTRUSTED_BINDING_REMEDY =
+  "No declared model is available. \"opendox model-binding list\" says why for each binding; one read from this repository is used only once this machine trusts it, which \"opendox model-binding trust <id>\" records after showing what it would run and where it would connect. Then restart this console.";
+
+export function untrustedBindingRemedy(stateValue) {
+  if (stateValue.catalogFailure) return null;
+  if (stateValue.models === null) return null;
+  const models = stateValue.models || [];
+  if (models.length === 0) return null;
+  if (models.some((entry) => entry.available === true)) return null;
+  if (stateValue.intakeOffered === true) return null;
+  return UNTRUSTED_BINDING_REMEDY;
+}
+
 // T104 F10-2/4: the over-bound paste, refused VISIBLY. The pure model
 // refuses by returning the IDENTICAL state (refused, never truncated) and
 // render()'s unconditional value reassignment reverts the DOM — correct, but
@@ -1098,6 +1170,14 @@ export function mountDoxBenchChatRail(host, options = {}) {
   // unavailabilityNote derives from the state's own facts.
   const unavailableNote = el("div", "doxchat-unavailable doxchat-sronly",
                              CHAT_CATALOG_LOADING_NOTE);
+  // 16.4's visible line (`noModelConfiguredRemedy`): hidden until the catalog
+  // has answered empty. It is not itself a live region; render() ANNOUNCES its
+  // text through `announce` below, once per change.
+  const noModelNote = el("div", "doxchat-no-model");
+  noModelNote.hidden = true;
+  // 16.3a's visible line (`untrustedBindingRemedy`), announced as 16.4's is.
+  const untrustedNote = el("div", "doxchat-untrusted");
+  untrustedNote.hidden = true;
   const transcriptList = el("ul", "doxchat-transcript");
   transcriptList.setAttribute("aria-label", "chat transcript");
   const failureNote = el("div", "doxchat-failure");
@@ -1154,8 +1234,10 @@ export function mountDoxBenchChatRail(host, options = {}) {
   sendBtn.setAttribute("aria-describedby", unavailableNote.id);
   host.append(loadedSelect, loadedNote, loadedEmpty,
               loadedFull, subjectInput,
-              unavailableNote, transcriptList, contextNote, retryNote,
-              cardsHost, announce, failureNote, composer, disclosure, sendrow);
+              unavailableNote, noModelNote, untrustedNote, transcriptList,
+              contextNote,
+              retryNote, cardsHost, announce, failureNote, composer,
+              disclosure, sendrow);
 
   // SELECTING IS IMMEDIATE, and it is not a state authority: the seam owns the
   // move, `state.active_buffer` remains the one answer, and this handler only
@@ -1467,6 +1549,24 @@ export function mountDoxBenchChatRail(host, options = {}) {
     // would trade a statement of posture for a call to action, and the posture is
     // the fact the human needs.
     unavailableNote.textContent = selectable ? "" : unavailabilityNote(state);
+    // ANNOUNCED, ONCE PER CHANGE. The catalog settles asynchronously and with
+    // no focus change, so a line that only appears is a line a screen-reader
+    // user is never told about: its text goes to the polite `announce` region
+    // too. Same only-when-it-changes guard as the posture and retry notes
+    // below, for the same measured reason: render() runs on every keystroke,
+    // and re-writing a live region with the same sentence re-announces it.
+    const remedyText = noModelConfiguredRemedy(state) || "";
+    if (noModelNote.textContent !== remedyText) {
+      noModelNote.hidden = !remedyText;
+      noModelNote.textContent = remedyText;
+      if (remedyText) announce.textContent = remedyText;
+    }
+    const trustText = untrustedBindingRemedy(state) || "";
+    if (untrustedNote.textContent !== trustText) {
+      untrustedNote.hidden = !trustText;
+      untrustedNote.textContent = trustText;
+      if (trustText) announce.textContent = trustText;
+    }
     selector.value = defaultSelectorValue(state);
     transcriptList.textContent = "";
     for (const turn of transcriptWindow(state)) {

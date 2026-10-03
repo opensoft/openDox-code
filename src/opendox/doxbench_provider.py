@@ -102,6 +102,7 @@ from __future__ import annotations
 
 import codecs
 import dataclasses
+import http.client
 import json
 import math
 import os
@@ -929,7 +930,11 @@ def _intake_reference(answer: object) -> str:
     """An intake answer, read EXACTLY, as the `reference` it returns."""
     document = _answer_document(answer, BROKER_INTAKE_KIND, INTAKE_FIELDS)
     reference = _declared_string(document, "reference")
-    if binding_mod.names_a_built_in_form(reference):
+    # A reference with a raw key's shape is malformed too, for the same
+    # reason: the record refuses it (the adversarial review of
+    # openDox-code#63, M2), where neither entry point expects a refusal.
+    if (binding_mod.names_a_built_in_form(reference)
+            or binding_mod.carries_a_raw_key(reference)):
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
     return reference
 
@@ -1094,11 +1099,20 @@ def _os_keyring():
     never names a keyring reference never needs it, and one that does installs
     it beside openDox. Without it, a keyring reference refuses with the fixed
     `DIAG_KEYRING_UNAVAILABLE` rather than raising an import error out of a
-    turn."""
+    turn.
+
+    AND A PACKAGE THAT FAILS AS IT IS IMPORTED REFUSES THE SAME WAY (Copilot's
+    review of openDox-code#63 at `82ec9a20`). An import runs the package's own
+    code, and a backend can fail there as it can when it is read, so its
+    error, of any class, is dropped as a read's is. The refusal is raised
+    outside the handler, so it keeps no context either."""
     try:
         import keyring
-    except ImportError:
-        raise BrokerRefused(DIAG_KEYRING_UNAVAILABLE) from None
+    # The package's own failure, of any class, never reaches a caller.
+    except Exception:  # noqa: BLE001
+        keyring = None
+    if keyring is None:
+        raise BrokerRefused(DIAG_KEYRING_UNAVAILABLE)
     return keyring
 
 
@@ -1403,7 +1417,12 @@ def _post_to_provider(*, endpoint: str, dialect: str,
         if status == PROVIDER_STATUS_TOKEN_EXPIRED:
             raise _TokenExpired from None
         raise BrokerRefused(DIAG_PROVIDER_REFUSED) from None
-    except (urllib.error.URLError, OSError, ValueError) as error:
+    # `urllib.error.URLError` is an `OSError`, so it is caught here too. And
+    # an `http.client.HTTPException`: a status line, a protocol or a header
+    # line `http.client` cannot read raises one, which is no OSError, and it
+    # escaped with the request's headers in `do_open`'s frame (the
+    # adversarial review of openDox-code#63, L4).
+    except (http.client.HTTPException, OSError, ValueError) as error:
         raise BrokerRefused(DIAG_PROVIDER_UNREACHABLE) from error
     if not isinstance(payload, (bytes, bytearray)):
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED)

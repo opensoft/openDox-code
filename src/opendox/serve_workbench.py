@@ -159,15 +159,27 @@ class WorkbenchRoutes:
         adapter is stateful -- the harness bridge the entrypoints declare holds
         per-document-thread sessions -- the factory returns ONE instance for
         the life of the process and this accessor hands back that same object
-        on every request. Nothing here may assume a per-request adapter."""
+        on every request. Nothing here may assume a per-request adapter.
+
+        "NO MODEL CONFIGURED" IS ABSENCE TOO (#1144's 16.4; plan 034's T081).
+        An install with no approved binding and no harness declares
+        `doxbench_model.NO_MODEL_CONFIGURED`, and this accessor answers that
+        one port, recognised by identity, as no port: so the catalog route
+        serves the editor-only posture and a turn or an abstract is refused
+        `model_capability_unavailable` before anything is spawned or
+        contacted."""
         if not self.capabilities.get("actions", {}).get("session"):
             return None
         if self.model_port_factory is None:
             return None
         try:
-            return self.model_port_factory()
+            port = self.model_port_factory()
         except Exception:  # noqa: BLE001 - absence is a capability verdict
             return None
+        from opendox import doxbench_model
+        if port is doxbench_model.NO_MODEL_CONFIGURED:
+            return None
+        return port
 
     # The largest corpus one tile's index is built from. A bound, not a
     # policy: a tile's staged set is a topic folder, and an index that grew
@@ -1688,6 +1700,30 @@ class WorkbenchRoutes:
         transcript_turns = fields["transcript_turns"]
         turn_buffers = fields["turn_buffers"]
 
+        # ---- the model verdict, AHEAD of step 5 (#1144's 16.4; plan 034's
+        # T081). A plane with NO model port refuses a well-formed turn here,
+        # with step 7's own code and envelope, before the scope is read: a
+        # plane-level verdict outranks any defect in the caller's request, the
+        # rule the validators refusal above keeps. It answers both an install
+        # with no model configured (`doxbench_model.NO_MODEL_CONFIGURED`, which
+        # the accessor answers as no port) and a plane with no factory at all,
+        # and it spawns nothing and contacts nothing. Measured at
+        # openDox-code#71 `e0298cf4`, once T085's validators answered
+        # standalone: without this, a standalone turn reached step 5's scope
+        # import and the connection dropped.
+        #
+        # THE PORT RESOLVED HERE IS THE ONE STEP 7 READS, so the declared
+        # factory runs ONCE per turn. The built-in factories memoize, but the
+        # accessor does not require an injected one to, and a second call
+        # would build a second adapter and discard the first (Copilot at
+        # openDox-code#74 8104fa6e, r4170882125). ----
+        port = self._workbench_model_port()
+        if port is None:
+            self._refuse_turn(validators,
+                              DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
+                              turn_id, failure_kind=failure_kind)
+            return
+
         from opendox import doxbench_hash
         from opendox import doxbench_model
         from openxdox import doxbench_scope
@@ -1847,13 +1883,8 @@ class WorkbenchRoutes:
                               failure_kind=failure_kind)
             return
 
-        # ---- step 7: model ----
-        port = self._workbench_model_port()
-        if port is None:
-            self._refuse_turn(validators,
-                              DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
-                              turn_id, failure_kind=failure_kind)
-            return
+        # ---- step 7: model. `port` is the one resolved, and found present,
+        # ahead of step 5; it is not resolved a second time. ----
         try:
             catalog = port.catalog()
         except Exception:  # noqa: BLE001 - never let a provider-shaped exception reach the wire

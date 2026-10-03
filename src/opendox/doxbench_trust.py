@@ -439,7 +439,8 @@ def _unsafe_because(info: os.stat_result, *, uid: int, own: bool,
 
 def _store_refused(path: Path | str, reason: str) -> TrustStoreRefused:
     return TrustStoreRefused(
-        f"the model-binding trust store refuses {path}: it {reason}, so "
+        f"the model-binding trust store refuses {shown(str(path))}: it "
+        f"{reason}, so "
         "another user could change what this machine trusts. Keep openDox's "
         "state directory (OPENDOX_STATE_DIR) where only this user can change "
         "it")

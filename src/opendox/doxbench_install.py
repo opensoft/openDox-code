@@ -48,12 +48,19 @@ still reads no credential-shaped environment variable. What it gained is a
 CHOICE between two declarations, which is exactly the kind of install-time fact
 this module exists to make readable in one place.
 
-THE UNCONFIGURED POSTURE IS UNCHANGED, BYTE FOR BYTE. A checkout with no
-bindings document, or one declaring no bindings, resolves the SAME
-`model_port_factory(session_root)` the entrypoints have always resolved, so an
-install that never heard of a broker behaves precisely as it did before this
-change — and a plane with no factory at all still refuses
-`model_capability_unavailable` exactly as it always has.
+THE UNCONFIGURED POSTURE IS A STATE (#1144's 16.4; plan 034's T081). A checkout
+with no approved binding resolves the SAME `model_port_factory(session_root)`
+the entrypoints have always resolved WHERE THE HARNESS IS INSTALLED, so the
+harness route stays for an install that has it. Where it is not (`omp`,
+`doxbench_bridge.HARNESS_COMMAND`, is not on the PATH: `harness_installed()`),
+there is no model, and the declaration says so: it resolves
+`doxbench_model.NO_MODEL_CONFIGURED`, whose catalog offers no available entry,
+and which `serve_workbench`'s accessor answers as no port at all. So the served
+catalog is the editor-only posture before any turn, and a turn is refused
+`model_capability_unavailable` before any process is spawned or any endpoint is
+contacted. Until T081, the harness declaration answered here whether or not
+`omp` existed, and its catalog offered `omp-local` as available: an install
+with no model read as one with a model until a turn failed.
 
 ONE INSTANCE PER PROCESS, and that is a requirement rather than an optimisation.
 `_workbench_model_port` is called PER REQUEST, and `OmpHarnessBridge` is
@@ -74,11 +81,13 @@ capabilities probe does — spawns no harness process.
 
 from __future__ import annotations
 
+import shutil
 import sys
 import threading
 from pathlib import Path
 
 from opendox import doxbench_bridge as bridge_mod
+from opendox import doxbench_model
 from opendox.doxbench_model import ModelCatalog, ModelCatalogEntry
 
 # --------------------------------------------------------------------------
@@ -186,6 +195,22 @@ def model_port_factory(session_root: Path | str, *,
             return port
 
     return resolve
+
+
+def harness_installed() -> bool:
+    """Is the harness installed: is `doxbench_bridge.HARNESS_COMMAND` on the
+    PATH this process resolves commands from?
+
+    The same question #1144's F16.1 asks as its precondition (`command -v omp`),
+    asked without starting anything: it reads the PATH and spawns no process."""
+    return shutil.which(bridge_mod.HARNESS_COMMAND) is not None
+
+
+def no_model_port_factory() -> doxbench_model.NoModelConfigured:
+    """The ZERO-ARGUMENT factory for an install with no model: it answers
+    `doxbench_model.NO_MODEL_CONFIGURED`, the one no-model port, and builds,
+    spawns and contacts nothing."""
+    return doxbench_model.NO_MODEL_CONFIGURED
 
 
 # --------------------------------------------------------------------------
@@ -344,7 +369,8 @@ def trust_gated_model_port_factory(binding, *, checkout_root: Path | str):
 def declared_model_port_factory(session_root: Path | str, *,
                                 checkout_root: Path | str,
                                 bindings_path: Path | str | None = None,
-                                spawn=None):
+                                spawn=None,
+                                harness_present=None):
     """THE declaration both entrypoints make (task 2.5).
 
     ONE rule, in one place, so `cli.cmd_generate_and_open` and `serve.serve()`
@@ -353,13 +379,17 @@ def declared_model_port_factory(session_root: Path | str, *,
       * a checkout declaring a model-provider BINDING resolves the brokered
         port for the FIRST declared binding, and every provider endpoint and
         every minted token it needs lives inside `doxbench_provider`;
-      * a checkout declaring NONE resolves exactly what these entrypoints have
-        always resolved — the harness bridge — so the unconfigured posture is
-        unchanged byte for byte;
+      * a checkout declaring NONE resolves the harness bridge where the harness
+        is installed, exactly as these entrypoints always have, and
+        `doxbench_model.NO_MODEL_CONFIGURED` where it is not (#1144's 16.4;
+        the module docstring). `harness_present` is that question, a
+        zero-argument callable, `harness_installed` by default, so a caller
+        that exercises a harness turn through `spawn` can say the harness is
+        there;
       * a bindings document that will not READ (malformed YAML, a wrong kind, a
-        record naming an unknown key) resolves the harness declaration too, and
-        says so on stderr. Refusing to serve at all would make one bad line in
-        an operator's settings file take the whole console down, and silently
+        record naming an unknown key) is read as declaring none, and says so
+        on stderr. Refusing to serve at all would make one bad line in an
+        operator's settings file take the whole console down, and silently
         serving a DIFFERENT provider than the one declared would be worse than
         either.
 
@@ -395,7 +425,7 @@ def declared_model_port_factory(session_root: Path | str, *,
     except binding_mod.BindingRefused as error:
         sys.stderr.write(
             f"[model-provider] the bindings document could not be read "
-            f"({error}); serving the local harness declaration instead\n")
+            f"({error}); reading it as declaring no binding\n")
         declared = ()
     pending = intake_mod.pending_binding_ids(checkout_root)
     approved = tuple(binding for binding in declared
@@ -411,6 +441,8 @@ def declared_model_port_factory(session_root: Path | str, *,
             "human approval and contribute no available model; approve them "
             "from the console's model intake flow\n")
     if not approved:
-        return model_port_factory(Path(session_root), spawn=spawn)
+        if (harness_present or harness_installed)():
+            return model_port_factory(Path(session_root), spawn=spawn)
+        return no_model_port_factory
     return trust_gated_model_port_factory(approved[0],
                                           checkout_root=checkout_root)

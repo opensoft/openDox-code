@@ -151,6 +151,10 @@ from opendox import doxbench_telemetry  # noqa: E402
 from opendox import consumer_reach  # noqa: E402
 from opendox import defaults  # noqa: E402
 from opendox import projection_seams  # noqa: E402
+# openDox's own defaults for the two doxBench seams (plan 034 T085), which
+# `build_server()` and `main()` register where no host has. Importing it
+# registers nothing.
+from opendox import doxbench_defaults  # noqa: E402
 # § 3.4 slice S5: `build_server()` publishes the VIEW MANIFEST on
 # `/capabilities`, the one line slice S3 built both ends of and left for the
 # slice at which a contribution first exists to deliver.
@@ -1801,6 +1805,11 @@ def build_server(
     # from the registered registry, which is what lets a server be BUILT with
     # nothing else installed (plan 034, research R7).
     projection_seams.register_defaults()
+    # AND openDox's OWN doxBench validators and status-exemption rail (4.3,
+    # T085; R1Q10 (a) and R1Q12 (a), the same pattern), each only where no host
+    # has registered its own. So the served model catalog answers standalone,
+    # validated by openDox's own validator over its packaged copies.
+    doxbench_defaults.register_defaults()
 
     from opendox import doxbench_turns
     # Imported HERE rather than at module scope, for the reason that is
@@ -2313,6 +2322,8 @@ def main(argv: list[str] | None = None) -> int:
     # BEFORE the parser: its option defaults below read the registered
     # registry (`registry_mod.DEFAULT_REF` and the data source's defaults).
     projection_seams.register_defaults()
+    # AND openDox's own doxBench defaults (4.3, T085), the same way.
+    doxbench_defaults.register_defaults()
     parser = argparse.ArgumentParser(prog="ideation-dashboard-serve", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--web-dir", default=str(Path(__file__).resolve().parent / "web"),
