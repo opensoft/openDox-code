@@ -170,6 +170,9 @@ FAKE_GH = """#!/usr/bin/env bash
 # A stand-in `gh`: it answers from the case's fixture and records nothing.
 case "$*" in
   *compare/*) printf '%s\\n' "$FAKE_STATUS" ;;
+  *actions/runs/*/approvals*)
+    [ -n "${FAKE_APPROVALS_FAILS:-}" ] && { echo "HTTP 404" >&2; exit 1; }
+    printf '%s\\n' "$FAKE_APPROVALS" ;;
   *environments/*)
     args="$*"; environment="${args##*environments/}"; environment="${environment%% *}"
     variable="FAKE_REVIEWERS_${environment}"
@@ -845,3 +848,74 @@ def test_the_install_verdict(case: str, tmp_path: Path) -> None:
                                  "VERSION": "0.1.0", "WHEEL_SHA256": "a" * 64})
     assert result.returncode == code, result.stdout + result.stderr
     assert said in result.stdout, result.stdout + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# The approval, at use time (Copilot's review of openDox-code#78): the build
+# job's reviewer check goes stale while the run waits, so each publish job
+# re-reads its environment's rule and this run's review history.
+
+APPROVAL_STEP = "this environment still asks a reviewer, and this run's deployment to it was approved"
+
+
+def test_each_publish_job_rechecks_its_approval_before_the_preflight() -> None:
+    jobs = _workflow()["jobs"]
+    scripts = set()
+    for job in ("testpypi", "pypi"):
+        assert jobs[job]["permissions"] == {"id-token": "write", "actions": "read"}, job
+        steps = jobs[job]["steps"]
+        upload = next(i for i, step in enumerate(steps)
+                      if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@"))
+        step = steps[upload - 3]
+        assert step["name"] == APPROVAL_STEP, job
+        assert step["env"] == {"GH_TOKEN": "${{ github.token }}",
+                               "ENVIRONMENT": jobs[job]["environment"]["name"]}, job
+        scripts.add(step["run"])
+    assert len(scripts) == 1, "the two approval checks are one script"
+
+
+def _approval(state: str, *environments: str) -> dict:
+    return {"state": state, "comment": "", "user": {"login": "brettheap"},
+            "environments": [{"id": 1, "name": name} for name in environments]}
+
+
+APPROVAL_CASES = {
+    "a reviewer named, and this deployment approved": (
+        dict(reviewers="1", approvals=[_approval("approved", "{env}")]), None),
+    "the reviewer rule removed meanwhile": (
+        dict(reviewers="0", approvals=[_approval("approved", "{env}")]), "names no required reviewer now"),
+    "the environment unreadable": (
+        dict(reviewers=None, approvals=[_approval("approved", "{env}")]), "cannot be read"),
+    "no approval at all": (dict(reviewers="1", approvals=[]), "holds no approval"),
+    "only the other environment approved": (
+        dict(reviewers="1", approvals=[_approval("approved", "{other}")]), "holds no approval"),
+    "this deployment rejected": (
+        dict(reviewers="1", approvals=[_approval("rejected", "{env}")]), "holds no approval"),
+    "the review history unreadable": (
+        dict(reviewers="1", approvals=None), "review history cannot be read"),
+}
+
+
+@needs_a_shell
+@pytest.mark.parametrize("job", ["testpypi", "pypi"])
+@pytest.mark.parametrize("case", sorted(APPROVAL_CASES))
+def test_the_approval_check(job: str, case: str, tmp_path: Path) -> None:
+    given, refusal = APPROVAL_CASES[case]
+    env_name, other = job, ("pypi" if job == "testpypi" else "testpypi")
+    step = _step(job, APPROVAL_STEP)
+    approvals = given["approvals"]
+    env = {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_RUN_ID": "1", "GH_TOKEN": "unused",
+           "ENVIRONMENT": step["env"]["ENVIRONMENT"]}
+    if given["reviewers"] is not None:
+        env[f"FAKE_REVIEWERS_{env_name}"] = given["reviewers"]
+    if approvals is None:
+        env["FAKE_APPROVALS_FAILS"] = "1"
+    else:
+        env["FAKE_APPROVALS"] = json.dumps(approvals).replace("{env}", env_name).replace("{other}", other)
+    result = _run(step["run"], tmp_path, env, (_fake_gh(tmp_path / "bin"),))
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"{env_name}: a required reviewer is named" in result.stdout
+    else:
+        assert result.returncode != 0, result.stdout
+        assert refusal in result.stdout + result.stderr, result.stdout + result.stderr
