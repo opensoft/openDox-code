@@ -302,10 +302,12 @@ def test_no_route_serves_the_token_to_another_local_user(
         assert stat.S_IMODE(info.st_mode) == mode, (path, oct(info.st_mode))
         assert info.st_uid == os.getuid(), path
     assert stat.S_ISREG(os.lstat(copy.path).st_mode)
-    # A copy ANOTHER user owns, as this module's reader sees one: refused.
+    # A copy ANOTHER user owns, as this module's reader sees one: refused, at
+    # the first directory of this user's that its walk passes through.
     real = os.getuid()
     monkeypatch.setattr(console_access.os, "getuid", lambda: real + 1)
-    with pytest.raises(console_access.ConsoleAccessRefused, match="not by this user"):
+    with pytest.raises(console_access.ConsoleAccessRefused,
+                       match="not by this user|neither this user nor root"):
         console_access.read_private_copy(copy.path)
 
 
@@ -1666,3 +1668,80 @@ def test_a_write_that_fails_part_way_leaves_no_partial_copy(
         _write(state)
     monkeypatch.undo()
     assert list((state / console_access.CONSOLE_DIRNAME).iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# 12 — the state directory is walked ONCE, every link and directory on the
+#      way judged, and the write is anchored to that walk (Copilot at
+#      openDox-code#84, r4174785933)
+# ---------------------------------------------------------------------------
+
+def _hop_layout(tmp_path: Path, shared_mode: int) -> dict:
+    """Copilot's layout: `OPENDOX_STATE_DIR=alias/state`, `alias ->
+    shared/hop`, `hop -> private`. Only `alias` is on the configured path;
+    `shared` is passed through by way of a link's target."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    served = tmp_path / "served"
+    served.mkdir(mode=0o700)
+    (shared / "hop").symlink_to(private)
+    (tmp_path / "alias").symlink_to(shared / "hop")
+    shared.chmod(shared_mode)
+    return {"shared": shared, "private": private, "served": served,
+            "hop": shared / "hop", "state": tmp_path / "alias" / "state"}
+
+
+def test_a_directory_passed_through_by_an_intermediate_link_is_judged(
+        tmp_path) -> None:
+    """`shared` is neither on the configured path nor above the resolved
+    one, and it was never judged: mode 0777 and not sticky, so another user
+    could replace `hop`. It is judged now, as every directory the walk passes
+    through is, and the write and the read are both refused by name."""
+    from opendox import console_access
+
+    layout = _hop_layout(tmp_path, 0o777)
+    try:
+        with pytest.raises(console_access.ConsoleAccessRefused,
+                           match="writable by every user and is not sticky") as refused:
+            _write(layout["state"])
+        assert str(layout["shared"]) in str(refused.value), str(refused.value)
+        assert _tree(layout["private"]) == [], "something was written"
+        # a copy that is there already is refused when read through that way
+        written = _write(layout["private"] / "state")
+        through = layout["state"] / console_access.CONSOLE_DIRNAME / written.path.name
+        with pytest.raises(console_access.ConsoleAccessRefused,
+                           match="writable by every user and is not sticky"):
+            console_access.read_private_copy(through)
+    finally:
+        layout["shared"].chmod(0o755)
+
+
+def test_a_link_swapped_after_the_checks_never_redirects_the_write(
+        tmp_path, monkeypatch) -> None:
+    """The race: `hop` is pointed at a served root after the served-root
+    check, and the write used to walk the configured path AGAIN, so the
+    token's copy landed in the served root, where `/source` serves it. The
+    path is walked once, and the write is anchored to that walk: the copy
+    is where the checks saw the state directory, and the served root gains
+    nothing."""
+    from opendox import console_access
+
+    layout = _hop_layout(tmp_path, 0o755)
+    real = console_access._refuse_a_served_state_dir
+
+    def then_swap(*args, **kwargs):
+        real(*args, **kwargs)
+        layout["hop"].unlink()
+        layout["hop"].symlink_to(layout["served"])
+
+    monkeypatch.setattr(console_access, "_refuse_a_served_state_dir", then_swap)
+    copy = console_access.write_private_copy(
+        layout["state"], page_url="http://127.0.0.1:8080/index.html", port=8080,
+        token=_token(), served_roots=(layout["served"],))
+    monkeypatch.undo()
+    assert _tree(layout["served"]) == [], "the swapped link redirected the write"
+    expected = (layout["private"] / "state").resolve()
+    assert copy.path == console_access.private_copy_path(expected, 8080)
+    assert console_access.read_private_copy(copy.path)["port"] == 8080

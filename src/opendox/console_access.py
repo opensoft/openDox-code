@@ -242,6 +242,79 @@ def _unsafe(path: Path, reason: str) -> ConsoleAccessRefused:
         f"({runtime_config.PREFIX}STATE_DIR)")
 
 
+#: How many symbolic links one walk of the state directory may follow, the
+#: kernel's own `MAXSYMLINKS` on Linux.
+_MAX_LINKS = 40
+
+
+def _walked(configured: Path | str) -> Path:
+    """The state directory, resolved ONCE, as the kernel walks it, with every
+    directory it passes through and every symbolic link it follows judged on
+    the way (Copilot at openDox-code#84, r4174785933).
+
+    The tree rules below judge the configured path's own components and the
+    directories above the RESOLVED path. A directory reached only through a
+    link's target (`alias -> shared/hop`, `hop -> private`) is neither, so a
+    `shared` that others could write went unjudged, and another user could
+    re-point `hop` between the checks and the write, which walked the
+    configured path again. So every directory passed through is judged by
+    the rule for the directories above the state directory (this user's or
+    root's, and sticky if others can write it), every link followed by the
+    rule for a link (this user's or root's), and the caller works on the
+    path returned, never on the configured one again. Nothing on that path
+    can then be replaced by another user. A missing tail is appended as
+    named, to be made by descriptor under the deepest directory that
+    exists."""
+    uid = os.getuid()
+    configured = Path(configured)
+    if not configured.is_absolute() or ".." in configured.parts:
+        raise ConsoleAccessRefused(
+            f"the state directory {str(configured)!r} is not an absolute path "
+            "without `..`, so the copy's path is not the one the kernel walks")
+    pending = list(reversed(configured.parts[1:]))
+    current = Path(configured.anchor)
+    links = 0
+    while pending:
+        name = pending.pop()
+        if name in ("", "."):
+            continue
+        if name == "..":                    # only ever from a link's target
+            current = current.parent
+            continue
+        candidate = current / name
+        try:
+            info = os.lstat(candidate)
+        except FileNotFoundError:
+            rest = [name, *reversed(pending)]
+            if ".." in rest:
+                raise ConsoleAccessRefused(
+                    f"{candidate} does not exist, and the state directory "
+                    f"{configured} would climb out of it with `..`") from None
+            return current.joinpath(*rest)
+        if stat.S_ISLNK(info.st_mode):
+            if info.st_uid not in (uid, 0):
+                raise _unsafe(candidate, f"is a symbolic link owned by uid "
+                              f"{info.st_uid}, neither this user nor root, who "
+                              "could point it elsewhere")
+            links += 1
+            if links > _MAX_LINKS:
+                raise ConsoleAccessRefused(
+                    f"the state directory {configured} passes through more "
+                    f"than {_MAX_LINKS} symbolic links")
+            target = Path(os.readlink(candidate))
+            if target.is_absolute():
+                current = Path(target.anchor)
+                pending.extend(reversed(target.parts[1:]))
+            else:
+                pending.extend(reversed(target.parts))
+            continue
+        reason = _unsafe_because(info, uid=uid, own=False)
+        if reason is not None:
+            raise _unsafe(candidate, reason)
+        current = candidate
+    return current
+
+
 def _refuse_an_unsafe_tree(state_dir: Path, *, existing_only: bool) -> None:
     """The copy's whole path is this user's to change, or it is refused.
 
@@ -454,8 +527,14 @@ def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
     `ConsoleAccessRefused` naming the copy, so the entry point refuses its
     start by name instead of ending in a traceback. And a copy whose
     read-back fails is removed with the refusal, so a start that never served
-    leaves no copy behind."""
-    state = Path(state_dir)
+    leaves no copy behind.
+
+    THE STATE DIRECTORY IS WALKED ONCE (`_walked`, Copilot at
+    openDox-code#84, r4174785933), and the served-root boundary, the tree's
+    rules and the write all work on the path that walk returned. A link on
+    the configured path that is re-pointed after the checks cannot redirect
+    the write. The copy's `path` is that walked path."""
+    state = _walked(state_dir)
     _refuse_a_served_state_dir(state, tuple(served_roots), port=port)
     record = {
         "schema_version": RECORD_SCHEMA_VERSION,
@@ -553,11 +632,13 @@ def read_private_copy(path: Path | str) -> dict:
     without following a link and without blocking: a regular file, this
     user's, exactly 0600, with one link. A planted, linked or loosened copy is
     refused, and so is a FIFO, without waiting on it."""
-    target = Path(path)
-    state = target.parent.parent
-    if target.parent.name != CONSOLE_DIRNAME:
-        raise ConsoleAccessRefused(f"{target} is not in a `{CONSOLE_DIRNAME}/` "
+    given = Path(path)
+    if given.parent.name != CONSOLE_DIRNAME:
+        raise ConsoleAccessRefused(f"{given} is not in a `{CONSOLE_DIRNAME}/` "
                                    "directory of a state directory")
+    # Walked once, as the writer walks it, and read from where the walk led.
+    state = _walked(given.parent.parent)
+    target = state / CONSOLE_DIRNAME / given.name
     try:
         _refuse_an_unsafe_tree(state, existing_only=False)
     except FileNotFoundError:
