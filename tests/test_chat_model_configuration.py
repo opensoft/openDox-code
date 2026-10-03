@@ -903,11 +903,15 @@ _DOCUMENT = "notes-rain-barrel-leak.md"
 #: What `_Answer.comparable` puts in place of a per-process value.
 _PER_PROCESS = "<per-process>"
 
+#: The one surface whose answer carries per-process values by design.
+_CAPABILITIES = "/capabilities"
+
 
 @dataclasses.dataclass(frozen=True)
 class _Answer:
     """One request's answer, or the fact that the connection dropped."""
 
+    path: str                   # the request's path, query included
     status: int | None          # None: no HTTP response at all
     content_type: str | None
     body: bytes
@@ -918,17 +922,21 @@ class _Answer:
         return self.status is None
 
     def comparable(self):
-        """What two postures must agree on. A JSON body is compared as data,
-        with its per-process values set aside: the console token, and the
-        values of `/capabilities`' `install.database_bundle`, the data and
+        """What two postures must agree on. A JSON body is compared as data;
+        any other body, byte for byte.
+
+        ONLY `/capabilities`' per-process values are set aside: its console
+        token, and the values of its `install.database_bundle`, the data and
         socket directories and pid of the bundled server each `--local` child
         starts under its own state directory (plan 034 T073). The bundle's
         SHAPE is still compared: the same keys, and a value on both sides or
-        on neither. Any other body, byte for byte."""
+        on neither. Every other surface is compared whole, so a `console_token`
+        or any other key that differs between the postures on another surface
+        fails the comparison (Copilot at openDox-code#76 47e8bb95)."""
         body = self.body
         if (self.content_type or "").startswith("application/json"):
             body = json.loads(self.body or b"null")
-            if isinstance(body, dict):
+            if self.path == _CAPABILITIES and isinstance(body, dict):
                 body = {k: v for k, v in body.items() if k != "console_token"}
                 install = body.get("install")
                 if (isinstance(install, dict)
@@ -964,7 +972,7 @@ class _Posture:
             answer = (None, None, b"")
         finally:
             connection.close()
-        return _Answer(*answer, tuple(self.child.refused()[before:]))
+        return _Answer(path, *answer, tuple(self.child.refused()[before:]))
 
     def checkout(self) -> tuple[str, str]:
         """The checkout's HEAD and its full status, untracked files included."""
