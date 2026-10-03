@@ -20,6 +20,12 @@ builds that child and reads it:
 * It is read on threads while it runs (`Child.wait_for_line`), so a server that
   never exits can still be asked where it serves, and then interrupted
   (`Child.interrupt`, SIGINT, as Ctrl-C sends).
+* IT INHERITS NO RUNTIME SETTING. Every `OPENDOX_*` name the runtime reads
+  (`opendox.runtime.config.SETTING_NAMES`) is taken out of the child's
+  environment, so an `OPENDOX_INSTALL_MODE=hosted` or a broker issuer the
+  runner happens to export cannot make a `generate-and-open --local` child
+  refuse before the case it exists for (plan 034 T070; Copilot review of
+  openDox-code#67).
 * CTRL-C REACHES IT AS IT WOULD AT A TERMINAL, whatever the runner's own
   disposition. The same `sitecustomize` sets SIGINT back to Python's
   KeyboardInterrupt handler. A runner started as a background job
@@ -140,7 +146,10 @@ class Child:
         blocker.mkdir(parents=True, exist_ok=True)
         (blocker / "sitecustomize.py").write_text(_BLOCKER, encoding="utf-8")
         self.refused_log = workdir / "refused-imports.log"
-        env = dict(os.environ)
+        from opendox.runtime.config import SETTING_NAMES
+
+        env = {name: value for name, value in os.environ.items()
+               if name not in SETTING_NAMES}
         env.pop("PYTHONUNBUFFERED", None)
         env["PYTHONPATH"] = os.pathsep.join(
             [str(blocker), *filter(None, [env.get("PYTHONPATH")])])

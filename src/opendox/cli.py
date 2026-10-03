@@ -83,6 +83,11 @@ from opendox import workbench as workbench_mod  # noqa: E402
 # `opendox.corpus_adapter` besides the stdlib.
 from opendox import corpus_adapter  # noqa: E402
 from opendox.runtime import local_git_adapter  # noqa: E402
+# THE INSTALL SHAPE (plan 034 T070; #1144 13.4-13.6): `generate-and-open`
+# resolves `--local` against `OPENDOX_INSTALL_MODE` here, before it generates
+# or serves anything. Stdlib-only, like `local_git_adapter` above, which
+# already imports it, so this adds no reach and no import weight.
+from opendox.runtime import config as runtime_config  # noqa: E402
 from opendox.boundary import (  # noqa: E402
     BoundaryViolation, HumanGate, OutputBoundary,
 )
@@ -97,6 +102,10 @@ from opendox.boundary import (  # noqa: E402
 # register the defaults where no host has. `is_rfc3339_datetime` is not a seam:
 # it is the neutral contract's own date-time rule, and openDox owns it.
 from opendox import projection_seams  # noqa: E402
+# openDox's own defaults for the two doxBench seams (plan 034 T085), which
+# the entry points below register the same way. Importing it registers
+# nothing.
+from opendox import doxbench_defaults  # noqa: E402
 from opendox.rfc3339 import is_rfc3339_datetime  # noqa: E402
 
 # THE COMPOSITION POINT, BOUND AT LAST (§ 4.3; RULED ASK-2 option (2),
@@ -548,11 +557,57 @@ def _validate(written: Path, args: argparse.Namespace, *,
     return 0
 
 
+def _resolve_install_shape(args: argparse.Namespace,
+                           env=None) -> str:
+    """The install shape this run serves as, or `ConfigurationError` naming why.
+
+    `--local` and `OPENDOX_INSTALL_MODE` are resolved by
+    `runtime_config.install_mode`, the one reading of the selector, which
+    refuses the two disagreeing (plan 034 T070's fail-closed reading) and
+    defaults to HOSTED (#1144 13.4, 13.5). Then each shape asks what it needs:
+
+      * LOCAL binds loopback only, with no opt-in: a non-loopback `--host` is
+        refused naming the rule (13.4), and so is anything a local install
+        cannot be (`refuse_what_a_local_install_cannot_be`: a broker setting
+        beside it, or a non-loopback `OPENDOX_BIND_HOST`). It needs no broker.
+        Its datastore is 13.1's, and arrives with T072.
+      * HOSTED, set or by default, refuses with no issuer, NAMING THE ISSUER
+        (13.5), and then loads the runtime's whole configuration, because the
+        serving process is the one whose settings are the install's (13.4a;
+        R1Q16 (i)). Otherwise unchanged (13.6).
+
+    Asked before anything is scanned, minted or bound, so a refused run leaves
+    nothing behind and exits at once rather than starting a server that a
+    bound would have to kill (F13.1's `test "$rc" -ne 124`).
+    """
+    env = os.environ if env is None else env
+    mode = runtime_config.install_mode(
+        env, local_flag=bool(getattr(args, "local", False)))
+    if mode == runtime_config.INSTALL_MODE_LOCAL:
+        runtime_config.refuse_a_non_loopback_local_bind("--host", args.host)
+        runtime_config.refuse_what_a_local_install_cannot_be(env)
+    else:
+        runtime_config.require_the_hosted_issuer(env)
+        runtime_config.load_settings(env)
+    return mode
+
+
 def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -> int:
     """Regenerate the snapshot from the working tree into a run dir, start the
     local server, print the URL (ALWAYS), and open the browser. `--no-open`
     suppresses the browser; `--no-serve` returns after printing the URL without
-    blocking (used by tests). `opener` is injectable for testing."""
+    blocking (used by tests). `opener` is injectable for testing.
+
+    THE INSTALL SHAPE IS RESOLVED FIRST (plan 034 T070): `--local`, or
+    `OPENDOX_INSTALL_MODE=local`, selects the local single-user install, and
+    with neither the install is hosted — see `_resolve_install_shape`. A
+    refusal there is printed on stderr and the command exits 1, before any
+    other work."""
+    try:
+        args.install_mode = _resolve_install_shape(args)
+    except runtime_config.ConfigurationError as exc:
+        print(f"generate-and-open refused: {exc}", file=sys.stderr)
+        return 1
     # Ahead of minting the run dir, so a refused root leaves not even an empty
     # temp directory behind. `_generate_and_write` is still the guard that MATTERS
     # (it is the one no caller can skip); these are the same checks, earlier.
@@ -1113,6 +1168,10 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     # only where no host has registered its own. Registering reads nothing, so
     # a host that registers after this parser is built still replaces them.
     projection_seams.register_defaults()
+    # AND openDox's OWN doxBench validators and status-exemption rail (4.3,
+    # T085; R1Q10 (a) and R1Q12 (a), the same pattern), each only where no
+    # host has registered its own, and replaceable by a host until read.
+    doxbench_defaults.register_defaults()
     parser = argparse.ArgumentParser(prog="ideation-dashboard", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1130,6 +1189,17 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     gao.add_argument("--actor", default=None,
                      help="human identity for loopback gate actions "
                           "(default: the checkout's git user.name)")
+    # THE INSTALL SHAPE'S FLAG (plan 034 T070; R1Q15 (b), as T007 batch H's
+    # 13.4 addendum reads): the documented command is
+    # `opendox generate-and-open --local …`. The same selection as
+    # `OPENDOX_INSTALL_MODE=local`; with neither the install is hosted, and the
+    # flag beside `OPENDOX_INSTALL_MODE=hosted` is refused.
+    gao.add_argument(runtime_config.LOCAL_FLAG, action="store_true",
+                     dest="local",
+                     help="the LOCAL single-user install: no identity broker, "
+                          "loopback only (the same selection as "
+                          "OPENDOX_INSTALL_MODE=local; with neither, the "
+                          "install is hosted and needs its broker's issuer)")
     gao.add_argument("--host", default=serve_mod.DEFAULT_HOST,
                      help="bind host (default: 127.0.0.1, loopback only)")
     gao.add_argument("--port", type=int, default=0, help="bind port (default: ephemeral)")
@@ -1220,6 +1290,8 @@ def main(argv: list[str] | None = None, *,
     generator_seam.register_default(default_generator.GENERATOR)
     # AND openDox's own projection defaults (5.5, T055), the same way.
     projection_seams.register_defaults()
+    # AND openDox's own doxBench defaults (4.3, T085), the same way.
+    doxbench_defaults.register_defaults()
     args = build_parser(
         subcommand_extensions=subcommand_extensions).parse_args(argv)
     try:
