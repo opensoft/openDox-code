@@ -244,6 +244,41 @@ def test_a_stylesheet_served_as_anything_but_css_is_a_named_failure(
     assert _failures(verdict) == expected
 
 
+@pytest.mark.parametrize("importer, expected", [
+    ('import "https://unreachable.invalid/app.js";\n',
+     "t.bundle.external https://unreachable.invalid/app.js"),
+    ('import("//unreachable.invalid/app.js").catch(() => null);\n',
+     "t.bundle.external http://unreachable.invalid/app.js"),
+    ('export { x } from "data:text/javascript,export const x = 1";\n',
+     "t.bundle.external data:text/javascript,export const x = 1"),
+], ids=["static-https", "dynamic-protocol-relative", "data-url"])
+def test_an_import_from_outside_the_plane_is_a_named_failure(
+        importer: str, expected: str) -> None:
+    """Never fetched from loopback by its path, where the local `/app.js`
+    would answer for it (Copilot review of #75 at 142d1352, previously
+    missed)."""
+    files = {"/app.js": (JS, importer)}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == [expected]
+
+
+def test_a_page_link_from_outside_the_plane_is_a_named_failure() -> None:
+    files = {"/app.js": (JS, "export const x = 1;\n"),
+             "/styles.css": ("text/css", "body { margin: 0; }\n")}
+    page = ('<html><head>'
+            '<link rel="stylesheet" href="https://cdn.invalid/styles.css">'
+            '<script type="module" src="https://cdn.invalid/app.js"></script>'
+            '</head></html>')
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(port, page, {}, verdict, "t")
+    assert _failures(verdict) == ["t.bundle.external https://cdn.invalid/styles.css",
+                                  "t.bundle.external https://cdn.invalid/app.js"]
+    assert modules == 0
+
+
 def test_a_dynamic_refusal_alone_is_not_a_failure() -> None:
     """10.2a's case: `intent-feed.js` is not owed, its importer degrades."""
     files = {"/app.js": (JS, 'import("./intent-feed.js").catch(() => null);\n')}
@@ -329,6 +364,8 @@ def test_a_catalog_that_answers_without_the_token_is_a_named_failure() -> None:
 
 PORT = 43123
 TOKEN = "Zq3_token-of-a-standalone-console-0123456789"
+#: The token with every character percent-encoded.
+ENCODED = "".join(f"%{ord(c):02X}" for c in TOKEN)
 FORWARD = f"http://127.0.0.1:{PORT}/index.html#console_token={TOKEN}"
 
 
@@ -385,11 +422,17 @@ def _printed(opener: Path) -> str:
             f"http://127.0.0.1:{PORT}/index.html\n")
 
 
-def _read(state: Path, printed: str, served_root: Path | None = None):
+#: What a plane launched as the harness launches it answers on: 127.0.0.1
+#: alone, and `localhost`, which a browser resolves to it.
+SERVED = ("127.0.0.1", "localhost")
+
+
+def _read(state: Path, printed: str, served_root: Path | None = None,
+          hosts: tuple[str, ...] = SERVED):
     verdict = harness.Verdict(keep_going=True)
     root = served_root if served_root is not None else state.parent / "repo"
     path, token = harness.check_console_opener(
-        "t", PORT, printed, state, root, verdict)
+        "t", PORT, printed, state, root, verdict, hosts=hosts)
     return _failures(verdict), path, token
 
 
@@ -407,6 +450,27 @@ def test_a_token_at_the_page_s_bounds_is_delivered(tmp_path: Path,
     failures, _path, delivered = _read(state, _printed(opener))
     assert failures == []
     assert delivered == token
+
+
+def test_a_forward_to_a_host_the_plane_answers_on_is_delivered(
+        tmp_path: Path) -> None:
+    """`[::1]` is refused where the plane answers on 127.0.0.1 alone, and
+    accepted where it answers there too."""
+    target = f"http://[::1]:{PORT}/index.html#console_token={TOKEN}"
+    state, opener = _opener(tmp_path, _opener_page(target))
+    assert _read(state, _printed(opener))[0] == [FRAGMENT]
+    failures, _path, token = _read(state, _printed(opener),
+                                   hosts=("127.0.0.1", "::1", "localhost"))
+    assert failures == []
+    assert token == TOKEN
+
+
+def test_the_hosts_a_plane_answers_on_are_probed() -> None:
+    """`served_loopback_hosts` asks the socket, as the browser will."""
+    with served({}) as port:
+        assert harness.served_loopback_hosts(port) == ("127.0.0.1",
+                                                       "localhost")
+    assert harness.served_loopback_hosts(port) == ()
 
 
 def test_the_opener_t104_writes_delivers_its_token(tmp_path: Path) -> None:
@@ -593,13 +657,26 @@ def test_a_hard_linked_opener_is_a_named_failure(tmp_path: Path) -> None:
     _opener_page(f"http://127.0.0.1:{PORT}/missing.html#console_token={TOKEN}"),
     _opener_page(f"http://127.0.0.1:{PORT}/snapshot.json#console_token={TOKEN}"),
     _opener_page(f"http://127.0.0.1:{PORT}//index.html#console_token={TOKEN}"),
+    # a percent-encoded copy of the token in the query or the path, which
+    # the request line still carries (Copilot review of #75 at 142d1352,
+    # r4174355680)
+    _opener_page(f"http://127.0.0.1:{PORT}/index.html?extra={ENCODED}"
+                 f"#console_token={TOKEN}"),
+    _opener_page(f"http://127.0.0.1:{PORT}/index.html?extra="
+                 f"{ENCODED.replace('%', '%25')}#console_token={TOKEN}"),
+    _opener_page(f"http://127.0.0.1:{PORT}/{ENCODED}/../index.html"
+                 f"#console_token={TOKEN}"),
+    # a loopback host the launched plane does not answer on (previously
+    # missed at 142d1352)
+    _opener_page(f"http://[::1]:{PORT}/index.html#console_token={TOKEN}"),
 ], ids=["query", "query-and-fragment", "path", "other-port", "off-loopback",
         "https", "no-token", "empty-token", "two-tokens", "two-forwards",
         "no-forward", "backslash", "userinfo-token", "userinfo-password",
         "tab", "space", "malformed-host", "port-out-of-range",
         "delay-word", "delay-negative", "delay-empty", "delay-absent",
         "token-short", "token-oversized", "token-dots", "token-plus",
-        "page-missing", "page-snapshot", "page-double-slash"])
+        "page-missing", "page-snapshot", "page-double-slash",
+        "query-encoded", "query-double-encoded", "path-encoded", "ipv6-unserved"])
 def test_a_forward_that_leaks_or_misses_the_token_is_a_named_failure(
         tmp_path: Path, page: str) -> None:
     state, opener = _opener(tmp_path, page)
@@ -622,7 +699,7 @@ def test_a_refused_forward_never_quotes_its_url(tmp_path: Path,
     state, opener = _opener(tmp_path, _opener_page(target))
     verdict = harness.Verdict(keep_going=True)
     harness.check_console_opener("t", PORT, _printed(opener), state,
-                                 tmp_path / "repo", verdict)
+                                 tmp_path / "repo", verdict, hosts=SERVED)
     assert [failure.ident for failure in verdict.failures] == [FRAGMENT]
     assert not any(TOKEN in str(failure) for failure in verdict.failures)
 
@@ -643,7 +720,7 @@ def test_a_record_reason_never_quotes_the_token(tmp_path: Path) -> None:
     state, opener = _opener(tmp_path, page)
     verdict = harness.Verdict(keep_going=True)
     harness.check_console_opener("t", PORT, _printed(opener), state,
-                                 tmp_path / "repo", verdict)
+                                 tmp_path / "repo", verdict, hosts=SERVED)
     assert [failure.ident for failure in verdict.failures] == [RECORD]
     assert not any(TOKEN in str(failure) for failure in verdict.failures)
 
@@ -654,7 +731,7 @@ def test_a_token_in_the_query_is_named_and_never_quoted(tmp_path: Path) -> None:
         f"#console_token={TOKEN}"))
     verdict = harness.Verdict(keep_going=True)
     harness.check_console_opener("t", PORT, _printed(opener), state,
-                                 tmp_path / "repo", verdict)
+                                 tmp_path / "repo", verdict, hosts=SERVED)
     assert [failure.ident for failure in verdict.failures] == [FRAGMENT]
     assert "QUERY" in verdict.failures[0].why
     assert not any(TOKEN in str(failure) for failure in verdict.failures)
@@ -681,3 +758,41 @@ def test_the_documented_start_is_the_readme_line_less_its_ellipsis() -> None:
     assert harness.documented_prefix() == ["opendox", "generate-and-open",
                                            "--local"]
     assert json.dumps(harness.DOCUMENTED_INSTALL) == '"pip install \\"opendox[local]\\""'
+
+
+# ---------------------------------------------------------------------------
+# The stop's exit status (Copilot review of #75 at 142d1352, previously
+# missed): 0, as `tests_runtime/test_bundled_postgres.py` requires.
+# ---------------------------------------------------------------------------
+
+class _StoppedProc:
+    def __init__(self, rc) -> None:
+        self.rc = rc
+
+    def send_signal(self, _signal) -> None:
+        pass
+
+    def wait(self, timeout=None):
+        if self.rc is None:
+            raise harness.subprocess.TimeoutExpired("opendox", timeout)
+        return self.rc
+
+
+@pytest.mark.parametrize("rc, expected", [
+    (0, []),
+    (1, ["t.stop exits 0"]),
+    (-15, ["t.stop exits 0"]),
+    (None, ["t.stop exits 0"]),
+], ids=["zero", "one", "sigterm", "timeout"])
+def test_the_stop_must_exit_zero(tmp_path: Path, rc, expected) -> None:
+    import types
+    out, err = tmp_path / "out", tmp_path / "err"
+    out.write_text("", encoding="utf-8")
+    err.write_text("", encoding="utf-8")
+    server = harness.Server("t", _StoppedProc(rc), PORT, out, err)
+    ctx = types.SimpleNamespace(server_package=None,
+                                state_dir=tmp_path / "state-of-no-server")
+    ctx.state_dir.mkdir()
+    verdict = harness.Verdict(keep_going=True)
+    harness.stop_and_look(server, ctx, verdict)
+    assert _failures(verdict) == expected

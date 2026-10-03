@@ -671,10 +671,23 @@ class _IndexLinks(html.parser.HTMLParser):
             self.sheets.append(a["href"])
 
 
+_SAME_ORIGIN = "http://loopback"
+
+
 def _resolve(base: str, ref: str) -> str:
-    parts = urllib.parse.urlsplit(
-        urllib.parse.urljoin("http://loopback" + base, ref))
+    """`ref` resolved against `base` as a browser resolves it on this plane:
+    a same-origin path (with its query), or, for anything that leaves the
+    plane, the whole absolute URL, which never starts with `/` (Copilot
+    review of openDox-code#75 at 142d1352, previously missed)."""
+    joined = urllib.parse.urljoin(_SAME_ORIGIN + base, ref)
+    parts = urllib.parse.urlsplit(joined)
+    if f"{parts.scheme}://{parts.netloc}" != _SAME_ORIGIN:
+        return joined
     return parts.path + (f"?{parts.query}" if parts.query else "")
+
+
+def _external(where: str) -> bool:
+    return not where.startswith("/")
 
 
 def _graph_roots(index_html: str, capabilities: dict) -> tuple[list, list]:
@@ -763,6 +776,13 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
     literal of the graph is added to `literals` where one is given."""
     roots, sheets = _graph_roots(index_html, capabilities)
     for sheet in sheets:
+        if _external(sheet):
+            verdict.check(
+                f"{label}.bundle.external {sheet}", False,
+                f"`/` links the stylesheet {sheet}, from outside this plane, "
+                "which a clean machine with only openDox installed cannot be "
+                "assumed to reach")
+            continue
         answer = get(port, sheet)
         verdict.check(f"{label}.bundle.sheet {sheet}", answer.status == 200,
                       f"the stylesheet `/` links answers {answer.describe()}")
@@ -787,6 +807,16 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
         if (path, static) in judged:
             continue
         judged.add((path, static))
+        if _external(path):
+            # Never fetched from loopback by its path, where a local file of
+            # the same name would answer for it.
+            verdict.check(
+                f"{label}.bundle.external {path}", False,
+                f"{importer} imports {path} "
+                f"{'statically' if static else 'dynamically'}, from outside "
+                "this plane, which a clean machine with only openDox "
+                "installed cannot be assumed to reach")
+            continue
         first = path not in answers
         if first:
             answers[path] = get(port, path)
@@ -1399,8 +1429,16 @@ def _within(path: Path, root: Path) -> bool:
 _UNPARSED_ALIKE = re.compile(r"[\\\x00-\x20\x7f]")
 
 
-def token_in_fragment(targets: list[str | None],
-                      port: int) -> tuple[str | None, str]:
+def served_loopback_hosts(port: int) -> tuple[str, ...]:
+    """The loopback hosts the launched plane answers on: `127.0.0.1` and
+    `::1` each where something listens on `port`, and `localhost`, which a
+    browser resolves to either, where one does."""
+    hosts = [host for host in ("127.0.0.1", "::1") if listening(host, port)]
+    return (*hosts, "localhost") if hosts else ()
+
+
+def token_in_fragment(targets: list[str | None], port: int,
+                      hosts: tuple[str, ...]) -> tuple[str | None, str]:
     """The token the opener's one forward carries in its FRAGMENT, or `None`
     and why not. No message here quotes a token, or any part of the URL,
     which could hold one (Copilot review of openDox-code#75 at d53a7378,
@@ -1409,9 +1447,10 @@ def token_in_fragment(targets: list[str | None],
         return None, (f"the opener has {len(targets)} meta-refresh forwards, "
                       "not one a browser follows to a URL (a delay that "
                       "does not start with a digit or `.` aborts it)")
+    answering = " and ".join(hosts) or "no host"
     elsewhere = (f"the opener does not forward to this plane on loopback "
-                 f"port {port} (its forward is not quoted, because it may "
-                 "hold the token)")
+                 f"port {port}, which answers on {answering} (its forward is "
+                 "not quoted, because it may hold the token)")
     target = targets[0]
     # A browser and `urllib.parse` must read the SAME destination, or the
     # check below judges a URL the browser never opens (r4173842763).
@@ -1427,8 +1466,11 @@ def token_in_fragment(targets: list[str | None],
             or "@" in parts.netloc:
         return None, (f"{elsewhere}: it carries user information before its "
                       "host")
+    # A loopback host the LAUNCHED plane answers on: a forward to `[::1]`
+    # reaches nothing where the plane listens on 127.0.0.1 alone (Copilot
+    # review of openDox-code#75 at 142d1352, previously missed).
     if (parts.scheme != "http" or parts.hostname not in LOOPBACK_HOSTS
-            or target_port != port):
+            or parts.hostname not in hosts or target_port != port):
         return None, elsewhere
     # THE CONSOLE PAGE, and no other page of this plane: a forward to
     # `/missing.html` or `/snapshot.json` opens no console, though every
@@ -1459,15 +1501,37 @@ def token_in_fragment(targets: list[str | None],
                       "discards: `takeDeliveredConsoleToken` accepts only "
                       f"{CONSOLE_TOKEN_SHAPE.pattern} (the value is not "
                       "quoted)")
-    if values[0] in parts.path or values[0] in parts.query:
+    # Decoded too, as often as it decodes: a percent-encoded copy in the path
+    # or the query still reaches the request line and the server's log, and
+    # is recovered from them (Copilot review of openDox-code#75 at 142d1352,
+    # r4174355680).
+    if any(values[0] in form for part in (parts.path, parts.query)
+           for form in _decodings(part)):
         return None, ("the opener's forward carries the token outside its "
-                      "fragment too")
+                      "fragment too, perhaps percent-encoded (the copy is "
+                      "not quoted)")
     return values[0], ""
 
 
+def _decodings(text: str, rounds: int = 5) -> set[str]:
+    """`text` and every percent-decoding of it (with `+` read as a space, and
+    not), repeated until nothing new appears, at most `rounds` deep."""
+    forms, frontier = {text}, [text]
+    for _ in range(rounds):
+        frontier = [decoded for form in frontier
+                    for decoded in (urllib.parse.unquote(form),
+                                    urllib.parse.unquote_plus(form))
+                    if decoded not in forms]
+        if not frontier:
+            break
+        forms.update(frontier)
+    return forms
+
+
 def check_console_opener(label: str, port: int, printed: str, state_dir: Path,
-                         served_root: Path,
-                         verdict: Verdict) -> tuple[Path | None, str | None]:
+                         served_root: Path, verdict: Verdict, *,
+                         hosts: tuple[str, ...],
+                         ) -> tuple[Path | None, str | None]:
     """Step 6: the opener the start printed, and the token its forward
     carries, read from the file as the user's browser reads it."""
     path = opener_location(printed)
@@ -1497,7 +1561,7 @@ def check_console_opener(label: str, port: int, printed: str, state_dir: Path,
     contents.feed(page)
     contents.close()
     targets = [refresh_target(content) for content in contents.contents]
-    token, why = token_in_fragment(targets, port)
+    token, why = token_in_fragment(targets, port, hosts)
     verdict.check(f"{label}.console opener forwards with the token in its "
                   "fragment", token is not None, why)
     if token is not None:
@@ -1636,9 +1700,14 @@ def stop_and_look(server: Server, ctx: Context, verdict: Verdict,
         rc = server.proc.wait(timeout=STOP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         rc = None
-    verdict.check(f"{label}.stop exits", rc is not None,
+    # EXIT STATUS 0, as `tests_runtime/test_bundled_postgres.py` requires of
+    # the same stop: a server that fails its own shutdown has not stopped
+    # cleanly, whatever it removed first (Copilot review of openDox-code#75
+    # at 142d1352, previously missed).
+    verdict.check(f"{label}.stop exits 0", rc == 0,
                   f"the server did not exit within {STOP_TIMEOUT_SECONDS:.0f}s "
-                  "of SIGTERM")
+                  "of SIGTERM" if rc is None else
+                  f"the server exited rc={rc} after SIGTERM, not 0")
     note(f"the entry point exited rc={rc}")
     left = bundled_server_processes(ctx.server_package, ctx.state_dir)
     verdict.check(f"{label}.stop leaves no bundled PostgreSQL process",
@@ -1670,8 +1739,9 @@ def serve_one(label: str, repo: Path, ctx: Context, verdict: Verdict) -> None:
     server, index = launch(label, repo, ctx, verdict)
     snapshot, caps = check_pages(server, index, verdict)
     check_grouping(label, snapshot, caps, verdict)
-    opener, token = check_console_opener(label, server.port, server.printed(),
-                                         ctx.state_dir, repo, verdict)
+    opener, token = check_console_opener(
+        label, server.port, server.printed(), ctx.state_dir, repo, verdict,
+        hosts=served_loopback_hosts(server.port))
     check_catalog(server, token, verdict)
     check_routes(server, index, snapshot, caps, token, verdict)
     stop_and_look(server, ctx, verdict, opener, token)
