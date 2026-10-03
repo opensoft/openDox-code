@@ -1260,6 +1260,17 @@ def test_an_id_the_catalog_refuses_prints_no_command_and_is_never_trusted(
     assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
     assert not trust_mod.verdict_for(served.declared(),
                                      root=served.repo).trusted
+    # Every other refusal path holds the same line, whatever its reason: the
+    # provider's own refusal of a binding no verdict covers, or one covering
+    # another binding, prints no command for such an id either.
+    assert trust_mod.trust_command(binding_id, str(served.repo)) is None
+    other = trust_mod.TrustVerdict.trusted_for(
+        _a_binding(), root=served.repo, basis=trust_mod.BASIS_HOST)
+    for verdict in (None, other):
+        with pytest.raises(trust_mod.BindingUntrusted) as refused:
+            trust_mod.require_admitted(served.declared(), verdict)
+        assert "opendox model-binding trust" not in str(refused.value)
+        assert trust_mod.REMEDY_UNSERVABLE in str(refused.value)
     assert not list(served.tmp.rglob("CANARY"))
     served.nothing_was_touched()
 
@@ -1287,8 +1298,16 @@ def test_a_binding_the_catalog_refuses_is_never_trusted_nor_fails_the_start(
         assert list(port.catalog().entries) == []
         with pytest.raises(trust_mod.BindingUntrusted) as refused:
             port.dispatch(_Envelope())
-        assert trust_mod.REASON_UNSERVABLE in str(refused.value)
-    capsys.readouterr()
+        notice = capsys.readouterr().err
+        assert _cli("model-binding", "list", "--repo-root",
+                    str(served.repo)) == 0
+        listed = capsys.readouterr().out
+        # trust cannot repair it, so no command that trusts it is printed,
+        # whatever its id looks like (here, for the label, a valid one)
+        for text in (str(refused.value), notice, listed):
+            assert trust_mod.REASON_UNSERVABLE in text, text
+            assert trust_mod.REMEDY_UNSERVABLE in text, text
+            assert "opendox model-binding trust" not in text, text
     trust_mod.unregister()
     trust_mod.register(served.trust)
     store = served.state_dir / trust_mod.TRUST_FILENAME
