@@ -1395,8 +1395,30 @@ class WorkbenchRoutes:
             "ok": True,
             "kind": "workbench-model-approval-result",
             "declaration": approved.as_read_back(),
-            "availability": doxbench_intake.APPROVAL_NOTICE,
+            "availability": self._approved_availability(binding),
         })
+
+    def _approved_availability(self, binding) -> str:
+        """What an approval says of the binding it approved (#1144 16.3a;
+        the trust-state walk). Approval is a governance record, and trust is
+        this machine's, so the result says the binding is available only
+        where the registered trust policy admits it: a governed host's, which
+        trusts what its gate approved, answers `APPROVAL_NOTICE` as before,
+        and openDox's strict default, until the binding is trusted, answers
+        `doxbench_trust.APPROVED_UNTRUSTED_NOTICE`.
+
+        ASKED OF A REGISTERED POLICY ONLY. This act is not one of the
+        consumers that register openDox's default (`doxbench_trust.policy`),
+        so where nothing is registered no binding has been judged trusted in
+        this process, and the result says it is not, rather than read a
+        store no consumer has asked for."""
+        from opendox import doxbench_intake
+        from opendox import doxbench_trust
+        if (doxbench_trust.is_registered()
+                and doxbench_trust.verdict_for(
+                    binding, root=Path(self.checkout_root)).admits(binding)):
+            return doxbench_intake.APPROVAL_NOTICE
+        return doxbench_trust.APPROVED_UNTRUSTED_NOTICE
 
     def _approval_binding(self, binding_id: str):
         """The binding a pending declaration names, or None. Read through the

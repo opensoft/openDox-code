@@ -98,6 +98,22 @@ NO_BROKER_TO_HAND_TO = (
     "binding {binding_id!r} names no broker, so there is nothing to hand a "
     "credential to: {custody}")
 
+#: What `list`'s console line says of each binding (#1144 16.3a; the
+#: trust-state walk), by the rule the console's own factory follows
+#: (`doxbench_install.declared_model_port_factory`): it reads the checkout's
+#: own bindings document, passes over a binding whose declaration is pending
+#: approval, and declares the FIRST of the rest. Whether a turn may use the
+#: one it declares is the trust line above it.
+CONSOLE_DECLARES_THIS = (
+    "declares this one, the first binding not pending approval")
+CONSOLE_PASSES_OVER_PENDING = (
+    "passes over it: its declaration is pending approval")
+CONSOLE_DECLARES_ANOTHER = (
+    "declares {binding_id}, the first binding not pending approval, and "
+    "declares one binding at a time")
+CONSOLE_READS_ANOTHER_DOCUMENT = (
+    "reads {path}, not this document, so it declares none of these")
+
 
 def cmd_model_binding_list(args: argparse.Namespace) -> int:
     """DISCLOSE every declared binding (task 1.2's read-back).
@@ -107,20 +123,27 @@ def cmd_model_binding_list(args: argparse.Namespace) -> int:
     secret it was never able to hold."""
     store = _binding_store(args)
     try:
-        disclosure = store.read_back()
+        # ONE SNAPSHOT (Copilot at openDox-code#82, r4174783250): the
+        # disclosure, the trust lines and the console lines are all of these
+        # objects, read once, so a document that changes, or stops reading,
+        # between two reads cannot pair one binding's fields with another's
+        # verdict, or end a listing in a traceback.
+        bindings = store.list()
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"  bindings {store.path}")
-    if not disclosure["bindings"]:
+    if not bindings:
         print("  (none declared — this install talks to no brokered provider)")
         return 0
-    verdicts = _trust_lines(store, args)
+    verdicts = _trust_lines(bindings, store, args)
+    consoles = _console_lines(bindings, store, args)
     # EVERY VALUE A REPOSITORY WROTE IS PRINTED ESCAPED, in a JSON string's
     # form (#1144 16.3a, T007 batch M): a newline or a terminal control
     # sequence in a field cannot forge or hide a line of this listing.
     shown = trust_mod.shown
-    for record in disclosure["bindings"]:
+    for binding in bindings:
+        record = binding.as_read_back()
         print(f"  {shown(record['id'])}  {shown(record['label'])}")
         print(f"    provider         {shown(record['provider'])}")
         print(f"    auth kind        {shown(record['auth_kind'])}")
@@ -136,27 +159,64 @@ def cmd_model_binding_list(args: argparse.Namespace) -> int:
         argv = record["broker_argv"]
         print(f"    broker argv      {shown(argv) if argv else NOT_DECLARED}")
         print(f"    custody          {record['credential_custody']}")
-        print(f"    trust            {verdicts.get(record['id'], '')}")
+        print(f"    trust            {verdicts[binding.id]}")
+        print(f"    console          {consoles[binding.id]}")
     return 0
 
 
-def _trust_lines(store: "binding_mod.BindingStore",
+def _trust_lines(bindings, store: "binding_mod.BindingStore",
                  args: argparse.Namespace) -> dict[str, str]:
     """`list`'s trust line for each binding (#1144 16.3a): trusted on this
-    machine, or why not and the command that trusts it. Asked only when a
-    binding is declared, so an empty store never touches the state
+    machine, or why not and what to do, ending with the command that trusts
+    it where one can be printed safely (`doxbench_trust.trust_remedy`). That
+    command reads the same bindings document this listing did. Asked only
+    when a binding is declared, so an empty store never touches the state
     directory."""
     root = _repo_root(args)
+    named = (str(store.path) if getattr(args, "bindings", None) else None)
     lines: dict[str, str] = {}
-    for binding in store.list():
+    for binding in bindings:
         verdict = trust_mod.verdict_for(binding, root=root)
         if verdict.admits(binding):
             lines[binding.id] = "trusted on this machine"
         else:
             reason = verdict.reason or trust_mod.REASON_NEVER_TRUSTED
+            remedy = trust_mod.trust_remedy(binding.id, str(root), reason,
+                                            bindings=named)
             lines[binding.id] = (
-                f"NOT trusted on this machine ({reason}); trust it with: "
-                f"{trust_mod.trust_command(binding.id, str(root))}")
+                f"NOT trusted on this machine ({reason}). {remedy}")
+    return lines
+
+
+def _console_lines(bindings, store: "binding_mod.BindingStore",
+                   args: argparse.Namespace) -> dict[str, str]:
+    """`list`'s console line for each binding (#1144 16.3a; the trust-state
+    walk): which one a console serving this repository declares, by its
+    factory's own rule, so a binding listed as trusted is never mistaken for
+    the one in use. The pending set is the factory's own
+    (`doxbench_intake.pending_binding_ids`), which reads a declarations
+    document that cannot be read as declaring nothing pending, as the
+    factory does."""
+    from opendox import doxbench_intake as intake_mod
+
+    root = _repo_root(args)
+    shown = trust_mod.shown
+    console_reads = binding_mod.bindings_path(root)
+    if Path(store.path).resolve() != console_reads.resolve():
+        line = CONSOLE_READS_ANOTHER_DOCUMENT.format(
+            path=shown(str(console_reads)))
+        return {binding.id: line for binding in bindings}
+    pending = intake_mod.pending_binding_ids(root)
+    approved = [binding for binding in bindings if binding.id not in pending]
+    lines: dict[str, str] = {}
+    for binding in bindings:
+        if binding.id in pending:
+            lines[binding.id] = CONSOLE_PASSES_OVER_PENDING
+        elif binding is approved[0]:
+            lines[binding.id] = CONSOLE_DECLARES_THIS
+        else:
+            lines[binding.id] = CONSOLE_DECLARES_ANOTHER.format(
+                binding_id=shown(approved[0].id))
     return lines
 
 

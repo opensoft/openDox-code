@@ -371,7 +371,7 @@ export function noModelConfiguredRemedy(stateValue) {
 // twin is `doxbench_trust.UNTRUSTED_BINDING_REMEDY`, which
 // tests/test_model_binding_trust.py holds to this spelling.
 export const UNTRUSTED_BINDING_REMEDY =
-  "No declared model is available. \"opendox model-binding list\" shows whether each binding is trusted on this machine, and \"opendox model-binding trust <id>\" trusts one after showing what it would run and where it would connect; then restart this console. A binding already trusted is unavailable for the reason this console printed when its provider refused.";
+  "No declared model is available. \"opendox model-binding list --repo-root <repository>\" shows whether each binding is trusted on this machine, and \"opendox model-binding trust --repo-root <repository> <id>\" trusts one after showing what it would run and where it would connect; then restart this console. A binding already trusted is unavailable for the reason this console printed when its provider refused.";
 
 export function untrustedBindingRemedy(stateValue) {
   if (stateValue.catalogFailure) return null;

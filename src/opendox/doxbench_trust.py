@@ -43,10 +43,18 @@ and a host's own policy may admit it (#1144 16.3a, T007 batch M).
 WHAT A REPOSITORY WROTE IS SHOWN ESCAPED. Every value a refusal, the
 factory's notice, `model-binding list` or `model-binding trust` prints from a
 binding is printed in a JSON string's form (`shown`), so a newline or a
-terminal control sequence in a field cannot forge or hide what is shown. The
-command that trusts a binding quotes each operand for a shell, and falls back
-to the same JSON form for an operand no shell quoting can show safely
-(`trust_command`).
+terminal control sequence in a field cannot forge or hide what is shown.
+
+A COMMAND PRINTED FOR AN OPERATOR TO PASTE IS READ BY A SHELL, and JSON's
+quoting is not a shell's: inside double quotes, `$(...)` and a backtick still
+run (Copilot at openDox-code#82, r4174783197). So a printed command carries
+only operands a POSIX shell reads back exactly (`trust_command`): an id the
+model catalog accepts, whose characters no shell expands and no option parser
+reads as an option, and a path quoted by `shlex.quote` where every character
+of it is printable. A path that is not printable is never printed in a
+command: the command names the repository as `.`, to be run from its root. An
+id the catalog refuses belongs to a binding no turn could use, so no policy
+trusts it and no command is printed for it (`unservable_because`).
 
 THE STORE is one private file in openDox's state directory, the one
 `runtime.config.state_dir` names (`OPENDOX_STATE_DIR`, or its per-user
@@ -82,10 +90,12 @@ act on a binding asks again, of a `TrustVerdict` it is handed:
 function) and its built-in resolver each refuse a binding the verdict does not
 cover, by id AND digest (`require_admitted`). No verdict is no trust.
 
-IMPORT WEIGHT. The standard library and `opendox.doxbench_binding`. The
-runtime's `config` is imported when a state directory is first resolved, and
-`doxbench_model` when the refusing port is built. This module names no
-provider, holds no credential, spawns nothing and reaches no network.
+IMPORT WEIGHT. The standard library, `opendox.doxbench_binding` and
+`opendox.doxbench_model` (whose own imports are `dataclasses` and `typing`).
+The runtime's `config` is imported when a state directory is first resolved,
+and `doxbench_install` when a binding's catalog entry is first judged
+(`unservable_because`). This module names no provider, holds no credential,
+spawns nothing and reaches no network.
 
 A CREATED FILE: it has no row in openxFactory's
 `docs/opendox-carve-manifest.yaml`, because the manifest declares what LEAVES
@@ -100,6 +110,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shlex
 import stat
 import sys
@@ -109,6 +120,7 @@ from pathlib import Path
 from typing import Any
 
 from opendox import doxbench_binding as binding_mod
+from opendox import doxbench_model
 
 try:                    # POSIX; where it is absent, nothing is recorded
     import fcntl
@@ -116,6 +128,8 @@ except ImportError:     # pragma: no cover - exercised through _lock_exclusively
     fcntl = None
 
 __all__ = [
+    "APPROVED_UNTRUSTED_NOTICE",
+    "BASIS_CATALOG",
     "BASIS_HOST",
     "BASIS_MACHINE_TRUST",
     "BindingUntrusted",
@@ -128,7 +142,10 @@ __all__ = [
     "UNTRUSTED_TURN_MESSAGE",
     "UntrustedBindingPort",
     "INTAKE_BROKER_UNTRUSTED",
+    "REASON_UNSERVABLE",
+    "REMEDY_UNSERVABLE",
     "binding_digest",
+    "command_safe_id",
     "current",
     "is_registered",
     "policy",
@@ -139,7 +156,9 @@ __all__ = [
     "resolved_root",
     "shown",
     "trust_command",
+    "trust_remedy",
     "unregister",
+    "unservable_because",
 ]
 
 # ---------------------------------------------------------------------------
@@ -181,6 +200,10 @@ BASIS_MACHINE_TRUST = "machine-trust"
 #: A host policy's verdict (a governed host's own rule).
 BASIS_HOST = "host"
 
+#: The verdict on a binding the model catalog refuses, given before any
+#: policy is asked (`unservable_because`).
+BASIS_CATALOG = "catalog"
+
 #: The setting that names openDox's state directory (openDox-code#69).
 STATE_DIR_SETTING = "OPENDOX_STATE_DIR"
 
@@ -213,6 +236,25 @@ REASON_INTAKE_NOT_ADMITTED = (
     "the console intake runs a broker the served repository's declarations "
     "document names, and openDox's per-machine trust admits no intake; only "
     "a host's own policy can, by answering intake_verdict")
+
+
+#: Why a binding the model catalog refuses is never trusted (Copilot at
+#: openDox-code#82, r4174783280). The catalog lists a binding by its id and
+#: its label, so a binding whose id or label it refuses is one no chat turn
+#: could ever use, and the factory could not declare it. The bounds are the
+#: released catalog schema's, as `doxbench_model` restates them.
+REASON_UNSERVABLE = (
+    "the model catalog cannot list it: an id is 1 to "
+    f"{doxbench_model.MODEL_REFERENCE_MAX_LENGTH} ASCII letters, digits, "
+    "'.', '_' and '-', beginning with a letter or a digit, and a label is 1 "
+    f"to {doxbench_model.LABEL_MAX_LENGTH} characters and not blank, so no "
+    "chat turn could use it")
+
+#: What an operator is told to do about such a binding. Trust cannot help, so
+#: no command that trusts it is printed.
+REMEDY_UNSERVABLE = (
+    "Trusting it cannot make it usable: declare it again with an id and a "
+    "label the model catalog accepts, then trust that binding")
 
 
 def unsupported_platform() -> str | None:
@@ -261,9 +303,10 @@ NO_STATE_DIR = (
 UNTRUSTED_TURN_MESSAGE = (
     "the model binding this install declares is not trusted on this machine, "
     "so nothing was sent: no broker ran, no credential was read and no "
-    "endpoint was contacted. Run \"opendox model-binding list\" to see which "
-    "binding and why, trust it with \"opendox model-binding trust <id>\", and "
-    "restart this console")
+    "endpoint was contacted. Run \"opendox model-binding list --repo-root "
+    "<repository>\" to see which binding and why, trust it with \"opendox "
+    "model-binding trust --repo-root <repository> <id>\", and restart this "
+    "console")
 
 
 #: What the chat rail says when the catalog lists a declared model and none is
@@ -278,12 +321,29 @@ UNTRUSTED_TURN_MESSAGE = (
 #: openDox-code#74's no-model line, is held to this spelling by
 #: `tests/test_model_binding_trust.py`.
 UNTRUSTED_BINDING_REMEDY = (
-    "No declared model is available. \"opendox model-binding list\" shows "
-    "whether each binding is trusted on this machine, and \"opendox "
-    "model-binding trust <id>\" trusts one after showing what it would run "
-    "and where it would connect; then restart this console. A binding "
-    "already trusted is unavailable for the reason this console printed "
-    "when its provider refused.")
+    "No declared model is available. \"opendox model-binding list "
+    "--repo-root <repository>\" shows whether each binding is trusted on "
+    "this machine, and \"opendox model-binding trust --repo-root <repository> "
+    "<id>\" trusts one after showing what it would run and where it would "
+    "connect; then restart this console. A binding already trusted is "
+    "unavailable for the reason this console printed when its provider "
+    "refused.")
+
+#: What the console's model approval answers, as its `availability`, when
+#: the trust policy does not admit the binding it approved (#1144 16.3a; the
+#: trust-state walk). Approval is a governance record, and trust is this
+#: machine's: under openDox's strict default an approved binding is still
+#: refused until it is trusted, so the result does not say it is available.
+#: A host whose policy admits it (a governed host's approval) answers
+#: `doxbench_intake.APPROVAL_NOTICE`, as before. A FIXED sentence.
+APPROVED_UNTRUSTED_NOTICE = (
+    "the model is approved for this console, but its binding is not trusted "
+    "on this machine, so it is not an available catalog entry: \"opendox "
+    "model-binding list --repo-root <repository>\" shows why, and \"opendox "
+    "model-binding trust --repo-root <repository> <id>\" trusts it after "
+    "showing what it would run and where it would connect; then restart this "
+    "console. The credential remains in the broker's custody and this act "
+    "neither mints nor reads one")
 
 #: What the console intake's hand-off is refused with when the trust policy
 #: does not admit the binding it is declaring (#1144 16.3a, T007 batch M). A
@@ -314,9 +374,10 @@ class TrustStoreRefused(binding_mod.BindingRefused):
 
 
 class TrustNotRecorded(binding_mod.BindingRefused):
-    """The registered policy did not record trust for the binding asked
-    about: it declined, answered for another binding, or failed. `add`,
-    `edit` and `trust` refuse with it before they write anything."""
+    """Trust was not recorded for the binding asked about: the model catalog
+    refuses it (`unservable_because`), or the registered policy declined,
+    answered for another binding, or failed. `add`, `edit` and `trust`
+    refuse with it before they write anything."""
 
 
 class TrustPolicyNotRegistered(RuntimeError):
@@ -366,30 +427,105 @@ def shown(value: object) -> str:
     return json.dumps(value, ensure_ascii=True)
 
 
-def _operand(value: str) -> str:
-    """One operand of a printed command: quoted for a POSIX shell where it is
-    printable ASCII, and otherwise in a JSON string's form, which no shell
-    quoting could print without carrying the bytes it escapes."""
-    if value.isascii() and value.isprintable():
-        return shlex.quote(value)
-    return shown(value)
+def command_safe_id(binding_id: object) -> bool:
+    """Whether `binding_id` may stand bare in a printed command: an id the
+    model catalog accepts (`doxbench_model.MODEL_REFERENCE_PATTERN`, at most
+    `MODEL_REFERENCE_MAX_LENGTH` characters). Its characters are ASCII
+    letters, digits, `.`, `_` and `-`, which no POSIX shell expands, splits or
+    quotes, and it begins with a letter or a digit, so no option parser reads
+    it as an option (Copilot at openDox-code#82, r4174632060). Every other id
+    is one the catalog refuses, so its binding is one no turn could use
+    (`unservable_because`), and no command is printed for it (r4174783197)."""
+    return (isinstance(binding_id, str)
+            and len(binding_id) <= doxbench_model.MODEL_REFERENCE_MAX_LENGTH
+            and re.fullmatch(doxbench_model.MODEL_REFERENCE_PATTERN,
+                             binding_id) is not None)
 
 
-def trust_command(binding_id: str, root: str | None = None) -> str:
-    """The command that trusts `binding_id`. The id and the root come from a
-    repository and a checkout, and a refusal that printed them bare would hand
-    a pasted command, or a terminal, whatever they hold (`_operand`).
+def _quoted_path(path: object) -> str | None:
+    """A path as a POSIX shell reads it back exactly (`shlex.quote`: one
+    single-quoted word, inside which no shell expands anything), or None
+    where a character of it is not printable: a newline, a terminal control
+    sequence, a bidirectional override, or a byte the file system's name did
+    not decode. Such a path is never printed in a command, because printing
+    it would hand a terminal what `shown` exists to escape (r4174783197)."""
+    if not isinstance(path, str) or not path or not path.isprintable():
+        return None
+    return shlex.quote(path)
 
-    The options come first and the id last, after `--` where the id itself
-    begins with `-`, so the command, run as printed, trusts the binding it
-    names whatever its id looks like to an option parser (Copilot at
-    openDox-code#82, r4174632060)."""
+
+def trust_command(binding_id: str, root: str | None, *,
+                  bindings: str | None = None) -> str | None:
+    """The command that trusts `binding_id` at `root`, as one line a POSIX
+    shell reads back as exactly the verb's arguments, or None where it cannot
+    be printed so (Copilot at openDox-code#82, r4174783197).
+
+    `--repo-root` is required by the verb, so there is no command without a
+    root. `--bindings` is given where the binding was read from a document
+    named by one. The id comes last, and only an id the catalog accepts is
+    printed (`command_safe_id`); each path is quoted (`_quoted_path`). An
+    absolute path begins with `/` and a relative one is given as `./...`, so
+    no operand reads as an option."""
+    if root is None or not command_safe_id(binding_id):
+        return None
     command = "opendox model-binding trust"
-    if root is not None:
-        command += f" --repo-root {_operand(root)}"
-    if binding_id.startswith("-"):
-        command += " --"
-    return f"{command} {_operand(binding_id)}"
+    for option, value in (("--repo-root", root), ("--bindings", bindings)):
+        if option == "--bindings" and value is None:
+            continue
+        quoted = _quoted_path(value)
+        if quoted is None:
+            return None
+        command += f" {option} {quoted}"
+    return f"{command} {binding_id}"
+
+
+def _command_from_the_root(binding_id: str, root: str | None,
+                           bindings: str | None) -> str | None:
+    """The command with the repository named `.`, to be run from its root,
+    for a binding whose root is unknown or cannot be printed. A bindings
+    document is named relative to that root, and only where it lies inside
+    it."""
+    if bindings is None:
+        return trust_command(binding_id, ".")
+    if root is None:
+        return None
+    try:
+        relative = Path(bindings).relative_to(root)
+    except ValueError:
+        return None
+    return trust_command(binding_id, ".",
+                         bindings=os.path.join(".", str(relative)))
+
+
+def trust_remedy(binding_id: str, root: str | None,
+                 reason: str | None = None, *,
+                 bindings: str | None = None) -> str:
+    """What a refusal, or `list`, tells the operator to do about a binding
+    that is not trusted: one sentence that ENDS with the command that trusts
+    it, where a command can be printed safely (`trust_command`).
+
+    A binding the catalog refuses gets no command, since trust cannot make it
+    usable (`REMEDY_UNSERVABLE`). Where the root is unknown, or a path cannot
+    be printed, the command names the repository `.` and says to run it from
+    that repository's root. Where even that cannot be printed, the sentence
+    says what to give the verb instead."""
+    if reason == REASON_UNSERVABLE or not command_safe_id(binding_id):
+        return REMEDY_UNSERVABLE
+    command = trust_command(binding_id, root, bindings=bindings)
+    if command is not None:
+        return f"Review it, then trust it with: {command}"
+    command = _command_from_the_root(binding_id, root, bindings)
+    lead = ("From the root directory of the repository that declares it"
+            if root is None else
+            "A path it is read from cannot be printed in a command safely, "
+            "so, from its repository's own root directory")
+    if command is not None:
+        return f"{lead}, review it, then trust it with: {command}"
+    return ("A path it is read from cannot be printed in a command safely, "
+            "so none is printed: review it, then run \"opendox model-binding "
+            "trust\" from its repository's own root directory, with "
+            "--repo-root . and --bindings naming the document it is read "
+            f"from, and the id {binding_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -438,17 +574,18 @@ class TrustVerdict:
                 and binding_digest(binding) == self.digest)
 
 
-def refusal_message(binding_id: str, root: str | None, reason: str) -> str:
+def refusal_message(binding_id: str, root: str | None, reason: str, *,
+                    bindings: str | None = None) -> str:
     """The refusal of an untrusted binding, BY NAME: the id, the reason, and
-    the command that trusts it. It names no secret, and nothing has been
+    what to do, which ends with the command that trusts it where one can be
+    printed safely (`trust_remedy`). It names no secret, and nothing has been
     resolved when it is composed."""
     where = (f" in the repository at {shown(root)}" if root is not None
              else "")
     return (f"model binding {shown(binding_id)}{where} is not trusted on this "
             f"machine ({reason}), so it is not used: no broker runs, no "
             "credential reference is resolved and no endpoint is contacted. "
-            "Review it, then trust it with: "
-            f"{trust_command(binding_id, root)}")
+            f"{trust_remedy(binding_id, root, reason, bindings=bindings)}")
 
 
 def require_admitted(binding, trust: TrustVerdict | None) -> None:
@@ -493,12 +630,37 @@ def _held_to(binding, verdict: Any, *, root: Path | str) -> TrustVerdict:
                                       reason=REASON_NOT_COVERED)
 
 
+def unservable_because(binding) -> str | None:
+    """Why no chat turn could use `binding`, or None: the model catalog
+    refuses its id or its label (Copilot at openDox-code#82, r4174783280).
+
+    Judged by building the very catalog the factory would declare for it
+    (`doxbench_install.brokered_catalog`), so the two cannot disagree. Asked
+    BEFORE any policy is: no policy, a host's included, trusts a binding that
+    could never be served, `add`, `edit` and `trust` record nothing for one
+    and write nothing, and the factory declares a refusing port for one
+    rather than fail at start on what a repository wrote."""
+    from opendox import doxbench_install
+
+    try:
+        doxbench_install.brokered_catalog(binding)
+    except doxbench_model.ModelCatalogError:
+        return REASON_UNSERVABLE
+    return None
+
+
 def verdict_for(binding, *, root: Path | str) -> TrustVerdict:
     """The registered policy's verdict on `binding` at `root`, held to it.
 
     What every consumer asks before it uses a binding read from a repository.
-    A policy that raises trusts nothing, and its words are not repeated
-    (`reason_policy_failed`)."""
+    A binding the catalog refuses is untrusted before any policy is asked
+    (`unservable_because`). A policy that raises trusts nothing, and its
+    words are not repeated (`reason_policy_failed`)."""
+    unservable = unservable_because(binding)
+    if unservable is not None:
+        return TrustVerdict.untrusted_for(binding, root=root,
+                                          basis=BASIS_CATALOG,
+                                          reason=unservable)
     try:
         verdict = policy().verdict(binding, root=root)
     except Exception as error:  # noqa: BLE001 - a policy that fails trusts nothing
@@ -518,7 +680,16 @@ def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
     and never its words. Only openDox's own store's `TrustStoreRefused`
     passes through as it is. `add`, `edit` and
     `trust` ask this before they write anything (Copilot at
-    openDox-code#82, r4173513738)."""
+    openDox-code#82, r4173513738).
+
+    A binding the catalog refuses is refused before any policy is asked, and
+    nothing is recorded for it (`unservable_because`, r4174783280)."""
+    unservable = unservable_because(binding)
+    if unservable is not None:
+        raise TrustNotRecorded(
+            f"model binding {shown(binding.id)} is not trusted on this "
+            f"machine, and no trust was recorded for it: {unservable}. "
+            f"{REMEDY_UNSERVABLE}")
     registered = policy()
     try:
         verdict = registered.record(binding, root=root)
@@ -636,6 +807,23 @@ def _store_refused_whole(path: Path | str, size: int) -> TrustStoreRefused:
         "this trust is not recorded and every trust already held stays held")
 
 
+def _store_failed(state: Path | str, error: OSError, *,
+                  writing: bool) -> TrustStoreRefused:
+    """What the store says when the system refuses an act on its tree that
+    no check above named (a permission, a full disk, a path that vanished),
+    BY NAME and by the system's own short word for it (Copilot at
+    openDox-code#82, r4174783301). Nothing is trusted through it."""
+    word = error.strerror or type(error).__name__
+    if writing:
+        return TrustStoreRefused(
+            f"the model-binding trust store in {shown(str(state))} could not "
+            f"be written ({word}), so this trust is not recorded and every "
+            "trust already held stays held")
+    return TrustStoreRefused(
+        f"the model-binding trust store in {shown(str(state))} could not be "
+        f"read ({word}), so nothing is trusted through it")
+
+
 def _store_refused(path: Path | str, reason: str) -> TrustStoreRefused:
     return TrustStoreRefused(
         f"the model-binding trust store refuses {shown(str(path))}: it "
@@ -645,18 +833,34 @@ def _store_refused(path: Path | str, reason: str) -> TrustStoreRefused:
         "it")
 
 
+def _store_refused_dangling(path: Path | str) -> TrustStoreRefused:
+    return TrustStoreRefused(
+        f"the model-binding trust store refuses {shown(str(path))}: it is a "
+        "symbolic link to nothing, so the store would be made or read through "
+        "a path no check has judged, and nothing is trusted through it. "
+        "Create what it points to, or set openDox's state directory "
+        f"({STATE_DIR_SETTING}) to a directory that exists")
+
+
 def _refuse_foreign_links(state: Path, *, existing_only: bool,
                           uid: int) -> None:
     """No link on the way to the store belongs to anyone but this user or
-    root, who alone could point it elsewhere."""
+    root, who alone could point it elsewhere. And none, whoever owns it,
+    points at nothing (Copilot at openDox-code#82, r4174783301): a link to
+    nothing resolves to a path the tree check never judged, and the store
+    would be made or read through it."""
     for component in (state, *state.parents):
         if existing_only and not os.path.lexists(component):
             continue
         info = os.lstat(component)
-        if stat.S_ISLNK(info.st_mode) and info.st_uid not in (uid, 0):
+        if not stat.S_ISLNK(info.st_mode):
+            continue
+        if info.st_uid not in (uid, 0):
             raise _store_refused(
                 component, f"is a symbolic link owned by uid {info.st_uid}, "
                 "neither this user nor root, who could point it elsewhere")
+        if not os.path.exists(component):
+            raise _store_refused_dangling(component)
 
 
 def _tree_to_judge(state: Path, *,
@@ -891,7 +1095,11 @@ class MachineTrust:
         A store that cannot be used trusts nothing, and says why."""
         key_root = resolved_root(root)
         try:
-            entries = self._read(self._state_dir_outside(key_root))
+            state = self._state_dir_outside(key_root)
+            try:
+                entries = self._read(state)
+            except OSError as error:
+                raise _store_failed(state, error, writing=False) from None
         except TrustStoreRefused as refusal:
             return TrustVerdict.untrusted_for(
                 binding, root=key_root, basis=BASIS_MACHINE_TRUST,
@@ -916,13 +1124,18 @@ class MachineTrust:
         digest = binding_digest(binding)
         with self._lock:
             state = self._state_dir_outside(key_root)
-            _refuse_an_unsafe_tree(state, existing_only=True)
-            _make_private_directories(state)
-            _refuse_an_unsafe_tree(state, existing_only=False)
-            with _store_locked(state):
-                entries = self._read(state)
-                entries[(key_root, binding.id)] = digest
-                self._write(state, entries)
+            try:
+                _refuse_an_unsafe_tree(state, existing_only=True)
+                _make_private_directories(state)
+                _refuse_an_unsafe_tree(state, existing_only=False)
+                with _store_locked(state):
+                    entries = self._read(state)
+                    entries[(key_root, binding.id)] = digest
+                    self._write(state, entries)
+            except OSError as error:
+                # Whatever the system refused that no check named: refused
+                # BY NAME, never a raw error (r4174783301).
+                raise _store_failed(state, error, writing=True) from None
         return TrustVerdict.trusted_for(binding, root=key_root,
                                         basis=BASIS_MACHINE_TRUST)
 
@@ -1068,9 +1281,10 @@ class UntrustedBindingPort:
     factory's notice, in `opendox model-binding list`, and in a refused turn's
     message (`UNTRUSTED_TURN_MESSAGE`)."""
 
-    __slots__ = ("_catalog", "_verdict")
+    __slots__ = ("_bindings", "_catalog", "_verdict")
 
-    def __init__(self, catalog, verdict: TrustVerdict) -> None:
+    def __init__(self, catalog, verdict: TrustVerdict, *,
+                 bindings: str | None = None) -> None:
         from opendox import doxbench_model
 
         if not isinstance(catalog, doxbench_model.ModelCatalog):
@@ -1081,6 +1295,7 @@ class UntrustedBindingPort:
                 "an untrusted binding's catalog offers no available entry")
         self._catalog = catalog
         self._verdict = verdict
+        self._bindings = bindings
 
     @property
     def timeout_seconds(self) -> float:
@@ -1096,7 +1311,8 @@ class UntrustedBindingPort:
     def dispatch(self, prompt_envelope: object) -> object:
         raise BindingUntrusted(refusal_message(
             self._verdict.binding_id, self._verdict.root,
-            self._verdict.reason or REASON_NEVER_TRUSTED))
+            self._verdict.reason or REASON_NEVER_TRUSTED,
+            bindings=self._bindings))
 
     def __repr__(self) -> str:
         return f"<model binding {shown(self._verdict.binding_id)} not trusted>"

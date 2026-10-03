@@ -313,7 +313,8 @@ def unavailable_catalog(binding) -> ModelCatalog:
         for entry in brokered_catalog(binding).entries])
 
 
-def trust_gated_model_port_factory(binding, *, checkout_root: Path | str):
+def trust_gated_model_port_factory(binding, *, checkout_root: Path | str,
+                                   bindings_path: Path | str | None = None):
     """The factory for the first approved binding, ONCE THE TRUST POLICY HAS
     JUDGED IT (#1144 16.3a; plan 034 T100; RULED openxFactory#656 comment
     5962785556, item 2).
@@ -331,25 +332,40 @@ def trust_gated_model_port_factory(binding, *, checkout_root: Path | str):
     The verdict is HELD TO THIS BINDING (`doxbench_trust.verdict_for`): a
     policy that raises trusts nothing, and its words are not repeated; one
     that answers for another binding, trusted or not, covers nothing, and the
-    refusal names THIS binding and its command."""
+    refusal names THIS binding and its command.
+
+    A BINDING THE CATALOG REFUSES IS NEVER TRUSTED, whatever the policy or
+    the store says (Copilot at openDox-code#82, r4174783280): its id or its
+    label is not one `brokered_catalog` can list, so the verdict refuses it
+    before any policy is asked (`doxbench_trust.unservable_because`), and
+    the start declares the refusing port over an empty catalog rather than
+    fail on what a repository wrote. So `brokered_catalog` below is only
+    ever built for a binding it accepts.
+
+    `bindings_path` is the document the binding was read from, where a
+    caller named one, so the command the refusal prints reads that document
+    too."""
     from opendox import doxbench_trust as trust_mod
     from opendox.doxbench_model import EMPTY_CATALOG, ModelCatalogError
 
     verdict = trust_mod.verdict_for(binding, root=checkout_root)
     if verdict.admits(binding):
         return brokered_model_port_factory(binding, trust=verdict)
+    bindings = (None if bindings_path is None
+                else str(Path(bindings_path).resolve()))
     sys.stderr.write("[model-provider] " + trust_mod.refusal_message(
         verdict.binding_id, verdict.root,
-        verdict.reason or trust_mod.REASON_NEVER_TRUSTED) + "\n")
+        verdict.reason or trust_mod.REASON_NEVER_TRUSTED,
+        bindings=bindings) + "\n")
     try:
         catalog = unavailable_catalog(binding)
     except ModelCatalogError:
         # An id or a label the catalog's schema refuses (a newline, a
-        # terminal escape) is a binding no turn could name anyway. It is
-        # refused by name above, and the catalog lists nothing rather than
-        # the start failing on what a repository wrote.
+        # terminal escape, an id past its bound) is a binding no turn could
+        # name. It is refused by name above, and the catalog lists nothing
+        # rather than the start failing on what a repository wrote.
         catalog = EMPTY_CATALOG
-    port = trust_mod.UntrustedBindingPort(catalog, verdict)
+    port = trust_mod.UntrustedBindingPort(catalog, verdict, bindings=bindings)
 
     def resolve():
         return port
@@ -436,4 +452,5 @@ def declared_model_port_factory(session_root: Path | str, *,
             return model_port_factory(Path(session_root), spawn=spawn)
         return no_model_port_factory
     return trust_gated_model_port_factory(approved[0],
-                                          checkout_root=checkout_root)
+                                          checkout_root=checkout_root,
+                                          bindings_path=bindings_path)

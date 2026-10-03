@@ -633,7 +633,8 @@ def test_a_binding_carrying_control_characters_is_shown_escaped(served,
     """A hand-written binding whose id, label and one broker argv member carry
     a newline and a terminal escape is printed with both escaped, by `trust`,
     by `list` and in the refusal, and no raw control byte reaches the
-    output."""
+    output. The catalog refuses such an id, so `trust` shows it and then
+    refuses it (Copilot at openDox-code#82, r4174783280)."""
     hostile = "evil\n\x1b[2J"
     served.hand_write(served.record(
         "broker", id=hostile, label=f"Label{hostile}",
@@ -643,7 +644,7 @@ def test_a_binding_carrying_control_characters_is_shown_escaped(served,
         port.dispatch(_Envelope())
     assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
     assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
-                hostile) == 0
+                hostile) == 1
     captured = capsys.readouterr()
     for text in (captured.out, captured.err, str(refused.value)):
         assert "\x1b" not in text
@@ -1058,13 +1059,15 @@ def test_a_record_that_would_outgrow_the_read_bound_is_refused(
     assert not served.trust.verdict(first, root=second).trusted
 
 
-@pytest.mark.parametrize("binding_id", ["-dash-model", "--repo-root",
-                                        BINDING_ID])
+@pytest.mark.parametrize("binding_id", [BINDING_ID, "0.dotted_id-9",
+                                        "M" * 128])
 def test_the_printed_trust_command_trusts_the_binding_it_names(
         served, capsys, binding_id):
-    """Copilot at openDox-code#82 (r4174632060). A valid id may begin with
-    `-`. The command a refusal prints, run as printed, trusts exactly that
-    binding, whatever its id looks like to an option parser."""
+    """Copilot at openDox-code#82 (r4174632060, r4174783197). The command a
+    refusal prints, run as printed, trusts exactly that binding, for every
+    shape of id the catalog accepts, up to its bound. An id that begins with
+    `-` is one the catalog refuses, and no command is printed for it
+    (`test_an_id_the_catalog_refuses_prints_no_command_and_is_never_trusted`)."""
     import shlex as shlex_mod
 
     trust_mod = _trust_mod()
@@ -1095,6 +1098,320 @@ def test_a_store_that_cannot_be_locked_records_nothing(served, monkeypatch):
         served.trust.record(served.declared(), root=served.repo)
     assert "lock" in str(refused.value)
     assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+
+
+# --- every command printed for an operator to paste (r4174783197) -----------
+
+#: Repository directory names, each holding what a shell acts on: a command
+#: substitution in both spellings, a command separator, both quotes, a
+#: newline, a terminal escape, and a printable non-ASCII name with a space.
+#: A shell that ran any of them would make `CANARY` where it runs.
+HOSTILE_ROOTS = {
+    "dollar-paren": "r$(touch CANARY)",
+    "backtick": "r`touch CANARY`",
+    "semicolon": "r; touch CANARY",
+    "quotes": "r'b\"c $(touch CANARY)",
+    "newline": "r\n$(touch CANARY)",
+    "escape": "r\x1b[2J$(touch CANARY)",
+    "non-ascii": "r é $(touch CANARY)",
+}
+
+#: Every POSIX shell on this machine (`sh` always is one), each with the flag
+#: that keeps it from reading the user's own start-up files.
+SHELLS = tuple((shell, *flags) for shell, *flags in (("sh",), ("bash",),
+                                                     ("zsh", "-f"))
+               if shutil.which(shell))
+
+
+def _as_each_shell_reads(command: str, where: Path) -> dict[str, list[str]]:
+    """`command`, as each shell here reads it, with `opendox` stubbed by a
+    shell function that writes the arguments it was given, NUL-separated:
+    exactly what that shell would hand the real verb. Run in `where`, so
+    whatever the command ran would land there."""
+    env = {k: v for k, v in _clean_env().items()
+           if k not in ("BASH_ENV", "ENV")}
+    stub = 'opendox() { printf "%s\\0" "$@" > "$OPENDOX_ARGV"; }\n'
+    read: dict[str, list[str]] = {}
+    for shell, *flags in SHELLS:
+        argv_file = where / f"argv-{shell}"
+        subprocess.run([shell, *flags, "-c", stub + command + "\n"],
+                       cwd=where, env={**env, "OPENDOX_ARGV": str(argv_file)},
+                       check=True, timeout=60)
+        read[shell] = [part.decode("utf-8", "surrogateescape") for part
+                       in argv_file.read_bytes().split(b"\0")[:-1]]
+    return read
+
+
+def _printed_commands(text: str) -> list[str]:
+    """Every command `text` prints for an operator to paste: what follows
+    "trust it with: " on its line."""
+    return [line.rsplit("trust it with: ", 1)[1]
+            for line in text.splitlines() if "trust it with: " in line]
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE_ROOTS))
+def test_every_printed_trust_command_reads_back_exactly_in_each_shell(
+        served, capsys, monkeypatch, name):
+    """Copilot at openDox-code#82 (r4174783197). A repository's path can hold
+    anything a directory name can. Every command printed to trust its binding
+    (the factory's notice, a refused turn, `list`, and `list --bindings`) is
+    ONE line that `sh`, `bash` and `zsh` each read back as exactly the verb's
+    arguments, and it runs nothing: no `CANARY` is made. A path that is not
+    printable is never printed in a command: the command names the
+    repository `.`, to be run from its root. Where the factory or `list` was
+    given the bindings document, the command names it too. Run as printed,
+    from there, the command trusts the binding it names."""
+    trust_mod = _trust_mod()
+    root = served.fresh_repository(HOSTILE_ROOTS[name])
+    document = served.hand_write(served.record("env"), root=root)
+    port = served.port(root)
+    notice = capsys.readouterr().err
+    with pytest.raises(trust_mod.BindingUntrusted) as refused:
+        port.dispatch(_Envelope())
+    port = install_mod.declared_model_port_factory(
+        served.tmp / "sessions", checkout_root=root,
+        bindings_path=document)()
+    notice_naming_the_document = capsys.readouterr().err
+    with pytest.raises(trust_mod.BindingUntrusted) as refused_naming:
+        port.dispatch(_Envelope())
+    assert _cli("model-binding", "list", "--repo-root", str(root)) == 0
+    listed = capsys.readouterr().out
+    assert _cli("model-binding", "list", "--repo-root", str(root),
+                "--bindings", str(document)) == 0
+    listed_naming_the_document = capsys.readouterr().out
+    printable = str(root.resolve()).isprintable()
+    place = str(root.resolve()) if printable else "."
+    named = (str(document.resolve()) if printable
+             else os.path.join(".", str(document.relative_to(root))))
+    plain = ["model-binding", "trust", "--repo-root", place, BINDING_ID]
+    naming = ["model-binding", "trust", "--repo-root", place, "--bindings",
+              named, BINDING_ID]
+    expected = {"notice": plain, "refused turn": plain, "list": plain,
+                "notice --bindings": naming,
+                "refused turn --bindings": naming,
+                "list --bindings": naming}
+    printed = {"notice": notice, "refused turn": str(refused.value),
+               "list": listed,
+               "notice --bindings": notice_naming_the_document,
+               "refused turn --bindings": str(refused_naming.value),
+               "list --bindings": listed_naming_the_document}
+    shells_run_in = served.tmp / "shells"
+    shells_run_in.mkdir()
+    for source, text in printed.items():
+        commands = _printed_commands(text)
+        assert len(commands) == 1, (source, text)
+        assert commands[0].isprintable(), (source, commands[0])
+        for shell, argv in _as_each_shell_reads(commands[0],
+                                                shells_run_in).items():
+            assert argv == expected[source], (source, shell, commands[0])
+    assert not list(served.tmp.rglob("CANARY"))
+    monkeypatch.chdir(root)
+    assert _cli(*expected["list --bindings"]) == 0
+    capsys.readouterr()
+    assert served.trust.verdict(served.declared(root), root=root).trusted
+    assert not list(served.tmp.rglob("CANARY"))
+    served.nothing_was_touched()
+
+
+#: Ids a repository may write that the model catalog refuses, each holding
+#: what a shell or an option parser would act on, or past the catalog's
+#: bound, or outside its ASCII vocabulary.
+HOSTILE_IDS = {
+    "dollar-paren": "$(touch CANARY)",
+    "backtick": "`touch CANARY`",
+    "semicolon": "m; touch CANARY",
+    "quotes": "m'b\"c",
+    "newline": "m\n$(touch CANARY)",
+    "dash": "-dash-model",
+    "option": "--repo-root",
+    "overlong": "M" * 129,
+    "non-ascii": "mé",
+}
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE_IDS))
+def test_an_id_the_catalog_refuses_prints_no_command_and_is_never_trusted(
+        served, capsys, name):
+    """Copilot at openDox-code#82 (r4174783197, r4174783280). An id the
+    model catalog refuses belongs to a binding no turn could use, so no
+    command that trusts it is printed anywhere (the factory's notice, a
+    refused turn, `list`), each says why instead, and `trust` refuses it with
+    nothing recorded. The catalog lists nothing, and the start does not
+    fail."""
+    trust_mod = _trust_mod()
+    binding_id = HOSTILE_IDS[name]
+    served.hand_write(served.record("env", id=binding_id))
+    port = served.port()
+    notice = capsys.readouterr().err
+    with pytest.raises(trust_mod.BindingUntrusted) as refused:
+        port.dispatch(_Envelope())
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    listed = capsys.readouterr().out
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                "--", binding_id) == 1
+    trusting = capsys.readouterr()
+    shown = (notice, str(refused.value), listed, trusting.err)
+    for text in shown:
+        assert "opendox model-binding trust" not in text, text
+    for text in shown:
+        assert trust_mod.REASON_UNSERVABLE in text, text
+        assert trust_mod.REMEDY_UNSERVABLE in text, text
+    assert list(port.catalog().entries) == []
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+    assert not trust_mod.verdict_for(served.declared(),
+                                     root=served.repo).trusted
+    assert not list(served.tmp.rglob("CANARY"))
+    served.nothing_was_touched()
+
+
+@pytest.mark.parametrize("field", ["id", "label"])
+def test_a_binding_the_catalog_refuses_is_never_trusted_nor_fails_the_start(
+        served, capsys, field):
+    """Copilot at openDox-code#82 (r4174783280). `ModelProviderBinding`
+    takes an id or a label the model catalog refuses (here, one past the
+    catalog's bound). Such a binding is refused before any policy is asked:
+    a trust the store recorded for it before, or a host policy that trusts
+    every binding, still leaves the start declaring a refusing port, never
+    failing on `brokered_catalog`; and `trust`, `add` and `edit` record
+    nothing and write nothing for one."""
+    trust_mod = _trust_mod()
+    record = served.record(
+        "env", **({"id": "M" * 129} if field == "id" else {"label": "L" * 201}))
+    document = served.hand_write(record)
+    # recorded straight into the store, as a store written before this check
+    served.trust.record(served.declared(), root=served.repo)
+    for policy in (served.trust, _TrustsEveryBinding()):
+        trust_mod.unregister()
+        trust_mod.register(policy)
+        port = served.port()
+        assert list(port.catalog().entries) == []
+        with pytest.raises(trust_mod.BindingUntrusted) as refused:
+            port.dispatch(_Envelope())
+        assert trust_mod.REASON_UNSERVABLE in str(refused.value)
+    capsys.readouterr()
+    trust_mod.unregister()
+    trust_mod.register(served.trust)
+    store = served.state_dir / trust_mod.TRUST_FILENAME
+    held = store.read_bytes()
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                "--", record["id"]) == 1
+    assert trust_mod.REASON_UNSERVABLE in capsys.readouterr().err
+    assert store.read_bytes() == held
+    document.unlink()
+    adding = served.add_argv("env")
+    adding[adding.index(f"--{field}") + 1] = record[field]
+    assert _cli(*adding) == 1
+    assert trust_mod.REASON_UNSERVABLE in capsys.readouterr().err
+    assert not document.exists()
+    assert store.read_bytes() == held
+    assert _cli(*served.add_argv("env")) == 0
+    capsys.readouterr()
+    before = document.read_bytes()
+    editing = served.add_argv("env")
+    editing[1] = "edit"
+    editing[editing.index("--label") + 1] = "L" * 201
+    assert _cli(*editing) == 1
+    assert trust_mod.REASON_UNSERVABLE in capsys.readouterr().err
+    assert document.read_bytes() == before
+    served.nothing_was_touched()
+
+
+@pytest.mark.parametrize("second", ["another-form", "unreadable"])
+def test_list_discloses_and_judges_one_reading_of_the_bindings(
+        served, capsys, monkeypatch, second):
+    """Copilot at openDox-code#82 (r4174783250). `list` reads the bindings
+    document ONCE, and the fields it discloses and the trust it reports are
+    both of that reading: a document that changes after it, or stops
+    reading, cannot pair one form's fields with another form's verdict, or
+    end the listing in a traceback."""
+    record = served.record("env")
+    served.hand_write(record)
+    served.trust.record(served.declared(), root=served.repo)
+    read = binding_mod.BindingStore._load
+    readings = []
+
+    def load(store):
+        readings.append(store.path)
+        if len(readings) == 1:
+            return read(store)
+        if second == "unreadable":
+            raise binding_mod.BindingRefused(
+                "the bindings document changed between two readings")
+        return [binding_mod.ModelProviderBinding.from_record(
+            {**record, "label": "Another form"})]
+
+    monkeypatch.setattr(binding_mod.BindingStore, "_load", load)
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    listed = capsys.readouterr().out
+    assert json.dumps(record["label"]) in listed
+    assert "Another form" not in listed
+    assert "    trust            trusted on this machine\n" in listed
+    assert len(readings) == 1
+
+
+@pytest.mark.parametrize("where", ["state-directory", "above-it"])
+def test_a_link_to_nothing_on_the_way_to_the_store_is_refused_by_name(
+        served, capsys, where):
+    """Copilot at openDox-code#82 (r4174783301). A link this user owns that
+    points at nothing, as the state directory or above it, is refused BY
+    NAME, by `record` (which went through it and failed raw) and by
+    `verdict`, and `trust` prints that refusal rather than call it a policy
+    failure. Nothing is made where it points."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    link = served.tmp / "dangling"
+    link.symlink_to(served.tmp / "nowhere")
+    policy = trust_mod.MachineTrust(
+        state_dir=link if where == "state-directory" else link / "st")
+    trust_mod.unregister()
+    trust_mod.register(policy)
+    with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+        policy.record(served.declared(), root=served.repo)
+    assert (f"refuses {json.dumps(str(link))}: it is a symbolic link to "
+            "nothing") in str(refused.value)
+    verdict = policy.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted and verdict.reason == str(refused.value)
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    assert str(refused.value) in capsys.readouterr().err
+    assert not (served.tmp / "nowhere").exists()
+
+
+def test_a_store_the_system_refuses_to_make_is_refused_by_name(
+        served, capsys, monkeypatch):
+    """Copilot at openDox-code#82 (r4174783301). Whatever the system refuses
+    on the store's tree that no check named (here, a permission) is refused
+    BY NAME, as a `TrustStoreRefused` naming the store and the system's word
+    for it, never a raw `OSError` that `trust` could only call a policy
+    failure. A verdict says the same of a store it cannot read, and `list`
+    prints it."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+
+    def refused_by_the_system(_leaf):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(trust_mod, "_make_private_directories",
+                        refused_by_the_system)
+    with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+        served.trust.record(served.declared(), root=served.repo)
+    assert json.dumps(str(served.state_dir)) in str(refused.value)
+    assert "(Permission denied)" in str(refused.value)
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    err = capsys.readouterr().err
+    assert str(refused.value) in err
+    assert "trust policy failed" not in err
+    monkeypatch.setattr(trust_mod, "_refuse_an_unsafe_tree",
+                        lambda *_args, **_kwargs: refused_by_the_system(None))
+    verdict = served.trust.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted
+    assert verdict.reason == (
+        f"the model-binding trust store in {json.dumps(str(served.state_dir))}"
+        " could not be read (Permission denied), so nothing is trusted "
+        "through it")
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    assert verdict.reason in capsys.readouterr().out
 
 
 # --- the console intake ------------------------------------------------------
@@ -1695,15 +2012,22 @@ class _GovernedHostPolicy:
         return self.verdict(binding, root=root)
 
 
-def _approve(root: Path, binding_id: str) -> None:
+def _propose(root: Path, binding_id: str):
+    """A PENDING declaration of `binding_id` in `root`'s declarations
+    document, as the console intake proposes one. Returns the store."""
     store = intake_mod.DeclarationStore(intake_mod.declarations_path(root))
     store.propose(intake_mod.ModelDeclaration(
         binding_id=binding_id, status=intake_mod.STATUS_PENDING,
         install_posture=intake_mod.POSTURE_SINGLE_OPERATOR,
         proposed_by="brett@opensoft.one", proposed_at=intake_mod.stamp()))
-    store.approve(binding_id, issued_by="console", approved_by="brett",
-                  expires_at=intake_mod.approval_expiry(),
-                  audit_ref="opaud-approved-1")
+    return store
+
+
+def _approve(root: Path, binding_id: str) -> None:
+    _propose(root, binding_id).approve(
+        binding_id, issued_by="console", approved_by="brett",
+        expires_at=intake_mod.approval_expiry(),
+        audit_ref="opaud-approved-1")
 
 
 @pytest.mark.parametrize("declared", ["approved", "undeclared"])
@@ -1759,6 +2083,190 @@ def test_a_governed_host_policy_refuses_a_pending_declaration(served):
     trust_mod.register(policy)
     with pytest.raises(trust_mod.TrustNotRecorded):
         trust_mod.recorded_for(served.declared(), root=served.repo)
+
+
+# --- the trust-state walk: what is printed, stored and enforced agree -------
+
+
+def _listed(out: str) -> dict[str, dict[str, str]]:
+    """`list`'s output as {binding id: {field: value}}: each binding's line
+    opens with its id in JSON's spelling, and each field's line is indented
+    four, its name padded to seventeen."""
+    blocks: dict[str, dict[str, str]] = {}
+    fields: dict[str, str] = {}
+    for line in out.splitlines():
+        if line.startswith('  "'):
+            fields = blocks.setdefault(
+                json.JSONDecoder().raw_decode(line[2:])[0], {})
+        elif line.startswith("    ") and not line.startswith("     "):
+            fields[line[4:21].strip()] = line[21:]
+    return blocks
+
+
+@pytest.mark.parametrize("declarations", ["none", "first-pending",
+                                          "unreadable"])
+def test_list_names_the_one_binding_a_console_declares(served, capsys,
+                                                       declarations):
+    """The trust-state walk: pending, approved, undeclared and unreadable
+    declarations. `list` names the binding a console serving this repository
+    declares, by its factory's own rule, so a binding listed as trusted is
+    never taken for the one in use: a pending declaration is passed over, an
+    undeclared binding is the operator's own and counts as approved, an
+    unreadable declarations document declares nothing pending, and the
+    console declares the FIRST of the rest. Listing another document says
+    the console does not read it."""
+    from opendox import cli_model_binding as cmb
+
+    served.hand_write(served.record("env", id="first-model"),
+                      served.record("env", id="second-model"))
+    if declarations == "first-pending":
+        _propose(served.repo, "first-model")
+    elif declarations == "unreadable":
+        path = intake_mod.declarations_path(served.repo)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not: [a, document", encoding="utf-8")
+    for binding in binding_mod.BindingStore(
+            binding_mod.bindings_path(served.repo)).list():
+        served.trust.record(binding, root=served.repo)
+    port = served.port()
+    capsys.readouterr()
+    declared = "second-model" if declarations == "first-pending" else (
+        "first-model")
+    assert [(e.model_id, e.available) for e in port.catalog().entries] == [
+        (declared, True)]
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    blocks = _listed(capsys.readouterr().out)
+    assert {block["trust"] for block in blocks.values()} == {
+        "trusted on this machine"}
+    assert blocks[declared]["console"] == cmb.CONSOLE_DECLARES_THIS
+    if declarations == "first-pending":
+        assert blocks["first-model"]["console"] == (
+            cmb.CONSOLE_PASSES_OVER_PENDING)
+    else:
+        assert blocks["second-model"]["console"] == (
+            cmb.CONSOLE_DECLARES_ANOTHER.format(
+                binding_id=json.dumps("first-model")))
+    elsewhere = served.tmp / "elsewhere.yaml"
+    shutil.copy(binding_mod.bindings_path(served.repo), elsewhere)
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo),
+                "--bindings", str(elsewhere)) == 0
+    blocks = _listed(capsys.readouterr().out)
+    assert {block["console"] for block in blocks.values()} == {
+        cmb.CONSOLE_READS_ANOTHER_DOCUMENT.format(path=json.dumps(str(
+            binding_mod.bindings_path(served.repo.resolve()))))}
+
+
+class _ApprovingHostGate(_HostGate):
+    """A host's gate that also builds, validates and writes the approval's
+    record, which openDox's own default refuses to build, as
+    `tests/test_capability_honesty.py`'s host gate does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.build_gate_action_record = lambda **fields: dict(fields)
+        self.validate_gate_action_record = lambda record: None
+        self.HumanGate = lambda root, prefixes, *, human_actor: (
+            root, tuple(prefixes), human_actor)
+        self.write_gate_action_record = lambda human, records_dir, record: (
+            self.written.append(record)
+            or Path(human[0]) / records_dir / "record.yaml")
+
+
+def _post_an_approval(served, binding_id: str) -> dict:
+    """The console's model approval of `binding_id`, posted to a stand-in
+    host that registers its gate (#77), as `_served_intake`'s host does.
+    Returns the answer."""
+    import http.client
+
+    from opendox import column_seams, serve
+
+    column_seams.gate.unregister()
+    column_seams.gate.register(_ApprovingHostGate())
+    httpd = serve.build_server(
+        REPO_ROOT / "src" / "opendox" / "web",
+        served.tmp / "out" / "snapshot.json", served.repo, port=0,
+        actor="brett", model_port_factory=lambda: None)
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    try:
+        base = httpd.server_address[:2]
+        connection = http.client.HTTPConnection(*base, timeout=30)
+        connection.request("GET", "/capabilities")
+        caps = json.loads(connection.getresponse().read().decode("utf-8"))
+        connection.close()
+        connection = http.client.HTTPConnection(*base, timeout=30)
+        connection.request(
+            "POST", "/actions/workbench/model-approval",
+            body=json.dumps({"binding": binding_id}).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     serve.CONSOLE_TOKEN_HEADER: caps.get("console_token",
+                                                          "")})
+        answer = json.loads(connection.getresponse().read().decode("utf-8")
+                            or "{}")
+        connection.close()
+        return answer
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join(timeout=10)
+        column_seams.gate.unregister()
+
+
+@pytest.mark.parametrize("judged_by", ["strict-default", "strict-default-trusted",
+                                       "host", "nothing-registered"])
+def test_an_approval_says_available_only_where_the_binding_is_trusted(
+        served, judged_by):
+    """The trust-state walk, at the console's approval. Approval is a
+    governance record, and trust is this machine's: under openDox's strict
+    default an approved binding is still refused until it is trusted, so the
+    result says so rather than that it is now an available catalog entry. A
+    host whose policy admits the binding (a governed host's approval) and a
+    binding this machine trusts read as before. Where nothing is registered,
+    the act registers nothing and reads no store: no binding has been judged
+    trusted in that process."""
+    trust_mod = _trust_mod()
+    _caps, answer = _served_intake(served, host_policy=_AdmitsTheIntake())
+    assert answer.get("error") is None, answer
+    trust_mod.unregister()
+    if judged_by == "host":
+        trust_mod.register(_AdmitsTheIntake())
+    elif judged_by != "nothing-registered":
+        trust_mod.register(served.trust)
+        if judged_by == "strict-default-trusted":
+            served.trust.record(served.declared(), root=served.repo)
+    approval = _post_an_approval(served, BINDING_ID)
+    assert approval.get("ok") is True, approval
+    if judged_by in ("strict-default", "nothing-registered"):
+        assert approval["availability"] != intake_mod.APPROVAL_NOTICE
+        assert approval["availability"] == (
+            trust_mod.APPROVED_UNTRUSTED_NOTICE)
+    else:
+        assert approval["availability"] == intake_mod.APPROVAL_NOTICE
+    assert trust_mod.is_registered() == (judged_by != "nothing-registered")
+
+
+@pytest.mark.parametrize("sentence", ["UNTRUSTED_TURN_MESSAGE",
+                                      "UNTRUSTED_BINDING_REMEDY",
+                                      "APPROVED_UNTRUSTED_NOTICE"])
+def test_each_command_a_fixed_sentence_quotes_is_one_the_verb_takes(
+        served, sentence):
+    """The trust-state walk. A fixed sentence (a refused turn's, the rail's,
+    an approval's) names no repository and no binding, so it quotes each
+    command with placeholders. Filled in, each is one `opendox` parses:
+    `--repo-root` is required by every `model-binding` verb, and a sentence
+    that left it out would send the operator to a usage error."""
+    import re
+    import shlex
+
+    text = getattr(_trust_mod(), sentence)
+    quoted = re.findall(r'"(opendox [^"]*)"', text)
+    assert sorted(command.split()[2] for command in quoted) == [
+        "list", "trust"]
+    for command in quoted:
+        argv = shlex.split(command.replace(
+            "<repository>", str(served.repo)).replace("<id>", BINDING_ID))
+        args = cli_mod.build_parser().parse_args(argv[1:])
+        assert Path(args.repo_root) == served.repo
 
 
 # ===========================================================================
