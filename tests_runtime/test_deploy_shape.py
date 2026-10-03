@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -181,19 +182,25 @@ def test_the_run_count_sees_every_shell_separator(script: str, runs: int) -> Non
 
 
 def test_the_workflow_declares_the_required_job_and_its_steps() -> None:
-    """ONE job, the required one, running the WHOLE suite (plan 034 T036).
+    """ONE job runs the suite, the required one, running the WHOLE suite
+    (plan 034 T036).
 
     The DB-backed `runtime` job this pin used to require is folded into
     `validate` (RULED R1Q8 (a): `tests_runtime/` is part of the whole suite,
-    with PostgreSQL in the required job). A second job would now only run the
-    same database-backed cases twice, once required and once not."""
+    with PostgreSQL in the required job). A second suite job would now only
+    run the same database-backed cases twice, once required and once not.
+
+    The one other job is `acceptance` (plan 034 T095), and it runs no suite:
+    it runs AT-R1's HTTP half, a harness outside `testpaths`, on a machine
+    with no database service. The case below holds it to that."""
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     assert "validate" in jobs, (
         "`validate` is this repository's one REQUIRED status check "
         "(openDox-code#2) and the workflow no longer declares it")
-    assert sorted(jobs) == ["validate"], (
+    assert sorted(jobs) == ["acceptance", "validate"], (
         f"the workflow declares {sorted(jobs)}; the whole suite runs in the "
-        "required job, so a second job runs nothing the required one does not")
+        "required job, so a second suite job runs nothing the required one "
+        "does not, and `acceptance` (T095) is the one other job")
     steps = jobs["validate"]["steps"]
     names = [step.get("name") for step in steps]
     assert "pytest" in names and "Pin the triple" in names, names
@@ -217,6 +224,40 @@ def test_the_workflow_declares_the_required_job_and_its_steps() -> None:
     assert positional == [], (
         f"the pytest step names {positional}; the whole suite is what "
         "`testpaths` names, so the step names nothing")
+
+
+def test_the_acceptance_job_runs_the_harness_on_a_clean_machine() -> None:
+    """`acceptance` runs AT-R1's HTTP half and nothing else (plan 034 T095).
+
+    The harness ASSERTS a clean machine, so the job may carry no service: a
+    database the job supplied would answer on the port the harness checks, or
+    stand in for the bundled server the install must bring. It runs no pytest
+    (the harness is not a test module, and `testpaths` does not name
+    `acceptance/`), and it installs nothing itself: the harness installs
+    `opendox[local]` into a fresh venv of its own, through the dependency lock
+    (`test_every_install_of_this_package_reads_one_dependency_lock`)."""
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    job = jobs["acceptance"]
+    assert "services" not in job, (
+        "the acceptance job declares a service; the harness asserts a clean "
+        "machine, which a database service breaks")
+    assert "container" not in job, (
+        "the acceptance job runs in a container; the harness asserts a clean "
+        "runner, and an image may carry a database or a sibling")
+    scripts = [step.get("run", "") or "" for step in job["steps"]]
+    assert [run for script in scripts for run in _pytest_runs(script)] == [], (
+        f"the acceptance job runs pytest ({scripts}); AT-R1's harness is not "
+        "a member of the suite")
+    assert not any("pip install" in script for script in scripts), scripts
+    assert scripts.count("python3 acceptance/at_r1_http.py") == 1, scripts
+    harness = ROOT / "acceptance" / "at_r1_http.py"
+    assert harness.is_file(), harness
+    testpaths = tomllib.loads(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["tool"]["pytest"]["ini_options"]["testpaths"]
+    assert not any(Path(path).parts[:1] == ("acceptance",)
+                   for path in testpaths), testpaths
+    assert not harness.name.startswith("test_"), harness.name
 
 
 def test_the_required_job_supplies_a_postgres_service_and_the_extras() -> None:
@@ -2373,7 +2414,11 @@ def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
     a CONSTRAINTS file rather than a requirements one: it pins what is installed
     and installs nothing, so each install still chooses its own extras. There
     are TWO since plan 034 T036 folded the DB-backed `runtime` job into the
-    required one: that job's install, and the image's.
+    required one: that job's install, and the image's. And a THIRD since plan
+    034 T095, which is no workflow step: AT-R1's harness
+    (`acceptance/at_r1_http.py`) installs `opendox[local]` into a fresh venv
+    of its own, and passes the same lock with `-c` where the lock's own
+    interpreter runs it (CPython 3.12 on Linux, the `acceptance` job's).
 
     AT THE REPOSITORY ROOT, and that is load-bearing: `deploy/` holds the
     git-ignored `.env` that `.dockerignore` exists to keep out of the build
@@ -2411,6 +2456,14 @@ def test_every_install_of_this_package_reads_one_dependency_lock() -> None:
     dockerfile = (COMPOSE / "Dockerfile").read_text(encoding="utf-8")
     for text, where in ((workflow, "validate.yml"), (dockerfile, "Dockerfile")):
         assert text.count("-c constraints-cpython312-linux.txt") >= 1, where
+    # THE HARNESS'S INSTALL reads the same lock: it names the file, and it
+    # hands it to pip as a constraint, beside the `local` extra it installs.
+    harness = (ROOT / "acceptance" / "at_r1_http.py").read_text(
+        encoding="utf-8")
+    assert '"constraints-cpython312-linux.txt"' in harness, (
+        "AT-R1's harness installs this package without the dependency lock")
+    assert re.search(r'install \+= \["-c", str\(lock\)\]', harness), (
+        "AT-R1's harness names the lock but never passes it to pip")
     # AND THE IMAGE CARRIES IT, before the install that reads it.
     assert dockerfile.index("COPY constraints-cpython312-linux.txt") < \
         dockerfile.index("pip install --no-cache-dir"), (
