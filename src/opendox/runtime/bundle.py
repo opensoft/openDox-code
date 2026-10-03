@@ -248,23 +248,37 @@ def _lock_file_pid(bundle: DatabaseBundle) -> int | None:
 PROC = Path("/proc")
 
 
+class _Withheld(LookupError):
+    """`/proc` exists, and it will not describe this live pid."""
+
+
 def _identity(pid: int) -> tuple[str, str] | None:
     """`(executable, working directory)` of `pid`, from the kernel's `/proc`.
 
-    `None` where the process is gone or is not this user's to inspect. A
-    process that exits between the lock file's read and this one is GONE,
+    `None` where the process is GONE: its entry has vanished, as it does for
+    a process that exits between the lock file's read and this one, which is
     never proof of anything (Copilot review of openDox-code#69). Raises
     `LookupError` where there is no `/proc` at all (macOS, the BSDs): the
     standard library has no portable way to ask, and `running_pid` then
     believes nothing it cannot prove.
+
+    AND RAISES `_Withheld`, a `LookupError` too, where the entry exists and
+    the kernel refuses to describe it (Copilot review of openDox-code#69). A
+    procfs mount option or a security module can hide a LIVE process of this
+    very user, a PostgreSQL server included. That is not knowledge that the
+    pid is something else. It used to read as `None`, which `_serves` turned
+    into "not this server", so a start removed a lock that a live server
+    still held.
     """
     if not PROC.joinpath("self").exists():
         raise LookupError("no /proc to ask")
     try:
         return (os.readlink(PROC / str(pid) / "exe"),
                 os.readlink(PROC / str(pid) / "cwd"))
-    except OSError:                  # gone, or another user's: not inspectable
-        return None
+    except (FileNotFoundError, ProcessLookupError):
+        return None                  # gone
+    except OSError as exc:
+        raise _Withheld(f"pid {pid}: {type(exc).__name__}") from None
 
 
 def _serves(pid: int, bundle: DatabaseBundle) -> bool | None:
@@ -277,10 +291,12 @@ def _serves(pid: int, bundle: DatabaseBundle) -> bool | None:
     anything else is not it, even another `postgres` serving another directory
     (Copilot review of openDox-code#69).
 
-    `False` also for a process that is gone, or that the platform will not
-    describe: another user's process cannot be this bundle's server, because
-    the server runs as the owner of a 0700 data directory, which is the user
-    this runs as. `None` only where nothing can be asked at all.
+    `False` also for a process that is gone. `None` where nothing can be
+    asked at all (no `/proc`), and where the platform will not describe this
+    live pid (`_Withheld`): unknown is not "not ours". Another user's
+    process never reaches this, because every caller asks `os.kill(pid, 0)`
+    first, and the server runs as the owner of a 0700 data directory, which
+    is the user this runs as.
     """
     try:
         identity = _identity(pid)
@@ -332,7 +348,13 @@ def _remove_a_proven_stale_lock(bundle: DatabaseBundle) -> None:
     of the same user, and that refusal would last as long as the unrelated
     process does. Where `/proc` shows that process is not this data
     directory's postmaster, the lock is stale by proof and is removed. Where
-    nothing can be proven, it is left for PostgreSQL to judge.
+    there is no `/proc` at all, it is left for PostgreSQL to judge.
+
+    A LIVE PID `/proc` WILL NOT DESCRIBE FAILS CLOSED (Copilot review of
+    openDox-code#69). It may be this data directory's own server, hidden
+    by a procfs or security-module policy, so the lock is KEPT and the start
+    is refused by name, rather than the lock removed and a second server
+    launched beside the first.
     """
     pid = _lock_file_pid(bundle)
     if pid is None:
@@ -341,8 +363,21 @@ def _remove_a_proven_stale_lock(bundle: DatabaseBundle) -> None:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
         return                      # PostgreSQL's own rule covers both
+    lock = bundle.data_dir / "postmaster.pid"
+    try:
+        _identity(pid)
+    except _Withheld:
+        raise BundleRefused(
+            f"{lock} names pid {pid}, a live process of this user that the "
+            "platform will not describe (its /proc entry is withheld), so it "
+            "may be this data directory's own server. The lock is kept and no "
+            "second server is started: stop that process, or remove the lock "
+            "yourself once you know it is not a PostgreSQL server on "
+            f"{bundle.data_dir}") from None
+    except LookupError:
+        return                      # no /proc: PostgreSQL judges
     if _serves(pid, bundle) is False:
-        (bundle.data_dir / "postmaster.pid").unlink(missing_ok=True)
+        lock.unlink(missing_ok=True)
 
 
 def refusal_before_connecting(bundle: DatabaseBundle) -> str | None:
