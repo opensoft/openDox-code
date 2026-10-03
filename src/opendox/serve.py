@@ -106,6 +106,7 @@ import functools
 import http.server
 import json
 import secrets
+import socket
 import subprocess
 import sys
 import urllib.parse
@@ -2417,13 +2418,40 @@ def build_server(
     # trace on the first live connection.
     route_extension.resolve_handlers(route_bindings, bound)
     factory = functools.partial(bound, directory=str(web_dir))
-    return http.server.ThreadingHTTPServer((host, port), factory)
+    return _server_class_for(host)((host, port), factory)
+
+
+class _IPv6ThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    """`ThreadingHTTPServer` over `AF_INET6`, for a bind to an IPv6 literal
+    (plan 034 T103; Copilot at openDox-code#80, r4171161548).
+
+    The standard class is `AF_INET` only, so `host="::1"`, which
+    `LOOPBACK_HOSTS` and the local install's `LOCAL_BIND_HOSTS` both name,
+    failed at the bind with `gaierror`, and `generate-and-open --local --host
+    ::1` ended in a traceback. The loopback Host gate accepts `[::1]:<port>`
+    exactly where the socket is bound to `::1`, so the bind it names has to
+    be one this module can make."""
+
+    address_family = socket.AF_INET6
+
+
+def _server_class_for(host: str) -> type[http.server.ThreadingHTTPServer]:
+    """The server class a bind to `host` takes: `AF_INET6` for an IPv6
+    literal (the one spelling of a host that contains a colon), and the
+    standard `AF_INET` class for everything else, exactly as before."""
+    return (_IPv6ThreadingHTTPServer if ":" in str(host)
+            else http.server.ThreadingHTTPServer)
 
 
 def server_url(httpd: http.server.ThreadingHTTPServer, path: str = "/") -> str:
     host, port = httpd.server_address[:2]
     if host in ("0.0.0.0", "", "::"):
         host = "127.0.0.1"
+    # AN IPv6 LITERAL IS BRACKETED in a URL (RFC 3986 § 3.2.2): `::1` is
+    # `http://[::1]:<port>/`, and `[::1]:<port>` is also the `Host` a browser
+    # then sends, which the loopback gate accepts on that bind (T103).
+    if ":" in str(host):
+        host = f"[{host}]"
     # plain-HTTP by design (S5332): a loopback-only local dev server — TLS adds
     # nothing on 127.0.0.1; the scheme is composed so no insecure-URL literal
     # exists for a copy-paste into non-loopback code.
