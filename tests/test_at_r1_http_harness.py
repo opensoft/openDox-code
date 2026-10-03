@@ -20,6 +20,9 @@ is installed or started:
   * the module graph terminates on an import cycle and counts each module once;
   * a module refused as a DYNAMIC import is still judged where another module
     imports it STATICALLY (Copilot review of #75 at 1c064bb3, r4170450448);
+  * a module the server serves must be served as JavaScript, and a linked
+    stylesheet as `text/css`, a `charset` parameter aside (Copilot review of
+    #75 at f29b4ddd, r4173769822 and r4173769844);
   * a malformed 200 catalog is a named failure, never an exception
     (r4170450491), and so is a catalog whose envelope the chat rail would
     not adopt (Copilot review of #75 at f0e0ffe1).
@@ -69,7 +72,8 @@ def served(files: dict[str, tuple[str, str]]):
                 return
             body = entry[1].encode("utf-8")
             self.send_response(200)
-            self.send_header("Content-Type", entry[0])
+            if entry[0]:
+                self.send_header("Content-Type", entry[0])
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -171,6 +175,55 @@ def test_a_dynamic_refusal_does_not_hide_a_static_import_of_the_same_path() -> N
             port, _page("./app.js"), {}, verdict, "t")
     assert _failures(verdict) == ["t.bundle.module /missing.js"]
     assert modules == 2
+
+
+@pytest.mark.parametrize("static", [True, False], ids=["static", "dynamic"])
+@pytest.mark.parametrize("content_type", ["text/plain", "text/html",
+                                          "application/json", ""])
+def test_a_module_served_as_anything_but_javascript_is_a_named_failure(
+        static: bool, content_type: str) -> None:
+    importer = ('import "./child.js";\n' if static
+                else 'import("./child.js").catch(() => null);\n')
+    files = {"/app.js": (JS, importer),
+             "/child.js": (content_type, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == ["t.bundle.module-type /child.js"]
+
+
+@pytest.mark.parametrize("content_type", [
+    "text/javascript", "text/javascript; charset=utf-8",
+    "Application/JavaScript;charset=UTF-8", "text/ecmascript",
+])
+def test_every_javascript_type_essence_passes(content_type: str) -> None:
+    files = {"/app.js": (content_type, 'import("./child.js");\n'),
+             "/child.js": (content_type, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(
+            port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == []
+    assert modules == 2
+
+
+@pytest.mark.parametrize("content_type, expected", [
+    ("text/css", []),
+    ("text/css; charset=utf-8", []),
+    ("text/plain", ["t.bundle.sheet-type /styles.css"]),
+    ("text/html", ["t.bundle.sheet-type /styles.css"]),
+    ("", ["t.bundle.sheet-type /styles.css"]),
+])
+def test_a_stylesheet_served_as_anything_but_css_is_a_named_failure(
+        content_type: str, expected: list[str]) -> None:
+    files = {"/app.js": (JS, "export const x = 1;\n"),
+             "/styles.css": (content_type, "body { margin: 0; }\n")}
+    page = ('<html><head><link rel="stylesheet" href="./styles.css">'
+            '<script type="module" src="./app.js"></script></head></html>')
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, page, {}, verdict, "t")
+    assert _failures(verdict) == expected
 
 
 def test_a_dynamic_refusal_alone_is_not_a_failure() -> None:
