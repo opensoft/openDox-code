@@ -403,6 +403,14 @@ export function doxbenchScopeProjection(snapshot, kind, id, options = {}) {
   const scope = workbenchScope(snapshot, kind, id);
   if (!scope) return null;
 
+  // T102: `editableBy: "tile"` is openDox's OWN scope authority, the one a
+  // standalone install's server answers with (`default_columns.resolve_scope`,
+  // RULED `5961651355`): the tile's own documents, editable, and nothing else
+  // in context. Absent, which is every governed host, the projection is
+  // byte-for-byte what it was.
+  const byTile = options.editableBy === "tile";
+  const tileOwn = byTile ? tileOwnEditablePaths(snapshot, kind, id) : null;
+
   const contextPaths = [];
   const contextSeen = new Set();
   const pushContext = (path) => {
@@ -411,24 +419,33 @@ export function doxbenchScopeProjection(snapshot, kind, id, options = {}) {
     contextSeen.add(value);
     contextPaths.push(value);
   };
-  for (const section of scope.sections || []) {
-    for (const row of section.documents || []) {
-      if (row.resolved) pushContext(row.path);
+  if (byTile) {
+    // the neutral scope's context IS its own sections' resolved rows, which
+    // are exactly the editable set: a section it projects is the tile's own
+    for (const path of tileOwn) pushContext(path);
+  } else {
+    for (const section of scope.sections || []) {
+      for (const row of section.documents || []) {
+        if (row.resolved) pushContext(row.path);
+      }
     }
+    // FR-043 (T107): a session-created document is CONTEXT as well as
+    // editable, so it appears here too — appended AFTER the sections, which is
+    // where the server appends it (`doxbench_scope._projection`), because the
+    // two derivations are compared as ordered lists on the shared fixture.
+    // `createdDocuments` is the page's own overlay and this remains
+    // PRESENTATION: the server derives its own created record from the session
+    // worktree and never reads this one.
+    for (const path of options.createdDocuments || []) pushContext(path);
   }
-  // FR-043 (T107): a session-created document is CONTEXT as well as editable, so
-  // it appears here too — appended AFTER the sections, which is where the server
-  // appends it (`doxbench_scope._projection`), because the two derivations are
-  // compared as ordered lists on the shared fixture. `createdDocuments` is the
-  // page's own overlay and this remains PRESENTATION: the server derives its own
-  // created record from the session worktree and never reads this one.
-  for (const path of options.createdDocuments || []) pushContext(path);
 
   let outlinePath = null;
   if (scope.outline && typeof options.outlinePathFor === "function") {
     outlinePath = asId(options.outlinePathFor(scope.outline)) || null;
   }
-  const editablePaths = rewritableDocuments(scope, options.createdDocuments || []);
+  const editablePaths = byTile
+    ? [...tileOwn]
+    : rewritableDocuments(scope, options.createdDocuments || []);
   const editableSeen = new Set(editablePaths);
   // T104 F2, byte-for-byte the server's own rule (doxbench_scope._projection --
   // the two derivations are compared as ordered lists on the shared fixture):
@@ -1465,6 +1482,213 @@ export function notebookRefreshCommand(opts) {
   return parts.join(" ");
 }
 
+// ---- EDITING BY SCOPE (plan 034 T102) -------------------------------------
+//
+// RULED by Brett Heap, openxFactory#656 comment `5963618568`, "Edit and chat by
+// scope (Recommended)": the editors and the chat rail appear WHEREVER THE SCOPE
+// LETS THE DOCUMENT BE EDITED, and only creating documents and Save stay behind
+// the gate, so Save is refused by name. It builds on `5961651355`, "Tile's own
+// documents editable (Recommended)": openDox's own neutral scope default marks
+// a tile's OWN documents editable.
+//
+// What it replaces. The canvas, the rail, the docs tile's `edit` verb and the
+// outline's add-section seam were ALL gated on the create column's
+// `createGateLive(caps)`, and only openXdox's `gate.workbench.create` binding
+// answers that. A standalone install registers no such column, so every
+// workbench it opened was read-only, though its `/capabilities` reads
+// `edit: true` and its own scope makes the tile's documents editable.
+//
+// So editing is now asked of the two signals a standalone install HAS: the
+// `edit` capability (`/capabilities` `actions.edit`, the serving process's own
+// loopback-human verdict) and the per-document editability the scope answers.
+// The gate keeps what is the gate's: creating a document, and Save.
+//
+// A GOVERNED HOST IS UNTOUCHED, by construction rather than by care. Where a
+// host's gate column is registered, the gate decides the whole editing posture
+// exactly as before (`governed` below): the by-scope arm is openDox's own
+// default, answered only where no column is.
+
+//: The modes `editingPosture` answers, as data a caller can compare against.
+export const EDITING_MODES = Object.freeze({
+  // the host's create gate is live: editing, create and Save, as before
+  gate: "gate",
+  // no gate column: editing and chat by scope; create absent, Save refused
+  scope: "scope",
+  // no gate column, the edit capability live, and nothing editable in scope
+  nothing: "nothing-editable",
+  // no editing at all on this console
+  readOnly: "read-only",
+  // the hosted plane, which shows no editing surface whatever it claims
+  hidden: "hidden",
+});
+
+// A path the neutral scope can name safely, or null. This is
+// `default_columns._canonical`'s rule, which refuses the WHOLE tile when any
+// one of its paths fails it (it raises `ScopeConfinementError`), so the caller
+// below answers "nothing editable" for that tile rather than a partial set the
+// server would never agree to.
+function canonicalScopePath(raw) {
+  if (typeof raw !== "string" || !raw || raw.includes("\u0000")
+      || raw.includes("\\") || raw.startsWith("/")) {
+    return null;
+  }
+  const parts = raw.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === "..")) {
+    return null;
+  }
+  return raw;
+}
+
+function scopeText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+// THE TILE'S OWN DOCUMENTS, as openDox's neutral scope default answers them.
+//
+// This MIRRORS `opendox.default_columns.resolve_scope` and `editable_paths`,
+// read off the same snapshot fields in the same order: a group's
+// `document_edges`, a selection's `files`, and the members of the groups that
+// claim a candidate. Each is resolved, deduplicated and kept in order, and an
+// unknown tile, an unknown group or a path the scope cannot name answers what
+// the server answers. A node-and-Python parity test holds the two together
+// (`tests/test_workbench_edit_by_scope.py`).
+//
+// It is PRESENTATION, like every projection in this module: the server decides
+// for every turn and every Save from its own rule. One fact the browser cannot
+// see is whether a catalogued path still RESOLVES inside the checkout (the
+// server's `resolve_within`); a document deleted since the snapshot was taken
+// is therefore offered here and refused there, by the server's own scope
+// refusal.
+export function tileOwnEditablePaths(snapshot, kind, id) {
+  const s = snapshot || {};
+  const wanted = asId(id);
+  if (!wanted) return [];
+  const known = new Set();
+  for (const d of Array.isArray(s.documents) ? s.documents : []) {
+    const path = scopeText(d && d.path);
+    if (path) known.add(path);
+  }
+  // `{_text(g.get("id")): g}` on the server: a repeated id keeps the last.
+  const groups = new Map();
+  for (const g of Array.isArray(s.clusters) ? s.clusters : []) {
+    groups.set(scopeText(g && g.id), g && typeof g === "object" ? g : {});
+  }
+  const members = (group) => (Array.isArray(group && group.document_edges)
+    ? group.document_edges : [])
+    .map((edge) => (edge && typeof edge === "object" ? edge.document : undefined));
+  let refs = null;
+  if (kind === SCOPE_KINDS.grouping) {
+    if (!groups.has(wanted)) return [];
+    refs = members(groups.get(wanted));
+  } else if (kind === SCOPE_KINDS.selection) {
+    const selection = (Array.isArray(s.staged_topics) ? s.staged_topics : [])
+      .find((t) => scopeText(t && t.staging_id) === wanted);
+    if (!selection) return [];
+    refs = Array.isArray(selection.files) ? selection.files : [];
+  } else if (kind === SCOPE_KINDS.candidate) {
+    const candidate = (Array.isArray(s.possibles) ? s.possibles : [])
+      .find((p) => scopeText(p && p.id) === wanted);
+    if (!candidate) return [];
+    refs = [];
+    for (const groupId of Array.isArray(candidate.claiming_clusters)
+      ? candidate.claiming_clusters : []) {
+      refs.push(...members(groups.get(scopeText(groupId)) || {}));
+    }
+  } else {
+    return [];
+  }
+  const out = [];
+  const seen = new Set();
+  for (const raw of refs) {
+    const path = canonicalScopePath(raw);
+    if (path === null) return [];   // the server refuses the whole tile
+    if (seen.has(path)) continue;
+    seen.add(path);
+    if (known.has(path)) out.push(path);
+  }
+  return out;
+}
+
+// THE ONE ANSWER TO "MAY THIS SURFACE EDIT, AND BY WHOSE AUTHORITY". Pure:
+// facts in, a frozen posture out.
+//
+//   governed       a host's gate column is registered (`gate.workbench.create`)
+//   gateLive       that column's `createGateLive(caps)`; never true without one
+//   surfaceHidden  `sessionSurfaceHidden(caps)`, the hosted plane
+//   editLive       `/capabilities` `actions.edit`
+//   editablePaths  the scope's own answer, `tileOwnEditablePaths(...)`
+//
+// The answer's `editors` drives the canvas, the rail, the docs tile's `edit`
+// verb and the add-section seam; `create` drives every create affordance and
+// the document abstract's generation (ruling 7.7 keys it on the gate); `save`
+// says what Save does: `gate` (the governed Save), `refused` (present, and
+// refused by name), or `absent` (there is no canvas to save from).
+export function editingPosture(input) {
+  const f = input || {};
+  const editable = Array.isArray(f.editablePaths)
+    ? f.editablePaths.filter((path) => typeof path === "string" && path) : [];
+  const answer = (mode, editors, create, save, paths) => Object.freeze({
+    mode, editors, create, save,
+    editablePaths: paths === null ? null : Object.freeze([...paths]),
+  });
+  if (f.surfaceHidden) {
+    return answer(EDITING_MODES.hidden, false, false, "absent", []);
+  }
+  // THE GATE, exactly as before: where it is live it decides everything, and
+  // every document the tile carries is loadable, as it always was.
+  if (f.gateLive) {
+    return answer(EDITING_MODES.gate, true, true, "gate", null);
+  }
+  // A HOST'S COLUMN IS REGISTERED AND ITS GATE IS OFF: read-only, as before.
+  // The by-scope arm is openDox's own default and never a host's.
+  if (f.governed || f.editLive !== true) {
+    return answer(EDITING_MODES.readOnly, false, false, "absent", []);
+  }
+  if (!editable.length) {
+    return answer(EDITING_MODES.nothing, false, false, "absent", []);
+  }
+  return answer(EDITING_MODES.scope, true, false, "refused", editable);
+}
+
+// Whether ONE document of the tile may be loaded for editing under `posture`.
+// Under the gate every document the tile carries is, as it always was (the
+// governed Save withholds context-only material itself); by scope, exactly the
+// documents the scope answers editable; otherwise none.
+export function documentEditable(posture, path) {
+  if (!posture || !posture.editors) return false;
+  if (posture.mode === EDITING_MODES.gate) return true;
+  return Array.isArray(posture.editablePaths)
+    && posture.editablePaths.includes(asId(path));
+}
+
+// WHAT A STANDALONE SAVE ANSWERS, by name. `app.js`'s `refusalTransport` is
+// the Save transport where no host contributes `gate.workbench.session`, which
+// is every standalone install, and this is the sentence its refusal carries:
+// what is missing, which binding would supply it, and what happened to the
+// human's text. It stood there as "run the CLI verb in your pinned checkout",
+// a remedy a standalone install does not have.
+export const GATELESS_SAVE_REFUSAL =
+  "Save needs the create gate, and this install has none: no column "
+  + "contributes the first-edit transport (`gate.workbench.session`), so a "
+  + "governed Save cannot be sent. Your edits stay in this browser's buffers, "
+  + "unsaved.";
+
+// The plane note the by-scope posture stands on, beside whatever the chat rung
+// says on the send button. Written through the facet: the tile's own items are
+// the registered domain's word.
+export function scopeEditingNote() {
+  return "editing by scope: this tile's own " + vocab.many(SOURCE)
+    + " are editable here, and creating one and Save need the create gate, "
+    + "which this install does not have, so Save is refused by name and "
+    + "nothing is written.";
+}
+
+export function nothingEditableNote() {
+  return "read-only: this tile has none of its own " + vocab.many(SOURCE)
+    + " to edit here, so editing and chat are not offered — retained context "
+    + "stays readable.";
+}
+
 // ---- the presentation posture (010-doxbench-editor-chat T090) -----------
 //
 // ONE derivation names the posture the presentation is in, so omitting a
@@ -1480,8 +1704,26 @@ export function notebookRefreshCommand(opts) {
 // lands (T005-T008 / T052-T054) — so a capable local console today states
 // that chat is unavailable while both editors stay usable (FR-025, US5
 // acceptance scenario 2), which is the truth of this build.
+//
+// T102 ADDS ONE FACT, `editing` (`editingPosture(...).mode`), and changes
+// nothing for a caller that does not pass it, which is every governed host:
+// there the gate rung below answers exactly as it did. With the gate off and
+// `editing` the by-scope mode, the gate rung stands aside and the ladder goes
+// on down; every posture it then reaches that offers the canvas also carries
+// `editing: "scope"` and the `scopeNote` the shell states beside it, because
+// "Save is refused by name" is a fact about the PLANE and is not what any chat
+// rung says. With the gate off and nothing editable in scope, the gate rung
+// says so in those words rather than blaming a gate.
 export function presentationPosture(input) {
   const facts = input || {};
+  const byScope = !facts.gateLive && facts.editing === EDITING_MODES.scope;
+  const posture = postureLadder(facts, byScope);
+  return byScope && posture.canvas
+    ? { ...posture, editing: EDITING_MODES.scope, scopeNote: scopeEditingNote() }
+    : posture;
+}
+
+function postureLadder(facts, byScope) {
   const gateLive = !!facts.gateLive;
   const surfaceHidden = !!facts.surfaceHidden;
   const keyed = !!facts.repository && !!facts.ref;
@@ -1496,7 +1738,10 @@ export function presentationPosture(input) {
         + ", and " + TAB_IDS.outline + " stay readable.",
     };
   }
-  if (!gateLive) {
+  if (!gateLive && !byScope && facts.editing === EDITING_MODES.nothing) {
+    return { kind: "nothing-editable", canvas: false, note: nothingEditableNote() };
+  }
+  if (!gateLive && !byScope) {
     return {
       kind: "gate-off", canvas: false,
       note: "read-only: the create/edit gate is off here, so editing, chat, " +
@@ -1972,11 +2217,19 @@ export function abstractRegionState(input) {
 // it was inherited, and the wheel renders that on the tile's sub-line — the slot
 // where the deck shows a link degree. Nothing the headings said is lost; it just
 // travels with the tile instead of sitting above a group of them.
-export function docWheelEntries(scope) {
+//
+// `options.editable` (T102) is the by-scope posture's editable set. Given, each
+// entry also says whether IT is editable and owned, so the tile can offer its
+// `edit` verb on exactly the documents the scope lets be edited and state the
+// absence on the rest. Absent, which is the gate's posture, the entries are
+// byte-for-byte what they were.
+export function docWheelEntries(scope, options = {}) {
+  const editable = Array.isArray(options && options.editable)
+    ? new Set(options.editable) : null;
   const out = [];
   for (const section of scope?.sections || []) {
     for (const row of section.documents || []) {
-      out.push(docWheelEntry(section, row));
+      out.push(docWheelEntry(section, row, editable));
     }
   }
   return out;
@@ -1985,10 +2238,13 @@ export function docWheelEntries(scope) {
 // ONE tile's worth of it. Split out of the loops above so each half stays
 // readable: the loops are about flattening sections, this is about what a
 // single document contributes.
-function docWheelEntry(section, row) {
+function docWheelEntry(section, row, editable) {
   const path = typeof row.path === "string" ? row.path : "";
   const score = row.completeness?.score;
+  const byScope = editable === null ? {}
+    : { editable: editable.has(path), owned: editable.has(path) };
   return Object.freeze({
+    ...byScope,
     path,
     label: path ? path.split("/").pop() : "(unnamed)",
     section: section.label || "",

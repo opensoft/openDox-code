@@ -73,7 +73,7 @@ import { mountStagingWorkbench } from "./views/staging-workbench.js";
 // resolved in `render()` below, off the `gate.workbench.session` binding, and
 // `refusalTransport` is the fallback.
 import { createModelIntakeTransports } from "./views/swb-model-intake.js";
-import { CONSOLE_TOKEN_FIELD } from "./views/staging-workbench-model.js";
+import { CONSOLE_TOKEN_FIELD, GATELESS_SAVE_REFUSAL } from "./views/staging-workbench-model.js";
 // THE TWO MODELS THE CONTRIBUTED GATE COLUMN REACHES THROUGH `ctx` — RULED
 // counterpart Q6 (opensoft/openxFactory#656 comment `5649094228`, Brett Heap,
 // 2026-09-12): "what a CONTRIBUTED view module may IMPORT from openDox's
@@ -952,14 +952,19 @@ function ensurePageOverlayHost(doc) {
 // column has no transport at all, and a Save that silently did nothing would be
 // the worst answer available. This stands in for it and REFUSES in the shape
 // `runSave` already understands, naming the layering rather than the symptom.
+//
+// SINCE T102 THIS IS EVERY STANDALONE SAVE (RULED openxFactory#656
+// `5963618568`: "only creating documents and Save stay behind the gate, so Save
+// is refused by name"). A standalone workbench now offers its editors by scope,
+// so a human really does press Save here, and the refusal is the model's one
+// sentence: what is missing and which binding would supply it. It used to end
+// "Run the CLI verb in your pinned checkout", a remedy a standalone install
+// does not have.
 function refusalTransport() {
   return async () => ({
     ok: false,
     error: "no_gate_column",
-    message: "this shell was assembled without the column that contributes the "
-      + "first-edit transport (`gate.workbench.session`), so a governed Save "
-      + "cannot be sent. Run the CLI verb in your pinned checkout, where the "
-      + "authority lives.",
+    message: GATELESS_SAVE_REFUSAL,
   });
 }
 
