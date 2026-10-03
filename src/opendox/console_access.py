@@ -489,8 +489,9 @@ def read_private_copy(path: Path | str) -> dict:
     """The record in the copy at `path`, or a refusal naming why.
 
     The tree is judged again, and the file by its own descriptor, opened
-    without following a link: a regular file, this user's, exactly 0600, with
-    one link. A planted, linked or loosened copy is refused."""
+    without following a link and without blocking: a regular file, this
+    user's, exactly 0600, with one link. A planted, linked or loosened copy is
+    refused, and so is a FIFO, without waiting on it."""
     target = Path(path)
     state = target.parent.parent
     if target.parent.name != CONSOLE_DIRNAME:
@@ -515,8 +516,13 @@ def read_private_copy(path: Path | str) -> dict:
         reason = _unsafe_because(os.fstat(directory), uid=uid, own=True)
         if reason is not None:
             raise _unsafe(target.parent, reason)
+        # `O_NONBLOCK` (Copilot at openDox-code#84, r4174674702): a FIFO
+        # planted at the name, with no writer, would block a plain read-only
+        # `open` forever, before the descriptor's regular-file check below
+        # could refuse it. A regular file reads the same either way.
         try:
-            handle = os.open(target.name, os.O_RDONLY | os.O_NOFOLLOW,
+            handle = os.open(target.name,
+                             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                              dir_fd=directory)
         except FileNotFoundError:
             raise ConsoleAccessRefused(f"{target} does not exist: no plane on "

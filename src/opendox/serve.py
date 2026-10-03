@@ -1345,13 +1345,29 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         point marked private (`console_access.publish` sets
         `private_roots` on the server), or lies inside one, is a 404, for GET
         and HEAD, files and listings alike. A server with no copy marks
-        nothing, and serves exactly as before."""
+        nothing, and serves exactly as before.
+
+        A DIRECTORY REQUEST IS JUDGED BY WHAT IT SERVES (Copilot at
+        openDox-code#84, r4174674625). For `/sub/` the stdlib handler serves
+        the directory's first index page that exists (`index_pages`:
+        `index.html`, then `index.htm`), so the index page it would pick is
+        judged as well as the directory, and `web/sub/index.html` linked to a
+        copy is a 404 like the link itself."""
         private = getattr(self.server, "private_roots", ())
         if private:
-            target = Path(self.translate_path(self.path)).resolve()
-            if any(target == root or root in target.parents for root in private):
-                self.send_error(404, "File not found")
-                return None
+            path = Path(self.translate_path(self.path))
+            judged = [path]
+            if path.is_dir():
+                for name in getattr(self, "index_pages", ("index.html", "index.htm")):
+                    if (path / name).is_file():
+                        judged.append(path / name)
+                        break
+            for candidate in judged:
+                target = candidate.resolve()
+                if any(target == root or root in target.parents
+                       for root in private):
+                    self.send_error(404, "File not found")
+                    return None
         return super().send_head()
 
     def do_GET(self):  # noqa: N802

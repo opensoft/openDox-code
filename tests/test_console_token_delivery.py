@@ -1098,3 +1098,103 @@ def test_a_source_link_into_the_state_directory_never_serves_the_copy(
         httpd.shutdown()
         httpd.server_close()
         worker.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# 10 — Copilot review 4: a directory's index page, and a FIFO at the copy
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("index", ["index.html", "index.htm"])
+def test_a_directory_index_linked_to_a_private_copy_is_never_served(
+        tmp_path, monkeypatch, standalone_profile, index) -> None:
+    """Copilot at openDox-code#84, r4174674625. For a directory request the
+    stdlib handler serves the directory's first index page that exists
+    (`index.html`, then `index.htm`), so judging only the directory let
+    `GET /sub/` serve `web/sub/<index>`, a link to the console token's copy,
+    while `/sub/<index>` itself answered 404. The index page the handler
+    would serve is judged too: GET and HEAD of the directory answer 404, the
+    redirect of the bare name carries nothing, and no answer carries the
+    token. A directory whose index page is the bundle's own still serves it."""
+    import shutil as _shutil
+
+    from opendox import console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    web = tmp_path / "web"
+    _shutil.copytree(WEB, web)
+    (web / "sub").mkdir()
+    (web / "plain").mkdir()
+    (web / "plain" / index).write_text("<html>plain index</html>", encoding="utf-8")
+    state = _state(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    httpd = serve.build_server(web, snapshot, repo, port=0, quiet=True)
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    try:
+        base = httpd.server_address[:2]
+        copy = console_access.publish(
+            httpd, page_url=serve.server_url(httpd, "/index.html"),
+            env={"OPENDOX_STATE_DIR": str(state)})
+        (web / "sub" / index).symlink_to(copy.path)
+        token = httpd.console_token
+        for path in ("/sub/", f"/sub/{index}", "/sub/?x=1"):
+            for method in ("GET", "HEAD"):
+                status, headers, raw = _call(base, method, path)
+                assert status == 404, (method, path, status)
+                assert token.encode() not in raw
+                assert all(token not in str(v) for v in headers.values())
+        status, headers, raw = _call(base, "GET", "/sub")
+        assert status != 200, status
+        assert token.encode() not in raw
+        assert all(token not in str(v) for v in headers.values())
+        for method in ("GET", "HEAD"):
+            status, _headers, raw = _call(base, method, "/plain/")
+            assert status == 200, (method, status)
+        assert b"plain index" in _call(base, "GET", "/plain/")[2]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join(timeout=10)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs on this platform")
+def test_a_fifo_at_the_copy_is_refused_without_blocking(tmp_path) -> None:
+    """Copilot at openDox-code#84, r4174674702. A FIFO planted at
+    `console/<port>.html`, with no writer, blocked a read in its `open`
+    before the descriptor's regular-file check could run, so the reader
+    hung instead of refusing. The read opens without blocking and refuses it
+    as not a regular file. A write refuses it too, by its name, and neither
+    ever waits on it."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    (state / console_access.CONSOLE_DIRNAME).mkdir(mode=0o700)
+    fifo = console_access.private_copy_path(state, 8080)
+    os.mkfifo(fifo, 0o600)
+    outcome: dict = {}
+
+    def attempt(name, call) -> None:
+        try:
+            call()
+        except BaseException as exc:  # noqa: BLE001 — judged below
+            outcome[name] = exc
+        else:
+            outcome[name] = None
+
+    for name, call in (("read", lambda: console_access.read_private_copy(fifo)),
+                       ("write", lambda: _write(state))):
+        worker = threading.Thread(target=attempt, args=(name, call), daemon=True)
+        worker.start()
+        worker.join(timeout=10)
+        if worker.is_alive():
+            # Release the blocked open, so the case fails rather than hangs.
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            worker.join(timeout=10)
+            pytest.fail(f"the {name} blocked on a FIFO at {fifo}")
+        assert isinstance(outcome[name], console_access.ConsoleAccessRefused), (
+            name, outcome[name])
+        assert "not a regular file" in str(outcome[name]), str(outcome[name])
+    assert stat.S_ISFIFO(os.lstat(fifo).st_mode), "the FIFO was replaced"
