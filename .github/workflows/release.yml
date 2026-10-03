@@ -20,8 +20,10 @@ name: release
 # so the build job refuses any other commit. Release 1's order is: the bump of
 # `version` to 0.1.0 lands last among phase 3's openDox-code landings, the
 # openDox root pins that commit (plan 034 T087), and then this workflow is
-# dispatched, on `main` while its head is still the pinned commit, or on a tag
-# at that commit once `main` has moved on.
+# dispatched at the cut. `main`'s head may have moved past the pinned commit by
+# then (T095 lands later), so the head is never required: the run's commit
+# must equal the root's pin and be on `main`. The dispatch names `main`, or
+# the tag `v<version>` created at the pinned commit, and no other tag.
 #
 # FOUR JOBS, EACH GATED ON THE ONE BEFORE IT:
 #   build            builds the sdist and the wheel in a clean job, runs
@@ -98,16 +100,26 @@ jobs:
         with:
           python-version: '3.12'
 
-      # THE RELEASE IS THE PINNED COMMIT. This run's commit must equal
+      # THE RELEASE IS THE PINNED COMMIT. This run's commit must (a) equal
       # `commit:` in opensoft/openDox `main`'s `contracts/code-pin.yaml`, whose
-      # `source_repository` must be this repository, and it must be on this
-      # repository's `main`. A dispatch may name any branch or tag, and the
-      # commit it names is what would be published, so this is checked first.
-      # Both repositories are public, and both reads go through the API.
+      # `source_repository` must be this repository, and (b) be on this
+      # repository's `main`, as `main` or an ancestor of it. `main`'s head
+      # need not be that commit. A dispatch on a tag must name `v<version>`.
+      # A dispatch may name any ref, and the commit it names is what would be
+      # published, so this is checked first. Both repositories are public, and
+      # both reads go through the API.
       - name: the dispatched commit is the one the openDox root pins
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          case "$GITHUB_REF" in
+            refs/tags/*)
+              if [ "$GITHUB_REF" != "refs/tags/v$VERSION" ]; then
+                echo "::error::a release dispatched on a tag names v$VERSION, and this run names $GITHUB_REF"
+                exit 1
+              fi
+              ;;
+          esac
           if ! pin="$(gh api 'repos/opensoft/openDox/contents/contracts/code-pin.yaml?ref=main' \
               -H 'Accept: application/vnd.github.raw')"; then
             echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
@@ -180,9 +192,12 @@ jobs:
             -r .github/release-tools-cpython312-linux.txt
 
       # THE VERSION GATE. The input must be a PEP 440 version in normalized
-      # form (the form the files are named by), must equal what
-      # `pyproject.toml` declares, and must not be `0.0.0`, the scaffold's
-      # placeholder, which is never a release.
+      # form (the form the files are named by), with no epoch and no local
+      # label, must equal what `pyproject.toml` declares, and must not be
+      # `0.0.0`, the scaffold's placeholder, which is never a release. An
+      # epoch (`1!2.0`) is refused because a wheel's file name escapes its `!`,
+      # so the files would not carry the version as written, and every check
+      # below names them by it.
       - name: the version input is pyproject's version
         run: |
           "$RUNNER_TEMP/tools/bin/python" - <<'PY'
@@ -201,6 +216,9 @@ jobs:
                        f"which is {str(parsed)!r}; the files would be named by that")
           if parsed.local is not None:
               sys.exit(f"::error::{asked!r} carries a local label, which no index accepts")
+          if parsed.epoch:
+              sys.exit(f"::error::{asked!r} carries an epoch, which a wheel's file name "
+                       "escapes; this workflow names the files by the version as written")
           if parsed == Version("0.0.0"):
               sys.exit("::error::0.0.0 is the scaffold's placeholder version, never a release")
           if asked != declared:
@@ -228,7 +246,10 @@ jobs:
       # THE ARTIFACT CHECKS, BEFORE ANY UPLOAD. Each prints what it read.
       #   1. dist/ holds exactly the sdist and the wheel named for VERSION;
       #   2. the wheel's metadata names `opendox` at VERSION;
-      #   3. the `local` extra is declared, with its requirements (T072);
+      #   3. the wheel declares exactly the requirements `pyproject.toml` does,
+      #      for the base install and for every extra, compared as normalized
+      #      requirements; and its `local` extra (T072) carries
+      #      `opendox[runtime]` and the bundled server's package;
       #   4. the console script `opendox` is declared, as `opendox.cli:main`;
       #   5. every file under `src/opendox/web/` that git tracks is in the
       #      wheel, dotfiles included (T075's `web/**/.*`): 42 of 42 at
@@ -246,7 +267,9 @@ jobs:
       - name: verify the artifacts
         run: |
           "$RUNNER_TEMP/tools/bin/python" - <<'PY'
-          import configparser, email.parser, os, pathlib, subprocess, sys, zipfile
+          import configparser, email.parser, os, pathlib, re, subprocess, sys, tomllib, zipfile
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
 
           version = os.environ["VERSION"]
           wheel = f"opendox-{version}-py3-none-any.whl"
@@ -274,12 +297,43 @@ jobs:
                   problems.append(f"the wheel's metadata names {meta['Name']} {meta['Version']}, "
                                   f"not opendox {version}")
 
-              extras = meta.get_all("Provides-Extra") or []
-              local = [r for r in meta.get_all("Requires-Dist") or []
-                       if r.replace(" ", "").endswith('extra=="local"')]
-              print(f"3. extras: {extras}; the local extra requires {local}")
-              if "local" not in extras or not local:
-                  problems.append("the `local` extra is not declared with its requirements")
+              def named(requirement):
+                  extras = ",".join(sorted(canonicalize_name(e) for e in requirement.extras))
+                  return canonicalize_name(requirement.name) + (f"[{extras}]" if extras else "")
+
+              def normal(requirement):
+                  return named(requirement) + str(requirement.specifier)
+
+              with open("pyproject.toml", "rb") as handle:
+                  project = tomllib.load(handle)["project"]
+              declared = {"": {normal(Requirement(r)) for r in project.get("dependencies", [])}}
+              for extra, requirements in project.get("optional-dependencies", {}).items():
+                  declared[canonicalize_name(extra)] = {normal(Requirement(r)) for r in requirements}
+              carried = {""} | {canonicalize_name(e) for e in meta.get_all("Provides-Extra") or []}
+              carried = {extra: set() for extra in carried}
+              local_names = set()
+              for raw in meta.get_all("Requires-Dist") or []:
+                  requirement = Requirement(raw)
+                  # The extra a requirement belongs to is read from its marker's
+                  # text, so a platform marker beside it changes nothing.
+                  owners = sorted({canonicalize_name(e) for e in
+                                   re.findall(r'extra\s*==\s*"([^"]+)"', str(requirement.marker or ""))})
+                  if any(owner not in carried for owner in owners):
+                      problems.append(f"the requirement {raw!r} names an extra the wheel does not provide")
+                      continue
+                  requirement.marker = None
+                  for owner in owners or [""]:
+                      carried[owner].add(normal(requirement))
+                      if owner == "local":
+                          local_names.add(named(requirement))
+              print(f"3. requirements: the local extra carries {sorted(carried.get('local', ()))}")
+              if carried != declared:
+                  problems.append(f"the wheel's requirements {carried} are not "
+                                  f"pyproject.toml's {declared}")
+              if not {"opendox[runtime]", "pixeltable-pgserver"} <= local_names:
+                  problems.append(f"the `local` extra carries {sorted(local_names)}, not "
+                                  "opendox[runtime] and the bundled server's package, "
+                                  "pixeltable-pgserver")
 
               entry_points = configparser.ConfigParser(delimiters=("=",))
               entry_points.optionxform = str
@@ -343,6 +397,51 @@ jobs:
               sys.exit("::error::the installed opendox is not the version being released")
           print(f"opendox {importlib.metadata.version('opendox')} imports from {where.parent}")
           PY
+          # EVERY REQUIREMENT OF `opendox[local]` IS INSTALLED AND SATISFIED,
+          # walked from the wheel's own metadata, extras and markers included,
+          # with the tools' `packaging` over the fresh venv's distributions.
+          "$RUNNER_TEMP/tools/bin/python" - "$("$RUNNER_TEMP/fresh/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" <<'PY'
+          import importlib.metadata, sys
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
+          installed = {canonicalize_name(d.metadata["Name"]): d
+                       for d in importlib.metadata.distributions(path=[sys.argv[1]])}
+          problems, seen = [], set()
+
+          def need(name, extras):
+              key = (canonicalize_name(name), frozenset(extras))
+              if key in seen:
+                  return
+              seen.add(key)
+              for raw in installed[key[0]].requires or []:
+                  requirement = Requirement(raw)
+                  if requirement.marker and not any(
+                          requirement.marker.evaluate({"extra": extra})
+                          for extra in (sorted(extras) or [""])):
+                      continue
+                  dependency = installed.get(canonicalize_name(requirement.name))
+                  if dependency is None:
+                      problems.append(f"{raw} is not installed")
+                  elif not requirement.specifier.contains(dependency.version, prereleases=True):
+                      problems.append(f"{raw} is not satisfied by {dependency.version}")
+                  else:
+                      need(requirement.name, requirement.extras)
+
+          need("opendox", {"local"})
+          for problem in problems:
+              print(f"::error::{problem}")
+          if problems:
+              sys.exit(1)
+          print(f"opendox[local]: {len({name for name, _ in seen})} distributions, "
+                "every requirement installed and satisfied")
+          PY
+          # THE BUNDLED SERVER ARRIVED WITH THE EXTRA, and its binaries run:
+          # the product's own locator (`opendox.runtime.bundle`, T072), then
+          # each binary's `--version`.
+          for binary in initdb postgres; do
+            "$("$RUNNER_TEMP/fresh/bin/python" -c 'from opendox.runtime.bundle import server_binaries; print(server_binaries())')/$binary" --version
+          done
           "$RUNNER_TEMP/fresh/bin/opendox" --help
           "$RUNNER_TEMP/fresh/bin/opendox" generate-and-open --help > help.txt
           if ! grep -q -- '--local' help.txt; then
@@ -461,10 +560,13 @@ jobs:
 
       # T099's DRY-RUN FALSIFIER, as plan 034 writes it, in a fresh venv:
       # `pip install --index-url https://test.pypi.org/simple/
-      # --extra-index-url https://pypi.org/simple/ "opendox[local]"`, here
-      # pinned to the version just uploaded, with this package's lock for its
-      # dependencies, and wheels only. The simple index can lag the JSON API,
-      # so the install is tried up to ten times, 30 seconds apart.
+      # --extra-index-url https://pypi.org/simple/ "opendox[local]"`. The
+      # requirement is the install line as written, unversioned. The step adds
+      # this package's lock for the dependencies and wheels only, and then
+      # requires the installed opendox to be the version just uploaded, so an
+      # index that lags, or an older release, cannot pass for it. The simple
+      # index can lag the JSON API, so each try is a fresh venv, up to ten
+      # tries, 30 seconds apart.
       #
       # THE TRADE, stated: with two indexes, pip may take a dependency from
       # either. The lock pins every dependency's version, and this job holds no
@@ -473,31 +575,31 @@ jobs:
       # build job's, checked by digest in the `pypi` job.
       - name: install opendox[local] from TestPyPI into a fresh venv, and run it
         run: |
-          python -m venv "$RUNNER_TEMP/fresh"
           installed=0
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            rm -rf "$RUNNER_TEMP/fresh"
+            python -m venv "$RUNNER_TEMP/fresh"
             if "$RUNNER_TEMP/fresh/bin/python" -m pip install --disable-pip-version-check \
                 --no-cache-dir --only-binary :all: -c constraints-cpython312-linux.txt \
                 --index-url https://test.pypi.org/simple/ \
                 --extra-index-url https://pypi.org/simple/ \
-                "opendox[local]==$VERSION"; then
-              installed=1
-              break
+                "opendox[local]"; then
+              got="$("$RUNNER_TEMP/fresh/bin/python" -c 'import importlib.metadata; print(importlib.metadata.version("opendox"))')"
+              if [ "$got" = "$VERSION" ]; then
+                installed=1
+                break
+              fi
+              echo "attempt $attempt: the install line resolved opendox $got, not $VERSION"
             fi
-            echo "attempt $attempt: the install did not complete; retrying in 30 seconds"
+            echo "attempt $attempt: opendox $VERSION is not installed yet; retrying in 30 seconds"
             sleep 30
           done
           if [ "$installed" != 1 ]; then
-            echo "::error::opendox[local]==$VERSION did not install from TestPyPI"
+            echo "::error::the install line did not install opendox $VERSION from TestPyPI"
             exit 1
           fi
           cd "$RUNNER_TEMP"
-          "$RUNNER_TEMP/fresh/bin/python" - <<'PY'
-          import importlib.metadata, os, sys
-          if importlib.metadata.version("opendox") != os.environ["VERSION"]:
-              sys.exit("::error::the installed opendox is not the version just uploaded")
-          print(f"opendox {importlib.metadata.version('opendox')} installed from TestPyPI")
-          PY
+          echo "opendox $VERSION installed from TestPyPI by the install line as written"
           "$RUNNER_TEMP/fresh/bin/opendox" --help
 
   pypi:
