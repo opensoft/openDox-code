@@ -1333,6 +1333,27 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             return True
         return False
 
+    def send_head(self):
+        """The static bundle's file, as `SimpleHTTPRequestHandler` serves it,
+        except a target inside a console token's private-copy directory.
+
+        The stdlib handler follows links inside `--web-dir`, and a governed
+        host's composed web root is MADE of links out of it, so links are not
+        refused wholesale. But a link into the state directory must never
+        serve the token's copy (plan 034 T104; Copilot at openDox-code#84,
+        r4173889294): a target whose RESOLVED path is a directory the entry
+        point marked private (`console_access.publish` sets
+        `private_roots` on the server), or lies inside one, is a 404, for GET
+        and HEAD, files and listings alike. A server with no copy marks
+        nothing, and serves exactly as before."""
+        private = getattr(self.server, "private_roots", ())
+        if private:
+            target = Path(self.translate_path(self.path)).resolve()
+            if any(target == root or root in target.parents for root in private):
+                self.send_error(404, "File not found")
+                return None
+        return super().send_head()
+
     def do_GET(self):  # noqa: N802
         if not self._route(head_only=False):
             super().do_GET()

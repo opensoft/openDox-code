@@ -366,7 +366,8 @@ def _opener_html(record: Mapping[str, Any]) -> str:
 
 
 def _refuse_a_served_state_dir(state_dir: Path,
-                               served_roots: Iterable[Path | str]) -> None:
+                               served_roots: Iterable[Path | str], *,
+                               port: int) -> None:
     """The state directory may not BE, or lie inside, a root this plane serves.
 
     RULED by the holder on openxFactory#1220's review (Copilot
@@ -387,6 +388,18 @@ def _refuse_a_served_state_dir(state_dir: Path,
                 "copy is refused there and nothing is written. Set "
                 f"{runtime_config.PREFIX}STATE_DIR to a directory outside the "
                 "repositories this machine serves")
+        # AND THE COPY ITSELF (Copilot at openDox-code#84, r4173889265): a
+        # served root may be the state directory's `console/`, or anything
+        # else that holds the copy, while the state directory lies outside
+        # every served root. The copy's own resolved path is judged.
+        target = private_copy_path(resolved, port).resolve()
+        if served in target.parents:
+            raise ConsoleAccessRefused(
+                f"{runtime_config.PREFIX}STATE_DIR ({state_dir}) would put the "
+                f"console token's private copy at {target}, inside {served}, "
+                "which this plane serves, so the copy is refused there and "
+                f"nothing is written. Set {runtime_config.PREFIX}STATE_DIR to "
+                "a directory whose `console/` no served root holds")
 
 
 def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
@@ -400,7 +413,7 @@ def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
     own earlier copy for the same port (a server restarted there), and refuses
     anything else already at that name."""
     state = Path(state_dir)
-    _refuse_a_served_state_dir(state, tuple(served_roots))
+    _refuse_a_served_state_dir(state, tuple(served_roots), port=port)
     record = {
         "schema_version": RECORD_SCHEMA_VERSION,
         "kind": RECORD_KIND,
@@ -632,6 +645,14 @@ def publish(httpd: Any, *, page_url: str,
         raise ConsoleAccessRefused(
             f"the console token's private copy has no state directory: {exc}"
         ) from None
-    return write_private_copy(state, page_url=page_url,
+    copy = write_private_copy(state, page_url=page_url,
                               port=int(httpd.server_address[1]), token=token,
                               served_roots=getattr(httpd, "served_roots", ()))
+    # THE STATIC HANDLER NEVER SERVES A COPY (Copilot at openDox-code#84,
+    # r4173889294). It follows links inside `--web-dir` (a governed host's
+    # composed web root is made of them), so a link out of the bundle into the
+    # state directory would reach the copies. The handler refuses every static
+    # request whose resolved target is this directory or lies inside it
+    # (`serve.DashboardHandler.send_head`), every port's copy included.
+    httpd.private_roots = (copy.path.parent.resolve(),)
+    return copy

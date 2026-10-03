@@ -954,3 +954,74 @@ def test_a_plain_kill_removes_the_copy(tmp_path, monkeypatch, entry) -> None:
         assert "Traceback" not in child.stderr_text(), child.stderr_text()
     finally:
         child.kill()
+
+
+# ---------------------------------------------------------------------------
+# 8 — the static handler never serves a private copy (Copilot review 2)
+# ---------------------------------------------------------------------------
+
+def test_a_served_root_equal_to_the_console_directory_is_refused(tmp_path) -> None:
+    """Copilot at openDox-code#84, r4173889265. The state directory is outside
+    every served root, but the static bundle IS its `console/` directory, so
+    the copy would be `GET /<port>.html`. The copy's own path is judged
+    against the served roots, so this is refused by name before anything is
+    written."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    console = state / console_access.CONSOLE_DIRNAME
+    console.mkdir(mode=0o700)
+    with pytest.raises(console_access.ConsoleAccessRefused,
+                       match="OPENDOX_STATE_DIR") as refused:
+        console_access.write_private_copy(
+            state, page_url="http://127.0.0.1:8080/index.html", port=8080,
+            token=_token(), served_roots=(console,))
+    assert str(console.resolve()) in str(refused.value)
+    assert list(console.iterdir()) == [], "something was written"
+
+
+def test_a_static_link_out_of_the_bundle_never_serves_a_private_copy(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """Copilot at openDox-code#84, r4173889294. The static handler follows a
+    link inside `--web-dir` (a governed host's composed web root is MADE of
+    such links, so they cannot be refused wholesale). A link that leads into
+    the state directory must still never serve a copy: every static request
+    whose resolved target is the private-copy directory, or inside it, is
+    answered 404, for GET and HEAD, the copy, the directory listing, and
+    another port's copy alike. The bundle itself still answers."""
+    import shutil as _shutil
+
+    from opendox import console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    web = tmp_path / "web"
+    _shutil.copytree(WEB, web)
+    state = _state(tmp_path)
+    (web / "state-alias").symlink_to(state)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    httpd = serve.build_server(web, snapshot, repo, port=0, quiet=True)
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    try:
+        base = httpd.server_address[:2]
+        copy = console_access.publish(
+            httpd, page_url=serve.server_url(httpd, "/index.html"),
+            env={"OPENDOX_STATE_DIR": str(state)})
+        other = _write(state, port=9, token=_token())    # another serve's copy
+        token = httpd.console_token
+        for path in (f"/state-alias/console/{copy.path.name}",
+                     f"/state-alias/console/{other.path.name}",
+                     "/state-alias/console/", "/state-alias/console"):
+            for method in ("GET", "HEAD"):
+                status, headers, raw = _call(base, method, path)
+                assert status == 404, (method, path, status)
+                assert token.encode() not in raw and copy.path.name.encode() not in raw
+                assert all(token not in str(v) for v in headers.values())
+        status, _headers, raw = _call(base, "GET", "/index.html")
+        assert status == 200 and b"<html" in raw.lower()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join(timeout=10)
