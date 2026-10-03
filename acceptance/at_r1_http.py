@@ -75,9 +75,11 @@ A harness that breaks before a verdict exits 2, never 0.
     `opendox-console-access` v1) must describe that same forward: its port,
     its token, its `opened_url` and its `page_url`. The harness reads that
     file itself, with the standard library, as a browser would, and imports
-    nothing from the product. From here on, no line the harness prints
-    quotes that token, or any other the opener or `/capabilities` carries
-    (`Verdict.redact`), and no diagnostic quotes the entry point's output.
+    nothing from the product. No line the harness prints quotes that token,
+    or any other the opener or `/capabilities` carries (`Verdict.redact`):
+    it reads the opener's tokens as soon as the start answers, before step 5
+    quotes anything (`learn_opener_tokens`), and no diagnostic quotes the
+    entry point's output or a `/capabilities` payload.
  7. FETCHES THE MODEL CATALOG, presenting that token in
     `X-XF-Console-Token`. It must answer the envelope the chat rail adopts
     (`schema_version` 1, `kind` `workbench-model-catalog`, `models[]`), with
@@ -111,19 +113,18 @@ which of them fire on load and which on a click, so ALL of them are
 requested, a superset of the three panes' load-time reads. The action
 routes (`/actions/…`) are requested with a GET too, which never executes
 them (a GET there finds no handler, and their POST is a user's act, not a
-load). Two kinds take values the panes fill from the snapshot, and the
-harness fills them the same way:
- * a route ending in `/` (`/source/`) is a prefix the wheel, the viewer and
-   the workbench's source loader complete with a document path, so it is also
-   requested once per document the snapshot lists, plain and keyed by the
-   workbench's `(repository, ref)` key;
- * the thread read (`/workbench/thread`) is also requested with the query the
-   chat rail sends when it opens on a document (`views/staging-workbench.js`,
-   `loadThread`): `repository` and `ref` from the workbench's key, which with
-   no snapshot index is the snapshot's repository at `main` (`app.js`,
-   `sourceKeyFor`), `tile_kind` `cluster` (a grouping tile's kind,
-   `views/wheel-model.js`) and `tile_id` the snapshot's first grouping tile,
-   whose first member is the `document`.
+load). A route ending in `/` (`/source/`) is a prefix the wheel, the viewer
+and the workbench's source loader complete with a document path, so it is
+also requested once per document the snapshot lists, plain and keyed by the
+workbench's `(repository, ref)` key, as the panes fill it.
+The chat rail's THREAD READ is not requested with a query, because a
+standalone plane's rail sends none: the rail reads `/workbench/thread` only
+where `/capabilities` contributes a branch-session column,
+`gate.workbench.session`, and otherwise answers "no readable thread" itself
+(`app.js`, `doxbenchThreadSeam`; openDox-code#85, the T102 follow-on, holder
+ruling F1 (i) on openxFactory#656). The harness asserts that this plane
+contributes none, and asks the bare route literal only, as it asks every
+literal.
 Every request carries the console token the opener delivered (step 6), as
 the doxBench transports do, so a guarded read answers from its handler
 rather than from the console check.
@@ -249,10 +250,13 @@ CATALOG_ROUTE = "/workbench/model-catalog"
 CATALOG_KIND = "workbench-model-catalog"
 CATALOG_SCHEMA_VERSION = 1
 
-#: The thread read the chat rail makes on open, and the kind of a grouping
-#: tile (`views/wheel-model.js`: "clusters -> \"cluster\"").
+#: The chat rail's thread read, and the contributed binding it is read
+#: through: the rail sends one only where `/capabilities` contributes a
+#: branch-session column, `gate.workbench.session` (`app.js`,
+#: `doxbenchThreadSeam`; openDox-code#85, the T102 follow-on; holder ruling
+#: F1 (i) on openxFactory#656, `5973854291`). A standalone plane has none.
 THREAD_ROUTE = "/workbench/thread"
-GROUPING_TILE_KIND = "cluster"
+SESSION_BINDING_ID = "gate.workbench.session"
 
 #: Repository (b): ordinary Markdown with NO front matter at all, quickstart.md
 #: § 2's three notes, byte for byte.
@@ -527,7 +531,14 @@ class Answer:
         self.error = error
 
     def json(self):
-        return json.loads(self.body.decode("utf-8"))
+        """The body as JSON. A body nested past the parser's depth raises
+        `ValueError`, as any other malformed body does, so every caller's
+        named failure takes it, never a harness ERROR (Copilot review of
+        openDox-code#75 at ec95f451, r4175016692)."""
+        try:
+            return json.loads(self.body.decode("utf-8"))
+        except RecursionError as exc:
+            raise ValueError("JSON nested past the parser's depth") from exc
 
     def describe(self) -> str:
         return f"HTTP {self.status}" if self.status is not None else (
@@ -1233,11 +1244,14 @@ def fetch_object(server: Server, route: str,
                     f"{route} answers {answer.describe()}")
     try:
         body = answer.json()
-    except ValueError as exc:
-        body = exc
+        parsed = f"it is JSON, a {type(body).__name__}"
+    except ValueError:
+        body, parsed = None, "it is not JSON"
+    # The payload itself is not quoted: it may carry the console token
+    # (Copilot review of openDox-code#75 at ec95f451, r4175016672).
     verdict.require(f"{server.label}.{route} is a JSON object",
                     isinstance(body, dict),
-                    f"{route} is not a JSON object: {body!r:.300}")
+                    f"{route} is not a JSON object: {parsed}")
     return body, answer.body.decode("utf-8", "replace")
 
 
@@ -1290,19 +1304,36 @@ def check_pages(server: Server, index: Answer,
     verdict.note(f"snapshot kind={snapshot.get('kind')!r}, "
                  f"{len(as_list(snapshot.get('documents')))} documents")
     caps, caps_raw = fetch_object(server, "/capabilities", verdict)
-    # A token `/capabilities` publishes is never printed either, though the
-    # check below fails on it (T104).
-    verdict.keep_secret(caps.get(CONSOLE_TOKEN_FIELD))
+    # A token `/capabilities` publishes, under its name at any depth, is
+    # never printed either, though the check below fails on it (T104;
+    # Copilot review of openDox-code#75 at ec95f451, r4175016672).
+    for published in values_under_names(caps, CONSOLE_TOKEN_FIELD):
+        verdict.keep_secret(published)
     install_block = as_object(caps.get("install"))
     verdict.check(f"{label}.capabilities install.mode == local",
                   install_block.get("mode") == "local",
-                  f"the served install block is {caps.get('install')!r}")
+                  "the served install block reports no mode \"local\" (it "
+                  "is not quoted: /capabilities may carry the console "
+                  "token)")
     pid = as_object(install_block.get("database_bundle")).get("pid")
     if isinstance(pid, int):
         verdict.note(f"the served install reports its bundled server as "
                      f"pid {pid}")
     check_no_published_token(label, caps, caps_raw, verdict)
     return snapshot, caps, caps_raw
+
+
+def values_under_names(node, name: str):
+    """Every string under a key that contains `name`, at any depth."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if name in key:
+                yield from string_values(value)
+            else:
+                yield from values_under_names(value, name)
+    elif isinstance(node, list):
+        for value in node:
+            yield from values_under_names(value, name)
 
 
 def keys_at_any_depth(node):
@@ -1360,11 +1391,10 @@ def grouping_field_of(caps: dict) -> str:
 def check_grouping(label: str, snapshot: dict, caps: dict,
                    verdict: Verdict) -> None:
     """A grouping tile the chat pane can open on: an id and a member
-    document, which is also what the rail's thread read is built from
-    (Copilot review of openDox-code#75, at 32ef3e8c)."""
+    document (Copilot review of openDox-code#75, at 32ef3e8c)."""
     field = grouping_field_of(caps)
     verdict.check(f"{label}.snapshot fills the grouping station",
-                  thread_query(snapshot, field) is not None,
+                  grouping_tile(snapshot, field) is not None,
                   f"the snapshot's grouping station ({field!r}) holds no "
                   "tile with an id and a member document, so no grouping "
                   "tile can open the chat pane (R1Q13 (a) with (c); AT-R1 "
@@ -1920,9 +1950,10 @@ def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
                   f"no model is configured, yet the catalog offers {available}")
 
 
-def thread_query(snapshot: dict, grouping_field: str) -> str | None:
-    """The query the chat rail sends on open, for the first grouping tile
-    that has a member document."""
+def grouping_tile(snapshot: dict,
+                  grouping_field: str) -> tuple[str, str] | None:
+    """`(tile id, member document)` for the first grouping tile that has a
+    member document: the tile the chat pane opens from."""
     for group in map(as_object, as_list(snapshot.get(grouping_field))):
         if not group.get("id"):
             continue
@@ -1930,33 +1961,49 @@ def thread_query(snapshot: dict, grouping_field: str) -> str | None:
                    map(as_object, as_list(group.get("document_edges")))
                    if edge.get("document")]
         if members:
-            return urllib.parse.urlencode({
-                "repository": str(snapshot.get("repository") or ""),
-                "ref": "main",
-                "tile_kind": GROUPING_TILE_KIND,
-                "tile_id": str(group["id"]),
-                "document": str(members[0]),
-            })
+            return str(group["id"]), str(members[0])
     return None
 
 
-def requests_for(routes: list[str], snapshot: dict,
-                 grouping_field: str) -> list[str]:
+def requests_for(routes: list[str], snapshot: dict) -> list[str]:
+    """Every route literal, and every `/`-ended one completed with each
+    document the snapshot lists. No thread read is completed with a query:
+    a standalone plane's rail sends none (`check_no_thread_read`)."""
     documents = [urllib.parse.quote(str(d["path"]))
                  for d in map(as_object, as_list(snapshot.get("documents")))
                  if d.get("path")]
     key = urllib.parse.quote(f"{snapshot.get('repository') or ''}@main",
                              safe="")
-    query = thread_query(snapshot, grouping_field)
     targets: list[str] = []
     for route in routes:
         targets.append(route)
         if route.endswith("/"):
             targets += [route + doc for doc in documents]
             targets += [f"{route}{key}/{doc}" for doc in documents]
-        if route == THREAD_ROUTE and query:
-            targets.append(f"{route}?{query}")
     return targets
+
+
+def session_bindings(caps: dict) -> list[dict]:
+    """The contributed view bindings `/capabilities` declares under the
+    branch-session column's id, as the shell's `resolveView` finds them."""
+    views = as_list(as_object(caps.get("views")).get("views"))
+    return [view for view in map(as_object, views)
+            if view.get("id") == SESSION_BINDING_ID]
+
+
+def check_no_thread_read(label: str, caps: dict, verdict: Verdict) -> None:
+    """The chat rail reads a thread only through a branch-session column
+    (openDox-code#85; holder ruling F1 (i)), and a standalone plane
+    contributes none, so its rail sends no thread read and this harness asks
+    none. A binding whose `requires` would leave it unresolved still counts
+    here: the check fails closed."""
+    verdict.check(f"{label}.chat rail reads no thread (no branch session)",
+                  not session_bindings(caps),
+                  f"/capabilities contributes `{SESSION_BINDING_ID}`, so the "
+                  f"chat rail reads {THREAD_ROUTE} on every switch of its "
+                  "document; a standalone plane has no branch session, and "
+                  "answers each such read 403 with a console error "
+                  "(openDox-code#85, the T102 follow-on)")
 
 
 def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
@@ -1977,7 +2024,8 @@ def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
                   CATALOG_KIND in literals,
                   f"the served bundle no longer names {CATALOG_KIND!r}, so "
                   "this harness's catalog envelope check is stale")
-    for target in requests_for(routes, snapshot, grouping_field_of(caps)):
+    check_no_thread_read(label, caps, verdict)
+    for target in requests_for(routes, snapshot):
         answer = get(server.port, target, token=token)
         verdict.note(f"GET {target} -> {answer.describe()}")
         dropped = ("; a dropped connection is a handler that raised"
@@ -2031,9 +2079,33 @@ def check_console_gone(label: str, opener: Path | None, token: str | None,
                       "it prints only the opener's path")
 
 
+def learn_opener_tokens(printed: str, verdict: Verdict) -> None:
+    """Every token the opener carries, kept out of every line BEFORE step 5
+    quotes anything a route answered, so a payload that carries the token
+    under any name prints none of it (Copilot review of openDox-code#75 at
+    ec95f451, r4175016672). It only reads the opener, as step 6 reads it,
+    and judges nothing: step 6 does, in its place. The entry point writes
+    the opener before it serves (`console_access.publish`), so it is there
+    once `/` has answered."""
+    path = opener_location(printed)
+    if path is None:
+        return
+    try:
+        page = _read_without_following(path)
+    except OSError:
+        return
+    contents = _RefreshContents()
+    contents.feed(page)
+    contents.close()
+    targets = [refresh_target(content) for content in contents.contents]
+    for carried in carried_tokens(targets, contents.records):
+        verdict.keep_secret(carried)
+
+
 def serve_one(label: str, repo: Path, ctx: Context, verdict: Verdict) -> None:
     """Steps 4-9 for one repository: start, fetch, stop, and look."""
     server, index = launch(label, repo, ctx, verdict)
+    learn_opener_tokens(server.printed(), verdict)
     snapshot, caps, caps_raw = check_pages(server, index, verdict)
     check_grouping(label, snapshot, caps, verdict)
     opener, token = check_console_opener(

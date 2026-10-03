@@ -45,7 +45,14 @@ is installed or started:
     write it; the harness refuses a TMPDIR that is not (r4174671426);
   * no line the harness prints quotes a console token, from the opener, its
     record or `/capabilities`, or the entry point's output (r4174621486,
-    carried to every diagnostic).
+    carried to every diagnostic), or a `/capabilities` payload (r4175016672);
+    a payload nested past the JSON parser's depth is a named failure
+    (r4175016692);
+  * the raw `/capabilities` payload carries the token neither by name, at
+    any depth, nor by value (T007 batch N);
+  * the chat rail's thread read is never asked with a query, as a standalone
+    plane's rail sends none, and the plane must contribute no branch-session
+    column (openDox-code#85, the T102 follow-on).
 """
 
 from __future__ import annotations
@@ -58,6 +65,7 @@ import json
 import os
 import sys
 import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -925,7 +933,6 @@ class _StoppedProc:
     (None, ["t.stop exits 0"]),
 ], ids=["zero", "one", "sigterm", "timeout"])
 def test_the_stop_must_exit_zero(tmp_path: Path, rc, expected) -> None:
-    import types
     out, err = tmp_path / "out", tmp_path / "err"
     out.write_text("", encoding="utf-8")
     err.write_text("", encoding="utf-8")
@@ -1311,21 +1318,129 @@ def test_every_token_the_opener_carries_is_kept_secret(tmp_path: Path) -> None:
         f"an answer echoed {harness.REDACTED} and {harness.REDACTED}")
 
 
-def test_a_published_token_is_never_printed(tmp_path: Path, capsys) -> None:
-    caps = {"console_token": TOKEN, "install": {"mode": TOKEN}}
-    files = {"/snapshot.json": ("application/json",
-                                json.dumps({"documents": [{"path": "a.md"}]})),
-             "/capabilities": ("application/json", json.dumps(caps))}
+def _quiet_server(tmp_path: Path, port: int):
     out, err = tmp_path / "out", tmp_path / "err"
     out.write_text("", encoding="utf-8")
     err.write_text("", encoding="utf-8")
+    return harness.Server("t", None, port, out, err)
+
+
+def _pages(caps_payload: str) -> dict:
+    return {"/snapshot.json": ("application/json",
+                               json.dumps({"documents": [{"path": "a.md"}]})),
+            "/capabilities": ("application/json", caps_payload)}
+
+
+@pytest.mark.parametrize("caps", [
+    {"console_token": TOKEN, "install": {"mode": "local"}},
+    # Copilot review of #75 at ec95f451, r4175016672's example
+    {"install": {"mode": "hosted", "console_token": TOKEN}},
+    {"install": {"mode": "local"}, "a": [{"b": {"console_token": [TOKEN]}}]},
+], ids=["top-level", "nested-in-install", "nested-in-a-list"])
+def test_a_published_token_is_never_printed(tmp_path: Path, capsys,
+                                            caps: dict) -> None:
+    """Under its name at any depth, the token `/capabilities` publishes is
+    kept out of every later line: here a view module the payload names by
+    it, which step 8's walk reports."""
+    payload = dict(caps, views={"views": [{"module": f"/views/{TOKEN}.js"}]})
+    verdict = harness.Verdict(keep_going=True)
+    with served(_pages(json.dumps(payload))) as port:
+        _snapshot, got, _raw = harness.check_pages(
+            _quiet_server(tmp_path, port), _HTML_INDEX, verdict)
+        harness.derive_bundle(port, "<html></html>", got, verdict, "t")
+    verdict.report()
+    assert BY_NAME in _failures(verdict)
+    assert f"t.bundle.module /views/{harness.REDACTED}.js" in _failures(verdict)
+    assert TOKEN not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("payload, failure", [
+    (json.dumps({"install": {"mode": "hosted", "session": TOKEN}}),
+     "t.capabilities install.mode == local"),
+    (json.dumps([{"session": TOKEN}]), "t./capabilities is a JSON object"),
+    (json.dumps(f"session {TOKEN}"), "t./capabilities is a JSON object"),
+], ids=["install-block", "a-list", "a-string"])
+def test_no_failure_quotes_a_capabilities_payload(tmp_path: Path, capsys,
+                                                  payload: str,
+                                                  failure: str) -> None:
+    """A token under another name is unknown until step 6 reads the opener,
+    so no step-5 reason quotes the payload at all (Copilot review of #75 at
+    ec95f451, r4175016672: "use a fixed message")."""
+    verdict = harness.Verdict(keep_going=True)
+    with served(_pages(payload)) as port:
+        with contextlib.suppress(harness.Failed):
+            harness.check_pages(_quiet_server(tmp_path, port), _HTML_INDEX,
+                                verdict)
+    verdict.report()
+    assert failure in _failures(verdict)
+    assert not any(TOKEN in str(failed) for failed in verdict.failures)
+    assert TOKEN not in capsys.readouterr().out
+
+
+#: JSON nested past the parser's depth (Copilot review of #75 at ec95f451,
+#: r4175016692): the product's answer, so a named failure, never exit 2.
+_DEEP = "[" * 30000 + "]" * 30000
+
+
+@pytest.mark.parametrize("route", ["/snapshot.json", "/capabilities"])
+def test_a_page_nested_past_the_parser_s_depth_is_a_named_failure(
+        tmp_path: Path, route: str) -> None:
+    files = _pages(json.dumps({"install": {"mode": "local"}}))
+    files[route] = ("application/json", _DEEP)
     verdict = harness.Verdict(keep_going=True)
     with served(files) as port:
-        harness.check_pages(harness.Server("t", None, port, out, err),
-                            _HTML_INDEX, verdict)
+        with pytest.raises(harness.Failed) as failed:
+            harness.check_pages(_quiet_server(tmp_path, port), _HTML_INDEX,
+                                verdict)
+    assert failed.value.ident == f"t.{route} is a JSON object"
+    assert failed.value.why.endswith("it is not JSON")
+
+
+def test_a_catalog_nested_past_the_parser_s_depth_is_a_named_failure() -> None:
+    files = {harness.CATALOG_ROUTE: ("application/json", _DEEP)}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files, guarded=frozenset({harness.CATALOG_ROUTE})) as port:
+        harness.check_catalog(_Server(port), "token", verdict)
+    assert _failures(verdict) == _NOT_A_CATALOG
+
+
+def test_one_serve_learns_the_opener_s_token_before_it_quotes_a_page(
+        tmp_path: Path, monkeypatch, capsys) -> None:
+    """`serve_one` reads the opener's tokens as soon as the start answers,
+    so a payload carrying the token under another name (here the grouping
+    field `/capabilities` names) prints none of it in step 5, and step 6
+    still fails it by value. The start and the stop are stood in for."""
+    caps = {"install": {"mode": "local"},
+            "display": {"fields": {"grouping": {"field": TOKEN}}}}
+    files = _pages(json.dumps(caps))
+    files[harness.CATALOG_ROUTE] = ("application/json",
+                                    '{%s, "models": []}' % _ENVELOPE)
+    with served(files, guarded=frozenset({harness.CATALOG_ROUTE})) as port:
+        target = f"http://127.0.0.1:{port}/index.html#console_token={TOKEN}"
+        state = tmp_path / "state"
+        console = state / harness.CONSOLE_DIRNAME
+        console.mkdir(parents=True)
+        tmp_path.chmod(0o700)
+        state.chmod(0o700)
+        console.chmod(0o700)
+        opener = console / f"{port}.html"
+        opener.write_text(_opener_page(target, records=[
+            _record(target, port=port)]), encoding="utf-8")
+        opener.chmod(0o600)
+        server = _quiet_server(tmp_path, port)
+        server.out.write_text(f"  console {opener.as_uri()}\n",
+                              encoding="utf-8")
+        monkeypatch.setattr(harness, "launch",
+                            lambda *_args: (server, _HTML_INDEX))
+        monkeypatch.setattr(harness, "stop_and_look", lambda *_a, **_k: None)
+        verdict = harness.Verdict(keep_going=True)
+        harness.serve_one("t", tmp_path / "repo",
+                          types.SimpleNamespace(state_dir=state), verdict)
     verdict.report()
-    assert _failures(verdict) == ["t.capabilities install.mode == local",
-                                  "t.capabilities carries no console token"]
+    failures = _failures(verdict)
+    assert "t.snapshot fills the grouping station" in failures
+    assert BY_VALUE in failures
+    assert not any(TOKEN in str(failed) for failed in verdict.failures)
     assert TOKEN not in capsys.readouterr().out
 
 
@@ -1403,3 +1518,51 @@ def test_a_record_nested_past_the_parser_s_depth_is_a_named_failure(
     failures, _path, token = _read(state, _printed(opener))
     assert failures == [RECORD]
     assert token == TOKEN
+
+
+# ---------------------------------------------------------------------------
+# The chat rail's thread read (openDox-code#85, the T102 follow-on; holder
+# ruling F1 (i)): a standalone plane's rail sends none, so the harness asks
+# none with a query, and asserts the plane contributes no branch-session
+# column, the one condition under which the rail would.
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT = {"repository": "fixture", "documents": [{"path": "a.md"}],
+             "clusters": [{"id": "g1", "document_edges": [{"document": "a.md"}]}]}
+
+
+def test_the_rail_s_thread_read_is_never_asked_with_a_query() -> None:
+    """Only the bare literal, as every literal is asked; the `/`-ended
+    prefix is still completed with each document."""
+    targets = harness.requests_for(
+        ["/source/", harness.THREAD_ROUTE, "/snapshot.json"], _SNAPSHOT)
+    assert targets == ["/source/", "/source/a.md", "/source/fixture%40main/a.md",
+                       harness.THREAD_ROUTE, "/snapshot.json"]
+
+
+@pytest.mark.parametrize("caps, reads", [
+    ({}, False),
+    ({"views": {"views": []}}, False),
+    ({"views": {"views": [{"id": "gate.bar", "module": "./g.js"}]}}, False),
+    ({"views": [{"id": "gate.workbench.session"}]}, False),
+    ({"views": {"views": [{"id": "gate.workbench.session",
+                           "module": "./session.js"}]}}, True),
+    ({"views": {"views": [{"id": "gate.bar"},
+                          {"id": "gate.workbench.session"}]}}, True),
+], ids=["no-views", "no-bindings", "another-column", "not-a-manifest",
+        "session-column", "session-among-others"])
+def test_a_contributed_session_column_is_a_named_failure(caps: dict,
+                                                         reads: bool) -> None:
+    verdict = harness.Verdict(keep_going=True)
+    harness.check_no_thread_read("t", caps, verdict)
+    assert _failures(verdict) == (
+        ["t.chat rail reads no thread (no branch session)"] if reads else [])
+
+
+def test_step_8_asserts_the_rail_reads_no_thread(tmp_path: Path) -> None:
+    caps = {"views": {"views": [{"id": "gate.workbench.session"}]}}
+    verdict = harness.Verdict(keep_going=True)
+    with served({}) as port:
+        harness.check_routes(_quiet_server(tmp_path, port), _HTML_INDEX,
+                             _SNAPSHOT, caps, None, verdict)
+    assert "t.chat rail reads no thread (no branch session)" in _failures(verdict)
