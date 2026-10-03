@@ -359,8 +359,10 @@ export function noModelConfiguredRemedy(stateValue) {
 // only once this machine trusts it, and until then the catalog keeps it,
 // `available: false`. The catalog's shape is closed, so the rail cannot say
 // WHICH binding or why; this line sends the operator to `model-binding list`,
-// which says why for each binding (not trusted here, or a broker refusal),
-// and names the verb that trusts one. Its OWN visible line, beside 16.4's:
+// which shows whether each binding is trusted, names the verb that trusts
+// one, and says where the reason is for a binding already trusted, which a
+// provider's refusal also leaves unavailable (Copilot at openDox-code#82,
+// r4173876849). Its OWN visible line, beside 16.4's:
 // that one is for an EMPTY catalog, and an operator with a binding declared
 // has a model configured. It shows only when the catalog has ANSWERED, is
 // NOT EMPTY, offers nothing available, no catalog failure is recorded (each
@@ -369,7 +371,7 @@ export function noModelConfiguredRemedy(stateValue) {
 // twin is `doxbench_trust.UNTRUSTED_BINDING_REMEDY`, which
 // tests/test_model_binding_trust.py holds to this spelling.
 export const UNTRUSTED_BINDING_REMEDY =
-  "No declared model is available. \"opendox model-binding list\" says why for each binding; one read from this repository is used only once this machine trusts it, which \"opendox model-binding trust <id>\" records after showing what it would run and where it would connect. Then restart this console.";
+  "No declared model is available. \"opendox model-binding list\" shows whether each binding is trusted on this machine, and \"opendox model-binding trust <id>\" trusts one after showing what it would run and where it would connect; then restart this console. A binding already trusted is unavailable for the reason this console printed when its provider refused.";
 
 export function untrustedBindingRemedy(stateValue) {
   if (stateValue.catalogFailure) return null;

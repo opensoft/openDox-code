@@ -970,6 +970,73 @@ def test_a_lock_file_another_user_could_change_records_nothing(served,
     assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
 
 
+class _OsWithout:
+    """`os`, as the trust module sees it, lacking one name, as a platform
+    without that POSIX primitive does. Everything else is the real `os`."""
+
+    def __init__(self, missing: str) -> None:
+        self._missing = missing
+
+    def __getattr__(self, name):
+        if name == self._missing:
+            raise AttributeError(name)
+        return getattr(os, name)
+
+
+@pytest.mark.parametrize("missing", ["getuid", "O_NOFOLLOW", "O_DIRECTORY",
+                                     "fchmod", "fcntl"])
+def test_a_platform_without_the_stores_primitives_trusts_nothing(
+        served, capsys, monkeypatch, missing):
+    """Copilot at openDox-code#82 (r4173876800). Where the platform lacks a
+    POSIX primitive the store's guarantees rest on (as Windows lacks
+    `os.getuid`, `O_NOFOLLOW` and `fcntl`), the store is refused by name,
+    up front: every binding reads untrusted, `record` writes nothing, and
+    `list` and the factory answer rather than raise."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    if missing == "fcntl":
+        monkeypatch.setattr(trust_mod, "fcntl", None)
+    else:
+        monkeypatch.setattr(trust_mod, "os", _OsWithout(missing))
+    verdict = served.trust.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted
+    assert "POSIX" in verdict.reason
+    with pytest.raises(trust_mod.TrustStoreRefused):
+        served.trust.record(served.declared(), root=served.repo)
+    assert not served.state_dir.exists()
+    assert isinstance(served.port(), trust_mod.UntrustedBindingPort)
+    assert "POSIX" in capsys.readouterr().err
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    assert "POSIX" in capsys.readouterr().out
+    served.nothing_was_touched()
+
+
+def test_a_state_directory_that_cannot_resolve_trusts_nothing(served,
+                                                             capsys):
+    """Copilot at openDox-code#82 (r4173876823). A state directory that is
+    a link loop cannot be resolved; the store is refused by name, every
+    binding reads untrusted, `record` writes nothing, and `list` and the
+    factory answer rather than raise."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    loop = served.tmp / "loop"
+    loop.symlink_to(served.tmp / "pool")
+    (served.tmp / "pool").symlink_to(loop)
+    trust_mod.unregister()
+    looped = trust_mod.MachineTrust(state_dir=loop / "st")
+    trust_mod.register(looped)
+    verdict = looped.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted
+    assert "cannot be resolved" in verdict.reason
+    with pytest.raises(trust_mod.TrustStoreRefused):
+        looped.record(served.declared(), root=served.repo)
+    assert isinstance(served.port(), trust_mod.UntrustedBindingPort)
+    assert "cannot be resolved" in capsys.readouterr().err
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    assert "cannot be resolved" in capsys.readouterr().out
+    served.nothing_was_touched()
+
+
 def test_a_store_that_cannot_be_locked_records_nothing(served, monkeypatch):
     """Where the platform or the file system offers no lock, `record` is
     refused by name and writes nothing, rather than risk losing a trust."""
@@ -1144,8 +1211,27 @@ class _RecordRaises(_Declines):
         raise RuntimeError(SECRET)
 
 
+class _RecordRefuses(_Declines):
+    """A host policy whose `record` raises a `BindingRefused` carrying text
+    of its own (Copilot at openDox-code#82, review 5402101086, previously
+    missed): its words never reach the output, only its class does."""
+
+    def record(self, binding, *, root):
+        raise binding_mod.BindingRefused(SECRET)
+
+
+class _RecordStoreRefuses(_Declines):
+    """A host policy whose `record` raises the store's own refusal class
+    with text of its own: only openDox's own store's refusal passes as it
+    is."""
+
+    def record(self, binding, *, root):
+        raise _trust_mod().TrustStoreRefused(SECRET)
+
+
 RECORDING_POLICIES = {"declines": _Declines, "records-another": _RecordsAnother,
-                      "raises": _RecordRaises}
+                      "raises": _RecordRaises, "refuses": _RecordRefuses,
+                      "store-refuses": _RecordStoreRefuses}
 
 
 @pytest.mark.parametrize("policy", sorted(RECORDING_POLICIES))
@@ -1179,6 +1265,45 @@ def test_add_edit_and_trust_refuse_when_the_policy_does_not_record_trust(
     assert SECRET not in captured.out + captured.err
     if policy == "raises":
         assert "RuntimeError" in captured.err
+    if policy == "refuses":
+        assert "BindingRefused" in captured.err
+    if policy == "store-refuses":
+        assert "TrustStoreRefused" in captured.err
+
+
+@pytest.mark.parametrize("question", ["binding", "intake"])
+def test_a_verdict_for_another_root_covers_nothing_here(served, capsys,
+                                                        question):
+    """Copilot at openDox-code#82 (r4174310794). A policy that answers a
+    TRUSTED verdict minted for another repository root covers nothing at
+    this one: the per-repository key holds, the binding is refused naming
+    this root, and the intake runs no broker."""
+    trust_mod = _trust_mod()
+    elsewhere = served.fresh_repository("elsewhere")
+
+    class _AnswersForAnotherRoot(_Declines):
+        def verdict(self, binding, *, root):
+            return trust_mod.TrustVerdict.trusted_for(
+                binding, root=elsewhere, basis=trust_mod.BASIS_HOST)
+
+        def intake_verdict(self, binding, *, root):
+            return self.verdict(binding, root=root)
+
+    if question == "intake":
+        _caps, answer = _served_intake(served,
+                                       host_policy=_AnswersForAnotherRoot())
+        assert answer.get("reason") == trust_mod.INTAKE_BROKER_UNTRUSTED
+        assert not served.marker.exists()
+        return
+    trust_mod.unregister()
+    trust_mod.register(_AnswersForAnotherRoot())
+    served.hand_write(served.record("env"))
+    port = served.port()
+    notice = capsys.readouterr().err
+    assert isinstance(port, trust_mod.UntrustedBindingPort)
+    assert _command(served.repo) in notice
+    assert trust_mod.REASON_NOT_COVERED in notice
+    served.nothing_was_touched()
 
 
 @pytest.mark.parametrize("other", ["untrusted", "trusted"])
@@ -1719,6 +1844,13 @@ def test_the_rail_says_how_to_trust_a_declared_binding(tmp_path):
     rail = json.loads(done.stdout)
     remedy = _trust_mod().UNTRUSTED_BINDING_REMEDY
     assert rail["remedy"] == remedy
+    # Copilot at openDox-code#82 (r4173876849): a TRUSTED binding is also
+    # unavailable after its provider refused, and `list` then says only that
+    # it is trusted. The line says what `list` shows, and where the reason
+    # is for a binding already trusted.
+    assert "shows whether each binding is trusted" in remedy
+    assert "says why" not in remedy
+    assert "already trusted" in remedy
     shown = rail["onlyUnavailable"]
     assert shown["shown"] == remedy
     assert shown["noModel"] is None, "a declared model is not 'no model'"

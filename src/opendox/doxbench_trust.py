@@ -102,6 +102,7 @@ import json
 import os
 import shlex
 import stat
+import sys
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -214,6 +215,31 @@ REASON_INTAKE_NOT_ADMITTED = (
     "a host's own policy can, by answering intake_verdict")
 
 
+def unsupported_platform() -> str | None:
+    """Why this platform cannot keep the per-machine store, or None (Copilot
+    at openDox-code#82, r4173876800; #69's `runtime.bundle.
+    unsupported_platform` names its own gaps the same way). The store is
+    judged by its owner's uid, opened and made without following a link,
+    made relative to its parent's descriptor, written with `fchmod`, and
+    recorded under a file lock. Where one of those is missing, nothing can be
+    trusted, and the store says so by name rather than fail on the first
+    missing name."""
+    missing = [name for name, present in (
+        ("os.getuid", hasattr(os, "getuid")),
+        ("os.O_DIRECTORY", hasattr(os, "O_DIRECTORY")),
+        ("os.O_NOFOLLOW", hasattr(os, "O_NOFOLLOW")),
+        ("os.fchmod", hasattr(os, "fchmod")),
+        ("mkdir with dir_fd", os.mkdir in getattr(os, "supports_dir_fd", ())),
+        ("fcntl.flock", fcntl is not None),
+    ) if not present]
+    if not missing:
+        return None
+    return (f"the model-binding trust store needs a POSIX platform, and this "
+            f"one ({sys.platform}) lacks {', '.join(missing)}: the store is "
+            "judged by its owner, opened without following a link and "
+            "recorded under a file lock, so nothing can be trusted here")
+
+
 def reason_policy_failed(error: BaseException) -> str:
     """Why a binding a policy failed to judge is untrusted. It names the class
     of what the policy raised and never its words, which may hold anything."""
@@ -244,17 +270,20 @@ UNTRUSTED_TURN_MESSAGE = (
 #: available (#1144 16.3a; RULED openxFactory#656 comment 5962785556, item 2,
 #: "make the rail say how to trust"). The catalog's wire shape is closed, so
 #: the rail cannot say WHICH binding or why: it sends the operator to
-#: `model-binding list`, which says why for each binding (not trusted here, or
-#: a broker refusal), and names the verb that trusts one. The rail's JavaScript
+#: `model-binding list`, which shows whether each binding is trusted, names
+#: the verb that trusts one, and says where the reason is for a binding
+#: already trusted, which a provider's refusal also leaves unavailable
+#: (Copilot at openDox-code#82, r4173876849). The rail's JavaScript
 #: twin, `UNTRUSTED_BINDING_REMEDY` in `web/views/doxbench-chat.js`, beside
 #: openDox-code#74's no-model line, is held to this spelling by
 #: `tests/test_model_binding_trust.py`.
 UNTRUSTED_BINDING_REMEDY = (
-    "No declared model is available. \"opendox model-binding list\" says why "
-    "for each binding; one read from this repository is used only once this "
-    "machine trusts it, which \"opendox model-binding trust <id>\" records "
-    "after showing what it would run and where it would connect. Then "
-    "restart this console.")
+    "No declared model is available. \"opendox model-binding list\" shows "
+    "whether each binding is trusted on this machine, and \"opendox "
+    "model-binding trust <id>\" trusts one after showing what it would run "
+    "and where it would connect; then restart this console. A binding "
+    "already trusted is unavailable for the reason this console printed "
+    "when its provider refused.")
 
 #: What the console intake's hand-off is refused with when the trust policy
 #: does not admit the binding it is declaring (#1144 16.3a, T007 batch M). A
@@ -436,15 +465,18 @@ def require_admitted(binding, trust: TrustVerdict | None) -> None:
         trust.binding_id, trust.root, trust.reason or REASON_NEVER_TRUSTED))
 
 
-def _held_to(binding, verdict: Any, *, root: Path | str | None) -> TrustVerdict:
-    """`verdict`, held to `binding`. A verdict that admits exactly `binding` is
-    returned. So is an UNTRUSTED one for exactly this record, which carries
-    the policy's own reason. Anything else (a verdict for another binding, or
-    another form of this one, trusted or not, or something that is not a
-    verdict) is replaced by an untrusted verdict for THIS binding, so a
-    refusal never names the wrong binding or its command (Copilot at
-    openDox-code#82, r4173513795)."""
-    if isinstance(verdict, TrustVerdict):
+def _held_to(binding, verdict: Any, *, root: Path | str) -> TrustVerdict:
+    """`verdict`, held to `binding` AT `root`. A verdict for this root that
+    admits exactly `binding` is returned. So is an UNTRUSTED one for exactly
+    this record at this root, which carries the policy's own reason.
+    Anything else is replaced by an untrusted verdict for THIS binding at
+    THIS root, so a refusal never names the wrong binding, root or command:
+    a verdict for another binding, or another form of this one, trusted or
+    not (Copilot at openDox-code#82, r4173513795); one minted for another
+    repository root, which would defeat the per-repository key (r4174310794);
+    and something that is not a verdict."""
+    if isinstance(verdict, TrustVerdict) and verdict.root == resolved_root(
+            root):
         if verdict.admits(binding):
             return verdict
         if (not verdict.trusted and verdict.binding_id == binding.id
@@ -474,14 +506,25 @@ def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
 
     A policy may decline, as a governed host's does for a binding whose
     declaration is pending. So an answer that does not admit exactly this
-    binding is refused BY NAME (`TrustNotRecorded`), and so is a policy that
-    raises, naming what it raised and never its words. `add`, `edit` and
+    binding at this root is refused BY NAME (`TrustNotRecorded`), and so is
+    a policy that raises, a `BindingRefused` included, naming what it raised
+    and never its words. Only openDox's own store's `TrustStoreRefused`
+    passes through as it is. `add`, `edit` and
     `trust` ask this before they write anything (Copilot at
     openDox-code#82, r4173513738)."""
+    registered = policy()
     try:
-        verdict = policy().record(binding, root=root)
-    except binding_mod.BindingRefused:
-        raise
+        verdict = registered.record(binding, root=root)
+    except TrustStoreRefused:
+        # openDox's own store's refusal is actionable and composed from
+        # nothing a policy chose: it is raised as it is. Any other policy's
+        # refusal is named by its class alone, since its words are whatever
+        # that policy wrapped (Copilot at openDox-code#82, review 5402101086).
+        if isinstance(registered, MachineTrust):
+            raise
+        verdict = TrustVerdict.untrusted_for(
+            binding, root=root, basis=BASIS_HOST,
+            reason=reason_policy_failed(TrustStoreRefused()))
     except Exception as error:  # noqa: BLE001 - a policy that fails records nothing
         verdict = TrustVerdict.untrusted_for(
             binding, root=root, basis=BASIS_HOST,
@@ -763,7 +806,11 @@ class MachineTrust:
     # -- where ---------------------------------------------------------------
 
     def state_dir(self) -> Path:
-        """The directory the store lives in, or a `TrustStoreRefused`."""
+        """The directory the store lives in, or a `TrustStoreRefused`. On a
+        platform that cannot keep the store, the refusal comes first."""
+        unsupported = unsupported_platform()
+        if unsupported is not None:
+            raise TrustStoreRefused(unsupported)
         if self._state_dir is not None:
             path = self._state_dir
         else:
@@ -795,7 +842,18 @@ class MachineTrust:
         any absolute path free of `..`, and a store a clone could carry is a
         store the repository writes."""
         state = self.state_dir()
-        resolved = state.resolve()
+        try:
+            resolved = state.resolve()
+        except (OSError, RuntimeError) as error:
+            # A link loop, or a path the system refuses to walk (Copilot at
+            # openDox-code#82, r4173876823): the store is refused by name,
+            # so a verdict reads untrusted rather than the caller failing.
+            raise TrustStoreRefused(
+                "the model-binding trust store's state directory "
+                f"{shown(str(state))} cannot be resolved "
+                f"({type(error).__name__}), so the store refuses it and "
+                f"trusts nothing. Set {STATE_DIR_SETTING} to a directory "
+                "that resolves") from None
         served = Path(root)
         if resolved == served or served in resolved.parents:
             setting = (STATE_DIR_SETTING if self._state_dir is None
