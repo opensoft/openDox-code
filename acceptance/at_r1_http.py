@@ -306,6 +306,12 @@ def as_object(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def is_json_number(value) -> bool:
+    """A JSON number as JavaScript reads it: an int or a float, never a
+    bool (which Python counts as an int) and never a string."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def as_list(value) -> list:
     return value if isinstance(value, list) else []
 
@@ -1122,11 +1128,14 @@ def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
     # THE ENVELOPE THE RAIL ADOPTS, or it shows "the catalog could not be
     # read" and never its no-model state (Copilot review of
     # openDox-code#75, at f0e0ffe1). JavaScript's `=== 1` admits no `true`
-    # and no `"1"`, so neither does this.
+    # and no `"1"`, so neither does this. It admits every JSON NUMBER equal to
+    # 1, though: `1.0` and `1e0` parse to the same JavaScript number, and
+    # Python reads them as the float 1.0 (Copilot review of #75 at 1c0ff975,
+    # r4173473346).
     envelope = as_object(payload)
     version = envelope.get("schema_version")
     verdict.check(f"{label}.catalog envelope is the one the chat rail adopts",
-                  type(version) is int and version == CATALOG_SCHEMA_VERSION
+                  is_json_number(version) and version == CATALOG_SCHEMA_VERSION
                   and envelope.get("kind") == CATALOG_KIND,
                   f"the catalog's envelope is schema_version={version!r}, "
                   f"kind={envelope.get('kind')!r}; the chat rail adopts only "

@@ -206,6 +206,14 @@ _WRONG_ENVELOPE = ["t.catalog envelope is the one the chat rail adopts"]
      ["t.catalog offers no available entry"]),
     ('{%s, "models": [{"model_id": "m", "available": false}]}' % _ENVELOPE, []),
     ('{%s, "models": []}' % _ENVELOPE, []),
+    # every JSON number equal to 1 is the one `=== 1` adopts (Copilot review
+    # of #75 at 1c0ff975, r4173473346)
+    ('{"schema_version": 1.0, "kind": "workbench-model-catalog", "models": []}',
+     []),
+    ('{"schema_version": 1e0, "kind": "workbench-model-catalog", "models": []}',
+     []),
+    ('{"schema_version": 10E-1, "kind": "workbench-model-catalog", "models": []}',
+     []),
     # the envelopes `adoptCatalog` refuses (Copilot review of #75 at f0e0ffe1)
     ('{"models": []}', _WRONG_ENVELOPE),
     ('{"schema_version": 1, "models": []}', _WRONG_ENVELOPE),
@@ -215,6 +223,10 @@ _WRONG_ENVELOPE = ["t.catalog envelope is the one the chat rail adopts"]
     ('{"schema_version": true, "kind": "workbench-model-catalog", "models": []}',
      _WRONG_ENVELOPE),
     ('{"schema_version": "1", "kind": "workbench-model-catalog", "models": []}',
+     _WRONG_ENVELOPE),
+    ('{"schema_version": 1.5, "kind": "workbench-model-catalog", "models": []}',
+     _WRONG_ENVELOPE),
+    ('{"schema_version": null, "kind": "workbench-model-catalog", "models": []}',
      _WRONG_ENVELOPE),
     ('{"schema_version": 1, "kind": "workbench-model-catalog-v2", "models": []}',
      _WRONG_ENVELOPE),
