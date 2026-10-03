@@ -10,9 +10,15 @@ it, reached over HTTP, asked about by a second process, and stopped with a
 signal. Nothing is stood in: the corpus root check, the generation, the
 validator and the serve loop are phase 2's own, landed on this stack's base
 (T054 to T058), so the stand-in driver this module once launched is gone. Where F13.1 reads the
-server's pid from `caps.json`, these cases read the same pid from
-`runtime status`'s `database_bundle`. `/capabilities`' `install` block is
-T073's, and nothing here pretends it exists.
+server's pid from `caps.json`, T072's cases read the same pid from
+`runtime status`'s `database_bundle`.
+
+T073's falsifier, F13.1's `caps.json` block, is here too, because it needs the
+same running server: the SERVING process's `/capabilities` reports its own
+install shape (#1144 13.4a; RULED R1Q16 (i)), so the pid F13.1's TCP-listener
+block reads is taken from that payload, as F13.1 takes it, and is held equal
+to the one `runtime status` reports. `tests/test_served_install_block.py`
+holds the block's other cases, none of which starts a database.
 
 R1Q16, each part asserted:
   (i)   the server is a CHILD of the entry point's process (its `PPid`);
@@ -435,6 +441,50 @@ def test_the_entry_point_owns_a_migrated_server_with_no_tcp_listener(
     assert _wait_gone(pid), "the bundled server outlived its entry point"
     assert config.DatabaseBundle(state_dir).data_dir.joinpath("PG_VERSION").is_file(), \
         "the data directory must survive a stop: it is the install's database"
+
+
+# `/proc` as above (Copilot review of openDox-code#72, r4173559498): the pid's
+# TCP listeners and its parent are the kernel's answers, read from it.
+@pytest.mark.skipif(not Path("/proc/self").exists(), reason="asks Linux's /proc")
+def test_the_serving_process_reports_its_own_install_shape(
+        corpus: Path, state_dir: Path, tmp_path: Path) -> None:
+    """F13.1's `caps.json` block (T073; #1144 13.4a): the server the user
+    reached on its port reports its OWN mode and datastore, so the claim is
+    about that server and not about a second process that read the same
+    settings. Then F13.1's TCP-listener block, with the pid read from
+    `caps.json`, as F13.1 reads it."""
+    server, url = _launch(corpus, state_dir, tmp_path / "run")
+    try:
+        caps_url = url.rsplit("/", 1)[0] + "/capabilities"
+        with urllib.request.urlopen(caps_url, timeout=10) as answer:
+            caps = json.loads(answer.read())
+        # -- F13.1's `caps.json` block, verbatim in substance ----------------
+        inst = caps.get("install") or {}
+        assert inst.get("mode") == "local", \
+            f"the served process is not in local mode: {inst}"
+        state = os.path.realpath(state_dir)
+        for key in ("data_dir", "socket_dir"):
+            got = os.path.realpath((inst.get("database_bundle") or {}).get(key, ""))
+            assert got.startswith(state + os.sep), (
+                f"the served process uses {key} {got!r}, not the bundle under "
+                f"{state!r}")
+        # -- F13.1's TCP-listener block, the pid from `caps.json` ------------
+        pid = (inst.get("database_bundle") or {}).get("pid")
+        assert isinstance(pid, int), f"the bundle reports no server pid: {pid!r}"
+        assert not _tcp_listeners(pid), \
+            f"the bundled server listens on TCP: {_tcp_listeners(pid)}"
+        # the served block and `runtime status` name ONE server, the child of
+        # the process that served `caps.json` (R1Q16 (i))
+        _code, status = _status(state_dir)
+        assert (status.get("database_bundle") or {}).get("pid") == pid, status
+        assert _parent_of(pid) == server.pid, (
+            "the reported server is not a child of the process that served "
+            "`/capabilities`")
+    finally:
+        server.send_signal(signal.SIGTERM)
+        server.communicate(timeout=60)
+    assert server.returncode == 0, server.returncode
+    assert _wait_gone(pid), "the bundled server outlived its entry point"
 
 
 #: libpq defaults that, READ, would move the bundle's connections: to an
