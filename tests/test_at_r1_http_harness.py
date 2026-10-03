@@ -537,15 +537,68 @@ def test_a_hard_linked_opener_is_a_named_failure(tmp_path: Path) -> None:
     _opener_page(FORWARD + f"&amp;console_token={TOKEN}"),
     _opener_page(FORWARD, FORWARD),
     _opener_page(),
+    # what a browser reads differently from urllib.parse (Copilot review of
+    # #75 at d53a7378, r4173842763 and r4173842811)
+    _opener_page(f"http://example.invalid\\@127.0.0.1:{PORT}/index.html"
+                 f"#console_token={TOKEN}"),
+    _opener_page(f"http://{TOKEN}@127.0.0.1:{PORT}/index.html"
+                 f"#console_token={TOKEN}"),
+    _opener_page(f"http://user:{TOKEN}@127.0.0.1:{PORT}/index.html"
+                 f"#console_token={TOKEN}"),
+    _opener_page(f"http://127.0.0.1:{PORT}/index.html\t#console_token={TOKEN}"),
+    _opener_page(f"http://127.0.0.1:{PORT}/ index.html#console_token={TOKEN}"),
+    _opener_page(f"http://[broken:{PORT}/index.html#console_token={TOKEN}"),
+    _opener_page(f"http://127.0.0.1:99999/index.html#console_token={TOKEN}"),
 ], ids=["query", "query-and-fragment", "path", "other-port", "off-loopback",
         "https", "no-token", "empty-token", "two-tokens", "two-forwards",
-        "no-forward"])
+        "no-forward", "backslash", "userinfo-token", "userinfo-password",
+        "tab", "space", "malformed-host", "port-out-of-range"])
 def test_a_forward_that_leaks_or_misses_the_token_is_a_named_failure(
         tmp_path: Path, page: str) -> None:
     state, opener = _opener(tmp_path, page)
     failures, _path, token = _read(state, _printed(opener))
     assert failures == [FRAGMENT]
     assert token is None
+
+
+@pytest.mark.parametrize("target", [
+    f"http://example.invalid:{PORT}/{TOKEN}/index.html#console_token={TOKEN}",
+    f"https://127.0.0.1:{PORT}/{TOKEN}#console_token={TOKEN}",
+    f"http://{TOKEN}.example:{PORT}/#console_token={TOKEN}",
+    f"http://[{TOKEN}:{PORT}/#console_token={TOKEN}",
+    f"http://x\\{TOKEN}@127.0.0.1:{PORT}/#console_token={TOKEN}",
+], ids=["path-elsewhere", "path-https", "host", "malformed", "backslash"])
+def test_a_refused_forward_never_quotes_its_url(tmp_path: Path,
+                                                target: str) -> None:
+    """A refused destination is not quoted, because it may hold the token
+    (Copilot review of #75 at d53a7378, r4173842794)."""
+    state, opener = _opener(tmp_path, _opener_page(target))
+    verdict = harness.Verdict(keep_going=True)
+    harness.check_console_opener("t", PORT, _printed(opener), state,
+                                 tmp_path / "repo", verdict)
+    assert [failure.ident for failure in verdict.failures] == [FRAGMENT]
+    assert not any(TOKEN in str(failure) for failure in verdict.failures)
+
+
+def test_an_unparseable_printed_location_is_a_named_failure(
+        tmp_path: Path) -> None:
+    """The product's output, so a named failure and never a harness error
+    (Copilot review of #75 at d53a7378, r4173842805)."""
+    state, _opener_path = _opener(tmp_path)
+    failures, path, token = _read(
+        state, "  console file://[broken/opener.html (this user's copy)\n")
+    assert failures == ["t.console opener printed"]
+    assert (path, token) == (None, None)
+
+
+def test_a_record_reason_never_quotes_the_token(tmp_path: Path) -> None:
+    page = _opener_page(FORWARD, records=[_record(kind=TOKEN, port=TOKEN)])
+    state, opener = _opener(tmp_path, page)
+    verdict = harness.Verdict(keep_going=True)
+    harness.check_console_opener("t", PORT, _printed(opener), state,
+                                 tmp_path / "repo", verdict)
+    assert [failure.ident for failure in verdict.failures] == [RECORD]
+    assert not any(TOKEN in str(failure) for failure in verdict.failures)
 
 
 def test_a_token_in_the_query_is_named_and_never_quoted(tmp_path: Path) -> None:

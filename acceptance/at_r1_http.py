@@ -1272,8 +1272,13 @@ def record_disagrees_because(records: list[str], port: int,
     if not (isinstance(page_url, str) and isinstance(target, str)
             and target.split("#", 1)[0] == page_url):
         problems.append("its `page_url` is not the forward's page")
-    return "the opener's record disagrees with its forward: " + "; ".join(
-        problems) if problems else None
+    if not problems:
+        return None
+    # A record value may hold the token (a `kind` that is the token, say),
+    # and a reason reaches the CI log, so it never quotes it.
+    reason = "the opener's record disagrees with its forward: " + "; ".join(
+        problems)
+    return reason.replace(token, "<the console token>")
 
 
 def refresh_target(content: str) -> str | None:
@@ -1296,7 +1301,13 @@ def opener_location(printed: str) -> Path | None:
     where = match.group("where")
     if not where.startswith("file:"):
         return Path(where)
-    parts = urllib.parse.urlsplit(where)
+    # An unparseable file URL is the product's output, so it is the named
+    # `console opener printed` failure, never a harness error (Copilot review
+    # of openDox-code#75 at d53a7378, r4173842805).
+    try:
+        parts = urllib.parse.urlsplit(where)
+    except ValueError:
+        return None
     if parts.netloc not in ("", "localhost") or parts.query or parts.fragment:
         return None
     return Path(urllib.parse.unquote(parts.path))
@@ -1352,22 +1363,44 @@ def _within(path: Path, root: Path) -> bool:
     return real.is_relative_to(Path(os.path.realpath(root)))
 
 
+#: What a browser's URL parser reads differently from `urllib.parse`, so a
+#: forward carrying it is refused before it is parsed at all: a backslash,
+#: which a browser reads as `/` in an http URL (`http://evil\@127.0.0.1/`
+#: goes to `evil`), and whitespace and control characters, which a browser
+#: strips or rejects.
+_UNPARSED_ALIKE = re.compile(r"[\\\x00-\x20\x7f]")
+
+
 def token_in_fragment(targets: list[str | None],
                       port: int) -> tuple[str | None, str]:
     """The token the opener's one forward carries in its FRAGMENT, or `None`
-    and why not. No message here quotes a token."""
+    and why not. No message here quotes a token, or any part of the URL,
+    which could hold one (Copilot review of openDox-code#75 at d53a7378,
+    r4173842794)."""
     if len(targets) != 1 or targets[0] is None:
         return None, (f"the opener has {len(targets)} meta-refresh forwards, "
                       "not one that names a URL")
-    parts = urllib.parse.urlsplit(targets[0])
+    elsewhere = (f"the opener does not forward to this plane on loopback "
+                 f"port {port} (its forward is not quoted, because it may "
+                 "hold the token)")
+    target = targets[0]
+    # A browser and `urllib.parse` must read the SAME destination, or the
+    # check below judges a URL the browser never opens (r4173842763).
+    if _UNPARSED_ALIKE.search(target):
+        return None, (f"{elsewhere}: it holds a backslash, whitespace or a "
+                      "control character, which a browser reads differently")
     try:
+        parts = urllib.parse.urlsplit(target)
         target_port = parts.port
-    except ValueError:
-        target_port = None
+    except ValueError:      # a malformed authority or port (r4173842811)
+        return None, f"{elsewhere}: it is not a URL this harness can parse"
+    if parts.username is not None or parts.password is not None \
+            or "@" in parts.netloc:
+        return None, (f"{elsewhere}: it carries user information before its "
+                      "host")
     if (parts.scheme != "http" or parts.hostname not in LOOPBACK_HOSTS
             or target_port != port):
-        return None, (f"the opener forwards to {parts.scheme}://{parts.netloc}"
-                      f"{parts.path}, not to this plane on loopback port {port}")
+        return None, elsewhere
     if CONSOLE_FRAGMENT_KEY in urllib.parse.parse_qs(parts.query,
                                                      keep_blank_values=True):
         return None, ("the opener's forward carries the token in its QUERY, "
