@@ -332,12 +332,35 @@ TOKEN = "Zq3_token-of-a-standalone-console-0123456789"
 FORWARD = f"http://127.0.0.1:{PORT}/index.html#console_token={TOKEN}"
 
 
-def _opener_page(*targets: str) -> str:
-    """An opener as T104 writes one: a meta-refresh to each target."""
+def _record(target: str = FORWARD, **changes) -> dict:
+    """The record T104's opener carries for a forward to `target`."""
+    record = {"schema_version": 1, "kind": "opendox-console-access",
+              "page_url": target.split("#", 1)[0], "opened_url": target,
+              "port": PORT, "pid": 4242, "console_token": TOKEN}
+    record.update(changes)
+    return record
+
+
+def _record_script(record) -> str:
+    """As T104 embeds it: `<`, `>` and `&` escaped as JSON `\\u` escapes."""
+    text = json.dumps(record, sort_keys=True)
+    text = (text.replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace("&", "\\u0026"))
+    return ('<script type="application/json" id="opendox-console">'
+            f"{text}</script>\n")
+
+
+def _opener_page(*targets: str, records: list | None = None) -> str:
+    """An opener as T104 writes one: a meta-refresh to each target, and the
+    record of the first (or `records`, as given)."""
     metas = "".join(f'<meta http-equiv="refresh" content="0;url={t}">\n'
                     for t in targets)
+    if records is None:
+        records = [_record(targets[0].replace("&amp;", "&"))] if targets else []
+    scripts = "".join(_record_script(r) for r in records)
     return ("<!doctype html>\n<html><head><meta charset=\"utf-8\">\n"
-            f"{metas}<title>Opening openDox</title></head><body></body></html>\n")
+            f"{metas}<title>Opening openDox</title>\n{scripts}</head>"
+            "<body></body></html>\n")
 
 
 def _opener(tmp_path: Path, page: str | None = None, *, mode: int = 0o600,
@@ -389,6 +412,45 @@ def test_the_opener_t104_writes_delivers_its_token(tmp_path: Path) -> None:
 ], ids=["spaced-upper-URL", "quoted", "escaped-ampersand"])
 def test_the_opener_is_read_as_a_browser_reads_its_refresh(
         tmp_path: Path, page: str) -> None:
+    state, opener = _opener(tmp_path, page)
+    failures, _path, token = _read(state, _printed(opener))
+    assert failures == []
+    assert token == TOKEN
+
+
+RECORD = "t.console opener record agrees with its forward"
+
+
+@pytest.mark.parametrize("records", [
+    [],
+    [_record(), _record()],
+    ["not json"],
+    [["a", "list"]],
+    [_record(kind="opendox-console")],
+    [_record(schema_version=2)],
+    [_record(schema_version="1")],
+    [_record(port=PORT + 1)],
+    [_record(port=str(PORT))],
+    [_record(console_token=TOKEN[::-1])],
+    [_record(opened_url=FORWARD.replace("index.html", "other.html"))],
+    [_record(page_url=f"http://127.0.0.1:{PORT}/other.html")],
+], ids=["none", "two", "not-json", "not-an-object", "kind", "version",
+        "version-string", "port", "port-string", "token", "opened-url",
+        "page-url"])
+def test_a_record_that_disagrees_with_the_forward_is_a_named_failure(
+        tmp_path: Path, records: list) -> None:
+    page = _opener_page(FORWARD, records=records).replace(
+        '"not json"', "not json")
+    state, opener = _opener(tmp_path, page)
+    failures, _path, token = _read(state, _printed(opener))
+    assert failures == [RECORD]
+    assert token == TOKEN
+
+
+def test_a_record_escaped_as_t104_writes_it_agrees(tmp_path: Path) -> None:
+    """A token-free `page_url` with every character T104 escapes in it."""
+    target = f"http://127.0.0.1:{PORT}/index.html#console_token={TOKEN}"
+    page = _opener_page(target, records=[_record(target, note="<&>")])
     state, opener = _opener(tmp_path, page)
     failures, _path, token = _read(state, _printed(opener))
     assert failures == []

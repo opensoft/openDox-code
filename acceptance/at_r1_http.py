@@ -66,8 +66,11 @@ A harness that breaks before a verdict exits 2, never 0.
     with one link, in a directory no one else can enter, and outside the
     served repository. Its meta-refresh forwards to this plane on loopback
     with `#console_token=<token>` in the URL's FRAGMENT, and never in the
-    query. The harness reads that file itself, with the standard library,
-    as a browser would, and imports nothing from the product.
+    query. Its JSON record (`#opendox-console`, kind
+    `opendox-console-access` v1) must describe that same forward: its port,
+    its token, its `opened_url` and its `page_url`. The harness reads that
+    file itself, with the standard library, as a browser would, and imports
+    nothing from the product.
  7. FETCHES THE MODEL CATALOG, presenting that token in
     `X-XF-Console-Token`. It must answer the envelope the chat rail adopts
     (`schema_version` 1, `kind` `workbench-model-catalog`, `models[]`), with
@@ -203,6 +206,13 @@ CONSOLE_TOKEN_FIELD = "console_token"
 CONSOLE_DIRNAME = "console"
 CONSOLE_FRAGMENT_KEY = "console_token"
 CONSOLE_LINE = re.compile(r"^[ \t]*console (?P<where>(?:file:|/)\S*)", re.M)
+#: The opener's machine-readable record, "for a harness or a script"
+#: (`opendox.console_access`, T104): JSON in
+#: `<script type="application/json" id="opendox-console">`. The harness parses
+#: it itself, with the standard library, and imports nothing from the product.
+CONSOLE_RECORD_ID = "opendox-console"
+CONSOLE_RECORD_KIND = "opendox-console-access"
+CONSOLE_RECORD_SCHEMA_VERSION = 1
 OPENER_MODE = 0o600
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 
@@ -1198,18 +1208,72 @@ def check_grouping(label: str, snapshot: dict, caps: dict,
 # ---------------------------------------------------------------------------
 
 class _RefreshContents(html.parser.HTMLParser):
-    """Every `<meta http-equiv="refresh">` `content` in a page, unescaped."""
+    """Every `<meta http-equiv="refresh">` `content` in a page, unescaped,
+    and the text of every JSON `<script>` whose id is the console record's."""
 
     def __init__(self) -> None:
         super().__init__()
         self.contents: list[str] = []
+        self.records: list[str] = []
+        self._in_record = False
 
     def handle_starttag(self, tag, attrs) -> None:
+        named = {key.lower(): value or "" for key, value in attrs}
+        if tag == "script":
+            self._in_record = (
+                named.get("id") == CONSOLE_RECORD_ID
+                and named.get("type", "").strip().lower() == "application/json")
+            if self._in_record:
+                self.records.append("")
+            return
         if tag != "meta":
             return
-        named = {key.lower(): value or "" for key, value in attrs}
         if named.get("http-equiv", "").strip().lower() == "refresh":
             self.contents.append(named.get("content", ""))
+
+    def handle_endtag(self, tag) -> None:
+        if tag == "script":
+            self._in_record = False
+
+    def handle_data(self, data) -> None:
+        if self._in_record:
+            self.records[-1] += data
+
+
+def record_disagrees_because(records: list[str], port: int,
+                             target: str | None, token: str) -> str | None:
+    """Why the opener's record does not describe its own forward, or `None`.
+    No reason quotes the token."""
+    if len(records) != 1:
+        return (f"the opener holds {len(records)} `#{CONSOLE_RECORD_ID}` "
+                "JSON records, not one")
+    try:
+        record = json.loads(records[0])
+    except ValueError:
+        return "the opener's record is not JSON"
+    if not isinstance(record, dict):
+        return "the opener's record is not a JSON object"
+    version = record.get("schema_version")
+    problems = []
+    if record.get("kind") != CONSOLE_RECORD_KIND or not (
+            is_json_number(version)
+            and version == CONSOLE_RECORD_SCHEMA_VERSION):
+        problems.append(f"it is kind={record.get('kind')!r} "
+                        f"schema_version={version!r}, not "
+                        f"{CONSOLE_RECORD_KIND!r} v{CONSOLE_RECORD_SCHEMA_VERSION}")
+    if not (is_json_number(record.get("port")) and record.get("port") == port):
+        problems.append(f"its port is {record.get('port')!r}, not {port}")
+    if record.get(CONSOLE_FRAGMENT_KEY) != token:
+        problems.append(f"its `{CONSOLE_FRAGMENT_KEY}` is not the token the "
+                        "forward carries")
+    if record.get("opened_url") != target:
+        problems.append("its `opened_url` is not the URL the forward opens")
+    page_url = record.get("page_url")
+    if not (isinstance(page_url, str) and isinstance(target, str)
+            and target.split("#", 1)[0] == page_url):
+        problems.append("its `page_url` is not the forward's page")
+    return "the opener's record disagrees with its forward: " + "; ".join(
+        problems) if problems else None
 
 
 def refresh_target(content: str) -> str | None:
@@ -1351,10 +1415,15 @@ def check_console_opener(label: str, port: int, printed: str, state_dir: Path,
     contents = _RefreshContents()
     contents.feed(page)
     contents.close()
-    token, why = token_in_fragment(
-        [refresh_target(content) for content in contents.contents], port)
+    targets = [refresh_target(content) for content in contents.contents]
+    token, why = token_in_fragment(targets, port)
     verdict.check(f"{label}.console opener forwards with the token in its "
                   "fragment", token is not None, why)
+    if token is not None:
+        disagrees = record_disagrees_because(contents.records, port,
+                                             targets[0], token)
+        verdict.check(f"{label}.console opener record agrees with its forward",
+                      disagrees is None, disagrees or "")
     return path, token
 
 
