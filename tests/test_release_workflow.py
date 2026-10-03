@@ -14,8 +14,13 @@ of a script in a test is a test of the copy.
 EVERY CASE IS HERMETIC. The two steps that call `gh` run with a stand-in `gh`
 first on `PATH`, which answers from the case's own fixture and records nothing,
 so no case reaches GitHub (and `tests/hermeticity.py`'s refusal shim stays the
-answer for any other `gh`). No case reaches an index. The one step that reads
-TestPyPI over HTTP is not run here; it runs at the dry run.
+answer for any other `gh`). The release-commit step reads the openDox root's
+pin over git, from `https://github.com/opensoft/openDox.git`. Each case
+redirects that URL, through git's own `url.<base>.insteadOf` in the
+environment's config, to a repository the case builds under its temporary
+directory, so the step's script runs unchanged and reaches no network. No case
+reaches an index. The one step that reads TestPyPI over HTTP is not run here;
+it runs at the dry run.
 
 What is held:
   * the shape: dispatch only, one `version` input, no secret, `id-token: write`
@@ -23,10 +28,13 @@ What is held:
     pinned by a full commit SHA, and the four jobs chained;
   * the release-commit step: the pinned commit on `main` passes, and a commit
     the openDox root does not pin, a commit off `main`, another repository's
-    pin, a tag other than `v<version>` and an unreadable pin each refuse;
+    pin, a tag other than `v<version>`, an unreachable root and a root with no
+    pin each refuse. The pin is read over git with no credential, and the
+    step's one `gh` call is the compare with this repository's `main`;
   * the environment step: both environments with a reviewer pass, and either
     one without a reviewer, or unreadable, refuses;
-  * the version gate, case by case;
+  * the version gate, case by case, a pre-release and a development release
+    among the refusals;
   * the artifact checks, over a small built-by-hand wheel and sdist in a git
     tree of their own: the whole set passes, and each kind of gap refuses;
   * the publish jobs' digest check: the verified files pass, and a changed
@@ -153,9 +161,6 @@ def test_the_four_jobs_are_chained() -> None:
 FAKE_GH = """#!/usr/bin/env bash
 # A stand-in `gh`: it answers from the case's fixture and records nothing.
 case "$*" in
-  *contents/contracts/code-pin.yaml*)
-    [ -n "${FAKE_PIN_FAILS:-}" ] && { echo "HTTP 404" >&2; exit 1; }
-    printf '%s\\n' "$FAKE_PIN" ;;
   *compare/*) printf '%s\\n' "$FAKE_STATUS" ;;
   *environments/*)
     args="$*"; environment="${args##*environments/}"; environment="${environment%% *}"
@@ -180,6 +185,40 @@ def _pin(commit: str, source: str = REPOSITORY) -> str:
             f'commit: "{commit}"\nrevision_kind: commit\n')
 
 
+ROOT_URL = "https://github.com/opensoft/openDox.git"
+
+
+def _root(where: Path, pin: str | None) -> Path:
+    """A stand-in openDox root: a repository whose `main` carries `pin` as
+    `contracts/code-pin.yaml`, or carries no pin at all when `pin` is None."""
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(where),
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_AUTHOR_NAME": "root", "GIT_AUTHOR_EMAIL": "root@example.invalid",
+           "GIT_COMMITTER_NAME": "root", "GIT_COMMITTER_EMAIL": "root@example.invalid"}
+    where.mkdir(parents=True)
+    subprocess.run(("git", "init", "-q", "-b", "main", str(where)), check=True, env=env)
+    if pin is None:
+        (where / "README.md").write_text("no pin\n", encoding="utf-8")
+    else:
+        (where / "contracts").mkdir()
+        (where / "contracts" / "code-pin.yaml").write_text(pin, encoding="utf-8")
+    subprocess.run(("git", "-C", str(where), "add", "-A"), check=True, env=env)
+    subprocess.run(("git", "-C", str(where), "commit", "-q", "-m", "root"), check=True, env=env)
+    return where
+
+
+def _redirect(to: Path) -> dict[str, str]:
+    """Git config, in the environment, that sends the root's URL to `to`.
+
+    `GIT_ALLOW_PROTOCOL=file` makes git refuse every other transport, so a
+    redirect that failed to apply would refuse the fetch rather than read the
+    real root over the network: no case can pass by reaching GitHub."""
+    return {"GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": f"url.{to.as_uri()}.insteadOf",
+            "GIT_CONFIG_VALUE_0": ROOT_URL,
+            "GIT_ALLOW_PROTOCOL": "file"}
+
+
 RELEASE_COMMIT_CASES = {
     "the pinned commit, at main's head": (
         dict(sha=PINNED, pin=_pin(PINNED), status="identical"), None),
@@ -202,8 +241,11 @@ RELEASE_COMMIT_CASES = {
     "a tag other than v<version>": (
         dict(sha=PINNED, pin=_pin(PINNED), status="identical", ref="refs/tags/latest"),
         "names v0.1.0"),
-    "an unreadable pin": (
-        dict(sha=PINNED, pin="", status="identical", pin_fails=True),
+    "an unreachable root": (
+        dict(sha=PINNED, pin=_pin(PINNED), status="identical", unreachable=True),
+        "cannot be read"),
+    "a root with no pin": (
+        dict(sha=PINNED, pin=None, status="identical"),
         "cannot be read"),
 }
 
@@ -213,11 +255,14 @@ RELEASE_COMMIT_CASES = {
 def test_the_release_commit_step(case: str, tmp_path: Path) -> None:
     given, refusal = RELEASE_COMMIT_CASES[case]
     step = _step("build", "the dispatched commit is the one the openDox root pins")
+    root = _root(tmp_path / "root", given["pin"])
+    if given.get("unreachable"):
+        root = tmp_path / "no-such-root"
+    (tmp_path / "rt").mkdir()
     env = {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_SHA": given["sha"],
            "GITHUB_REF": given.get("ref", "refs/heads/main"), "VERSION": "0.1.0",
-           "FAKE_PIN": given["pin"], "FAKE_STATUS": given["status"], "GH_TOKEN": "unused"}
-    if given.get("pin_fails"):
-        env["FAKE_PIN_FAILS"] = "1"
+           "RUNNER_TEMP": str(tmp_path / "rt"), "FAKE_STATUS": given["status"],
+           "GH_TOKEN": "unused", **_redirect(root)}
     result = _run(step["run"], tmp_path, env, (_fake_gh(tmp_path / "bin"),))
     if refusal is None:
         assert result.returncode == 0, result.stdout + result.stderr
@@ -225,6 +270,15 @@ def test_the_release_commit_step(case: str, tmp_path: Path) -> None:
     else:
         assert result.returncode != 0, result.stdout
         assert refusal in result.stdout + result.stderr, result.stdout + result.stderr
+
+
+def test_the_root_pin_is_read_over_git_with_no_credential() -> None:
+    script = _step("build", "the dispatched commit is the one the openDox root pins")["run"]
+    assert "contents/contracts/code-pin.yaml" not in script
+    assert re.search(r'GIT_TERMINAL_PROMPT=0 git -C "\$root" -c credential\.helper= \\\n'
+                     r'\s+fetch -q --depth 1 --no-tags ' + re.escape(ROOT_URL) + r' main', script), script
+    calls = [line.strip() for line in script.splitlines() if re.search(r"\bgh\b", line)]
+    assert len(calls) == 1 and "/compare/" in calls[0], calls
 
 
 ENVIRONMENT_CASES = {
@@ -260,6 +314,10 @@ VERSION_CASES = {
     "an epoch": ("1!2.0", "1!2.0", "carries an epoch"),
     "the placeholder": ("0.0.0", "0.0.0", "the scaffold's placeholder"),
     "no version at all": ("0.1.0", "banana", "is not a PEP 440 version"),
+    "a pre-release": ("0.2.0rc1", "0.2.0rc1", "is a pre-release or a development release"),
+    "a development release": ("0.2.0.dev1", "0.2.0.dev1",
+                              "is a pre-release or a development release"),
+    "a post-release": ("0.1.0.post1", "0.1.0.post1", None),
 }
 
 

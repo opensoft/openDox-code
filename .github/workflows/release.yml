@@ -45,8 +45,10 @@ name: release
 # (owner `opensoft`, repository `openDox-code`, workflow `release.yml`, and the
 # environment the job runs in). `id-token: write` is granted to the two publish
 # jobs and to no other job. The one other credential is GitHub's own automatic
-# `GITHUB_TOKEN`, which the build job passes to `gh` for its two API reads,
-# with `contents: read` and `actions: read` and nothing more.
+# `GITHUB_TOKEN`, which the build job passes to `gh` for two reads of THIS
+# repository's API (the compare with `main`, and the environments), with
+# `contents: read` and `actions: read` and nothing more. The openDox root's
+# pin, in another repository, is read over git with no credential at all.
 #
 # EVERY ACTION IS PINNED BY FULL COMMIT SHA, with its release tag beside it.
 # (`validate.yml` pins by tag. A tag can be moved after review, and a commit
@@ -111,8 +113,14 @@ jobs:
       # repository's `main`, as `main` or an ancestor of it. `main`'s head
       # need not be that commit. A dispatch on a tag must name `v<version>`.
       # A dispatch may name any ref, and the commit it names is what would be
-      # published, so this is checked first. Both repositories are public, and
-      # both reads go through the API.
+      # published, so this is checked first.
+      #
+      # THE ROOT'S PIN IS READ ANONYMOUSLY, OVER GIT. opensoft/openDox is
+      # public, and this job's GITHUB_TOKEN is an installation token scoped
+      # to this repository, so the read of another repository uses no token:
+      # a fetch of `main`, depth 1, with every credential helper cleared and
+      # no prompt, in a repository of its own under `$RUNNER_TEMP`. The
+      # compare with `main` reads this repository, through the API.
       - name: the dispatched commit is the one the openDox root pins
         env:
           GH_TOKEN: ${{ github.token }}
@@ -125,8 +133,12 @@ jobs:
               fi
               ;;
           esac
-          if ! pin="$(gh api 'repos/opensoft/openDox/contents/contracts/code-pin.yaml?ref=main' \
-              -H 'Accept: application/vnd.github.raw')"; then
+          root="$RUNNER_TEMP/opendox-root"
+          rm -rf "$root"
+          git init -q -b main "$root"
+          if ! GIT_TERMINAL_PROMPT=0 git -C "$root" -c credential.helper= \
+              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git main \
+              || ! pin="$(git -C "$root" show FETCH_HEAD:contracts/code-pin.yaml)"; then
             echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
             exit 1
           fi
@@ -200,11 +212,15 @@ jobs:
 
       # THE VERSION GATE. The input must be a PEP 440 version in normalized
       # form (the form the files are named by), with no epoch and no local
-      # label, must equal what `pyproject.toml` declares, and must not be
-      # `0.0.0`, the scaffold's placeholder, which is never a release. An
-      # epoch (`1!2.0`) is refused because a wheel's file name escapes its `!`,
-      # so the files would not carry the version as written, and every check
-      # below names them by it.
+      # label, must be a final release, must equal what `pyproject.toml`
+      # declares, and must not be `0.0.0`, the scaffold's placeholder, which
+      # is never a release. An epoch (`1!2.0`) is refused because a wheel's
+      # file name escapes its `!`, so the files would not carry the version as
+      # written, and every check below names them by it. A pre-release or a
+      # development release (`0.2.0rc1`, `0.2.0.dev1`) is refused because the
+      # dry run installs the unversioned `opendox[local]`, as 10.3's line
+      # reads, and pip passes over a pre-release once any final release
+      # exists, so the dry run could never install what was uploaded.
       - name: the version input is pyproject's version
         run: |
           "$RUNNER_TEMP/tools/bin/python" - <<'PY'
@@ -226,6 +242,10 @@ jobs:
           if parsed.epoch:
               sys.exit(f"::error::{asked!r} carries an epoch, which a wheel's file name "
                        "escapes; this workflow names the files by the version as written")
+          if parsed.is_prerelease:
+              sys.exit(f"::error::{asked!r} is a pre-release or a development release; "
+                       "the dry run installs the unversioned \"opendox[local]\", which "
+                       "pip resolves to a final release once one exists")
           if parsed == Version("0.0.0"):
               sys.exit("::error::0.0.0 is the scaffold's placeholder version, never a release")
           if asked != declared:
