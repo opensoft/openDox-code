@@ -63,14 +63,19 @@ A harness that breaks before a verdict exits 2, never 0.
     T104; RULED openxFactory#656 `5963851934`). The start prints the PATH of
     a private opener file, `<OPENDOX_STATE_DIR>/console/<port>.html`, and
     never the token. The file must be this user's regular file, mode 0600,
-    with one link, in a directory no one else can enter, and outside the
-    served repository. Its meta-refresh forwards to this plane on loopback
-    with `#console_token=<token>` in the URL's FRAGMENT, and never in the
-    query. Its JSON record (`#opendox-console`, kind
+    with one link, in a directory no one else can enter, under a state
+    directory and ancestors no other user can change (T104's own rules for
+    that tree), and outside the served repository. Its one LIVE
+    meta-refresh (none inside a `<template>`, a `<noscript>` or a raw-text
+    element counts, as none forwards a browser that runs scripts) forwards
+    to this plane on loopback with `#console_token=<token>` in the URL's
+    FRAGMENT, and never in the query. Its JSON record (`#opendox-console`, kind
     `opendox-console-access` v1) must describe that same forward: its port,
     its token, its `opened_url` and its `page_url`. The harness reads that
     file itself, with the standard library, as a browser would, and imports
-    nothing from the product.
+    nothing from the product. From here on, no line the harness prints
+    quotes that token, or any other the opener or `/capabilities` carries
+    (`Verdict.redact`), and no diagnostic quotes the entry point's output.
  7. FETCHES THE MODEL CATALOG, presenting that token in
     `X-XF-Console-Token`. It must answer the envelope the chat rail adopts
     (`schema_version` 1, `kind` `workbench-model-catalog`, `models[]`), with
@@ -127,7 +132,8 @@ another tree, copy this file into it. It takes no path or port: its scratch
 space and its `OPENDOX_STATE_DIR` are fresh temporary directories, so
 `TMPDIR` chooses where they go. Choose a short one that only you can write:
 the bundled server refuses a state directory below a directory any user can
-write without the sticky bit, and its socket path may not pass 107 bytes.
+write without the sticky bit, and so does the harness, before it installs
+anything (exit 2); and the socket path may not pass 107 bytes.
 It needs Linux (it reads `/proc`), `git`, and network access to the package
 index. The standard library only: it runs before, and outside, the
 environment it builds.
@@ -209,6 +215,11 @@ CONSOLE_FRAGMENT_KEY = "console_token"
 #: The only token the page accepts from the fragment (T104's
 #: `web/views/notebook.js`, `CONSOLE_TOKEN_SHAPE`, `^[A-Za-z0-9_-]{16,512}$`).
 CONSOLE_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]{16,512}")
+#: What stands for a console token in every line the harness prints
+#: (`Verdict.redact`), and the least length of a value it stands for: the
+#: page's own least length, so a short value never blanks out a word.
+REDACTED = "<the console token>"
+SECRET_MIN_LENGTH = 16
 CONSOLE_LINE = re.compile(r"^[ \t]*console (?P<where>(?:file:|/)\S*)", re.M)
 #: The opener's machine-readable record, "for a harness or a script"
 #: (`opendox.console_access`, T104): JSON in
@@ -303,14 +314,38 @@ class Failed(Exception):
 
 class Verdict:
     """Fail fast by default; with `--keep-going`, record and carry on where
-    the next step does not depend on the failed one."""
+    the next step does not depend on the failed one.
+
+    NO LINE IT PRINTS QUOTES A CONSOLE TOKEN. Every token the run has seen
+    (`keep_secret`: the one the opener carries, any other its forwards or
+    its record carry, one `/capabilities` publishes) is blanked out of every
+    assertion id, every reason and every note, so a product that echoes its
+    token into an answer or a path cannot make the harness publish it in the
+    CI log."""
 
     def __init__(self, keep_going: bool) -> None:
         self.keep_going = keep_going
         self.failures: list[Failed] = []
         self.passed = 0
+        self.secrets: set[str] = set()
+
+    def keep_secret(self, value: object) -> None:
+        """Never print `value`: a console token this run has seen. Only a
+        string of a token's least length (`CONSOLE_TOKEN_SHAPE`) is kept, so
+        a short value never blanks words out of an unrelated line."""
+        if isinstance(value, str) and len(value) >= SECRET_MIN_LENGTH:
+            self.secrets.add(value)
+
+    def redact(self, text: str) -> str:
+        for secret in sorted(self.secrets, key=len, reverse=True):
+            text = text.replace(secret, REDACTED)
+        return text
+
+    def note(self, text: str) -> None:
+        note(self.redact(text))
 
     def check(self, ident: str, condition: object, why: str) -> bool:
+        ident, why = self.redact(ident), self.redact(why)
         if condition:
             self.passed += 1
             print(f"ok    [{ident}]", flush=True)
@@ -336,18 +371,23 @@ class Verdict:
         if not self.failures:
             print(f"\nAT-R1 HTTP half: PASS ({self.passed} assertions held)")
             return 0
+        # Again here: a token learned after a failure was recorded.
         first = self.failures[0]
-        print(f"\nAT-R1 HTTP half: FAIL [{first.ident}]: "
-              f"{first.why.splitlines()[0]}")
+        print(self.redact(f"\nAT-R1 HTTP half: FAIL [{first.ident}]: "
+                          f"{first_line(first.why)}"))
         for later in self.failures[1:]:
-            print(f"      also FAIL [{later.ident}]: "
-                  f"{later.why.splitlines()[0]}")
+            print(self.redact(f"      also FAIL [{later.ident}]: "
+                              f"{first_line(later.why)}"))
         print(f"      {len(self.failures)} failed, {self.passed} held")
         return 1
 
 
 def note(text: str) -> None:
     print(f"      {text}", flush=True)
+
+
+def first_line(text: str) -> str:
+    return (text.splitlines() or [""])[0]
 
 
 def as_object(value) -> dict:
@@ -739,8 +779,9 @@ def _judge_module(answer: Answer, path: str, static: bool, importer: str,
             f"{path}, imported dynamically by {importer}, answers "
             f"{answer.describe()}")
         if answer.status != 200:
-            note(f"{path} (dynamic, from {importer}) answers "
-                 f"{answer.describe()}: refused, and its importer degrades")
+            verdict.note(f"{path} (dynamic, from {importer}) answers "
+                         f"{answer.describe()}: refused, and its importer "
+                         "degrades")
     if answer.status == 200:
         # SERVED, so it must be runnable: a module of any other type is
         # refused by the browser as surely as a 404 (Copilot review of
@@ -951,7 +992,7 @@ def install_opendox(ctx: Context, verdict: Verdict) -> dict:
     if use_lock:
         install += ["-c", str(lock)]
     install.append(f"{source}[local]")
-    note("$ " + " ".join(install[2:]) + (
+    verdict.note("$ " + " ".join(install[2:]) + (
         "" if use_lock else "   (no lock: it pins CPython 3.12 on Linux)"))
     installed = run(install, env=ctx.base_env, cwd=ctx.scratch,
                     timeout=INSTALL_TIMEOUT_SECONDS)
@@ -1022,9 +1063,9 @@ def no_database_answers(verdict: Verdict, env: dict[str, str]) -> None:
     # `/tmp`'s socket alone, with TCP off, passed a fixed list).
     for sock in sorted(set(postgres_sockets()) | set(DISTRIBUTION_SOCKETS)):
         if not _shared_directory(sock):
-            note(f"{sock} is another install's private socket (its "
-                 "directory admits no other user); no child is configured "
-                 "to reach it")
+            verdict.note(f"{sock} is another install's private socket "
+                         "(its directory admits no other user); no child is "
+                         "configured to reach it")
             continue
         verdict.check(f"clean.database socket {sock}",
                       not _socket_answers(sock),
@@ -1148,7 +1189,7 @@ def launch(label: str, repo: Path, ctx: Context,
         and Path(program).resolve().is_relative_to(ctx.venv.resolve()),
         f"`{argv[0]}` resolves to {program!r}, not the fresh venv's console "
         "script")
-    note("$ " + " ".join(argv))
+    verdict.note("$ " + " ".join(argv))
     out, err = ctx.scratch / f"{label}-server.out", ctx.scratch / f"{label}-server.err"
     with open(out, "wb") as stdout, open(err, "wb") as stderr:
         proc = subprocess.Popen(argv, executable=program, env=ctx.env,
@@ -1224,7 +1265,8 @@ def check_pages(server: Server, index: Answer,
     # EVERY DOCUMENT NAMES ITS PATH, or `requests_for` would skip its source
     # reads and the run would pass on less than it claims (Copilot review of
     # openDox-code#75 at 33841d4a, r4174621535).
-    pathless = [index for index, document in enumerate(as_list(documents))
+    pathless = [position for position, document
+                in enumerate(as_list(documents))
                 if not (isinstance(document, dict)
                         and isinstance(document.get("path"), str)
                         and document["path"])]
@@ -1238,16 +1280,20 @@ def check_pages(server: Server, index: Answer,
     verdict.check(f"{label}.snapshot neutral (F5.3)", not leaks,
                   f"openxFactory's vocabulary leaked into the neutral "
                   f"snapshot: {leaks}")
-    note(f"snapshot kind={snapshot.get('kind')!r}, "
-         f"{len(as_list(snapshot.get('documents')))} documents")
+    verdict.note(f"snapshot kind={snapshot.get('kind')!r}, "
+                 f"{len(as_list(snapshot.get('documents')))} documents")
     caps = fetch_object(server, "/capabilities", verdict)
+    # A token `/capabilities` publishes is never printed either, though the
+    # check below fails on it (T104).
+    verdict.keep_secret(caps.get(CONSOLE_TOKEN_FIELD))
     install_block = as_object(caps.get("install"))
     verdict.check(f"{label}.capabilities install.mode == local",
                   install_block.get("mode") == "local",
                   f"the served install block is {caps.get('install')!r}")
     pid = as_object(install_block.get("database_bundle")).get("pid")
     if isinstance(pid, int):
-        note(f"the served install reports its bundled server as pid {pid}")
+        verdict.note(f"the served install reports its bundled server as "
+                     f"pid {pid}")
     check_no_published_token(label, caps, verdict)
     return snapshot, caps
 
@@ -1288,18 +1334,58 @@ def check_grouping(label: str, snapshot: dict, caps: dict,
 # Step 6: the console token, as the user's browser is handed it (T104).
 # ---------------------------------------------------------------------------
 
+#: Elements whose content a browser that runs scripts (as the console page
+#: needs) never makes live, by the HTML standard's parsing rules: a
+#: `<template>`'s content is inert, a `<noscript>`'s is text where scripts
+#: run, and a raw-text or escapable raw-text element holds text, never
+#: elements. A refresh or a record inside one forwards and records nothing
+#: (Copilot review of openDox-code#75 at 4809b3d2, r4174671390). Two more
+#: fail closed: `select`, whose content parsers have dropped or kept as they
+#: changed, and `frameset`, after which no other element is ever inserted.
+_INERT_CONTENT = frozenset({"template", "noscript", "script", "style",
+                            "textarea", "title", "xmp", "iframe", "noembed",
+                            "noframes", "plaintext", "select", "frameset"})
+#: ... and of those, the ones whose content is TEXT: nothing inside opens an
+#: element, and only their own end tag closes them.
+_TEXT_CONTENT = _INERT_CONTENT - {"template", "select", "frameset"}
+#: ... and the ones nothing closes, to the end of the page.
+_NEVER_CLOSED = frozenset({"plaintext", "frameset"})
+
+
+def _first_attributes(attrs) -> dict[str, str]:
+    """A tag's attributes as a browser keeps them: where a name repeats,
+    the FIRST value, never the last."""
+    named: dict[str, str] = {}
+    for key, value in attrs:
+        named.setdefault(key.lower(), value or "")
+    return named
+
+
 class _RefreshContents(html.parser.HTMLParser):
-    """Every `<meta http-equiv="refresh">` `content` in a page, unescaped,
-    and the text of every JSON `<script>` whose id is the console record's."""
+    """The `content` of every LIVE `<meta http-equiv="refresh">` in a page,
+    unescaped, and the text of every live JSON `<script>` whose id is the
+    console record's. Live as a browser that runs scripts parses the page:
+    nothing inside `_INERT_CONTENT` counts, the first of a repeated
+    attribute is the one read, `http-equiv` is `refresh` exactly (ASCII
+    case aside, and no whitespace trimmed), and `/>` closes only a void
+    element, so `<template/>` stays open."""
 
     def __init__(self) -> None:
         super().__init__()
         self.contents: list[str] = []
         self.records: list[str] = []
         self._in_record = False
+        self._inert: list[str] = []
 
     def handle_starttag(self, tag, attrs) -> None:
-        named = {key.lower(): value or "" for key, value in attrs}
+        if self._inert and self._inert[-1] in _TEXT_CONTENT:
+            return                      # text to a browser, not an element
+        live = not self._inert
+        if tag in _INERT_CONTENT:
+            self._inert.append(tag)
+        if not live:
+            return
+        named = _first_attributes(attrs)
         if tag == "script":
             self._in_record = (
                 named.get("id") == CONSOLE_RECORD_ID
@@ -1307,14 +1393,19 @@ class _RefreshContents(html.parser.HTMLParser):
             if self._in_record:
                 self.records.append("")
             return
-        if tag != "meta":
-            return
-        if named.get("http-equiv", "").strip().lower() == "refresh":
+        equiv = named.get("http-equiv", "")
+        if tag == "meta" and equiv.isascii() and equiv.lower() == "refresh":
             self.contents.append(named.get("content", ""))
 
+    def handle_startendtag(self, tag, attrs) -> None:
+        # A browser ignores `/>` on any element but a void one.
+        self.handle_starttag(tag, attrs)
+
     def handle_endtag(self, tag) -> None:
-        if tag == "script":
-            self._in_record = False
+        if self._inert and tag == self._inert[-1] and tag not in _NEVER_CLOSED:
+            self._inert.pop()
+            if tag == "script":
+                self._in_record = False
 
     def handle_data(self, data) -> None:
         if self._in_record:
@@ -1328,10 +1419,7 @@ def record_disagrees_because(records: list[str], port: int,
     if len(records) != 1:
         return (f"the opener holds {len(records)} `#{CONSOLE_RECORD_ID}` "
                 "JSON records, not one")
-    try:
-        record = json.loads(records[0])
-    except ValueError:
-        return "the opener's record is not JSON"
+    record = _json_or_none(records[0])
     if not isinstance(record, dict):
         return "the opener's record is not a JSON object"
     version = record.get("schema_version")
@@ -1416,15 +1504,79 @@ def opener_location(printed: str) -> Path | None:
     return Path(urllib.parse.unquote(parts.path))
 
 
-def opener_unsafe_because(path: Path) -> str | None:
-    """Why `path` is not a private opener, or `None`: this user's regular
-    file, mode exactly 0600, with one link, in this user's own directory,
-    which no one else can enter."""
+def _writable_by(mode: int) -> str:
+    return "every user" if mode & 0o002 else "its group"
+
+
+def directory_unsafe_because(info: os.stat_result, *, own: bool) -> str | None:
+    """Why one directory on a private file's path lets another user replace
+    what lies below it, or `None`. The rules T104's opener writer holds its
+    own tree to (`opendox.console_access._unsafe_because`, the bundle's,
+    copied), asked again here of what the run left: a directory of the
+    state tree (`own`) is a real directory, this user's, that no one else
+    can write; one above it is this user's or root's, and sticky where
+    others can write it."""
+    mode = info.st_mode
+    if stat.S_ISLNK(mode):
+        return "is a symbolic link"
+    if not stat.S_ISDIR(mode):
+        return "is not a directory"
+    if own:
+        if info.st_uid != os.getuid():
+            return f"is owned by uid {info.st_uid}, not by this user"
+        if mode & 0o022:
+            return (f"is writable by {_writable_by(mode)} "
+                    f"(mode {stat.S_IMODE(mode):o})")
+        return None
+    if info.st_uid not in (os.getuid(), 0):
+        return f"is owned by uid {info.st_uid}, neither this user nor root"
+    if mode & 0o022 and not mode & stat.S_ISVTX:
+        return (f"is writable by {_writable_by(mode)} and is not sticky "
+                f"(mode {stat.S_IMODE(mode):o})")
+    return None
+
+
+def tree_unsafe_because(state: Path) -> tuple[Path, str] | None:
+    """`(directory, why)` for the first directory on `state`'s path that
+    lets another user replace what lies below it, or `None`: `state` itself
+    by the state tree's rule, every directory above it, as written and as
+    resolved, by the rule for the directories above, and every symbolic link
+    on the way, which must be this user's or root's, as T104 holds its own
+    tree (Copilot review of openDox-code#75 at 4809b3d2, r4174671426)."""
+    try:
+        for component in (state, *state.parents):
+            info = os.lstat(component)
+            if stat.S_ISLNK(info.st_mode) and info.st_uid not in (os.getuid(),
+                                                                  0):
+                return component, (f"is a symbolic link owned by uid "
+                                   f"{info.st_uid}, neither this user nor "
+                                   "root, who could point it elsewhere")
+        reason = directory_unsafe_because(os.lstat(state), own=True)
+        if reason is not None:
+            return state, reason
+        resolved = Path(os.path.realpath(state))
+        for directory in dict.fromkeys([*state.parents, *resolved.parents]):
+            reason = directory_unsafe_because(os.stat(directory), own=False)
+            if reason is not None:
+                return directory, reason
+    except OSError as exc:
+        return state, (f"cannot be examined ({type(exc).__name__}: "
+                       f"{exc.strerror})")
+    return None
+
+
+def opener_unsafe_because(path: Path) -> tuple[Path, str] | None:
+    """`(where, why)` for the first reason `path` is not a private opener,
+    or `None`: this user's regular file, mode exactly 0600, with one link,
+    in this user's own directory, which no one else can enter, under a
+    state directory and ancestors no other user can change. `where` is the
+    file or the directory at fault, and no reason quotes a path, so a
+    caller decides whether it may quote `where`."""
     try:
         info = os.lstat(path)
         directory = os.lstat(path.parent)
     except OSError as exc:
-        return f"cannot be examined ({type(exc).__name__}: {exc.strerror})"
+        return path, f"cannot be examined ({type(exc).__name__}: {exc.strerror})"
     uid = os.getuid()
     mode = stat.S_IMODE(info.st_mode)
     reason = None
@@ -1438,12 +1590,14 @@ def opener_unsafe_because(path: Path) -> str | None:
         reason = f"has {info.st_nlink} hard links, not one"
     elif mode != OPENER_MODE:
         reason = f"has mode {mode:o}, not {OPENER_MODE:o}"
-    elif not stat.S_ISDIR(directory.st_mode) or directory.st_uid != uid:
-        reason = f"sits in {path.parent}, which is not this user's own directory"
-    elif directory.st_mode & 0o077:
-        reason = (f"sits in {path.parent}, mode "
-                  f"{stat.S_IMODE(directory.st_mode):o}, which others can enter")
-    return reason
+    if reason is not None:
+        return path, reason
+    if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != uid:
+        return path.parent, "is not this user's own directory"
+    if directory.st_mode & 0o077:
+        return path.parent, (f"has mode {stat.S_IMODE(directory.st_mode):o}, "
+                             "which others can enter")
+    return tree_unsafe_because(path.parent.parent)
 
 
 def _read_without_following(path: Path, limit: int = 64 * 1024) -> str:
@@ -1565,6 +1719,37 @@ def token_in_fragment(targets: list[str | None], port: int,
     return values[0], ""
 
 
+def _json_or_none(text: str):
+    """`text` parsed as JSON, or `None` where it is not JSON or nests past
+    the parser's depth, which is the product's output and so a named
+    failure, never a harness error."""
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+
+
+def carried_tokens(targets: list[str | None], records: list[str]) -> list[str]:
+    """Every value the opener carries under `console_token`: in any
+    forward's fragment or query, or in any of its records, delivered or
+    refused. Each may be this plane's token, so `Verdict.keep_secret` keeps
+    them all out of every line the harness prints."""
+    found: list[str] = []
+    for target in filter(None, targets):
+        try:
+            parts = urllib.parse.urlsplit(target)
+        except ValueError:
+            continue
+        for part in (parts.fragment, parts.query):
+            found += urllib.parse.parse_qs(part, keep_blank_values=True).get(
+                CONSOLE_FRAGMENT_KEY, [])
+    for text in records:
+        value = as_object(_json_or_none(text)).get(CONSOLE_FRAGMENT_KEY)
+        if isinstance(value, str):
+            found.append(value)
+    return found
+
+
 def _decodings(text: str, rounds: int = 5) -> set[str]:
     """`text` and every percent-decoding of it (with `+` read as a space, and
     not), repeated until nothing new appears, at most `rounds` deep."""
@@ -1593,26 +1778,44 @@ def check_console_opener(label: str, port: int, printed: str, state_dir: Path,
     if path is None:
         return None, None
     expected = state_dir / CONSOLE_DIRNAME / f"{port}.html"
+    here = path == expected
     verdict.check(f"{label}.console opener is OPENDOX_STATE_DIR/console/<port>.html",
-                  path == expected, f"the start printed {path}, not {expected}")
+                  here, f"the start printed another path, not {expected} (the "
+                  "printed path is not quoted here or below: it is the entry "
+                  "point's output, which may hold the console token)")
+
+    def shown(where: Path) -> str:
+        # The printed path is the entry point's output, so it is quoted, and
+        # so is a directory on it, only where it is the path this run made
+        # (Copilot review of openDox-code#75 at 33841d4a, r4174621486).
+        if here:
+            return str(where)
+        return ("the printed opener" if where == path
+                else "a directory on the printed opener's path")
+
     verdict.check(f"{label}.console opener is outside the served repository",
                   not _within(path, served_root),
-                  f"{path} is inside the served repository {served_root}")
-    reason = opener_unsafe_because(path)
-    verdict.check(f"{label}.console opener is private", reason is None,
-                  f"{path} {reason}")
+                  f"{shown(path)} is inside the served repository "
+                  f"{served_root}")
+    unsafe = opener_unsafe_because(path)
+    verdict.check(f"{label}.console opener is private", unsafe is None,
+                  f"{shown(unsafe[0])} {unsafe[1]}" if unsafe else "")
     try:
         page = _read_without_following(path)
     except OSError as exc:
         verdict.check(f"{label}.console opener forwards with the token in its "
                       "fragment", False,
-                      f"{path} cannot be read ({type(exc).__name__}: "
+                      f"{shown(path)} cannot be read ({type(exc).__name__}: "
                       f"{exc.strerror})")
         return path, None
     contents = _RefreshContents()
     contents.feed(page)
     contents.close()
     targets = [refresh_target(content) for content in contents.contents]
+    # Every token the opener carries, delivered or refused, is never printed
+    # from here on, whatever answer or path later echoes it.
+    for carried in carried_tokens(targets, contents.records):
+        verdict.keep_secret(carried)
     token, why = token_in_fragment(targets, port, hosts)
     verdict.check(f"{label}.console opener forwards with the token in its "
                   "fragment", token is not None, why)
@@ -1722,8 +1925,8 @@ def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
     routes, modules = derive_bundle(server.port,
                                     index.body.decode("utf-8", "replace"),
                                     caps, verdict, label, literals)
-    note(f"derived from the served bundle: {modules} modules, "
-         f"{len(routes)} routes: {', '.join(routes)}")
+    verdict.note(f"derived from the served bundle: {modules} modules, "
+                 f"{len(routes)} routes: {', '.join(routes)}")
     verdict.check(f"{label}.bundle names the catalog route",
                   CATALOG_ROUTE in routes,
                   f"the served bundle no longer names {CATALOG_ROUTE}, so "
@@ -1734,7 +1937,7 @@ def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
                   "this harness's catalog envelope check is stale")
     for target in requests_for(routes, snapshot, grouping_field_of(caps)):
         answer = get(server.port, target, token=token)
-        note(f"GET {target} -> {answer.describe()}")
+        verdict.note(f"GET {target} -> {answer.describe()}")
         dropped = ("; a dropped connection is a handler that raised"
                    if answer.status is None else "")
         verdict.check(f"{label}.route {target}",
@@ -1760,7 +1963,7 @@ def stop_and_look(server: Server, ctx: Context, verdict: Verdict,
                   f"the server did not exit within {STOP_TIMEOUT_SECONDS:.0f}s "
                   "of SIGTERM" if rc is None else
                   f"the server exited rc={rc} after SIGTERM, not 0")
-    note(f"the entry point exited rc={rc}")
+    verdict.note(f"the entry point exited rc={rc}")
     left = bundled_server_processes(ctx.server_package, ctx.state_dir)
     verdict.check(f"{label}.stop leaves no bundled PostgreSQL process",
                   not left,
@@ -1777,8 +1980,8 @@ def check_console_gone(label: str, opener: Path | None, token: str | None,
     if opener is not None:
         verdict.check(f"{label}.stop removes the console opener",
                       not os.path.lexists(opener),
-                      f"{opener} is still there after the server stopped, "
-                      "and its token was this serve's")
+                      "the opener the start printed is still there after the "
+                      "server stopped, and its token was this serve's")
     if token is not None:
         verdict.check(f"{label}.console token never printed",
                       token not in printed,
@@ -1821,6 +2024,16 @@ def prepare() -> Context:
             f"OPENDOX_STATE_DIR {state_dir} would put the bundled server's "
             f"socket at {socket_path} bytes, past {SOCKET_PATH_MAX}; set "
             "TMPDIR to a shorter directory")
+    # THE STATE TREE STARTS PRIVATE, so step 6's verdict on it judges what
+    # the product made of it, never where TMPDIR happened to point.
+    unsafe = tree_unsafe_because(state_dir)
+    if unsafe is not None:
+        shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(state_dir, ignore_errors=True)
+        raise HarnessError(
+            f"{unsafe[0]} {unsafe[1]}, so another user could replace the "
+            f"console opener under OPENDOX_STATE_DIR {state_dir}; set TMPDIR "
+            "to a directory only you can change")
     base_env, dropped = stripped_environment(dict(os.environ))
     if dropped:
         note(f"not inherited by any child: {', '.join(dropped)}")
@@ -1903,12 +2116,14 @@ def main(argv: list[str] | None = None) -> int:
     except HarnessError as exc:
         error = str(exc)
     except Exception:  # the harness itself broke: say so, never a PASS
-        traceback.print_exc()
+        print(verdict.redact(traceback.format_exc()), end="",
+              file=sys.stderr, flush=True)
         error = "the harness raised before a verdict"
     finally:
         cleanup(ctx, args.keep)
     if error is not None:
-        print(f"\nAT-R1 HTTP half: ERROR: {error}", flush=True)
+        print(verdict.redact(f"\nAT-R1 HTTP half: ERROR: {error}"),
+              flush=True)
         return 2
     return verdict.report()
 

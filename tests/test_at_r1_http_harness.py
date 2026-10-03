@@ -34,7 +34,18 @@ is installed or started:
     is a named failure: no opener named, one somewhere else, one inside the
     served repository, one another user could read or replace, a token in
     the query, a forward to another plane, an opener left after the stop,
-    and a token printed.
+    and a token printed;
+  * only a LIVE refresh forwards, as a browser that runs scripts parses the
+    page: none inside a `<template>`, a `<noscript>` or a raw-text element,
+    the first of a repeated attribute, `http-equiv` read exactly (Copilot
+    review of #75 at 4809b3d2, r4174671390);
+  * the opener's whole path is judged as T104 holds its own tree: the state
+    directory is this user's and no one else can write it, and every
+    directory above it is this user's or root's, sticky where others can
+    write it; the harness refuses a TMPDIR that is not (r4174671426);
+  * no line the harness prints quotes a console token, from the opener, its
+    record or `/capabilities`, or the entry point's output (r4174621486,
+    carried to every diagnostic).
 """
 
 from __future__ import annotations
@@ -439,10 +450,16 @@ def _opener_page(*targets: str, records: list | None = None,
 
 def _opener(tmp_path: Path, page: str | None = None, *, mode: int = 0o600,
             dir_mode: int = 0o700) -> tuple[Path, Path]:
-    """`(state_dir, opener)`: `<state_dir>/console/<PORT>.html`."""
+    """`(state_dir, opener)`: `<state_dir>/console/<PORT>.html`.
+
+    The opener's whole path is judged, to `/`, so every directory made here
+    is set private whatever the umask, and a case changes only what it
+    names."""
     state = tmp_path / "state"
     console = state / harness.CONSOLE_DIRNAME
     console.mkdir(parents=True)
+    tmp_path.chmod(0o700)
+    state.chmod(0o700)
     opener = console / f"{PORT}.html"
     opener.write_text(_opener_page(FORWARD) if page is None else page,
                       encoding="utf-8")
@@ -930,3 +947,417 @@ def test_a_diagnostic_names_where_the_output_is_and_never_echoes_it(
     assert str(out) in said and str(err) in said
     # the after-stop check still reads all of it
     assert TOKEN in server.printed()
+
+
+# ---------------------------------------------------------------------------
+# Only a LIVE refresh forwards (Copilot review of #75 at 4809b3d2,
+# r4174671390): a browser that runs scripts never acts on one inside a
+# `<template>`, a `<noscript>` or a raw-text element, keeps the first of a
+# repeated attribute, and reads `http-equiv` exactly.
+# ---------------------------------------------------------------------------
+
+_LIVE_META = f'<meta http-equiv="refresh" content="0;url={FORWARD}">'
+_ELSEWHERE_META = ('<meta http-equiv="refresh" '
+                   'content="0;url=http://example.invalid/">')
+
+
+def _page_with(head: str, body: str = "") -> str:
+    """An opener page whose refreshes are `head` and `body`, with T104's
+    live record of `FORWARD`."""
+    return ("<!doctype html>\n<html><head><meta charset=\"utf-8\">\n"
+            f"{head}\n{_record_script(_record())}</head>"
+            f"<body>{body}</body></html>\n")
+
+
+@pytest.mark.parametrize("head, body", [
+    (f"<template>{_LIVE_META}</template>", ""),
+    (f"<noscript>{_LIVE_META}</noscript>", ""),
+    ("", f"<noscript>{_LIVE_META}</noscript>"),
+    ("", f"<template><div>{_LIVE_META}</div></template>"),
+    ("", f"<template><template></template>{_LIVE_META}</template>"),
+    (f"<template/>{_LIVE_META}", ""),
+    (f"<title>{_LIVE_META}</title>", ""),
+    (f"<style>{_LIVE_META}</style>", ""),
+    (f'<script type="text/plain">{_LIVE_META}</script>', ""),
+    ("", f"<textarea>{_LIVE_META}</textarea>"),
+    ("", f"<xmp>{_LIVE_META}</xmp>"),
+    ("", f"<iframe>{_LIVE_META}</iframe>"),
+    ("", f"<noembed>{_LIVE_META}</noembed>"),
+    ("", f"<noframes>{_LIVE_META}</noframes>"),
+    ("", f"<select>{_LIVE_META}</select>"),
+    ("", f"<plaintext></plaintext>{_LIVE_META}"),
+    ("<frameset></frameset>", _LIVE_META),
+], ids=["template", "noscript-head", "noscript-body", "template-nested-div",
+        "template-in-template", "template-self-closed", "title", "style",
+        "script", "textarea", "xmp", "iframe", "noembed", "noframes",
+        "select", "plaintext", "frameset"])
+def test_an_inert_refresh_forwards_nothing(tmp_path: Path, head: str,
+                                          body: str) -> None:
+    """The opener's one refresh sits where a browser never acts on it, so
+    the user never reaches the console, and the run must say so."""
+    state, opener = _opener(tmp_path, _page_with(head, body))
+    failures, _path, token = _read(state, _printed(opener))
+    assert failures == [FRAGMENT]
+    assert token is None
+
+
+@pytest.mark.parametrize("head", [
+    f"<template>{_ELSEWHERE_META}</template>{_LIVE_META}",
+    f"<noscript>{_ELSEWHERE_META}</noscript>{_LIVE_META}",
+    f"<title>Opening</title>{_LIVE_META}",
+    # a tag inside text content opens nothing, so its own end tag closes it
+    f"<noscript><template></noscript>{_LIVE_META}",
+    f"<iframe><template></iframe>{_LIVE_META}",
+    f"<textarea><template></textarea>{_LIVE_META}",
+    _LIVE_META.replace(">", "/>"),
+    _LIVE_META.replace('"refresh"', '"REFRESH"'),
+], ids=["after-template", "after-noscript", "after-title",
+        "noscript-holds-tags", "iframe-holds-tags", "textarea-holds-tags",
+        "void-self-closed", "upper-case"])
+def test_a_live_refresh_beside_inert_markup_is_delivered(tmp_path: Path,
+                                                         head: str) -> None:
+    state, opener = _opener(tmp_path, _page_with(head))
+    failures, _path, token = _read(state, _printed(opener))
+    assert failures == []
+    assert token == TOKEN
+
+
+@pytest.mark.parametrize("meta, delivered", [
+    ('<meta http-equiv="refresh" content="0;url=http://example.invalid/" '
+     f'content="0;url={FORWARD}">', False),
+    (f'<meta http-equiv="refresh" content="0;url={FORWARD}" '
+     'content="0;url=http://example.invalid/">', True),
+    (f'<meta http-equiv="x" http-equiv="refresh" content="0;url={FORWARD}">',
+     False),
+    (f'<meta http-equiv=" refresh" content="0;url={FORWARD}">', False),
+    (f'<meta http-equiv="refresh " content="0;url={FORWARD}">', False),
+], ids=["first-content-elsewhere", "first-content-here", "first-equiv-other",
+        "equiv-leading-space", "equiv-trailing-space"])
+def test_a_refresh_is_read_by_its_first_attributes_exactly(
+        tmp_path: Path, meta: str, delivered: bool) -> None:
+    state, opener = _opener(tmp_path, _page_with(meta))
+    failures, _path, token = _read(state, _printed(opener))
+    assert failures == ([] if delivered else [FRAGMENT])
+    assert token == (TOKEN if delivered else None)
+
+
+@pytest.mark.parametrize("wrapper", ["template", "noscript"])
+def test_an_inert_record_is_no_record(tmp_path: Path, wrapper: str) -> None:
+    page = ("<!doctype html>\n<html><head>\n"
+            f"{_LIVE_META}\n<{wrapper}>{_record_script(_record())}</{wrapper}>"
+            "</head><body></body></html>\n")
+    state, opener = _opener(tmp_path, page)
+    failures, _path, token = _read(state, _printed(opener))
+    assert failures == [RECORD]
+    assert token == TOKEN
+
+
+# ---------------------------------------------------------------------------
+# The opener's whole path, as T104 holds its own tree (Copilot review of #75
+# at 4809b3d2, r4174671426): the state directory is this user's and no one
+# else can write it, and every directory above it is this user's or root's,
+# sticky where others can write it.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("state_mode, private", [
+    (0o700, True),
+    (0o755, True),
+    (0o711, True),
+    (0o777, False),
+    (0o757, False),
+    (0o775, False),
+    (0o1777, False),
+], ids=["0700", "0755", "0711", "0777", "other-writable", "group-writable",
+        "sticky-0777"])
+def test_a_state_directory_others_can_write_is_a_named_failure(
+        tmp_path: Path, state_mode: int, private: bool) -> None:
+    state, opener = _opener(tmp_path)
+    state.chmod(state_mode)
+    verdict = harness.Verdict(keep_going=True)
+    path, token = harness.check_console_opener(
+        "t", PORT, _printed(opener), state, tmp_path / "repo", verdict,
+        hosts=SERVED)
+    assert _failures(verdict) == ([] if private else [PRIVATE])
+    assert token == TOKEN
+    if not private:
+        assert f"{state} is writable by" in verdict.failures[0].why
+
+
+@pytest.mark.parametrize("above_mode, private", [
+    (0o755, True),
+    (0o700, True),
+    (0o1777, True),
+    (0o1770, True),
+    (0o777, False),
+    (0o775, False),
+    (0o757, False),
+], ids=["0755", "0700", "sticky-0777", "sticky-group", "0777",
+        "group-writable", "other-writable"])
+def test_a_directory_above_the_state_others_can_change_is_a_named_failure(
+        tmp_path: Path, above_mode: int, private: bool) -> None:
+    above = tmp_path / "above"
+    state, opener = _opener(above)
+    above.chmod(above_mode)
+    verdict = harness.Verdict(keep_going=True)
+    harness.check_console_opener("t", PORT, _printed(opener), state,
+                                 tmp_path / "repo", verdict, hosts=SERVED)
+    assert _failures(verdict) == ([] if private else [PRIVATE])
+    if not private:
+        assert verdict.failures[0].why.startswith(f"{above} is writable by")
+        assert "not sticky" in verdict.failures[0].why
+
+
+def test_a_symbolic_link_above_the_state_this_user_owns_is_followed(
+        tmp_path: Path) -> None:
+    """A link on the way that this user owns is this user's to point; the
+    directories it leads to are judged as well."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    state, opener = _opener(tmp_path / "link")
+    failures, _path, token = _read(state, _printed(opener))
+    assert failures == []
+    assert token == TOKEN
+    real.chmod(0o777)
+    assert _read(state, _printed(opener))[0] == [PRIVATE]
+
+
+def test_a_link_s_target_is_judged_by_its_own_ancestors(tmp_path: Path) -> None:
+    """A link this user owns may lead below a directory others can change;
+    the resolved path's ancestors are judged as well as the written ones."""
+    open_dir = tmp_path / "open"
+    real = open_dir / "real"
+    real.mkdir(parents=True)
+    (tmp_path / "link").symlink_to(real)
+    state, opener = _opener(tmp_path / "link")
+    assert _read(state, _printed(opener))[0] == []
+    open_dir.chmod(0o777)
+    verdict = harness.Verdict(keep_going=True)
+    harness.check_console_opener("t", PORT, _printed(opener), state,
+                                 tmp_path / "repo", verdict, hosts=SERVED)
+    assert _failures(verdict) == [PRIVATE]
+    assert verdict.failures[0].why.startswith(f"{open_dir} is writable by")
+
+
+def _owned_by(real, faked: Path, uid: int):
+    """`real` (`os.lstat` or `os.stat`), answering `faked` as owned by
+    `uid`: no test can chown, so another user's link or directory is told."""
+    def answer(path, *args, **kwargs):
+        info = real(path, *args, **kwargs)
+        if Path(path) != faked:
+            return info
+        fields = list(info[:10])
+        fields[4] = uid
+        return os.stat_result(fields)
+    return answer
+
+
+def test_a_link_another_user_owns_above_the_state_is_a_named_failure(
+        tmp_path: Path, monkeypatch) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    state, opener = _opener(link)
+    stranger = os.getuid() + 4242
+    monkeypatch.setattr(harness.os, "lstat",
+                        _owned_by(os.lstat, link, stranger))
+    verdict = harness.Verdict(keep_going=True)
+    harness.check_console_opener("t", PORT, _printed(opener), state,
+                                 tmp_path / "repo", verdict, hosts=SERVED)
+    assert _failures(verdict) == [PRIVATE]
+    assert verdict.failures[0].why == (
+        f"{link} is a symbolic link owned by uid {stranger}, neither this "
+        "user nor root, who could point it elsewhere")
+
+
+@pytest.mark.parametrize("owner, private", [("root", True),
+                                            ("stranger", False)])
+def test_a_directory_above_the_state_another_user_owns_is_a_named_failure(
+        tmp_path: Path, monkeypatch, owner: str, private: bool) -> None:
+    above = tmp_path / "above"
+    state, opener = _opener(above)
+    uid = 0 if owner == "root" else os.getuid() + 4242
+    monkeypatch.setattr(harness.os, "stat", _owned_by(os.stat, above, uid))
+    verdict = harness.Verdict(keep_going=True)
+    harness.check_console_opener("t", PORT, _printed(opener), state,
+                                 tmp_path / "repo", verdict, hosts=SERVED)
+    assert _failures(verdict) == ([] if private else [PRIVATE])
+    if not private:
+        assert verdict.failures[0].why == (
+            f"{above} is owned by uid {uid}, neither this user nor root")
+
+
+def test_a_state_directory_that_is_a_link_is_a_named_failure(
+        tmp_path: Path) -> None:
+    elsewhere, _opener_path = _opener(tmp_path / "elsewhere")
+    state = tmp_path / "state"
+    state.symlink_to(elsewhere)
+    opener = state / harness.CONSOLE_DIRNAME / f"{PORT}.html"
+    verdict = harness.Verdict(keep_going=True)
+    harness.check_console_opener("t", PORT, _printed(opener), state,
+                                 tmp_path / "repo", verdict, hosts=SERVED)
+    assert _failures(verdict) == [PRIVATE]
+    assert verdict.failures[0].why == f"{state} is a symbolic link"
+
+
+@pytest.mark.parametrize("mode, refused", [(0o700, False), (0o1777, False),
+                                           (0o777, True), (0o775, True)],
+                         ids=["0700", "sticky", "0777", "group-writable"])
+def test_the_harness_refuses_a_tmpdir_others_can_change(
+        tmp_path_factory, monkeypatch, mode: int, refused: bool) -> None:
+    """Before anything is installed, so the verdict on the opener's tree
+    judges what the product made, never where TMPDIR pointed (exit 2)."""
+    base = tmp_path_factory.mktemp("t")
+    base.chmod(mode)
+    monkeypatch.setattr(harness.tempfile, "tempdir", str(base))
+    if refused:
+        with pytest.raises(harness.HarnessError, match="set TMPDIR"):
+            harness.prepare()
+        assert list(base.iterdir()) == []      # nothing left behind
+        return
+    ctx = harness.prepare()
+    try:
+        assert ctx.state_dir.parent == base.resolve()
+    finally:
+        harness.shutil.rmtree(ctx.scratch, ignore_errors=True)
+        harness.shutil.rmtree(ctx.state_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# No line the harness prints quotes a console token, or the entry point's
+# output (Copilot review of #75 at 33841d4a, r4174621486, carried to every
+# diagnostic).
+# ---------------------------------------------------------------------------
+
+def test_a_catalog_answer_that_echoes_the_token_never_prints_it(
+        tmp_path: Path, capsys) -> None:
+    """The catalog is asked with the token, so its answer may echo it; the
+    token the opener carried is kept out of every line from then on."""
+    state, opener = _opener(tmp_path)
+    echo = json.dumps({"error": f"unknown token {TOKEN}"})
+    files = {harness.CATALOG_ROUTE: ("application/json", echo)}
+    verdict = harness.Verdict(keep_going=True)
+    _path, token = harness.check_console_opener(
+        "t", PORT, _printed(opener), state, tmp_path / "repo", verdict,
+        hosts=SERVED)
+    with served(files, guarded=frozenset({harness.CATALOG_ROUTE})) as port:
+        harness.check_catalog(_Server(port), token, verdict)
+    verdict.report()
+    assert "t.catalog is a catalog" in _failures(verdict)
+    assert any(harness.REDACTED in failure.why for failure in verdict.failures)
+    assert not any(TOKEN in str(failure) for failure in verdict.failures)
+    assert TOKEN not in capsys.readouterr().out
+
+
+def test_every_token_the_opener_carries_is_kept_secret(tmp_path: Path) -> None:
+    """A refused forward's token, and its record's, though none is delivered."""
+    other = "Other_token-0123456789abcdef"
+    page = _opener_page(
+        f"http://127.0.0.1:{PORT}/index.html?console_token={TOKEN}"
+        f"#console_token={TOKEN}",
+        records=[_record(console_token=other)])
+    state, opener = _opener(tmp_path, page)
+    verdict = harness.Verdict(keep_going=True)
+    _path, token = harness.check_console_opener(
+        "t", PORT, _printed(opener), state, tmp_path / "repo", verdict,
+        hosts=SERVED)
+    assert token is None
+    assert {TOKEN, other} <= verdict.secrets
+    verdict.check("t.later", False, f"an answer echoed {TOKEN} and {other}")
+    assert verdict.failures[-1].why == (
+        f"an answer echoed {harness.REDACTED} and {harness.REDACTED}")
+
+
+def test_a_published_token_is_never_printed(tmp_path: Path, capsys) -> None:
+    caps = {"console_token": TOKEN, "install": {"mode": TOKEN}}
+    files = {"/snapshot.json": ("application/json",
+                                json.dumps({"documents": [{"path": "a.md"}]})),
+             "/capabilities": ("application/json", json.dumps(caps))}
+    out, err = tmp_path / "out", tmp_path / "err"
+    out.write_text("", encoding="utf-8")
+    err.write_text("", encoding="utf-8")
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.check_pages(harness.Server("t", None, port, out, err),
+                            _HTML_INDEX, verdict)
+    verdict.report()
+    assert _failures(verdict) == ["t.capabilities install.mode == local",
+                                  "t.capabilities carries no console token"]
+    assert TOKEN not in capsys.readouterr().out
+
+
+def test_a_printed_path_other_than_the_expected_one_is_never_quoted(
+        tmp_path: Path, capsys) -> None:
+    """The printed path is the entry point's output: it may carry the token,
+    so no reason quotes it, or a directory on it."""
+    state, _opener_path = _opener(tmp_path)
+    printed = f"  console /run/{TOKEN}/opener.html (this user's copy)\n"
+    verdict = harness.Verdict(keep_going=True)
+    path, token = harness.check_console_opener(
+        "t", PORT, printed, state, tmp_path / "repo", verdict, hosts=SERVED)
+    assert path == Path(f"/run/{TOKEN}/opener.html") and token is None
+    assert _failures(verdict) == [
+        "t.console opener is OPENDOX_STATE_DIR/console/<port>.html",
+        PRIVATE, FRAGMENT]
+    assert verdict.failures[1].why.startswith("the printed opener ")
+    harness.check_console_gone("t", path, None, printed, verdict)
+    assert not any(TOKEN in str(failure) for failure in verdict.failures)
+    assert TOKEN not in capsys.readouterr().out
+
+
+def test_a_printed_opener_elsewhere_is_judged_but_never_quoted(
+        tmp_path: Path, capsys) -> None:
+    """An opener that exists at a path the harness did not expect is still
+    judged, and its path, which holds a value the harness does not know,
+    is quoted by no reason, the stop's included."""
+    other = "Path_token-0123456789abcdef"
+    state, _expected = _opener(tmp_path / "expected")
+    _elsewhere, printed_opener = _opener(tmp_path / other, mode=0o644)
+    printed = _printed(printed_opener)
+    verdict = harness.Verdict(keep_going=True)
+    path, token = harness.check_console_opener(
+        "t", PORT, printed, state, tmp_path / "repo", verdict, hosts=SERVED)
+    assert (path, token) == (printed_opener, TOKEN)
+    assert _failures(verdict) == [
+        "t.console opener is OPENDOX_STATE_DIR/console/<port>.html", PRIVATE]
+    assert verdict.failures[1].why == "the printed opener has mode 644, not 600"
+    harness.check_console_gone("t", path, token, printed, verdict)
+    assert _failures(verdict)[-1] == "t.stop removes the console opener"
+    assert not any(other in str(failure) for failure in verdict.failures)
+    assert other not in capsys.readouterr().out
+
+
+def test_notes_and_the_report_are_redacted(capsys) -> None:
+    verdict = harness.Verdict(keep_going=True)
+    verdict.check("t.early", False, f"an early line with {TOKEN} in it")
+    verdict.keep_secret(TOKEN)          # learned after the failure was kept
+    verdict.note(f"GET /x?{TOKEN}")
+    assert verdict.report() == 1
+    out = capsys.readouterr().out
+    assert f"GET /x?{harness.REDACTED}" in out
+    report = out[out.index("AT-R1 HTTP half: FAIL"):]
+    assert TOKEN not in report and harness.REDACTED in report
+
+
+@pytest.mark.parametrize("value", [None, "", "short", 12345678901234567890,
+                                   "a" * 15])
+def test_a_short_or_non_string_value_is_never_kept(value) -> None:
+    """A short value would blank words out of unrelated lines."""
+    verdict = harness.Verdict(keep_going=True)
+    verdict.keep_secret(value)
+    assert verdict.secrets == set()
+    assert verdict.redact("a short line") == "a short line"
+
+
+def test_a_record_nested_past_the_parser_s_depth_is_a_named_failure(
+        tmp_path: Path) -> None:
+    """The product's output, so a named failure, never a harness error."""
+    deep = "[" * 30000 + "]" * 30000
+    page = _opener_page(FORWARD, records=[]).replace(
+        "</head>", f'<script type="application/json" id="opendox-console">'
+                   f"{deep}</script></head>")
+    state, opener = _opener(tmp_path, page)
+    failures, _path, token = _read(state, _printed(opener))
+    assert failures == [RECORD]
+    assert token == TOKEN
