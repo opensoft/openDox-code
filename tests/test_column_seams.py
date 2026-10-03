@@ -363,6 +363,29 @@ def test_a_group_edge_names_its_document_by_id(corpus) -> None:
     assert staged.editable_paths == ("sel.md",)
 
 
+def test_a_selection_file_is_a_path_where_it_spells_another_documents_id(
+        corpus) -> None:
+    """A selection's `files` are PATHS and a group's edges are IDS, and the
+    contract does not forbid one document's path from spelling another
+    document's id (Copilot review of openDox-code#77, r4173844321). Here
+    `sel.md` is the PATH of one document and the ID of another, `a.md`. The
+    selection's file is the document at `sel.md`, and a group edge naming
+    `sel.md` is the document whose id it is."""
+    snapshot = _snapshot()
+    snapshot["documents"] = [
+        {"id": "sel.md", "path": "a.md"},          # an id spelled as a path
+        {"id": "notes/sel", "path": "sel.md"},
+        *({"id": p, "path": p} for p in ("b.md", "c.md", "gone.md"))]
+    snapshot["clusters"][0]["document_edges"] = [
+        {"document": "sel.md"}, {"document": "b.md"}]
+    staged = dc.resolve_scope(snapshot, _key("staged", "s1"), source_root=corpus)
+    assert [(row.id, row.path, row.resolved) for row in staged.sections[0].documents] \
+        == [("sel.md", "sel.md", True)]
+    assert staged.editable_paths == ("sel.md",)
+    group = dc.resolve_scope(snapshot, _key("cluster", "g1"), source_root=corpus)
+    assert group.editable_paths == ("a.md", "b.md")
+
+
 def test_a_listed_document_missing_from_the_tree_is_not_resolved(corpus) -> None:
     projection = dc.resolve_scope(_snapshot(), _key("cluster", "g2"), source_root=corpus)
     rows = {row.path: row.resolved for row in projection.sections[0].documents}
