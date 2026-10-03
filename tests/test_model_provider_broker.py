@@ -3088,16 +3088,22 @@ def _read_by_urllib_alone(url: str) -> None:
         response.read()
 
 
-@pytest.mark.parametrize("resolver", ["built-in", "none"])
+@pytest.mark.parametrize("resolver", ["built-in", "none", "broker"])
 @pytest.mark.parametrize("raised", sorted(UNREADABLE_ANSWERS))
 def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
-        raised, resolver):
+        tmp_path, raised, resolver):
     """The adversarial review of openDox-code#63 at `4948e6dd`, L4. A status
     line, a protocol, a header, a body or a path that `http.client` cannot
     read or send raises an `http.client.HTTPException`, which is no
     `OSError`. So it escaped `dispatch`, with the request's headers, and the
     key, in `do_open`'s frame. Each is the fixed unreachable refusal now,
-    raised afresh where a built-in credential was presented."""
+    raised afresh where a built-in credential was presented.
+
+    THE TRANSPORT IS SHARED, so a broker's turn lands on the same sentence
+    (Copilot's review of openDox-code#63 at `44582f8f`), where it escaped
+    before. That is the one change this PR makes to the broker path's
+    failure. Raising it afresh there is openDox-code#64's, as the ruling
+    leaves that path to it."""
     answer, path = UNREADABLE_ANSWERS[raised]
     handler = type(f"_{raised}Answer", (_UnreadableAnswerHandler,),
                    {"answer": answer})
@@ -3106,12 +3112,18 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
         with pytest.raises(http.client.HTTPException) as unread:
             _read_by_urllib_alone(base + path)
         assert type(unread.value) is getattr(http.client, raised)
-        binding = (_built_in_binding(endpoint=base + path)
-                   if resolver == "built-in"
-                   else _none_binding(endpoint=base + path))
+        runner = _refusing_runner
+        if resolver == "built-in":
+            binding = _built_in_binding(endpoint=base + path)
+        elif resolver == "none":
+            binding = _none_binding(endpoint=base + path)
+        else:
+            binding = _broker_binding(_write_broker(tmp_path),
+                                      endpoint=base + path)
+            runner = provider_mod.subprocess_broker_runner
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
-            runner=_refusing_runner, notice=lambda _text: None,
+            runner=runner, notice=lambda _text: None,
             environ={ENV_NAME: KEY_SENTINEL})
         envelope = _Envelope()
         with pytest.raises(provider_mod.BrokerRefused) as caught:
