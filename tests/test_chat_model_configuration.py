@@ -63,6 +63,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import types
 from pathlib import Path
@@ -100,13 +101,54 @@ CONFIGURED_NONE = ("chat is unavailable — no approved model is configured; bot
                    "editors remain fully usable.")
 
 
-def _no_omp_path(tmp_path: Path) -> str:
-    """This process's PATH with every directory holding `omp` left out."""
-    kept = [entry for entry in os.environ.get("PATH", "").split(os.pathsep)
-            if entry and shutil.which(bridge_mod.HARNESS_COMMAND, path=entry) is None]
-    path = os.pathsep.join(kept)
-    assert shutil.which(bridge_mod.HARNESS_COMMAND, path=path) is None
-    return path
+def _no_omp_path(tmp_path: Path, path: str | None = None) -> str:
+    """This process's PATH (or `path`) with `omp` taken out and EVERY OTHER
+    COMMAND KEPT, in order. A directory holding `omp` is replaced by a mirror
+    of it under `tmp_path`: a symlink to each of its other entries. Dropping
+    the whole directory would drop whatever else it holds, `git` among them,
+    and a child that cannot find `git` fails before the case it exists for
+    (Copilot at openDox-code#74 9551f20d, r4170794383)."""
+    harness = bridge_mod.HARNESS_COMMAND
+    mirrors = Path(tempfile.mkdtemp(prefix="path-without-omp-", dir=tmp_path))
+    kept = []
+    for index, entry in enumerate(
+            (os.environ.get("PATH", "") if path is None else path).split(os.pathsep)):
+        if not entry:
+            continue
+        if shutil.which(harness, path=entry) is None:
+            kept.append(entry)
+            continue
+        mirror = mirrors / str(index)
+        mirror.mkdir()
+        for item in sorted(Path(entry).iterdir()):
+            if item.name != harness:
+                (mirror / item.name).symlink_to(item)
+        kept.append(str(mirror))
+    without = os.pathsep.join(kept)
+    assert shutil.which(harness, path=without) is None
+    return without
+
+
+def test_a_path_without_omp_keeps_every_other_command(tmp_path) -> None:
+    """A directory that holds `omp` beside another command keeps the other
+    command, in its place in the order."""
+    shared = tmp_path / "shared-bin"
+    shared.mkdir()
+    for name in (bridge_mod.HARNESS_COMMAND, "fixture-git"):
+        tool = shared / name
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+    before, after = tmp_path / "before", tmp_path / "after"
+    before.mkdir()
+    after.mkdir()
+    path = os.pathsep.join([str(before), str(shared), str(after)])
+    without = _no_omp_path(tmp_path, path).split(os.pathsep)
+    assert len(without) == 3, "a directory holding omp was dropped whole"
+    assert without[0] == str(before) and without[2] == str(after), without
+    assert shutil.which(bridge_mod.HARNESS_COMMAND, path=os.pathsep.join(without)) is None
+    found = shutil.which("fixture-git", path=os.pathsep.join(without))
+    assert found is not None and Path(found).parent == Path(without[1]), found
+    assert Path(found).resolve() == (shared / "fixture-git").resolve()
 
 
 def _fake_omp(tmp_path: Path) -> Path:
