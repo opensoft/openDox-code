@@ -121,6 +121,7 @@ from datetime import datetime, timezone
 from opendox import doxbench_binding as binding_mod
 from opendox import doxbench_bridge as bridge_mod
 from opendox import doxbench_model as model_mod
+from opendox import doxbench_trust as trust_mod
 
 #: THIS MODULE'S OWN NAME, declared so the structural boundary test and the
 #: module cannot drift into naming two different files. The test asserts the
@@ -864,7 +865,7 @@ def _declared_string(document: Mapping, field: str) -> str:
     return value
 
 
-def _broker_operation(binding, operation: str, read, *, runner,
+def _broker_operation(binding, operation: str, read, *, runner, trust,
                       source=None, retry_of: str | None = None):
     """Run one declared `operation` through `runner`, and return what `read`
     makes of its answer. It is the one way each of the four operations asks
@@ -886,7 +887,17 @@ def _broker_operation(binding, operation: str, read, *, runner,
     holder's answer on openDox-code#64, 2026-10-02), so a refusal of the
     answer kills what is left of the broker's group too (`_settled`). A
     runner injected in its place, such as a test's, is given the argv alone
-    and its answer is read here, as before."""
+    and its answer is read here, as before.
+
+    NO BROKER RUNS FOR A BINDING THE TRUST VERDICT DOES NOT COVER (#1144
+    16.3a; plan 034 T100; RULED openxFactory#656 comment 5962785556, item
+    2). All four operations come through here, whichever runner was
+    injected, so this is where every broker spawn asks: `trust` must be a
+    `doxbench_trust.TrustVerdict` trusting exactly this binding, or the
+    binding is refused by name before its invocation is even assembled,
+    and before either runner's branch below. `doxbench_install` asks the
+    policy first. This is the defence beneath it."""
+    trust_mod.require_admitted(binding, trust)
     argv = broker_operation_argv(binding, operation, retry_of=retry_of)
     if runner is subprocess_broker_runner:
         result, failure = _run_broker(argv, source=source,
@@ -913,7 +924,7 @@ def _broker_operation(binding, operation: str, read, *, runner,
 # ---------------------------------------------------------------------------
 
 
-def hand_off_credential(binding, source, *,
+def hand_off_credential(binding, source, *, trust=None,
                         runner=subprocess_broker_runner) -> str:
     """Hand a human's credential to the broker's `intake` and keep only the
     reference.
@@ -943,9 +954,12 @@ def hand_off_credential(binding, source, *,
     here, where both entry points already catch a broker's refusal.
 
     A refusal names `intake` and keeps nothing the broker wrote
-    (`_broker_operation`)."""
+    (`_broker_operation`).
+
+    `trust` is the verdict covering this exact binding (#1144 16.3a). Without
+    one the binding is refused by name and `source` is never read."""
     return _broker_operation(binding, OPERATION_INTAKE, _intake_reference,
-                             runner=runner, source=source)
+                             runner=runner, source=source, trust=trust)
 
 
 def _intake_reference(answer: object) -> str:
@@ -966,7 +980,7 @@ def _intake_reference(answer: object) -> str:
 # ---------------------------------------------------------------------------
 
 
-def mint(binding, *, retry_of: str | None = None,
+def mint(binding, *, trust=None, retry_of: str | None = None,
          runner=subprocess_broker_runner) -> MintedToken:
     """Ask the broker for a short-lived token.
 
@@ -1013,7 +1027,7 @@ def mint(binding, *, retry_of: str | None = None,
     return _broker_operation(
         binding, OPERATION_MINT,
         lambda answer: _minted_token(answer, binding),
-        runner=runner, retry_of=retry_of)
+        runner=runner, retry_of=retry_of, trust=trust)
 
 
 def _minted_token(answer: object, binding) -> MintedToken:
@@ -1036,7 +1050,7 @@ def _minted_token(answer: object, binding) -> MintedToken:
         audit_ref=_declared_string(document, "audit_ref"))
 
 
-def revoke(binding, *, runner=subprocess_broker_runner) -> str:
+def revoke(binding, *, trust=None, runner=subprocess_broker_runner) -> str:
     """Destroy the broker's custody of this binding's credential.
 
     Returns the revocation's own `audit_ref`. The declaration keeps the audit
@@ -1046,7 +1060,7 @@ def revoke(binding, *, runner=subprocess_broker_runner) -> str:
     or the same returned reference, never as the broker's own words. A
     refusal names `revoke` (`_broker_operation`)."""
     return _broker_operation(binding, OPERATION_REVOKE, _revocation_audit_ref,
-                             runner=runner)
+                             runner=runner, trust=trust)
 
 
 def _revocation_audit_ref(answer: object) -> str:
@@ -1058,7 +1072,8 @@ def _revocation_audit_ref(answer: object) -> str:
     return _declared_string(document, "audit_ref")
 
 
-def list_references(binding, *, runner=subprocess_broker_runner) -> list:
+def list_references(binding, *, trust=None,
+                    runner=subprocess_broker_runner) -> list:
     """The broker's NON-SECRET reference index, as the declaration returns it.
 
     Safe to read and safe to print: `list` never opens a custody file, and the
@@ -1067,7 +1082,7 @@ def list_references(binding, *, runner=subprocess_broker_runner) -> list:
     an index it does not own invents a second contract for it. A refusal
     names `list` (`_broker_operation`)."""
     return _broker_operation(binding, OPERATION_LIST, _reference_index,
-                             runner=runner)
+                             runner=runner, trust=trust)
 
 
 def _reference_index(answer: object) -> list:
@@ -1137,7 +1152,7 @@ def _os_keyring():
     return keyring
 
 
-def resolve_credential_reference(binding, *, environ=None,
+def resolve_credential_reference(binding, *, trust=None, environ=None,
                                  keyring_backend=None) -> str:
     """THE BUILT-IN RESOLVER: the credential an `env:NAME` or
     `keyring:SERVICE/USERNAME` reference names, read NOW.
@@ -1167,7 +1182,15 @@ def resolve_credential_reference(binding, *, environ=None,
     that check here. The check is repeated before the first read all the
     same, because this is the function that holds the key. What reaches it
     is a programming error, like a broker's reference, and nothing has been
-    read when it is raised."""
+    read when it is raised.
+
+    NOTHING IS READ FOR A BINDING THE TRUST VERDICT DOES NOT COVER (#1144
+    16.3a; plan 034 T100; RULED openxFactory#656 comment 5962785556, item 2).
+    `trust` must be a `doxbench_trust.TrustVerdict` trusting exactly this
+    binding. It is asked after the two programming-error checks above and
+    BEFORE THE FIRST READ, so a binding a repository declared and nobody
+    trusted reads no variable and no keyring entry. `doxbench_install` asks
+    the policy before any port is built. This is the defence beneath it."""
     reference = binding_mod.built_in_reference_parts(binding.credential_ref)
     if reference is None:
         raise AssertionError(
@@ -1179,6 +1202,7 @@ def resolve_credential_reference(binding, *, environ=None,
             f"binding {binding.id!r} routes a credential the built-in "
             "resolver reads over a route that is not private, which the "
             "record refuses when it is declared; nothing was read")
+    trust_mod.require_admitted(binding, trust)
     if reference.form == binding_mod.CREDENTIAL_REF_ENV:
         value = (os.environ if environ is None else environ).get(
             reference.name)
@@ -1539,6 +1563,7 @@ class BrokeredProviderPort:
     every capabilities probe."""
 
     def __init__(self, binding, catalog, *,
+                 trust=None,
                  timeout_seconds: float = 60.0,
                  runner=subprocess_broker_runner,
                  opener=urllib.request.urlopen,
@@ -1555,6 +1580,10 @@ class BrokeredProviderPort:
                 f"catalog must be a ModelCatalog, got {type(catalog).__name__}")
         self._binding = binding
         self._declared_catalog = catalog
+        # THE TRUST VERDICT (#1144 16.3a). Held, and asked again by every act
+        # below, so a port built around a binding nobody trusted spawns,
+        # reads and contacts nothing (`dispatch`).
+        self._trust = trust
         self._timeout_seconds = model_mod.validated_timeout_seconds(
             timeout_seconds)
         self._runner = runner
@@ -1584,8 +1613,12 @@ class BrokeredProviderPort:
         The same honesty the harness bridge keeps: a declaration is available
         until something is measured, and a broker that has refused is measured.
         Nothing here contacts the broker, or reads a reference, to find out.
-        A later turn that succeeds makes the entry available again."""
-        if self._available:
+        A later turn that succeeds makes the entry available again.
+
+        A BINDING THE TRUST VERDICT DOES NOT COVER IS NEVER AVAILABLE (#1144
+        16.3a), so no turn can select it."""
+        if self._available and isinstance(self._trust, trust_mod.TrustVerdict) \
+                and self._trust.admits(self._binding):
             return self._declared_catalog
         return model_mod.ModelCatalog.from_entries([
             dataclasses.replace(entry, available=False)
@@ -1624,12 +1657,20 @@ class BrokeredProviderPort:
         A RECORD NO BROKER ANSWERS takes `_dispatch_without_a_broker` instead
         (#1144 box 16.3): no mint, no ledger event, and no retry.
 
+        A BINDING THE TRUST VERDICT DOES NOT COVER IS REFUSED FIRST, by name,
+        before the prompt is rendered, a broker is spawned, a reference is
+        read or the endpoint is contacted (#1144 16.3a; RULED openxFactory#656
+        comment 5962785556, item 2). That holds for the auth kind `none` too:
+        it presents no credential, but it would still send the turn to an
+        endpoint the binding chose.
+
         EITHER WAY, THE PROVIDER IS CALLED THROUGH `_call_provider`, so a
         broker's minted token keeps every rule a built-in credential keeps: no
         redirect, no proxy over plain `http://`, and a refusal that chains
         nothing (Brett Heap's word of 2026-09-29). The re-mint and the retry
         above therefore happen outside every handler, so a refusal raised by
         either keeps no context either."""
+        trust_mod.require_admitted(self._binding, self._trust)
         handle = getattr(prompt_envelope, "model_id", None)
         if not isinstance(handle, str) or not handle:
             entries = self._declared_catalog.entries
@@ -1687,7 +1728,7 @@ class BrokeredProviderPort:
                 == binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER):
             try:
                 credential = _PresentedCredential(resolve_credential_reference(
-                    self._binding, environ=self._environ,
+                    self._binding, trust=self._trust, environ=self._environ,
                     keyring_backend=self._keyring_backend))
             except BrokerRefused:
                 with self._lock:
@@ -1768,8 +1809,8 @@ class BrokeredProviderPort:
                 return held
             self._token = None
             try:
-                minted = mint(self._binding, retry_of=retry_of,
-                              runner=self._runner)
+                minted = mint(self._binding, trust=self._trust,
+                              retry_of=retry_of, runner=self._runner)
             except BrokerRefused:
                 self._available = False
                 raise

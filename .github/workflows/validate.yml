@@ -257,6 +257,29 @@ jobs:
           MIN_SELECTED: "2476"
           MIN_PASSED: "2465"
           # EXACT — the load-bearing number. Moves only with its reason.
+          #
+          # MOVED FROM 11 TO 14 BY plan 034 T100 (#1144 16.3a), for its three
+          # strict-xfail cases in `tests/test_model_binding_trust.py`, each of
+          # which waits on another draft and names it: the trust store's
+          # default location (openDox-code#69's `config.state_dir`), the chat
+          # rail's trust remedy (openDox-code#74's visible no-model line), and
+          # a served turn that reaches its model step standalone
+          # (openDox-code#77's scope seam). JUnit reports an xfail as a skip.
+          # Each turns into a pass when T100 merges `main` after that draft has
+          # landed, so this moves back by one with each, WITH the reason, and
+          # is 11 again once all three are in.
+          # BACK FROM 14 TO 13: #74 landed on `main` (`9a490405`) and reached
+          # this branch through #64's merge of `main` `1130e996` (`63e534cb`),
+          # so the rail case runs and passes, with the rail's trust line it
+          # waited on.
+          # BACK FROM 13 TO 12: #69 landed on `main` (`5e7ab003`) and reached
+          # this branch through #64's final head (`04bcb68e`), so the store's
+          # default-home case runs and passes. One remains: #77's.
+          # BACK FROM 12 TO 11: #77 landed on `main` (`e49b17c3`) and this
+          # branch merged it, so the served-turn case runs and passes. All
+          # three are in, and the pin is `main`'s again. The floors are not
+          # moved: CI read 3327 / 3316 on this change's first base (#64, run
+          # 37072154936), already 851 above them.
           EXPECT_SKIPPED: "11"
         run: |
           python3 - <<'PY' > triple.env
