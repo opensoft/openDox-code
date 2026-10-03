@@ -914,37 +914,42 @@ def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
         print(f"generate-and-open refused: {exc}", file=sys.stderr)
         return 1
     try:
-        print(f"  serving {url}")
-        print(f"  snapshot {serve_mod.server_url(httpd, '/snapshot.json')}")
-        if console is not None:
-            print(f"  console {console.file_url} (this user's private copy, "
-                  "mode 0600: open it to open the console page again)")
-        # The URL is ALWAYS printed on its own line, AND FLUSHED (plan 034
-        # T056). Where standard output is a pipe or a file, Python buffers it
-        # by block, and the process is about to block in `serve_forever()`.
-        # So without the flush, a wrapper reading this line never sees it
-        # while the server runs, and it cannot learn an ephemeral port or tell
-        # that the server started. Measured at openDox-code#59 e3ef506a: zero
-        # lines in 20 s on a pipe. It carries no token.
-        print(url, flush=True)
-
-        if not args.no_open:
-            try:
-                opener(console.file_url if console is not None else url)
-            except Exception as exc:  # a headless box has no browser — never fatal
-                print(f"  (could not open a browser: {exc}; open the "
-                      f"{'console file' if console is not None else 'URL'} "
-                      "above manually)")
-
-        if args.no_serve:
-            return 0
-
-        print("  serving until interrupted (Ctrl-C to stop)", flush=True)
-        # A plain `kill` stops a standalone console the way Ctrl-C does, so
-        # the copy below is removed (`terminate_as_interrupt`); a plane that
-        # wrote no copy keeps SIGTERM's default action.
+        # A plain `kill`, or a closed terminal, stops a standalone console the
+        # way Ctrl-C does, so the copy below is removed
+        # (`terminate_as_interrupt`); a plane that wrote no copy keeps the
+        # signals' default actions. It covers the WHOLE window from the write
+        # to the stop, the browser opener included, which can take seconds
+        # (T104's self-pass), and a stop asked for there is a clean stop too.
         with console_access.terminate_as_interrupt(console is not None):
             try:
+                print(f"  serving {url}")
+                print(f"  snapshot {serve_mod.server_url(httpd, '/snapshot.json')}")
+                if console is not None:
+                    print(f"  console {console.file_url} (this user's private "
+                          "copy, mode 0600: open it to open the console page "
+                          "again)")
+                # The URL is ALWAYS printed on its own line, AND FLUSHED (plan
+                # 034 T056). Where standard output is a pipe or a file, Python
+                # buffers it by block, and the process is about to block in
+                # `serve_forever()`. So without the flush, a wrapper reading
+                # this line never sees it while the server runs, and it cannot
+                # learn an ephemeral port or tell that the server started.
+                # Measured at openDox-code#59 e3ef506a: zero lines in 20 s on
+                # a pipe. It carries no token.
+                print(url, flush=True)
+
+                if not args.no_open:
+                    try:
+                        opener(console.file_url if console is not None else url)
+                    except Exception as exc:  # a headless box has no browser — never fatal
+                        print(f"  (could not open a browser: {exc}; open the "
+                              f"{'console file' if console is not None else 'URL'} "
+                              "above manually)")
+
+                if args.no_serve:
+                    return 0
+
+                print("  serving until interrupted (Ctrl-C to stop)", flush=True)
                 httpd.serve_forever()
             except KeyboardInterrupt:
                 pass

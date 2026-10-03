@@ -2615,18 +2615,21 @@ def serve(
         httpd.server_close()
         raise
     try:
-        if console is not None:
-            print(f"console {console.file_url} (this user's private copy, "
-                  "mode 0600: open it to open the console page)")
-        # FLUSHED before the process blocks (plan 034 T056): where standard
-        # output is a pipe or a file it is block-buffered, so an unflushed line
-        # never reaches a wrapper while the server runs, and the wrapper cannot
-        # learn an ephemeral port or tell that the server started.
-        print(f"serving ideation dashboard at {page}", flush=True)
-        # A plain `kill` stops a standalone console the way Ctrl-C does, so the
-        # copy is removed; a plane that wrote none keeps SIGTERM's default.
+        # A plain `kill`, or a closed terminal, stops a standalone console the
+        # way Ctrl-C does, so the copy is removed; a plane that wrote none
+        # keeps the signals' defaults. It covers the whole window from the
+        # write to the stop (T104's self-pass).
         with console_access.terminate_as_interrupt(console is not None):
             try:
+                if console is not None:
+                    print(f"console {console.file_url} (this user's private "
+                          "copy, mode 0600: open it to open the console page)")
+                # FLUSHED before the process blocks (plan 034 T056): where
+                # standard output is a pipe or a file it is block-buffered, so
+                # an unflushed line never reaches a wrapper while the server
+                # runs, and the wrapper cannot learn an ephemeral port or tell
+                # that the server started.
+                print(f"serving ideation dashboard at {page}", flush=True)
                 httpd.serve_forever()
             except KeyboardInterrupt:
                 pass

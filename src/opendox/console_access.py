@@ -41,24 +41,34 @@ THE COPY IS CHECKED THE WAY openDox-code#69's BUNDLE CHECKS ITS TREE
 are that module's private helpers and its refusal names a socket:
 
   * the state directory and `console/` must be real directories, this user's,
-    writable by no one else; every directory above them must be this user's or
-    root's, and one that others can write must be sticky; every symbolic link
-    on the configured path must be this user's or root's;
+    writable by no one else, and `console/` exactly 0700; every directory
+    above them must be this user's or root's, and one that others can write
+    must be sticky; every symbolic link on the configured path must be this
+    user's or root's;
   * a missing directory is made relative to its parent's DESCRIPTOR, born
     0700, and opened without following a link before anything is made under
     it;
   * the file is created exclusively, without following a link, set to exactly
     0600 by its descriptor, and renamed into place. A name already at the
-    target that is not this user's own regular file (a link, a directory, a
-    file another user owns, a file with a second hard link) is REFUSED, never
-    followed or replaced;
+    target that is not this user's own regular file of mode 0600 with one
+    link (a link, a directory, a FIFO, a file another user owns, a file with
+    a second hard link, a loosened file) is REFUSED, never followed or
+    replaced;
   * a READ asks all of it again of what exists, and of the file by its
-    descriptor: a regular file, this user's, exactly 0600, one link;
-  * and the state directory may not BE, or lie inside, a root the plane
-    serves (its checkout and any declared source root), by name and before
-    any write, as T100's served-repository boundary refuses its own: the
-    token must never sit inside what `/source` can serve (holder's ruling on
-    openxFactory#1220's review, Copilot `r4171166321`).
+    descriptor, opened without blocking: a regular file, this user's,
+    exactly 0600, one link;
+  * the state directory and every root the plane serves may not overlap in
+    either direction, by name and before any write, as T100's
+    served-repository boundary refuses its own (holder's rulings on
+    openxFactory#1220's review, Copilot `r4171166321`, and on batch N's,
+    `r4174345203`);
+  * every refusal names its path, an operating-system one included, so an
+    entry point refuses its start by name; and the copy is removed when the
+    server stops, by Ctrl-C, SIGTERM or SIGHUP, or when its start is refused
+    after it was written.
+
+#1144 12.4a, as T007 batch N amends it (openxFactory#1222), is the normative
+text this module realizes.
 
 A CREATED FILE, with no carve-manifest row (RULED OQ-C).
 """
@@ -105,6 +115,9 @@ RECORD_SCHEMA_VERSION = 1
 RECORD_ELEMENT_ID = "opendox-console"
 #: The one mode a private copy may have.
 PRIVATE_MODE = 0o600
+#: The one mode the copies' directory, `console/`, may have (#1144 12.4a: the
+#: copy is mode 0600 "in a directory of mode 0700").
+CONSOLE_DIR_MODE = 0o700
 #: A copy is a few hundred bytes; a read stops well past that.
 _READ_LIMIT = 64 * 1024
 #: `secrets.token_urlsafe` spells a token in these characters only, so a token
@@ -208,6 +221,20 @@ def _unsafe_because(info: os.stat_result, *, uid: int, own: bool) -> str | None:
     return None
 
 
+def _console_dir_unsafe_because(info: os.stat_result, *, uid: int) -> str | None:
+    """Why the copies' own directory is unsafe, or `None`: the rules for
+    every directory this user owns on the path, and exactly mode 0700 (#1144
+    12.4a). A `console/` loosened after it was made is refused by name, as a
+    loosened copy is, even where no one else can write it."""
+    reason = _unsafe_because(info, uid=uid, own=True)
+    # The PERMISSION bits only: a directory made under a setgid parent
+    # inherits the setgid bit, which grants no one access.
+    permissions = stat.S_IMODE(info.st_mode) & 0o777
+    if reason is None and permissions != CONSOLE_DIR_MODE:
+        reason = f"has mode {permissions:o}, not {CONSOLE_DIR_MODE:o}"
+    return reason
+
+
 def _unsafe(path: Path, reason: str) -> ConsoleAccessRefused:
     return ConsoleAccessRefused(
         f"{path} {reason}, so another user could replace or read the console "
@@ -247,7 +274,9 @@ def _refuse_an_unsafe_tree(state_dir: Path, *, existing_only: bool) -> None:
         if not present(directory):
             continue
         info = os.lstat(directory) if mine else os.stat(directory)
-        reason = _unsafe_because(info, uid=uid, own=mine)
+        reason = (_console_dir_unsafe_because(info, uid=uid)
+                  if directory == tree[1]
+                  else _unsafe_because(info, uid=uid, own=mine))
         if reason is not None:
             raise _unsafe(directory, reason)
 
@@ -412,11 +441,20 @@ def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
                        served_roots: Iterable[Path | str]) -> PrivateCopy:
     """Write the copy for the plane on `port`, mode 0600, or refuse.
 
-    `served_roots` are the roots this plane serves (`/source`'s checkout and
-    any declared source root): a state directory that is one of them, or lies
-    inside one, is refused before anything is written. Replaces this user's
-    own earlier copy for the same port (a server restarted there), and refuses
-    anything else already at that name."""
+    `served_roots` are the roots this plane serves: the state directory and
+    any of them may not overlap, in either direction, and that is asked
+    before anything is written. A file already at the copy's path is replaced
+    ONLY when it is this user's own regular file of mode 0600 with one link,
+    an earlier serve's copy for this port (#1144 12.4a). Anything else there,
+    a loosened copy included, is refused by name and never replaced.
+
+    EVERY REFUSAL NAMES ITS PATH (the opener file's lifecycle, T104's
+    self-pass). An operating-system refusal on the way (a parent that will
+    not let this user make the state directory, a full disk) is a
+    `ConsoleAccessRefused` naming the copy, so the entry point refuses its
+    start by name instead of ending in a traceback. And a copy whose
+    read-back fails is removed with the refusal, so a start that never served
+    leaves no copy behind."""
     state = Path(state_dir)
     _refuse_a_served_state_dir(state, tuple(served_roots), port=port)
     record = {
@@ -428,28 +466,53 @@ def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
         "pid": os.getpid(),
         FRAGMENT_KEY: token,
     }
-    _refuse_an_unsafe_tree(state, existing_only=True)
     target = private_copy_path(state, port)
+    try:
+        identity = _write_the_copy(state, target, record)
+    except OSError as exc:
+        raise ConsoleAccessRefused(
+            f"{target} cannot be written ({exc}), so the console token has no "
+            "private copy and the start is refused. Use a state directory this "
+            f"user can write ({runtime_config.PREFIX}STATE_DIR)") from None
+    copy = PrivateCopy(path=target, page_url=page_url,
+                       opened_url=record["opened_url"], identity=identity)
+    try:
+        read_private_copy(target)   # what was written is what a reader accepts
+    except BaseException:
+        remove_private_copy(copy)
+        raise
+    return copy
+
+
+def _write_the_copy(state: Path, target: Path,
+                    record: Mapping[str, Any]) -> tuple[int, int]:
+    """`write_private_copy`'s writing half: the tree judged and made, the
+    name judged, the file written beside it and renamed into place. Returns
+    the written file's `(st_dev, st_ino)`."""
+    _refuse_an_unsafe_tree(state, existing_only=True)
     directory = _open_private_directory(target.parent, state=state)
     uid = os.getuid()
     temporary = f".{target.name}.opendox-{os.getpid()}"
     try:
         # Judged only after the directories exist: what `existing_only` could
-        # not see before they were made, it sees now.
+        # not see before they were made, it sees now. `console/` is judged by
+        # its descriptor too, its exact mode included.
         _refuse_an_unsafe_tree(state, existing_only=False)
+        reason = _console_dir_unsafe_because(os.fstat(directory), uid=uid)
+        if reason is not None:
+            raise _unsafe(target.parent, reason)
         try:
             present = os.stat(target.name, dir_fd=directory,
                               follow_symlinks=False)
         except FileNotFoundError:
             present = None
-        # THIS USER'S OWN regular file, with one link, is an earlier serve's
-        # copy for this port, and is replaced. Anything else was PLANTED or
-        # LINKED there, and is refused, never followed or replaced.
-        if present is not None and not (
-                stat.S_ISREG(present.st_mode) and present.st_uid == uid
-                and present.st_nlink == 1):
-            reason = (_file_unsafe_because(present, uid=uid)
-                      or "is not this user's own file")
+        # THIS USER'S OWN regular file, of mode 0600, with one link, is an
+        # earlier serve's copy for this port, and is replaced. Anything else
+        # was PLANTED, LINKED or LOOSENED there, and is refused, never
+        # followed or replaced (#1144 12.4a).
+        reason = (None if present is None
+                  else _file_unsafe_because(present, uid=uid))
+        if reason is not None:
             raise ConsoleAccessRefused(
                 f"{target} {reason}: something other than this user's own "
                 "private copy is at that name, so it is refused, never "
@@ -459,17 +522,19 @@ def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
         handle = os.open(temporary,
                          os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                          PRIVATE_MODE, dir_fd=directory)
+        # From here a failure (a full disk, an interrupt) removes the
+        # temporary file it made, so no partial copy is left beside the name.
         try:
-            os.fchmod(handle, PRIVATE_MODE)
-            data = _opener_html(record).encode("utf-8")
-            view = memoryview(data)
-            while view:
-                view = view[os.write(handle, view):]
-            os.fsync(handle)
-            written = os.fstat(handle)
-        finally:
-            os.close(handle)
-        try:
+            try:
+                os.fchmod(handle, PRIVATE_MODE)
+                data = _opener_html(record).encode("utf-8")
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(handle, view):]
+                os.fsync(handle)
+                written = os.fstat(handle)
+            finally:
+                os.close(handle)
             os.replace(temporary, target.name, src_dir_fd=directory,
                        dst_dir_fd=directory)
         except BaseException:
@@ -478,11 +543,7 @@ def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
             raise
     finally:
         os.close(directory)
-    copy = PrivateCopy(path=target, page_url=page_url,
-                       opened_url=record["opened_url"],
-                       identity=(written.st_dev, written.st_ino))
-    read_private_copy(target)       # what was written is what a reader accepts
-    return copy
+    return (written.st_dev, written.st_ino)
 
 
 def read_private_copy(path: Path | str) -> dict:
@@ -513,7 +574,7 @@ def read_private_copy(path: Path | str) -> dict:
         raise _unsafe(target.parent, _unsafe_because(info, uid=uid, own=True)
                       or "cannot be opened") from None
     try:
-        reason = _unsafe_because(os.fstat(directory), uid=uid, own=True)
+        reason = _console_dir_unsafe_because(os.fstat(directory), uid=uid)
         if reason is not None:
             raise _unsafe(target.parent, reason)
         # `O_NONBLOCK` (Copilot at openDox-code#84, r4174674702): a FIFO
@@ -576,7 +637,13 @@ def remove_private_copy(copy: PrivateCopy | None) -> None:
     name (never over a still newer copy) and its temporary name removed. The
     entry points also remove the copy BEFORE they close the listening socket,
     so no later serve can bind the port, and write its own copy, until this
-    one is gone."""
+    one is gone.
+
+    PUT BACK BY A RENAME WHERE A HARD LINK CANNOT BE MADE (T104's self-pass).
+    A filesystem without hard links refuses the link (EPERM), and so does a
+    directory, and the other serve's copy used to be deleted with the
+    temporary name. It is renamed back instead, where the name is still
+    free."""
     if copy is None:
         return
     try:
@@ -596,17 +663,32 @@ def remove_private_copy(copy: PrivateCopy | None) -> None:
             if (info.st_dev, info.st_ino) != copy.identity:
                 # ANOTHER SERVE'S COPY: put it back under its name, unless a
                 # still newer one has arrived there, which then stands.
-                with contextlib.suppress(FileExistsError):
+                try:
                     os.link(taken, name, src_dir_fd=directory,
                             dst_dir_fd=directory, follow_symlinks=False)
+                except FileExistsError:
+                    pass
+                except OSError:
+                    if not _name_exists(name, directory):
+                        os.rename(taken, name, src_dir_fd=directory,
+                                  dst_dir_fd=directory)
         with contextlib.suppress(OSError):
             os.unlink(taken, dir_fd=directory)
     finally:
         os.close(directory)
 
 
+def _name_exists(name: str, directory: int) -> bool:
+    try:
+        os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
 class ConsoleTerminated(KeyboardInterrupt):
-    """SIGTERM, raised as the interrupt the serve loops already stop on."""
+    """SIGTERM or SIGHUP, raised as the interrupt the serve loops already
+    stop on."""
 
 
 def _terminate_as_interrupt(signum, frame):
@@ -622,19 +704,33 @@ def terminate_as_interrupt(enabled: bool):
     way out. `enabled` is False wherever no copy was written, a host's plane
     or a plane with no token, and then nothing changes: those planes keep the
     signal's default action exactly as before. Off the main thread no handler
-    can be installed, and nothing is."""
+    can be installed, and nothing is.
+
+    AND SIGHUP (T104's self-pass), which a closed terminal sends and whose
+    default action ends the process with the copy left behind. It is read the
+    same way, but only where it still has its default action: a process
+    started ignoring it (`nohup`) keeps ignoring it."""
     if not enabled:
         yield
         return
+    signals = [signal.SIGTERM]
+    hangup = getattr(signal, "SIGHUP", None)
+    if hangup is not None and signal.getsignal(hangup) == signal.SIG_DFL:
+        signals.append(hangup)
+    previous: dict = {}
     try:
-        previous = signal.signal(signal.SIGTERM, _terminate_as_interrupt)
+        for signum in signals:
+            previous[signum] = signal.signal(signum, _terminate_as_interrupt)
     except ValueError:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
         yield
         return
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def publish(httpd: Any, *, page_url: str,

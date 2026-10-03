@@ -28,12 +28,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import html.parser
 import http.client
 import json
 import os
 import re
 import signal
+import socket
+import socketserver
 import stat
 import threading
 import urllib.parse
@@ -1198,3 +1201,468 @@ def test_a_fifo_at_the_copy_is_refused_without_blocking(tmp_path) -> None:
             name, outcome[name])
         assert "not a regular file" in str(outcome[name]), str(outcome[name])
     assert stat.S_ISFIFO(os.lstat(fifo).st_mode), "the FIFO was replaced"
+
+
+# ---------------------------------------------------------------------------
+# 11 — #1144 12.4a as amended by T007 batch N (openxFactory#1222, landed
+#      bdd0f586), clause by clause, and the opener file's lifecycle
+# ---------------------------------------------------------------------------
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+#: What 12.4a says may be at the copy's path, other than an earlier copy of
+#: this user's, and the reason each is refused by.
+_PLANTED = {
+    "a symbolic link": "is a symbolic link",
+    "a directory": "is not a regular file",
+    "a FIFO": "is not a regular file",
+    "a hard-linked copy": "has 2 hard links",
+    "a loosened copy": "has mode 644, not 600",
+}
+
+
+def _plant(state: Path, port: int, kind: str, tmp_path: Path) -> Path:
+    from opendox import console_access
+
+    (state / console_access.CONSOLE_DIRNAME).mkdir(mode=0o700, exist_ok=True)
+    path = console_access.private_copy_path(state, port)
+    if kind == "a symbolic link":
+        bait = tmp_path / "bait.html"
+        bait.write_text("bait\n", encoding="utf-8")
+        path.symlink_to(bait)
+    elif kind == "a directory":
+        path.mkdir()
+    elif kind == "a FIFO":
+        os.mkfifo(path, 0o600)
+    else:
+        written = _write(state, port=port)
+        if kind == "a hard-linked copy":
+            os.link(written.path, tmp_path / "second-name.html")
+        else:
+            written.path.chmod(0o644)
+    return path
+
+
+def _fingerprint(path: Path) -> tuple:
+    info = os.lstat(path)
+    return (stat.S_IFMT(info.st_mode), stat.S_IMODE(info.st_mode), info.st_ino,
+            info.st_nlink, os.readlink(path) if stat.S_ISLNK(info.st_mode) else None)
+
+
+def _port_is_free(port: int) -> bool:
+    with socket.socket() as probe:
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+        return True
+
+
+def test_a_loosened_own_copy_is_refused_by_the_writer_and_left_as_it_is(
+        tmp_path) -> None:
+    """12.4a: a file at the copy's path is replaced ONLY when it is this
+    user's own regular file of mode 0600 with one link. A loosened one is
+    refused by name, never replaced (batch N's gap (a) at `c979747a`: the
+    writer asked for the type, the owner and the link count, not the mode)."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    first = _write(state)
+    first.path.chmod(0o644)
+    before = (first.path.read_bytes(), _fingerprint(first.path))
+    with pytest.raises(console_access.ConsoleAccessRefused,
+                       match="has mode 644, not 600") as refused:
+        _write(state)
+    assert str(first.path) in str(refused.value)
+    assert (first.path.read_bytes(), _fingerprint(first.path)) == before
+
+
+def test_another_users_file_at_the_copy_is_refused_by_the_writer(
+        tmp_path, monkeypatch) -> None:
+    """12.4a: another user's file at the copy's path refuses the write by
+    name and is never replaced. Simulated through the writer's own `stat` of
+    that name, so the tree above it is still this user's."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    first = _write(state)
+    before = (first.path.read_bytes(), _fingerprint(first.path))
+    real_stat = os.stat
+
+    def foreign(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        if path == first.path.name and kwargs.get("dir_fd") is not None:
+            values = list(info[:10])
+            values[4] = info.st_uid + 1                    # st_uid
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(console_access.os, "stat", foreign)
+    with pytest.raises(console_access.ConsoleAccessRefused,
+                       match="not by this user"):
+        _write(state)
+    monkeypatch.undo()
+    assert (first.path.read_bytes(), _fingerprint(first.path)) == before
+
+
+@pytest.mark.parametrize("kind", sorted(_PLANTED))
+def test_generate_and_open_refuses_by_name_what_was_planted_at_the_copy(
+        tmp_path, monkeypatch, capsys, standalone_profile, kind) -> None:
+    """12.4a, through the entry point: anything at the copy's path but an
+    earlier copy of this user's refuses the START by name. Nothing is printed
+    that serves, no browser is opened, the planted thing is untouched, and the
+    listening socket is closed, so the server never serves."""
+    from opendox import cli
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = _state(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    port = _free_port()
+    planted = _plant(state, port, kind, tmp_path)
+    before = _fingerprint(planted)
+    opened: list[str] = []
+    assert cli._generate_and_open(
+        _generate_and_open_args(tmp_path, repo, "--port", str(port)),
+        opener=opened.append) == 1
+    out, err = capsys.readouterr()
+    assert opened == []
+    assert "generate-and-open refused:" in err, err
+    assert str(planted) in err and _PLANTED[kind] in err, err
+    assert "  console " not in out and f":{port}/" not in out, out
+    assert _fingerprint(planted) == before
+    assert _port_is_free(port), "the refused start kept its socket"
+
+
+@pytest.mark.parametrize("kind", sorted(_PLANTED))
+def test_the_servers_own_entry_point_refuses_by_name_what_was_planted_at_the_copy(
+        tmp_path, monkeypatch, capsys, standalone_profile, kind) -> None:
+    """The same, through `python -m opendox.serve`'s `main`. A start that
+    did not refuse would serve: the serve loop here fails the case instead of
+    blocking it."""
+    from opendox import serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    state = _state(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    monkeypatch.setattr(serve, "real_notebook_adapter", lambda *a, **k: None)
+
+    def served(self, *args, **kwargs):
+        raise AssertionError("the server served")
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", served)
+    port = _free_port()
+    planted = _plant(state, port, kind, tmp_path)
+    before = _fingerprint(planted)
+    assert serve.main(["--snapshot", str(snapshot), "--checkout-root", str(repo),
+                       "--port", str(port)]) == 1
+    out, err = capsys.readouterr()
+    assert "serve refused:" in err and str(planted) in err, err
+    assert _PLANTED[kind] in err, err
+    assert "serving ideation dashboard at" not in out, out
+    assert _fingerprint(planted) == before
+    assert _port_is_free(port), "the refused start kept its socket"
+
+
+@pytest.mark.parametrize("inside", ["console", "postgres/run", "."])
+def test_a_served_root_that_is_a_link_into_the_state_directory_is_refused(
+        tmp_path, inside) -> None:
+    """Batch N's gap (e): a served root named through a SYMBOLIC LINK that
+    leads to the state directory, or into it, is judged where it leads. It
+    is refused by name, and nothing is written."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    target = state if inside == "." else state / inside
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    alias = tmp_path / "served-alias"
+    alias.symlink_to(target)
+    before = _tree(state)
+    with pytest.raises(console_access.ConsoleAccessRefused,
+                       match="OPENDOX_STATE_DIR") as refused:
+        console_access.write_private_copy(
+            state, page_url="http://127.0.0.1:8080/index.html", port=8080,
+            token=_token(), served_roots=(alias,))
+    assert str(target.resolve()) in str(refused.value), str(refused.value)
+    assert _tree(state) == before, "something was written"
+
+
+def test_the_servers_own_entry_point_refuses_a_bundle_linked_into_the_state_directory(
+        tmp_path, monkeypatch, capsys, standalone_profile) -> None:
+    """The same, through the entry point: `--web-dir` names a link that leads
+    to `<state_dir>/console`. The start is refused by name, and the static
+    handler never serves the directory the copies live in."""
+    from opendox import console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    state = _state(tmp_path)
+    console = state / console_access.CONSOLE_DIRNAME
+    console.mkdir(mode=0o700)
+    alias = tmp_path / "web-alias"
+    alias.symlink_to(console)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    monkeypatch.setattr(serve, "real_notebook_adapter", lambda *a, **k: None)
+
+    def served(self, *args, **kwargs):
+        raise AssertionError("the server served")
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", served)
+    assert serve.main(["--web-dir", str(alias), "--snapshot", str(snapshot),
+                       "--checkout-root", str(repo), "--port", "0"]) == 1
+    err = capsys.readouterr().err
+    assert "serve refused:" in err and str(console.resolve()) in err, err
+    assert list(console.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o750, 0o711])
+def test_a_console_directory_that_is_not_0700_is_refused(tmp_path, mode) -> None:
+    """12.4a: the copy is mode 0600 "in a directory of mode 0700". A
+    `console/` directory loosened after it was made, even where no one else
+    can write it, is refused by name by the reader and by the writer, and the
+    copy in it is left as it is."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    copy = _write(state)
+    copy.path.parent.chmod(mode)
+    try:
+        expected = f"has mode {mode:o}, not 700"
+        with pytest.raises(console_access.ConsoleAccessRefused, match=expected):
+            console_access.read_private_copy(copy.path)
+        with pytest.raises(console_access.ConsoleAccessRefused, match=expected):
+            _write(state)
+        assert copy.path.exists()
+    finally:
+        copy.path.parent.chmod(0o700)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write any directory")
+def test_a_copy_that_cannot_be_written_refuses_the_start_by_name(
+        tmp_path, monkeypatch, capsys, standalone_profile) -> None:
+    """The lifecycle self-pass: a state directory its parent will not let
+    this user make (an operating-system refusal, not a rule of this module)
+    used to escape as a raw `PermissionError`, a traceback and no refusal.
+    It refuses by name, through the writer and through the entry point."""
+    from opendox import cli, console_access
+
+    locked = tmp_path / "locked"
+    locked.mkdir(mode=0o700)
+    locked.chmod(0o500)
+    try:
+        state = locked / "state"
+        with pytest.raises(console_access.ConsoleAccessRefused,
+                           match="cannot be written") as refused:
+            _write(state)
+        assert str(console_access.private_copy_path(state, 8080)) in str(refused.value)
+        _clean_git(monkeypatch)
+        repo = _repository(tmp_path)
+        monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+        opened: list[str] = []
+        assert cli._generate_and_open(_generate_and_open_args(tmp_path, repo),
+                                      opener=opened.append) == 1
+        err = capsys.readouterr().err
+        assert opened == []
+        assert "generate-and-open refused:" in err and "cannot be written" in err, err
+        assert not state.exists()
+    finally:
+        locked.chmod(0o700)
+
+
+def test_a_copy_that_fails_its_own_read_back_is_not_left_behind(
+        tmp_path, monkeypatch) -> None:
+    """The lifecycle self-pass: the writer reads back what it wrote, as any
+    reader would, and refuses on a failure. The copy it wrote then goes with
+    the refusal, rather than outliving a start that never served."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+
+    def refusing(path):
+        raise console_access.ConsoleAccessRefused("staged: the read-back refused")
+
+    monkeypatch.setattr(console_access, "read_private_copy", refusing)
+    with pytest.raises(console_access.ConsoleAccessRefused, match="staged"):
+        _write(state)
+    monkeypatch.undo()
+    assert list((state / console_access.CONSOLE_DIRNAME).iterdir()) == []
+
+
+def test_another_serves_copy_survives_a_removal_where_hard_links_fail(
+        tmp_path, monkeypatch) -> None:
+    """The lifecycle self-pass, on removal: the name is taken and judged, and
+    another serve's copy is put back. Putting it back by a hard link fails on
+    a filesystem without them (EPERM), and that used to DELETE the other
+    serve's copy. It is put back by renaming it, where the name is free."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    first = _write(state)
+    second_token = _token()
+    real_rename = os.rename
+    raced: list = []
+
+    def racing(src, dst, *args, **kwargs):
+        if src == first.path.name and not raced:
+            raced.append(_write(state, token=second_token))   # the replacement
+        return real_rename(src, dst, *args, **kwargs)
+
+    def no_hard_links(*args, **kwargs):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(console_access.os, "rename", racing)
+    monkeypatch.setattr(console_access.os, "link", no_hard_links)
+    console_access.remove_private_copy(first)
+    monkeypatch.undo()
+    assert raced, "the race was never staged"
+    assert console_access.read_private_copy(first.path)["console_token"] == second_token
+    assert sorted(p.name for p in first.path.parent.iterdir()) == [first.path.name]
+
+
+def test_terminate_as_interrupt_reads_a_hangup_as_ctrl_c_unless_it_is_ignored(
+        ) -> None:
+    """The lifecycle self-pass, on stopping: closing the terminal sends
+    SIGHUP, whose default action ends the process without removing the copy.
+    While a copy exists, SIGHUP is read as Ctrl-C, as SIGTERM is. A SIGHUP
+    the process was started ignoring (`nohup`) stays ignored."""
+    from opendox import console_access
+
+    previous = signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            with console_access.terminate_as_interrupt(True):
+                # never deliver a hangup that would END this test process
+                assert signal.getsignal(signal.SIGHUP) not in (
+                    signal.SIG_DFL, signal.SIG_IGN), "no hangup handler"
+                os.kill(os.getpid(), signal.SIGHUP)
+                signal.pthread_sigmask(signal.SIG_BLOCK, [])   # deliver now
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_DFL
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)            # as `nohup` starts it
+        with console_access.terminate_as_interrupt(True):
+            assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+
+
+@pytest.mark.parametrize("entry", ["serve", "generate-and-open --local",
+                                   "generate-and-open, hosted"])
+def test_a_hangup_removes_the_copy(tmp_path, monkeypatch, entry) -> None:
+    """SIGHUP, as a closed terminal sends it, stops every standalone entry
+    point through the code that removes its copy, and each exits 0.
+
+    The child is started with SIGHUP at its DEFAULT action, whatever this
+    runner inherited: an ignored signal stays ignored across `exec`, so a
+    suite run under `nohup` would hand every child an ignored SIGHUP, which
+    the entry points rightly keep ignoring."""
+    from opendox import console_access
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    inherited = signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    try:
+        if entry == "serve":
+            snapshot = tmp_path / "snapshot.json"
+            snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+            child = Child(tmp_path, "opendox.serve", "--snapshot", str(snapshot),
+                          "--checkout-root", str(repo), "--port", "0")
+            url = _SERVE_URL
+        else:
+            local = ["--local"] if entry.endswith("--local") else []
+            child = Child(tmp_path, "opendox.cli", "generate-and-open", *local,
+                          "--repo-root", str(repo), "--repository", "fixture",
+                          "--no-open", "--port", "0",
+                          "--run-dir", str(tmp_path / "run"),
+                          extra_env=None if local else _HOSTED)
+            url = _URL
+    finally:
+        signal.signal(signal.SIGHUP, inherited)
+    try:
+        match = child.wait_for_line(url)
+        copy_path = console_access.private_copy_path(child.state_dir,
+                                                     int(match.group(3)))
+        assert copy_path.exists(), child.stdout_text() + child.stderr_text()
+        assert _stop(child, signal.SIGHUP) == 0, child.stderr_text()
+        assert not copy_path.exists(), "a hangup left the token's copy behind"
+        assert "Traceback" not in child.stderr_text(), child.stderr_text()
+    finally:
+        child.kill()
+
+
+@pytest.mark.parametrize("local", [False, True], ids=["hosted", "--local"])
+def test_a_kill_while_the_browser_opens_removes_the_copy(
+        tmp_path, monkeypatch, local) -> None:
+    """The lifecycle self-pass: the copy exists from the moment it is
+    written, and the browser opener can take seconds. A SIGTERM then, before
+    the serve loop, used to take SIGTERM's default action on a hosted
+    standalone plane, ending the process with the copy left behind. The
+    window from the write to the stop is covered whole. Here the browser
+    (`BROWSER`, a script) kills its own parent while it opens."""
+    import standalone_child
+    from opendox import console_access
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    browser = tmp_path / "kill-the-opener"
+    browser.write_text('#!/bin/sh\nkill -TERM "$PPID"\n', encoding="utf-8")
+    browser.chmod(0o700)
+    env = {"BROWSER": str(browser), **({} if local else _HOSTED)}
+    child = Child(tmp_path, "opendox.cli", "generate-and-open",
+                  *(["--local"] if local else []),
+                  "--repo-root", str(repo), "--repository", "fixture",
+                  "--port", "0", "--run-dir", str(tmp_path / "run"), extra_env=env)
+    try:
+        match = child.wait_for_line(_URL)
+        copy_path = console_access.private_copy_path(child.state_dir,
+                                                     int(match.group(3)))
+        code = child.process.wait(timeout=standalone_child.STOP_DEADLINE_SECONDS)
+        assert code == 0, (code, child.stderr_text())
+        assert not copy_path.exists(), "a kill while the browser opened left the copy"
+        assert "Traceback" not in child.stderr_text(), child.stderr_text()
+    finally:
+        child.kill()
+
+
+def test_a_console_directory_with_a_setgid_bit_is_still_0700(tmp_path) -> None:
+    """Only the permission bits are judged: a directory made under a setgid
+    parent inherits the setgid bit, which grants no one access, so a
+    `console/` of mode 2700 is accepted by the writer and the reader alike."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    copy = _write(state)
+    copy.path.parent.chmod(0o2700)
+    if not os.lstat(copy.path.parent).st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem keeps no setgid bit on a directory")
+    assert console_access.read_private_copy(copy.path)["port"] == 8080
+    assert _write(state).path == copy.path
+
+
+def test_a_write_that_fails_part_way_leaves_no_partial_copy(
+        tmp_path, monkeypatch) -> None:
+    """The lifecycle self-pass, on writing: the copy is written under a
+    temporary name and renamed into place. A failure part way (here the
+    disk is full at the `fsync`) refuses by name and removes the temporary
+    file, so nothing partial is left beside the name."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+
+    def full(handle):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(console_access.os, "fsync", full)
+    with pytest.raises(console_access.ConsoleAccessRefused,
+                       match="cannot be written.*No space left on device"):
+        _write(state)
+    monkeypatch.undo()
+    assert list((state / console_access.CONSOLE_DIRNAME).iterdir()) == []
