@@ -715,11 +715,20 @@ def _os_keyring():
     never names a keyring reference never needs it, and one that does installs
     it beside openDox. Without it, a keyring reference refuses with the fixed
     `DIAG_KEYRING_UNAVAILABLE` rather than raising an import error out of a
-    turn."""
+    turn.
+
+    AND A PACKAGE THAT FAILS AS IT IS IMPORTED REFUSES THE SAME WAY (Copilot's
+    review of openDox-code#63 at `82ec9a20`). An import runs the package's own
+    code, and a backend can fail there as it can when it is read, so its
+    error, of any class, is dropped as a read's is. The refusal is raised
+    outside the handler, so it keeps no context either."""
     try:
         import keyring
-    except ImportError:
-        raise BrokerRefused(DIAG_KEYRING_UNAVAILABLE) from None
+    # The package's own failure, of any class, never reaches a caller.
+    except Exception:  # noqa: BLE001
+        keyring = None
+    if keyring is None:
+        raise BrokerRefused(DIAG_KEYRING_UNAVAILABLE)
     return keyring
 
 

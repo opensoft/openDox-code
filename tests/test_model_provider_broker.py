@@ -46,6 +46,7 @@ are scriptable and no test depends on timing).
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import dataclasses
 import http.client
@@ -2770,6 +2771,33 @@ def test_without_the_keyring_package_a_keyring_reference_refuses(monkeypatch):
         port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_KEYRING_UNAVAILABLE
     assert opener.requests == []
+
+
+def test_a_keyring_package_that_fails_as_it_is_imported_refuses_the_same_way(
+        monkeypatch):
+    """Copilot's review of openDox-code#63 at `82ec9a20`. An import runs the
+    package's own code, and a backend can fail there as it can when it is
+    read. Whatever it raises, the reference refuses with the fixed sentence,
+    before any request, and the refusal carries none of what was raised."""
+    importing = builtins.__import__
+
+    def _failing_import(name, *args, **kwargs):
+        if name == "keyring":
+            raise RuntimeError(f"a backend failed at import: {KEY_SENTINEL}")
+        return importing(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _failing_import)
+    port, opener = _unbrokered_port(
+        _built_in_binding(f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}"),
+        _chat_completion())
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_KEYRING_UNAVAILABLE
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert opener.requests == []
+    assert _locals_holding(caught.value, KEY_SENTINEL) == []
 
 
 def test_the_production_keyring_path_imports_the_package_at_call_time(
