@@ -294,9 +294,48 @@ def test_the_two_dsns_are_two_users_over_the_one_socket(state_dir: Path) -> None
     assert config.user_named_by(settings.database_url) == config.BUNDLE_SERVED_ROLE
     assert config.user_named_by(settings.migration_database_url) == \
         config.BUNDLE_OWNER_ROLE
+    # both name their schema, the same one (Copilot review of #69)
+    assert config.schema_selected_by(settings.database_url) == \
+        config.schema_selected_by(settings.migration_database_url) == "public"
     assert bundle.data_dir.parent == bundle.socket_dir.parent
     assert bundle.data_dir.is_relative_to(state_dir)
     assert bundle.socket_dir.is_relative_to(state_dir)
+
+
+def test_schemas_named_for_the_roles_never_split_the_two_dsns(
+        state_dir: Path) -> None:
+    """PostgreSQL's default `search_path` is `"$user", public`, and the two
+    roles are different users. In a reused cluster holding a schema named
+    `opendox` (the owner's) and one named `opendox_runtime` (the served
+    role's), an implicit path put the migration's ledger and the served
+    workload's reads in two different schemas (Copilot review of #69). Both
+    DSNs name `public`, so both land there, a restart migrates nothing new,
+    and `status` reads the one ledger."""
+    import psycopg
+    from psycopg import sql
+
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    with bundle_mod.BundledServer(settings) as server:
+        with _owner(server) as conn:
+            conn.execute("create schema opendox")
+            conn.execute(sql.SQL("create schema opendox_runtime authorization {}")
+                         .format(sql.Identifier(config.BUNDLE_SERVED_ROLE)))
+    with bundle_mod.BundledServer(settings) as server:
+        applied_on_restart = list(server.applied)
+        current = {}
+        for role, dsn in ((config.BUNDLE_OWNER_ROLE, server.bundle.migration_dsn),
+                          (config.BUNDLE_SERVED_ROLE, server.bundle.served_dsn)):
+            with psycopg.connect(dsn) as conn:
+                current[role] = conn.execute(
+                    "select current_schema(), (select count(*) from "
+                    "opendox_schema_migrations)").fetchone()
+        code, status = _status(state_dir)
+    assert current[config.BUNDLE_OWNER_ROLE][0] == "public", current
+    assert current[config.BUNDLE_SERVED_ROLE][0] == "public", current
+    assert current[config.BUNDLE_OWNER_ROLE][1] == current[config.BUNDLE_SERVED_ROLE][1] > 0
+    assert applied_on_restart == [], applied_on_restart
+    assert status["database"] == "reachable" and status["pending_migrations"] == [], status
+    assert code == 0, status
 
 
 def test_a_state_dir_too_long_for_a_unix_socket_is_refused_naming_it() -> None:
