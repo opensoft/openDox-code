@@ -262,10 +262,15 @@ const ACTION_MOUNTERS = {
   // like read/lens/canvas — no transport of its own, just the app shell's
   // openWorkbench callback, and DISABLED (never a live no-op) when the shell
   // supplied no nav callbacks (a bare embedding).
+  //
+  // T102: the title said "(read-only)" and named the tile by its SEAM KEY
+  // (`cluster`, `possible`, `staged`). The workbench now edits wherever the
+  // scope lets a document be edited (RULED openxFactory#656 `5963618568`), so
+  // the claim is gone, and the tile is named by the registered domain's word.
   workbench: (row, item, opts) => mountNavButton(row, {
     label: opts.label,
     title: "open the staging workbench scoped to this " +
-      (WORKBENCH_TILE_KINDS[opts.wheelKey] || "tile") + " (read-only)",
+      (WORKBENCH_TILE_KINDS[opts.wheelKey] ? vocab.one(opts.wheelKey) : "tile"),
     run: WORKBENCH_TILE_KINDS[opts.wheelKey] && opts.nav?.openWorkbench &&
       (() => opts.nav.openWorkbench(WORKBENCH_TILE_KINDS[opts.wheelKey], item.id)),
   }),

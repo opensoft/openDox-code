@@ -79,6 +79,7 @@ import {
   workbenchScope, doxbenchScopeProjection, lensScopeSnapshot, lensSessionSeed,
   toggleKeyword, createSeed, createOffered, rewritableDocuments, sessionPosture,
   sessionSurfaceHidden, presentationPosture,
+  EDITING_MODES, editingPosture, documentEditable, tileOwnEditablePaths,
   documentAbstract, docWheelEntries, existingOnTopic,
   abstractRegionState, abstractSubjectDigest, setDisplay,
 } from "./staging-workbench-model.js";
@@ -870,8 +871,11 @@ function renderDocsPanel(pane, scope, onOpen, create, verbs, abstractSeam) {
   session.repaint = paint;
 
   // A drum is one reel, so the sections flatten — carrying their labels onto
-  // the tiles rather than losing them (see `docWheelEntries`).
-  const entries = docWheelEntries(scope);
+  // the tiles rather than losing them (see `docWheelEntries`). By scope (T102)
+  // the verbs carry the scope's editable set, and each tile then says whether
+  // it is one of the tile's own; under the gate they carry none, as before.
+  const entries = docWheelEntries(scope,
+    verbs && Array.isArray(verbs.editable) ? { editable: verbs.editable } : {});
   let seeded = false;
   // PR #196 review F4: while the wheel is being RECONCILED to the document the
   // canvas actually holds, its own onSelect must not turn round and ask for
@@ -1337,12 +1341,19 @@ async function runAddSection(seam, path, note, title, after, required) {
 // authority teaches the reader nothing, but there is no write path to reach —
 // the same posture viewer.js's "open in editor" button and the docs tile's
 // load/save verbs already take where the capability is absent.
-function mountAddSection(host, model, path, seam) {
+//
+// T102: `seam` may also be `{ absent: sentence }`, a stated absence with its
+// own reason. By scope there IS an editing capability but no outline buffer
+// (the neutral scope projects none), so the generic sentence below would be
+// false there.
+function mountAddSection(host, model, path, given) {
   const note = el("div", "swb-outlinenote");
   note.setAttribute("aria-live", "polite");
   note.hidden = true;
-  const absent = "adding a section needs the local human console's editing "
-    + "capability — this plane has none, so no write path is offered";
+  const seam = given && typeof given.absent === "string" ? null : given;
+  const absent = given && typeof given.absent === "string" ? given.absent
+    : "adding a section needs the local human console's editing "
+      + "capability — this plane has none, so no write path is offered";
 
   // `intent()` is read at CLICK time, never closed over at build time: the
   // free-form control's two values are whatever the human has typed and chosen
@@ -1615,6 +1626,18 @@ export function mountStagingWorkbench(container, snapshot,
   // workbenches must not share a column (Copilot review, round 2).
   const createColumn = gate?.create || NO_CREATE_COLUMN;
   const sessionColumn = gate?.session || NO_SESSION_COLUMN;
+  // A HOST'S GATE COLUMN IS REGISTERED (T102). Where one is, its gate decides
+  // the whole editing posture exactly as it always did; where none is, which
+  // is every standalone install, openDox's own default answers editing BY
+  // SCOPE (RULED `5963618568`). See `editingPosture` in the model.
+  // EITHER HALF counts (Copilot review of #81, r4174293974): the two bindings
+  // resolve independently, and `app.js` sends Save through a contributed
+  // session column's `firstEditTransport` whenever one exists. A host that
+  // registers only that half is therefore governed, so its Save is not the
+  // by-scope refusal; with no create column its gate reads off, so it stays
+  // read-only exactly as before T102.
+  const governed = createColumn !== NO_CREATE_COLUMN
+    || sessionColumn !== NO_SESSION_COLUMN;
   // THE VOCABULARY, INSTALLED BEFORE ANYTHING RENDERS (slice S7) — into this
   // module AND into the pure model it derives through, which is why the model
   // exports `setDisplay` rather than taking the facet on every signature.
@@ -1652,6 +1675,19 @@ export function mountStagingWorkbench(container, snapshot,
       ") — it never edits or deletes an existing document"
     : "doxBench writes nothing here — every create affordance is a " +
       "copyable CLI descriptor on this host";
+  const readonlyTitle = readonly.title;
+  // THE PILL FOLLOWS THE SCOPE where the gate does not decide (T102). Under
+  // the gate it is the constant above, exactly as before; by scope it states
+  // the posture the open tile is in, so it is redrawn with the canvas.
+  function drawPill(byScope) {
+    if (gateOn) return;
+    readonly.textContent = byScope ? "editing by scope" : "read-only";
+    readonly.title = byScope
+      ? "this tile's own " + vocab.many(SOURCE) + " are editable in this "
+        + "browser; creating one and Save need the create gate, which this "
+        + "install does not have, so Save is refused by name"
+      : readonlyTitle;
+  }
   const closeBtn = el("button", "swb-close", "✕ back to the wheel");
   closeBtn.type = "button";
   // FULL SCREEN: a class on the overlay, not the Fullscreen API — the panel is
@@ -2254,6 +2290,9 @@ export function mountStagingWorkbench(container, snapshot,
       ref: active.ref,
       outlinePathFor: (outline) => primaryFragmentPath(outline.stagingId, outline.files),
       createdDocuments: sessionColumn.createdDocuments(posture.branch),
+      // T102: with no host's gate column the server's scope authority is
+      // openDox's own default, so the projection says what THAT answers
+      ...(governed ? {} : { editableBy: "tile" }),
     });
   }
   function railScopeKey() {
@@ -2347,7 +2386,14 @@ export function mountStagingWorkbench(container, snapshot,
     if (!canvasOffered()) {
       return { bufferStateFor: () => null };
     }
+    // BY SCOPE (T102) THE VERB IS PER DOCUMENT: the scope's editable set rides
+    // the verbs, so the tile offers `edit` on exactly the documents the scope
+    // lets be edited and states the absence on the rest. Under the gate there
+    // is no such set and every document stays loadable, as it always was.
+    const editing = editingNow();
+    const byScope = editing.mode === EDITING_MODES.scope;
     return {
+      ...(byScope ? { editable: editing.editablePaths } : {}),
       load: async (path) => {
         // Re-checked at CLICK time, not at render time: the docs pane is drawn
         // before the canvas mounts, so a human who clicks before the mount
@@ -2356,6 +2402,14 @@ export function mountStagingWorkbench(container, snapshot,
             || typeof canvasController.loadDocumentForEditing !== "function") {
           return { ok: false,
                    error: "this console has no editing seam wired" };
+        }
+        // …and the scope's answer is re-read at click time too, as defence in
+        // depth behind the tile's own disabled verb
+        if (!documentEditable(editingNow(), path)) {
+          return { ok: false,
+                   error: "this document is context in the opened tile, not "
+                     + "one of the tile's own, so it is not offered for "
+                     + "editing here" };
         }
         // TWO ROUTES, and which one applies is a fact about the RESERVED SLOT.
         //
@@ -2478,7 +2532,14 @@ export function mountStagingWorkbench(container, snapshot,
       // `canvasOffered()` — the SAME derivation the canvas mount and the tile
       // verbs use — so the pane can never claim a capability the canvas
       // withheld, nor deny one it has.
-      capable: canvasOffered() && wired,
+      //
+      // AND THE GATE (T102). Editing by scope offers the canvas without the
+      // create gate, and ruling 7.7 keys GENERATION on the gate: the route
+      // refuses at its step 1 wherever `actions.gate` is false. So the control
+      // stays ABSENT there rather than present-and-refusing. Under the gate
+      // `canvasOffered()` already implied this conjunct, so a governed host
+      // reads exactly what it read.
+      capable: canvasOffered() && createColumn.createGateLive(caps) && wired,
       // A statement about the PLANE, which outranks any capability it reports.
       hosted: sessionSurfaceHidden(caps),
       // COMPOSED AS JSON, NEVER JOINED (adversarial review 2026-08-25, N6;
@@ -2548,6 +2609,15 @@ export function mountStagingWorkbench(container, snapshot,
   // listener bound.
   function outlineSectionSeam() {
     if (!canvasOffered()) return null;
+    // BY SCOPE THERE IS NO OUTLINE BUFFER (T102): the neutral scope projects
+    // none, so the selection's primary file is one of its own documents, edited
+    // through its tile's `edit` verb. The add-section controls say so instead
+    // of offering an insert that would find no outline to land in.
+    if (editingNow().mode === EDITING_MODES.scope) {
+      return { absent: "adding a section writes into an outline buffer, and "
+        + "here this tile's own " + vocab.many(SOURCE) + " are edited directly, "
+        + "with no outline buffer: open the file with its edit verb instead" };
+    }
     return {
       actor: (caps && caps.actor) || "local",
       // Read at CLICK time, never cached: "what the outline buffer holds" is a
@@ -2717,17 +2787,88 @@ export function mountStagingWorkbench(container, snapshot,
   // source-unavailable) keep the inline note: they explain a canvas that is
   // WITHHELD or degraded, the rail is not even mounted for most of them, and
   // there is no control to hang the sentence on.
+  //
+  // T102: the by-scope posture's `scopeNote` is a PLANE fact too ("Save is
+  // refused by name"), so it stands beside whatever a chat rung moved onto the
+  // send button. A governed host's postures carry none, so its note is what it
+  // was.
+  let lastPlane = null;
   function showPostureNote(plane) {
+    lastPlane = plane;
     const stands = !!plane.note && plane.chat !== true;
-    postureNote.textContent = stands ? plane.note : "";
-    postureNote.hidden = !stands;
+    const stale = outOfScopeLoaded();
+    const lines = [stands ? plane.note : null, plane.scopeNote || null,
+      stale.length ? outOfScopeNote(stale) : null].filter(Boolean);
+    postureNote.textContent = lines.join(" ");
+    postureNote.hidden = lines.length === 0;
+  }
+
+  // A RESTORED BUFFER THE SCOPE NO LONGER OWNS (T102; Copilot review of #81,
+  // r4173470792). The canvas restores a persisted record verbatim, and every
+  // other route into the loaded set is gated by scope: the tile's `edit` verb,
+  // and the canvas's own in-scope check. So by scope the RESTORE is the one way
+  // a document the scope no longer makes editable can still be loaded, for
+  // example after a regenerated snapshot drops it from the group. Once the
+  // canvas is ready it is reconciled with the projection it was mounted over:
+  //   * a CLEAN one leaves the loaded set, since nothing of the human's is in it;
+  //   * a DIRTY one stays, because unloading it would discard unsaved text,
+  //     and the posture note names it, says why, and says what to do. A chat
+  //     turn that carries it is refused by the server's own scope check, which
+  //     is why the note asks for it to be unloaded once the text is safe.
+  // By scope only: under the gate the projection, ownership and restore are
+  // exactly as before.
+  function outOfScopeLoaded() {
+    if (!canvasController || editingNow().mode !== EDITING_MODES.scope) return [];
+    const live = canvasController.state();
+    if (!live || !live.buffers) return [];
+    const editable = new Set(editingNow().editablePaths || []);
+    const out = [];
+    for (const key of Object.keys(live.buffers)) {
+      const buffer = live.buffers[key];
+      if (!buffer || buffer.kind !== "document" || !buffer.path) continue;
+      if (!editable.has(buffer.path)) out.push({ key, path: buffer.path,
+                                                 dirty: buffer.dirty === true });
+    }
+    return out;
+  }
+  function outOfScopeNote(stale) {
+    return "restored with unsaved text, but no longer one of this tile's own "
+      + vocab.many(SOURCE) + ": " + stale.map((b) => b.path).join(", ")
+      + ". It stays loaded so nothing is lost; copy the text out, then unload "
+      + "it, because a chat turn that carries it is refused.";
+  }
+  function reconcileRestoredScope() {
+    for (const buffer of outOfScopeLoaded()) {
+      if (!buffer.dirty) canvasController.unloadDocument(buffer.key);
+    }
+    if (lastPlane) showPostureNote(lastPlane);
+  }
+
+  // THE EDITING POSTURE (T102, RULED `5963618568`), read off the facts this
+  // console has: a host's gate column and its gate, the hosted plane, the
+  // `edit` capability, and the open tile's own editable documents as openDox's
+  // scope default answers them. A governed host asks only its gate.
+  function editingNow() {
+    return editingPosture({
+      governed,
+      gateLive: createColumn.createGateLive(caps),
+      surfaceHidden: sessionSurfaceHidden(caps),
+      editLive: !!(caps && caps.actions && caps.actions.edit === true),
+      editablePaths: scope && !governed
+        ? tileOwnEditablePaths(snapshot, scope.kind, scope.id) : [],
+    });
   }
 
   // WHETHER THIS SURFACE OFFERS EDITING AT ALL — one derivation, read by the
   // canvas mount and by the docs tile's verbs (F3), so the tile can never claim a
   // capability the canvas withheld or deny one it has.
+  //
+  // T102: `editingNow().editors` is `createColumn.createGateLive(caps) &&
+  // !sessionSurfaceHidden(caps)` wherever the gate is live, which is the whole
+  // of a governed host; where no gate column is registered it is the by-scope
+  // answer instead.
   function canvasOffered() {
-    return !!scope && createColumn.createGateLive(caps) && !sessionSurfaceHidden(caps)
+    return !!scope && editingNow().editors
       && !!active?.repository && !!active?.ref;
   }
   function drawCanvas() {
@@ -2742,8 +2883,12 @@ export function mountStagingWorkbench(container, snapshot,
     // decision itself is unchanged and stays pinned below; `approvedModelCount`
     // is LIVE — fed back by the mounted rail's adopted catalog (see the
     // onState wiring below) and reset to zero on rail teardown.
+    const editing = editingNow();
     const plane = presentationPosture({
       gateLive: createColumn.createGateLive(caps),
+      // T102: the editing posture's mode; a governed host's gate rung reads
+      // exactly as before, because there it is never the by-scope mode
+      editing: editing.mode,
       surfaceHidden: sessionSurfaceHidden(caps),
       repository: active?.repository,
       ref: active?.ref,
@@ -2754,6 +2899,7 @@ export function mountStagingWorkbench(container, snapshot,
     });
     showPostureNote(plane);
     const offered = canvasOffered();
+    drawPill(offered && editing.mode === EDITING_MODES.scope);
     canvas.hidden = !offered;
     if (!offered) return;
     // the SAME posture derivation drawSession() already uses, so the
@@ -2797,6 +2943,8 @@ export function mountStagingWorkbench(container, snapshot,
       onLoadedSetChanged: () => {
         syncContextFromCanvas();
         refreshDocTiles();
+        // an unload of a restored out-of-scope buffer retires its note (T102)
+        if (lastPlane) showPostureNote(lastPlane);
       },
     });
     // T055: the chat rail mounts ONLY when the seam bundle carries BOTH
@@ -2878,6 +3026,7 @@ export function mountStagingWorkbench(container, snapshot,
             postureIntakeOffered = modelIntakeOffered;
             const refreshed = presentationPosture({
               gateLive: createColumn.createGateLive(caps),
+              editing: editingNow().mode,
               surfaceHidden: sessionSurfaceHidden(caps),
               repository: active?.repository,
               ref: active?.ref,
@@ -2971,6 +3120,7 @@ export function mountStagingWorkbench(container, snapshot,
     const mounted = canvasController;
     if (mounted && mounted.ready && typeof mounted.ready.then === "function") {
       mounted.ready.then(() => {
+        if (canvasController === mounted) reconcileRestoredScope();
         if (canvasController === mounted) syncContextFromCanvas();
       });
     }
