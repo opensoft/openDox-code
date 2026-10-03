@@ -1136,7 +1136,7 @@ def register(subparsers: Any) -> None:
     """
     runtime = subparsers.add_parser(
         "runtime",
-        help="the identity and coordination runtime (split-opendox § 3.5)",
+        help="the identity and coordination runtime",
         description="Lifecycle verbs for the openDox runtime: FastAPI + "
                     "Postgres holding identity and coordination (RULING Q1), "
                     "OIDC through the Keycloak broker (RULING Q2).")

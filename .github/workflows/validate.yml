@@ -274,10 +274,13 @@ jobs:
           # waited on.
           # BACK FROM 13 TO 12: #69 landed on `main` (`5e7ab003`) and reached
           # this branch through #64's final head (`04bcb68e`), so the store's
-          # default-home case runs and passes. One remains: #77's. The floors
-          # are not moved: CI read 3327 / 3316 on this change's first base
-          # (#64, run 37072154936), already 851 above them.
-          EXPECT_SKIPPED: "12"
+          # default-home case runs and passes. One remains: #77's.
+          # BACK FROM 12 TO 11: #77 landed on `main` (`e49b17c3`) and this
+          # branch merged it, so the served-turn case runs and passes. All
+          # three are in, and the pin is `main`'s again. The floors are not
+          # moved: CI read 3327 / 3316 on this change's first base (#64, run
+          # 37072154936), already 851 above them.
+          EXPECT_SKIPPED: "11"
         run: |
           python3 - <<'PY' > triple.env
           import xml.etree.ElementTree as ET, pathlib

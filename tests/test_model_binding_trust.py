@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import contextlib
 import http.server
-import importlib.util
 import io
 import json
 import os
@@ -1056,13 +1055,32 @@ def test_a_store_that_cannot_be_locked_records_nothing(served, monkeypatch):
 # --- the console intake ------------------------------------------------------
 
 
+class _HostGate:
+    """A host's gate, registered at openDox's gate seam, as a host that
+    offers the console intake registers one (openDox-code#77, T084: standalone,
+    with no gate-record writer, the intake is refused; `5961364221` item 1).
+    openDox's default's names, with a record writer of its own."""
+
+    def __init__(self) -> None:
+        from opendox import column_seams as cs
+        from opendox import default_columns as dc
+
+        for name in (*cs.GATE_CALLABLES, *cs.GATE_VALUES):
+            setattr(self, name, getattr(dc.GATE, name))
+        self.written = []
+        self.write_gate_action_record = lambda gate, records_dir, record: (
+            self.written.append(record) or Path(records_dir) / "record.yaml")
+
+
 def _served_intake(served, *, host_policy=None):
-    """A stand-in host that offers the console intake: a plane with a session,
-    the served repository's declarations document naming the marker broker,
-    and an intake act posted from the console. Returns the answer."""
+    """A stand-in host that offers the console intake: a host's gate
+    registered (#77), a plane with a session, the served repository's
+    declarations document naming the marker broker, and an intake act posted
+    from the console. Returns the answer. The host registers a TRUST policy
+    only where `host_policy` names one."""
     import http.client
 
-    from opendox import serve
+    from opendox import column_seams, serve
 
     intake_mod.DeclarationStore(intake_mod.declarations_path(
         served.repo)).declare_broker(intake_mod.BrokerDeclaration(
@@ -1074,6 +1092,15 @@ def _served_intake(served, *, host_policy=None):
         trust_mod = _trust_mod()
         trust_mod.unregister()
         trust_mod.register(host_policy)
+    column_seams.gate.unregister()
+    column_seams.gate.register(_HostGate())
+    try:
+        return _post_an_intake(served, snapshot, http.client, serve)
+    finally:
+        column_seams.gate.unregister()
+
+
+def _post_an_intake(served, snapshot, client, serve):
     httpd = serve.build_server(
         REPO_ROOT / "src" / "opendox" / "web", snapshot, served.repo, port=0,
         actor="brett", model_port_factory=lambda: None)
@@ -1081,7 +1108,7 @@ def _served_intake(served, *, host_policy=None):
     worker.start()
     try:
         base = httpd.server_address[:2]
-        connection = http.client.HTTPConnection(*base, timeout=30)
+        connection = client.HTTPConnection(*base, timeout=30)
         connection.request("GET", "/capabilities")
         caps = json.loads(connection.getresponse().read().decode("utf-8"))
         connection.close()
@@ -1089,7 +1116,7 @@ def _served_intake(served, *, host_policy=None):
             "binding": BINDING_ID, "label": "Helpful", "provider": "anyone",
             "kind": "api_key", "endpoint": "https://provider.invalid/v1",
             "dialect": "openai-chat-v1"}.items())
-        connection = http.client.HTTPConnection(*base, timeout=30)
+        connection = client.HTTPConnection(*base, timeout=30)
         connection.request(
             "POST", f"/actions/workbench/model-intake?{query}",
             body=b"sk-stand-in-NOT-A-KEY",
@@ -1673,8 +1700,8 @@ def test_a_governed_host_policy_refuses_a_pending_declaration(served):
 
 
 # ===========================================================================
-# 5. the store's default home, the rail, and a served turn (#77's case
-#    still waits: strict, naming it)
+# 5. the store's default home, the rail, and a served turn (each waited on
+#    another draft, #69, #74 and #77, now all on `main`)
 # ===========================================================================
 
 def test_the_default_store_lives_in_the_settings_state_directory(tmp_path,
@@ -1863,10 +1890,6 @@ def test_the_rail_says_how_to_trust_a_declared_binding(tmp_path):
     assert rail["pure"] == {"loading": None, "staleToken": None}
 
 
-_TURN_REACHES_ITS_MODEL_STEP = importlib.util.find_spec(
-    "opendox.column_seams") is not None
-
-
 class _Conforms:
     @staticmethod
     def iter_errors(_instance):
@@ -1881,10 +1904,6 @@ class _EveryKind(dict):
         return _Conforms()
 
 
-@pytest.mark.xfail(not _TURN_REACHES_ITS_MODEL_STEP, strict=True,
-                   reason="standalone, a turn reaches its model step only "
-                          "once openDox-code#77 (T084) routes the doxBench "
-                          "scope through a seam")
 def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served):
     """A served turn naming the untrusted binding is refused
     `model_unavailable` with the fixed sentence that says how to trust it,

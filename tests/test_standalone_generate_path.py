@@ -152,7 +152,11 @@ def _assert_the_server_answers(base: tuple[str, int], written: Path,
     assert status == 200, status
     capabilities = json.loads(body)
     assert capabilities["refresh"]["binding"] == "regenerate"
-    assert capabilities["actions"]["refresh"] is True
+    # FALSE STANDALONE (plan 034 T084; #1144 4.3 as T007 batch L's addendum
+    # reads, RULED openxFactory#656 5920216845 item 1): the plane would
+    # regenerate, but `POST /actions/refresh` is a host's contributed route,
+    # and a standalone server carries none, so no refresh is offered.
+    assert capabilities["actions"]["refresh"] is False
     document = "notes-toolshed-inventory.md"
     status, kind, body = _get(base, f"/source/{document}")
     assert status == 200, status
