@@ -44,6 +44,7 @@ What is held:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -470,3 +471,145 @@ def test_the_publish_jobs_check_the_digests(job: str, change: str, tmp_path: Pat
     step = _step(job, "the files are the ones the build job verified")
     result = _run(step["run"], tmp_path, env)
     assert (result.returncode == 0) == (change == "none"), result.stdout + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Re-running an upload, and what each index serves after it.
+
+
+def test_both_uploads_skip_a_file_the_index_already_holds() -> None:
+    """A re-run after a partial upload uploads the rest instead of stopping on
+    the file already there (Copilot's review of openDox-code#78)."""
+    for job in ("testpypi", "pypi"):
+        uploads = [step for step in _workflow()["jobs"][job]["steps"]
+                   if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@")]
+        assert len(uploads) == 1, job
+        assert uploads[0]["with"]["skip-existing"] is True, job
+
+
+INDEX_STEPS = {"TestPyPI": ("testpypi-install", "TestPyPI serves the files the build job verified"),
+               "PyPI": ("pypi", "PyPI serves the files the build job verified")}
+
+
+def test_each_upload_is_followed_by_one_index_check_script() -> None:
+    """skip-existing can only skip a file name the index already holds, so
+    each upload is followed by the check that the index serves exactly the two
+    verified digests. Both checks are the same script, differing only in the
+    index they read."""
+    jobs = _workflow()["jobs"]
+    steps = {index: _step(job, name) for index, (job, name) in INDEX_STEPS.items()}
+    assert steps["TestPyPI"]["run"] == steps["PyPI"]["run"]
+    assert steps["TestPyPI"]["env"]["JSON_BASE"] == "https://test.pypi.org/pypi/opendox/"
+    assert steps["PyPI"]["env"]["JSON_BASE"] == "https://pypi.org/pypi/opendox/"
+    for index, step in steps.items():
+        assert step["env"]["INDEX"] == index
+        assert (step["env"]["READS"], step["env"]["PAUSE"]) == ("20", "15")
+    names = [step.get("name") or step.get("uses") for step in jobs["pypi"]["steps"]]
+    upload = next(i for i, step in enumerate(jobs["pypi"]["steps"])
+                  if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@"))
+    assert names[upload + 1] == INDEX_STEPS["PyPI"][1], names
+
+
+class _Index:
+    """A local JSON API: `answers` is the list of (status, files) it gives,
+    one per request, the last one repeated."""
+
+    def __init__(self, answers: list[tuple[int, dict[str, str]]]) -> None:
+        import http.server
+        import threading
+
+        self.answers, self.requests = answers, []
+        index = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 (the stdlib's name)
+                index.requests.append(self.path)
+                status, files = index.answers[min(len(index.requests), len(index.answers)) - 1]
+                body = json.dumps({"urls": [{"filename": name, "digests": {"sha256": digest}}
+                                            for name, digest in files.items()]}).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}/pypi/opendox/"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+WHEEL_FILE, SDIST_FILE = "opendox-0.1.0-py3-none-any.whl", "opendox-0.1.0.tar.gz"
+VERIFIED = {WHEEL_FILE: "a" * 64, SDIST_FILE: "b" * 64}
+
+INDEX_CASES = {
+    "it serves exactly the verified files": ([(200, VERIFIED)], None),
+    "it lags, then serves them": ([(404, {}), (200, {WHEEL_FILE: "a" * 64}), (200, VERIFIED)], None),
+    "it serves another sdist": ([(200, {**VERIFIED, SDIST_FILE: "c" * 64})], "after 3 reads"),
+    "it serves a third file": ([(200, {**VERIFIED, "opendox-0.1.0-py2-none-any.whl": "d" * 64})],
+                               "after 3 reads"),
+    "it refuses the read": ([(403, {})], "HTTP Error 403"),
+}
+
+
+@needs_a_shell
+@pytest.mark.parametrize("index", sorted(INDEX_STEPS))
+@pytest.mark.parametrize("case", sorted(INDEX_CASES))
+def test_the_index_check(index: str, case: str, tmp_path: Path) -> None:
+    answers, refusal = INDEX_CASES[case]
+    step = _step(*INDEX_STEPS[index])
+    server = _Index(answers)
+    try:
+        env = {"INDEX": index, "JSON_BASE": server.base, "READS": "3", "PAUSE": "0",
+               "VERSION": "0.1.0", "WHEEL": WHEEL_FILE, "WHEEL_SHA256": "a" * 64,
+               "SDIST": SDIST_FILE, "SDIST_SHA256": "b" * 64}
+        result = _run(step["run"], tmp_path, env, (_python3(tmp_path / "bin"),))
+    finally:
+        server.close()
+    assert server.requests and set(server.requests) == {"/pypi/opendox/0.1.0/json"}
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"{index} serves exactly the verified files" in result.stdout
+    else:
+        assert result.returncode != 0, result.stdout
+        assert refusal in result.stdout + result.stderr, result.stdout + result.stderr
+
+
+def _python3(where: Path) -> Path:
+    """A directory holding `python3`, this interpreter."""
+    where.mkdir(parents=True, exist_ok=True)
+    python3 = where / "python3"
+    if not python3.exists():
+        python3.symlink_to(sys.executable)
+    return where
+
+
+def _seconds(text: str, pattern: str) -> int:
+    found = re.search(pattern, text)
+    assert found, pattern
+    return int(found.group(1))
+
+
+def test_each_job_timeout_covers_the_retries_it_promises() -> None:
+    """A job cut off by its timeout would break a promised retry (Copilot's
+    review of openDox-code#78), so each budget is recomputed from the steps."""
+    jobs = _workflow()["jobs"]
+    check = _step(*INDEX_STEPS["TestPyPI"])
+    per_read = _seconds(check["run"], r"urlopen\(url, timeout=(\d+)\)")
+    reads, pause = int(check["env"]["READS"]), int(check["env"]["PAUSE"])
+    json_budget = reads * (per_read + pause)
+    install = _step("testpypi-install", "install opendox[local] from TestPyPI into a fresh venv, and run it")["run"]
+    tries = len(re.search(r"for attempt in ((?:\d+ ?)+); do", install).group(1).split())
+    per_try = _seconds(install, r"timeout (\d+) \"\$RUNNER_TEMP/fresh/bin/python\" -m pip install")
+    wait = _seconds(install, r"sleep (\d+)")
+    setup = 5 * 60
+    assert jobs["testpypi-install"]["timeout-minutes"] * 60 >= (
+        json_budget + tries * (per_try + wait) + setup)
+    upload = 10 * 60
+    assert jobs["pypi"]["timeout-minutes"] * 60 >= upload + json_budget + setup

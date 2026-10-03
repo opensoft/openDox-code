@@ -37,7 +37,8 @@ name: release
 #   testpypi-install installs `opendox[local]` from TestPyPI into a fresh
 #                    venv, as plan 034's T099 falsifier does, and runs it.
 #   pypi             publishes the same bytes to PyPI, in the `pypi`
-#                    environment.
+#                    environment, then requires PyPI to serve exactly
+#                    those two files, by digest.
 #
 # NO PyPI TOKEN AND NO STORED SECRET, ANYWHERE. Both uploads use PyPI's
 # trusted publishing (OIDC): the job asks GitHub for a short-lived identity
@@ -529,15 +530,26 @@ jobs:
           printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
             | sha256sum --strict -c -
 
+      # skip-existing: a re-run after a partial upload skips a file the index
+      # already holds, instead of stopping on it, and uploads the rest. An
+      # index keeps each file name once, so a skipped file could differ from
+      # the verified one; the JSON step that follows each upload requires the
+      # index to serve exactly the build job's two digests, so it cannot pass.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
 
   testpypi-install:
     name: install opendox[local] from TestPyPI
     needs: [build, testpypi]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # THE BUDGET, in full, so no retry this job promises is cut short:
+    #   the JSON step: 20 reads, each up to 30 s, 15 s apart   15 min
+    #   the install:   10 tries, each up to 300 s, 30 s apart  55 min
+    #   checkout, setup-python, the venvs and --help           5 min
+    # tests/test_release_workflow.py recomputes it from the steps.
+    timeout-minutes: 75
     permissions:
       contents: read
     env:
@@ -557,35 +569,43 @@ jobs:
 
       # TestPyPI serves exactly the two files the build job verified. Its JSON
       # API can lag the upload, answering 404 or a partial release for a
-      # while, so it is read up to 20 times, 15 seconds apart, until it serves
-      # exactly those two files, before this step refuses.
+      # while, so it is read up to READS times, PAUSE seconds apart, until it
+      # serves exactly those two files, before this step refuses. The `pypi`
+      # job runs the same script against PyPI after its upload.
       - name: TestPyPI serves the files the build job verified
+        env:
+          INDEX: TestPyPI
+          JSON_BASE: https://test.pypi.org/pypi/opendox/
+          READS: '20'
+          PAUSE: '15'
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           import json, os, sys, time, urllib.error, urllib.request
 
-          url = f"https://test.pypi.org/pypi/opendox/{os.environ['VERSION']}/json"
+          index = os.environ["INDEX"]
+          url = f"{os.environ['JSON_BASE']}{os.environ['VERSION']}/json"
+          reads, pause = int(os.environ["READS"]), float(os.environ["PAUSE"])
           wanted = {os.environ["WHEEL"]: os.environ["WHEEL_SHA256"],
                     os.environ["SDIST"]: os.environ["SDIST_SHA256"]}
           served = None
-          for attempt in range(1, 21):
+          for attempt in range(1, reads + 1):
               try:
                   with urllib.request.urlopen(url, timeout=30) as response:
                       release = json.load(response)
                   served = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
                   if served == wanted:
                       break
-                  print(f"attempt {attempt}: TestPyPI serves {served} so far")
-              except urllib.error.URLError as error:
+                  print(f"attempt {attempt}: {index} serves {served} so far")
+              except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
                   code = getattr(error, "code", None)
                   if code is not None and code != 404 and code < 500:
                       raise
                   print(f"attempt {attempt}: {url} did not answer yet ({error})")
-              time.sleep(15)
+              time.sleep(pause)
           else:
-              sys.exit(f"::error::after 20 reads, TestPyPI serves {served}, "
+              sys.exit(f"::error::after {reads} reads, {index} serves {served}, "
                        f"and the build job verified {wanted}")
-          print(f"TestPyPI serves exactly the verified files: {served}")
+          print(f"{index} serves exactly the verified files: {served}")
           PY
 
       # T099's DRY-RUN FALSIFIER, as plan 034 writes it, in a fresh venv:
@@ -596,7 +616,8 @@ jobs:
       # requires the installed opendox to be the version just uploaded, so an
       # index that lags, or an older release, cannot pass for it. The simple
       # index can lag the JSON API, so each try is a fresh venv, up to ten
-      # tries, 30 seconds apart.
+      # tries, 30 seconds apart, and each try is cut off after 300 seconds,
+      # so the job's budget holds.
       #
       # THE TRADE, stated: with two indexes, pip may take a dependency from
       # either. The lock pins every dependency's version, and this job holds no
@@ -609,7 +630,7 @@ jobs:
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
             rm -rf "$RUNNER_TEMP/fresh"
             python -m venv "$RUNNER_TEMP/fresh"
-            if "$RUNNER_TEMP/fresh/bin/python" -m pip install --disable-pip-version-check \
+            if timeout 300 "$RUNNER_TEMP/fresh/bin/python" -m pip install --disable-pip-version-check \
                 --no-cache-dir --only-binary :all: -c constraints-cpython312-linux.txt \
                 --index-url https://test.pypi.org/simple/ \
                 --extra-index-url https://pypi.org/simple/ \
@@ -636,7 +657,9 @@ jobs:
     name: publish to PyPI
     needs: [build, testpypi-install]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # THE BUDGET: the upload (10 min), then the JSON step, 20 reads, each up
+    # to 30 s, 15 s apart (15 min), and the download (5 min).
+    timeout-minutes: 30
     environment:
       name: pypi
       url: https://pypi.org/project/opendox/${{ inputs.version }}/
@@ -664,4 +687,53 @@ jobs:
           printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
             | sha256sum --strict -c -
 
+      # skip-existing: a re-run after a partial upload skips a file the index
+      # already holds, instead of stopping on it, and uploads the rest. An
+      # index keeps each file name once, so a skipped file could differ from
+      # the verified one; the JSON step that follows each upload requires the
+      # index to serve exactly the build job's two digests, so it cannot pass.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          skip-existing: true
+
+      # PyPI serves exactly the two files the build job verified: the same
+      # script as the TestPyPI check, against PyPI.
+      - name: PyPI serves the files the build job verified
+        env:
+          INDEX: PyPI
+          JSON_BASE: https://pypi.org/pypi/opendox/
+          READS: '20'
+          PAUSE: '15'
+          WHEEL: ${{ needs.build.outputs.wheel }}
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+          SDIST: ${{ needs.build.outputs.sdist }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist-sha256 }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time, urllib.error, urllib.request
+
+          index = os.environ["INDEX"]
+          url = f"{os.environ['JSON_BASE']}{os.environ['VERSION']}/json"
+          reads, pause = int(os.environ["READS"]), float(os.environ["PAUSE"])
+          wanted = {os.environ["WHEEL"]: os.environ["WHEEL_SHA256"],
+                    os.environ["SDIST"]: os.environ["SDIST_SHA256"]}
+          served = None
+          for attempt in range(1, reads + 1):
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as response:
+                      release = json.load(response)
+                  served = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
+                  if served == wanted:
+                      break
+                  print(f"attempt {attempt}: {index} serves {served} so far")
+              except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+                  code = getattr(error, "code", None)
+                  if code is not None and code != 404 and code < 500:
+                      raise
+                  print(f"attempt {attempt}: {url} did not answer yet ({error})")
+              time.sleep(pause)
+          else:
+              sys.exit(f"::error::after {reads} reads, {index} serves {served}, "
+                       f"and the build job verified {wanted}")
+          print(f"{index} serves exactly the verified files: {served}")
+          PY
