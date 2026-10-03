@@ -1683,11 +1683,18 @@ class WorkbenchRoutes:
         # rule the validators refusal above keeps. It answers both an install
         # with no model configured (`doxbench_model.NO_MODEL_CONFIGURED`, which
         # the accessor answers as no port) and a plane with no factory at all,
-        # and it spawns nothing and contacts nothing. Step 7 keeps its own check
-        # for the port it then reads. Measured at openDox-code#71 `e0298cf4`,
-        # once T085's validators answered standalone: without this, a standalone
-        # turn reached step 5's scope import and the connection dropped. ----
-        if self._workbench_model_port() is None:
+        # and it spawns nothing and contacts nothing. Measured at
+        # openDox-code#71 `e0298cf4`, once T085's validators answered
+        # standalone: without this, a standalone turn reached step 5's scope
+        # import and the connection dropped.
+        #
+        # THE PORT RESOLVED HERE IS THE ONE STEP 7 READS, so the declared
+        # factory runs ONCE per turn. The built-in factories memoize, but the
+        # accessor does not require an injected one to, and a second call
+        # would build a second adapter and discard the first (Copilot at
+        # openDox-code#74 8104fa6e, r4170882125). ----
+        port = self._workbench_model_port()
+        if port is None:
             self._refuse_turn(validators,
                               DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
                               turn_id, failure_kind=failure_kind)
@@ -1852,13 +1859,8 @@ class WorkbenchRoutes:
                               failure_kind=failure_kind)
             return
 
-        # ---- step 7: model ----
-        port = self._workbench_model_port()
-        if port is None:
-            self._refuse_turn(validators,
-                              DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
-                              turn_id, failure_kind=failure_kind)
-            return
+        # ---- step 7: model. `port` is the one resolved, and found present,
+        # ahead of step 5; it is not resolved a second time. ----
         try:
             catalog = port.catalog()
         except Exception:  # noqa: BLE001 - never let a provider-shaped exception reach the wire

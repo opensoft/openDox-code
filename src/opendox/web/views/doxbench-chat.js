@@ -335,6 +335,19 @@ export const NO_MODEL_CONFIGURED_REMEDY =
 export function noModelConfiguredRemedy(stateValue) {
   if (stateValue.catalogFailure) return null;
   if (stateValue.models === null) return null;
+  // EMPTY READS AS openDox's OWN NO-MODEL STATE, and that is a stated limit
+  // (RULED by the holder, 2026-10-03, on Copilot's r4170956940 at
+  // openDox-code#74). The remedy names openDox's OWN ways to configure a
+  // model. Every openDox entry point declares openDox's own model port
+  // (`doxbench_install.declared_model_port_factory`), whose empty catalog is
+  // exactly no binding and no harness. A programmatic embedder that injects
+  // its own port, and serves an empty catalog from it, supplies its own intake
+  // offer, and where intake is offered this line is hidden (the check below).
+  // The server cannot say more within the released contract:
+  // `xfactory-workbench-model-catalog` is closed (`additionalProperties:
+  // false`: `schema_version`, `kind`, `models`), and `/capabilities` and the
+  // intake surface are held EQUAL with and without a model by #1144's 16.5
+  // (plan 034 T082), so neither may carry a model posture.
   if ((stateValue.models || []).length !== 0) return null;
   if (stateValue.intakeOffered === true) return null;
   return NO_MODEL_CONFIGURED_REMEDY;

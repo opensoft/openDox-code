@@ -50,7 +50,27 @@ def _declared_binding(args: argparse.Namespace) -> "binding_mod.ModelProviderBin
         id=args.id, label=args.label, provider=args.provider,
         credential_ref=args.credential_ref, auth_kind=args.auth_kind,
         approved_by=args.approved_by, endpoint=args.endpoint,
-        dialect=args.dialect, broker_argv=tuple(args.broker_argv))
+        dialect=args.dialect, model=args.model,
+        broker_argv=tuple(args.broker_argv or ()))
+
+
+#: What `list` prints for a binding that declares no model (#1144 box 16.2).
+#: The request then names the binding's id, as every request did before the
+#: field existed, and the operator reading the list should see that.
+NO_MODEL_DECLARED = "(none declared: the request names this binding's id)"
+
+#: What `list` prints for a field the record's resolver forbids or does not
+#: need (#1144 box 16.3): the reference under the auth kind `none`, and the
+#: broker invocation of a record no broker answers. The custody line beside it
+#: says which resolver answers instead.
+NOT_DECLARED = "(none)"
+
+#: What `set-credential` says of a binding no broker answers (#1144 box 16.3).
+#: There is no broker to hand a credential to: the built-in resolver reads the
+#: reference at call time, or the endpoint takes none.
+NO_BROKER_TO_HAND_TO = (
+    "binding {binding_id!r} names no broker, so there is nothing to hand a "
+    "credential to: {custody}")
 
 
 def cmd_model_binding_list(args: argparse.Namespace) -> int:
@@ -74,10 +94,16 @@ def cmd_model_binding_list(args: argparse.Namespace) -> int:
         print(f"    provider         {record['provider']}")
         print(f"    auth kind        {record['auth_kind']}")
         print(f"    approved by      {record['approved_by']}")
-        print(f"    credential ref   {record['credential_ref']}")
+        reference = record["credential_ref"]
+        print(f"    credential ref   "
+              f"{reference if reference is not None else NOT_DECLARED}")
         print(f"    endpoint         {record['endpoint']}")
         print(f"    dialect          {record['dialect']}")
-        print(f"    broker argv      {record['broker_argv']}")
+        model = record["model"]
+        print(f"    model            "
+              f"{model if model is not None else NO_MODEL_DECLARED}")
+        argv = record["broker_argv"]
+        print(f"    broker argv      {argv if argv else NOT_DECLARED}")
         print(f"    custody          {record['credential_custody']}")
     return 0
 
@@ -90,7 +116,7 @@ def cmd_model_binding_add(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"  declared {binding.id} in {store.path}")
-    print(f"  {binding_mod.CUSTODY_NOTICE}")
+    print(f"  {binding.custody_notice()}")
     return 0
 
 
@@ -113,7 +139,7 @@ def cmd_model_binding_remove(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"  retired {binding.id} from {store.path}")
-    print(f"  {binding_mod.REMOVAL_NOTICE}")
+    print(f"  {binding.removal_notice()}")
     return 0
 
 
@@ -127,7 +153,12 @@ def cmd_model_binding_set_credential(args: argparse.Namespace, *,
     standard input. No variable in this function ever holds the credential, so
     none can outlive the call, be echoed in a message, or reach an exception.
     It is deliberately NOT a command-line argument: an argv is visible in the
-    process table and lands in a shell history."""
+    process table and lands in a shell history.
+
+    A BINDING NO BROKER ANSWERS IS REFUSED, and its standard input is left
+    unread (#1144 box 16.3). Its credential is where its `env:` or `keyring:`
+    reference names, or it takes none, so there is no custodian to hand a
+    value to, and reading one here would be holding it for nothing."""
     from opendox import doxbench_provider as provider_mod
 
     store = _binding_store(args)
@@ -136,6 +167,10 @@ def cmd_model_binding_set_credential(args: argparse.Namespace, *,
         if binding is None:
             raise binding_mod.BindingRefused(
                 f"no binding with id {args.id!r} is declared")
+        if (binding.credential_source()
+                != binding_mod.CREDENTIAL_FROM_BROKER):
+            raise binding_mod.BindingRefused(NO_BROKER_TO_HAND_TO.format(
+                binding_id=binding.id, custody=binding.custody_notice()))
         reference = provider_mod.hand_off_credential(
             binding, source if source is not None else sys.stdin)
         store.edit(dataclasses.replace(binding, credential_ref=reference))
@@ -161,15 +196,25 @@ def _add_binding_declaration_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--label", required=True,
                         help="the label the model menu shows")
     parser.add_argument("--provider", required=True,
-                        help="the provider name the broker takes custody for "
-                             "(the broker's declared `--provider`)")
-    parser.add_argument("--credential-ref", required=True,
+                        help="the provider's name; where a broker holds the "
+                             "credential, the one it takes custody for (the "
+                             "broker's declared `--provider`)")
+    # A REFERENCE, NEVER THE CREDENTIAL (#1144 box 16.3). NOT REQUIRED by the
+    # parser, because the auth kind `none` forbids it. The binding itself
+    # refuses a missing reference for every kind that takes a credential, and
+    # says why.
+    parser.add_argument("--credential-ref", default=None,
                         dest="credential_ref",
-                        help="the reference the broker resolves; NEVER the "
-                             "credential itself")
+                        help="the credential's REFERENCE, NEVER the credential "
+                             "itself: env:NAME or keyring:SERVICE/USERNAME, "
+                             "which the built-in resolver reads at call time, "
+                             "or a reference the broker resolves; omitted "
+                             f"for --auth-kind {binding_mod.AUTH_KIND_NONE}")
     parser.add_argument("--auth-kind", required=True, dest="auth_kind",
                         choices=list(binding_mod.AUTH_KINDS),
-                        help="the authentication kind the broker holds")
+                        help="the authentication kind of the credential; "
+                             f"{binding_mod.AUTH_KIND_NONE} for an endpoint "
+                             "that takes none")
     # REQUIRED because the broker requires it: `credential-contracts` holds
     # that a grant without an approver is invalid, and the broker's `intake`
     # refuses without an approver flag. A binding that could not name one could
@@ -198,11 +243,22 @@ def _add_binding_declaration_args(parser: argparse.ArgumentParser) -> None:
     # neither an endpoint nor a dialect from a mint, deliberately, so both are
     # declared here — see doxbench_binding's module docstring.
     parser.add_argument("--endpoint", required=True,
-                        help="the provider endpoint this binding's minted "
-                             "token is presented at")
+                        help="the provider endpoint this binding's requests "
+                             "are sent to; a URL carrying a credential is "
+                             "refused, so name the credential by its reference "
+                             "instead")
     parser.add_argument("--dialect", required=True,
                         choices=list(binding_mod.DIALECTS),
                         help="the request grammar that endpoint speaks")
+    # THE MODEL THE PROVIDER RECEIVES (#1144 box 16.2), the route's third fact.
+    # OPTIONAL, and that keeps a binding declared without it meaning what it
+    # always meant: the request names the binding's id. `edit` replaces the
+    # whole binding, as it always has, so an edit that omits `--model` declares
+    # none.
+    parser.add_argument("--model", default=None,
+                        help="the model name the provider receives in each "
+                             "request (default: none declared, and the "
+                             "request names this binding's id)")
     # A POSITIONAL, taken after a bare `--`, and that is the fix for a real
     # trap rather than a style choice: a broker invocation is full of
     # option-shaped members (`--binding`, `--ref`), and as a flag's value they
@@ -211,11 +267,17 @@ def _add_binding_declaration_args(parser: argparse.ArgumentParser) -> None:
     # rewriting the operator's store path and truncating their template. The
     # subparsers below also set `allow_abbrev=False`, so the two defences are
     # independent.
+    #
+    # ZERO OR MORE since #1144 box 16.3: a binding the built-in resolver or the
+    # auth kind `none` answers names no broker, and one given beside either is
+    # refused by the binding itself. A broker's reference still needs its
+    # invocation, and the binding still refuses one without it.
     parser.add_argument(
-        "broker_argv", nargs="+", metavar="-- BROKER ARGV",
+        "broker_argv", nargs="*", metavar="-- BROKER ARGV",
         help="the broker invocation, as argv members, after a bare `--`. "
              f"Placeholders {binding_mod.ARGV_PLACEHOLDERS} are filled from "
-             "this binding's own fields")
+             "this binding's own fields. Omitted for an env: or keyring: "
+             f"reference and for --auth-kind {binding_mod.AUTH_KIND_NONE}")
 
 
 def _add_model_binding_parser(sub) -> None:

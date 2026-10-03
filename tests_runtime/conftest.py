@@ -57,6 +57,31 @@ _SKIP_REASON = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_inherited_runtime_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No `OPENDOX_*` runtime setting the runner exports reaches a case.
+
+    Since plan 034 T070 the runtime reads a selector, `OPENDOX_INSTALL_MODE`,
+    and a runner that exports `local` (as a local install's own shell would)
+    turned every hosted case that leaves it unset into a configuration
+    refusal: 20 cases in `test_runtime_cli.py` and `test_migrations_apply.py`
+    (measured; Copilot review of openDox-code#67). So every name the runtime
+    reads (`opendox.runtime.config.SETTING_NAMES`) is cleared before each
+    case, and a case that wants one sets it. `OPENDOX_TEST_DATABASE_URL` is
+    not one of them (see `TEST_DSN_ENV`), so the harness's own DSN is kept.
+    The production refusal is unchanged.
+
+    An `opendox` that cannot be imported leaves nothing to clear: the case
+    then fails on its own import, which is the failure worth seeing.
+    """
+    try:
+        from opendox.runtime.config import SETTING_NAMES
+    except ImportError:
+        return
+    for name in SETTING_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
 def in_ci() -> bool:
     """Whether this run is CI's, by CI's own variable.
 

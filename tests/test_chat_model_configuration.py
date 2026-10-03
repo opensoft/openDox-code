@@ -63,6 +63,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import types
 from pathlib import Path
@@ -100,13 +101,78 @@ CONFIGURED_NONE = ("chat is unavailable — no approved model is configured; bot
                    "editors remain fully usable.")
 
 
-def _no_omp_path(tmp_path: Path) -> str:
-    """This process's PATH with every directory holding `omp` left out."""
-    kept = [entry for entry in os.environ.get("PATH", "").split(os.pathsep)
-            if entry and shutil.which(bridge_mod.HARNESS_COMMAND, path=entry) is None]
-    path = os.pathsep.join(kept)
-    assert shutil.which(bridge_mod.HARNESS_COMMAND, path=path) is None
-    return path
+def _no_omp_path(tmp_path: Path, path: str | None = None) -> str:
+    """This process's PATH (or `path`) with `omp` taken out and EVERY OTHER
+    COMMAND KEPT, in order. A directory holding `omp` is replaced by a mirror
+    of it under `tmp_path`: a symlink to each of its other entries. Dropping
+    the whole directory would drop whatever else it holds, `git` among them,
+    and a child that cannot find `git` fails before the case it exists for
+    (Copilot at openDox-code#74 9551f20d, r4170794383)."""
+    harness = bridge_mod.HARNESS_COMMAND
+    mirrors = Path(tempfile.mkdtemp(prefix="path-without-omp-", dir=tmp_path))
+    kept = []
+    for index, entry in enumerate(
+            (os.environ.get("PATH", "") if path is None else path).split(os.pathsep)):
+        if not entry:
+            continue
+        if shutil.which(harness, path=entry) is None:
+            kept.append(entry)
+            continue
+        mirror = mirrors / str(index)
+        mirror.mkdir()
+        # ABSOLUTE targets: a relative PATH entry names a directory relative
+        # to the current directory, and a relative link would resolve from
+        # the mirror instead (Copilot at openDox-code#74 4ef7575a,
+        # r4170839174).
+        for item in sorted(Path(os.path.abspath(entry)).iterdir()):
+            if item.name != harness:
+                (mirror / item.name).symlink_to(item)
+        kept.append(str(mirror))
+    without = os.pathsep.join(kept)
+    assert shutil.which(harness, path=without) is None
+    return without
+
+
+def test_a_path_without_omp_keeps_every_other_command(tmp_path) -> None:
+    """A directory that holds `omp` beside another command keeps the other
+    command, in its place in the order."""
+    shared = tmp_path / "shared-bin"
+    shared.mkdir()
+    for name in (bridge_mod.HARNESS_COMMAND, "fixture-git"):
+        tool = shared / name
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+    before, after = tmp_path / "before", tmp_path / "after"
+    before.mkdir()
+    after.mkdir()
+    path = os.pathsep.join([str(before), str(shared), str(after)])
+    without = _no_omp_path(tmp_path, path).split(os.pathsep)
+    assert len(without) == 3, "a directory holding omp was dropped whole"
+    assert without[0] == str(before) and without[2] == str(after), without
+    assert shutil.which(bridge_mod.HARNESS_COMMAND, path=os.pathsep.join(without)) is None
+    found = shutil.which("fixture-git", path=os.pathsep.join(without))
+    assert found is not None and Path(found).parent == Path(without[1]), found
+    assert Path(found).resolve() == (shared / "fixture-git").resolve()
+
+
+def test_a_relative_path_entry_without_omp_keeps_its_commands(
+        tmp_path, monkeypatch) -> None:
+    """A RELATIVE PATH entry holding `omp`: its other commands still resolve,
+    from anywhere, to the same files."""
+    shared = tmp_path / "shared-bin"
+    shared.mkdir()
+    for name in (bridge_mod.HARNESS_COMMAND, "fixture-git"):
+        tool = shared / name
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    assert shutil.which("fixture-git", path="shared-bin") is not None
+    without = _no_omp_path(tmp_path, "shared-bin")
+    monkeypatch.chdir(ROOT)                      # a child's own directory
+    assert shutil.which(bridge_mod.HARNESS_COMMAND, path=without) is None
+    found = shutil.which("fixture-git", path=without)
+    assert found is not None, without
+    assert Path(found).resolve() == (shared / "fixture-git").resolve()
 
 
 def _fake_omp(tmp_path: Path) -> Path:
@@ -342,7 +408,10 @@ def standalone(tmp_path, monkeypatch):
     assert ACTOR in GATE_TEST_PRINCIPALS
     repo = fresh_repository(PLAIN, tmp_path)
     monkeypatch.setenv("PATH", _no_omp_path(tmp_path))   # the child inherits it
-    child = Child(tmp_path, "opendox.cli", "generate-and-open",
+    # `--local`: the single-user install. Since plan 034 T070 an unflagged
+    # `generate-and-open` is HOSTED, and with no issuer it refuses (13.5)
+    # before it serves anything.
+    child = Child(tmp_path, "opendox.cli", "generate-and-open", "--local",
                   "--repo-root", str(repo), "--repository", "fixture",
                   "--no-open", "--port", "0", "--run-dir", str(tmp_path / "run"),
                   "--actor", ACTOR)
@@ -566,13 +635,27 @@ def test_the_turn_routes_order_with_and_without_a_port(
     posture. With no port (no model configured, or no factory), the no-model
     refusal answers before a scope, identity or limits defect, and the scope
     is never read. With a port, every defect answers what it answered before
-    the hoist, and a well-formed turn reaches step 7."""
+    the hoist, and a well-formed turn reaches step 7.
+
+    The declared model factory runs AT MOST ONCE per turn: once where the
+    turn reaches the model verdict, never where an earlier defect answers
+    (Copilot at openDox-code#74 8104fa6e, r4170882125)."""
     payload, arguments = _defective(defect)
     port = _OfferingNothing()
+    declared = (lambda: port) if posture == "a port" else _NO_PORT[posture]
+    resolved = []
+
+    def counted():
+        resolved.append(posture)
+        return declared()
+
     route = _TurnRoute(payload, root=tmp_path,
-                       port_factory=(lambda: port) if posture == "a port"
-                       else _NO_PORT[posture], **arguments)
+                       port_factory=None if declared is None else counted,
+                       **arguments)
     route._handle_workbench_chat_turn()
+    reaches_the_verdict = defect not in _BEFORE_THE_MODEL_VERDICT
+    assert len(resolved) == (1 if reaches_the_verdict and declared is not None
+                             else 0), (posture, defect, resolved)
     assert len(route.sent) == 1, route.sent
     status, body = route.sent[0]
     expected = (_WITH_A_PORT[defect]
@@ -910,8 +993,10 @@ def postures(tmp_path_factory):
             assert binding_mod.bindings_path(bound).is_file()
             for name, repo in zip(POSTURES, (no_model, bound)):
                 slug = name.replace(" ", "-")
+                # `--local`: the single-user install (plan 034 T070), as the
+                # `standalone` fixture above runs it.
                 child = Child(work / f"child-{slug}", "opendox.cli",
-                              "generate-and-open", "--repo-root", str(repo),
+                              "generate-and-open", "--local", "--repo-root", str(repo),
                               "--repository", "fixture", "--no-open", "--port", "0",
                               "--run-dir", str(work / f"run-{slug}"),
                               "--actor", ACTOR)
