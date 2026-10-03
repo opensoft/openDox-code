@@ -46,6 +46,10 @@ from opendox import action_errors
 # proxy is bound at module level here: `tests/test_projection_seams.py` holds
 # the set of modules that bind one, and this module reads the seam in a body.
 from opendox import projection_seams
+# THE GATE'S RECORDS PREFIX AND KICKOFF'S READERS, THROUGH THEIR SEAMS (plan
+# 034 T084; #1144 4.3, R1Q10 (a)): `_serve_project_register` reads both per
+# request, a host's registration or openDox's own default. Stdlib-only.
+from opendox import column_seams
 from opendox.serve_wire import (
     AGENT_INVOCATION_REFUSAL,
     JSON_CTYPE,
@@ -266,13 +270,19 @@ class ProjectRoutes:
         duplicate guard uses, so a fresh commission is visible as pending
         instead of looking like it did nothing. A pending id the register
         already carries is dropped: the register wins the moment the
-        fulfilment lands, even before the descriptor's status flips."""
+        fulfilment lands, even before the descriptor's status flips.
+
+        THROUGH THE COLUMN SEAMS (plan 034 T084; #1144 batch L, RULED
+        `5920216845`). These were deferred `openxdox.gate_console` and
+        `openxdox.kickoff` imports, so where openXdox is not installed every
+        request ended in a dropped connection. openDox's own kickoff default
+        discovers no register, so a lone openDox answers today's structured
+        404 "no project register" and the picker hides, as it does in any
+        checkout without one."""
         import yaml
-        from openxdox.gate_console import DEFAULT_RECORDS_DIR
-        from openxdox.kickoff import (
-            dispatched_commission_rows, dispatched_commissions,
-            discover_project_register)
-        source = discover_project_register(Path(self.checkout_root))
+        gate = column_seams.gate.current()
+        kickoff = column_seams.kickoff.current()
+        source = kickoff.discover_project_register(Path(self.checkout_root))
         register = None
         if source is not None:
             try:
@@ -289,7 +299,7 @@ class ProjectRoutes:
             if isinstance(p, dict) and p.get("id")
         ]
         real_ids = {p["id"] for p in projects}
-        records_root = Path(self.checkout_root) / DEFAULT_RECORDS_DIR
+        records_root = Path(self.checkout_root) / gate.DEFAULT_RECORDS_DIR
 
         def _job(descriptor):
             try:
@@ -300,7 +310,8 @@ class ProjectRoutes:
 
         pending = []
         for pid, descriptor in sorted(
-                dispatched_commissions(records_root, "create-project").items()):
+                kickoff.dispatched_commissions(records_root,
+                                               "create-project").items()):
             if pid in real_ids:
                 continue
             job = _job(descriptor)
@@ -319,7 +330,7 @@ class ProjectRoutes:
         # neither plane is dropped (nothing to badge).
         pending_ids = {p["id"] for p in pending}
         pending_edits = []
-        for pid, _descriptor, job in dispatched_commission_rows(
+        for pid, _descriptor, job in kickoff.dispatched_commission_rows(
                 records_root, "edit-project"):
             if pid not in real_ids and pid not in pending_ids:
                 continue

@@ -445,8 +445,15 @@ def test_the_lens_of_a_real_standalone_serve_offers_neither_seed_action(
     capabilities, snapshot = served["capabilities"], served["snapshot"]
     assert capabilities["views"]["contributed_routes"] == [], (
         "a serve with no host contributes no route")
-    assert capabilities["actions"]["gate"] is actor, (
-        "the serve's gate verdict follows the identity it can resolve")
+    # SINCE T084 (plan 034; RULED openxFactory#656 `5920216845`, item 1) the
+    # gate flag is true only where a contributed binding answers a gate verb,
+    # and a serve with no host contributes none. So it reads false in both
+    # runs, and the identity is asserted where it lands, on the resolved
+    # actor.
+    assert capabilities["actions"]["gate"] is False, (
+        "a serve with no gate route offers no gate action")
+    assert (capabilities["actor"] is not None) is actor, (
+        "the serve's actor follows the identity it can resolve")
     # the keyword the most documents declare, so the radar has dots to draw
     carriers = Counter(topic for doc in snapshot["documents"]
                        for topic in doc.get("topics", []))
