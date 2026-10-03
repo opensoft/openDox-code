@@ -80,8 +80,12 @@ active entry's freshness (`X-Snapshot-Repository`, `X-Snapshot-Ref`,
 `X-Snapshot-Origin`, `X-Snapshot-Generated-At`, `X-Snapshot-Stale`), the
 transport half of the freshness header the renderer displays (design D11).
 
-Security posture: binds LOOPBACK only by default (127.0.0.1); every write route
-is loopback-gated; the source route is read-only and confined PER REGISTRY ENTRY
+Security posture: binds LOOPBACK only by default (127.0.0.1); on a loopback
+plane EVERY request, whatever its route or method, is refused unless its one
+`Host` names this serve's own loopback authority at the bound port, so a
+DNS-rebinding page cannot read the corpus through the engineer's browser (plan
+034 T103; see `host_names_this_loopback_serve`); every write route is
+loopback-gated; the source route is read-only and confined PER REGISTRY ENTRY
 (an entry with no declared root serves no documents at all); the actions
 validate their request body and confine every path through the read-side guard
 before touching the filesystem.
@@ -703,18 +707,97 @@ def mint_console_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def loopback_authorities(port: int) -> frozenset[str]:
-    """Normalized ``Host``/origin authorities for this loopback serve."""
+def loopback_authorities(port: int, bound_host: str | None = None) -> frozenset[str]:
+    """Normalized ``Host``/origin authorities for this loopback serve.
+
+    `bound_host` is the address the socket is actually bound to
+    (`server_address[0]`). Given one, the IPv6 literal ``[::1]`` is an
+    authority only where the socket is bound to ``::1`` (plan 034 T103): a
+    browser that names ``[::1]`` connects to ``::1``, which an IPv4 bind never
+    answers, so on that bind no legitimate page names it. ``127.0.0.1`` and
+    ``localhost`` stay authorities on every loopback bind. With no
+    `bound_host` the set is every loopback spelling, as it always was."""
+    hosts = (LOOPBACK_HOSTS if bound_host is None else
+             frozenset(host for host in LOOPBACK_HOSTS
+                       if ":" not in host or host == bound_host))
     authorities = {
         f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-        for host in LOOPBACK_HOSTS
+        for host in hosts
     }
     if port == 80:
         authorities |= {
             f"[{host}]" if ":" in host else host
-            for host in LOOPBACK_HOSTS
+            for host in hosts
         }
     return frozenset(authorities)
+
+
+# --------------------------- the loopback Host gate (plan 034 T103) ---------------------------
+#
+# DNS REBINDING READ THE WHOLE CORPUS (adversarial review 2, 2026-10-03, M4,
+# measured at openDox-code#77 `b1db1965`). A page on `evil.example` whose name
+# is re-pointed at 127.0.0.1 makes the engineer's own browser send
+# `GET /source/<doc>.md` with `Host: evil.example:<port>` to this loopback
+# socket, and the page may read the answer, because to the browser it is
+# same-origin. Only `/capabilities` (and only when a console token had been
+# minted) and the console routes asked whether the `Host` named this serve, so
+# `/source/*`, `/snapshot.json` and the static bundle answered 200 to any
+# `Host`. And L2: with no git identity a local serve mints no token, so
+# `/capabilities` skipped its own check and handed the install block (the data
+# directory, the socket directory and the bundled server's pid, which name
+# the OS user) to any `Host` as well.
+#
+# THE GATE IS ONE CHECK AT ONE PLACE, ahead of every route:
+# `DashboardHandler.parse_request`, which the standard library runs on every
+# request before it looks for a `do_<METHOD>` at all. So the static bundle
+# (`index.html`, `app.js`, `views/*`), `/source/*`, `/snapshot.json`,
+# `/capabilities` whatever the token state, every `/workbench` and
+# `/actions` route, a route a host contributes, HEAD, OPTIONS and any other
+# method are refused alike, and a route added tomorrow is behind it without
+# its author doing anything.
+#
+# WHAT IT ACCEPTS: exactly one `Host` line naming one of the plane's own
+# loopback authorities at the BOUND port (`loopback_authorities`, the same
+# set the console's Origin test reads): `127.0.0.1:<port>`,
+# `localhost:<port>` in any case, and `[::1]:<port>` only where the socket is
+# bound to `::1`. Exact match after trimming the optional whitespace RFC 9110
+# allows around a field value, and lower-casing, which is all `localhost`
+# needs. No suffix, no prefix, no other port, no missing or empty `Host`, no
+# second `Host` line (RFC 9112 § 3.2 refuses that too).
+#
+# WHAT IT ANSWERS: one fixed status and one fixed body, built from constants
+# below, so a refusal never echoes the `Host` it refused and never says which
+# test failed. 403 and `invalid_host`, the code `/capabilities` already
+# answered a rebinding `Host` with, so a client that read that refusal reads
+# this one. A declared request body is drained, bounded, first, as every other
+# refusal here drains one, so the refusal survives its own transport.
+#
+# A HOSTED PLANE IS UNTOUCHED. Off loopback the bind is `0.0.0.0` behind an
+# ingress, whose `Host` is the public name, and the hosted plane's rules are
+# its own (`hosted_ref_refused`, the gateway's identity): `parse_request` asks
+# `self.loopback` first and does nothing else when it is false.
+FOREIGN_HOST_STATUS = 403
+FOREIGN_HOST_ERROR = "invalid_host"
+FOREIGN_HOST_MESSAGE = "the request Host does not name this loopback server"
+FOREIGN_HOST_BODY = json.dumps({"ok": False, "error": FOREIGN_HOST_ERROR,
+                                "message": FOREIGN_HOST_MESSAGE}).encode("utf-8")
+
+
+def host_names_this_loopback_serve(host_lines, port: int,
+                                   bound_host: str | None = None) -> bool:
+    """Whether a request's `Host` header lines name this loopback serve.
+
+    `host_lines` is every `Host` line the request carried, in order
+    (`headers.get_all("Host")`, which is None when there is none). True only
+    for exactly one line whose value, with the surrounding spaces and tabs
+    trimmed and lower-cased, is one of `loopback_authorities(port,
+    bound_host)`. Pure, so the table of crafted `Host`s is asserted on it
+    directly as well as through a live server."""
+    lines = list(host_lines or ())
+    if len(lines) != 1:
+        return False
+    value = str(lines[0]).strip(" \t").lower()
+    return value in loopback_authorities(port, bound_host)
 
 
 # --------------------------- source-path containment (pure) ---------------------------
@@ -1153,14 +1236,15 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             self._serve_project_register(head_only)
             return True
         if path == CAPABILITIES_ROUTE:
-            # The loopback console token is process-launch authority. Never
-            # disclose it to a DNS-rebinding Host, even though the connection
-            # itself arrived on the loopback socket.
-            if self.console_token and not self._trusted_console_host():
-                self._send_json(403, {"ok": False, "error": "invalid_host",
-                                      "message": "the request Host is not this "
-                                                 "loopback console"})
-                return True
+            # NO HOST TEST OF ITS OWN HERE ANY MORE (plan 034 T103). One stood
+            # here, run only when a console token had been minted, so a local
+            # serve with no git identity handed its install block to a
+            # DNS-rebinding `Host` (adversarial review 2, L2). On a loopback
+            # plane `parse_request` has refused every such request before any
+            # route is reached, whatever the token state; on a hosted plane
+            # no token is ever minted (the `session` capability needs
+            # loopback), so the old test could not fire there either.
+            #
             # THE ONE REPOSITORY THIS SERVE CAN WRITE TO, reported from the
             # SAME authority a create is refused against (`_session_repository`
             # — a session lives in one tree, the served checkout), so the
@@ -1485,17 +1569,77 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             return
         self._send_error_code(action_errors.ERR_UNKNOWN_ACTION)
 
+    # ---- the loopback Host gate (plan 034 T103), ahead of every route ----
+    def parse_request(self) -> bool:
+        """The standard library's request parse, then THE LOOPBACK HOST GATE.
+
+        `BaseHTTPRequestHandler.handle_one_request` calls this for every
+        request and dispatches to `do_<METHOD>` only when it answers True, so
+        a refusal here is ahead of every route and every method, the ones a
+        host contributes included (see the gate's banner beside
+        `host_names_this_loopback_serve`). `DashboardHandler` is the first
+        base of every bound class (`route_extension.compose_handler`), so no
+        contributed mixin comes ahead of it.
+
+        Off loopback it is the standard parse and nothing else: the hosted
+        plane keeps its own rules."""
+        if not super().parse_request():
+            return False
+        if self.loopback and not self._trusted_console_host():
+            self._refuse_foreign_host()
+            return False
+        return True
+
+    def _refuse_foreign_host(self) -> None:
+        """The gate's ONE answer: a fixed status and body, never the `Host`.
+
+        The declared body, if any, is drained (bounded) first, as every other
+        refusal on this surface drains one: answering with bytes unread can
+        reset the connection under the refusal before the client reads it. The
+        connection closes after it, so nothing left on the socket is read as
+        a next request. The server log gets one fixed line, so the refusal is
+        reported as well as made, and that line names no request-derived
+        value either."""
+        try:
+            declared = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            declared = 0
+        if declared > 0:
+            _drain_refused_body(self.rfile, declared)
+        sys.stderr.write("[loopback] refused a request whose Host does not "
+                         "name this loopback server\n")
+        self.close_connection = True
+        self.send_response(FOREIGN_HOST_STATUS)
+        self.send_header("Content-Type", JSON_CTYPE)
+        self.send_header("Content-Length", str(len(FOREIGN_HOST_BODY)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(FOREIGN_HOST_BODY)
+
+    def _bound_authorities(self) -> frozenset[str]:
+        """This serve's own loopback authorities, from the BOUND socket: its
+        port and its address, never anything the request said."""
+        bound = self.server.server_address
+        return loopback_authorities(int(bound[1]), str(bound[0]))
+
     # ---- the human-console test (FR-019's third clause) ----
     def _trusted_console_host(self) -> bool:
-        """Whether ``Host`` names this server's bound loopback port."""
-        raw = str(self.headers.get("Host") or "").strip().lower()
-        return raw in loopback_authorities(int(self.server.server_address[1]))
+        """Whether the request's ONE ``Host`` line names this server's bound
+        loopback port (`host_names_this_loopback_serve`). The gate in
+        `parse_request` asks it of every request on a loopback plane, and the
+        console test asks it again, so the console's answer never depends on
+        the gate having run (a hand-built handler)."""
+        bound = self.server.server_address
+        return host_names_this_loopback_serve(
+            self.headers.get_all("Host"), int(bound[1]), str(bound[0]))
 
     def _own_origin_authorities(self) -> set[str]:
         """The `host:port` spellings a request from THIS serve's own page can
-        legitimately name. Derived from the bound port, never from the request's
-        untrusted ``Host``, so DNS rebinding cannot define its own origin."""
-        return set(loopback_authorities(int(self.server.server_address[1])))
+        legitimately name. Derived from the bound socket, never from the
+        request's untrusted ``Host``, so DNS rebinding cannot define its own
+        origin."""
+        return set(self._bound_authorities())
 
     def _foreign_origin(self) -> bool:
         """Whether the caller declares an origin that is not this serve's own.
