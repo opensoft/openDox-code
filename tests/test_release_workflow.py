@@ -34,12 +34,16 @@ What is held:
     pin, read over git with no credential;
   * the pin, again, as the step right before each upload, the build job's
     script: a pin that moved meanwhile stops the upload;
+  * before that, the preflight: the index holds no file of this version but a
+    verified one at its verified digest, so skip-existing can never make a
+    mixed release;
   * the environment step: both environments with a reviewer pass, and either
     one without a reviewer, or unreadable, refuses;
   * the version gate, case by case, a pre-release and a development release
     among the refusals;
   * the artifact checks, over a small built-by-hand wheel and sdist in a git
-    tree of their own: the whole set passes, and each kind of gap refuses;
+    tree of their own: the whole set passes, and each kind of gap refuses,
+    a changed or dropped marker and a direct URL among them;
   * the publish jobs' digest check: the verified files pass, and a changed
     byte or a third file refuses.
 """
@@ -385,15 +389,28 @@ def test_the_version_gate(case: str, tmp_path: Path) -> None:
 PYPROJECT = """[project]
 name = "opendox"
 version = "0.1.0"
-dependencies = ["PyYAML>=6.0"]
+dependencies = ["PyYAML>=6.0", "colorama>=0.4; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
-runtime = ["fastapi>=0.115"]
+runtime = ["fastapi>=0.115", "uvloop>=0.19; sys_platform != 'win32' or python_version < '3.13'"]
 local = ["opendox[runtime]", "pixeltable-pgserver>=0.6.0"]
 """
 
-REQUIRES = ["PyYAML>=6.0", 'fastapi>=0.115; extra == "runtime"',
+# The wheel's requirements as setuptools writes them for PYPROJECT: a
+# requirement of an extra gains `and extra == "..."`, and its own marker is
+# parenthesized where it needs to be (measured with the locked setuptools).
+REQUIRES = ["PyYAML>=6.0", 'colorama>=0.4; sys_platform == "win32"',
+            'fastapi>=0.115; extra == "runtime"',
+            'uvloop>=0.19; (sys_platform != "win32" or python_version < "3.13") and extra == "runtime"',
             'opendox[runtime]; extra == "local"', 'pixeltable-pgserver>=0.6.0; extra == "local"']
+
+
+def _requires(old: str, new: str) -> list[str]:
+    assert old in REQUIRES, old
+    return [new if r == old else r for r in REQUIRES]
+
+
+UVLOOP = REQUIRES[3]
 
 TREE = {
     "src/.gitkeep": "",
@@ -456,6 +473,29 @@ ARTIFACT_CASES = {
         dict(requires=[*REQUIRES, 'httpx>=0.27; extra == "local"']), "are not pyproject.toml's"),
     "no console script": (dict(scripts="opendox-runtime = opendox.runtime.cli:main"),
                           "the console script `opendox = opendox.cli:main` is not declared"),
+    # The markers, compared whole but for the extra's own clause (Copilot's
+    # review of openDox-code#78).
+    "an extra's marker changed": (
+        dict(requires=_requires(UVLOOP, 'uvloop>=0.19; sys_platform == "linux" and extra == "runtime"')),
+        "are not pyproject.toml's"),
+    "an extra's marker dropped": (
+        dict(requires=_requires(UVLOOP, 'uvloop>=0.19; extra == "runtime"')), "are not pyproject.toml's"),
+    "a base requirement's marker changed": (
+        dict(requires=_requires('colorama>=0.4; sys_platform == "win32"',
+                                'colorama>=0.4; sys_platform == "linux"')), "are not pyproject.toml's"),
+    "a base requirement's marker dropped": (
+        dict(requires=_requires('colorama>=0.4; sys_platform == "win32"', "colorama>=0.4")),
+        "are not pyproject.toml's"),
+    "a direct URL in place of the version": (
+        dict(requires=_requires('fastapi>=0.115; extra == "runtime"',
+                                'fastapi @ https://example.invalid/fastapi.whl ; extra == "runtime"')),
+        "are not pyproject.toml's"),
+    "the extra's clause first, unparenthesized": (
+        dict(requires=_requires(UVLOOP, 'uvloop>=0.19; extra == "runtime" and (sys_platform != "win32" '
+                                        'or python_version < "3.13")')), None),
+    "an extra under an or": (
+        dict(requires=_requires(UVLOOP, 'uvloop>=0.19; extra == "runtime" or sys_platform != "win32"')),
+        "an extra clause under a top-level `or`"),
 }
 
 
@@ -654,3 +694,62 @@ def test_each_job_timeout_covers_the_retries_it_promises() -> None:
         json_budget + tries * (per_try + wait) + setup)
     upload = 10 * 60
     assert jobs["pypi"]["timeout-minutes"] * 60 >= upload + json_budget + setup
+
+
+# ---------------------------------------------------------------------------
+# Before each upload: the index holds no file of this version but a verified
+# one (Copilot's review of openDox-code#78: skip-existing must never make a
+# mixed release).
+
+PREFLIGHT_STEPS = {"TestPyPI": ("testpypi", "TestPyPI holds no file of this version but the verified ones"),
+                   "PyPI": ("pypi", "PyPI holds no file of this version but the verified ones")}
+
+
+def test_each_upload_is_preceded_by_the_preflight_then_the_pin() -> None:
+    jobs = _workflow()["jobs"]
+    scripts = set()
+    for index, (job, name) in PREFLIGHT_STEPS.items():
+        steps = jobs[job]["steps"]
+        upload = next(i for i, step in enumerate(steps)
+                      if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@"))
+        assert steps[upload - 1]["name"] == PIN_STEP, job
+        assert steps[upload - 2]["name"] == name, job
+        assert steps[upload - 2]["env"]["INDEX"] == index
+        assert steps[upload]["with"]["skip-existing"] is True
+        scripts.add(steps[upload - 2]["run"])
+    assert len(scripts) == 1, "the two preflights are one script"
+    assert _step(*PREFLIGHT_STEPS["TestPyPI"])["env"]["JSON_BASE"] == "https://test.pypi.org/pypi/opendox/"
+    assert _step(*PREFLIGHT_STEPS["PyPI"])["env"]["JSON_BASE"] == "https://pypi.org/pypi/opendox/"
+
+
+PREFLIGHT_CASES = {
+    "no file of this version yet": ([(404, {})], None),
+    "both verified files, from an earlier try": ([(200, VERIFIED)], None),
+    "one verified file, from a partial upload": ([(200, {WHEEL_FILE: "a" * 64})], None),
+    "the sdist at another digest": ([(200, {SDIST_FILE: "c" * 64})], "would make a mixed release"),
+    "a file nobody verified": ([(200, {"opendox-0.1.0-py2-none-any.whl": "d" * 64})],
+                               "would make a mixed release"),
+    "the index refuses the read": ([(503, {})], "HTTP Error 503"),
+}
+
+
+@needs_a_shell
+@pytest.mark.parametrize("index", sorted(PREFLIGHT_STEPS))
+@pytest.mark.parametrize("case", sorted(PREFLIGHT_CASES))
+def test_the_preflight(index: str, case: str, tmp_path: Path) -> None:
+    answers, refusal = PREFLIGHT_CASES[case]
+    step = _step(*PREFLIGHT_STEPS[index])
+    server = _Index(answers)
+    try:
+        env = {"INDEX": index, "JSON_BASE": server.base, "VERSION": "0.1.0",
+               "WHEEL": WHEEL_FILE, "WHEEL_SHA256": "a" * 64,
+               "SDIST": SDIST_FILE, "SDIST_SHA256": "b" * 64}
+        result = _run(step["run"], tmp_path, env, (_python3(tmp_path / "bin"),))
+    finally:
+        server.close()
+    assert server.requests == ["/pypi/opendox/0.1.0/json"]
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0, result.stdout
+        assert refusal in result.stdout + result.stderr, result.stdout + result.stderr

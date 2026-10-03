@@ -285,8 +285,11 @@ jobs:
       #   2. the wheel's metadata names `opendox` at VERSION;
       #   3. the wheel declares exactly the requirements `pyproject.toml` does,
       #      for the base install and for every extra, compared as normalized
-      #      requirements; and its `local` extra (T072) carries
-      #      `opendox[runtime]` and the bundled server's package;
+      #      requirements: the name, the extras, the version specifier or
+      #      direct URL, and the marker, less only the `extra == "..."` clause
+      #      setuptools adds to say which extra a requirement belongs to; and
+      #      its `local` extra (T072) carries `opendox[runtime]` and the
+      #      bundled server's package;
       #   4. the console script `opendox` is declared, as `opendox.cli:main`;
       #   5. every file under `src/opendox/web/` that git tracks is in the
       #      wheel, dotfiles included (T075's `web/**/.*`): 42 of 42 at
@@ -338,29 +341,89 @@ jobs:
                   extras = ",".join(sorted(canonicalize_name(e) for e in requirement.extras))
                   return canonicalize_name(requirement.name) + (f"[{extras}]" if extras else "")
 
-              def normal(requirement):
-                  return named(requirement) + str(requirement.specifier)
+              # A MARKER IS COMPARED WHOLE, less only the clause that says which
+              # extra a requirement belongs to. setuptools writes a requirement
+              # of extra X as `<its own marker> and extra == "X"`, wrapping its
+              # own marker in parentheses where it needs them. The parsed marker
+              # (packaging's `Marker._markers`: comparisons as triples, `and`
+              # and `or` as strings, parentheses as nested lists; the hash lock
+              # pins packaging) loses that top-level clause, and what is left is
+              # written out in one form for both sides. An `extra` anywhere else
+              # (under an `or`, or nested) is refused: it is not setuptools'
+              # form, and its ownership would not be plain.
+              def is_extra(node):
+                  return isinstance(node, tuple) and any(
+                      getattr(part, "value", None) == "extra" and type(part).__name__ == "Variable"
+                      for part in (node[0], node[2]))
+
+              def mentions_extra(nodes):
+                  return any(mentions_extra(n) if isinstance(n, list) else is_extra(n) for n in nodes)
+
+              def unwrap(nodes):
+                  while len(nodes) == 1 and isinstance(nodes[0], list):
+                      nodes = nodes[0]
+                  return nodes
+
+              def written(nodes):
+                  return " ".join(f"({written(unwrap(n))})" if isinstance(n, list)
+                                  else n if isinstance(n, str)
+                                  else " ".join(part.serialize() for part in n)
+                                  for n in nodes)
+
+              def split_marker(requirement):
+                  if requirement.marker is None:
+                      return "", []
+                  nodes = list(requirement.marker._markers)
+                  if any(is_extra(n) and n[1].value != "==" for n in nodes):
+                      raise ValueError("an extra clause that is not `extra == ...`")
+                  owners = [n[2].value if type(n[0]).__name__ == "Variable" else n[0].value
+                            for n in nodes if is_extra(n)]
+                  if owners and "or" in nodes:
+                      raise ValueError("an extra clause under a top-level `or`")
+                  rest = []
+                  for n in nodes:
+                      if is_extra(n):
+                          if rest and rest[-1] == "and":
+                              rest.pop()
+                          continue
+                      if not rest and n == "and":
+                          continue
+                      rest.append(n)
+                  if mentions_extra(rest):
+                      raise ValueError("an extra clause nested in the marker")
+                  return written(unwrap(rest)), sorted({canonicalize_name(o) for o in owners})
+
+              def normal(requirement, marker):
+                  pinned = f"@ {requirement.url}" if requirement.url else str(requirement.specifier)
+                  return named(requirement) + pinned + (f"; {marker}" if marker else "")
+
+              def declared_form(text):
+                  requirement = Requirement(text)
+                  marker, owners = split_marker(requirement)
+                  if owners:
+                      raise ValueError(f"pyproject.toml's {text!r} names an extra in its marker")
+                  return normal(requirement, marker)
 
               with open("pyproject.toml", "rb") as handle:
                   project = tomllib.load(handle)["project"]
-              declared = {"": {normal(Requirement(r)) for r in project.get("dependencies", [])}}
+              declared = {"": {declared_form(r) for r in project.get("dependencies", [])}}
               for extra, requirements in project.get("optional-dependencies", {}).items():
-                  declared[canonicalize_name(extra)] = {normal(Requirement(r)) for r in requirements}
+                  declared[canonicalize_name(extra)] = {declared_form(r) for r in requirements}
               carried = {""} | {canonicalize_name(e) for e in meta.get_all("Provides-Extra") or []}
               carried = {extra: set() for extra in carried}
               local_names = set()
               for raw in meta.get_all("Requires-Dist") or []:
                   requirement = Requirement(raw)
-                  # The extra a requirement belongs to is read from its marker's
-                  # text, so a platform marker beside it changes nothing.
-                  owners = sorted({canonicalize_name(e) for e in
-                                   re.findall(r'extra\s*==\s*"([^"]+)"', str(requirement.marker or ""))})
+                  try:
+                      marker, owners = split_marker(requirement)
+                  except ValueError as error:
+                      problems.append(f"the requirement {raw!r} carries {error}")
+                      continue
                   if any(owner not in carried for owner in owners):
                       problems.append(f"the requirement {raw!r} names an extra the wheel does not provide")
                       continue
-                  requirement.marker = None
                   for owner in owners or [""]:
-                      carried[owner].add(normal(requirement))
+                      carried[owner].add(normal(requirement, marker))
                       if owner == "local":
                           local_names.add(named(requirement))
               print(f"3. requirements: the local extra carries {sorted(carried.get('local', ()))}")
@@ -539,6 +602,46 @@ jobs:
           printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
             | sha256sum --strict -c -
 
+      # BEFORE THE UPLOAD, NOTHING ELSE HELD. skip-existing skips a file name
+      # the index already holds, so the index must hold no file for this
+      # version but the verified ones, at the verified digests: otherwise the
+      # upload would put a verified file beside one nobody verified, and an
+      # index never replaces a file. A 404 is a version with no file yet. A
+      # re-run after a partial upload passes, and uploads only what is missing.
+      - name: TestPyPI holds no file of this version but the verified ones
+        env:
+          INDEX: TestPyPI
+          JSON_BASE: https://test.pypi.org/pypi/opendox/
+          WHEEL: ${{ needs.build.outputs.wheel }}
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+          SDIST: ${{ needs.build.outputs.sdist }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist-sha256 }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.error, urllib.request
+
+          index = os.environ["INDEX"]
+          url = f"{os.environ['JSON_BASE']}{os.environ['VERSION']}/json"
+          wanted = {os.environ["WHEEL"]: os.environ["WHEEL_SHA256"],
+                    os.environ["SDIST"]: os.environ["SDIST_SHA256"]}
+          try:
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  release = json.load(response)
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+              print(f"{index} holds no file of opendox {os.environ['VERSION']} yet")
+              sys.exit(0)
+          held = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
+          other = {name: digest for name, digest in held.items() if wanted.get(name) != digest}
+          if other:
+              sys.exit(f"::error::{index} already holds {other} for opendox "
+                       f"{os.environ['VERSION']}, which the build job did not verify; "
+                       "an upload now would make a mixed release, so nothing is uploaded")
+          print(f"{index} holds {sorted(held)} for opendox {os.environ['VERSION']}, each at "
+                "the verified digest; skip-existing uploads only what is missing")
+          PY
+
       # THE PIN, AGAIN, RIGHT BEFORE THE UPLOAD: the build job's step, the same
       # script. Between the build job's check and this upload the run waits on
       # an approval (and, before PyPI, on TestPyPI too), and the openDox root
@@ -579,10 +682,10 @@ jobs:
           PY
 
       # skip-existing: a re-run after a partial upload skips a file the index
-      # already holds, instead of stopping on it, and uploads the rest. An
-      # index keeps each file name once, so a skipped file could differ from
-      # the verified one; the JSON step that follows each upload requires the
-      # index to serve exactly the build job's two digests, so it cannot pass.
+      # already holds, instead of stopping on it, and uploads the rest. The
+      # step before the pin's re-check refused any file but a verified one at
+      # its verified digest, and the JSON step after the upload requires the
+      # index to serve exactly the build job's two digests.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
@@ -735,6 +838,46 @@ jobs:
           printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
             | sha256sum --strict -c -
 
+      # BEFORE THE UPLOAD, NOTHING ELSE HELD. skip-existing skips a file name
+      # the index already holds, so the index must hold no file for this
+      # version but the verified ones, at the verified digests: otherwise the
+      # upload would put a verified file beside one nobody verified, and an
+      # index never replaces a file. A 404 is a version with no file yet. A
+      # re-run after a partial upload passes, and uploads only what is missing.
+      - name: PyPI holds no file of this version but the verified ones
+        env:
+          INDEX: PyPI
+          JSON_BASE: https://pypi.org/pypi/opendox/
+          WHEEL: ${{ needs.build.outputs.wheel }}
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+          SDIST: ${{ needs.build.outputs.sdist }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist-sha256 }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.error, urllib.request
+
+          index = os.environ["INDEX"]
+          url = f"{os.environ['JSON_BASE']}{os.environ['VERSION']}/json"
+          wanted = {os.environ["WHEEL"]: os.environ["WHEEL_SHA256"],
+                    os.environ["SDIST"]: os.environ["SDIST_SHA256"]}
+          try:
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  release = json.load(response)
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+              print(f"{index} holds no file of opendox {os.environ['VERSION']} yet")
+              sys.exit(0)
+          held = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
+          other = {name: digest for name, digest in held.items() if wanted.get(name) != digest}
+          if other:
+              sys.exit(f"::error::{index} already holds {other} for opendox "
+                       f"{os.environ['VERSION']}, which the build job did not verify; "
+                       "an upload now would make a mixed release, so nothing is uploaded")
+          print(f"{index} holds {sorted(held)} for opendox {os.environ['VERSION']}, each at "
+                "the verified digest; skip-existing uploads only what is missing")
+          PY
+
       # THE PIN, AGAIN, RIGHT BEFORE THE UPLOAD: the build job's step, the same
       # script. Between the build job's check and this upload the run waits on
       # an approval (and, before PyPI, on TestPyPI too), and the openDox root
@@ -775,10 +918,10 @@ jobs:
           PY
 
       # skip-existing: a re-run after a partial upload skips a file the index
-      # already holds, instead of stopping on it, and uploads the rest. An
-      # index keeps each file name once, so a skipped file could differ from
-      # the verified one; the JSON step that follows each upload requires the
-      # index to serve exactly the build job's two digests, so it cannot pass.
+      # already holds, instead of stopping on it, and uploads the rest. The
+      # step before the pin's re-check refused any file but a verified one at
+      # its verified digest, and the JSON step after the upload requires the
+      # index to serve exactly the build job's two digests.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           skip-existing: true
