@@ -56,16 +56,29 @@ A harness that breaks before a verdict exits 2, never 0.
  5. FETCHES `/` (it must be HTML), `/snapshot.json` (non-empty, and neutral
     per F5.3: none of openxFactory's declared governance words in any string
     value; and it fills the grouping station, so the chat pane can open, R1Q13
-    (a) with (c)) and `/capabilities` (`install.mode == "local"`).
- 6. FETCHES THE MODEL CATALOG, presenting `/capabilities`' `console_token` in
+    (a) with (c)) and `/capabilities` (`install.mode == "local"`, and NO
+    `console_token`: a standalone plane hands its token to no loopback
+    caller, T104).
+ 6. READS THE CONSOLE TOKEN THE WAY THE USER'S BROWSER IS HANDED IT (plan 034
+    T104; RULED openxFactory#656 `5963851934`). The start prints the PATH of
+    a private opener file, `<OPENDOX_STATE_DIR>/console/<port>.html`, and
+    never the token. The file must be this user's regular file, mode 0600,
+    with one link, in a directory no one else can enter, and outside the
+    served repository. Its meta-refresh forwards to this plane on loopback
+    with `#console_token=<token>` in the URL's FRAGMENT, and never in the
+    query. The harness reads that file itself, with the standard library,
+    as a browser would, and imports nothing from the product.
+ 7. FETCHES THE MODEL CATALOG, presenting that token in
     `X-XF-Console-Token`. It must answer the envelope the chat rail adopts
     (`schema_version` 1, `kind` `workbench-model-catalog`, `models[]`), with
-    no available entry (16.4).
- 7. FETCHES EVERY ROUTE THE PANES CAN REQUEST, and none may answer 5xx or
+    no available entry (16.4). Asked WITHOUT the token, it must refuse, so
+    the token the opener carries is the one that opens it.
+ 8. FETCHES EVERY ROUTE THE PANES CAN REQUEST, and none may answer 5xx or
     drop the connection. The list is DERIVED from the served bundle, not kept
     here: see `derive_bundle` below.
- 8. STOPS THE SERVER (SIGTERM to the entry point alone, as `kill` would), and
-    asserts that no bundled PostgreSQL process is left running (R1Q16 (iv)).
+ 9. STOPS THE SERVER (SIGTERM to the entry point alone, as `kill` would), and
+    asserts that no bundled PostgreSQL process is left running (R1Q16 (iv))
+    and that the opener file went with the server.
 
 HOW THE ROUTE LIST IS DERIVED (`derive_bundle`). From the RUNNING server, not
 from the source tree: `/` is fetched, its `<script type="module">` and
@@ -96,8 +109,9 @@ the snapshot, and the harness fills them the same way:
    `sourceKeyFor`), `tile_kind` `cluster` (a grouping tile's kind,
    `views/wheel-model.js`) and `tile_id` the snapshot's first grouping tile,
    whose first member is the `document`.
-Every request carries the console token, as the doxBench transports do, so
-a guarded read answers from its handler rather than from the console check.
+Every request carries the console token the opener delivered (step 6), as
+the doxBench transports do, so a guarded read answers from its handler
+rather than from the console check.
 
 RUNNING IT. From an openDox-code checkout, `python3 acceptance/at_r1_http.py`
 installs and drives THAT checkout (the one this file is in); to measure
@@ -171,6 +185,21 @@ F53_PATTERN = re.compile(r"\b(" + "|".join(re.escape(w) for w in F53_WORDS)
 
 #: The console-presence header the doxBench transports carry (`app.js`).
 CONSOLE_TOKEN_HEADER = "X-XF-Console-Token"
+
+#: THE CONSOLE TOKEN'S DELIVERY on a standalone plane (plan 034 T104; RULED
+#: openxFactory#656 `5963851934`, adversarial review 2's M5). `/capabilities`
+#: carries no `console_token`. The start prints the opener's location on a
+#: `console <file URL>` line, and the opener is
+#: `<OPENDOX_STATE_DIR>/console/<port>.html`, mode 0600. Its meta-refresh
+#: carries the token as `#console_token=<token>`, in the fragment and never in
+#: the query, because a fragment never reaches a request line, a server log
+#: or a `Referer`.
+CONSOLE_TOKEN_FIELD = "console_token"
+CONSOLE_DIRNAME = "console"
+CONSOLE_FRAGMENT_KEY = "console_token"
+CONSOLE_LINE = re.compile(r"^[ \t]*console (?P<where>(?:file:|/)\S*)", re.M)
+OPENER_MODE = 0o600
+LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 
 #: The model-catalog route (`app.js` `CATALOG_ROUTE`), which the derived list
 #: must also name, so this constant cannot drift from the bundle unseen.
@@ -952,6 +981,11 @@ class Server:
         return (f"\n--- stdout ---\n{tail(self.out.read_text('utf-8', 'replace'))}"
                 f"\n--- stderr ---\n{tail(self.err.read_text('utf-8', 'replace'))}")
 
+    def printed(self) -> str:
+        """Everything the entry point has written so far, both streams."""
+        return (self.out.read_text("utf-8", "replace") + "\n"
+                + self.err.read_text("utf-8", "replace"))
+
 
 def documented_prefix() -> list[str]:
     words = DOCUMENTED_START.split(" ")
@@ -1071,12 +1105,20 @@ def check_pages(server: Server, index: Answer,
     pid = as_object(install_block.get("database_bundle")).get("pid")
     if isinstance(pid, int):
         note(f"the served install reports its bundled server as pid {pid}")
-    verdict.check(f"{label}.capabilities console_token",
-                  isinstance(caps.get("console_token"), str)
-                  and bool(caps.get("console_token")),
-                  "/capabilities carries no console token, so no guarded "
-                  "route can be asked")
+    check_no_published_token(label, caps, verdict)
     return snapshot, caps
+
+
+def check_no_published_token(label: str, caps: dict, verdict: Verdict) -> None:
+    """A standalone plane does not publish its console token on
+    `/capabilities` (plan 034 T104): any loopback caller, another OS user of
+    the machine included, can read that route."""
+    verdict.check(f"{label}.capabilities carries no console token",
+                  CONSOLE_TOKEN_FIELD not in caps,
+                  f"/capabilities publishes `{CONSOLE_TOKEN_FIELD}` to any "
+                  "loopback caller; a standalone plane delivers it only "
+                  "through the 0600 opener file (T104, adversarial review "
+                  "2's M5)")
 
 
 def grouping_field_of(caps: dict) -> str:
@@ -1099,12 +1141,186 @@ def check_grouping(label: str, snapshot: dict, caps: dict,
                   f"fails and does not skip): {snapshot.get(field)!r:.200}")
 
 
+# ---------------------------------------------------------------------------
+# Step 6: the console token, as the user's browser is handed it (T104).
+# ---------------------------------------------------------------------------
+
+class _RefreshContents(html.parser.HTMLParser):
+    """Every `<meta http-equiv="refresh">` `content` in a page, unescaped."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.contents: list[str] = []
+
+    def handle_starttag(self, tag, attrs) -> None:
+        if tag != "meta":
+            return
+        named = {key.lower(): value or "" for key, value in attrs}
+        if named.get("http-equiv", "").strip().lower() == "refresh":
+            self.contents.append(named.get("content", ""))
+
+
+def refresh_target(content: str) -> str | None:
+    """The URL a refresh's `content` names (`0;url=<target>`, quoted or not)."""
+    _delay, separator, rest = content.partition(";")
+    rest = rest.strip()
+    if not separator or rest[:4].lower() != "url=":
+        return None
+    target = rest[4:].strip()
+    if len(target) >= 2 and target[0] == target[-1] and target[0] in "'\"":
+        target = target[1:-1]
+    return target or None
+
+
+def opener_location(printed: str) -> Path | None:
+    """The opener's path, from the start's `console <file URL>` line."""
+    match = CONSOLE_LINE.search(printed)
+    if match is None:
+        return None
+    where = match.group("where")
+    if not where.startswith("file:"):
+        return Path(where)
+    parts = urllib.parse.urlsplit(where)
+    if parts.netloc not in ("", "localhost") or parts.query or parts.fragment:
+        return None
+    return Path(urllib.parse.unquote(parts.path))
+
+
+def opener_unsafe_because(path: Path) -> str | None:
+    """Why `path` is not a private opener, or `None`: this user's regular
+    file, mode exactly 0600, with one link, in this user's own directory,
+    which no one else can enter."""
+    try:
+        info = os.lstat(path)
+        directory = os.lstat(path.parent)
+    except OSError as exc:
+        return f"cannot be examined ({type(exc).__name__}: {exc.strerror})"
+    uid = os.getuid()
+    mode = stat.S_IMODE(info.st_mode)
+    reason = None
+    if stat.S_ISLNK(info.st_mode):
+        reason = "is a symbolic link"
+    elif not stat.S_ISREG(info.st_mode):
+        reason = "is not a regular file"
+    elif info.st_uid != uid:
+        reason = f"is owned by uid {info.st_uid}, not by this user"
+    elif info.st_nlink != 1:
+        reason = f"has {info.st_nlink} hard links, not one"
+    elif mode != OPENER_MODE:
+        reason = f"has mode {mode:o}, not {OPENER_MODE:o}"
+    elif not stat.S_ISDIR(directory.st_mode) or directory.st_uid != uid:
+        reason = f"sits in {path.parent}, which is not this user's own directory"
+    elif directory.st_mode & 0o077:
+        reason = (f"sits in {path.parent}, mode "
+                  f"{stat.S_IMODE(directory.st_mode):o}, which others can enter")
+    return reason
+
+
+def _read_without_following(path: Path, limit: int = 64 * 1024) -> str:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        chunks, size = [], 0
+        while size < limit:
+            chunk = os.read(descriptor, limit - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
+def _within(path: Path, root: Path) -> bool:
+    real = Path(os.path.realpath(path))
+    return real.is_relative_to(Path(os.path.realpath(root)))
+
+
+def token_in_fragment(targets: list[str | None],
+                      port: int) -> tuple[str | None, str]:
+    """The token the opener's one forward carries in its FRAGMENT, or `None`
+    and why not. No message here quotes a token."""
+    if len(targets) != 1 or targets[0] is None:
+        return None, (f"the opener has {len(targets)} meta-refresh forwards, "
+                      "not one that names a URL")
+    parts = urllib.parse.urlsplit(targets[0])
+    try:
+        target_port = parts.port
+    except ValueError:
+        target_port = None
+    if (parts.scheme != "http" or parts.hostname not in LOOPBACK_HOSTS
+            or target_port != port):
+        return None, (f"the opener forwards to {parts.scheme}://{parts.netloc}"
+                      f"{parts.path}, not to this plane on loopback port {port}")
+    if CONSOLE_FRAGMENT_KEY in urllib.parse.parse_qs(parts.query,
+                                                     keep_blank_values=True):
+        return None, ("the opener's forward carries the token in its QUERY, "
+                      "which reaches the request line, the server's log and "
+                      "any Referer")
+    values = urllib.parse.parse_qs(parts.fragment, keep_blank_values=True).get(
+        CONSOLE_FRAGMENT_KEY, [])
+    if len(values) != 1 or not values[0]:
+        return None, (f"the opener's forward carries no single "
+                      f"`#{CONSOLE_FRAGMENT_KEY}=` in its fragment")
+    if values[0] in parts.path or values[0] in parts.query:
+        return None, ("the opener's forward carries the token outside its "
+                      "fragment too")
+    return values[0], ""
+
+
+def check_console_opener(label: str, port: int, printed: str, state_dir: Path,
+                         served_root: Path,
+                         verdict: Verdict) -> tuple[Path | None, str | None]:
+    """Step 6: the opener the start printed, and the token its forward
+    carries, read from the file as the user's browser reads it."""
+    path = opener_location(printed)
+    verdict.check(f"{label}.console opener printed", path is not None,
+                  "the start printed no `console <file URL>` line naming the "
+                  "opener, so a user has no way to open the console page")
+    if path is None:
+        return None, None
+    expected = state_dir / CONSOLE_DIRNAME / f"{port}.html"
+    verdict.check(f"{label}.console opener is OPENDOX_STATE_DIR/console/<port>.html",
+                  path == expected, f"the start printed {path}, not {expected}")
+    verdict.check(f"{label}.console opener is outside the served repository",
+                  not _within(path, served_root),
+                  f"{path} is inside the served repository {served_root}")
+    reason = opener_unsafe_because(path)
+    verdict.check(f"{label}.console opener is private", reason is None,
+                  f"{path} {reason}")
+    try:
+        page = _read_without_following(path)
+    except OSError as exc:
+        verdict.check(f"{label}.console opener forwards with the token in its "
+                      "fragment", False,
+                      f"{path} cannot be read ({type(exc).__name__}: "
+                      f"{exc.strerror})")
+        return path, None
+    contents = _RefreshContents()
+    contents.feed(page)
+    contents.close()
+    token, why = token_in_fragment(
+        [refresh_target(content) for content in contents.contents], port)
+    verdict.check(f"{label}.console opener forwards with the token in its "
+                  "fragment", token is not None, why)
+    return path, token
+
+
 def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
-    """Step 6: the catalog, asked as the console, offers nothing available."""
+    """Step 7: the catalog, asked as the console, offers nothing available,
+    and asked without the token, refuses."""
     label = server.label
+    bare = get(server.port, CATALOG_ROUTE)
+    verdict.check(f"{label}.catalog refuses a caller without the console token",
+                  bare.status is not None and 400 <= bare.status < 500,
+                  f"{CATALOG_ROUTE} without the token answers "
+                  f"{bare.describe()}, so the token the opener carries would "
+                  "guard nothing")
     catalog = get(server.port, CATALOG_ROUTE, token=token)
+    asked = ("with the console token" if token else
+             "with no console token to present (step 6 found none)")
     verdict.check(f"{label}.catalog answers", catalog.status == 200,
-                  f"{CATALOG_ROUTE} with the console token answers "
+                  f"{CATALOG_ROUTE} {asked} answers "
                   f"{catalog.describe()}: {catalog.body[:300]!r}")
     if catalog.status != 200:
         return
@@ -1179,7 +1395,7 @@ def requests_for(routes: list[str], snapshot: dict,
 
 def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
                  token: str | None, verdict: Verdict) -> None:
-    """Step 7: every route the served bundle names answers, below 5xx."""
+    """Step 8: every route the served bundle names answers, below 5xx."""
     label = server.label
     literals: set[str] = set()
     routes, modules = derive_bundle(server.port,
@@ -1206,8 +1422,9 @@ def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
                       + server.said())
 
 
-def stop_and_look(server: Server, ctx: Context, verdict: Verdict) -> None:
-    """Step 8: stop the entry point alone, as `kill` would, and look."""
+def stop_and_look(server: Server, ctx: Context, verdict: Verdict,
+                  opener: Path | None = None, token: str | None = None) -> None:
+    """Step 9: stop the entry point alone, as `kill` would, and look."""
     label = server.label
     server.proc.send_signal(signal.SIGTERM)
     try:
@@ -1223,18 +1440,36 @@ def stop_and_look(server: Server, ctx: Context, verdict: Verdict) -> None:
                   not left,
                   "still running after the entry point stopped: "
                   + "; ".join(f"pid {pid}: {what}" for pid, what in left))
+    # Over the WHOLE serve's output, its shutdown included.
+    check_console_gone(label, opener, token, server.printed(), verdict)
+
+
+def check_console_gone(label: str, opener: Path | None, token: str | None,
+                       printed: str, verdict: Verdict) -> None:
+    """After the stop: the opener went with the server, and the token was
+    never printed, in either stream."""
+    if opener is not None:
+        verdict.check(f"{label}.stop removes the console opener",
+                      not os.path.lexists(opener),
+                      f"{opener} is still there after the server stopped, "
+                      "and its token was this serve's")
+    if token is not None:
+        verdict.check(f"{label}.console token never printed",
+                      token not in printed,
+                      "the entry point printed the console token itself; "
+                      "it prints only the opener's path")
 
 
 def serve_one(label: str, repo: Path, ctx: Context, verdict: Verdict) -> None:
-    """Steps 4-8 for one repository: start, fetch, stop, and look."""
+    """Steps 4-9 for one repository: start, fetch, stop, and look."""
     server, index = launch(label, repo, ctx, verdict)
     snapshot, caps = check_pages(server, index, verdict)
     check_grouping(label, snapshot, caps, verdict)
-    token = caps.get("console_token")
-    token = token if isinstance(token, str) else None
+    opener, token = check_console_opener(label, server.port, server.printed(),
+                                         ctx.state_dir, repo, verdict)
     check_catalog(server, token, verdict)
     check_routes(server, index, snapshot, caps, token, verdict)
-    stop_and_look(server, ctx, verdict)
+    stop_and_look(server, ctx, verdict, opener, token)
 
 
 # ---------------------------------------------------------------------------
