@@ -353,6 +353,46 @@ def test_a_created_path_is_readable_and_never_editable(corpus) -> None:
     assert projection.editable_paths == ("a.md", "b.md")
 
 
+@pytest.mark.parametrize("settings", [
+    "ideation/dashboard/model-provider-bindings.yaml",
+    "ideation/dashboard/model-declarations.yaml",
+])
+def test_opendoxs_own_settings_documents_are_never_editable(
+        corpus, settings) -> None:
+    """Adversarial review 2, M1: a group whose members include one of
+    openDox's own settings documents does not make it editable or owned. It
+    stays readable, in a section nothing owns."""
+    from opendox import doxbench_binding, doxbench_intake
+    assert dc.SETTINGS_DOCUMENTS == {doxbench_binding.DEFAULT_BINDINGS_RELPATH,
+                                     doxbench_intake.DEFAULT_DECLARATIONS_RELPATH}
+    target = corpus / settings
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("schema_version: 1\n", encoding="utf-8")
+    snapshot = _snapshot()
+    snapshot["documents"].append({"id": settings, "path": settings})
+    snapshot["clusters"][0]["document_edges"].append({"document": settings})
+    projection = dc.resolve_scope(snapshot, _key("cluster", "g1"), source_root=corpus)
+    assert projection.editable_paths == ("a.md", "b.md")
+    assert settings not in projection.active_document_candidates
+    assert settings in projection.context_paths, "readable, never editable"
+    owned = {row.path for section in projection.sections if section.owned
+             for row in section.documents}
+    assert settings not in owned
+    (holder,) = [section for section in projection.sections
+                 if settings in {row.path for row in section.documents}]
+    assert holder.key == "settings" and holder.owned is False
+
+
+def test_the_editable_set_refuses_a_settings_document_in_any_section() -> None:
+    """`editable_paths` itself, over an owned section that carries one."""
+    from opendox.doxbench_scope_types import ScopeDocument, ScopeSection
+    section = ScopeSection(
+        key="k", label="l", note="n", inherited=False, owned=True,
+        documents=tuple(ScopeDocument(id=p, path=p, resolved=True) for p in
+                        ("a.md", *sorted(dc.SETTINGS_DOCUMENTS))))
+    assert dc.editable_paths([section]) == ("a.md",)
+
+
 def test_the_editable_set_is_the_owned_sections_resolved_rows() -> None:
     """`editable_paths` itself: owned sections only, resolved rows only, once
     each and in order."""

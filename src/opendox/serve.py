@@ -2596,6 +2596,18 @@ def _refuse_impossible_checkout_root(value: Path | str) -> int:
     return 0
 
 
+#: THE SERVER ENTRY POINT'S OWN NAME AND WORDS (plan 034 T084, with
+#: `cli.PROG`; adversarial review 2). `python -m opendox.serve --help` printed
+#: `usage: ideation-dashboard-serve` and this module's docstring, which is
+#: openxFactory's pre-carve history. It names how it is run and openDox only.
+SERVE_PROG = "python -m opendox.serve"
+SERVE_DESCRIPTION = (
+    "Serve an openDox snapshot locally: the browser bundle, the snapshot and "
+    "the read-only source of the checkout it was generated from, on a "
+    "loopback address. `opendox generate-and-open` generates a snapshot and "
+    "serves it in one command.")
+
+
 def main(argv: list[str] | None = None) -> int:
     # The process entry point registers openDox's own default where no host has
     # (R1Q3 (a)), exactly where a host would register its own. Nothing is BUILT
@@ -2621,8 +2633,8 @@ def main(argv: list[str] | None = None) -> int:
     # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
     # the cross-reference register, the same way.
     column_seams.register_defaults()
-    parser = argparse.ArgumentParser(prog="ideation-dashboard-serve", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(prog=SERVE_PROG,
+                                     description=SERVE_DESCRIPTION)
     parser.add_argument("--web-dir", default=str(Path(__file__).resolve().parent / "web"),
                         help="static bundle directory (default: the packaged web/)")
     parser.add_argument("--snapshot", required=True,
