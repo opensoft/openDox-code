@@ -957,9 +957,14 @@ def _commission_cli(verb: str, args: argparse.Namespace, target: str,
     engine, same guards. The CLI adds nothing of its own except the printing —
     which is exactly what makes the two surfaces equivalent."""
     repo_root = Path(args.repo_root).resolve()
-    console = gate_mod.GateConsole(_human_gate(repo_root, args),
-                                   records_dir=args.records_dir)
+    human = _human_gate(repo_root, args)
     try:
+        # INSIDE the refusal boundary (plan 034 T084): openDox's own gate
+        # default refuses the governed `GateConsole` at construction
+        # (`GateRecordsNotRegistered`, a `GateRefused`), so a contributed gate
+        # verb that reaches it with no host's gate registered answers
+        # "<verb> refused: ..." rather than a traceback.
+        console = gate_mod.GateConsole(human, records_dir=args.records_dir)
         res = getattr(console, verb.replace("-", "_"))(
             target, outline=args.outline, workflow=args.workflow,
             note=args.note, provenance=cli_provenance(), **engine_kwargs)
