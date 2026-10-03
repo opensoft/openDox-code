@@ -222,8 +222,8 @@ UNTRUSTED_BINDING_REMEDY = (
     "No declared model is available. \"opendox model-binding list\" says why "
     "for each binding; one read from this repository is used only once this "
     "machine trusts it, which \"opendox model-binding trust <id>\" records "
-    "after showing what it runs and where its credential goes. Then restart "
-    "this console.")
+    "after showing what it would run and where it would connect. Then "
+    "restart this console.")
 
 #: What the console intake's hand-off is refused with when the trust policy
 #: does not admit the binding it is declaring (#1144 16.3a, T007 batch M). A
