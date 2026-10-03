@@ -15,7 +15,9 @@ arises. `serve.STATIC_CONTENT_TYPES` pins the bundle's extensions.
 2. An extension the pin does not carry still falls back to the platform's
    table: the pin narrows nothing else.
 3. Every extension the shipped bundle carries is pinned, so a file of a new
-   kind added to `src/opendox/web/` fails here until it is.
+   kind added to `src/opendox/web/` fails here until it is. The extensionless
+   package marker `vendor/.gitkeep` ships too, and is set aside with its
+   reason checked (`TYPELESS_MARKERS`): it has no type to pin.
 
 A CREATED FILE: no carve-manifest row (RULED OQ-C).
 """
@@ -36,14 +38,24 @@ ROOT = Path(__file__).resolve().parent.parent
 PLAIN = ROOT / "tests" / "fixtures" / "plain-documents"
 WEB = ROOT / "src" / "opendox" / "web"
 
-#: Files of the tree that the wheel does not ship (`pyproject.toml`'s
-#: package data ships `web/**`, and setuptools leaves dotfiles out).
-UNSHIPPED = {".gitkeep"}
+#: The bundle's EXTENSIONLESS PACKAGE MARKERS, outside these content-type
+#: checks. `vendor/.gitkeep` SHIPS: `pyproject.toml`'s package data carries
+#: `web/**/.*` beside `web/**` (plan 034 T075), and
+#: `tests_runtime/test_served_bundle.py` fetches it from an installed entry
+#: point with every other bundle file. It is an empty file that keeps
+#: `vendor/` in the tree, with no extension and so no content type to pin,
+#: and no page loads it. So it is set aside here BY THAT REASON, which
+#: `test_the_set_aside_markers_are_empty_and_extensionless` holds (Copilot
+#: review of openDox-code#77, "previously missed": the name `UNSHIPPED`
+#: claimed the wheel left it out, which T075 made untrue).
+TYPELESS_MARKERS = {".gitkeep"}
 
 
 def _bundle() -> list[Path]:
+    """Every file of the bundle that carries a content type: every shipped
+    file but the typeless markers."""
     return sorted(p for p in WEB.rglob("*")
-                  if p.is_file() and p.name not in UNSHIPPED)
+                  if p.is_file() and p.name not in TYPELESS_MARKERS)
 
 
 def _hostile(monkeypatch) -> None:
@@ -139,6 +151,18 @@ def test_an_extension_outside_the_pin_still_reads_the_platform_table(
                         lambda *_a, **_k: ("text/x-from-the-table", None))
     assert _content_type(base, "/notes.txt") == (200, "text/x-from-the-table")
     assert _content_type(base, "/index.html") == (200, "text/html")
+
+
+def test_the_set_aside_markers_are_empty_and_extensionless() -> None:
+    """What `TYPELESS_MARKERS` sets aside is what its reason says, and no
+    more: each name is present in the bundle, and every file by it is empty
+    and has no extension, so no file with a type escapes the checks."""
+    markers = [p for p in WEB.rglob("*")
+               if p.is_file() and p.name in TYPELESS_MARKERS]
+    assert {p.name for p in markers} == TYPELESS_MARKERS, markers
+    for path in markers:
+        assert path.suffix == "", path
+        assert path.stat().st_size == 0, path
 
 
 def test_every_extension_the_bundle_ships_is_pinned() -> None:

@@ -300,9 +300,48 @@ def test_the_two_dsns_are_two_users_over_the_one_socket(state_dir: Path) -> None
     assert config.user_named_by(settings.database_url) == config.BUNDLE_SERVED_ROLE
     assert config.user_named_by(settings.migration_database_url) == \
         config.BUNDLE_OWNER_ROLE
+    # both name their schema, the same one (Copilot review of #69)
+    assert config.schema_selected_by(settings.database_url) == \
+        config.schema_selected_by(settings.migration_database_url) == "public"
     assert bundle.data_dir.parent == bundle.socket_dir.parent
     assert bundle.data_dir.is_relative_to(state_dir)
     assert bundle.socket_dir.is_relative_to(state_dir)
+
+
+def test_schemas_named_for_the_roles_never_split_the_two_dsns(
+        state_dir: Path) -> None:
+    """PostgreSQL's default `search_path` is `"$user", public`, and the two
+    roles are different users. In a reused cluster holding a schema named
+    `opendox` (the owner's) and one named `opendox_runtime` (the served
+    role's), an implicit path put the migration's ledger and the served
+    workload's reads in two different schemas (Copilot review of #69). Both
+    DSNs name `public`, so both land there, a restart migrates nothing new,
+    and `status` reads the one ledger."""
+    import psycopg
+    from psycopg import sql
+
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    with bundle_mod.BundledServer(settings) as server:
+        with _owner(server) as conn:
+            conn.execute("create schema opendox")
+            conn.execute(sql.SQL("create schema opendox_runtime authorization {}")
+                         .format(sql.Identifier(config.BUNDLE_SERVED_ROLE)))
+    with bundle_mod.BundledServer(settings) as server:
+        applied_on_restart = list(server.applied)
+        current = {}
+        for role, dsn in ((config.BUNDLE_OWNER_ROLE, server.bundle.migration_dsn),
+                          (config.BUNDLE_SERVED_ROLE, server.bundle.served_dsn)):
+            with psycopg.connect(dsn) as conn:
+                current[role] = conn.execute(
+                    "select current_schema(), (select count(*) from "
+                    "opendox_schema_migrations)").fetchone()
+        code, status = _status(state_dir)
+    assert current[config.BUNDLE_OWNER_ROLE][0] == "public", current
+    assert current[config.BUNDLE_SERVED_ROLE][0] == "public", current
+    assert current[config.BUNDLE_OWNER_ROLE][1] == current[config.BUNDLE_SERVED_ROLE][1] > 0
+    assert applied_on_restart == [], applied_on_restart
+    assert status["database"] == "reachable" and status["pending_migrations"] == [], status
+    assert code == 0, status
 
 
 def test_a_state_dir_too_long_for_a_unix_socket_is_refused_naming_it() -> None:
@@ -353,6 +392,12 @@ def test_the_default_state_dir_is_the_users_own(monkeypatch) -> None:
 # -- 13.1 and R1Q16 (i), (ii), (iv): F13.1's two blocks, on the real entry point
 
 
+# LINUX'S `/proc`, FOR THE KERNEL'S OWN ANSWERS (Copilot review of #69): the
+# server's parent, its TCP listeners and `status`'s pid are read from it, so
+# a POSIX platform without it skips this case rather than failing it.
+# F13.1 names Linux's socket table; the lifecycle it shares with every POSIX
+# platform is held by the cases around it.
+@pytest.mark.skipif(not Path("/proc/self").exists(), reason="asks Linux's /proc")
 def test_the_entry_point_owns_a_migrated_server_with_no_tcp_listener(
         corpus: Path, state_dir: Path, tmp_path: Path) -> None:
     """F13.1's `runtime status` block and its TCP-listener block, against the
@@ -398,6 +443,9 @@ def test_the_entry_point_owns_a_migrated_server_with_no_tcp_listener(
         "the data directory must survive a stop: it is the install's database"
 
 
+# `/proc` as above (Copilot review of openDox-code#72, r4173559498): the pid's
+# TCP listeners and its parent are the kernel's answers, read from it.
+@pytest.mark.skipif(not Path("/proc/self").exists(), reason="asks Linux's /proc")
 def test_the_serving_process_reports_its_own_install_shape(
         corpus: Path, state_dir: Path, tmp_path: Path) -> None:
     """F13.1's `caps.json` block (T073; #1144 13.4a): the server the user
@@ -591,6 +639,33 @@ def test_the_bundle_authenticates_by_peer_through_the_one_map(
     assert mappings == [
         (bundle_mod.IDENT_MAP, user, config.BUNDLE_OWNER_ROLE, None),
         (bundle_mod.IDENT_MAP, user, config.BUNDLE_SERVED_ROLE, None)], mappings
+
+
+@pytest.mark.parametrize("user", ["DOMAIN\\alice", "alice\\", "a\\\\b"])
+def test_the_server_reads_a_backslash_in_the_map_literally(
+        state_dir: Path, user: str) -> None:
+    """A user name holding a backslash, the shape an NSS or AD account takes
+    (`DOMAIN\\alice`), is written into `pg_ident.conf` as it is. PostgreSQL
+    16 reads a quoted field's backslash LITERALLY: its tokenizer treats a
+    backslash specially only at the end of a line, as a continuation, and
+    never inside quotes. So the name is NOT escaped, and escaping it would
+    map a different name (Copilot review of #69, which suggested escaping,
+    answered by measurement). The server's own reading of the file is
+    asked, for each shape."""
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    with bundle_mod.BundledServer(settings) as server:
+        data = server.bundle.data_dir
+        (data / "pg_ident.conf").write_text(
+            bundle_mod.authentication_files(user)["pg_ident.conf"], encoding="utf-8")
+        try:
+            with _owner(server) as conn:
+                mappings = conn.execute(
+                    "select sys_name, pg_username, error from pg_ident_file_mappings "
+                    "order by map_number").fetchall()
+        finally:
+            bundle_mod.write_authentication(data, bundle_mod.os_user())
+    assert mappings == [(user, config.BUNDLE_OWNER_ROLE, None),
+                        (user, config.BUNDLE_SERVED_ROLE, None)], mappings
 
 
 def test_a_role_outside_the_map_is_refused_even_for_this_os_user(

@@ -62,7 +62,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from opendox import defaults
 from opendox.column_seams import GATE_RECORDS_REFUSAL
@@ -291,8 +291,16 @@ def _canonical(path: Any) -> str:
     return path
 
 
-def _document_index(snapshot: Mapping[str, Any]) -> dict[str, str]:
-    """Each listed document's PATH, by its id and by its path.
+class _DocumentIndex(NamedTuple):
+    """Each listed document's PATH, looked up in the namespace a reference
+    is written in: `ids` for a document ID, `paths` for a document PATH."""
+
+    ids: Mapping[str, str]
+    paths: Mapping[str, str]
+
+
+def _document_index(snapshot: Mapping[str, Any]) -> _DocumentIndex:
+    """Each listed document's PATH, by its id and, apart, by its path.
 
     A group's `document_edges[].document` names a document by ID, and a
     selection's `files` by PATH (the snapshot schema's `$defs/id` and
@@ -300,24 +308,36 @@ def _document_index(snapshot: Mapping[str, Any]) -> dict[str, str]:
     but the contract does not promise it: a snapshot with id `notes/soil-test`
     and path `notes/soil-test.md` is valid (Copilot review of
     openDox-code#77, r4171136778). So every reference is looked up here and
-    the section carries the document's path, as openXdox's authority does
-    (`_document_index`). An id is indexed first, so a path that equals some
-    other document's id cannot take that id's place."""
-    index: dict[str, str] = {}
+    the section carries the document's path, as openXdox's authority does.
+
+    THE TWO NAMESPACES ARE KEPT APART (r4173844321). Nor does the contract
+    forbid one document's path from equaling another document's id, so one
+    map from either spelling would resolve a selection's file `x` to the
+    document whose ID is `x`. `paths` answers a path only. `ids` answers an
+    id first and then, for an edge written as a path, a path: an id is
+    indexed first, so a path that equals some other document's id cannot
+    take that id's place."""
+    ids: dict[str, str] = {}
+    paths: dict[str, str] = {}
     documents = [_mapping(d) for d in _sequence(snapshot.get("documents"))]
     for field in ("id", "path"):
         for document in documents:
             key, path = _text(document.get(field)), _text(document.get("path"))
-            if key and path and key not in index:
-                index[key] = path
-    return index
+            if key and path and key not in ids:
+                ids[key] = path
+    for document in documents:
+        path = _text(document.get("path"))
+        if path and path not in paths:
+            paths[path] = path
+    return _DocumentIndex(ids=ids, paths=paths)
 
 
 def _section(key: str, label: str, note: str, references: Iterable[Any], *,
              index: Mapping[str, str], seen: set[str], root: Path,
              inherited: bool, owned: bool) -> ScopeSection:
-    """One section of a tile: each reference (a document id or path) as the
-    document it names, by that document's path, confined to `root`. A
+    """One section of a tile: each reference as the document it names in
+    `index`, the namespace its references are written in (`_DocumentIndex`),
+    by that document's path, confined to `root`. A
     reference no listed document answers is kept, unresolved, under its own
     spelling, which must still be a safe path."""
     from opendox import projection_seams
@@ -344,8 +364,9 @@ def _section(key: str, label: str, note: str, references: Iterable[Any], *,
 #: talks to, or approve a pending declaration, through a proposal. So
 #: `resolve_scope` keeps them out of every owned section, into a section of
 #: their own that is readable and owned by nothing, and `editable_paths`
-#: refuses them whatever section carries them. The corpus scan's own exclusion
-#: (openDox-code#76) is a second layer, not this one.
+#: refuses them whatever section carries them. An in-root symlink that reaches
+#: one is treated as the document it reaches (`_settings_test`). The corpus
+#: scan's own exclusion (openDox-code#76) is a second layer, not this one.
 SETTINGS_DOCUMENTS: frozenset[str] = frozenset({
     DEFAULT_BINDINGS_RELPATH, DEFAULT_DECLARATIONS_RELPATH})
 
@@ -354,18 +375,46 @@ _SETTINGS_SECTION = ("settings", "openDox's own settings documents",
                      "editable through a tile")
 
 
-def _without_settings(sections: Sequence[ScopeSection]) -> list[ScopeSection]:
-    """`sections` with every settings document moved out of an OWNED section
-    into one trailing section that nothing owns, in the order they appeared."""
+def _settings_test(root: Path) -> Callable[[str], bool]:
+    """Whether a row's path IS one of openDox's settings documents, by its
+    spelling or by the file it reaches under `root`.
+
+    A SYMLINK ALIAS IS ONE (Copilot review of openDox-code#77, r4173903232).
+    `resolve_within` follows links to the canonical file, but a row keeps the
+    spelling it was named by, so `alias.md -> ideation/dashboard/
+    model-provider-bindings.yaml` (or a directory link on the way) compared
+    unequal to every settings path and stayed owned and editable. So the
+    file a row resolves to is compared with the files the settings documents
+    resolve to, and an alias is moved out of the owned sections under its own
+    name, like the document it reaches."""
+    from opendox import projection_seams
+
+    resolve_within = projection_seams.registry.current().resolve_within
+    targets = {target for target in (resolve_within(root, name)
+                                     for name in SETTINGS_DOCUMENTS)
+               if target is not None}
+
+    def is_settings(path: str) -> bool:
+        return path in SETTINGS_DOCUMENTS or (
+            bool(targets) and resolve_within(root, path) in targets)
+
+    return is_settings
+
+
+def _without_settings(sections: Sequence[ScopeSection], *,
+                      root: Path) -> list[ScopeSection]:
+    """`sections` with every settings document, or an alias that reaches one
+    (`_settings_test`), moved out of an OWNED section into one trailing
+    section that nothing owns, in the order they appeared."""
+    is_settings = _settings_test(root)
     kept: list[ScopeSection] = []
     moved: list[ScopeDocument] = []
     for section in sections:
         if not section.owned:
             kept.append(section)
             continue
-        rows = [row for row in section.documents if row.path not in SETTINGS_DOCUMENTS]
-        moved.extend(row for row in section.documents
-                     if row.path in SETTINGS_DOCUMENTS)
+        rows = [row for row in section.documents if not is_settings(row.path)]
+        moved.extend(row for row in section.documents if is_settings(row.path))
         kept.append(ScopeSection(key=section.key, label=section.label,
                                  note=section.note, inherited=section.inherited,
                                  owned=True, documents=tuple(rows)))
@@ -450,7 +499,7 @@ def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
         keywords = tuple(_text(t) for t in _sequence(group.get("topics")) if _text(t))
         sections.append(_section(
             "members", "group documents", "the group's own document edges",
-            members(group), index=index, seen=seen, root=root, inherited=False,
+            members(group), index=index.ids, seen=seen, root=root, inherited=False,
             owned=True))
     elif key.tile_kind == "staged":
         selection = next((_mapping(s) for s in _sequence(snapshot.get("staged_topics"))
@@ -460,7 +509,7 @@ def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
         title = key.tile_id
         sections.append(_section(
             "files", "selection files", "the documents this selection names",
-            _sequence(selection.get("files")), index=index, seen=seen, root=root,
+            _sequence(selection.get("files")), index=index.paths, seen=seen, root=root,
             inherited=False, owned=True))
     elif key.tile_kind == "possible":
         candidate = next((_mapping(p) for p in _sequence(snapshot.get("possibles"))
@@ -473,11 +522,11 @@ def resolve_scope(snapshot: Mapping[str, Any], key: ScopeKey, *,
         sections.append(_section(
             "claiming", "documents of the claiming groups",
             "membership inferred from the groups that claim this candidate",
-            claimed, index=index, seen=seen, root=root, inherited=True,
+            claimed, index=index.ids, seen=seen, root=root, inherited=True,
             owned=True))
     else:
         return None
-    sections = _without_settings(sections)
+    sections = _without_settings(sections, root=root)
     context = [row.path for section in sections for row in section.documents
                if row.resolved]
     for raw in created:

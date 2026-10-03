@@ -38,6 +38,12 @@ WHAT HAPPENS HERE, in the order a turn meets it:
     grammar the binding may declare has one arm here (`_DIALECT_ARMS`): this
     repository's own prompt grammar, and the OpenAI-compatible chat-completions
     grammar (#1144 box 16.1);
+  * OR NO BROKER AT ALL (#1144 box 16.3). A record whose reference is
+    `env:NAME` or `keyring:SERVICE/USERNAME` is answered by the BUILT-IN
+    RESOLVER below, at call time and in this module only (RULED R1Q17 (b)).
+    The reference is read for the one request that presents it, and nothing
+    is minted, cached or stored. A record with the auth kind `none` presents
+    no credential at all (RULED R1Q18 (a));
   * EXPIRY is handled by the 2026-08-26 ruling: re-mint and retry ONCE, with the
     re-mint and the paid retry visibly recorded, and a second expiry inside one
     turn surfaces the standard refusal rather than buying a third call. The
@@ -47,10 +53,15 @@ WHAT HAPPENS HERE, in the order a turn meets it:
 
 WHAT NEVER HAPPENS HERE:
 
-  * a credential is never held. `hand_off_credential` streams the human's value
-    from an open source straight into the broker's standard input and never
-    materialises it as a value of its own — no variable that outlives the call,
-    no file, no echo in a return value, and nothing in any exception;
+  * a credential is never held beyond the one call that uses it.
+    `hand_off_credential` streams the human's value from an open source
+    straight into the broker's standard input and never materialises it as a
+    value of its own — no variable that outlives the call, no file, no echo in
+    a return value, and nothing in any exception. The built-in resolver's
+    value, the one exception 16.3 makes, is read at call time, presented in
+    that request's authorization header, and dropped with the call. It is
+    never cached on the port, written, logged, returned, or put in an
+    exception;
   * a minted token is never written to a file, never placed in a response,
     never logged, and never survives the process. `MintedToken` carries a
     redacting `__repr__`, so even a traceback frame or a debugger `print` of the
@@ -59,7 +70,10 @@ WHAT NEVER HAPPENS HERE:
     this module raises carries one of the FIXED sentences below, composed from
     nothing the broker or the provider said, so `doxbench_model.dispatch_turn`
     maps it onto the same redacted `model_failed` every other adapter failure
-    already maps onto.
+    already maps onto. A broker's refusal keeps nothing the broker wrote: no
+    cause, no context, and no frame that holds its answer (Brett Heap's word
+    of 2026-09-29). It names the operation that failed, one of the declared
+    four, and the failure class.
 
 THE PROGRAM IS DECLARED; THE VERBS ARE THE DECLARATION'S (task 2.6). This was
 written while openProfiler was unbuilt, so it named the operation in a JSON
@@ -86,10 +100,15 @@ What that means in practice, and where the line falls:
 
 from __future__ import annotations
 
+import codecs
 import dataclasses
+import http.client
 import json
+import math
 import os
-import shutil
+import select
+import selectors
+import signal
 import subprocess
 import sys
 import threading
@@ -188,6 +207,16 @@ DIALECTS: tuple[str, ...] = binding_mod.DIALECTS
 #: cannot answer.
 BROKER_TIMEOUT_SECONDS = 30.0
 
+#: How much of the credential is read from its source at a time.
+_STDIN_CHUNK = 8192
+
+#: How long a refusal waits for a broker it has killed. SIGKILL ends a broker
+#: at once unless it is stuck in uninterruptible I/O, so this is no second
+#: clock, as `runtime/local_git_adapter._stop_the_whole_group`'s bound is not.
+#: Past it the refusal goes on, and CPython reaps the broker once its `Popen`
+#: is collected (`subprocess._active`).
+_REAP_GRACE_SECONDS = 5.0
+
 #: The largest answer a broker may write. A bound, not a policy: an unbounded
 #: read of a child's stdout is a way to spend this process's memory by
 #: misconfiguring a binding.
@@ -212,14 +241,32 @@ MAX_PROVIDER_ANSWER_BYTES = model_mod.SERVER_MAX_OUTPUT_LIMIT_BYTES
 #: the provider said. A broker's stderr, a provider's error body and an
 #: exception's text are all dropped unread at the boundary that observes them,
 #: exactly as `dispatch_turn` drops a provider exception's text.
+#:
+#: THE BROKER'S SENTENCES NAME A FAILURE CLASS AND NO OPERATION. They are
+#: shared by all four operations, and a refusal raised by one of them names
+#: that operation beside the sentence (`BrokerRefused.operation`). At
+#: `788d764b` two of them said "so no token could be minted" whichever
+#: operation had failed, and a broker that answered past the bound was refused
+#: as MALFORMED, beside every answer of the wrong shape.
 DIAG_BROKER_UNREACHABLE = (
-    "the credential broker could not be started, so no token could be minted")
+    "the credential broker could not be started")
 DIAG_BROKER_REFUSED = (
-    "the credential broker refused, so no token could be minted")
+    "the credential broker exited non-zero, and its answer is withheld by "
+    "design")
 DIAG_BROKER_MALFORMED = (
-    "the credential broker's answer did not match the declared mint contract")
+    "the credential broker's answer did not match the operation's declared "
+    "contract, and it is withheld by design")
 DIAG_BROKER_TIMEOUT = (
-    "the credential broker did not answer within the declared timeout")
+    "the credential broker did not answer within the declared timeout, and "
+    "anything it wrote is withheld by design")
+#: `MAX_BROKER_ANSWER_BYTES` exceeded. The provider's bound stays on
+#: `DIAG_PROVIDER_MALFORMED` (see `MAX_PROVIDER_ANSWER_BYTES`). The broker's
+#: has its own sentence: Brett Heap's word of 2026-09-29 names three ways a
+#: broker misbehaves, this is one of them, and a refusal names its class. It
+#: says only that the bound was passed, never by how much.
+DIAG_BROKER_OVERSIZE = (
+    "the credential broker's answer was larger than the declared bound, and "
+    "it is withheld by design")
 DIAG_PROVIDER_UNREACHABLE = (
     "the provider could not be reached and its details are withheld by design")
 DIAG_PROVIDER_REFUSED = (
@@ -230,18 +277,49 @@ DIAG_TOKEN_EXPIRED_TWICE = (
     "the minted token expired twice within one turn; a further paid call is "
     "not made on a turn that has already been retried once")
 
+#: The built-in resolver's two refusals (#1144 box 16.3). Fixed, like every
+#: other sentence here: they name no variable, no service and no user, so a
+#: reference an operator mistyped is not repeated wherever the refusal goes.
+DIAG_REFERENCE_UNRESOLVED = (
+    "the credential reference resolved to no usable credential, so none was "
+    "presented")
+DIAG_KEYRING_UNAVAILABLE = (
+    "the OS keyring could not be read by this process, so the keyring "
+    "reference could not be resolved")
+
+#: The answer to a redirect of a request that carried a credential: a broker's
+#: minted token, or what the built-in resolver read. That request follows no
+#: redirect (see `_DeclineRedirects`), so the credential went to the declared
+#: endpoint and nowhere else, and the sentence says what to declare instead.
+DIAG_PROVIDER_REDIRECTED = (
+    "the provider answered with a redirect, which a request carrying a "
+    "credential does not follow, so the credential was sent nowhere else; "
+    "declare the endpoint the provider redirects to")
+
 #: The closed set, so a test can assert no other sentence can be raised.
-#: EIGHT, not the nine this set held before the reconciliation.
-#: `DIAG_DIALECT_UNKNOWN` is gone because the fact it guarded moved: the dialect
-#: is the BINDING's, validated against the closed vocabulary when the operator
-#: declares it (`doxbench_binding.ModelProviderBinding.__post_init__`), so an
-#: unknown grammar can no longer reach a mint. Keeping a sentence here that no
-#: path can raise would be a refusal nobody can trigger, asserted by a test that
-#: proves nothing.
+#: TWELVE: the eight the reconciliation left, the built-in resolver's two
+#: (#1144 box 16.3), the redirect a request carrying a credential declines,
+#: and a broker answer past the bound (2026-09-29).
+#: `DIAG_DIALECT_UNKNOWN` is gone because the fact it guarded
+#: moved: the dialect is the BINDING's, validated against the closed vocabulary
+#: when the operator declares it
+#: (`doxbench_binding.ModelProviderBinding.__post_init__`), so an unknown
+#: grammar can no longer reach a mint. Keeping a sentence here that no path can
+#: raise would be a refusal nobody can trigger, asserted by a test that proves
+#: nothing.
 FIXED_DIAGNOSTICS: frozenset[str] = frozenset({
     DIAG_BROKER_UNREACHABLE, DIAG_BROKER_REFUSED, DIAG_BROKER_MALFORMED,
     DIAG_BROKER_TIMEOUT, DIAG_PROVIDER_UNREACHABLE,
     DIAG_PROVIDER_REFUSED, DIAG_PROVIDER_MALFORMED, DIAG_TOKEN_EXPIRED_TWICE,
+    DIAG_REFERENCE_UNRESOLVED, DIAG_KEYRING_UNAVAILABLE,
+    DIAG_PROVIDER_REDIRECTED, DIAG_BROKER_OVERSIZE,
+})
+
+#: The sentences a BROKER's failure is stated in, the only ones a refusal may
+#: name an operation beside.
+BROKER_DIAGNOSTICS: frozenset[str] = frozenset({
+    DIAG_BROKER_UNREACHABLE, DIAG_BROKER_REFUSED, DIAG_BROKER_MALFORMED,
+    DIAG_BROKER_TIMEOUT, DIAG_BROKER_OVERSIZE,
 })
 
 
@@ -251,16 +329,33 @@ class BrokerRefused(RuntimeError):
 
     Deliberately carries no payload, no status code, no stderr and no response
     body: there is no attribute a caller could log that discloses provider or
-    broker detail, which is the same discipline `TurnDispatchFailure` keeps."""
+    broker detail, which is the same discipline `TurnDispatchFailure` keeps.
 
-    def __init__(self, diagnostic: str) -> None:
+    A BROKER'S REFUSAL NAMES ITS OPERATION, so that a refusal holding
+    nothing a broker wrote (Brett Heap's word of 2026-09-29, openxFactory#656)
+    still says what failed. `operation` is one of `OPERATIONS`, given only
+    beside a broker's sentence (`BROKER_DIAGNOSTICS`), and the message reads
+    "broker <operation>: <sentence>". Both halves come from this module's
+    closed vocabularies, so the message still holds nothing a broker wrote.
+    `diagnostic` stays the sentence alone, and `operation` is None for a
+    provider's refusal and for one the runner raises by itself."""
+
+    def __init__(self, diagnostic: str, *,
+                 operation: str | None = None) -> None:
         if diagnostic not in FIXED_DIAGNOSTICS:
             raise AssertionError(
                 "a broker refusal carries a FIXED diagnostic; composing one "
                 "from what the broker or the provider said is exactly what "
                 "this class exists to prevent")
-        super().__init__(diagnostic)
+        if operation is not None and (operation not in OPERATIONS
+                                      or diagnostic not in BROKER_DIAGNOSTICS):
+            raise AssertionError(
+                "a refusal names an operation only beside a broker's "
+                "sentence, and only one of the declared four")
+        super().__init__(diagnostic if operation is None
+                         else f"broker {operation}: {diagnostic}")
         self.diagnostic = diagnostic
+        self.operation = operation
 
 
 class _TokenExpired(Exception):
@@ -325,11 +420,26 @@ def _parse_expires_at(value: object) -> float:
     Accepts an ISO-8601 instant (the spelling `credential-contracts` uses for
     its own `expires_at`) or a plain number of epoch seconds. A naive instant is
     read as UTC — the alternative, reading it in the console host's local zone,
-    would make a token's life depend on where the operator lives."""
+    would make a token's life depend on where the operator lives.
+
+    A NUMBER MUST BE FINITE (Copilot's review of openDox-code#64 at
+    `a2c838a0`). JSON can carry an integer too large for a float, which
+    `float()` refuses with an `OverflowError`. Python's JSON reader also takes
+    `NaN`, `Infinity` and `-Infinity`, and none of them is an instant: the
+    token would never expire, or would always have expired. Each is a
+    malformed answer, refused with the fixed sentence, so no token whose
+    expiry cannot be read is held, and `mint` raises the refusal again,
+    holding nothing of the answer."""
     if isinstance(value, bool):
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
     if isinstance(value, (int, float)):
-        return float(value)
+        try:
+            seconds = float(value)
+        except OverflowError:
+            seconds = math.inf
+        if not math.isfinite(seconds):
+            raise BrokerRefused(DIAG_BROKER_MALFORMED)
+        return seconds
     if not isinstance(value, str) or not value.strip():
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
     text = value.strip()
@@ -360,8 +470,8 @@ def subprocess_broker_runner(argv, *, source=None,
     operation reads no standard input at all, and this function closes the pipe
     immediately for them, which is what the declaration says a caller may do.
 
-    The credential is STREAMED, not read: `shutil.copyfileobj` moves it in
-    chunks from the operator's handle to the child's pipe, so the whole value
+    The credential is STREAMED, not read: `_answer_of` moves it in chunks
+    from the operator's handle to the child's pipe, so the whole value
     never becomes a string in this process and there is no variable holding it
     to outlive the call.
 
@@ -389,7 +499,104 @@ def subprocess_broker_runner(argv, *, source=None,
     broker's own words must never reach a caller, inheriting this process's
     stderr would put them on the console, and capturing them into a pipe would
     make this process's memory a function of how noisy a declared program
-    chooses to be. The kernel drops them instead, unread by construction."""
+    chooses to be. The kernel drops them instead, unread by construction.
+
+    A BROKER THAT MISBEHAVES IS REFUSED WITH NOTHING IT WROTE (Brett Heap's
+    word of 2026-09-29, openxFactory#656), for all four operations. That is a
+    broker that exits non-zero, answers past `MAX_BROKER_ANSWER_BYTES`, times
+    out, or writes an answer that is not UTF-8. Each refusal is raised here,
+    after `_run_broker` has returned: outside every handler, so it keeps no
+    cause and no context, and from the one frame that never held the child or
+    its answer. Measured at #64's `788d764b`, a broker that wrote a token and
+    then exited non-zero, or wrote past the bound, left it in this frame's
+    `answer` and in the child's buffers. One that wrote it and then timed out
+    chained the `TimeoutExpired` that holds it. One that wrote it beside a
+    byte that is not UTF-8 escaped as a `UnicodeDecodeError` that holds it,
+    and was no refusal at all."""
+    answer, failure = _run_broker(argv, source=source, timeout=timeout)
+    if failure is not None:
+        raise BrokerRefused(failure)
+    return answer
+
+
+def _kill_the_group(child) -> None:
+    """Kill the broker and every descendant still in its process group. A
+    descendant holding the answer's pipe open would otherwise keep the
+    answer from ending. Where process groups do not exist, the broker alone
+    is killed."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is not None:
+        try:
+            killpg(child.pid, signal.SIGKILL)
+            return
+        except OSError:
+            pass
+    child.kill()
+
+
+def _reap(child) -> None:
+    """Kill a child this runner is refusing, and its process group, wait for
+    it, and close both of this process's ends of its pipes. Nothing is left
+    reading them. A descendant that left the group keeps only its own copy
+    of the pipe, which nothing here waits on.
+
+    THE GROUP IS SIGNALLED ONLY WHILE THE BROKER IS UNREAPED (Copilot's
+    review of openDox-code#64 at `bbcb565e`). Its id is the broker's pid,
+    which can be reused once the broker is reaped, and a signal then could
+    reach an unrelated process group. A broker whose exit was read is
+    still unreaped (`_exit_status_unreaped`), so its group is killed here
+    first and the broker reaped after.
+
+    THE WAIT IS BOUNDED (the same review): a broker stuck in uninterruptible
+    I/O outlives SIGKILL, and the refusal does not wait on it past
+    `_REAP_GRACE_SECONDS`."""
+    if child.returncode is None:
+        _kill_the_group(child)
+    try:
+        child.wait(timeout=_REAP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    _close_quietly(child.stdin)
+    child.stdin = None
+    _close_quietly(child.stdout)
+
+
+def _close_quietly(stream) -> None:
+    if stream is None:
+        return
+    try:
+        stream.close()
+    except OSError:
+        pass
+
+
+def _run_broker(argv, *, source, timeout: float,
+                read=None) -> tuple[object | None, str | None]:
+    """The work of `subprocess_broker_runner`: `(answer, None)`, or
+    `(None, sentence)` for a refusal. It raises no refusal itself, so no
+    refusal keeps its frame, which holds the child and what the child
+    wrote. Given `read`, the answer is `read`'s reading of it, made while
+    the broker is still unreaped (`_settled`).
+
+    THE BOUND IS A BOUND ON WHAT IS READ (Copilot's review of
+    openDox-code#64 at `25788f91`). At most one byte past
+    `MAX_BROKER_ANSWER_BYTES` is read, and a broker that writes that byte is
+    refused and killed there. At `25788f91` the whole of the child's output
+    was read before the bound was checked, so a broker that wrote without
+    end filled this process's memory until the timeout.
+
+    ONE LOOP, IN THIS THREAD, AND ONE DEADLINE (Copilot's reviews at
+    `b847ef3d` and `a603a032`). The credential is written and the answer is
+    read by one selector loop, as `communicate` does on POSIX, and the
+    timeout covers both. There is no reader thread to abandon. A refusal
+    kills the broker's process group and closes this process's ends of both
+    pipes, so a descendant that left the group, and holds the answer's pipe
+    open, costs no thread and no descriptor here and can add nothing to
+    what was read.
+
+    The answer is decoded as UTF-8, JSON's own encoding, where
+    `communicate` used the locale's. An answer that is not UTF-8 is
+    malformed."""
     try:
         child = subprocess.Popen(  # noqa: S603 - argv from a declared binding plus the declared subcommand, never a shell string
             list(argv),
@@ -398,47 +605,169 @@ def subprocess_broker_runner(argv, *, source=None,
             stderr=subprocess.DEVNULL,
             env=bridge_mod.child_environment(os.environ),
             text=True,
+            # Its own process group, so a refusal can kill its descendants
+            # too (`_kill_the_group`). The session, and so the terminal, is
+            # this process's.
+            process_group=0 if hasattr(os, "killpg") else None,
         )
-    except (OSError, ValueError) as error:
-        raise BrokerRefused(DIAG_BROKER_UNREACHABLE) from error
+    except (OSError, ValueError):
+        return None, DIAG_BROKER_UNREACHABLE
+    received: list[bytes] = []
     try:
+        return _answer_of(child, received, source=source, timeout=timeout,
+                          read=read)
+    except BaseException:
+        # Anything else that escapes, such as the credential's own source
+        # failing while it is copied (the operator's input, not the broker's
+        # output), goes on as it was. The child is reaped first, and what it
+        # wrote is dropped. Nothing else can add to it once this loop has
+        # stopped.
+        _reap(child)
+        received.clear()
+        raise
+
+
+def _answer_of(child, received: list, *, source, timeout: float,
+               read=None) -> tuple[object | None, str | None]:
+    """`_run_broker`'s work once the child is running: the credential, if
+    any, streamed to its standard input, and its answer read, within the
+    bound and the timeout."""
+    deadline = time.monotonic() + timeout
+    encoder = codecs.getincrementalencoder(child.stdin.encoding)()
+    pending = b""
+    source_done = source is None
+    size = 0
+    with selectors.DefaultSelector() as selector:
+        selector.register(child.stdout, selectors.EVENT_READ)
+        selector.register(child.stdin, selectors.EVENT_WRITE)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _reap(child)
+                return None, DIAG_BROKER_TIMEOUT
+            for key, _events in selector.select(remaining):
+                if key.fileobj is child.stdin:
+                    if not pending and not source_done:
+                        # The credential's ONLY path through this process:
+                        # handle to pipe, in chunks, never assembled.
+                        text = source.read(_STDIN_CHUNK)
+                        pending = encoder.encode(text, final=not text)
+                        source_done = not text
+                    try:
+                        written = os.write(child.stdin.fileno(),
+                                           pending[:select.PIPE_BUF])
+                    except BrokenPipeError:
+                        # THE REFUSAL ARRIVING. Nothing is raised here; the
+                        # exit code and the child's own answer are read
+                        # below, exactly as the declaration instructs.
+                        written, pending, source_done = 0, b"", True
+                    pending = pending[written:]
+                    if source_done and not pending:
+                        # Closing it IS the signal a streamed credential's
+                        # end of file needs.
+                        selector.unregister(child.stdin)
+                        _close_quietly(child.stdin)
+                        child.stdin = None
+                    continue
+                # Read straight into `received`, so no other name in this
+                # frame holds what the broker wrote.
+                received.append(os.read(child.stdout.fileno(),
+                                        MAX_BROKER_ANSWER_BYTES + 1 - size))
+                if not received[-1]:
+                    received.pop()
+                    selector.unregister(child.stdout)
+                    continue
+                size += len(received[-1])
+                if size > MAX_BROKER_ANSWER_BYTES:
+                    _reap(child)
+                    return None, DIAG_BROKER_OVERSIZE
+    return _settled(child, received, deadline, read=read)
+
+
+def _settled(child, received: list, deadline: float,
+             read=None) -> tuple[object | None, str | None]:
+    """The broker's answer once its output has ended. Its exit is read
+    without reaping it, so a refusal can still kill what is left of its
+    group (`_reap`). An answer is returned with the broker reaped.
+
+    A REFUSAL KILLS WHAT IS LEFT OF THE GROUP, here as at the timeout and
+    the bound. The broker has exited, but a descendant still in its group
+    would outlive it, one more for each such call (Copilot's review of
+    openDox-code#64 at `a271d307`).
+
+    EVERY REFUSAL DOES, a refused answer from a broker that exited 0 among
+    them (the holder's answer on openDox-code#64, 2026-10-02). So `read`,
+    when it is given, reads the answer here, while the broker is still
+    unreaped and its group's id still its own. A refusal of the answer
+    kills what is left of the group before the broker is reaped. A
+    successful answer leaves the group alone, since a broker may leave a
+    helper running on purpose."""
+    returncode = _exit_status_unreaped(child, deadline)
+    if returncode is None:
+        _reap(child)
+        return None, DIAG_BROKER_TIMEOUT
+    if returncode != 0:
+        _reap(child)
+        return None, DIAG_BROKER_REFUSED
+    try:
+        # Decoded in place, so no other name holds what the broker wrote.
+        received[:] = [b"".join(received).decode("utf-8")]
+    except UnicodeDecodeError:
+        _reap(child)
+        return None, DIAG_BROKER_MALFORMED
+    answer = received.pop()
+    if read is not None:
         try:
-            if source is not None:
-                # The credential's ONLY path through this process: handle to
-                # pipe, in chunks, never assembled.
-                shutil.copyfileobj(source, child.stdin)
-            child.stdin.close()
-        except BrokenPipeError:
-            # THE REFUSAL ARRIVING. Nothing is raised here; the exit code and
-            # the child's own answer are read below, exactly as the declaration
-            # instructs. The close is still attempted so the descriptor is not
-            # left to a garbage collector, and its own broken pipe is dropped
-            # for the same reason the first one was.
-            try:
-                child.stdin.close()
-            except OSError:
-                pass
-        # `communicate` flushes `child.stdin` before reading, which raises on a
-        # handle this function has already closed — and closing it IS the
-        # signal a streamed credential's end of file needs. Dropping the
-        # reference is the documented way to say "stdin is finished with", and
-        # it is also the last place in this process that could have held the
-        # pipe the credential travelled down.
-        child.stdin = None
-        answer, _dropped_stderr = child.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as error:
-        child.kill()
-        child.communicate()
-        raise BrokerRefused(DIAG_BROKER_TIMEOUT) from error
-    except OSError as error:
-        child.kill()
-        child.communicate()
-        raise BrokerRefused(DIAG_BROKER_UNREACHABLE) from error
-    if child.returncode != 0:
-        raise BrokerRefused(DIAG_BROKER_REFUSED)
-    if len(answer.encode("utf-8")) > MAX_BROKER_ANSWER_BYTES:
-        raise BrokerRefused(DIAG_BROKER_MALFORMED)
-    return answer
+            answer = read(answer)
+        except BrokerRefused as refusal:
+            failure = refusal.diagnostic
+        else:
+            failure = None
+        if failure is not None:
+            # What the broker wrote leaves this frame before the reap.
+            del answer
+            _reap(child)
+            return None, failure
+    # It has exited, so this reaps it at once.
+    child.wait()
+    _close_quietly(child.stdout)
+    return answer, None
+
+
+def _exit_status_unreaped(child, deadline: float) -> int | None:
+    """The broker's exit status once it has exited, read WITHOUT reaping
+    it, or None at `deadline`. It reads as `Popen.returncode` does: the
+    exit code, or the negated number of the signal that ended it.
+
+    NOT REAPED, SO ITS GROUP'S ID IS STILL ITS OWN (Copilot's review of
+    openDox-code#64 at `bbcb565e`). Read with `WNOWAIT`, the broker stays a
+    zombie and keeps its pid, which is its group's id, so `_reap` can kill
+    what is left of the group before the broker is reaped. Where `waitid`
+    does not exist, the broker is reaped as it is read, and `_reap` then
+    signals no group. So does a broker something else has reaped, which
+    `Popen` reads as an exit of 0."""
+    waitid = getattr(os, "waitid", None)
+    if waitid is None:
+        try:
+            return child.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            return None
+    delay = 0.0005
+    while True:
+        try:
+            state = waitid(os.P_PID, child.pid,
+                           os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return child.wait()
+        if state is not None:
+            if state.si_code == os.CLD_EXITED:
+                return state.si_status
+            return -state.si_status
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(delay, remaining, 0.05))
+        delay *= 2
 
 
 def broker_operation_argv(binding, operation: str, *,
@@ -455,11 +784,22 @@ def broker_operation_argv(binding, operation: str, *,
     careful: every value comes from a field of the binding, the binding has no
     secret field to read, and the declaration refuses a credential-shaped flag
     on every command with its own `secret_in_argv` code. Two independent
-    refusals, agreeing."""
+    refusals, agreeing.
+
+    A BINDING THAT NAMES NO BROKER HAS NO BROKER OPERATION (#1144 box 16.3).
+    The built-in resolver or the auth kind `none` answers it, and its empty
+    base invocation would otherwise run the SUBCOMMAND as a program. So that
+    is a programming error here, like an undeclared operation. The operator
+    door refuses it in words first (`cli_model_binding`)."""
     if operation not in OPERATIONS:
         raise AssertionError(
             f"{operation!r} is outside the broker's declared operation "
             f"vocabulary {OPERATIONS}")
+    if binding.credential_source() != binding_mod.CREDENTIAL_FROM_BROKER:
+        raise AssertionError(
+            f"binding {binding.id!r} names no broker, so it has no broker "
+            "operation: the built-in resolver or the auth kind "
+            f"{binding_mod.AUTH_KIND_NONE!r} answers it")
     argv = list(binding.substituted_argv())
     if operation == OPERATION_INTAKE:
         argv += [OPERATION_INTAKE,
@@ -501,7 +841,10 @@ def _answer_document(text: object, kind: str, fields) -> dict:
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
     try:
         document = json.loads(text)
-    except (ValueError, TypeError) as error:
+    # A RecursionError too: arrays nested past the interpreter's limit fit
+    # well inside MAX_BROKER_ANSWER_BYTES (measured: 30,000 of them in 60 KB),
+    # and such an answer is malformed, not a crash that escapes with it.
+    except (ValueError, TypeError, RecursionError) as error:
         raise BrokerRefused(DIAG_BROKER_MALFORMED) from error
     if not isinstance(document, dict):
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
@@ -519,6 +862,50 @@ def _declared_string(document: Mapping, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
     return value
+
+
+def _broker_operation(binding, operation: str, read, *, runner,
+                      source=None, retry_of: str | None = None):
+    """Run one declared `operation` through `runner`, and return what `read`
+    makes of its answer. It is the one way each of the four operations asks
+    the broker.
+
+    EVERY REFUSAL KEEPS NOTHING THE BROKER WROTE (Brett Heap's word of
+    2026-09-29, openxFactory#656), AND NAMES THE OPERATION. A refusal from the
+    runner, or from `read`, is raised again here with the operation named
+    (`BrokerRefused.operation`). It is raised afresh, outside the handler and
+    after the answer has left this frame, so it keeps no cause, no context
+    and no frame that holds the answer, whichever runner was injected. The
+    answer is dropped even when it carries no secret, since a broker that
+    misbehaves may write anything into it.
+
+    `source` is given to the runner only when there is one, which is
+    `intake`'s case. Every other operation reads no standard input.
+
+    THE SUBPROCESS RUNNER READS THE ANSWER BEFORE THE BROKER IS REAPED (the
+    holder's answer on openDox-code#64, 2026-10-02), so a refusal of the
+    answer kills what is left of the broker's group too (`_settled`). A
+    runner injected in its place, such as a test's, is given the argv alone
+    and its answer is read here, as before."""
+    argv = broker_operation_argv(binding, operation, retry_of=retry_of)
+    if runner is subprocess_broker_runner:
+        result, failure = _run_broker(argv, source=source,
+                                      timeout=BROKER_TIMEOUT_SECONDS,
+                                      read=read)
+        if failure is None:
+            return result
+        raise BrokerRefused(failure, operation=operation)
+    answer = None
+    try:
+        if source is None:
+            answer = runner(argv)
+        else:
+            answer = runner(argv, source=source)
+        return read(answer)
+    except BrokerRefused as refusal:
+        failure = refusal.diagnostic
+    del answer
+    raise BrokerRefused(failure, operation=operation)
 
 
 # ---------------------------------------------------------------------------
@@ -545,11 +932,33 @@ def hand_off_credential(binding, source, *,
 
     Returns the `reference` the broker gives back — the declaration's own field
     name (0.2 FINDING 4). That reference is the only thing that then lives in a
-    binding, in a file, in a log or in a review."""
-    answer = runner(broker_operation_argv(binding, OPERATION_INTAKE),
-                    source=source)
+    binding, in a file, in a log or in a review.
+
+    THE BUILT-IN FORMS ARE RESERVED (#1144 box 16.3; Copilot's overview of
+    openDox-code#63 at `286655f3`). A broker's reference in the `env:` or
+    `keyring:` form would make the record read it as the built-in resolver's,
+    beside the broker that holds the credential, which is two resolvers. The
+    record refuses that, and it would do so where neither entry point
+    expects a refusal. So such an answer is malformed, and it is refused
+    here, where both entry points already catch a broker's refusal.
+
+    A refusal names `intake` and keeps nothing the broker wrote
+    (`_broker_operation`)."""
+    return _broker_operation(binding, OPERATION_INTAKE, _intake_reference,
+                             runner=runner, source=source)
+
+
+def _intake_reference(answer: object) -> str:
+    """An intake answer, read EXACTLY, as the `reference` it returns."""
     document = _answer_document(answer, BROKER_INTAKE_KIND, INTAKE_FIELDS)
-    return _declared_string(document, "reference")
+    reference = _declared_string(document, "reference")
+    # A reference with a raw key's shape is malformed too, for the same
+    # reason: the record refuses it (the adversarial review of
+    # openDox-code#63, M2), where neither entry point expects a refusal.
+    if (binding_mod.names_a_built_in_form(reference)
+            or binding_mod.carries_a_raw_key(reference)):
+        raise BrokerRefused(DIAG_BROKER_MALFORMED)
+    return reference
 
 
 # ---------------------------------------------------------------------------
@@ -572,12 +981,55 @@ def mint(binding, *, retry_of: str | None = None,
     WHERE the token is good and WHAT GRAMMAR that endpoint speaks come from the
     BINDING, not from this answer: the declaration emits neither and says why —
     the broker is provider-agnostic about the request grammar and will not name
-    an endpoint it would then be accountable for (0.2 FINDING 3)."""
-    answer = runner(broker_operation_argv(binding, OPERATION_MINT,
-                                          retry_of=retry_of))
+    an endpoint it would then be accountable for (0.2 FINDING 3).
+
+    NO TOKEN IS ASKED FOR ON A ROUTE THAT IS NOT PRIVATE (Brett Heap's word of
+    2026-09-29: a broker's minted token keeps the rules a built-in credential
+    keeps). The record refuses such a binding when it is declared
+    (`doxbench_binding.ENDPOINT_NOT_PRIVATE`), so no declared binding reaches
+    this check. It is repeated before the broker is asked all the same, as the
+    built-in resolver repeats it before it reads, because this is the function
+    that obtains the token. What reaches it is a programming error, and
+    nothing has been minted when it is raised.
+
+    A TOKEN THAT CANNOT BE PRESENTED AS IT IS, IS REFUSED, with
+    `DIAG_BROKER_MALFORMED`. The test is the built-in resolver's own
+    (`_presentable`), and the refusal comes before the port holds the token
+    or any provider is contacted. Measured at T080's head: a token outside
+    latin-1 failed inside `urllib` as `DIAG_PROVIDER_UNREACHABLE`, which
+    names the wrong party, and one with a space or another non-ASCII
+    character was sent as it was.
+
+    NO REFUSAL OF THE ANSWER KEEPS IT. The answer carries the token, so every
+    refusal is raised again, afresh, after the answer has left the frame that
+    read it (`_broker_operation`), and it names `mint`. It keeps no frame,
+    cause or context that holds the token, as the built-in resolver lets go
+    of what it read."""
+    if not binding_mod.is_a_private_route(binding.endpoint):
+        raise AssertionError(
+            f"binding {binding.id!r} would present a minted token over a "
+            "route that is not private, which the record refuses when it is "
+            "declared; nothing was minted")
+    return _broker_operation(
+        binding, OPERATION_MINT,
+        lambda answer: _minted_token(answer, binding),
+        runner=runner, retry_of=retry_of)
+
+
+def _minted_token(answer: object, binding) -> MintedToken:
+    """A mint answer, read EXACTLY (`_answer_document`), as a `MintedToken`.
+
+    Every refusal is `DIAG_BROKER_MALFORMED`: an answer of another shape, a
+    token that cannot be presented as it is (`_presentable`, which also
+    refuses one that is not a string or is blank), or an expiry or an audit
+    reference the declaration does not allow. `_broker_operation` raises each
+    one again, holding nothing of the answer."""
     document = _answer_document(answer, BROKER_MINT_KIND, MINT_FIELDS)
+    token = document["token"]
+    if not _presentable(token):
+        raise BrokerRefused(DIAG_BROKER_MALFORMED)
     return MintedToken(
-        token=_declared_string(document, "token"),
+        token=token,
         expires_at=_parse_expires_at(document["expires_at"]),
         endpoint=binding.endpoint,
         dialect=binding.dialect,
@@ -591,8 +1043,14 @@ def revoke(binding, *, runner=subprocess_broker_runner) -> str:
     trail through a revocation and refuses an unknown reference rather than
     answering silently, so "there was nothing there" and "it is gone now" stay
     different answers — and both reach a caller here as the same fixed refusal
-    or the same returned reference, never as the broker's own words."""
-    answer = runner(broker_operation_argv(binding, OPERATION_REVOKE))
+    or the same returned reference, never as the broker's own words. A
+    refusal names `revoke` (`_broker_operation`)."""
+    return _broker_operation(binding, OPERATION_REVOKE, _revocation_audit_ref,
+                             runner=runner)
+
+
+def _revocation_audit_ref(answer: object) -> str:
+    """A revocation answer, read EXACTLY, as its `audit_ref`."""
     document = _answer_document(answer, BROKER_REVOCATION_KIND,
                                 REVOCATION_FIELDS)
     if document["revoked"] is not True:
@@ -606,14 +1064,145 @@ def list_references(binding, *, runner=subprocess_broker_runner) -> list:
     Safe to read and safe to print: `list` never opens a custody file, and the
     index it reads carries no credential material. Returned as the declaration's
     own list of entries rather than reshaped, because a consumer that reshapes
-    an index it does not own invents a second contract for it."""
-    answer = runner(broker_operation_argv(binding, OPERATION_LIST))
+    an index it does not own invents a second contract for it. A refusal
+    names `list` (`_broker_operation`)."""
+    return _broker_operation(binding, OPERATION_LIST, _reference_index,
+                             runner=runner)
+
+
+def _reference_index(answer: object) -> list:
+    """A reference-index answer, read EXACTLY, as its list of entries."""
     document = _answer_document(answer, BROKER_REFERENCE_LIST_KIND,
                                 REFERENCE_LIST_FIELDS)
     references = document["references"]
     if not isinstance(references, list):
         raise BrokerRefused(DIAG_BROKER_MALFORMED)
     return references
+
+
+# ---------------------------------------------------------------------------
+# the built-in resolver (#1144 box 16.3; RULED R1Q17 (b), `5850003126`)
+# ---------------------------------------------------------------------------
+
+def _presentable(value: object) -> bool:
+    """Whether a credential can be presented AS IT IS, as the bearer
+    credential of the request's Authorization header. It is asked of a value
+    the built-in resolver read, and of a token a broker minted (`mint`).
+
+    It must be a non-empty string of printable ASCII with no whitespace, which
+    a bearer credential is by its grammar (RFC 6750's `b64token` is narrower
+    still). Any other value is refused, before any provider is contacted
+    (Copilot's overview of openDox-code#63). Measured against `urllib`:
+      * a line break or a NUL cannot travel in a header at all;
+      * a character outside latin-1 fails while the header is encoded. The
+        refusal from there would read `DIAG_PROVIDER_UNREACHABLE`, which names
+        the wrong party, and the `UnicodeEncodeError` it chains holds the
+        whole header, credential included;
+      * any other non-ASCII character, and an embedded space, is SENT, as a
+        credential the grammar does not allow.
+    Trimming or re-encoding the value would present a credential other than
+    the one the reference names or the broker minted, so the value is
+    refused instead."""
+    return (isinstance(value, str) and value != ""
+            and all("!" <= character <= "~" for character in value))
+
+
+#: What a keyring backend's failure reads as, inside the resolver only. A
+#: sentinel, not None, because None is what a backend answers for an absent
+#: entry, which is a different refusal.
+_UNREADABLE = object()
+
+
+def _os_keyring():
+    """The OS keyring, through the `keyring` package, imported at call time.
+
+    NOT A DEPENDENCY OF THIS PACKAGE, and that is deliberate. An install that
+    never names a keyring reference never needs it, and one that does installs
+    it beside openDox. Without it, a keyring reference refuses with the fixed
+    `DIAG_KEYRING_UNAVAILABLE` rather than raising an import error out of a
+    turn.
+
+    AND A PACKAGE THAT FAILS AS IT IS IMPORTED REFUSES THE SAME WAY (Copilot's
+    review of openDox-code#63 at `82ec9a20`). An import runs the package's own
+    code, and a backend can fail there as it can when it is read, so its
+    error, of any class, is dropped as a read's is. The refusal is raised
+    outside the handler, so it keeps no context either."""
+    try:
+        import keyring
+    # The package's own failure, of any class, never reaches a caller.
+    except Exception:  # noqa: BLE001
+        keyring = None
+    if keyring is None:
+        raise BrokerRefused(DIAG_KEYRING_UNAVAILABLE)
+    return keyring
+
+
+def resolve_credential_reference(binding, *, environ=None,
+                                 keyring_backend=None) -> str:
+    """THE BUILT-IN RESOLVER: the credential an `env:NAME` or
+    `keyring:SERVICE/USERNAME` reference names, read NOW.
+
+    AT CALL TIME, IN THIS MODULE ONLY (R1Q17 (b)). The port calls it once per
+    request and hands the answer straight to `_post_to_provider`, and nothing
+    keeps it. So a key rotated in the keyring is the key the next request
+    presents, and no credential lives on the port between turns. The
+    reference's FORM is parsed by `doxbench_binding.built_in_reference_parts`,
+    which the record already ran when the binding was declared, so the two
+    cannot disagree about it.
+
+    `environ` and `keyring_backend` are seams for tests. Production passes
+    neither, and so reads this process's own environment and the OS keyring.
+
+    Every failure is a FIXED refusal, raised before any provider is contacted.
+    An unset variable, an absent keyring entry, or a value that cannot be
+    presented as it is (`_presentable`) is `DIAG_REFERENCE_UNRESOLVED`. A
+    keyring that cannot be read is `DIAG_KEYRING_UNAVAILABLE`. A keyring
+    backend's own error is dropped unread, like a broker's or a provider's.
+
+    NOTHING IS READ FOR A ROUTE THAT IS NOT PRIVATE (Brett Heap's ruling of
+    2026-09-28, "Refuse unless loopback"). What this function reads is a
+    long-lived key, sent only over `https://` or over `http://` to this host.
+    The record refuses any other endpoint when the binding is declared
+    (`doxbench_binding.ENDPOINT_NOT_PRIVATE`), so no declared binding reaches
+    that check here. The check is repeated before the first read all the
+    same, because this is the function that holds the key. What reaches it
+    is a programming error, like a broker's reference, and nothing has been
+    read when it is raised."""
+    reference = binding_mod.built_in_reference_parts(binding.credential_ref)
+    if reference is None:
+        raise AssertionError(
+            f"binding {binding.id!r} names a broker's reference, which the "
+            "broker resolves; the built-in resolver takes only the "
+            f"{binding_mod.BUILT_IN_REFERENCE_FORMS} forms")
+    if not binding_mod.is_a_private_route(binding.endpoint):
+        raise AssertionError(
+            f"binding {binding.id!r} routes a credential the built-in "
+            "resolver reads over a route that is not private, which the "
+            "record refuses when it is declared; nothing was read")
+    if reference.form == binding_mod.CREDENTIAL_REF_ENV:
+        value = (os.environ if environ is None else environ).get(
+            reference.name)
+    else:
+        backend = (keyring_backend if keyring_backend is not None
+                   else _os_keyring())
+        try:
+            value = backend.get_password(reference.name, reference.user)
+        # A keyring backend's own error, of any class, never reaches a caller.
+        except Exception:  # noqa: BLE001
+            value = _UNREADABLE
+        if value is _UNREADABLE:
+            # Raised outside the handler, so the refusal keeps no context
+            # (Copilot's overview of openDox-code#63 at `286655f3`): the
+            # backend's own frames may hold what it was decoding when it
+            # failed.
+            raise BrokerRefused(DIAG_KEYRING_UNAVAILABLE)
+    if not _presentable(value):
+        # The refusal's traceback keeps this frame, so what was read leaves
+        # it first: a value that cannot be presented can still be most of a
+        # key.
+        del value
+        raise BrokerRefused(DIAG_REFERENCE_UNRESOLVED)
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -704,22 +1293,109 @@ _DIALECT_ARMS: dict[str, tuple] = {
 }
 
 
-def _post_to_provider(token: MintedToken, *, model: str, prompt: str,
-                      timeout: float, opener) -> str:
+class _PresentedCredential:
+    """A credential on its way into ONE request's authorization header.
+
+    Its repr and its str say nothing, as `MintedToken`'s do (Copilot's review
+    of openDox-code#63 at `d240fd50`). A traceback keeps the frames it passes
+    through, and an error reporter that records a frame's locals records them
+    by their repr. So in this module a raw credential is a local of no frame
+    except the ones that read it, until they return:
+    `resolve_credential_reference`, and `subprocess_broker_runner`, `mint`
+    and `_minted_token` reading a broker's answer. Every frame that carries a
+    credential to the provider carries this wrapper instead, or a
+    `MintedToken`."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def __repr__(self) -> str:
+        return "_PresentedCredential(<withheld>)"
+
+    __str__ = __repr__
+
+    def authorization(self) -> str:
+        """The authorization header's value, built as the header is set."""
+        return f"Bearer {self._value}"
+
+
+class _Redirected(Exception):
+    """A provider answered a request carrying a credential with a redirect,
+    and the redirect was declined.
+
+    PRIVATE and never raised out of this module: the port answers it with
+    `DIAG_PROVIDER_REDIRECTED` before any caller sees anything."""
+
+
+class _DeclineRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that follows NO redirect (Copilot's review of
+    openDox-code#63 at `4abc6d4d`).
+
+    `urllib`'s own handler re-sends a request's headers, all but the content
+    ones, to whatever `Location` the provider names, whatever its host and
+    scheme. Measured: a POST answered 301, 302 or 303 reaches the redirect's
+    target as a GET that still carries `Authorization: Bearer ...`, whether
+    the bearer is a built-in credential or a broker's minted token. A
+    credential travels only by a private route (the loopback ruling of
+    2026-09-28, which Brett Heap's word of 2026-09-29 gave a minted token
+    too), and a followed redirect would send it by any route. So a request
+    that carries one declines every redirect, with the redirect's answer
+    closed unread."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise _Redirected
+
+
+def _open_with_a_credential(request, *, timeout):
+    """`urllib.request.urlopen` for a request that carries a credential: a
+    broker's minted token, or what the built-in resolver read. It changes two
+    things, and nothing else.
+
+    * EVERY REDIRECT IS DECLINED (`_DeclineRedirects`).
+    * A PLAIN-`http://` REQUEST GOES DIRECT, whatever proxy the environment
+      names (Copilot's review of openDox-code#63 at `1b0fb3f4`). Such a
+      route is private only because it stays on this host, and a proxy
+      would carry it, in cleartext, to wherever the proxy is. Measured: with
+      `http_proxy` set, urllib's default opener sends a request addressed
+      to `127.0.0.1` to the proxy, credential header and all. An `https://`
+      request may still use the environment's proxy, because a proxy
+      reaches it only by CONNECT, and the credential stays inside TLS.
+
+    The opener is built per call, as `urlopen` builds its own on first use,
+    so the proxy environment is read when a request is made."""
+    handlers: list = [_DeclineRedirects]
+    if request.type == "http":
+        handlers.insert(0, urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers).open(
+        request, timeout=timeout)
+
+
+def _post_to_provider(*, endpoint: str, dialect: str,
+                      credential: _PresentedCredential | None,
+                      model: str, prompt: str, timeout: float, opener) -> str:
     """The ONE place a provider is contacted. Returns the assistant prose.
 
-    `model` is the model name the request carries, which the port chose (the
-    binding's declared `model`, or the catalog handle for a binding that
-    declares none).
+    `endpoint` and `dialect` are the binding's route. `model` is the model
+    name the request carries, which the port chose (the binding's declared
+    `model`, or the catalog handle for a binding that declares none).
+    `credential` is what this request presents (#1144 box 16.3): the token a
+    broker minted (a `MintedToken`'s), the value the built-in resolver read for
+    this call, or None under the auth kind `none`. With None the request
+    carries no authorization header at all. A credential arrives wrapped in a
+    `_PresentedCredential`, so this frame holds no raw value for a traceback
+    to keep.
 
-    The token travels in the request's authorization header and nowhere else;
-    it is not in the URL (which a proxy logs), not in the body (which an error
-    handler might echo), and not in this function's return value.
+    The credential travels in the request's authorization header and nowhere
+    else; it is not in the URL (which a proxy logs), not in the body (which an
+    error handler might echo), and not in this function's return value.
 
-    THE GRAMMAR IS THE BINDING'S DIALECT (#1144 box 16.1), which the token
-    carries from the binding. Its arm in `_DIALECT_ARMS` builds the request
-    body and reads the answer. The route, the header, the bound, the expiry
-    status and every refusal below are the same for both dialects.
+    THE GRAMMAR IS THE BINDING'S DIALECT (#1144 box 16.1). Its arm in
+    `_DIALECT_ARMS` builds the request body and reads the answer. The route,
+    the header, the bound, the expiry status and every refusal below are the
+    same for both dialects.
 
     THE ANSWER IS BOUNDED (PR #392 review note b). `response.read()` with no
     argument reads until the peer stops sending, which makes the memory of this
@@ -728,18 +1404,19 @@ def _post_to_provider(token: MintedToken, *, model: str, prompt: str,
     byte over `MAX_PROVIDER_ANSWER_BYTES` is read deliberately, so an answer
     that is exactly at the bound is still honoured while one past it is
     detected rather than truncated into a shorter document that would parse."""
-    arm = _DIALECT_ARMS.get(token.dialect)
+    arm = _DIALECT_ARMS.get(dialect)
     if arm is None:
         raise AssertionError(
-            f"{token.dialect!r} is outside the declared dialect vocabulary "
+            f"{dialect!r} is outside the declared dialect vocabulary "
             f"{DIALECTS}; the binding refuses it at declaration, so no turn "
             "can carry one")
     build_request, read_answer = arm
     body = json.dumps(build_request(model, prompt)).encode("utf-8")
-    request = urllib.request.Request(  # noqa: S310 - endpoint declared on the binding by its operator, carried on the minted token
-        token.endpoint, data=body, method="POST")
+    request = urllib.request.Request(  # noqa: S310 - endpoint declared on the binding by its operator
+        endpoint, data=body, method="POST")
     request.add_header("Content-Type", "application/json")
-    request.add_header("Authorization", f"Bearer {token.token}")
+    if credential is not None:
+        request.add_header("Authorization", credential.authorization())
     try:
         with opener(request, timeout=timeout) as response:
             payload = response.read(MAX_PROVIDER_ANSWER_BYTES + 1)
@@ -752,7 +1429,12 @@ def _post_to_provider(token: MintedToken, *, model: str, prompt: str,
         if status == PROVIDER_STATUS_TOKEN_EXPIRED:
             raise _TokenExpired from None
         raise BrokerRefused(DIAG_PROVIDER_REFUSED) from None
-    except (urllib.error.URLError, OSError, ValueError) as error:
+    # `urllib.error.URLError` is an `OSError`, so it is caught here too. And
+    # an `http.client.HTTPException`: a status line, a protocol or a header
+    # line `http.client` cannot read raises one, which is no OSError, and it
+    # escaped with the request's headers in `do_open`'s frame (the
+    # adversarial review of openDox-code#63, L4).
+    except (http.client.HTTPException, OSError, ValueError) as error:
         raise BrokerRefused(DIAG_PROVIDER_UNREACHABLE) from error
     if not isinstance(payload, (bytes, bytearray)):
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
@@ -763,7 +1445,13 @@ def _post_to_provider(token: MintedToken, *, model: str, prompt: str,
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
     try:
         document = json.loads(payload.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as error:
+    # A ValueError covers a UnicodeDecodeError, which is one. A RecursionError
+    # too: arrays nested past the interpreter's limit fit well inside
+    # MAX_PROVIDER_ANSWER_BYTES (30,000 of them take 60 KB). Such an answer
+    # is malformed, and must not escape as a crash whose traceback keeps this
+    # frame, and so the request and its authorization header (Copilot's
+    # review of openDox-code#64 at `e1a6cb0f`).
+    except (ValueError, RecursionError) as error:
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED) from error
     if not isinstance(document, dict):
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED)
@@ -827,29 +1515,37 @@ REMINT_NOTICE = (
 
 
 class BrokeredProviderPort:
-    """A `doxbench_model.WorkbenchModelPort` backed by a broker-minted token.
+    """A `doxbench_model.WorkbenchModelPort` backed by the binding's
+    credential: a broker-minted token, or, since #1144 box 16.3, a reference
+    the built-in resolver reads at call time, or no credential at all under
+    the auth kind `none`. The record's `credential_source()` says which, and
+    the name is kept because the entry points construct this class by it.
 
     THREE MEMBERS AND NO FOURTH, exactly like every other adapter this seam
     accepts: `timeout_seconds`, `catalog()`, `dispatch(envelope)`. Everything
-    below them — minting, expiry, the retry ruling, the provider call — is this
-    class's business and reaches the seam as one opaque dispatch.
+    below them — minting, expiry, the retry ruling, the built-in resolver, the
+    provider call — is this class's business and reaches the seam as one
+    opaque dispatch.
 
     ONE INSTANCE PER PROCESS, for the same reason the harness bridge is:
     `_workbench_model_port` resolves per REQUEST, and a port constructed per
     call would mint a fresh token for every turn and throw away a perfectly
     live one. The token is guarded by a lock because the server is a
-    `ThreadingHTTPServer`.
+    `ThreadingHTTPServer`. A record no broker answers holds NO credential on
+    the port: the resolver reads it for each request.
 
-    `catalog()` NEVER MINTS. A menu is not a paid call, and a console that
-    minted a token to render one would spend a mint on every capabilities
-    probe."""
+    `catalog()` NEVER MINTS AND NEVER RESOLVES. A menu is not a paid call, and
+    a console that minted a token or read a key to render one would do so on
+    every capabilities probe."""
 
     def __init__(self, binding, catalog, *,
                  timeout_seconds: float = 60.0,
                  runner=subprocess_broker_runner,
                  opener=urllib.request.urlopen,
                  clock=time.time,
-                 notice=None) -> None:
+                 notice=None,
+                 environ=None,
+                 keyring_backend=None) -> None:
         if not isinstance(binding, binding_mod.ModelProviderBinding):
             raise TypeError(
                 "binding must be a ModelProviderBinding, got "
@@ -865,9 +1561,13 @@ class BrokeredProviderPort:
         self._opener = opener
         self._clock = clock
         self._notice = notice if notice is not None else sys.stderr.write
+        # The built-in resolver's seams (#1144 box 16.3). None reads this
+        # process's own environment and the OS keyring, AT CALL TIME.
+        self._environ = environ
+        self._keyring_backend = keyring_backend
         self._lock = threading.Lock()
         self._token: MintedToken | None = None
-        self._mintable = True
+        self._available = True
         self.ledger: list[MintEvent] = []
 
     # -- the three port members --------------------------------------------
@@ -878,12 +1578,14 @@ class BrokeredProviderPort:
 
     def catalog(self) -> model_mod.ModelCatalog:
         """The install's declared catalog, marked unavailable once this port
-        knows it cannot mint.
+        knows it cannot present a credential: a broker that refused to mint,
+        or a reference the built-in resolver could not resolve.
 
         The same honesty the harness bridge keeps: a declaration is available
         until something is measured, and a broker that has refused is measured.
-        Nothing here contacts the broker to find out."""
-        if self._mintable:
+        Nothing here contacts the broker, or reads a reference, to find out.
+        A later turn that succeeds makes the entry available again."""
+        if self._available:
             return self._declared_catalog
         return model_mod.ModelCatalog.from_entries([
             dataclasses.replace(entry, available=False)
@@ -917,7 +1619,17 @@ class BrokeredProviderPort:
 
         THE REQUEST'S MODEL IS THE BINDING'S DECLARED `model` (#1144 box
         16.2). A binding that declares none sends the catalog handle, which is
-        what every request sent before the field existed, byte for byte."""
+        what every request sent before the field existed, byte for byte.
+
+        A RECORD NO BROKER ANSWERS takes `_dispatch_without_a_broker` instead
+        (#1144 box 16.3): no mint, no ledger event, and no retry.
+
+        EITHER WAY, THE PROVIDER IS CALLED THROUGH `_call_provider`, so a
+        broker's minted token keeps every rule a built-in credential keeps: no
+        redirect, no proxy over plain `http://`, and a refusal that chains
+        nothing (Brett Heap's word of 2026-09-29). The re-mint and the retry
+        above therefore happen outside every handler, so a refusal raised by
+        either keeps no context either."""
         handle = getattr(prompt_envelope, "model_id", None)
         if not isinstance(handle, str) or not handle:
             entries = self._declared_catalog.entries
@@ -925,12 +1637,16 @@ class BrokeredProviderPort:
         declared_model = self._binding.model
         model = declared_model if declared_model is not None else handle
         prompt = bridge_mod.render_prompt_message(prompt_envelope)
+        if (self._binding.credential_source()
+                != binding_mod.CREDENTIAL_FROM_BROKER):
+            return {"assistant_prose": self._dispatch_without_a_broker(
+                        model=model, prompt=prompt),
+                    "proposals": []}
         token = self._current_token(REASON_FIRST_MINT)
-        try:
-            prose = _post_to_provider(token, model=model, prompt=prompt,
-                                      timeout=self._timeout_seconds,
-                                      opener=self._opener)
-        except _TokenExpired:
+        prose = self._call_provider(
+            _PresentedCredential(token.token), endpoint=token.endpoint,
+            dialect=token.dialect, model=model, prompt=prompt)
+        if prose is None:
             # PER-TURN STATE, and no longer than the turn: the expired mint's
             # own audit reference, read before the token is dropped, so the
             # re-mint can name what it replaces.
@@ -940,14 +1656,98 @@ class BrokeredProviderPort:
             token = self._current_token(REASON_EXPIRY_REMINT,
                                         retry_of=replaced)
             self._record(REASON_PAID_RETRY)
-            try:
-                prose = _post_to_provider(
-                    token, model=model, prompt=prompt,
-                    timeout=self._timeout_seconds, opener=self._opener)
-            except _TokenExpired:
+            prose = self._call_provider(
+                _PresentedCredential(token.token), endpoint=token.endpoint,
+                dialect=token.dialect, model=model, prompt=prompt)
+            if prose is None:
                 self._forget_token()
-                raise BrokerRefused(DIAG_TOKEN_EXPIRED_TWICE) from None
+                raise BrokerRefused(DIAG_TOKEN_EXPIRED_TWICE)
         return {"assistant_prose": prose, "proposals": []}
+
+    def _dispatch_without_a_broker(self, *, model: str, prompt: str) -> str:
+        """One turn for a record NO BROKER answers (#1144 box 16.3).
+
+        NOTHING IS MINTED AND NOTHING IS KEPT. Under the built-in resolver the
+        credential is read now, for this one request (RULED R1Q17 (b)), and it
+        is dropped when this call returns. Under the auth kind `none` there is
+        no credential, and the request carries no authorization header (RULED
+        R1Q18 (a)). A resolution that fails refuses before any provider is
+        contacted, and marks the catalog unavailable as a refused mint does.
+
+        A 401 HERE IS A REFUSAL, NOT AN EXPIRY. The 2026-08-26 retry ruling is
+        about a MINTED token outliving its turn, and here there is no mint to
+        repeat: the reference names the same value on a second read, so a
+        retry would buy a second paid call for the same refusal. It is raised
+        outside every handler, so it keeps no context.
+
+        The request itself is made through `_call_provider`, which keeps the
+        rules for a request that carries a credential."""
+        credential = None
+        if (self._binding.credential_source()
+                == binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER):
+            try:
+                credential = _PresentedCredential(resolve_credential_reference(
+                    self._binding, environ=self._environ,
+                    keyring_backend=self._keyring_backend))
+            except BrokerRefused:
+                with self._lock:
+                    self._available = False
+                raise
+            with self._lock:
+                self._available = True
+        prose = self._call_provider(
+            credential, endpoint=self._binding.endpoint,
+            dialect=self._binding.dialect, model=model, prompt=prompt)
+        if prose is None:
+            raise BrokerRefused(DIAG_PROVIDER_REFUSED)
+        return prose
+
+    def _call_provider(self, credential: _PresentedCredential | None, *,
+                       endpoint: str, dialect: str, model: str,
+                       prompt: str) -> str | None:
+        """ONE provider call, under the rules a request that carries a
+        credential keeps, whichever resolver answered it: a broker's minted
+        token, or what the built-in resolver read. Returns the prose, or None
+        when the provider said the credential is no longer valid (a 401), which
+        each path answers in its own way.
+
+        A REQUEST THAT CARRIES A CREDENTIAL FOLLOWS NO REDIRECT AND, OVER
+        PLAIN `http://`, USES NO PROXY. The default opener does both, and
+        sends the credential header along each time, so such a request uses
+        `_open_with_a_credential` in its place. An opener a caller injected is
+        that caller's own seam, and it is used as given.
+
+        A REFUSAL OF A REQUEST THAT CARRIED A CREDENTIAL CHAINS NOTHING. The
+        credential stays wrapped in a `_PresentedCredential` in every frame
+        here, and the refusal is raised afresh, with no cause and no context,
+        so no traceback it carries reaches a frame inside `urllib` whose locals
+        hold the request's headers (Copilot's review of openDox-code#63 at
+        `d240fd50`).
+
+        T080 gave these rules to the built-in resolver's key. Brett Heap's
+        word of 2026-09-29 gave them to a broker's minted token too. The auth
+        kind `none` presents nothing, so its request keeps the default opener,
+        and its refusal is raised as `_post_to_provider` raised it."""
+        opener = self._opener
+        if credential is not None and opener is urllib.request.urlopen:
+            opener = _open_with_a_credential
+        try:
+            return _post_to_provider(
+                endpoint=endpoint, dialect=dialect, credential=credential,
+                model=model, prompt=prompt, timeout=self._timeout_seconds,
+                opener=opener)
+        except _TokenExpired:
+            return None
+        except _Redirected:
+            failure = DIAG_PROVIDER_REDIRECTED
+        except BrokerRefused as refusal:
+            if credential is None:
+                raise
+            failure = refusal.diagnostic
+        # RAISED HERE, OUTSIDE EVERY HANDLER, so the refusal chains nothing. A
+        # cause chained from inside `urllib` keeps frames whose locals hold the
+        # request's headers, and so the credential.
+        raise BrokerRefused(failure)
 
     # -- token custody ------------------------------------------------------
 
@@ -971,9 +1771,9 @@ class BrokeredProviderPort:
                 minted = mint(self._binding, retry_of=retry_of,
                               runner=self._runner)
             except BrokerRefused:
-                self._mintable = False
+                self._available = False
                 raise
-            self._mintable = True
+            self._available = True
             self._token = minted
         self._record(reason, audit_ref=minted.audit_ref)
         return minted
@@ -992,5 +1792,5 @@ class BrokeredProviderPort:
 
     def __repr__(self) -> str:
         return (f"BrokeredProviderPort(binding={self._binding.id!r}, "
-                f"mintable={self._mintable}, "
+                f"available={self._available}, "
                 f"token={'held' if self._token is not None else 'none'})")
