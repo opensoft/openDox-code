@@ -25,20 +25,23 @@ name: release
 # must equal the root's pin and be on `main`. A dispatch runs at the head of
 # the ref it names, so it names the tag `v<version>`, created at the pinned
 # commit, or `main` only while `main`'s head is still that commit. No other
-# tag is accepted.
+# tag is accepted. The pin is checked in the build job and AGAIN right before
+# each upload, so a pin that moves while the run waits (on an approval, or on
+# TestPyPI) stops the upload.
 #
 # FOUR JOBS, EACH GATED ON THE ONE BEFORE IT:
 #   build            builds the sdist and the wheel in a clean job, runs
 #                    `twine check`, VERIFIES both before any upload, and
 #                    installs the wheel into a fresh venv. It mints no
 #                    identity token, and its GITHUB_TOKEN reads only.
-#   testpypi         the dry run: publishes those exact bytes to TestPyPI,
-#                    in the `testpypi` environment.
+#   testpypi         the dry run: re-checks the root's pin, then publishes
+#                    those exact bytes to TestPyPI, in the `testpypi`
+#                    environment.
 #   testpypi-install installs `opendox[local]` from TestPyPI into a fresh
 #                    venv, as plan 034's T099 falsifier does, and runs it.
-#   pypi             publishes the same bytes to PyPI, in the `pypi`
-#                    environment, then requires PyPI to serve exactly
-#                    those two files, by digest.
+#   pypi             re-checks the root's pin, publishes the same bytes to
+#                    PyPI, in the `pypi` environment, then requires PyPI to
+#                    serve exactly those two files, by digest.
 #
 # NO PyPI TOKEN AND NO STORED SECRET, ANYWHERE. Both uploads use PyPI's
 # trusted publishing (OIDC): the job asks GitHub for a short-lived identity
@@ -49,7 +52,8 @@ name: release
 # `GITHUB_TOKEN`, which the build job passes to `gh` for two reads of THIS
 # repository's API (the compare with `main`, and the environments), with
 # `contents: read` and `actions: read` and nothing more. The openDox root's
-# pin, in another repository, is read over git with no credential at all.
+# pin, in another repository, is read over git with no credential at all, in
+# the build job and again right before each upload.
 #
 # EVERY ACTION IS PINNED BY FULL COMMIT SHA, with its release tag beside it.
 # (`validate.yml` pins by tag. A tag can be moved after review, and a commit
@@ -108,21 +112,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      # THE RELEASE IS THE PINNED COMMIT. This run's commit must (a) equal
-      # `commit:` in opensoft/openDox `main`'s `contracts/code-pin.yaml`, whose
-      # `source_repository` must be this repository, and (b) be on this
-      # repository's `main`, as `main` or an ancestor of it. `main`'s head
-      # need not be that commit. A dispatch on a tag must name `v<version>`.
-      # A dispatch may name any ref, and the commit it names is what would be
-      # published, so this is checked first.
-      #
-      # THE ROOT'S PIN IS READ ANONYMOUSLY, OVER GIT. opensoft/openDox is
-      # public, and this job's GITHUB_TOKEN is an installation token scoped
-      # to this repository, so the read of another repository uses no token:
-      # a fetch of `main`, depth 1, with every credential helper cleared and
-      # no prompt, in a repository of its own under `$RUNNER_TEMP`. The
-      # compare with `main` reads this repository, through the API.
-      - name: the dispatched commit is the one the openDox root pins
+      # THE RELEASE IS THE PINNED COMMIT, ON `main`. A dispatch may name any
+      # ref, and the commit it names is what would be published, so these two
+      # steps come first. This one: a dispatch on a tag must name
+      # `v<version>`, and the run's commit must be on this repository's
+      # `main`, as `main` or an ancestor of it (`main`'s head need not be that
+      # commit). The compare reads this repository, through the API.
+      - name: the dispatched commit is on main, dispatched on v<version> or a branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -134,6 +130,27 @@ jobs:
               fi
               ;;
           esac
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq .status)"
+          case "$status" in
+            identical|ahead) echo "$GITHUB_SHA is on main ($status), dispatched on $GITHUB_REF" ;;
+            *)
+              echo "::error::$GITHUB_SHA is not on this repository's main (compare: $status)"
+              exit 1
+              ;;
+          esac
+
+      # And this one: the run's commit must equal `commit:` in opensoft/openDox
+      # `main`'s `contracts/code-pin.yaml`, whose `source_repository` must be
+      # this repository. The two publish jobs run this same step again, right
+      # before their upload.
+      #
+      # THE ROOT'S PIN IS READ ANONYMOUSLY, OVER GIT. opensoft/openDox is
+      # public, and a job's GITHUB_TOKEN is an installation token scoped to
+      # this repository, so the read of another repository uses no token: a
+      # fetch of `main`, depth 1, with every credential helper cleared and no
+      # prompt, in a repository of its own under `$RUNNER_TEMP`.
+      - name: the dispatched commit is the one the openDox root pins
+        run: |
           root="$RUNNER_TEMP/opendox-root"
           rm -rf "$root"
           git init -q -b main "$root"
@@ -143,7 +160,7 @@ jobs:
             echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
             exit 1
           fi
-          PIN="$pin" python - <<'PY'
+          PIN="$pin" python3 - <<'PY'
           import os, re, sys
 
           pin = os.environ["PIN"]
@@ -165,14 +182,6 @@ jobs:
                        f"at {pinned}")
           print(f"{this} is the commit opensoft/openDox main pins for {here}")
           PY
-          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq .status)"
-          case "$status" in
-            identical|ahead) echo "$GITHUB_SHA is on main ($status), dispatched on $GITHUB_REF" ;;
-            *)
-              echo "::error::$GITHUB_SHA is not on this repository's main (compare: $status)"
-              exit 1
-              ;;
-          esac
 
       # BOTH ENVIRONMENTS MUST ASK A REVIEWER. GitHub creates an environment a
       # job names if it does not exist yet, and creates it with no protection
@@ -530,6 +539,45 @@ jobs:
           printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
             | sha256sum --strict -c -
 
+      # THE PIN, AGAIN, RIGHT BEFORE THE UPLOAD: the build job's step, the same
+      # script. Between the build job's check and this upload the run waits on
+      # an approval (and, before PyPI, on TestPyPI too), and the openDox root
+      # may pin another commit meanwhile. An upload cannot be taken back, so a
+      # moved pin stops it here.
+      - name: the dispatched commit is the one the openDox root pins
+        run: |
+          root="$RUNNER_TEMP/opendox-root"
+          rm -rf "$root"
+          git init -q -b main "$root"
+          if ! GIT_TERMINAL_PROMPT=0 git -C "$root" -c credential.helper= \
+              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git main \
+              || ! pin="$(git -C "$root" show FETCH_HEAD:contracts/code-pin.yaml)"; then
+            echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
+            exit 1
+          fi
+          PIN="$pin" python3 - <<'PY'
+          import os, re, sys
+
+          pin = os.environ["PIN"]
+
+          def field(name):
+              found = re.search(rf'^{name}:[ \t]*"?([^"\s#]+)"?[ \t]*(?:#.*)?$', pin, re.M)
+              return found.group(1) if found else None
+
+          source, pinned = field("source_repository"), field("commit")
+          here, this = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
+          if source != here:
+              sys.exit(f"::error::the openDox root's code pin names {source!r}, not {here!r}")
+          if not pinned or not re.fullmatch(r"[0-9a-f]{40}", pinned):
+              sys.exit(f"::error::the openDox root's code pin names no full commit: {pinned!r}")
+          if pinned != this:
+              sys.exit(f"::error::this run is at {this}, and the openDox root pins {pinned}; "
+                       "a release publishes only the pinned commit. A dispatch runs at the "
+                       "head of the ref it names, so dispatch on the tag v<version> created "
+                       f"at {pinned}")
+          print(f"{this} is the commit opensoft/openDox main pins for {here}")
+          PY
+
       # skip-existing: a re-run after a partial upload skips a file the index
       # already holds, instead of stopping on it, and uploads the rest. An
       # index keeps each file name once, so a skipped file could differ from
@@ -686,6 +734,45 @@ jobs:
           fi
           printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
             | sha256sum --strict -c -
+
+      # THE PIN, AGAIN, RIGHT BEFORE THE UPLOAD: the build job's step, the same
+      # script. Between the build job's check and this upload the run waits on
+      # an approval (and, before PyPI, on TestPyPI too), and the openDox root
+      # may pin another commit meanwhile. An upload cannot be taken back, so a
+      # moved pin stops it here.
+      - name: the dispatched commit is the one the openDox root pins
+        run: |
+          root="$RUNNER_TEMP/opendox-root"
+          rm -rf "$root"
+          git init -q -b main "$root"
+          if ! GIT_TERMINAL_PROMPT=0 git -C "$root" -c credential.helper= \
+              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git main \
+              || ! pin="$(git -C "$root" show FETCH_HEAD:contracts/code-pin.yaml)"; then
+            echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
+            exit 1
+          fi
+          PIN="$pin" python3 - <<'PY'
+          import os, re, sys
+
+          pin = os.environ["PIN"]
+
+          def field(name):
+              found = re.search(rf'^{name}:[ \t]*"?([^"\s#]+)"?[ \t]*(?:#.*)?$', pin, re.M)
+              return found.group(1) if found else None
+
+          source, pinned = field("source_repository"), field("commit")
+          here, this = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
+          if source != here:
+              sys.exit(f"::error::the openDox root's code pin names {source!r}, not {here!r}")
+          if not pinned or not re.fullmatch(r"[0-9a-f]{40}", pinned):
+              sys.exit(f"::error::the openDox root's code pin names no full commit: {pinned!r}")
+          if pinned != this:
+              sys.exit(f"::error::this run is at {this}, and the openDox root pins {pinned}; "
+                       "a release publishes only the pinned commit. A dispatch runs at the "
+                       "head of the ref it names, so dispatch on the tag v<version> created "
+                       f"at {pinned}")
+          print(f"{this} is the commit opensoft/openDox main pins for {here}")
+          PY
 
       # skip-existing: a re-run after a partial upload skips a file the index
       # already holds, instead of stopping on it, and uploads the rest. An

@@ -29,8 +29,11 @@ What is held:
   * the release-commit step: the pinned commit on `main` passes, and a commit
     the openDox root does not pin, a commit off `main`, another repository's
     pin, a tag other than `v<version>`, an unreachable root and a root with no
-    pin each refuse. The pin is read over git with no credential, and the
-    step's one `gh` call is the compare with this repository's `main`;
+    pin each refuse. The build job runs it as two steps, the ref and `main`
+    (its one `gh` call is the compare with this repository's `main`), and the
+    pin, read over git with no credential;
+  * the pin, again, as the step right before each upload, the build job's
+    script: a pin that moved meanwhile stops the upload;
   * the environment step: both environments with a reviewer pass, and either
     one without a reviewer, or unreadable, refuses;
   * the version gate, case by case, a pre-release and a development release
@@ -187,6 +190,8 @@ def _pin(commit: str, source: str = REPOSITORY) -> str:
 
 
 ROOT_URL = "https://github.com/opensoft/openDox.git"
+REF_STEP = "the dispatched commit is on main, dispatched on v<version> or a branch"
+PIN_STEP = "the dispatched commit is the one the openDox root pins"
 
 
 def _root(where: Path, pin: str | None) -> Path:
@@ -255,7 +260,7 @@ RELEASE_COMMIT_CASES = {
 @pytest.mark.parametrize("case", sorted(RELEASE_COMMIT_CASES))
 def test_the_release_commit_step(case: str, tmp_path: Path) -> None:
     given, refusal = RELEASE_COMMIT_CASES[case]
-    step = _step("build", "the dispatched commit is the one the openDox root pins")
+    script = "\n".join(_step("build", name)["run"] for name in (REF_STEP, PIN_STEP))
     root = _root(tmp_path / "root", given["pin"])
     if given.get("unreachable"):
         root = tmp_path / "no-such-root"
@@ -264,7 +269,7 @@ def test_the_release_commit_step(case: str, tmp_path: Path) -> None:
            "GITHUB_REF": given.get("ref", "refs/heads/main"), "VERSION": "0.1.0",
            "RUNNER_TEMP": str(tmp_path / "rt"), "FAKE_STATUS": given["status"],
            "GH_TOKEN": "unused", **_redirect(root)}
-    result = _run(step["run"], tmp_path, env, (_fake_gh(tmp_path / "bin"),))
+    result = _run(script, tmp_path, env, (_fake_gh(tmp_path / "bin"),))
     if refusal is None:
         assert result.returncode == 0, result.stdout + result.stderr
         assert "is the commit opensoft/openDox main pins" in result.stdout
@@ -274,12 +279,48 @@ def test_the_release_commit_step(case: str, tmp_path: Path) -> None:
 
 
 def test_the_root_pin_is_read_over_git_with_no_credential() -> None:
-    script = _step("build", "the dispatched commit is the one the openDox root pins")["run"]
+    step = _step("build", PIN_STEP)
+    script = step["run"]
     assert "contents/contracts/code-pin.yaml" not in script
     assert re.search(r'GIT_TERMINAL_PROMPT=0 git -C "\$root" -c credential\.helper= \\\n'
                      r'\s+fetch -q --depth 1 --no-tags ' + re.escape(ROOT_URL) + r' main', script), script
-    calls = [line.strip() for line in script.splitlines() if re.search(r"\bgh\b", line)]
+    assert not re.search(r"\bgh\b", script) and "env" not in step, step
+    ref = _step("build", REF_STEP)["run"]
+    calls = [line.strip() for line in ref.splitlines() if re.search(r"\bgh\b", line)]
     assert len(calls) == 1 and "/compare/" in calls[0], calls
+
+
+def test_each_upload_rechecks_the_pin_right_before_it() -> None:
+    """The run waits on approvals, and before PyPI on TestPyPI too, so the
+    root may pin another commit after the build job's check. Each publish
+    job runs the build job's pin step again, the same script, as the step
+    right before its upload (Copilot's review of openDox-code#78)."""
+    jobs = _workflow()["jobs"]
+    pin = _step("build", PIN_STEP)
+    for job in ("testpypi", "pypi"):
+        steps = jobs[job]["steps"]
+        upload = next(i for i, step in enumerate(steps)
+                      if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@"))
+        assert steps[upload - 1] == pin, (job, steps[upload - 1])
+
+
+@needs_a_shell
+@pytest.mark.parametrize("job", ["testpypi", "pypi"])
+@pytest.mark.parametrize("moved", [False, True])
+def test_a_pin_that_moved_stops_the_upload(job: str, moved: bool, tmp_path: Path) -> None:
+    steps = _workflow()["jobs"][job]["steps"]
+    upload = next(i for i, step in enumerate(steps)
+                  if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@"))
+    root = _root(tmp_path / "root", _pin("2" * 40 if moved else PINNED))
+    (tmp_path / "rt").mkdir()
+    env = {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_SHA": PINNED,
+           "RUNNER_TEMP": str(tmp_path / "rt"), **_redirect(root)}
+    result = _run(steps[upload - 1]["run"], tmp_path, env)
+    if moved:
+        assert result.returncode != 0, result.stdout
+        assert "a release publishes only the pinned commit" in result.stdout + result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 ENVIRONMENT_CASES = {
