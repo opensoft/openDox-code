@@ -2442,6 +2442,9 @@ def build_server(
     # uses. Both `None` where no token was minted.
     httpd.console_token = console_token
     httpd.console_token_delivery = console_delivery
+    # ...and the roots `/source` serves, which the token's copy may not sit in.
+    httpd.served_roots = (checkout_root, *(
+        Path(path).resolve() for path in (source_roots or {}).values()))
     return httpd
 
 

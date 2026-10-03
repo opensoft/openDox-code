@@ -144,7 +144,7 @@ def _write(state: Path, port: int = 8080, token: str | None = None,
     from opendox import console_access
     return console_access.write_private_copy(
         state, page_url=page_url or f"http://127.0.0.1:{port}/index.html",
-        port=port, token=token or _token())
+        port=port, token=token or _token(), served_roots=())
 
 
 class _Targets(html.parser.HTMLParser):
@@ -709,3 +709,96 @@ def test_the_servers_own_entry_point_refuses_where_no_safe_copy_can_be_written(
                        "--port", "0"]) == 1
     err = capsys.readouterr().err
     assert "serve refused:" in err and "writable by every user" in err, err
+
+
+# ---------------------------------------------------------------------------
+# 6 — never inside what the plane serves
+# ---------------------------------------------------------------------------
+
+def _tree(path: Path) -> list[str]:
+    return sorted(str(p.relative_to(path)) for p in path.rglob("*"))
+
+
+@pytest.mark.parametrize("where", ["the served root", "under the served root"])
+def test_a_state_directory_in_the_served_root_is_refused_before_any_write(
+        tmp_path, where) -> None:
+    """The holder's ruling on openxFactory#1220's review (Copilot
+    `r4171166321`), mirroring T100's served-repository boundary: the token's
+    copy must never sit inside what `/source` can serve. A state directory
+    that IS a served root, or lies inside one (a declared source root
+    included), is refused by name, and nothing is created or written."""
+    from opendox import console_access
+
+    served = tmp_path / "served"
+    served.mkdir(mode=0o700)
+    other = tmp_path / "other-source-root"
+    other.mkdir(mode=0o700)
+    before = (_tree(served), _tree(other))
+    for root in (served, other):
+        state = root if where == "the served root" else root / "nested" / "state"
+        with pytest.raises(console_access.ConsoleAccessRefused) as refused:
+            console_access.write_private_copy(
+                state, page_url="http://127.0.0.1:8080/index.html", port=8080,
+                token=_token(), served_roots=(served, other))
+        message = str(refused.value)
+        assert "OPENDOX_STATE_DIR" in message and str(root.resolve()) in message
+        assert (("is the served repository" if where == "the served root"
+                 else "lies inside the served repository") in message), message
+    assert (_tree(served), _tree(other)) == before, "something was written"
+
+
+def test_a_state_directory_reached_through_a_link_into_the_served_root_is_refused(
+        tmp_path) -> None:
+    """Judged on the RESOLVED path, so a link from outside that lands inside
+    the served root is the served root."""
+    from opendox import console_access
+
+    served = tmp_path / "served"
+    (served / "inside").mkdir(parents=True, mode=0o700)
+    link = tmp_path / "looks-outside"
+    link.symlink_to(served / "inside")
+    with pytest.raises(console_access.ConsoleAccessRefused, match="inside the served"):
+        console_access.write_private_copy(
+            link / "state", page_url="http://127.0.0.1:8080/index.html",
+            port=8080, token=_token(), served_roots=(served,))
+    assert _tree(served / "inside") == []
+
+
+def test_generate_and_open_refuses_a_state_directory_inside_the_served_repository(
+        tmp_path, monkeypatch, capsys, standalone_profile) -> None:
+    """Through the entry point: `OPENDOX_STATE_DIR` inside the repository it
+    serves refuses the run, naming the setting, and the repository gains no
+    file."""
+    from opendox import cli
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(repo / ".opendox-state"))
+    before = _tree(repo)
+    opened: list[str] = []
+    assert cli._generate_and_open(_generate_and_open_args(tmp_path, repo),
+                                  opener=opened.append) == 1
+    err = capsys.readouterr().err
+    assert opened == []
+    assert "generate-and-open refused:" in err and "OPENDOX_STATE_DIR" in err
+    assert "lies inside the served repository" in err, err
+    assert _tree(repo) == before
+
+
+def test_the_plane_reports_every_root_it_serves(tmp_path, monkeypatch,
+                                                standalone_profile) -> None:
+    """`publish` reads the plane's own served roots: its checkout, and each
+    declared source root, resolved."""
+    from opendox import serve
+
+    with _serving(tmp_path, monkeypatch) as (httpd, _base, repo):
+        assert httpd.served_roots == (repo.resolve(),)
+        other = tmp_path / "other-source-root"
+        other.mkdir()
+        snapshot = tmp_path / "snapshot.json"
+        declared = serve.build_server(WEB, snapshot, repo, port=0, quiet=True,
+                                      source_roots={"other": str(other)})
+        try:
+            assert declared.served_roots == (repo.resolve(), other.resolve())
+        finally:
+            declared.server_close()

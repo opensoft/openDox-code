@@ -53,7 +53,12 @@ are that module's private helpers and its refusal names a socket:
     file another user owns, a file with a second hard link) is REFUSED, never
     followed or replaced;
   * a READ asks all of it again of what exists, and of the file by its
-    descriptor: a regular file, this user's, exactly 0600, one link.
+    descriptor: a regular file, this user's, exactly 0600, one link;
+  * and the state directory may not BE, or lie inside, a root the plane
+    serves (its checkout and any declared source root), by name and before
+    any write, as T100's served-repository boundary refuses its own: the
+    token must never sit inside what `/source` can serve (holder's ruling on
+    openxFactory#1220's review, Copilot `r4171166321`).
 
 A CREATED FILE, with no carve-manifest row (RULED OQ-C).
 """
@@ -68,7 +73,7 @@ import os
 import re
 import stat
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -357,13 +362,42 @@ def _opener_html(record: Mapping[str, Any]) -> str:
         "</html>\n")
 
 
+def _refuse_a_served_state_dir(state_dir: Path,
+                               served_roots: Iterable[Path | str]) -> None:
+    """The state directory may not BE, or lie inside, a root this plane serves.
+
+    RULED by the holder on openxFactory#1220's review (Copilot
+    `r4171166321`), mirroring T100's served-repository boundary
+    (`doxbench_trust`'s state directory): the token's copy must never sit
+    inside what `/source` can serve, nor where a clone or an accidental commit
+    could carry it. Asked of the RESOLVED paths, before anything is written."""
+    resolved = Path(state_dir).resolve()
+    for root in served_roots:
+        served = Path(root).resolve()
+        if resolved == served or served in resolved.parents:
+            where = ("is the served repository" if resolved == served
+                     else "lies inside the served repository")
+            raise ConsoleAccessRefused(
+                f"{runtime_config.PREFIX}STATE_DIR ({state_dir}) {where} "
+                f"({served}), which this plane serves through `/source` and a "
+                "clone or a commit could carry, so the console token's private "
+                "copy is refused there and nothing is written. Set "
+                f"{runtime_config.PREFIX}STATE_DIR to a directory outside the "
+                "repositories this machine serves")
+
+
 def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
-                       token: str) -> PrivateCopy:
+                       token: str,
+                       served_roots: Iterable[Path | str]) -> PrivateCopy:
     """Write the copy for the plane on `port`, mode 0600, or refuse.
 
-    Replaces this user's own earlier copy for the same port (a server
-    restarted there), and refuses anything else already at that name."""
+    `served_roots` are the roots this plane serves (`/source`'s checkout and
+    any declared source root): a state directory that is one of them, or lies
+    inside one, is refused before anything is written. Replaces this user's
+    own earlier copy for the same port (a server restarted there), and refuses
+    anything else already at that name."""
     state = Path(state_dir)
+    _refuse_a_served_state_dir(state, tuple(served_roots))
     record = {
         "schema_version": RECORD_SCHEMA_VERSION,
         "kind": RECORD_KIND,
@@ -533,4 +567,5 @@ def publish(httpd: Any, *, page_url: str,
             f"the console token's private copy has no state directory: {exc}"
         ) from None
     return write_private_copy(state, page_url=page_url,
-                              port=int(httpd.server_address[1]), token=token)
+                              port=int(httpd.server_address[1]), token=token,
+                              served_roots=getattr(httpd, "served_roots", ()))
