@@ -2142,6 +2142,23 @@ def test_the_scheme_refusal_is_a_fixed_sentence_that_repeats_nothing(
         assert scheme in message
 
 
+def test_the_scheme_refusal_is_route_neutral():
+    """Copilot's review of openDox-code#63 at `abbb05d4`. Every resolver
+    meets the scheme refusal, and only a built-in credential is held to a
+    private route (`ENDPOINT_NOT_PRIVATE`), so the refusal names the schemes
+    and nothing about hosts: a broker's or a `none` binding may still name
+    an `http://` endpoint on another host."""
+    for declare in (_binding, _built_in_binding, _none_binding):
+        with pytest.raises(binding_mod.BindingRefused) as caught:
+            declare(endpoint="ftp://provider.invalid/turn")
+        assert str(caught.value) == binding_mod.ENDPOINT_SCHEME_REFUSED
+    for word in ("host", "loopback", "localhost", "127.0.0.1"):
+        assert word not in binding_mod.ENDPOINT_SCHEME_REFUSED
+    for declare in (_binding, _none_binding):
+        endpoint = "http://api.example.invalid/v1/chat/completions"
+        assert declare(endpoint=endpoint).endpoint == endpoint
+
+
 #: Where a key was carried past the detector (M5), and the reviewer's M3
 #: examples, where a key in the endpoint field reached the scheme refusal.
 _KEYED_ENDPOINTS = {

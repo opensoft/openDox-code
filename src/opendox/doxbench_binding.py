@@ -286,11 +286,15 @@ ENDPOINT_CARRIES_A_CREDENTIAL = (
 #: `ftp://<key>` and `" https://…?q=<key>"` each printed the key to the
 #: terminal, to startup's standard error and, through the console's intake
 #: route, to a browser (the adversarial review of openDox-code#63, M3). It is
-#: composed from `ENDPOINT_SCHEMES` alone.
+#: composed from `ENDPOINT_SCHEMES` alone. AND IT SAYS NOTHING OF HOSTS
+#: (Copilot's review of openDox-code#63 at `abbb05d4`): every resolver meets
+#: it, and only a built-in credential is held to a private route, which
+#: `ENDPOINT_NOT_PRIVATE` says, so a broker's or a `none` binding may still
+#: name an `http://` endpoint on another host.
 ENDPOINT_SCHEME_REFUSED = (
     "the endpoint does not begin with one of " + " or ".join(ENDPOINT_SCHEMES)
     + ", and it is not repeated here, since a value in the wrong field can be "
-    "a key; declare an https:// endpoint, or an http:// one on this host")
+    "a key; declare the endpoint's URL with one of those schemes")
 
 #: The refusal a reference with a raw key's shape earns (#1144 box 16.3: a
 #: reference is never a raw key). At T080's `4948e6dd` any value that was not
