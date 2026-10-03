@@ -58,7 +58,9 @@ A harness that breaks before a verdict exits 2, never 0.
     value; and it fills the grouping station, so the chat pane can open, R1Q13
     (a) with (c)) and `/capabilities` (`install.mode == "local"`).
  6. FETCHES THE MODEL CATALOG, presenting `/capabilities`' `console_token` in
-    `X-XF-Console-Token`, and it must answer with no available entry (16.4).
+    `X-XF-Console-Token`. It must answer the envelope the chat rail adopts
+    (`schema_version` 1, `kind` `workbench-model-catalog`, `models[]`), with
+    no available entry (16.4).
  7. FETCHES EVERY ROUTE THE PANES CAN REQUEST, and none may answer 5xx or
     drop the connection. The list is DERIVED from the served bundle, not kept
     here: see `derive_bundle` below.
@@ -173,6 +175,13 @@ CONSOLE_TOKEN_HEADER = "X-XF-Console-Token"
 #: The model-catalog route (`app.js` `CATALOG_ROUTE`), which the derived list
 #: must also name, so this constant cannot drift from the bundle unseen.
 CATALOG_ROUTE = "/workbench/model-catalog"
+
+#: The only catalog envelope the chat rail ADOPTS (`views/doxbench-chat-model.js`,
+#: `adoptCatalog`: `schema_version === 1`, `kind === CATALOG_WIRE_KIND`, and an
+#: array of `models`); it reads any other as unreadable. The served bundle must
+#: name the kind too, so this constant cannot drift from the bundle unseen.
+CATALOG_KIND = "workbench-model-catalog"
+CATALOG_SCHEMA_VERSION = 1
 
 #: The thread read the chat rail makes on open, and the kind of a grouping
 #: tile (`views/wheel-model.js`: "clusters -> \"cluster\"").
@@ -643,9 +652,11 @@ def _judge_module(answer: Answer, path: str, static: bool, importer: str,
 
 
 def _scan_module(path: str, body: bytes, pending: collections.deque,
-                 routes: set[str]) -> None:
+                 routes: set[str], literals: set[str] | None = None) -> None:
     for _quote, value, before in JsStrings(
             body.decode("utf-8", "replace")).scan():
+        if literals is not None:
+            literals.add(value)
         if _DYNAMIC_IMPORT_CONTEXT.search(before):
             pending.append((_resolve(path, value), False, path))
         elif _STATIC_IMPORT_CONTEXT.search(before):
@@ -655,10 +666,12 @@ def _scan_module(path: str, body: bytes, pending: collections.deque,
 
 
 def derive_bundle(port: int, index_html: str, capabilities: dict,
-                  verdict: Verdict, label: str) -> tuple[list[str], int]:
+                  verdict: Verdict, label: str,
+                  literals: set[str] | None = None) -> tuple[list[str], int]:
     """Walk the module graph the served `/` loads, fetching each module from
     the server, and return `(routes, modules)`: every same-origin path
-    literal the graph names, and how many modules it holds."""
+    literal the graph names, and how many modules it holds. Every string
+    literal of the graph is added to `literals` where one is given."""
     roots, sheets = _graph_roots(index_html, capabilities)
     for sheet in sheets:
         answer = get(port, sheet)
@@ -683,7 +696,7 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
         answer = answers[path]
         _judge_module(answer, path, static, importer, verdict, label)
         if first and answer.status == 200:
-            _scan_module(path, answer.body, pending, routes)
+            _scan_module(path, answer.body, pending, routes, literals)
     modules = sum(1 for answer in answers.values() if answer.status == 200)
     return sorted(routes), modules
 
@@ -1106,6 +1119,19 @@ def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
     verdict.check(f"{label}.catalog is a catalog", isinstance(models, list),
                   f"{CATALOG_ROUTE} answered no models[]: "
                   f"{catalog.body[:300]!r}")
+    # THE ENVELOPE THE RAIL ADOPTS, or it shows "the catalog could not be
+    # read" and never its no-model state (Copilot review of
+    # openDox-code#75, at f0e0ffe1). JavaScript's `=== 1` admits no `true`
+    # and no `"1"`, so neither does this.
+    envelope = as_object(payload)
+    version = envelope.get("schema_version")
+    verdict.check(f"{label}.catalog envelope is the one the chat rail adopts",
+                  type(version) is int and version == CATALOG_SCHEMA_VERSION
+                  and envelope.get("kind") == CATALOG_KIND,
+                  f"the catalog's envelope is schema_version={version!r}, "
+                  f"kind={envelope.get('kind')!r}; the chat rail adopts only "
+                  f"schema_version={CATALOG_SCHEMA_VERSION}, "
+                  f"kind={CATALOG_KIND!r}")
     available = [as_object(m).get("model_id") for m in as_list(models)
                  if as_object(m).get("available")]
     verdict.check(f"{label}.catalog offers no available entry", not available,
@@ -1155,15 +1181,20 @@ def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
                  token: str | None, verdict: Verdict) -> None:
     """Step 7: every route the served bundle names answers, below 5xx."""
     label = server.label
+    literals: set[str] = set()
     routes, modules = derive_bundle(server.port,
                                     index.body.decode("utf-8", "replace"),
-                                    caps, verdict, label)
+                                    caps, verdict, label, literals)
     note(f"derived from the served bundle: {modules} modules, "
          f"{len(routes)} routes: {', '.join(routes)}")
     verdict.check(f"{label}.bundle names the catalog route",
                   CATALOG_ROUTE in routes,
                   f"the served bundle no longer names {CATALOG_ROUTE}, so "
                   "this harness's catalog step asks the wrong route")
+    verdict.check(f"{label}.bundle names the catalog kind",
+                  CATALOG_KIND in literals,
+                  f"the served bundle no longer names {CATALOG_KIND!r}, so "
+                  "this harness's catalog envelope check is stale")
     for target in requests_for(routes, snapshot, grouping_field_of(caps)):
         answer = get(server.port, target, token=token)
         note(f"GET {target} -> {answer.describe()}")

@@ -21,7 +21,8 @@ is installed or started:
   * a module refused as a DYNAMIC import is still judged where another module
     imports it STATICALLY (Copilot review of #75 at 1c064bb3, r4170450448);
   * a malformed 200 catalog is a named failure, never an exception
-    (r4170450491).
+    (r4170450491), and so is a catalog whose envelope the chat rail would
+    not adopt (Copilot review of #75 at f0e0ffe1).
 """
 
 from __future__ import annotations
@@ -143,15 +144,19 @@ def test_the_module_graph_terminates_on_a_cycle_and_counts_each_module_once() ->
     files = {
         "/app.js": (JS, 'import "./a.js";\nconst R = "/capabilities";\n'),
         "/a.js": (JS, 'import "./b.js";\nconst S = "/workbench/model-catalog";\n'),
-        "/b.js": (JS, 'import "./a.js";\nimport "./app.js";\n'),
+        "/b.js": (JS, 'import "./a.js";\nimport "./app.js";\n'
+                      'const KIND = "workbench-model-catalog";\n'),
     }
     verdict = harness.Verdict(keep_going=True)
+    literals: set[str] = set()
     with served(files) as port:
         routes, modules = harness.derive_bundle(
-            port, _page("./app.js"), {}, verdict, "t")
+            port, _page("./app.js"), {}, verdict, "t", literals)
     assert _failures(verdict) == []
     assert modules == 3
     assert routes == ["/capabilities", "/workbench/model-catalog"]
+    # every string literal of the graph is collected, the kind among them
+    assert harness.CATALOG_KIND in literals
 
 
 def test_a_dynamic_refusal_does_not_hide_a_static_import_of_the_same_path() -> None:
@@ -186,15 +191,33 @@ class _Server:
         self.port = port
 
 
+_ENVELOPE = '"schema_version": 1, "kind": "workbench-model-catalog"'
+_NOT_A_CATALOG = ["t.catalog is a catalog",
+                  "t.catalog envelope is the one the chat rail adopts"]
+_WRONG_ENVELOPE = ["t.catalog envelope is the one the chat rail adopts"]
+
+
 @pytest.mark.parametrize("body, expected", [
-    ("[]", ["t.catalog is a catalog"]),
-    ("null", ["t.catalog is a catalog"]),
-    ('{"models": 1}', ["t.catalog is a catalog"]),
-    ("not json", ["t.catalog is a catalog"]),
-    ('{"models": [1, {"model_id": "m", "available": true}]}',
+    ("[]", _NOT_A_CATALOG),
+    ("null", _NOT_A_CATALOG),
+    ('{"models": 1}', _NOT_A_CATALOG),
+    ("not json", _NOT_A_CATALOG),
+    ('{%s, "models": [1, {"model_id": "m", "available": true}]}' % _ENVELOPE,
      ["t.catalog offers no available entry"]),
-    ('{"models": [{"model_id": "m", "available": false}]}', []),
-    ('{"models": []}', []),
+    ('{%s, "models": [{"model_id": "m", "available": false}]}' % _ENVELOPE, []),
+    ('{%s, "models": []}' % _ENVELOPE, []),
+    # the envelopes `adoptCatalog` refuses (Copilot review of #75 at f0e0ffe1)
+    ('{"models": []}', _WRONG_ENVELOPE),
+    ('{"schema_version": 1, "models": []}', _WRONG_ENVELOPE),
+    ('{"kind": "workbench-model-catalog", "models": []}', _WRONG_ENVELOPE),
+    ('{"schema_version": 2, "kind": "workbench-model-catalog", "models": []}',
+     _WRONG_ENVELOPE),
+    ('{"schema_version": true, "kind": "workbench-model-catalog", "models": []}',
+     _WRONG_ENVELOPE),
+    ('{"schema_version": "1", "kind": "workbench-model-catalog", "models": []}',
+     _WRONG_ENVELOPE),
+    ('{"schema_version": 1, "kind": "workbench-model-catalog-v2", "models": []}',
+     _WRONG_ENVELOPE),
 ])
 def test_a_malformed_catalog_is_a_named_failure_never_an_exception(
         body: str, expected: list[str]) -> None:
