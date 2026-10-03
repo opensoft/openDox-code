@@ -21,6 +21,9 @@ Five layers, each proving a different thing about the same machinery:
       redacted refusal `doxbench_model.dispatch_turn` already defines, and the
       UNCONFIGURED posture is byte-for-byte what it was before this change.
 
+A SIXTH LAYER, (f), holds #1144 Group 16's binding and provider boxes (plan
+034 phase 3, slice P3-B). 16.1 is the OpenAI-compatible dialect (T078).
+
 THE FAKE BROKER SPEAKS THE DECLARED CONTRACT (task 2.6). It was this
 repository's own invented stdin/stdout protocol until the reconciliation, which
 meant every test here agreed with a broker that does not exist. It now takes the
@@ -40,6 +43,7 @@ are scriptable and no test depends on timing).
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import http.server
 import io
@@ -145,8 +149,12 @@ def test_the_dialect_vocabulary_is_closed_and_refuses_at_declaration():
     there; openProfiler's declaration emits no dialect at all, so the fact is
     the BINDING's and the refusal happens when an operator DECLARES one — before
     any broker is invoked and long before a paid call. Closed, still: an unknown
-    grammar refuses rather than being guessed at."""
-    assert binding_mod.DIALECTS == ("xfactory-prompt-v1",)
+    grammar refuses rather than being guessed at.
+
+    TWO MEMBERS since #1144 box 16.1 (plan 034 T078), and the order is pinned:
+    the prompt grammar stays first, and the OpenAI-compatible chat grammar
+    joins after it. The refusal below is the same refusal it always was."""
+    assert binding_mod.DIALECTS == ("xfactory-prompt-v1", "openai-chat-v1")
     assert provider_mod.DIALECTS is binding_mod.DIALECTS, \
         "one vocabulary, read from the record that declares it"
     with pytest.raises(binding_mod.BindingRefused) as caught:
@@ -866,9 +874,9 @@ def _expired_error():
 
 
 def _port(tmp_path, *outcomes, expires=None, notice=None, clock=time.time,
-          endpoint=ENDPOINT):
+          endpoint=ENDPOINT, dialect=binding_mod.DIALECT_XFACTORY_PROMPT_V1):
     script = _write_broker(tmp_path, expires=expires)
-    binding = _broker_binding(script, endpoint=endpoint)
+    binding = _broker_binding(script, endpoint=endpoint, dialect=dialect)
     opener = _Opener(*outcomes)
     port = provider_mod.BrokeredProviderPort(
         binding, install_mod.brokered_catalog(binding),
@@ -1336,3 +1344,241 @@ def test_the_subprocess_runner_never_uses_a_shell(tmp_path):
     assert "shell=True" not in source
     assert "os.system" not in source
     assert subprocess.Popen is subprocess.Popen  # the module spawns, nothing else
+
+
+# ===========================================================================
+# (f) CHAT'S MODEL CONFIGURATION (#1144 Group 16; plan 034 phase 3, P3-B)
+# ===========================================================================
+#
+# 16.1, the OpenAI-compatible dialect (T078). `openai-chat-v1` is the second
+# `DIALECTS` member. Its request is the chat-completions grammar (`model`,
+# `messages`), and its answer is read at `choices[0].message.content`. Both are
+# spoken by one arm in `doxbench_provider`, beside the prompt grammar's arm.
+
+OPENAI_CHAT = binding_mod.DIALECT_OPENAI_CHAT_V1
+
+
+def _chat_completion(content="the chat answer"):
+    """A chat-completions answer in that grammar's own shape. The keys around
+    `choices` are what a real server sends, and nothing here reads them."""
+    return {"id": "chatcmpl-stand-in", "object": "chat.completion",
+            "model": "stand-in-model",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant",
+                                     "content": content}}]}
+
+
+def test_f16_1_the_openai_compatible_dialect_is_declared():
+    """F16.1's dialect assertion, as #1144 writes it:
+    `assert "openai-chat-v1" in b.DIALECTS`. A binding may declare it."""
+    assert "openai-chat-v1" in binding_mod.DIALECTS, (
+        f"no OpenAI-compatible dialect: {binding_mod.DIALECTS}")
+    assert OPENAI_CHAT == "openai-chat-v1"
+    assert _binding(dialect=OPENAI_CHAT).dialect == OPENAI_CHAT
+    assert provider_mod.DIALECT_OPENAI_CHAT_V1 is OPENAI_CHAT, \
+        "one spelling, read from the record that declares it"
+
+
+def test_every_declared_dialect_has_exactly_one_arm_in_the_provider_module():
+    """A member cannot join the vocabulary without an arm, or an arm exist
+    for a member the record would refuse."""
+    assert set(provider_mod._DIALECT_ARMS) == set(binding_mod.DIALECTS)
+
+
+def test_a_chat_turn_speaks_the_chat_completions_grammar(tmp_path):
+    port, opener = _port(tmp_path, _chat_completion("the answer"),
+                         dialect=OPENAI_CHAT)
+    assert port.dispatch(_Envelope()) == {"assistant_prose": "the answer",
+                                          "proposals": []}
+    request = opener.requests[0]
+    assert request.get_method() == "POST"
+    assert request.get_full_url() == ENDPOINT
+    assert json.loads(request.data.decode("utf-8")) == {
+        "model": "openprofiler-demo",
+        "messages": [{"role": "user", "content": "assembled prompt"}]}
+    assert request.get_header("Content-type") == "application/json"
+    # the token travels in the header, exactly as it does for the prompt grammar
+    assert request.get_header("Authorization") == f"Bearer {SENTINEL_TOKEN}"
+    assert SENTINEL_TOKEN not in request.get_full_url()
+    assert SENTINEL_TOKEN not in request.data.decode("utf-8")
+
+
+def test_the_prompt_dialect_is_unchanged_byte_for_byte(tmp_path):
+    """The first member's request is the bytes it always was: the arm table
+    moved the code, and nothing it sends."""
+    port, opener = _port(tmp_path, {"assistant_prose": "a"})
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    assert opener.requests[0].data == json.dumps(
+        {"model": "openprofiler-demo", "prompt": "assembled prompt"}
+    ).encode("utf-8")
+
+
+@pytest.mark.parametrize("answer", [
+    {},
+    {"choices": []},
+    {"choices": "not a list"},
+    {"choices": ["not an object"]},
+    {"choices": [{}]},
+    {"choices": [{"message": "not an object"}]},
+    {"choices": [{"message": {"role": "assistant"}}]},
+    {"choices": [{"message": {"role": "assistant", "content": None}}]},
+    {"choices": [{"message": {"role": "assistant", "content": 7}}]},
+    {"assistant_prose": "the prompt grammar's answer, not this one's"},
+], ids=["empty", "no-choice", "choices-not-a-list", "choice-not-an-object",
+        "no-message", "message-not-an-object", "no-content", "null-content",
+        "content-not-text", "the-other-grammar"])
+def test_a_chat_answer_off_the_declared_path_is_malformed(tmp_path, answer):
+    port, _opener = _port(tmp_path, answer, dialect=OPENAI_CHAT)
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_MALFORMED
+
+
+def test_a_chat_shaped_answer_is_not_the_prompt_grammars_answer(tmp_path):
+    """Each arm reads its own grammar and no other."""
+    port, _opener = _port(tmp_path, _chat_completion())
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_MALFORMED
+
+
+def test_only_the_first_choice_is_read(tmp_path):
+    answer = _chat_completion("first")
+    answer["choices"].append({"index": 1, "finish_reason": "stop",
+                              "message": {"role": "assistant",
+                                          "content": "second"}})
+    port, _opener = _port(tmp_path, answer, dialect=OPENAI_CHAT)
+    assert port.dispatch(_Envelope())["assistant_prose"] == "first"
+
+
+def test_the_expiry_ruling_holds_for_the_chat_grammar(tmp_path):
+    """The 2026-08-26 ruling is the port's, not a dialect's: a mid-turn expiry
+    re-mints and retries once, visibly, in either grammar."""
+    printed: list[str] = []
+    port, opener = _port(tmp_path, _expired_error(),
+                         _chat_completion("the retried answer"),
+                         notice=printed.append, dialect=OPENAI_CHAT)
+    assert port.dispatch(_Envelope())["assistant_prose"] == "the retried answer"
+    assert len(opener.requests) == 2, "exactly one paid retry"
+    assert [event.reason for event in port.ledger] == [
+        provider_mod.REASON_FIRST_MINT,
+        provider_mod.REASON_EXPIRY_REMINT,
+        provider_mod.REASON_PAID_RETRY,
+    ]
+    assert printed
+    assert "re-minted once and retried" in printed[0]
+
+
+def test_the_answer_bound_holds_for_the_chat_grammar(tmp_path):
+    bound = provider_mod.MAX_PROVIDER_ANSWER_BYTES
+    oversize = json.dumps(_chat_completion("x" * bound)).encode("utf-8")
+    port, _opener = _port(tmp_path, oversize, dialect=OPENAI_CHAT)
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_MALFORMED
+
+
+def test_a_chat_provider_refusal_lands_on_the_fixed_sentence(tmp_path):
+    port, _opener = _port(
+        tmp_path,
+        urllib.error.HTTPError(ENDPOINT, 400, "Bad Request", {},
+                               io.BytesIO(b'{"error":{"message":"leaky"}}')),
+        dialect=OPENAI_CHAT)
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_REFUSED
+    assert "leaky" not in str(caught.value)
+
+
+@contextlib.contextmanager
+def _stand_in_provider(handler_class):
+    """A stand-in provider on loopback for the length of one test. It yields
+    the server's base URL, and it is shut down and joined however the test
+    ends."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, prt = server.server_address[:2]
+        yield f"http://{host}:{prt}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _answer_json(handler, document) -> None:
+    """Answer one stand-in request with `document` as a JSON body."""
+    payload = json.dumps(document).encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(payload)))
+    handler.end_headers()
+    handler.wfile.write(payload)
+
+
+class _ChatCompletionsHandler(http.server.BaseHTTPRequestHandler):
+    """A stand-in OpenAI-compatible server on loopback. It records each
+    request and answers in the chat-completions grammar."""
+
+    seen: dict = {}
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+        length = int(self.headers.get("Content-Length", "0"))
+        _ChatCompletionsHandler.seen = {
+            "path": self.path,
+            "authorization": self.headers.get("Authorization"),
+            "content_type": self.headers.get("Content-Type"),
+            "body": json.loads(self.rfile.read(length).decode("utf-8")),
+        }
+        _answer_json(self, _chat_completion("answered in the chat grammar"))
+
+    def log_message(self, *_args):
+        return
+
+
+def test_a_chat_turn_reaches_a_stand_in_chat_completions_server(tmp_path):
+    """The real `urllib` path, in the chat grammar: a stand-in server on
+    loopback receives the request at the binding's declared endpoint, in that
+    grammar, with the token in the authorization header and nowhere else."""
+    with _stand_in_provider(_ChatCompletionsHandler) as base:
+        binding = _broker_binding(_write_broker(tmp_path),
+                                  endpoint=f"{base}/v1/chat/completions",
+                                  dialect=OPENAI_CHAT)
+        port = provider_mod.BrokeredProviderPort(
+            binding, install_mod.brokered_catalog(binding),
+            notice=lambda _text: None)
+        assert port.dispatch(_Envelope()) == {
+            "assistant_prose": "answered in the chat grammar",
+            "proposals": []}
+
+    seen = _ChatCompletionsHandler.seen
+    assert seen["path"] == "/v1/chat/completions"
+    assert seen["authorization"] == f"Bearer {SENTINEL_TOKEN}"
+    assert seen["content_type"] == "application/json"
+    assert seen["body"] == {
+        "model": "openprofiler-demo",
+        "messages": [{"role": "user", "content": "assembled prompt"}]}
+    assert SENTINEL_TOKEN not in json.dumps(seen["body"])
+
+
+def test_the_cli_declares_a_chat_binding(tmp_path, capsys):
+    """The operator door offers the dialect, because its choices are read from
+    the record's vocabulary rather than respelled."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    args = cli_mod.build_parser().parse_args([
+        "model-binding", "add", "--repo-root", str(checkout),
+        "--id", "local-chat", "--label", "Local chat", "--provider", "local",
+        "--credential-ref", FAKE_REFERENCE, "--auth-kind", "api_key",
+        "--credential-approver", "brett@opensoft.one",
+        "--endpoint", "http://127.0.0.1:9/v1/chat/completions",
+        "--dialect", OPENAI_CHAT, "--", "openprofiler-broker"])
+    assert args.func(args) == 0
+    capsys.readouterr()
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+    assert store.get("local-chat").dialect == OPENAI_CHAT

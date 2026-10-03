@@ -107,16 +107,33 @@ parsed. A compiled validator is cached under the digest that proof returned,
 never under a name or a time. So a changed byte is refused on the very call
 that sees it, as openxFactory's `doxbench_contracts.validators()` refuses one.
 
+THE WORKBENCH MANIFEST'S TWO VALIDATOR RULES (plan 034's T085; RULED
+`openxFactory#656` comment `5920216845`, item 2, *"Move into openDox's
+validator (Recommended)"*). The `ideation-workbench` copy states two rules in
+its own text and leaves them to its validator, because no JSON Schema keyword
+states either: `recipe.pinned` says *"every pinned keyword MUST also appear in
+`checked` -- this schema does not encode the subset constraint"*, and a
+`recipe.new_candidates` entry is a document the set has not placed yet. The
+copy carries no `x-rules` catalog, so this module OWNS the two rules
+(`OWNED_RULES`), under ids it gives them, stating what must hold as its other
+rules do: `pinned-keywords-are-checked` and `new-candidates-are-disjoint`.
+T058 carried them in `default_projection`, under the consumer script's
+identifiers. They live here now, and nothing answers to the old identifiers.
+A copy that DOES carry a catalog has its rules from the catalog alone, so a
+copy that carries one and is also owned rules here is refused when its
+validator is built: one rule is enforced from one place.
+
 jsonschema's SHAPE, FOR THE doxBench SEAM. `KindValidator.iter_errors()`
 yields violations whose `validator` (the failed keyword) and `absolute_path`
 read as a `jsonschema` error's do. Those are the two fields
 `serve_workbench`'s readers of the doxBench-validators seam read.
-`validators()` answers one validator per wire kind: the model catalog's whole
-document, and each chat-turn envelope's own `$defs` entry, as openxFactory's
-`doxbench_contracts` builds them. So T085 can register it
-(`serve_wire.register_doxbench_validators`). The doxBench kinds' semantic
-rules are T085's. Here they are validated structurally, as openxFactory's
-`validators()` validates them.
+`doxbench_validators()` answers one validator per doxBench wire kind
+(`DOXBENCH_KINDS`): the model catalog's whole document, and each chat-turn
+envelope's own `$defs` entry, as openxFactory's `doxbench_contracts` builds
+them. It is openDox's own default at that seam, which the entry points
+register where no host has (plan 034's T085, R1Q10 (a);
+`opendox.doxbench_defaults`). The doxBench kinds are validated structurally
+here, as openxFactory's `validators()` validates them.
 
 IMPORT WEIGHT. The standard library, and `opendox.contracts`, whose record and
 copies are read with PyYAML only when a validator is built. It names no
@@ -139,16 +156,19 @@ from opendox import contracts
 __all__ = [
     "DEPTH_RULE",
     "DIALECT",
+    "DOXBENCH_KINDS",
     "FORMATS",
     "KEYWORDS",
     "KINDS",
     "KIND_ENTRIES",
     "KindValidator",
+    "OWNED_RULES",
     "REFERENCE_RULES",
     "SchemaNotEvaluable",
     "UnknownKind",
     "ValidatorUnavailable",
     "Violation",
+    "doxbench_validators",
     "report",
     "validate",
     "validator_for",
@@ -184,6 +204,16 @@ KIND_ENTRIES: Mapping[str, tuple[str, str]] = {
 
 #: The instance kinds, sorted.
 KINDS: tuple[str, ...] = tuple(sorted(KIND_ENTRIES))
+
+#: The doxBench WIRE kinds, sorted: the model catalog and the three chat-turn
+#: envelopes, which the two model routes validate through the
+#: doxBench-validators seam (`serve_wire`), as openxFactory's
+#: `doxbench_contracts.WIRE_KINDS` names them. Each is held in openDox's
+#: packaged copy of `xfactory-workbench-model-catalog` or
+#: `xfactory-workbench-chat-turn` (R1Q12 (a)).
+DOXBENCH_KINDS: tuple[str, ...] = tuple(sorted(
+    kind for kind, (copy_id, _pointer) in KIND_ENTRIES.items()
+    if copy_id in ("xfactory-workbench-chat-turn", "xfactory-workbench-model-catalog")))
 
 #: The keywords that can FAIL, and that this module evaluates.
 _ASSERTING = frozenset({
@@ -640,6 +670,98 @@ REFERENCE_RULES: Mapping[str, Mapping[str, Callable[[Any], Iterator[Violation]]]
 
 
 # ---------------------------------------------------------------------------
+# the workbench manifest's two validator rules (plan 034's T085)
+# ---------------------------------------------------------------------------
+
+def _names(value: Any) -> list[str]:
+    """A list's string entries, once each, in order. Anything else answers
+    none: its shape is the schema's to judge, and these rules only compare.
+
+    Linear: the schema bounds none of the three lists, so membership is a
+    set's, and the list only keeps the order (Copilot at openDox-code#68
+    09cd1e8a, r4139734444)."""
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if isinstance(item, str) and item not in seen:
+            seen.add(item)
+            names.append(item)
+    return names
+
+
+#: How many names a rule's detail quotes before it says how many more, and
+#: how much of each name it quotes.
+_QUOTED = 10
+_NAME_CHARS = 80
+
+
+def _quoted(names: list[str]) -> str:
+    """`names` as a detail quotes them: the first few, each cut to a readable
+    length, and a count of the rest, so one violation stays one readable line.
+    The schema bounds neither the lists nor their strings (Copilot at
+    openDox-code#68 21e4723f, r4139769791)."""
+    shown = repr([name if len(name) <= _NAME_CHARS else name[:_NAME_CHARS - 1] + "…"
+                  for name in names[:_QUOTED]])
+    return shown if len(names) <= _QUOTED else f"{shown[:-1]}, and {len(names) - _QUOTED} more]"
+
+
+def _placed(entries: Any) -> set[str]:
+    """The `document` of each entry of a members or excluded list."""
+    if not isinstance(entries, list):
+        return set()
+    return {entry["document"] for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("document"), str)}
+
+
+def _recipe(manifest: Any) -> dict[str, Any] | None:
+    recipe = manifest.get("recipe") if isinstance(manifest, dict) else None
+    return recipe if isinstance(recipe, dict) else None
+
+
+def _pinned_keywords_are_checked(manifest: Any) -> Iterator[Violation]:
+    """Every `recipe.pinned` keyword is also in `recipe.checked`: a keyword
+    is pinned (required) only among the keywords that stratify the set."""
+    recipe = _recipe(manifest)
+    if recipe is None:
+        return
+    checked = set(_names(recipe.get("checked")))
+    stray = [name for name in _names(recipe.get("pinned")) if name not in checked]
+    if stray:
+        yield _broken("pinned-keywords-are-checked", ("recipe", "pinned"),
+                      f"pinned keyword(s) {_quoted(stray)} are not in checked: "
+                      "every pinned keyword MUST also be checked")
+
+
+def _new_candidates_are_disjoint(manifest: Any) -> Iterator[Violation]:
+    """No `recipe.new_candidates` document is already a member or excluded: a
+    new candidate is a document the set has not placed yet."""
+    recipe = _recipe(manifest)
+    if recipe is None:
+        return
+    placed = _placed(manifest.get("members")) | _placed(manifest.get("excluded"))
+    overlap = [name for name in _names(recipe.get("new_candidates")) if name in placed]
+    if overlap:
+        yield _broken("new-candidates-are-disjoint", ("recipe", "new_candidates"),
+                      f"new_candidates {_quoted(overlap)} already appear in members "
+                      "or excluded: a new candidate is a document the set has not "
+                      "placed yet")
+
+
+#: The rules this module OWNS, per packaged copy: rules a copy states in its own
+#: text and leaves to its validator, because no JSON Schema keyword states them,
+#: for a copy that carries no `x-rules` catalog (this module's docstring). Only
+#: the workbench manifest's copy has any (RULED `5920216845`, item 2).
+OWNED_RULES: Mapping[str, Mapping[str, Callable[[Any], Iterator[Violation]]]] = {
+    "ideation-workbench": {
+        "pinned-keywords-are-checked": _pinned_keywords_are_checked,
+        "new-candidates-are-disjoint": _new_candidates_are_disjoint,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # a copy, compiled
 # ---------------------------------------------------------------------------
 
@@ -772,9 +894,10 @@ class KindValidator:
     """The validator of one kind, built over one proved copy.
 
     `iter_errors(instance)` yields every `Violation`: the schema's, in the
-    order the schema is walked, and then the reference rules', in the
-    contract's catalog order. `violations()` lists them and `is_valid()` asks
-    whether there are none."""
+    order the schema is walked, then the reference rules', in the contract's
+    catalog order, and then the rules this module owns for the copy
+    (`OWNED_RULES`), in their order. `violations()` lists them and
+    `is_valid()` asks whether there are none."""
 
     def __init__(self, kind: str, copy_id: str, pointer: str, document: Any,
                  digest: str) -> None:
@@ -787,6 +910,7 @@ class KindValidator:
         self._refuse_what_is_not_evaluated(document, pointer)
         self._entry = _at_pointer(document, pointer)    # resolved, and a schema
         self._reference = self._reference_rules(document)
+        self._owned = self._owned_rules(document)
 
     # -- building -----------------------------------------------------------
 
@@ -929,6 +1053,20 @@ class KindValidator:
                 "is enforced only when both name it")
         return tuple(implemented[rule] for rule in declared)
 
+    def _owned_rules(self, document: dict[str, Any]
+                     ) -> tuple[Callable[[Any], Iterator[Violation]], ...]:
+        """The rules this module owns for the copy (`OWNED_RULES`), in their
+        order. Refused for a copy that carries an `x-rules` catalog: the
+        catalog then states every rule the copy has, and a rule this module
+        also owned would be enforced from two places."""
+        owned = OWNED_RULES.get(self.copy_id, {})
+        if owned and "x-rules" in document:
+            raise self._not_evaluable(
+                f"it carries an x-rules catalog, and this module also owns the "
+                f"rules {sorted(owned)} for it; a copy with a catalog has its "
+                "rules from the catalog alone")
+        return tuple(owned.values())
+
     # -- evaluating ---------------------------------------------------------
 
     def iter_errors(self, instance: Any) -> Iterator[Violation]:
@@ -947,6 +1085,8 @@ class KindValidator:
                             "evaluation can walk (Python's recursion limit), so "
                             "it is not judged valid")
         for check in self._reference:
+            yield from check(instance)
+        for check in self._owned:
             yield from check(instance)
 
     def violations(self, instance: Any) -> list[Violation]:
@@ -1215,6 +1355,18 @@ def validators() -> dict[str, KindValidator]:
     """One validator per kind, every copy proved on this call. A fresh dict,
     so a caller changing its copy changes no other caller's."""
     return {kind: validator_for(kind) for kind in KINDS}
+
+
+def doxbench_validators() -> dict[str, KindValidator]:
+    """openDox's own validators for the doxBench wire kinds (`DOXBENCH_KINDS`),
+    every copy proved on this call: the factory openDox registers, as its
+    default, at the doxBench-validators seam (`serve_wire`; plan 034's T085,
+    R1Q10 (a) and R1Q12 (a)). The seam calls it once per request, so a copy
+    that changes is refused on the very request that reads it. A copy that
+    fails its proof raises `ValidatorUnavailable`, and the seam's reader turns
+    that into no validators, so both model routes refuse: no verdict is never
+    a pass. A fresh dict on every call."""
+    return {kind: validator_for(kind) for kind in DOXBENCH_KINDS}
 
 
 def validate(instance: Any, *, kind: str | None = None) -> list[Violation]:

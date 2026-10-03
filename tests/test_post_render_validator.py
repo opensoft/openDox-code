@@ -22,7 +22,12 @@ skips validation. This file holds:
    `search_from` change nothing.
 4. The workbench manifest, read as YAML, with the two validator rules its
    schema leaves to the validator, and `workbench.save(validate=True)` over
-   them.
+   them. Since plan 034's T085 (RULED `openxFactory#656` comment
+   `5920216845`, item 2), the rules are `opendox.validator`'s own, as
+   `pinned-keywords-are-checked` and `new-candidates-are-disjoint`, and
+   `default_projection` checks neither. The identifiers T058 gave them appear
+   here only as the BEFORE-STATE (`RETIRED_RULE_IDS`), which nothing may
+   report.
 
 Every case starts with nothing registered at the four projection seams and
 puts back what it found.
@@ -54,6 +59,17 @@ MALFORMED = FIXTURES / "malformed"        # T051
 EXPECTED_RULE = (MALFORMED / "EXPECTED_RULE").read_text(encoding="utf-8").strip()
 NEUTRAL = "opendox-snapshot"
 NOW = "2026-09-27T12:00:00Z"
+
+#: The workbench manifest's two validator rules, as `opendox.validator` owns
+#: them (T085).
+PINNED_RULE = "pinned-keywords-are-checked"
+CANDIDATE_RULE = "new-candidates-are-disjoint"
+
+#: THE BEFORE-STATE: the identifiers T058 carried the same two rules under, in
+#: `default_projection.WORKBENCH_RULES` at openDox-code `047bb4fa`, as the
+#: consumer's script named them. T085 keeps neither as an alias, so no report
+#: may name either.
+RETIRED_RULE_IDS = ("workbench-pinned-not-checked", "workbench-candidate-overlap")
 
 
 _SINGLE_SEAMS = (ps.registry, ps.corpus_root, ps.writer)
@@ -141,11 +157,13 @@ def test_F7_2_the_malformed_fixture_is_refused_without_strict_too(tmp_path) -> N
 
 @pytest.mark.parametrize("fixture,expected", [(PLAIN, 0), (MALFORMED, 1)])
 def test_generate_and_open_gives_the_same_verdicts(tmp_path, fixture, expected) -> None:
-    """`generate-and-open --no-open --no-serve --strict`: the good fixture
-    builds its server and prints its URL, and the malformed one stops before
-    a server is built, naming the rule."""
+    """`generate-and-open --local --no-open --no-serve --strict`: the good
+    fixture builds its server and prints its URL, and the malformed one stops
+    before a server is built, naming the rule. `--local` because this is the
+    single-user install: since plan 034 T070, an unflagged run is HOSTED and
+    refuses without its broker's issuer, before the validator is reached."""
     repo = fresh_repository(fixture, tmp_path)
-    child, status = run_module(tmp_path, "opendox.cli", "generate-and-open",
+    child, status = run_module(tmp_path, "opendox.cli", "generate-and-open", "--local",
                                "--repo-root", str(repo), "--repository", "fixture",
                                "--no-open", "--no-serve", "--strict",
                                "--run-dir", str(tmp_path / "run"))
@@ -368,7 +386,7 @@ def test_the_rules_read_a_long_list_in_linear_time() -> None:
 
     names = [f"keyword-{index}" for index in range(50_000)]
     started = time.monotonic()
-    read = default_projection._names(names + names + [7, None])
+    read = own._names(names + names + [7, None])
     elapsed = time.monotonic() - started
     assert read == names
     assert elapsed < 5, f"{elapsed:.1f}s to read 100,002 entries"
@@ -445,7 +463,7 @@ def test_a_pinned_keyword_that_is_not_checked_breaks_its_rule(tmp_path) -> None:
         _manifest(tmp_path, document))
     assert result.outcome == ps.NOT_CONFORMANT
     assert result.stdout.splitlines() == [
-        "[workbench-pinned-not-checked] /recipe/pinned: pinned keyword(s) ['worms'] "
+        f"[{PINNED_RULE}] /recipe/pinned: pinned keyword(s) ['worms'] "
         "are not in checked: every pinned keyword MUST also be checked",
         "1 violation(s) of the ideation-workbench contract, by "
         f"{result.validator}"]
@@ -457,7 +475,7 @@ def test_a_rules_detail_quotes_a_few_names_and_counts_the_rest(tmp_path) -> None
     result = default_projection.VALIDATORS[workbench.KIND].validate(
         _manifest(tmp_path, document))
     first = result.stdout.splitlines()[0]
-    assert first.startswith("[workbench-pinned-not-checked] /recipe/pinned: pinned "
+    assert first.startswith(f"[{PINNED_RULE}] /recipe/pinned: pinned "
                             "keyword(s) ['k00', 'k01', ")
     assert "'k09', and 15 more] are not in checked" in first and "'k10'" not in first
 
@@ -479,7 +497,7 @@ def test_a_new_candidate_already_placed_breaks_its_rule(tmp_path) -> None:
         _manifest(tmp_path, document))
     assert result.outcome == ps.NOT_CONFORMANT
     assert result.stdout.splitlines()[0] == (
-        "[workbench-candidate-overlap] /recipe/new_candidates: new_candidates "
+        f"[{CANDIDATE_RULE}] /recipe/new_candidates: new_candidates "
         "['notes/out.md', 'notes/in.md'] already appear in members or excluded: a "
         "new candidate is a document the set has not placed yet")
 
@@ -492,8 +510,8 @@ def test_the_two_rules_are_judged_beside_the_schema_and_never_crash(tmp_path) ->
     result = default_projection.VALIDATORS[workbench.KIND].validate(
         _manifest(tmp_path, document))
     rules = [line.split("]")[0][1:] for line in result.stdout.splitlines()[:-1]]
-    assert "workbench-pinned-not-checked" in rules
-    assert "workbench-candidate-overlap" not in rules
+    assert PINNED_RULE in rules
+    assert CANDIDATE_RULE not in rules
     assert {"type"} <= set(rules), rules
 
 
@@ -516,5 +534,78 @@ def test_save_with_validate_keeps_a_valid_manifest_and_unwinds_a_broken_one(tmp_
     broken.data["recipe"]["pinned"] = ["worms"]
     with pytest.raises(workbench.ManifestInvalid) as refused:
         workbench.save(broken, boundary, validate=True)
-    assert "[workbench-pinned-not-checked] /recipe/pinned:" in str(refused.value)
+    assert f"[{PINNED_RULE}] /recipe/pinned:" in str(refused.value)
     assert not (tmp_path / workbench.manifest_relpath("a broken set")).exists()
+
+
+# ---------------------------------------------------------------------------
+# 4a — the two rules are the validator's, under their new ids (T085)
+# ---------------------------------------------------------------------------
+
+def _breaking_both() -> dict:
+    """A manifest that breaks each of the two rules once, and nothing else."""
+    document = yaml.safe_load(_recipe_set().render())
+    document["recipe"]["pinned"] = ["soil", "worms"]
+    document["recipe"]["new_candidates"] = ["notes/fresh.md", "notes/out.md"]
+    return document
+
+
+def test_openDoxs_validator_reports_both_rules_under_their_new_ids() -> None:
+    """RULED `5920216845`, item 2: the rules are `opendox.validator`'s own,
+    reported by the validator itself, with no adapter in between."""
+    assert tuple(own.OWNED_RULES[workbench.KIND]) == (PINNED_RULE, CANDIDATE_RULE)
+    found = own.validator_for(workbench.KIND).violations(_breaking_both())
+    assert [(v.rule, v.path, v.keyword) for v in found] == [
+        (PINNED_RULE, ("recipe", "pinned"), "reference"),
+        (CANDIDATE_RULE, ("recipe", "new_candidates"), "reference")]
+    assert own.validate(_breaking_both()) == found
+    assert own.report(found) == [
+        f"[{PINNED_RULE}] /recipe/pinned: pinned keyword(s) ['worms'] are not in "
+        "checked: every pinned keyword MUST also be checked",
+        f"[{CANDIDATE_RULE}] /recipe/new_candidates: new_candidates "
+        "['notes/out.md'] already appear in members or excluded: a new candidate "
+        "is a document the set has not placed yet"]
+    assert own.validator_for(workbench.KIND).is_valid(
+        yaml.safe_load(_recipe_set().render()))
+
+
+def test_no_report_names_a_retired_id_and_none_is_an_alias(tmp_path) -> None:
+    """The BEFORE-STATE: at `047bb4fa` the adapter reported these two rules as
+    `RETIRED_RULE_IDS`. Neither is an id any longer, nor an alias of one."""
+    result = default_projection.VALIDATORS[workbench.KIND].validate(
+        _manifest(tmp_path, _breaking_both()))
+    assert result.outcome == ps.NOT_CONFORMANT
+    for retired in RETIRED_RULE_IDS:
+        assert retired not in result.stdout, result.stdout
+        assert retired not in own.OWNED_RULES[workbench.KIND]
+        assert all(retired not in rules for rules in own.REFERENCE_RULES.values())
+
+
+def test_default_projection_checks_neither_rule(tmp_path, monkeypatch) -> None:
+    """`default_projection` carries no copy of either rule: with the
+    validator's two taken away, its adapter reports nothing for a manifest
+    that breaks both. With them in place, it reports each exactly once, so an
+    adapter that checked them again beside the validator fails here too."""
+    assert not hasattr(default_projection, "WORKBENCH_RULES")
+    assert not hasattr(default_projection.OwnValidator, "_workbench_rules")
+    path = _manifest(tmp_path, _breaking_both())
+    lines = default_projection.VALIDATORS[workbench.KIND].validate(path).stdout.splitlines()
+    rules = [line.split("]")[0][1:] for line in lines[:-1]]
+    assert rules == [PINNED_RULE, CANDIDATE_RULE], lines
+    assert lines[-1].startswith("2 violation(s) of the ideation-workbench contract")
+    monkeypatch.setattr(own, "OWNED_RULES", {})
+    monkeypatch.setattr(own, "_CACHE", {})
+    bare = default_projection.VALIDATORS[workbench.KIND].validate(path)
+    assert (bare.ok, bare.outcome) == (True, ps.VALIDATED), bare.stdout
+
+
+def test_a_copy_with_a_catalog_cannot_also_have_owned_rules() -> None:
+    """One rule is enforced from one place: a copy that carries an `x-rules`
+    catalog has its rules from it alone, so owned rules beside it are refused
+    when the validator is built, never enforced twice."""
+    document = contracts.load(workbench.KIND)
+    copy_id, pointer = own.KIND_ENTRIES[workbench.KIND]
+    own.KindValidator(workbench.KIND, copy_id, pointer, document, "digest")
+    with pytest.raises(own.SchemaNotEvaluable, match="x-rules catalog"):
+        own.KindValidator(workbench.KIND, copy_id, pointer,
+                          {**document, "x-rules": []}, "digest")
