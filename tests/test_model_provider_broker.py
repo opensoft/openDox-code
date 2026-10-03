@@ -25,7 +25,9 @@ A SIXTH LAYER, (f), holds #1144 Group 16's binding and provider boxes (plan
 034 phase 3, slice P3-B). 16.1 is the OpenAI-compatible dialect (T078), 16.2
 is the model name the provider receives (T079), and 16.3 is the credential
 staying a reference: a key in the URL or an extra field refused, the built-in
-`env:` and keyring resolver, and the auth kind `none` (T080).
+`env:` and keyring resolver, and the auth kind `none` (T080). Its last section
+holds a broker's minted token to the rules T080 gave a built-in credential
+(the broker path's hardening, Brett Heap's word of 2026-09-29).
 
 THE FAKE BROKER SPEAKS THE DECLARED CONTRACT (task 2.6). It was this
 repository's own invented stdin/stdout protocol until the reconciliation, which
@@ -49,10 +51,13 @@ from __future__ import annotations
 import builtins
 import contextlib
 import dataclasses
+import functools
 import http.client
 import http.server
 import io
 import json
+import os
+import signal
 import socket
 import subprocess
 import sys
@@ -896,14 +901,15 @@ def _expired_error():
 
 def _port(tmp_path, *outcomes, expires=None, notice=None, clock=time.time,
           endpoint=ENDPOINT, dialect=binding_mod.DIALECT_XFACTORY_PROMPT_V1,
-          model=None):
-    script = _write_broker(tmp_path, expires=expires)
+          model=None, token=SENTINEL_TOKEN,
+          runner=provider_mod.subprocess_broker_runner):
+    script = _write_broker(tmp_path, expires=expires, token=token)
     binding = _broker_binding(script, endpoint=endpoint, dialect=dialect,
                               model=model)
     opener = _Opener(*outcomes)
     port = provider_mod.BrokeredProviderPort(
         binding, install_mod.brokered_catalog(binding),
-        opener=opener, clock=clock,
+        runner=runner, opener=opener, clock=clock,
         notice=notice if notice is not None else (lambda _text: None))
     return port, opener
 
@@ -1144,12 +1150,19 @@ def test_the_fixed_diagnostics_are_all_reachable_and_no_more():
     declaration-time refusal; keeping an unraisable sentence would be a refusal
     nobody can trigger. ELEVEN since #1144 box 16.3: the built-in resolver's
     two joined, and so did the redirect a built-in credential declines.
-    Section (f) below reaches each of the three."""
-    assert len(provider_mod.FIXED_DIAGNOSTICS) == 11
+    Section (f) below reaches each of the three. TWELVE since Brett Heap's
+    word of 2026-09-29: a broker answer past the bound has its own sentence,
+    and the last section reaches it."""
+    assert len(provider_mod.FIXED_DIAGNOSTICS) == 12
     assert {provider_mod.DIAG_REFERENCE_UNRESOLVED,
             provider_mod.DIAG_KEYRING_UNAVAILABLE,
-            provider_mod.DIAG_PROVIDER_REDIRECTED} <= \
+            provider_mod.DIAG_PROVIDER_REDIRECTED,
+            provider_mod.DIAG_BROKER_OVERSIZE} <= \
         provider_mod.FIXED_DIAGNOSTICS
+    assert provider_mod.BROKER_DIAGNOSTICS == {
+        provider_mod.DIAG_BROKER_UNREACHABLE,
+        provider_mod.DIAG_BROKER_REFUSED, provider_mod.DIAG_BROKER_MALFORMED,
+        provider_mod.DIAG_BROKER_TIMEOUT, provider_mod.DIAG_BROKER_OVERSIZE}
     assert not hasattr(provider_mod, "DIAG_DIALECT_UNKNOWN")
 
 
@@ -1359,14 +1372,19 @@ def test_a_broker_that_hangs_is_refused_at_the_declared_timeout(tmp_path):
 
 
 def test_the_broker_answer_is_bounded(tmp_path):
-    script = tmp_path / "loud-broker.py"
-    script.write_text(
-        "import sys\n"
-        f"sys.stdout.write('x' * {provider_mod.MAX_BROKER_ANSWER_BYTES + 1})\n",
-        encoding="utf-8")
-    with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.mint(_broker_binding(script))
-    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    """One byte past the bound has its own sentence since Brett Heap's word
+    of 2026-09-29. It was `DIAG_BROKER_MALFORMED`, beside every answer of
+    the wrong shape. An answer at the bound is read, and refused only as
+    what it is: here, not JSON."""
+    bound = provider_mod.MAX_BROKER_ANSWER_BYTES
+    for size, expected in ((bound + 1, provider_mod.DIAG_BROKER_OVERSIZE),
+                           (bound, provider_mod.DIAG_BROKER_MALFORMED)):
+        script = tmp_path / f"loud-broker-{size}.py"
+        script.write_text(f"import sys\nsys.stdout.write('x' * {size})\n",
+                          encoding="utf-8")
+        with pytest.raises(provider_mod.BrokerRefused) as caught:
+            provider_mod.mint(_broker_binding(script))
+        assert caught.value.diagnostic == expected
 
 
 def test_the_subprocess_runner_never_uses_a_shell(tmp_path):
@@ -2155,19 +2173,19 @@ def test_the_scheme_refusal_is_a_fixed_sentence_that_repeats_nothing(
 
 def test_the_scheme_refusal_is_route_neutral():
     """Copilot's review of openDox-code#63 at `abbb05d4`. Every resolver
-    meets the scheme refusal, and only a built-in credential is held to a
-    private route (`ENDPOINT_NOT_PRIVATE`), so the refusal names the schemes
-    and nothing about hosts: a broker's or a `none` binding may still name
-    an `http://` endpoint on another host."""
+    meets the scheme refusal, and only a credential is held to a private
+    route (`ENDPOINT_NOT_PRIVATE`): the built-in resolver's key and, on this
+    branch, a broker's minted token. So the refusal names the schemes and
+    nothing about hosts, and a `none` binding may still name an `http://`
+    endpoint on another host."""
     for declare in (_binding, _built_in_binding, _none_binding):
         with pytest.raises(binding_mod.BindingRefused) as caught:
             declare(endpoint="ftp://provider.invalid/turn")
         assert str(caught.value) == binding_mod.ENDPOINT_SCHEME_REFUSED
     for word in ("host", "loopback", "localhost", "127.0.0.1"):
         assert word not in binding_mod.ENDPOINT_SCHEME_REFUSED
-    for declare in (_binding, _none_binding):
-        endpoint = "http://api.example.invalid/v1/chat/completions"
-        assert declare(endpoint=endpoint).endpoint == endpoint
+    endpoint = "http://api.example.invalid/v1/chat/completions"
+    assert _none_binding(endpoint=endpoint).endpoint == endpoint
 
 
 #: Where a key was carried past the detector (M5), and the reviewer's M3
@@ -2407,8 +2425,10 @@ BUILT_IN_REFERENCES = (f"env:{ENV_NAME}",
                        f"keyring:{KEYRING_SERVICE}/{KEYRING_USER}")
 BACKSLASH = chr(92)
 
-
-@pytest.mark.parametrize("endpoint", [
+#: The routes a credential may take, and the routes it may not. One list of
+#: each, shared by the built-in resolver's cases here and the broker path's
+#: cases below, because the rule is one rule.
+ON_A_PRIVATE_ROUTE = pytest.mark.parametrize("endpoint", [
     "https://api.example.invalid/v1/chat/completions",
     "http://127.0.0.1:8080/v1/chat/completions",
     "http://[::1]:8080/v1/chat/completions",
@@ -2417,15 +2437,7 @@ BACKSLASH = chr(92)
     "http://localhost",
 ], ids=["https", "ipv4-loopback", "ipv6-loopback", "localhost",
         "localhost-in-capitals", "no-path"])
-def test_a_built_in_credential_is_declared_on_a_private_route(endpoint):
-    for reference in BUILT_IN_REFERENCES:
-        binding = _built_in_binding(reference, endpoint=endpoint)
-        assert binding.endpoint == endpoint
-        assert binding.credential_source() == (
-            binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER)
-
-
-@pytest.mark.parametrize("endpoint", [
+NOT_ON_A_PRIVATE_ROUTE = pytest.mark.parametrize("endpoint", [
     "http://api.example.invalid/v1/chat/completions",
     "http://localhost.evil.com/v1/chat/completions",
     "http://127.0.0.1.evil.com/v1/chat/completions",
@@ -2439,6 +2451,18 @@ def test_a_built_in_credential_is_declared_on_a_private_route(endpoint):
         "localhost-only-in-the-path", "a-loopback-address-not-named",
         "another-spelling-of-ipv6-loopback", "trailing-dot",
         "percent-encoded-dot", "unspecified-address"])
+
+
+@ON_A_PRIVATE_ROUTE
+def test_a_built_in_credential_is_declared_on_a_private_route(endpoint):
+    for reference in BUILT_IN_REFERENCES:
+        binding = _built_in_binding(reference, endpoint=endpoint)
+        assert binding.endpoint == endpoint
+        assert binding.credential_source() == (
+            binding_mod.CREDENTIAL_FROM_BUILT_IN_RESOLVER)
+
+
+@NOT_ON_A_PRIVATE_ROUTE
 def test_a_built_in_credential_over_http_to_another_host_is_refused(endpoint):
     """Refused when it is declared, by the constructor and from a stored
     record alike, with the one fixed sentence."""
@@ -2577,15 +2601,12 @@ def test_a_broker_reference_the_record_would_refuse_is_malformed(tmp_path,
     assert reference not in str(caught.value)
 
 
-@pytest.mark.parametrize("endpoint", [
-    "http://api.example.invalid/turn", "http://localhost.evil.com/turn"])
-def test_the_loopback_rule_is_the_built_in_resolvers_alone(endpoint):
-    """The ruling leaves the broker path as it is today: a broker's minted
-    token may still be declared over plain http:// to any host, which is the
-    pre-existing gap the PR notes. The auth kind `none` presents no
-    credential, so it keeps its route too."""
-    assert _binding(endpoint=endpoint).credential_source() == (
-        binding_mod.CREDENTIAL_FROM_BROKER)
+@NOT_ON_A_PRIVATE_ROUTE
+def test_a_none_binding_keeps_a_route_that_is_not_private(endpoint):
+    """The auth kind `none` presents no credential, so it is the one kind
+    that keeps such a route. Before the broker path's hardening (the last
+    section of this file), T080 pinned its scope here by declaring a broker
+    binding on two such routes as well. That half is now refused."""
     assert _none_binding(endpoint=endpoint).credential_source() == (
         binding_mod.NO_CREDENTIAL)
 
@@ -2935,6 +2956,40 @@ class _RedirectingHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
+@contextlib.contextmanager
+def _a_provider_that_redirects(monkeypatch, code):
+    """A stand-in provider that answers every request with a `code` redirect
+    to a second stand-in, `_ElsewhereHandler`, which records whatever it is
+    sent. It yields the first one's base URL."""
+    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
+    monkeypatch.setattr(_RedirectingHandler, "code", code)
+    with _stand_in_provider(_ElsewhereHandler) as elsewhere, \
+            _stand_in_provider(_RedirectingHandler) as base:
+        monkeypatch.setattr(_RedirectingHandler, "location",
+                            f"{elsewhere}/v1/chat/completions")
+        yield base
+
+
+@contextlib.contextmanager
+def _an_environment_proxy(monkeypatch):
+    """A stand-in proxy that `http_proxy` names, recording into
+    `_ElsewhereHandler.seen`, for the length of one test.
+
+    `urlopen`'s global opener is dropped first. `urlopen` builds it on first
+    use and reads the proxy environment then, so a request made through
+    `urlopen` here reads this environment, as it would in a process started
+    with the variable set. Without that, a proxy case would pass or fail by
+    whichever earlier test built the opener."""
+    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    with _stand_in_provider(_ElsewhereHandler) as proxy:
+        for name in ("http_proxy", "HTTP_PROXY"):
+            monkeypatch.setenv(name, proxy)
+        yield proxy
+
+
 @pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
 def test_a_built_in_credential_follows_no_redirect(monkeypatch, code):
     """Copilot's review of openDox-code#63 at `4abc6d4d`, over real sockets.
@@ -2942,12 +2997,7 @@ def test_a_built_in_credential_follows_no_redirect(monkeypatch, code):
     GET to the `Location`, with the credential header still on it (measured).
     A request that carries a built-in credential declines the redirect, and
     the second server hears nothing at all."""
-    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
-    monkeypatch.setattr(_RedirectingHandler, "code", code)
-    with _stand_in_provider(_ElsewhereHandler) as elsewhere, \
-            _stand_in_provider(_RedirectingHandler) as base:
-        monkeypatch.setattr(_RedirectingHandler, "location",
-                            f"{elsewhere}/v1/chat/completions")
+    with _a_provider_that_redirects(monkeypatch, code) as base:
         binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
@@ -2967,14 +3017,9 @@ def test_a_built_in_credential_over_http_to_this_host_uses_no_proxy(
     `http_proxy` set, urllib's default opener sends a request addressed to
     `127.0.0.1` to the proxy, credential header and all (measured). This
     request goes direct, and the stand-in proxy hears nothing."""
-    monkeypatch.setattr(_ElsewhereHandler, "seen", [])
     monkeypatch.setattr(_ChatCompletionsHandler, "seen", {})
-    for name in ("no_proxy", "NO_PROXY"):
-        monkeypatch.delenv(name, raising=False)
-    with _stand_in_provider(_ElsewhereHandler) as proxy, \
+    with _an_environment_proxy(monkeypatch), \
             _stand_in_provider(_ChatCompletionsHandler) as base:
-        for name in ("http_proxy", "HTTP_PROXY"):
-            monkeypatch.setenv(name, proxy)
         binding = _built_in_binding(endpoint=f"{base}/v1/chat/completions")
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
@@ -3110,9 +3155,10 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
 
     THE TRANSPORT IS SHARED, so a broker's turn lands on the same sentence
     (Copilot's review of openDox-code#63 at `44582f8f`), where it escaped
-    before. That is the one change this PR makes to the broker path's
-    failure. Raising it afresh there is openDox-code#64's, as the ruling
-    leaves that path to it."""
+    before. On this branch it is raised afresh there too, as every refusal
+    of a request that carried a credential is (`_call_provider`), so no
+    frame it keeps holds the minted token (the adversarial review's L4, for
+    openDox-code#64)."""
     answer, path = UNREADABLE_ANSWERS[raised]
     handler = type(f"_{raised}Answer", (_UnreadableAnswerHandler,),
                    {"answer": answer})
@@ -3138,10 +3184,11 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
         with pytest.raises(provider_mod.BrokerRefused) as caught:
             port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
-    if resolver == "built-in":
+    if resolver != "none":
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None
         assert _locals_holding(caught.value, KEY_SENTINEL) == []
+        assert _locals_holding(caught.value, SENTINEL_TOKEN) == []
 
 
 def test_an_unpresentable_value_leaves_no_frame_that_holds_it(monkeypatch):
@@ -3321,3 +3368,1052 @@ def test_set_credential_refuses_a_binding_no_broker_answers(tmp_path, capsys,
         args, source=_UnreadableSource()) == 1
     assert "names no broker" in capsys.readouterr().err
     assert store.get(binding.id) == binding, "nothing changed"
+
+
+# --- the broker path keeps the same rules (follows T080) -----------------
+# Brett Heap's word of 2026-09-29, answering openDox-code#63's closing
+# question ("Should the broker path follow it?"): "Yes, separate phase-3
+# draft". A broker's minted token keeps every rule T080 gave a credential the
+# built-in resolver reads. At `main`, and at T080's head, the broker path had
+# four gaps, each measured over real sockets and a real broker child:
+#
+#   1. the token could be declared over plain http:// to any host;
+#   2. a redirect, or an environment proxy, carried it elsewhere;
+#   3. a provider-unreachable refusal chained urllib's error, whose frames
+#      held the token in their locals;
+#   4. a token that cannot be presented went to urllib as it was, so one
+#      outside latin-1 failed there as DIAG_PROVIDER_UNREACHABLE.
+#
+# Each gap's cases below fail at T080's head, and the controls beside them
+# (a private route declared, a presentable token presented) pass there too.
+# Every token here is an obvious fake.
+
+
+@ON_A_PRIVATE_ROUTE
+def test_a_broker_token_is_declared_on_a_private_route(endpoint):
+    """The control for gap 1: every route a built-in credential may take."""
+    binding = _binding(endpoint=endpoint, dialect=OPENAI_CHAT)
+    assert binding.endpoint == endpoint
+    assert binding.credential_source() == binding_mod.CREDENTIAL_FROM_BROKER
+
+
+@NOT_ON_A_PRIVATE_ROUTE
+def test_a_broker_token_over_http_to_another_host_is_refused(endpoint):
+    """Gap 1. Refused when it is declared, by the constructor and from a
+    stored record alike, with the fixed sentence a built-in credential
+    earns on the same route."""
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        _binding(endpoint=endpoint, dialect=OPENAI_CHAT)
+    assert str(caught.value) == binding_mod.ENDPOINT_NOT_PRIVATE
+    record = dict(_binding().as_record(), endpoint=endpoint)
+    with pytest.raises(binding_mod.BindingRefused) as caught:
+        binding_mod.ModelProviderBinding.from_record(record)
+    assert str(caught.value) == binding_mod.ENDPOINT_NOT_PRIVATE
+
+
+def test_mint_asks_no_broker_for_a_token_on_a_route_that_is_not_private(
+        tmp_path):
+    """Gap 1, in `mint` itself, as the built-in resolver checks before it
+    reads. The record refuses such a binding when it is declared, so this
+    one is forced past that check, as no declaration can do. It still
+    cannot make a broker mint."""
+    script = _write_broker(tmp_path)
+    binding = _broker_binding(script)
+    object.__setattr__(binding, "endpoint", "http://api.example.invalid/v1")
+    with pytest.raises(AssertionError) as caught:
+        provider_mod.mint(binding)
+    assert "nothing was minted" in str(caught.value)
+    assert _seen_all(script) == [], "the broker was never asked"
+
+
+def test_the_cli_refuses_a_broker_binding_over_http_to_another_host(
+        tmp_path, capsys):
+    """Gap 1, through the operator door: refused, and nothing is stored."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    args = cli_mod.build_parser().parse_args([
+        "model-binding", "add", "--repo-root", str(checkout),
+        "--id", "cleartext-broker", "--label", "L", "--provider", "local",
+        "--credential-ref", FAKE_REFERENCE, "--auth-kind", "api_key",
+        "--credential-approver", "brett@opensoft.one",
+        "--endpoint", "http://api.example.invalid/v1/chat/completions",
+        "--dialect", OPENAI_CHAT, "--", "openprofiler-broker"])
+    assert args.func(args) == 1
+    assert binding_mod.ENDPOINT_NOT_PRIVATE in capsys.readouterr().err
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+    assert store.list() == (), "nothing is stored"
+
+
+def _minting_port(tmp_path, endpoint, *, token=SENTINEL_TOKEN):
+    """A port as a served install builds one, for a binding at `endpoint`
+    whose broker, a real child, mints `token`. It keeps the default opener,
+    so nothing stands between the port and the socket."""
+    binding = _broker_binding(_write_broker(tmp_path, token=token),
+                              endpoint=endpoint, dialect=OPENAI_CHAT)
+    return provider_mod.BrokeredProviderPort(
+        binding, install_mod.brokered_catalog(binding),
+        notice=lambda _text: None)
+
+
+def _refused_turn(port) -> provider_mod.BrokerRefused:
+    """The refusal one turn on `port` ends in."""
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    return caught.value
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_a_broker_token_follows_no_redirect(tmp_path, monkeypatch, code):
+    """Gap 2, over real sockets, for each redirect code.
+
+    At T080's head, urllib followed only the 301, 302 and 303 codes. For
+    those it sent a GET that still carried the minted token to the
+    redirect's target, and the turn was answered from there. It did not
+    follow a 307 or a 308, and the turn refused with
+    `DIAG_PROVIDER_REFUSED`, as though the provider had refused. Now every
+    redirect is declined, the second server hears nothing, and the refusal
+    chains nothing."""
+    with _a_provider_that_redirects(monkeypatch, code) as base:
+        refusal = _refused_turn(
+            _minting_port(tmp_path, f"{base}/v1/chat/completions"))
+    assert refusal.diagnostic == provider_mod.DIAG_PROVIDER_REDIRECTED
+    assert _ElsewhereHandler.seen == [], "the token went nowhere else"
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+
+
+def test_a_broker_token_over_http_to_this_host_uses_no_proxy(tmp_path,
+                                                             monkeypatch):
+    """Gap 2, over real sockets. With `http_proxy` set, T080's head sent a
+    request that carried a minted token to the proxy, even one addressed to
+    `127.0.0.1` (measured with a fresh global opener, as in a process
+    started with the variable set). The request goes direct, and the
+    stand-in proxy hears nothing."""
+    monkeypatch.setattr(_ChatCompletionsHandler, "seen", {})
+    with _an_environment_proxy(monkeypatch), \
+            _stand_in_provider(_ChatCompletionsHandler) as base:
+        answer = _minting_port(
+            tmp_path, f"{base}/v1/chat/completions").dispatch(_Envelope())
+    assert answer["assistant_prose"] == "answered in the chat grammar"
+    assert _ChatCompletionsHandler.seen["authorization"] == (
+        f"Bearer {SENTINEL_TOKEN}")
+    assert _ElsewhereHandler.seen == [], "the proxy heard nothing"
+
+
+def test_a_refused_connection_keeps_no_frame_that_holds_the_token(tmp_path):
+    """Gap 3, over the real transport. At T080's head this refusal chained
+    urllib's `URLError`, and five frames it kept held the token in their
+    locals (measured: `do_open.headers`, `_send_request.headers`,
+    `_send_output.msg`, `send.data` and `request.headers`). The refusal
+    chains nothing, and no frame it keeps holds the token."""
+    with _a_closed_loopback_port() as closed:
+        refusal = _refused_turn(_minting_port(
+            tmp_path, f"http://127.0.0.1:{closed}/v1/chat/completions"))
+    assert refusal.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert _locals_holding(refusal, SENTINEL_TOKEN) == []
+
+
+@pytest.mark.parametrize("outcomes,expected", [
+    ((urllib.error.URLError("down"),),
+     provider_mod.DIAG_PROVIDER_UNREACHABLE),
+    ((urllib.error.HTTPError(ENDPOINT, 500, "boom", {},
+                             io.BytesIO(b"provider detail")),),
+     provider_mod.DIAG_PROVIDER_REFUSED),
+    ((b"not json",), provider_mod.DIAG_PROVIDER_MALFORMED),
+    ((_expired_error(), _expired_error()),
+     provider_mod.DIAG_TOKEN_EXPIRED_TWICE),
+], ids=["unreachable", "refused", "malformed", "expired-twice"])
+def test_a_refusal_of_a_turn_that_presented_a_token_chains_nothing(
+        tmp_path, outcomes, expected):
+    """Gap 3, for each refusal a presented token can meet. At T080's head
+    each of them kept urllib's error, or the expiry, as its cause or its
+    context."""
+    port, _opener = _port(tmp_path, *outcomes)
+    refusal = _refused_turn(port)
+    assert refusal.diagnostic == expected
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+
+
+def test_a_re_mint_the_broker_refuses_after_an_expiry_keeps_no_context(
+        tmp_path):
+    """The one re-mint the 2026-08-26 ruling allows happens outside every
+    handler, so the broker's refusal of it keeps no context. At T080's head
+    it kept the expiry, which kept urllib's error."""
+    asked: list = []
+
+    def refuses_a_second_mint(argv, **kwargs):
+        asked.append(argv)
+        if len(asked) > 1:
+            raise provider_mod.BrokerRefused(provider_mod.DIAG_BROKER_REFUSED)
+        return provider_mod.subprocess_broker_runner(argv, **kwargs)
+
+    port, opener = _port(tmp_path, _expired_error(),
+                         runner=refuses_a_second_mint)
+    refusal = _refused_turn(port)
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_REFUSED
+    assert len(opener.requests) == 1, "no paid retry without a token"
+    assert refusal.__context__ is None
+
+
+@pytest.mark.parametrize("token", [
+    f"{SENTINEL_TOKEN}\u20ac", f"{SENTINEL_TOKEN}\u00e9",
+    "mint-stand-in NOT-A-TOKEN", "mint-stand-in\tNOT-A-TOKEN",
+    f"{SENTINEL_TOKEN}\n", f"{SENTINEL_TOKEN}\x00", f"{SENTINEL_TOKEN}\x7f",
+    f"{SENTINEL_TOKEN} ",
+], ids=["outside-latin-1", "latin-1-not-ascii", "embedded-space", "tab",
+        "line-break", "nul", "delete", "trailing-space"])
+def test_an_unpresentable_token_is_refused_before_any_request(tmp_path,
+                                                            token):
+    """Gap 4. A bearer credential is printable ASCII with no whitespace, and
+    the minted token is held to the test the built-in resolver's value
+    meets. At T080's head each of these reached the opener as it was. A
+    refused answer is no mint: nothing is held, and nothing is recorded."""
+    port, opener = _port(tmp_path, _chat_completion(), dialect=OPENAI_CHAT,
+                         token=token)
+    refusal = _refused_turn(port)
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    assert opener.requests == [], "no provider was contacted"
+    assert port.catalog().entries[0].available is False
+    assert port.ledger == []
+
+
+def test_a_token_outside_latin_1_is_refused_before_any_header_is_built(
+        tmp_path, monkeypatch):
+    """Gap 4, over a real socket, because the failure was `urllib`'s. At
+    T080's head such a token failed while the header was encoded, and the
+    turn read `DIAG_PROVIDER_UNREACHABLE`, which names the wrong party. It
+    is now the broker's answer that is refused, nothing is chained, and no
+    request is sent."""
+    monkeypatch.setattr(_ChatCompletionsHandler, "seen", {})
+    with _stand_in_provider(_ChatCompletionsHandler) as base:
+        refusal = _refused_turn(_minting_port(
+            tmp_path, f"{base}/v1/chat/completions",
+            token=f"{SENTINEL_TOKEN}\u20ac"))
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert _ChatCompletionsHandler.seen == {}, "no request reached the server"
+
+
+def test_a_token_of_printable_ascii_is_presented_as_it_is(tmp_path):
+    """The control for gap 4: the check refuses what a bearer credential
+    cannot be and nothing more, so every printable ASCII character but the
+    space is presented unchanged."""
+    token = "mint-" + "".join(chr(code) for code in range(0x21, 0x7F))
+    port, opener = _port(tmp_path, _chat_completion("a"), dialect=OPENAI_CHAT,
+                         token=token)
+    assert port.dispatch(_Envelope())["assistant_prose"] == "a"
+    assert opener.requests[0].get_header("Authorization") == f"Bearer {token}"
+
+
+def test_an_unpresentable_token_leaves_no_frame_that_holds_it(tmp_path):
+    """A token refused as unpresentable can still be most of a token, such
+    as one with a line break after it. The refusal keeps no frame that holds
+    it, as the built-in resolver's refusal of an unpresentable value keeps
+    none."""
+    port, _opener = _port(tmp_path, _chat_completion(), dialect=OPENAI_CHAT,
+                          token=f"{SENTINEL_TOKEN}\n")
+    refusal = _refused_turn(port)
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    assert _locals_holding(refusal, SENTINEL_TOKEN) == []
+
+
+def _mint_answer(**changes) -> dict:
+    """A mint answer in the declared shape, carrying `SENTINEL_TOKEN`, with
+    `changes` applied."""
+    answer = {
+        "schema_version": 1, "kind": "openprofiler_broker_mint",
+        "reference": FAKE_REFERENCE, "binding": "openprofiler-demo",
+        "provider": "demo-provider", "auth_kind": "api_key",
+        "token": SENTINEL_TOKEN, "token_type": "api_key",
+        "issued_at": "2026-08-26T14:07:52Z",
+        "expires_at": _iso(time.time() + 300), "expires_in_seconds": 300,
+        "scope": [], "issued_by": "openprofiler-broker/0.1.4-fake",
+        "approved_by": "brett@opensoft.one",
+        "audit_ref": "opaud-" + "0" * 24, "retry_of": None,
+        "enforcement": {"expiry": "broker_bookkeeping", "scope": "declared"}}
+    answer.update(changes)
+    return answer
+
+
+def _broker_answering(tmp_path, text: str) -> Path:
+    """A broker that answers every operation with `text`, verbatim."""
+    script = tmp_path / "answering-broker.py"
+    script.write_text(f"import sys\nsys.stdout.write({text!r})\n",
+                      encoding="utf-8")
+    return script
+
+
+def test_the_declared_mint_answer_mints(tmp_path):
+    """The control for the case below: this answer, unchanged, mints."""
+    script = _broker_answering(tmp_path, json.dumps(_mint_answer()))
+    assert provider_mod.mint(_broker_binding(script)).token == SENTINEL_TOKEN
+
+
+#: A mint answer nested past the interpreter's recursion limit, and still well
+#: inside the broker's answer bound.
+_NESTED_PAST_THE_LIMIT = (json.dumps(_mint_answer())[:-1] + ', "deep": '
+                          + "[" * 30_000 + "]" * 30_000 + "}")
+
+
+@pytest.mark.parametrize("text", [
+    json.dumps(_mint_answer(expires_at="not-an-instant")),
+    json.dumps(_mint_answer(debug_note="a key the declaration does not name")),
+    json.dumps(_mint_answer())[:-1],
+    json.dumps(_mint_answer(expires_at=10 ** 400)),
+    json.dumps(_mint_answer(expires_at=float("nan"))),
+    json.dumps(_mint_answer(expires_at=float("inf"))),
+    json.dumps(_mint_answer(expires_at=float("-inf"))),
+    _NESTED_PAST_THE_LIMIT,
+], ids=["expiry-malformed", "undeclared-key", "not-json",
+        "expiry-past-a-float", "expiry-nan", "expiry-infinite",
+        "expiry-minus-infinite", "nested-past-the-recursion-limit"])
+def test_a_malformed_mint_answer_keeps_no_frame_that_holds_its_token(
+        tmp_path, text):
+    """The same rule for every refusal of the answer that carried the token.
+    At T080's head the answer stayed in the refusal's frames (measured:
+    `mint.answer`, `mint.document`, `_answer_document.text` and
+    `_answer_document.document`).
+
+    Some answers escaped `mint` outright (Copilot's review of
+    openDox-code#64 at `a2c838a0`): an expiry past a float's range, as an
+    `OverflowError`, and an answer nested past the recursion limit, as a
+    `RecursionError`. An expiry of `NaN` or an infinity minted a token that
+    would never expire, or would always have expired. Each is now a
+    malformed answer, and its refusal keeps no frame, cause or context that
+    holds the token."""
+    assert len(text.encode("utf-8")) <= provider_mod.MAX_BROKER_ANSWER_BYTES, \
+        "a case for the answer's parser, not for the runner's bound"
+    binding = _broker_binding(_broker_answering(tmp_path, text))
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.mint(binding)
+    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert _locals_holding(caught.value, SENTINEL_TOKEN) == []
+
+
+#: A provider answer nested past the interpreter's recursion limit, and still
+#: well inside the provider's answer bound.
+_PROVIDER_ANSWER_NESTED_PAST_THE_LIMIT = (
+    b'{"choices": ' + b"[" * 30_000 + b"]" * 30_000 + b"}")
+
+
+@pytest.mark.parametrize("source", ["broker", "built-in", "none"])
+def test_a_provider_answer_nested_past_the_recursion_limit_is_malformed(
+        tmp_path, source):
+    """Copilot's review of openDox-code#64 at `e1a6cb0f`. The provider's
+    answer is parsed in `_post_to_provider`, whose frame holds the request,
+    and so its authorization header. An answer nested past the recursion
+    limit fits well inside the answer's bound. Its parse escaped as a
+    `RecursionError`, with that frame in its traceback, on every path. It
+    is now a malformed answer. A refusal of a request that carried a
+    credential chains nothing, and keeps no frame of the call that held it.
+    Under the auth kind `none` nothing was presented, so its refusal is held
+    to the fixed sentence alone."""
+    payload = _PROVIDER_ANSWER_NESTED_PAST_THE_LIMIT
+    assert len(payload) <= provider_mod.MAX_PROVIDER_ANSWER_BYTES, \
+        "a case for the answer's parser, not for its bound"
+    secret = None
+    if source == "broker":
+        port, _opener = _port(tmp_path, payload)
+        secret = SENTINEL_TOKEN
+    elif source == "built-in":
+        port, _opener = _unbrokered_port(
+            _built_in_binding(), payload, environ={ENV_NAME: KEY_SENTINEL})
+        secret = KEY_SENTINEL
+    else:
+        port, _opener = _unbrokered_port(_none_binding(), payload)
+    envelope = _Envelope()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        port.dispatch(envelope)
+    assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_MALFORMED
+    if secret is not None:
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        kept = {frame.f_code.co_name
+                for frame in _frames_kept_by(caught.value)}
+        assert "_post_to_provider" not in kept, kept
+        assert _locals_holding(caught.value, secret) == []
+
+
+# --- a broker that misbehaves is refused with nothing it wrote -----------
+# Brett Heap's word of 2026-09-29 (openxFactory#656, the lane's latest RULED
+# comment): "Yes, add to #64". When a broker misbehaves, the shared runner's
+# refusal carries no broker output, no cause and no context, for all four
+# operations. So that it stays useful, it names the operation and the failure
+# class, and never the bytes. Measured at #64's `788d764b`, with a broker that
+# wrote the token before it misbehaved:
+#
+#   * exits non-zero: the runner's frame held the token, in `answer` and in
+#     the child's `_fileobj2output`;
+#   * answers past the bound: the same, and the refusal read as MALFORMED;
+#   * times out, with its output open or closed: the refusal chained the
+#     `TimeoutExpired`, whose `output` and whose frames inside `subprocess`
+#     held the token;
+#   * answers in bytes that are not UTF-8: a `UnicodeDecodeError` escaped
+#     holding the token in `object`, and no refusal was raised at all.
+#
+# No refusal named its operation, and two of the sentences said no token
+# could be minted, whichever operation had failed. Every case below fails at
+# `788d764b`. Every token here is an obvious fake.
+
+#: Long enough for a Python child to start and write, well before it expires.
+_MISBEHAVING_TIMEOUT = 1.0
+
+#: What each broker below does once it has written `SENTINEL_TOKEN`, and the
+#: failure class its refusal names. The sentence is named here, and read
+#: only once the refusal has been checked for what it keeps.
+_MISBEHAVIOURS = {
+    "exits-non-zero": (
+        "sys.stdout.write(TOKEN)\nwrote()\nsys.exit(3)\n",
+        "DIAG_BROKER_REFUSED"),
+    "answers-past-the-bound": (
+        "sys.stdout.write(TOKEN)\nwrote()\nsys.stdout.write('x' * BOUND)\n",
+        "DIAG_BROKER_OVERSIZE"),
+    "times-out": (
+        "sys.stdout.write(TOKEN)\nwrote()\ntime.sleep(30)\n",
+        "DIAG_BROKER_TIMEOUT"),
+    "closes-its-output-and-times-out": (
+        "sys.stdout.write(TOKEN)\nwrote()\nos.close(1)\ntime.sleep(30)\n",
+        "DIAG_BROKER_TIMEOUT"),
+    "answers-in-no-utf-8": (
+        "sys.stdout.buffer.write(TOKEN.encode() + b'\\xff')\nwrote()\n",
+        "DIAG_BROKER_MALFORMED"),
+    "answers-in-no-utf-8-and-times-out": (
+        "sys.stdout.buffer.write(TOKEN.encode() + b'\\xff')\nwrote()\n"
+        "time.sleep(30)\n",
+        "DIAG_BROKER_TIMEOUT"),
+}
+
+#: The broker's preamble. `wrote()` flushes, then leaves a mark beside the
+#: script, so a test can show the token was written before the misbehaviour.
+_MISBEHAVING_PREAMBLE = (
+    "import os, pathlib, sys, time\n"
+    "TOKEN = {token!r}\n"
+    "BOUND = {bound!r}\n"
+    "def wrote():\n"
+    "    sys.stdout.flush()\n"
+    "    pathlib.Path(sys.argv[0] + '.wrote').touch()\n")
+
+
+def _misbehaving_broker(tmp_path, misbehaviour: str) -> Path:
+    body, _sentence = _MISBEHAVIOURS[misbehaviour]
+    script = tmp_path / f"{misbehaviour}-broker.py"
+    script.write_text(_MISBEHAVING_PREAMBLE.format(
+        token=SENTINEL_TOKEN, bound=provider_mod.MAX_BROKER_ANSWER_BYTES)
+        + body, encoding="utf-8")
+    return script
+
+
+def _sentence_for(misbehaviour: str) -> str:
+    return getattr(provider_mod, _MISBEHAVIOURS[misbehaviour][1])
+
+
+def _wrote(script: Path) -> bool:
+    return Path(str(script) + ".wrote").is_file()
+
+
+def _kept_anywhere(exception, secret: str) -> list[str]:
+    """`_locals_holding`, and one level deeper. The attributes of each local
+    are searched too, since that is where a `Popen` keeps what its child
+    wrote (`_fileobj2output`). So are the refusal's own arguments and
+    attributes."""
+    found = set(_locals_holding(exception, secret))
+    for frame in _frames_kept_by(exception):
+        for name, value in list(frame.f_locals.items()):
+            attributes = getattr(value, "__dict__", None)
+            if (isinstance(attributes, dict)
+                    and secret in _safe_repr(attributes)):
+                found.add(f"{frame.f_code.co_name}.{name}.__dict__")
+    if (secret in _safe_repr(exception.args)
+            or secret in _safe_repr(vars(exception))):
+        found.add("the refusal itself")
+    return sorted(found)
+
+
+def _children_kept_by(exception) -> list[str]:
+    """The frame locals that hold a broker child (`subprocess.Popen`). A
+    child holds the pipe its answer came down, and whatever that pipe's
+    buffers still hold, so no refusal keeps one."""
+    return sorted({f"{frame.f_code.co_name}.{name}"
+                   for frame in _frames_kept_by(exception)
+                   for name, value in list(frame.f_locals.items())
+                   if isinstance(value, subprocess.Popen)})
+
+
+#: Each operation, asked through its own function, with the real runner.
+_OPERATIONS_ASKED = {
+    provider_mod.OPERATION_INTAKE: lambda binding, runner: (
+        provider_mod.hand_off_credential(
+            binding, io.StringIO("sk-stand-in-intake-NOT-A-KEY"),
+            runner=runner)),
+    provider_mod.OPERATION_MINT: lambda binding, runner: (
+        provider_mod.mint(binding, runner=runner)),
+    provider_mod.OPERATION_REVOKE: lambda binding, runner: (
+        provider_mod.revoke(binding, runner=runner)),
+    provider_mod.OPERATION_LIST: lambda binding, runner: (
+        provider_mod.list_references(binding, runner=runner)),
+}
+
+
+def test_every_operation_is_asked_here():
+    assert tuple(_OPERATIONS_ASKED) == provider_mod.OPERATIONS
+
+
+@pytest.mark.parametrize("misbehaviour", sorted(_MISBEHAVIOURS))
+def test_the_shared_runner_refuses_a_misbehaving_broker_keeping_nothing(
+        tmp_path, misbehaviour):
+    """The runner itself, called directly. Its refusal keeps no cause, no
+    context, no frame or attribute that holds what the broker wrote, and no
+    frame that holds the child. It names the failure class. It is not told
+    the operation, so it names none."""
+    script = _misbehaving_broker(tmp_path, misbehaviour)
+    argv = provider_mod.broker_operation_argv(
+        _broker_binding(script), provider_mod.OPERATION_MINT)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.subprocess_broker_runner(
+            argv, timeout=_MISBEHAVING_TIMEOUT)
+    refusal = caught.value
+    assert _wrote(script), "the broker wrote the token before it misbehaved"
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
+    assert _children_kept_by(refusal) == []
+    expected = _sentence_for(misbehaviour)
+    assert refusal.diagnostic == expected
+    assert refusal.operation is None
+    assert str(refusal) == expected
+
+
+def test_a_broker_that_writes_without_end_is_refused_at_the_bound(tmp_path):
+    """Copilot's review of openDox-code#64 at `25788f91`: the bound was
+    checked only once the whole answer had been read, so it bounded nothing
+    in memory. A broker that writes without end is now refused as soon as it
+    passes the bound, well inside the timeout, and it is killed there. At
+    `25788f91`, and at `788d764b`, the runner read it until the timeout and
+    refused it as a timeout."""
+    script = tmp_path / "endless-broker.py"
+    script.write_text(
+        "import sys, time\n"
+        f"sys.stdout.write({SENTINEL_TOKEN!r})\n"
+        "while True:\n"
+        "    sys.stdout.write('x' * 65536)\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(0.01)\n", encoding="utf-8")
+    argv = provider_mod.broker_operation_argv(
+        _broker_binding(script), provider_mod.OPERATION_MINT)
+    started = time.monotonic()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.subprocess_broker_runner(argv, timeout=5.0)
+    assert time.monotonic() - started < 2.5, "refused at the bound"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert _kept_anywhere(caught.value, SENTINEL_TOKEN) == []
+    assert _children_kept_by(caught.value) == []
+    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_OVERSIZE
+
+
+@pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
+@pytest.mark.parametrize("misbehaviour", sorted(_MISBEHAVIOURS))
+def test_a_misbehaving_broker_is_refused_naming_the_operation(
+        tmp_path, misbehaviour, operation):
+    """Each of the four operations, through the real runner. The refusal
+    names the operation and the failure class, and keeps nothing the broker
+    wrote."""
+    script = _misbehaving_broker(tmp_path, misbehaviour)
+    runner = functools.partial(provider_mod.subprocess_broker_runner,
+                               timeout=_MISBEHAVING_TIMEOUT)
+    ask, binding = _OPERATIONS_ASKED[operation], _broker_binding(script)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        ask(binding, runner)
+    refusal = caught.value
+    assert _wrote(script), "the broker wrote the token before it misbehaved"
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
+    assert _children_kept_by(refusal) == []
+    expected = _sentence_for(misbehaviour)
+    assert refusal.diagnostic == expected
+    assert refusal.operation == operation
+    assert str(refusal) == f"broker {operation}: {expected}"
+
+
+@pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
+def test_a_broker_that_cannot_be_started_chains_nothing(tmp_path, operation):
+    """A program that does not exist wrote nothing, and its refusal chains
+    nothing either. At `788d764b` it chained the `FileNotFoundError`, by the
+    runner and by the operation alike."""
+    binding = _binding(broker_argv=(str(tmp_path / "no-such-broker"),))
+    argv = provider_mod.broker_operation_argv(binding, operation)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.subprocess_broker_runner(argv)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_UNREACHABLE
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        _OPERATIONS_ASKED[operation](binding,
+                                     provider_mod.subprocess_broker_runner)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert caught.value.operation == operation
+    assert str(caught.value) == (
+        f"broker {operation}: {provider_mod.DIAG_BROKER_UNREACHABLE}")
+
+
+def test_a_credential_source_that_fails_leaves_no_broker_running(tmp_path):
+    """The credential's own source is the operator's input, not the
+    broker's output, so the ruling does not reach it. A source that fails
+    while it is copied still escapes as it did. But the broker must not be
+    left running with its reader blocked on it, which aborted the
+    interpreter at exit at `b847ef3d` ("Fatal Python error:
+    _enter_buffered_busy"). A child interpreter runs it, so that its exit
+    is what is measured."""
+    binding = _broker_binding(_write_broker(tmp_path))
+    fields = {field.name: getattr(binding, field.name)
+              for field in dataclasses.fields(binding)}
+    program = (
+        "from opendox import doxbench_binding as b\n"
+        "from opendox import doxbench_provider as p\n"
+        "class Failing:\n"
+        "    parts = ['sk-stand-in-input-side-NOT-A-KEY']\n"
+        "    def read(self, _size=-1):\n"
+        "        if self.parts:\n"
+        "            return self.parts.pop()\n"
+        "        raise UnicodeDecodeError('utf-8', b'x', 0, 1, 'stand-in')\n"
+        f"binding = b.ModelProviderBinding(**{fields!r})\n"
+        "p.hand_off_credential(binding, Failing())\n")
+    run = subprocess.run([sys.executable, "-c", program], cwd=tmp_path,
+                         capture_output=True, text=True, timeout=60,
+                         check=False)
+    assert "Fatal Python error" not in run.stderr
+    assert run.returncode == 1
+    assert "UnicodeDecodeError" in run.stderr
+    assert "sk-stand-in-input-side-NOT-A-KEY" not in run.stderr
+
+
+def _still_running(pid: int, *, within: float = 2.0) -> bool:
+    """Whether `pid` is still running after `within` seconds. A zombie,
+    which a container's first process may never reap, has stopped."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1]
+        except OSError:
+            return False
+        if state.split()[0] in ("Z", "X"):
+            return False
+        if time.monotonic() > deadline:
+            return True
+        time.sleep(0.05)
+
+
+@pytest.mark.parametrize("leaves_the_group", [False, True],
+                         ids=["descendant-in-its-group",
+                              "descendant-that-left-it"])
+def test_a_broker_whose_descendant_holds_its_output_is_still_refused_in_time(
+        tmp_path, leaves_the_group):
+    """Copilot's reviews of openDox-code#64 at `b847ef3d` and `a603a032`.
+    A descendant that inherits the broker's standard output kept the pipe
+    open after the broker was killed. At `e3eec6b1` the refusal waited on it
+    forever. At `a603a032` a descendant that left the group left a reader
+    thread blocked, and its descriptor open, behind every refusal. The
+    broker now has its own process group, which a refusal kills whole, and
+    one loop in the calling thread reads the answer. So the refusal comes
+    at the timeout, and leaves no thread and no descriptor behind."""
+    script = tmp_path / "forking-broker.py"
+    script.write_text(
+        "import os, subprocess, sys, time\n"
+        "descendant = subprocess.Popen([sys.executable, '-c', "
+        f"'import os, time\\n{'os.setsid()' if leaves_the_group else 'pass'}"
+        "\\ntime.sleep(10)'])\n"
+        "open(sys.argv[0] + '.pid', 'w').write(str(descendant.pid))\n"
+        f"sys.stdout.write({SENTINEL_TOKEN!r})\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(30)\n", encoding="utf-8")
+    argv = provider_mod.broker_operation_argv(
+        _broker_binding(script), provider_mod.OPERATION_MINT)
+    caught: list = []
+
+    def run():
+        try:
+            provider_mod.subprocess_broker_runner(argv, timeout=0.5)
+        except provider_mod.BrokerRefused as refusal:
+            caught.append(refusal)
+
+    threads = threading.active_count()
+    descriptors = len(os.listdir("/proc/self/fd"))
+    runner = threading.Thread(target=run, daemon=True)
+    started = time.monotonic()
+    runner.start()
+    runner.join(10)
+    assert not runner.is_alive(), "the refusal waited on the descendant"
+    elapsed = time.monotonic() - started
+    [refusal] = caught
+    assert elapsed < 0.5 + 2, "refused at the timeout"
+    assert threading.active_count() == threads, "no thread is left behind"
+    assert len(os.listdir("/proc/self/fd")) == descriptors, \
+        "no descriptor is left behind"
+    descendant = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
+    if not leaves_the_group:
+        assert not _still_running(descendant), \
+            "the broker's whole process group is killed"
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_TIMEOUT
+    assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
+
+
+def _process_state(pid: int) -> str | None:
+    """The state letter `/proc` gives `pid` (`Z` for a zombie, which has
+    exited and is not yet reaped), or None once it is gone."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    return stat.rsplit(")", 1)[1].split()[0]
+
+
+@pytest.mark.parametrize("misbehaviour", ["exits-non-zero",
+                                          "answers-in-no-utf-8"])
+def test_a_refusal_after_the_broker_exits_kills_what_is_left_of_its_group(
+        tmp_path, monkeypatch, misbehaviour):
+    """Copilot's review of openDox-code#64 at `a271d307`, a note it had
+    missed before. A broker left a descendant in its group, holding none of
+    its pipes, and then exited non-zero or answered in bytes that are not
+    UTF-8. It was refused at once, but the descendant went on running, and
+    each such call left one more. Every refusal of the runner now kills
+    what is left of the broker's group, as the timeout and the bound
+    already did.
+
+    Copilot's review at `bbcb565e`: the group's id is the broker's pid,
+    which can be reused once the broker is reaped. At `bbcb565e` the broker
+    was reaped first and its group signalled after. Now the group is
+    signalled while the broker is a zombie, exited and not yet reaped."""
+    signalled: list = []
+    killpg = os.killpg
+
+    def recording_killpg(pgid, sig):
+        signalled.append(_process_state(pgid))
+        return killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", recording_killpg)
+    if misbehaviour == "exits-non-zero":
+        last, expected = "sys.exit(3)\n", provider_mod.DIAG_BROKER_REFUSED
+    else:
+        last = "sys.stdout.buffer.write(b'\\xff')\n"
+        expected = provider_mod.DIAG_BROKER_MALFORMED
+    script = tmp_path / "descendant-leaving-broker.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "descendant = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(20)'],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL)\n"
+        "open(sys.argv[0] + '.pid', 'w').write(str(descendant.pid))\n"
+        f"sys.stdout.write({SENTINEL_TOKEN!r})\n"
+        "sys.stdout.flush()\n" + last, encoding="utf-8")
+    argv = provider_mod.broker_operation_argv(
+        _broker_binding(script), provider_mod.OPERATION_MINT)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.subprocess_broker_runner(argv, timeout=5)
+    descendant = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
+    try:
+        assert caught.value.diagnostic == expected
+        assert signalled == ["Z"], \
+            "the group is signalled once, before the broker is reaped"
+        assert not _still_running(descendant), \
+            "the descendant was left running"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(descendant, signal.SIGKILL)
+
+
+def test_where_an_exit_cannot_be_read_unreaped_no_group_is_signalled(
+        tmp_path, monkeypatch):
+    """Where `os.waitid` does not exist, the broker is reaped as its exit
+    is read, so its pid, which is its group's id, may already be reused.
+    Its refusal then signals no group at all. A descendant still in that
+    group is not reached there, which is the one cost."""
+    monkeypatch.delattr(os, "waitid")
+    signalled: list = []
+    killpg = os.killpg
+
+    def recording_killpg(pgid, sig):
+        signalled.append(pgid)
+        return killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", recording_killpg)
+    script = tmp_path / "descendant-leaving-broker.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "descendant = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(20)'],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL)\n"
+        "open(sys.argv[0] + '.pid', 'w').write(str(descendant.pid))\n"
+        "sys.exit(3)\n", encoding="utf-8")
+    argv = provider_mod.broker_operation_argv(
+        _broker_binding(script), provider_mod.OPERATION_MINT)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        provider_mod.subprocess_broker_runner(argv, timeout=5)
+    descendant = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
+    try:
+        assert caught.value.diagnostic == provider_mod.DIAG_BROKER_REFUSED
+        assert signalled == [], "no group is signalled after the reap"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(descendant, signal.SIGKILL)
+
+
+def _a_broker_that_leaves_a_helper(tmp_path, then: str) -> Path:
+    """A broker that starts a helper in its own process group, holding none
+    of its pipes, records the helper's pid beside itself, and then runs
+    `then`."""
+    script = tmp_path / "helper-leaving-broker.py"
+    script.write_text(
+        "import os, subprocess, sys\n"
+        "helper = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(20)'],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL)\n"
+        "open(sys.argv[0] + '.pid', 'w').write(str(helper.pid))\n" + then,
+        encoding="utf-8")
+    return script
+
+
+def _recording_killpg(monkeypatch) -> list:
+    """`os.killpg`, recording the state of each group's leader as it is
+    signalled (`_process_state`)."""
+    signalled: list = []
+    killpg = os.killpg
+
+    def recording(pgid, sig):
+        signalled.append(_process_state(pgid))
+        return killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", recording)
+    return signalled
+
+
+@pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
+def test_a_refused_answer_kills_what_is_left_of_the_brokers_group(
+        tmp_path, monkeypatch, operation):
+    """The holder's answer on openDox-code#64 (2026-10-02): EVERY refusal
+    kills what is left of the broker's group, a refusal of the answer of a
+    broker that exited 0 among them. Measured at `f8bc8aca`: such a broker,
+    leaving a helper in its group, was reaped as it answered, its answer
+    was refused after, and the helper went on running. Its answer is read
+    now while the broker is unreaped, and the group is signalled once,
+    while the broker is a zombie."""
+    signalled = _recording_killpg(monkeypatch)
+    answer = json.dumps({"schema_version": 1, "kind": "no-declared-kind",
+                         "token": SENTINEL_TOKEN})
+    script = _a_broker_that_leaves_a_helper(
+        tmp_path, f"sys.stdin.read()\nsys.stdout.write({answer!r})\n")
+    binding = _broker_binding(script)
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        _OPERATIONS_ASKED[operation](binding,
+                                     provider_mod.subprocess_broker_runner)
+    helper = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
+    try:
+        refusal = caught.value
+        assert refusal.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
+        assert refusal.operation == operation
+        assert refusal.__cause__ is None
+        assert refusal.__context__ is None
+        assert _kept_anywhere(refusal, SENTINEL_TOKEN) == []
+        assert signalled == ["Z"], \
+            "the group is signalled once, before the broker is reaped"
+        assert not _still_running(helper), "the helper was left running"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(helper, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
+def test_a_successful_answer_leaves_the_brokers_group_alone(
+        tmp_path, monkeypatch, operation):
+    """The other half of the holder's answer: a broker may leave a helper
+    running on purpose, so an answer that is read without a refusal
+    signals no group. The broker here starts a helper and then becomes the
+    fake broker, in the same process and the same group."""
+    signalled = _recording_killpg(monkeypatch)
+    broker = _write_broker(tmp_path)
+    script = _a_broker_that_leaves_a_helper(
+        tmp_path, f"os.execv(sys.executable, [sys.executable, "
+                  f"{str(broker)!r}, *sys.argv[1:]])\n")
+    binding = _broker_binding(script, credential_ref=FAKE_REFERENCE)
+    _OPERATIONS_ASKED[operation](binding,
+                                 provider_mod.subprocess_broker_runner)
+    helper = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
+    try:
+        assert signalled == [], "a successful answer signals no group"
+        assert _process_state(helper) not in (None, "Z"), \
+            "the helper still runs"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(helper, signal.SIGKILL)
+
+
+def test_a_refusal_waits_on_a_killed_broker_only_so_long(monkeypatch):
+    """Copilot's review of openDox-code#64 at `bbcb565e`. SIGKILL ends a
+    broker at once unless it is stuck in uninterruptible I/O. Then the
+    refusal's wait, unbounded at `bbcb565e`, never returned, and this
+    process's ends of the pipes stayed open. The wait is bounded, and the
+    pipes are closed past it. The stand-in here is a real broker whose
+    `wait` behaves as that one's would."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, process_group=0)
+    reap = child.wait
+    asked: list = []
+
+    def a_wait_sigkill_cannot_end(timeout=None):
+        asked.append(timeout)
+        if timeout is None:
+            raise AssertionError("an unbounded wait")
+        raise subprocess.TimeoutExpired(child.args, timeout)
+
+    monkeypatch.setattr(child, "wait", a_wait_sigkill_cannot_end)
+    try:
+        provider_mod._reap(child)
+        assert asked == [provider_mod._REAP_GRACE_SECONDS]
+        assert child.stdin is None
+        assert child.stdout.closed
+    finally:
+        monkeypatch.undo()
+        child.kill()
+        reap(timeout=10)
+
+
+def test_a_broker_that_never_reads_the_credential_is_refused_in_time(
+        tmp_path):
+    """The timeout covers the credential's streaming too. At `a603a032` the
+    credential was written before the timeout began, so a broker that never
+    read a credential larger than its pipe held the refusal until the broker
+    itself exited."""
+    script = tmp_path / "deaf-broker.py"
+    # It reads a little and then stops, so the pipe has room for some of
+    # the credential but not for all of it.
+    script.write_text("import os, time\nos.read(0, 5000)\ntime.sleep(30)\n",
+                      encoding="utf-8")
+    binding = _broker_binding(script)
+    runner = functools.partial(provider_mod.subprocess_broker_runner,
+                               timeout=0.5)
+    caught: list = []
+
+    def run():
+        try:
+            provider_mod.hand_off_credential(
+                binding, io.StringIO("k" * 1_000_000), runner=runner)
+        except provider_mod.BrokerRefused as refusal:
+            caught.append(refusal)
+
+    thread = threading.Thread(target=run, daemon=True)
+    started = time.monotonic()
+    thread.start()
+    thread.join(10)
+    assert not thread.is_alive(), "the refusal waited on the broker"
+    assert time.monotonic() - started < 0.5 + 2
+    [refusal] = caught
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_TIMEOUT
+    assert refusal.operation == provider_mod.OPERATION_INTAKE
+
+
+class _SourceFailingOnceMarked:
+    """A credential source that gives a small part at each read, and fails
+    a few reads after `mark` exists. So the broker has written, and its
+    answer has been read, before the source fails."""
+
+    def __init__(self, mark: Path) -> None:
+        self.mark = mark
+        self.reads_since_marked = 0
+
+    def read(self, _size=-1):
+        time.sleep(0.02)
+        if self.mark.exists():
+            self.reads_since_marked += 1
+        if self.reads_since_marked > 5:
+            raise UnicodeDecodeError("utf-8", b"x", 0, 1, "stand-in")
+        return "sk-stand-in-input-side-NOT-A-KEY"
+
+
+def test_a_failing_credential_source_escapes_with_no_broker_output(tmp_path):
+    """The same escape, in this process, from a broker that wrote the
+    token while the credential was still streaming. What escapes keeps
+    nothing the broker wrote, as a refusal would not. The broker is not
+    left running, where it would read the end of its input and store
+    whatever part of the credential had reached it."""
+    script = tmp_path / "early-writing-broker.py"
+    script.write_text(_MISBEHAVING_PREAMBLE.format(
+        token=SENTINEL_TOKEN, bound=provider_mod.MAX_BROKER_ANSWER_BYTES)
+        + "pathlib.Path(sys.argv[0] + '.pid').write_text(str(os.getpid()))\n"
+        "sys.stdout.write(TOKEN)\nwrote()\ntime.sleep(30)\n",
+        encoding="utf-8")
+    source = _SourceFailingOnceMarked(Path(str(script) + ".wrote"))
+    binding = _broker_binding(script)
+    with pytest.raises(UnicodeDecodeError) as caught:
+        provider_mod.hand_off_credential(binding, source)
+    assert _wrote(script), "the broker wrote before the source failed"
+    assert _kept_anywhere(caught.value, SENTINEL_TOKEN) == []
+    pid = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+@pytest.mark.parametrize("operation", provider_mod.OPERATIONS)
+def test_an_injected_runners_refusal_is_named_too(tmp_path, operation):
+    """The operation is named by the function that asked, so a runner that
+    was injected is covered as the default one is."""
+    def refusing(argv, **_kwargs):
+        raise provider_mod.BrokerRefused(provider_mod.DIAG_BROKER_REFUSED)
+
+    ask, binding = _OPERATIONS_ASKED[operation], _binding()
+    with pytest.raises(provider_mod.BrokerRefused) as caught:
+        ask(binding, refusing)
+    assert caught.value.operation == operation
+    assert caught.value.diagnostic == provider_mod.DIAG_BROKER_REFUSED
+    assert caught.value.__context__ is None
+
+
+def test_only_a_broker_sentence_names_a_declared_operation():
+    refusal = provider_mod.BrokerRefused(
+        provider_mod.DIAG_BROKER_TIMEOUT,
+        operation=provider_mod.OPERATION_REVOKE)
+    assert str(refusal) == f"broker revoke: {provider_mod.DIAG_BROKER_TIMEOUT}"
+    assert refusal.diagnostic == provider_mod.DIAG_BROKER_TIMEOUT
+    assert refusal.operation == provider_mod.OPERATION_REVOKE
+    with pytest.raises(AssertionError):
+        provider_mod.BrokerRefused(provider_mod.DIAG_BROKER_REFUSED,
+                                   operation="exfiltrate")
+    with pytest.raises(AssertionError):
+        provider_mod.BrokerRefused(provider_mod.DIAG_PROVIDER_REFUSED,
+                                   operation=provider_mod.OPERATION_MINT)
+    provider_refusal = provider_mod.BrokerRefused(
+        provider_mod.DIAG_PROVIDER_REFUSED)
+    assert provider_refusal.operation is None
+    assert str(provider_refusal) == provider_mod.DIAG_PROVIDER_REFUSED
+
+
+def test_the_operator_door_names_the_operation_and_withholds_the_answer(
+        tmp_path, capsys):
+    """What an operator reads when `set-credential` meets a broker that wrote
+    and then exited non-zero: the operation and the failure class, and none
+    of what it wrote."""
+    script = _misbehaving_broker(tmp_path, "exits-non-zero")
+    checkout = tmp_path / "checkout"
+    (checkout / "ideation" / "dashboard").mkdir(parents=True)
+    store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
+    store.add(_broker_binding(script, credential_ref="opref-" + "0" * 24))
+    args = cli_mod.build_parser().parse_args([
+        "model-binding", "set-credential", "--repo-root", str(checkout),
+        "--id", "openprofiler-demo"])
+    assert cli_mod.cmd_model_binding_set_credential(
+        args, source=io.StringIO("sk-stand-in-intake-NOT-A-KEY")) == 1
+    captured = capsys.readouterr()
+    assert captured.err == (
+        f"broker intake: {provider_mod.DIAG_BROKER_REFUSED}\n")
+    assert SENTINEL_TOKEN not in captured.out + captured.err

@@ -50,6 +50,11 @@ STDLIB_ONLY_MODULES: tuple[str, ...] = (
     # one would make openDox the only destination the corpus could not test.
     "opendox.runtime.local_git_adapter",
     "opendox.runtime.repository_act",
+    # THE LOCAL INSTALL'S BUNDLED SERVER (plan 034 T072). `opendox.cli`
+    # imports it at module level, and `opendox.cli` is what `opendox --help`
+    # runs on an install with no extra at all, so it connects through
+    # `psycopg` only inside the functions that start the server.
+    "opendox.runtime.bundle",
 )
 
 #: The modules that legitimately need the `runtime` extra, and the only ones.
