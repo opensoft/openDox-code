@@ -91,11 +91,14 @@ function spy(answer) {
 // NO SESSION COLUMN: the standalone plane
 {
   const s = spy({ ok: false, status: 403, json: async () => ({}) });
+  // a seam that is not a function is RECORDED, not called, so its absence
+  // reads as a failed assertion rather than as a crashed harness
+  const ask = async (seam) => (typeof seam === 'function' ? seam(QUERY) : null);
   const seam = doxbenchThreadSeam(null, () => 'token', s.fetcher);
-  const answer = await seam(QUERY);
-  out.standalone = { kind: typeof seam, answer, calls: s.calls.length };
+  out.standalone = { kind: typeof seam, answer: await ask(seam),
+                     calls: s.calls.length };
   const absent = doxbenchThreadSeam(undefined, () => 'token', s.fetcher);
-  out.undefinedSession = { kind: typeof absent, answer: await absent(QUERY),
+  out.undefinedSession = { kind: typeof absent, answer: await ask(absent),
                            calls: s.calls.length };
 }
 // A SESSION COLUMN: the composed host
@@ -183,6 +186,8 @@ const threadRequests = () => sent.filter((u) => u.startsWith('/workbench/thread'
 // ASKED, whatever the seam then sent.
 function counted(seam) {
   const asked = [];
+  // no seam is handed down as none, exactly as the shell would see it
+  if (typeof seam !== 'function') return { asked, wrapped: seam };
   const wrapped = async (query) => { asked.push(query); return seam(query); };
   return { asked, wrapped };
 }
