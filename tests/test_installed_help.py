@@ -82,3 +82,18 @@ def test_the_parser_carries_the_neutral_name_and_words() -> None:
     assert parser.epilog == cli.PARSER_EPILOG
     for text in (cli.PARSER_DESCRIPTION, cli.PARSER_EPILOG):
         assert not FOREIGN.search(text), text
+
+
+def test_the_servers_own_help_names_openDox_only() -> None:
+    """`python -m opendox.serve --help`, the server entry point's help, under
+    the same rule (adversarial review 2): it printed
+    `usage: ideation-dashboard-serve` and the module's pre-carve docstring."""
+    from opendox import serve
+    done = subprocess.run([sys.executable, "-m", "opendox.serve", "--help"],
+                          capture_output=True, text=True, timeout=120,
+                          env={**os.environ, "COLUMNS": "100"})
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith(f"usage: {serve.SERVE_PROG} "), \
+        done.stdout.splitlines()[0]
+    found = sorted({m.group(0) for m in FOREIGN.finditer(done.stdout)})
+    assert found == [], f"the server's help names {found}:\n{done.stdout}"

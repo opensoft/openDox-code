@@ -167,15 +167,27 @@ class WorkbenchRoutes:
         adapter is stateful -- the harness bridge the entrypoints declare holds
         per-document-thread sessions -- the factory returns ONE instance for
         the life of the process and this accessor hands back that same object
-        on every request. Nothing here may assume a per-request adapter."""
+        on every request. Nothing here may assume a per-request adapter.
+
+        "NO MODEL CONFIGURED" IS ABSENCE TOO (#1144's 16.4; plan 034's T081).
+        An install with no approved binding and no harness declares
+        `doxbench_model.NO_MODEL_CONFIGURED`, and this accessor answers that
+        one port, recognised by identity, as no port: so the catalog route
+        serves the editor-only posture and a turn or an abstract is refused
+        `model_capability_unavailable` before anything is spawned or
+        contacted."""
         if not self.capabilities.get("actions", {}).get("session"):
             return None
         if self.model_port_factory is None:
             return None
         try:
-            return self.model_port_factory()
+            port = self.model_port_factory()
         except Exception:  # noqa: BLE001 - absence is a capability verdict
             return None
+        from opendox import doxbench_model
+        if port is doxbench_model.NO_MODEL_CONFIGURED:
+            return None
+        return port
 
     # The largest corpus one tile's index is built from. A bound, not a
     # policy: a tile's staged set is a topic folder, and an index that grew
@@ -554,10 +566,20 @@ class WorkbenchRoutes:
                 doxbench_error_status(DOXBENCH_ERR_INVALID_TURN_REQUEST),
                 doxbench_error_body(DOXBENCH_ERR_INVALID_TURN_REQUEST))
             return
-        # openDox's OWN scope type (`doxbench_scope_types`), no seam (T084)
-        key = ScopeKey(
-            repository=fields["repository"], ref=fields["ref"],
-            tile_kind=fields["tile_kind"], tile_id=fields["tile_id"])
+        # openDox's OWN scope type (`doxbench_scope_types`), no seam (T084).
+        # It refuses a `tile_kind` outside its closed vocabulary with a
+        # `ValueError`, which used to escape and drop the connection
+        # (adversarial review 2, L1). An unknown kind is a malformed query,
+        # answered as a missing field is.
+        try:
+            key = ScopeKey(
+                repository=fields["repository"], ref=fields["ref"],
+                tile_kind=fields["tile_kind"], tile_id=fields["tile_id"])
+        except ValueError:
+            self._send_json(
+                doxbench_error_status(DOXBENCH_ERR_INVALID_TURN_REQUEST),
+                doxbench_error_body(DOXBENCH_ERR_INVALID_TURN_REQUEST))
+            return
         worktree = self._session_worktree_for(key)
         if worktree is None:
             # No live session on this scope. A DISTINCT cause (adversarial
@@ -1720,6 +1742,30 @@ class WorkbenchRoutes:
         transcript_turns = fields["transcript_turns"]
         turn_buffers = fields["turn_buffers"]
 
+        # ---- the model verdict, AHEAD of step 5 (#1144's 16.4; plan 034's
+        # T081). A plane with NO model port refuses a well-formed turn here,
+        # with step 7's own code and envelope, before the scope is read: a
+        # plane-level verdict outranks any defect in the caller's request, the
+        # rule the validators refusal above keeps. It answers both an install
+        # with no model configured (`doxbench_model.NO_MODEL_CONFIGURED`, which
+        # the accessor answers as no port) and a plane with no factory at all,
+        # and it spawns nothing and contacts nothing. Measured at
+        # openDox-code#71 `e0298cf4`, once T085's validators answered
+        # standalone: without this, a standalone turn reached step 5's scope
+        # import and the connection dropped.
+        #
+        # THE PORT RESOLVED HERE IS THE ONE STEP 7 READS, so the declared
+        # factory runs ONCE per turn. The built-in factories memoize, but the
+        # accessor does not require an injected one to, and a second call
+        # would build a second adapter and discard the first (Copilot at
+        # openDox-code#74 8104fa6e, r4170882125). ----
+        port = self._workbench_model_port()
+        if port is None:
+            self._refuse_turn(validators,
+                              DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
+                              turn_id, failure_kind=failure_kind)
+            return
+
         from opendox import doxbench_hash
         from opendox import doxbench_model
         # The scope authority through its seam (plan 034 T084; #1144 4.3,
@@ -1729,10 +1775,19 @@ class WorkbenchRoutes:
         scope_authority = column_seams.scope.current()
         from opendox import doxbench_turns
 
-        key = ScopeKey(repository=scope_fields["repository"],
-                       ref=scope_fields["ref"],
-                       tile_kind=scope_fields["tile_kind"],
-                       tile_id=scope_fields["tile_id"])
+        try:
+            key = ScopeKey(repository=scope_fields["repository"],
+                           ref=scope_fields["ref"],
+                           tile_kind=scope_fields["tile_kind"],
+                           tile_id=scope_fields["tile_id"])
+        except ValueError:
+            # A scope outside `ScopeKey`'s closed vocabulary (an unknown
+            # `tile_kind`, an empty field) is a malformed request, refused in
+            # the released envelope, never a dropped connection (adversarial
+            # review 2, L1). The released schema refuses most of these first.
+            self._refuse_turn(validators, DOXBENCH_ERR_INVALID_TURN_REQUEST,
+                              turn_id, failure_kind=failure_kind)
+            return
         # ---- step 5: scope, all from SERVER truth ----
         projection = None
         session_base = None
@@ -1883,13 +1938,8 @@ class WorkbenchRoutes:
                               failure_kind=failure_kind)
             return
 
-        # ---- step 7: model ----
-        port = self._workbench_model_port()
-        if port is None:
-            self._refuse_turn(validators,
-                              DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
-                              turn_id, failure_kind=failure_kind)
-            return
+        # ---- step 7: model. `port` is the one resolved, and found present,
+        # ahead of step 5; it is not resolved a second time. ----
         try:
             catalog = port.catalog()
         except Exception:  # noqa: BLE001 - never let a provider-shaped exception reach the wire
@@ -2722,7 +2772,16 @@ class WorkbenchRoutes:
         subject_path = fields["subject_path"]
         model_id = fields["model_id"]
         refresh = fields["refresh"]
-        key = ScopeKey(**fields["scope"])
+        try:
+            key = ScopeKey(**fields["scope"])
+        except ValueError:
+            # An unknown `tile_kind` is outside `ScopeKey`'s closed vocabulary:
+            # the request is malformed, and is answered so rather than with a
+            # dropped connection (adversarial review 2, L1).
+            self._send_json(
+                doxbench_error_status(DOXBENCH_ERR_INVALID_ABSTRACT_REQUEST),
+                doxbench_error_body(DOXBENCH_ERR_INVALID_ABSTRACT_REQUEST))
+            return
 
         # ---- step 4: scope, all from SERVER truth ----
         # THE SCOPE AUTHORITY IS READ HERE, BELOW STEP 1 (plan 034 T084; #1144
