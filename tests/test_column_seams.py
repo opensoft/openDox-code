@@ -363,6 +363,29 @@ def test_a_group_edge_names_its_document_by_id(corpus) -> None:
     assert staged.editable_paths == ("sel.md",)
 
 
+def test_a_selection_file_is_a_path_where_it_spells_another_documents_id(
+        corpus) -> None:
+    """A selection's `files` are PATHS and a group's edges are IDS, and the
+    contract does not forbid one document's path from spelling another
+    document's id (Copilot review of openDox-code#77, r4173844321). Here
+    `sel.md` is the PATH of one document and the ID of another, `a.md`. The
+    selection's file is the document at `sel.md`, and a group edge naming
+    `sel.md` is the document whose id it is."""
+    snapshot = _snapshot()
+    snapshot["documents"] = [
+        {"id": "sel.md", "path": "a.md"},          # an id spelled as a path
+        {"id": "notes/sel", "path": "sel.md"},
+        *({"id": p, "path": p} for p in ("b.md", "c.md", "gone.md"))]
+    snapshot["clusters"][0]["document_edges"] = [
+        {"document": "sel.md"}, {"document": "b.md"}]
+    staged = dc.resolve_scope(snapshot, _key("staged", "s1"), source_root=corpus)
+    assert [(row.id, row.path, row.resolved) for row in staged.sections[0].documents] \
+        == [("sel.md", "sel.md", True)]
+    assert staged.editable_paths == ("sel.md",)
+    group = dc.resolve_scope(snapshot, _key("cluster", "g1"), source_root=corpus)
+    assert group.editable_paths == ("a.md", "b.md")
+
+
 def test_a_listed_document_missing_from_the_tree_is_not_resolved(corpus) -> None:
     projection = dc.resolve_scope(_snapshot(), _key("cluster", "g2"), source_root=corpus)
     rows = {row.path: row.resolved for row in projection.sections[0].documents}
@@ -406,6 +429,40 @@ def test_opendoxs_own_settings_documents_are_never_editable(
     (holder,) = [section for section in projection.sections
                  if settings in {row.path for row in section.documents}]
     assert holder.key == "settings" and holder.owned is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creates symlinks")
+@pytest.mark.parametrize("alias, link, to", [
+    # a file alias, as review r4173903232 names it
+    ("alias.md", "alias.md", "ideation/dashboard/model-provider-bindings.yaml"),
+    # a directory link on the way to one
+    ("cfg/model-declarations.yaml", "cfg", "ideation/dashboard"),
+])
+def test_an_in_root_alias_of_a_settings_document_is_never_editable(
+        corpus, alias, link, to) -> None:
+    """Copilot review of openDox-code#77, r4173903232: `resolve_within`
+    follows a symlink to the canonical file, but the row keeps its alias, so
+    an alias of a settings document compared unequal to every settings path
+    and stayed owned and editable. The file it REACHES is compared now: the
+    alias is readable, in the section nothing owns, and never editable."""
+    for name in dc.SETTINGS_DOCUMENTS:
+        (corpus / name).parent.mkdir(parents=True, exist_ok=True)
+        (corpus / name).write_text("schema_version: 1\n", encoding="utf-8")
+    (corpus / link).parent.mkdir(parents=True, exist_ok=True)
+    (corpus / link).symlink_to(corpus / to)
+    snapshot = _snapshot()
+    snapshot["documents"].append({"id": alias, "path": alias})
+    snapshot["clusters"][0]["document_edges"].append({"document": alias})
+    projection = dc.resolve_scope(snapshot, _key("cluster", "g1"), source_root=corpus)
+    assert projection.editable_paths == ("a.md", "b.md")
+    assert alias not in projection.active_document_candidates
+    owned = {row.path for section in projection.sections if section.owned
+             for row in section.documents}
+    assert alias not in owned
+    (holder,) = [section for section in projection.sections
+                 if alias in {row.path for row in section.documents}]
+    assert holder.key == "settings" and holder.owned is False
+    assert alias in projection.context_paths, "readable, never editable"
 
 
 def test_the_editable_set_refuses_a_settings_document_in_any_section() -> None:

@@ -97,3 +97,16 @@ def test_the_servers_own_help_names_openDox_only() -> None:
         done.stdout.splitlines()[0]
     found = sorted({m.group(0) for m in FOREIGN.finditer(done.stdout)})
     assert found == [], f"the server's help names {found}:\n{done.stdout}"
+
+
+def test_the_servers_help_states_loopback_as_the_default_bind() -> None:
+    """Loopback is the server's DEFAULT bind, not a promise: `--host` takes any
+    address, and a hosted install serves through this entry point (Copilot
+    review of openDox-code#77, r4173844338). The help said every run served
+    "locally ... on a loopback address", which a hosted run is not. Where it
+    names loopback, it names the option that replaces it."""
+    from opendox import serve
+    text = " ".join(serve.SERVE_DESCRIPTION.split())
+    assert "loopback" in text, text
+    assert "unless --host" in text, text
+    assert not re.search(r"\blocally\b", text), text
