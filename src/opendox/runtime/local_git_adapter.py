@@ -3133,12 +3133,17 @@ class WorkingTreeCorpus(LocalGitCorpus):
         """The parent's verdict, over the documents this corpus LISTS.
 
         `subjects=None` means the whole corpus (`CorpusAdapter.check`), and
-        the whole corpus is what `list_documents` lists. So a finding on an
-        excluded path is left out of a whole-corpus check, and an edited,
-        committed bindings document is not reported as an uncommitted document
-        the corpus does not hold (Copilot at openDox-code#76, r4170556938). A
-        subject the caller NAMES is answered whether or not it is excluded:
-        asking about one file by name is not asking about the corpus."""
+        an excluded path is not in the corpus this class lists. So a finding
+        on an excluded path is left out of a whole-corpus check, and an
+        edited, committed bindings document is not reported as an uncommitted
+        document the corpus does not hold (Copilot at openDox-code#76,
+        r4170556938). THAT IS ALL THIS FILTER DOES: every other finding the
+        parent reports stands as it did before T082, including one on a
+        tracked path deleted from the working tree, which the listing omits
+        (`_list_documents_bound`) and the parent's diff still reports as a
+        divergence from the resolved commit. A subject the caller NAMES is
+        answered whether or not it is excluded: asking about one file by name
+        is not asking about the corpus."""
         findings = super().check(corpus, subjects)
         if subjects is not None or not self._excluded:
             return findings

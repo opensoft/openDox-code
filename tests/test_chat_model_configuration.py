@@ -1178,9 +1178,13 @@ def test_documents_answer_alike(postures, method, path, body) -> None:
 
 # ---- generation ----
 
-def test_generation_answers_alike(postures, tmp_path) -> None:
+def test_generation_answers_alike(postures, tmp_path, monkeypatch) -> None:
     """The `generate` verb, run over each checkout as a lone openDox, writes the
-    same snapshot, and it is the one each posture serves."""
+    same snapshot, and it is the one each posture serves. Each run gets the
+    PATH the two servers started with, with no `omp` on it, so "no model"
+    is no model here too (Copilot at openDox-code#76 0b0f038e): the
+    `postures` fixture restores the ambient PATH once its children start."""
+    monkeypatch.setenv("PATH", _no_omp_path(tmp_path))
     written = []
     for name in POSTURES:
         output = tmp_path / f"{name.replace(' ', '-')}.json"
