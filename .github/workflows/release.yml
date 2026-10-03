@@ -22,13 +22,16 @@ name: release
 # openDox root pins that commit (plan 034 T087), and then this workflow is
 # dispatched at the cut. `main`'s head may have moved past the pinned commit by
 # then (T095 lands later), so the head is never required: the run's commit
-# must equal the root's pin and be on `main`. The dispatch names `main`, or
-# the tag `v<version>` created at the pinned commit, and no other tag.
+# must equal the root's pin and be on `main`. A dispatch runs at the head of
+# the ref it names, so it names the tag `v<version>`, created at the pinned
+# commit, or `main` only while `main`'s head is still that commit. No other
+# tag is accepted.
 #
 # FOUR JOBS, EACH GATED ON THE ONE BEFORE IT:
 #   build            builds the sdist and the wheel in a clean job, runs
 #                    `twine check`, VERIFIES both before any upload, and
-#                    installs the wheel into a fresh venv. It holds no token.
+#                    installs the wheel into a fresh venv. It mints no
+#                    identity token, and its GITHUB_TOKEN reads only.
 #   testpypi         the dry run: publishes those exact bytes to TestPyPI,
 #                    in the `testpypi` environment.
 #   testpypi-install installs `opendox[local]` from TestPyPI into a fresh
@@ -36,12 +39,14 @@ name: release
 #   pypi             publishes the same bytes to PyPI, in the `pypi`
 #                    environment.
 #
-# NO TOKEN AND NO SECRET, ANYWHERE. Both uploads use PyPI's trusted publishing
-# (OIDC): the job asks GitHub for a short-lived identity token, and the index
-# accepts it only for the publisher configured on its side (owner `opensoft`,
-# repository `openDox-code`, workflow `release.yml`, and the environment the
-# job runs in). `id-token: write` is granted to the two publish jobs and to no
-# other job.
+# NO PyPI TOKEN AND NO STORED SECRET, ANYWHERE. Both uploads use PyPI's
+# trusted publishing (OIDC): the job asks GitHub for a short-lived identity
+# token, and the index accepts it only for the publisher configured on its side
+# (owner `opensoft`, repository `openDox-code`, workflow `release.yml`, and the
+# environment the job runs in). `id-token: write` is granted to the two publish
+# jobs and to no other job. The one other credential is GitHub's own automatic
+# `GITHUB_TOKEN`, which the build job passes to `gh` for its two API reads,
+# with `contents: read` and `actions: read` and nothing more.
 #
 # EVERY ACTION IS PINNED BY FULL COMMIT SHA, with its release tag beside it.
 # (`validate.yml` pins by tag. A tag can be moved after review, and a commit
@@ -142,7 +147,9 @@ jobs:
               sys.exit(f"::error::the openDox root's code pin names no full commit: {pinned!r}")
           if pinned != this:
               sys.exit(f"::error::this run is at {this}, and the openDox root pins {pinned}; "
-                       "a release publishes only the pinned commit")
+                       "a release publishes only the pinned commit. A dispatch runs at the "
+                       "head of the ref it names, so dispatch on the tag v<version> created "
+                       f"at {pinned}")
           print(f"{this} is the commit opensoft/openDox main pins for {here}")
           PY
           status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq .status)"
@@ -529,33 +536,36 @@ jobs:
           python-version: '3.12'
 
       # TestPyPI serves exactly the two files the build job verified. Its JSON
-      # API can lag the upload by a little, so it is read up to 20 times, 15
-      # seconds apart, before this step refuses.
+      # API can lag the upload, answering 404 or a partial release for a
+      # while, so it is read up to 20 times, 15 seconds apart, until it serves
+      # exactly those two files, before this step refuses.
       - name: TestPyPI serves the files the build job verified
         run: |
           python - <<'PY'
           import json, os, sys, time, urllib.error, urllib.request
 
           url = f"https://test.pypi.org/pypi/opendox/{os.environ['VERSION']}/json"
+          wanted = {os.environ["WHEEL"]: os.environ["WHEEL_SHA256"],
+                    os.environ["SDIST"]: os.environ["SDIST_SHA256"]}
+          served = None
           for attempt in range(1, 21):
               try:
                   with urllib.request.urlopen(url, timeout=30) as response:
                       release = json.load(response)
-                  break
+                  served = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
+                  if served == wanted:
+                      break
+                  print(f"attempt {attempt}: TestPyPI serves {served} so far")
               except urllib.error.URLError as error:
                   code = getattr(error, "code", None)
                   if code is not None and code != 404 and code < 500:
                       raise
                   print(f"attempt {attempt}: {url} did not answer yet ({error})")
-                  time.sleep(15)
+              time.sleep(15)
           else:
-              sys.exit(f"::error::{url} never answered")
-          served = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
-          wanted = {os.environ["WHEEL"]: os.environ["WHEEL_SHA256"],
-                    os.environ["SDIST"]: os.environ["SDIST_SHA256"]}
-          print(f"TestPyPI serves {served}")
-          if served != wanted:
-              sys.exit(f"::error::TestPyPI serves {served}, and the build job verified {wanted}")
+              sys.exit(f"::error::after 20 reads, TestPyPI serves {served}, "
+                       f"and the build job verified {wanted}")
+          print(f"TestPyPI serves exactly the verified files: {served}")
           PY
 
       # T099's DRY-RUN FALSIFIER, as plan 034 writes it, in a fresh venv:
