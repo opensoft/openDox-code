@@ -31,7 +31,9 @@ provider-agnostic about the request grammar and refuses to name an endpoint it
 would then be accountable for. So provider routing is the CONSUMER's fact, and
 the consumer's declared record is where a fact the consumer owns belongs.
 Declaring a route is not holding a transport: nothing here opens a socket, and
-the module still names no provider host of its own.
+the module still names no provider host of its own. #1144 box 16.2 gave the
+route a third fact, `model`: the model name the provider receives. It is the
+consumer's fact for the same reason.
 
 THE BROKER INVOCATION IS DECLARED, NOT WRITTEN INTO CODE — the program and its
 fixed leading arguments. `broker_argv` is the BASE invocation and names no
@@ -133,9 +135,14 @@ ENDPOINT_SCHEMES: tuple[str, ...] = ("https://", "http://")
 #: `provider` and `approved_by` are REQUIRED flags of the declared `intake`
 #: (`--provider`, `--approved-by`; the second because `credential-contracts`
 #: holds that a grant without an approver is invalid), and `endpoint`/`dialect`
-#: are the provider route the mint answer deliberately does not carry. STILL NO
-#: SECRET FIELD: nine fields, and the absence of a tenth is the same point the
-#: absence of a sixth was.
+#: are the provider route the mint answer deliberately does not carry.
+#:
+#: AND FROM NINE TO TEN BY #1144 box 16.2 (plan 034 T079): `model`, the model
+#: name the provider receives as the request's model. It sits with the route
+#: it belongs to, after `dialect`. Before it, the request named the catalog
+#: handle, which is this binding's `id`, so no provider model could be named.
+#: STILL NO SECRET FIELD: ten fields, and the absence of an eleventh is the
+#: same point the absence of a sixth was.
 BINDING_FIELDS: tuple[str, ...] = (
     "id",
     "label",
@@ -145,8 +152,15 @@ BINDING_FIELDS: tuple[str, ...] = (
     "approved_by",
     "endpoint",
     "dialect",
+    "model",
     "broker_argv",
 )
+
+#: The one field a stored record may leave out. A record without `model` was
+#: declared before the field existed, and it keeps the meaning it had: the
+#: request names the catalog handle, this binding's `id`. Every other field is
+#: required, as it always was.
+OPTIONAL_BINDING_FIELDS: tuple[str, ...] = ("model",)
 
 #: The CLOSED placeholder vocabulary an argv template may name. Every member is
 #: a field of the binding itself, which is the property that matters: a template
@@ -154,7 +168,9 @@ BINDING_FIELDS: tuple[str, ...] = (
 #: substitution can smuggle a value the record does not carry. A template naming
 #: anything outside this set is refused at construction rather than at
 #: execution — an operator finds out when they declare the binding, not when a
-#: turn fails.
+#: turn fails. `model` is not a member: a broker's invocation is about custody,
+#: never about which model a turn asks for, and an undeclared model has no
+#: value to fill a placeholder with.
 ARGV_PLACEHOLDERS: tuple[str, ...] = (
     "binding_id", "label", "provider", "credential_ref", "auth_kind",
     "approved_by", "endpoint", "dialect")
@@ -195,12 +211,19 @@ def _require_non_blank_str(field: str, value: object) -> str:
 class ModelProviderBinding:
     """ONE model provider, as settings hold it.
 
-    Nine fields, and the absence of a tenth is the point (see the module
+    Ten fields, and the absence of an eleventh is the point (see the module
     docstring). `broker_argv` is the DECLARED BASE invocation as a tuple of argv
     members — argv, never a shell string, so no operator's label and no
     credential reference can ever be read as shell syntax. It names the program
     and its fixed leading arguments and NOT the operation: the operation is a
     declared subcommand `doxbench_provider` appends.
+
+    `model` (#1144 box 16.2) is the model name the provider receives as the
+    request's model. It is KEYWORD-ONLY and defaults to None, so every
+    construction written before it existed still builds the binding it built.
+    That binding keeps its old meaning: with no model declared, the request
+    names the catalog handle, which is the binding's `id`, exactly as before.
+    A declared model is a non-blank string.
     """
 
     id: str
@@ -211,12 +234,15 @@ class ModelProviderBinding:
     approved_by: str
     endpoint: str
     dialect: str
+    model: str | None = dataclasses.field(default=None, kw_only=True)
     broker_argv: tuple[str, ...]
 
     def __post_init__(self) -> None:
         for field in ("id", "label", "provider", "credential_ref", "auth_kind",
                       "approved_by", "endpoint", "dialect"):
             _require_non_blank_str(field, getattr(self, field))
+        if self.model is not None:
+            _require_non_blank_str("model", self.model)
         if self.auth_kind not in AUTH_KINDS:
             raise BindingRefused(
                 f"auth_kind {self.auth_kind!r} is outside the closed "
@@ -259,7 +285,8 @@ class ModelProviderBinding:
     def as_record(self) -> dict:
         """The STORED record: the record kind, then exactly ``BINDING_FIELDS``
         in order. `broker_argv` becomes a list because that is what YAML round
-        trips; nothing else changes shape."""
+        trips. An undeclared `model` is written as null, so every stored
+        record carries all ten keys; nothing else changes shape."""
         return {
             "kind": BINDING_KIND,
             "id": self.id,
@@ -270,6 +297,7 @@ class ModelProviderBinding:
             "approved_by": self.approved_by,
             "endpoint": self.endpoint,
             "dialect": self.dialect,
+            "model": self.model,
             "broker_argv": list(self.broker_argv),
         }
 
@@ -334,7 +362,9 @@ class ModelProviderBinding:
             raise BindingRefused(
                 f"a binding record declares kind {declared_kind!r}, not "
                 f"{BINDING_KIND!r}")
-        missing = [field for field in BINDING_FIELDS if field not in record]
+        missing = [field for field in BINDING_FIELDS
+                   if field not in record
+                   and field not in OPTIONAL_BINDING_FIELDS]
         if missing:
             raise BindingRefused(
                 f"a binding record is missing {missing}")
@@ -347,6 +377,7 @@ class ModelProviderBinding:
             approved_by=record["approved_by"],
             endpoint=record["endpoint"],
             dialect=record["dialect"],
+            model=record.get("model"),
             broker_argv=record["broker_argv"],
         )
 

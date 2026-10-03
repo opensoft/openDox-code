@@ -704,9 +704,13 @@ _DIALECT_ARMS: dict[str, tuple] = {
 }
 
 
-def _post_to_provider(token: MintedToken, *, model_id: str, prompt: str,
+def _post_to_provider(token: MintedToken, *, model: str, prompt: str,
                       timeout: float, opener) -> str:
     """The ONE place a provider is contacted. Returns the assistant prose.
+
+    `model` is the model name the request carries, which the port chose (the
+    binding's declared `model`, or the catalog handle for a binding that
+    declares none).
 
     The token travels in the request's authorization header and nowhere else;
     it is not in the URL (which a proxy logs), not in the body (which an error
@@ -731,7 +735,7 @@ def _post_to_provider(token: MintedToken, *, model_id: str, prompt: str,
             f"{DIALECTS}; the binding refuses it at declaration, so no turn "
             "can carry one")
     build_request, read_answer = arm
-    body = json.dumps(build_request(model_id, prompt)).encode("utf-8")
+    body = json.dumps(build_request(model, prompt)).encode("utf-8")
     request = urllib.request.Request(  # noqa: S310 - endpoint declared on the binding by its operator, carried on the minted token
         token.endpoint, data=body, method="POST")
     request.add_header("Content-Type", "application/json")
@@ -909,15 +913,21 @@ class BrokeredProviderPort:
             unrelated issuances. The expired mint's reference is read off the
             token this turn is holding and lives no longer than the turn;
           * a SECOND expiry inside the same turn raises the standard refusal.
-            No third call is bought."""
-        model_id = getattr(prompt_envelope, "model_id", None)
-        if not isinstance(model_id, str) or not model_id:
+            No third call is bought.
+
+        THE REQUEST'S MODEL IS THE BINDING'S DECLARED `model` (#1144 box
+        16.2). A binding that declares none sends the catalog handle, which is
+        what every request sent before the field existed, byte for byte."""
+        handle = getattr(prompt_envelope, "model_id", None)
+        if not isinstance(handle, str) or not handle:
             entries = self._declared_catalog.entries
-            model_id = entries[0].model_id if entries else ""
+            handle = entries[0].model_id if entries else ""
+        declared_model = self._binding.model
+        model = declared_model if declared_model is not None else handle
         prompt = bridge_mod.render_prompt_message(prompt_envelope)
         token = self._current_token(REASON_FIRST_MINT)
         try:
-            prose = _post_to_provider(token, model_id=model_id, prompt=prompt,
+            prose = _post_to_provider(token, model=model, prompt=prompt,
                                       timeout=self._timeout_seconds,
                                       opener=self._opener)
         except _TokenExpired:
@@ -932,7 +942,7 @@ class BrokeredProviderPort:
             self._record(REASON_PAID_RETRY)
             try:
                 prose = _post_to_provider(
-                    token, model_id=model_id, prompt=prompt,
+                    token, model=model, prompt=prompt,
                     timeout=self._timeout_seconds, opener=self._opener)
             except _TokenExpired:
                 self._forget_token()
