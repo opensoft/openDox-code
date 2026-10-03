@@ -1059,6 +1059,59 @@ def test_a_local_verb_connects_only_behind_a_verified_server(
         assert reason is not None and expected in reason, reason
 
 
+@pytest.mark.parametrize("lacking", ["O_NOFOLLOW", "getuid", "AF_UNIX", "dir_fd"])
+def test_a_platform_without_the_posix_primitives_is_the_named_refusal(
+        monkeypatch, tmp_path: Path, short_state: Path, lacking: str) -> None:
+    """The bundle rests on POSIX primitives, and the carrier ships Windows
+    wheels too (Copilot review of #69). Lacking any one, a start and the
+    local verbs' socket check both name the gap, never an `AttributeError`."""
+    import socket as socket_mod
+
+    if lacking == "AF_UNIX":
+        monkeypatch.delattr(socket_mod, "AF_UNIX")
+    elif lacking == "dir_fd":
+        monkeypatch.setattr(bundle_mod, "MKDIR_TAKES_DIR_FD", False)
+    else:
+        monkeypatch.delattr(bundle_mod.os, lacking)
+    expected = {"dir_fd": "mkdir with dir_fd", "AF_UNIX": "socket.AF_UNIX"}.get(
+        lacking, f"os.{lacking}")
+    server = _prepared(monkeypatch, tmp_path, short_state)
+    with pytest.raises(bundle_mod.BundleRefused) as caught:
+        server.start()
+    assert "needs a POSIX platform" in str(caught.value), caught.value
+    assert expected in str(caught.value), caught.value
+    assert not (short_state / "postgres").exists(), "made directories first"
+    reason = bundle_mod.refusal_before_connecting(config.DatabaseBundle(short_state))
+    assert reason is not None and expected in reason, reason
+
+
+def test_a_symlink_loop_in_the_state_path_is_a_reason_not_a_traceback(
+        tmp_path: Path, short_state: Path) -> None:
+    """`Path.resolve()` raises for a symbolic-link loop (`RuntimeError` on
+    Python 3.12), and the local verbs' socket check must still answer with
+    a reason (Copilot review of #69)."""
+    loop = short_state / "loop"
+    loop.symlink_to(loop)
+    reason = bundle_mod.refusal_before_connecting(
+        config.DatabaseBundle(loop / "state"))
+    assert reason is not None, reason
+    assert "could not be judged" in reason or "symbolic link" in reason, reason
+
+
+def test_status_reports_no_pid_behind_a_tree_it_refuses(
+        monkeypatch, short_state: Path) -> None:
+    """A pid is reported only behind a verified tree (Copilot review of
+    #69): `running_pid` alone would answer for whatever `postgres/data` is,
+    another live bundle's included."""
+    bundle = _a_tree(short_state)
+    monkeypatch.setattr(bundle_mod, "running_pid", lambda b: 4242)
+    monkeypatch.setattr(bundle_mod, "refusal_before_connecting",
+                        lambda b: "refused, for the case")
+    assert bundle_mod.report(bundle)["pid"] is None
+    monkeypatch.setattr(bundle_mod, "refusal_before_connecting", lambda b: None)
+    assert bundle_mod.report(bundle)["pid"] == 4242
+
+
 def test_an_initdb_that_dies_midway_leaves_no_data_directory(
         monkeypatch, tmp_path: Path, short_state: Path) -> None:
     """The half-built cluster: `PG_VERSION` written, then the run fails. The

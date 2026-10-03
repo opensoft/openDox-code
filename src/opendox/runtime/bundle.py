@@ -74,6 +74,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -124,6 +125,42 @@ class BundleRefused(Exception):
     One exception, because the caller does nothing different for any of them:
     the local install does not start.
     """
+
+
+#: Whether `os.mkdir` takes `dir_fd` here, read ONCE at import: a case that
+#: stands a wrapper in for `os.mkdir` must not read as another platform.
+MKDIR_TAKES_DIR_FD = os.mkdir in os.supports_dir_fd
+
+
+def unsupported_platform() -> str | None:
+    """Why this platform cannot run the local install's bundled server, or `None`.
+
+    The bundle is a POSIX design, and every one of its guarantees rests on a
+    POSIX primitive. The socket is a Unix socket, and authentication is peer,
+    by the kernel's uid. The directories are judged by uid and made without
+    following a link (`os.getuid`, `O_DIRECTORY`, `O_NOFOLLOW`, a `dir_fd`
+    `mkdir`, `fchmod`). The carrier ships wheels for Windows too, and there
+    a start failed as a generic `AttributeError` and `status` raised one
+    (Copilot review of openDox-code#69). So the gap is named first, as
+    `runtime/local_git_adapter.py`'s `refuse_without_the_no_follow_walk`
+    names its own.
+    """
+    missing = [name for name, present in (
+        ("os.getuid", hasattr(os, "getuid")),
+        ("os.O_DIRECTORY", hasattr(os, "O_DIRECTORY")),
+        ("os.O_NOFOLLOW", hasattr(os, "O_NOFOLLOW")),
+        ("os.fchmod", hasattr(os, "fchmod")),
+        ("mkdir with dir_fd", MKDIR_TAKES_DIR_FD),
+        ("socket.AF_UNIX", hasattr(socket, "AF_UNIX")),
+    ) if not present]
+    if not missing:
+        return None
+    return (f"the local install's bundled PostgreSQL server needs a POSIX "
+            f"platform, and this one ({sys.platform}) lacks "
+            f"{', '.join(missing)}: its socket is a Unix socket authenticated "
+            "by peer, and its directories are judged by owner and made "
+            "without following a link. Use a hosted install here "
+            f"({PREFIX}INSTALL_MODE=hosted, with an operator's database)")
 
 
 def _distribution_search_path() -> list[str]:
@@ -331,13 +368,21 @@ def refusal_before_connecting(bundle: DatabaseBundle) -> str | None:
         `/proc` cannot say what the pid is, the other answers still bind
         the socket to this tree.
     """
+    gap = unsupported_platform()
+    if gap is not None:
+        return gap
     try:
         refuse_an_unsafe_tree(bundle, existing_only=True)
     except BundleRefused as exc:
         return str(exc)
-    except OSError as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
+        # A SYMBOLIC-LINK LOOP OR A NUL IS A REASON TOO (Copilot review of
+        # openDox-code#69): `Path.resolve()` raises `RuntimeError` for a loop
+        # (Python 3.12) and the `os` calls `ValueError` for an embedded NUL,
+        # and either would otherwise escape as the CLI's generic failure.
         return (f"the bundled server's path under {bundle.state_dir} could "
-                f"not be judged ({type(exc).__name__})")
+                f"not be judged ({type(exc).__name__}): it is not a tree "
+                "this install can verify")
     lock = bundle.data_dir / "postmaster.pid"
     try:
         lines = lock.read_text(encoding="utf-8").splitlines()
@@ -365,10 +410,19 @@ def refusal_before_connecting(bundle: DatabaseBundle) -> str | None:
 
 
 def report(bundle: DatabaseBundle) -> dict[str, Any]:
-    """The `database_bundle` block `runtime status` prints (#1144 13.1)."""
+    """The `database_bundle` block `runtime status` prints (#1144 13.1).
+
+    THE PID ONLY BEHIND A VERIFIED TREE (Copilot review of openDox-code#69).
+    `running_pid` reads the lock file through whatever `postgres/data` is,
+    so a `data` linked to another live bundle answered with THAT server's
+    pid, while the connection guard refused the same tree. A pid is
+    reported only where `refusal_before_connecting` has nothing to say, so
+    `status` never claims a server it would not connect to.
+    """
+    verified = refusal_before_connecting(bundle) is None
     return {"data_dir": str(bundle.data_dir),
             "socket_dir": str(bundle.socket_dir),
-            "pid": running_pid(bundle)}
+            "pid": running_pid(bundle) if verified else None}
 
 
 def _child_environment() -> dict[str, str]:
@@ -742,6 +796,9 @@ class BundledServer:
     # -- start -------------------------------------------------------------
 
     def start(self) -> BundledServer:
+        gap = unsupported_platform()
+        if gap is not None:
+            raise BundleRefused(gap)
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             raise BundleRefused(
                 "the bundled PostgreSQL server refuses to run as root, and so "
@@ -1115,5 +1172,6 @@ class BundledServer:
 
 __all__ = ["BUNDLE_PORT", "BundleRefused", "BundledServer",
            "authentication_files", "isolated_from_libpq_environment",
-           "os_user", "report", "running_pid", "server_binaries",
+           "os_user", "refusal_before_connecting", "refuse_an_unsafe_tree",
+           "report", "running_pid", "server_binaries", "unsupported_platform",
            "write_authentication"]
