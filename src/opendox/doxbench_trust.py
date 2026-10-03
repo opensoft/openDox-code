@@ -378,11 +378,18 @@ def _operand(value: str) -> str:
 def trust_command(binding_id: str, root: str | None = None) -> str:
     """The command that trusts `binding_id`. The id and the root come from a
     repository and a checkout, and a refusal that printed them bare would hand
-    a pasted command, or a terminal, whatever they hold (`_operand`)."""
-    command = f"opendox model-binding trust {_operand(binding_id)}"
+    a pasted command, or a terminal, whatever they hold (`_operand`).
+
+    The options come first and the id last, after `--` where the id itself
+    begins with `-`, so the command, run as printed, trusts the binding it
+    names whatever its id looks like to an option parser (Copilot at
+    openDox-code#82, r4174632060)."""
+    command = "opendox model-binding trust"
     if root is not None:
         command += f" --repo-root {_operand(root)}"
-    return command
+    if binding_id.startswith("-"):
+        command += " --"
+    return f"{command} {_operand(binding_id)}"
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +527,9 @@ def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
         # nothing a policy chose: it is raised as it is. Any other policy's
         # refusal is named by its class alone, since its words are whatever
         # that policy wrapped (Copilot at openDox-code#82, review 5402101086).
-        if isinstance(registered, MachineTrust):
+        # "openDox's own" is the exact class: a host's subclass may override
+        # `record` with words of its own (r4174632006).
+        if type(registered) is MachineTrust:
             raise
         verdict = TrustVerdict.untrusted_for(
             binding, root=root, basis=BASIS_HOST,
@@ -618,6 +627,13 @@ def _unsafe_because(info: os.stat_result, *, uid: int, own: bool,
         return kind
     return (_unsafe_own(info, uid=uid) if own
             else _unsafe_ancestor(info, uid=uid))
+
+
+def _store_refused_whole(path: Path | str, size: int) -> TrustStoreRefused:
+    return TrustStoreRefused(
+        f"the model-binding trust store {shown(str(path))} would grow to "
+        f"{size} bytes, larger than the {MAX_TRUST_STORE_BYTES} it reads, so "
+        "this trust is not recorded and every trust already held stays held")
 
 
 def _store_refused(path: Path | str, reason: str) -> TrustStoreRefused:
@@ -998,6 +1014,12 @@ class MachineTrust:
         payload = (json.dumps(document, indent=2, sort_keys=True,
                               ensure_ascii=True) + "\n").encode("ascii")
         target = state / TRUST_FILENAME
+        if len(payload) > MAX_TRUST_STORE_BYTES:
+            # The read bound is the write bound: a store this writes is one
+            # it can read again, so a record that would outgrow it is refused
+            # before anything is replaced, and every trust held stays held
+            # (Copilot at openDox-code#82, r4174632086).
+            raise _store_refused_whole(target, len(payload))
         temporary = state / f".{TRUST_FILENAME}.opendox-{os.getpid()}"
         try:
             os.unlink(temporary)    # an interrupted write's; a link itself, never its target

@@ -339,8 +339,8 @@ def _cli(*argv: str) -> int:
 
 
 def _command(root: Path) -> str:
-    return (f"opendox model-binding trust {BINDING_ID} --repo-root "
-            f"{root.resolve()}")
+    return (f"opendox model-binding trust --repo-root {root.resolve()} "
+            f"{BINDING_ID}")
 
 
 # ===========================================================================
@@ -1036,6 +1036,51 @@ def test_a_state_directory_that_cannot_resolve_trusts_nothing(served,
     served.nothing_was_touched()
 
 
+def test_a_record_that_would_outgrow_the_read_bound_is_refused(
+        served, monkeypatch):
+    """Copilot at openDox-code#82 (r4174632086). The store reads nothing
+    larger than `MAX_TRUST_STORE_BYTES`, so it writes nothing larger either:
+    a record that would outgrow the bound is refused by name, before the
+    store is replaced, and every trust already recorded still holds."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    first = served.declared()
+    served.trust.record(first, root=served.repo)
+    path = served.state_dir / trust_mod.TRUST_FILENAME
+    held = path.read_bytes()
+    monkeypatch.setattr(trust_mod, "MAX_TRUST_STORE_BYTES", len(held) + 16)
+    second = served.fresh_repository("r2")
+    with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+        served.trust.record(first, root=second)
+    assert "larger" in str(refused.value)
+    assert path.read_bytes() == held
+    assert served.trust.verdict(first, root=served.repo).trusted
+    assert not served.trust.verdict(first, root=second).trusted
+
+
+@pytest.mark.parametrize("binding_id", ["-dash-model", "--repo-root",
+                                        BINDING_ID])
+def test_the_printed_trust_command_trusts_the_binding_it_names(
+        served, capsys, binding_id):
+    """Copilot at openDox-code#82 (r4174632060). A valid id may begin with
+    `-`. The command a refusal prints, run as printed, trusts exactly that
+    binding, whatever its id looks like to an option parser."""
+    import shlex as shlex_mod
+
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env", id=binding_id))
+    port = served.port()
+    capsys.readouterr()
+    with pytest.raises(trust_mod.BindingUntrusted) as refused:
+        port.dispatch(_Envelope())
+    command = str(refused.value).rsplit("trust it with: ", 1)[1]
+    argv = shlex_mod.split(command)
+    assert argv[:3] == ["opendox", "model-binding", "trust"]
+    assert _cli(*argv[1:]) == 0
+    assert served.trust.verdict(served.declared(), root=served.repo).trusted
+    served.nothing_was_touched()
+
+
 def test_a_store_that_cannot_be_locked_records_nothing(served, monkeypatch):
     """Where the platform or the file system offers no lock, `record` is
     refused by name and writes nothing, rather than risk losing a trust."""
@@ -1256,9 +1301,26 @@ class _RecordStoreRefuses(_Declines):
         raise _trust_mod().TrustStoreRefused(SECRET)
 
 
+class _SubclassStoreRefuses:
+    """A HOST policy built on `MachineTrust` whose `record` raises the store's
+    refusal class with text of its own (Copilot at openDox-code#82,
+    r4174632006): a subclass is not openDox's own store, so its words never
+    pass through."""
+
+    def __new__(cls):
+        trust_mod = _trust_mod()
+
+        class _Sub(trust_mod.MachineTrust):
+            def record(self, binding, *, root):
+                raise trust_mod.TrustStoreRefused(SECRET)
+
+        return _Sub(state_dir="/nonexistent-t100-subclass")
+
+
 RECORDING_POLICIES = {"declines": _Declines, "records-another": _RecordsAnother,
                       "raises": _RecordRaises, "refuses": _RecordRefuses,
-                      "store-refuses": _RecordStoreRefuses}
+                      "store-refuses": _RecordStoreRefuses,
+                      "subclass-store-refuses": _SubclassStoreRefuses}
 
 
 @pytest.mark.parametrize("policy", sorted(RECORDING_POLICIES))
@@ -1294,7 +1356,7 @@ def test_add_edit_and_trust_refuse_when_the_policy_does_not_record_trust(
         assert "RuntimeError" in captured.err
     if policy == "refuses":
         assert "BindingRefused" in captured.err
-    if policy == "store-refuses":
+    if policy in ("store-refuses", "subclass-store-refuses"):
         assert "TrustStoreRefused" in captured.err
 
 
