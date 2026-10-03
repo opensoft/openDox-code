@@ -793,10 +793,12 @@ jobs:
       # that lags) is tried again. Only then does `opendox --help` run.
       #
       # THE TRADE, stated: with two indexes, pip may take a dependency from
-      # either. The lock pins every dependency's version, and this job holds no
-      # token, no OIDC grant and no secret, and publishes nothing. What it can
-      # spoil is its own verdict, and the files PyPI receives are still the
-      # build job's, checked by digest in the `pypi` job.
+      # either. The lock pins every dependency's version. This step receives
+      # no token, no OIDC grant and no secret: the job's GITHUB_TOKEN
+      # (`contents: read`) is used only by the checkout above, which does not
+      # persist it, and the job publishes nothing. What it can spoil is its
+      # own verdict, and the files PyPI receives are still the build job's,
+      # checked by digest in the `pypi` job.
       - name: install opendox[local] from TestPyPI into a fresh venv, and run it
         timeout-minutes: 60
         run: |
