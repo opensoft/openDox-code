@@ -1110,6 +1110,27 @@ class WorkbenchRoutes:
             self._intake_refusal(DOXBENCH_ERR_INVALID_INTAKE_REQUEST,
                                  str(error))
             return
+        # THE BROKER IS THE SERVED REPOSITORY'S, SO IT RUNS ONLY IF TRUSTED
+        # (#1144 16.3a, T007 batch M; RULED openxFactory#656 comment
+        # 5962785556, item 2). The broker above comes from the repository's
+        # declarations document, which no binding's trust admits, so the
+        # registered trust policy is asked about the binding being declared.
+        # openDox's strict default refuses it; a host's own policy may admit
+        # it. Refused here, before any byte of the body is read, and the
+        # body is drained unread.
+        from opendox import doxbench_trust
+        try:
+            verdict = doxbench_trust.policy().verdict(
+                binding, root=Path(self.checkout_root))
+        except Exception:  # noqa: BLE001 - a policy that fails admits nothing
+            verdict = None
+        if not (isinstance(verdict, doxbench_trust.TrustVerdict)
+                and verdict.admits(binding)):
+            if length > 0:
+                _drain_refused_body(self.rfile, length)
+            self._intake_refusal(DOXBENCH_ERR_INTAKE_REFUSED,
+                                 doxbench_trust.INTAKE_BROKER_UNTRUSTED)
+            return
         accepts_secret = (
             declared["kind"] == doxbench_binding.AUTH_KIND_API_KEY)
         source = (_CredentialStream(self.rfile, length)
@@ -1124,7 +1145,10 @@ class WorkbenchRoutes:
             # a credential for no reason at all.
             _drain_refused_body(self.rfile, length)
         try:
-            reference = doxbench_provider.hand_off_credential(binding, source)
+            # Under the verdict the policy gave above. What the intake writes
+            # is NOT trusted by it (#1144 16.3a).
+            reference = doxbench_provider.hand_off_credential(
+                binding, source, trust=verdict)
         except doxbench_provider.BrokerRefused as error:
             # THE BROKER'S OWN WORDS NEVER REACH HERE: `BrokerRefused` carries
             # one of `doxbench_provider.FIXED_DIAGNOSTICS` and nothing else, and
@@ -1842,8 +1866,19 @@ class WorkbenchRoutes:
             return
         model_entry = catalog.selectable_entry_for(model_id)
         if model_entry is None:
-            self._refuse_turn(validators, DOXBENCH_ERR_MODEL_UNAVAILABLE,
-                              turn_id, failure_kind=failure_kind)
+            # A BINDING NOT TRUSTED ON THIS MACHINE SAYS SO (#1144 16.3a): its
+            # port is `doxbench_trust.UntrustedBindingPort`, and the refusal
+            # carries that module's FIXED sentence, which names no binding and
+            # no path. The catalog's shape is closed, so this is where a turn
+            # reads why.
+            from opendox import doxbench_trust
+            self._refuse_turn(
+                validators, DOXBENCH_ERR_MODEL_UNAVAILABLE, turn_id,
+                failure_kind=failure_kind,
+                message=(doxbench_trust.UNTRUSTED_TURN_MESSAGE
+                         if isinstance(port,
+                                       doxbench_trust.UntrustedBindingPort)
+                         else None))
             return
 
         effective_input_limit = doxbench_model.effective_limit_bytes(

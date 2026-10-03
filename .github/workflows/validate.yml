@@ -257,7 +257,20 @@ jobs:
           MIN_SELECTED: "2476"
           MIN_PASSED: "2465"
           # EXACT — the load-bearing number. Moves only with its reason.
-          EXPECT_SKIPPED: "11"
+          #
+          # MOVED FROM 11 TO 14 BY plan 034 T100 (#1144 16.3a), for its three
+          # strict-xfail cases in `tests/test_model_binding_trust.py`, each of
+          # which waits on another draft and names it: the trust store's
+          # default location (openDox-code#69's `config.state_dir`), the chat
+          # rail's trust remedy (openDox-code#74's visible no-model line), and
+          # a served turn that reaches its model step standalone
+          # (openDox-code#77's scope seam). JUnit reports an xfail as a skip.
+          # Each turns into a pass when T100 merges `main` after that draft has
+          # landed, so this moves back by one with each, WITH the reason, and
+          # is 11 again once all three are in. The floors are not moved: CI
+          # read 3327 / 3316 on this change's base (#64, run 37072154936),
+          # already 851 above them.
+          EXPECT_SKIPPED: "14"
         run: |
           python3 - <<'PY' > triple.env
           import xml.etree.ElementTree as ET, pathlib
