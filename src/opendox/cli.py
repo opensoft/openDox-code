@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
 import tempfile
 import webbrowser
@@ -88,6 +89,12 @@ from opendox.runtime import local_git_adapter  # noqa: E402
 # or serves anything. Stdlib-only, like `local_git_adapter` above, which
 # already imports it, so this adds no reach and no import weight.
 from opendox.runtime import config as runtime_config  # noqa: E402
+# THE LOCAL INSTALL'S BUNDLED POSTGRESQL SERVER (plan 034 T072; #1144 13.1,
+# R1Q16 (i)-(iv)): started as THIS process's child by `generate-and-open
+# --local`, and stopped with it. Stdlib-only at import, like `runtime_config`;
+# the driver is imported when the server is started, never here.
+from opendox.runtime import bundle as bundle_mod  # noqa: E402
+from opendox.runtime import migrations as migrations_mod  # noqa: E402
 from opendox.boundary import (  # noqa: E402
     BoundaryViolation, HumanGate, OutputBoundary,
 )
@@ -558,8 +565,8 @@ def _validate(written: Path, args: argparse.Namespace, *,
 
 
 def _resolve_install_shape(args: argparse.Namespace,
-                           env=None) -> str:
-    """The install shape this run serves as, or `ConfigurationError` naming why.
+                           env=None) -> runtime_config.RuntimeSettings:
+    """The settings this run serves with, or `ConfigurationError` naming why.
 
     `--local` and `OPENDOX_INSTALL_MODE` are resolved by
     `runtime_config.install_mode`, the one reading of the selector, which
@@ -569,27 +576,45 @@ def _resolve_install_shape(args: argparse.Namespace,
       * LOCAL binds loopback only, with no opt-in: a non-loopback `--host` is
         refused naming the rule (13.4), and so is anything a local install
         cannot be (`refuse_what_a_local_install_cannot_be`: a broker setting
-        beside it, or a non-loopback `OPENDOX_BIND_HOST`). It needs no broker.
-        Its datastore is 13.1's, and arrives with T072.
+        beside it, a DSN beside it, or a non-loopback `OPENDOX_BIND_HOST`). It
+        needs no broker, and it supplies BOTH DSNs itself, from the server it
+        bundles under `OPENDOX_STATE_DIR` (13.1; plan 034 T072).
       * HOSTED, set or by default, refuses with no issuer, NAMING THE ISSUER
-        (13.5), and then loads the runtime's whole configuration, because the
-        serving process is the one whose settings are the install's (13.4a;
-        R1Q16 (i)). Otherwise unchanged (13.6).
+        (13.5), and then loads the runtime's whole configuration.
+        Otherwise unchanged (13.6).
+
+    Either way the result is the runtime's own `load_settings`, because the
+    serving process is the one whose settings are the install's (13.4a;
+    R1Q16 (i)).
 
     Asked before anything is scanned, minted or bound, so a refused run leaves
     nothing behind and exits at once rather than starting a server that a
     bound would have to kill (F13.1's `test "$rc" -ne 124`).
     """
     env = os.environ if env is None else env
-    mode = runtime_config.install_mode(
-        env, local_flag=bool(getattr(args, "local", False)))
+    local_flag = bool(getattr(args, "local", False))
+    mode = runtime_config.install_mode(env, local_flag=local_flag)
     if mode == runtime_config.INSTALL_MODE_LOCAL:
         runtime_config.refuse_a_non_loopback_local_bind("--host", args.host)
         runtime_config.refuse_what_a_local_install_cannot_be(env)
     else:
         runtime_config.require_the_hosted_issuer(env)
-        runtime_config.load_settings(env)
-    return mode
+    return runtime_config.load_settings(env, local_flag=local_flag)
+
+
+class _Terminated(KeyboardInterrupt):
+    """SIGTERM, raised as the interrupt the serve loop already stops cleanly on.
+
+    A subclass, so the serve loop's own `except KeyboardInterrupt` still ends
+    a served run with 0 (F13.1's `kill "$SERVER"; wait "$SERVER"`). An
+    interrupt that arrives BEFORE the serve loop can still say which signal
+    it was.
+    """
+
+
+def _terminate_as_interrupt(signum, frame):
+    """SIGTERM, read as the Ctrl-C the serve loop already stops cleanly on."""
+    raise _Terminated
 
 
 def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -> int:
@@ -602,12 +627,85 @@ def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -
     `OPENDOX_INSTALL_MODE=local`, selects the local single-user install, and
     with neither the install is hosted — see `_resolve_install_shape`. A
     refusal there is printed on stderr and the command exits 1, before any
-    other work."""
+    other work.
+
+    A LOCAL RUN OWNS ITS DATABASE (plan 034 T072; #1144 13.1, R1Q16 (i)-(iv)).
+    Once the corpus root and the anchors are known good, the bundled
+    PostgreSQL server is started as THIS process's child, bootstrapped and
+    migrated — starting and migrating it is all release 1 asks of it — and it
+    is stopped when this command returns, however it returns: a served run
+    ended by Ctrl-C or by SIGTERM (read here as the same interrupt), a
+    `--no-serve` run, or a failure. A refused start exits 1 on stderr, like
+    every other refusal of this verb."""
     try:
-        args.install_mode = _resolve_install_shape(args)
+        settings = _resolve_install_shape(args)
     except runtime_config.ConfigurationError as exc:
         print(f"generate-and-open refused: {exc}", file=sys.stderr)
         return 1
+    args.install_mode = settings.install_mode
+    args.runtime_settings = settings
+    if settings.install_mode != runtime_config.INSTALL_MODE_LOCAL:
+        return _generate_and_open(args, opener=opener)
+    # THE CHEAP REFUSALS FIRST, so a mistyped root never costs a database
+    # start: every one `_generate_and_open` asks before it mints its run
+    # directory, main's empty-source-option refusal (T055) included.
+    _refuse_non_corpus_repo_root(args)
+    _refuse_malformed_generated_at(args)
+    _refuse_empty_source_options(args)
+    server = bundle_mod.BundledServer(settings)
+    args.database_bundle = server
+    # NO `PG*` DEFAULT REACHES THE BUNDLE'S CONNECTIONS while this process
+    # runs its database (Copilot review of openDox-code#69): see
+    # `bundle.isolated_from_libpq_environment`.
+    with bundle_mod.isolated_from_libpq_environment():
+        return _run_the_local_lifecycle(args, server, opener=opener)
+
+
+def _run_the_local_lifecycle(args: argparse.Namespace, server, *, opener) -> int:
+    """Start the bundled server, generate and serve, and stop it, however
+    this ends: a served run ended by Ctrl-C or SIGTERM, a `--no-serve` run, a
+    refusal, a failure, or an interrupt before anything was served."""
+    try:
+        previous = signal.signal(signal.SIGTERM, _terminate_as_interrupt)
+    except ValueError:                  # not the main thread: no handler to own
+        previous = None
+    try:
+        try:
+            server.start()
+        except (bundle_mod.BundleRefused, runtime_config.ConfigurationError,
+                migrations_mod.MigrationError) as exc:
+            print(f"generate-and-open refused: {exc}", file=sys.stderr)
+            return 1
+        report = server.report()
+        print(f"  database {report['socket_dir']} (bundled, pid {report['pid']}, "
+              f"migrations applied now: {server.applied or 'none pending'})")
+        return _generate_and_open(args, opener=opener)
+    except KeyboardInterrupt as interrupt:
+        # AN INTERRUPT ANYWHERE IN THE LOCAL LIFECYCLE IS A CLEAN STOP (Copilot
+        # review of openDox-code#69). SIGTERM, or Ctrl-C, can arrive while the
+        # server is initializing or migrating, or while the snapshot is being
+        # generated, all before the serve loop's own handler. It is a stop
+        # that was asked for, so it is not a traceback: the `finally` below
+        # stops the bundled server and restores the handler. Nothing was
+        # served, so the exit is the signal's conventional status (128 + its
+        # number) and not 0.
+        signum = (signal.SIGTERM if isinstance(interrupt, _Terminated)
+                  else signal.SIGINT)
+        print(f"generate-and-open interrupted ({signum.name}) before it "
+              "served; its bundled PostgreSQL server stops with it",
+              file=sys.stderr)
+        return 128 + int(signum)
+    finally:
+        # THE HANDLER FIRST, so a second SIGTERM during the stop takes the
+        # default action at once; the parent-death signal still stops the
+        # server if this process goes before `stop()` has finished.
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+        server.stop()
+
+
+def _generate_and_open(args: argparse.Namespace, *, opener) -> int:
+    """`generate-and-open`'s generate-then-serve half, once the install is known."""
     # Ahead of minting the run dir, so a refused root leaves not even an empty
     # temp directory behind. `_generate_and_write` is still the guard that MATTERS
     # (it is the one no caller can skip); these are the same checks, earlier.

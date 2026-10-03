@@ -10,10 +10,10 @@ CONFIGURATION refusal, which is the whole of what 13.4-13.6 ask of
 
 The exception is `test_runtime_status_of_a_healthy_local_install_exits_zero`,
 which is DB-BACKED (Copilot review of openDox-code#67). A healthy local
-`status` exits 0 only against a database that answers, so that case takes the
-suite's `postgres_dsn` and `database` fixtures (`tests_runtime/conftest.py`).
-Like every DB-backed case, it is skipped where there is no Postgres, and it
-fails under CI.
+`status` exits 0 only against a database that answers. A local install refuses
+an operator's DSN (T072), so that case starts the local install's OWN bundled
+server on a fresh state directory. It needs the `local` extra's binaries,
+which the `test` extra installs.
 
 WHAT IS RULED AND WHAT IS READ, so a reviewer can tell them apart:
 
@@ -70,6 +70,11 @@ DSNS = {
 HOSTED = {**DSNS,
           PREFIX + "OIDC_ISSUER": "https://issuer.example.invalid/realms/fixture",
           PREFIX + "OIDC_AUDIENCE": "fixture"}
+#: A LOCAL install's whole environment: the selector and a state directory.
+#: No DSN — the local install supplies both from the server it bundles
+#: (plan 034 T072), and one given beside it is refused. Nothing is created
+#: there: `load_settings` derives paths, and starts nothing.
+LOCAL = {MODE: "local", PREFIX + "STATE_DIR": "/nonexistent/opendox-state"}
 
 
 def _refusal(env: dict, **kwargs) -> str:
@@ -198,7 +203,7 @@ def test_the_hosted_mode_is_unchanged() -> None:
 
 @pytest.mark.parametrize("selection", ["setting", "flag"])
 def test_a_local_install_needs_no_broker(selection: str) -> None:
-    env = dict(DSNS)
+    env = {PREFIX + "STATE_DIR": LOCAL[PREFIX + "STATE_DIR"]}
     kwargs = {}
     if selection == "setting":
         env[MODE] = "local"
@@ -221,13 +226,19 @@ def test_a_broker_setting_beside_the_local_mode_is_refused_by_name(
     """A holder reading (#656, T070): a broker setting says hosted was meant."""
     assert set(HOSTED_ONLY_SETTINGS) == {PREFIX + "OIDC_ISSUER",
                                          PREFIX + "OIDC_AUDIENCE",
-                                         PREFIX + "OIDC_JWKS_URL"}
-    secret = "https://svc:hunter2@broker.example.invalid/realms/x"
-    message = _refusal({**DSNS, MODE: "local", name: secret})
+                                         PREFIX + "OIDC_JWKS_URL",
+                                         # and T072's two: the local install
+                                         # supplies both DSNs itself (13.1)
+                                         PREFIX + "DATABASE_URL",
+                                         PREFIX + "MIGRATION_DATABASE_URL"}
+    secret = ("https://svc:hunter2@broker.example.invalid/realms/x"
+              if "OIDC" in name else "postgresql://u:hunter2@db.invalid/x")
+    message = _refusal({**LOCAL, name: secret})
     assert name in message, message
     assert "hunter2" not in message, "the value must not be repeated"
     # and the flag spelling of the same selection refuses it the same way
-    assert name in _refusal({**DSNS, name: secret}, local_flag=True)
+    assert name in _refusal({PREFIX + "STATE_DIR": LOCAL[PREFIX + "STATE_DIR"],
+                             name: secret}, local_flag=True)
 
 
 def test_every_broker_setting_given_is_named_at_once() -> None:
@@ -239,8 +250,7 @@ def test_every_broker_setting_given_is_named_at_once() -> None:
 
 @pytest.mark.parametrize("host", sorted(LOCAL_BIND_HOSTS))
 def test_a_local_install_binds_each_loopback_spelling(host: str) -> None:
-    settings = load_settings({**DSNS, MODE: "local",
-                              PREFIX + "BIND_HOST": host})
+    settings = load_settings({**LOCAL, PREFIX + "BIND_HOST": host})
     assert settings.bind_host == host
 
 
@@ -251,7 +261,7 @@ def test_a_local_install_refuses_a_non_loopback_bind_naming_the_rule(
     """13.4: loopback ONLY, and no opt-in. `127.0.0.2` is refused too: the
     document server does not treat it as loopback (`serve.LOOPBACK_HOSTS`),
     and the mode makes the SAME judgement at its own boundary."""
-    message = _refusal({**DSNS, MODE: "local", PREFIX + "BIND_HOST": host})
+    message = _refusal({**LOCAL, PREFIX + "BIND_HOST": host})
     assert PREFIX + "BIND_HOST" in message, message
     assert "loopback" in message.lower(), message
     assert "no opt-in" in message.lower(), message
@@ -291,9 +301,8 @@ def test_runtime_serve_refuses_under_the_local_mode(scrubbed) -> None:
     stub.Config, stub.Server = _Config, _Server
     scrubbed.setitem(sys.modules, "uvicorn", stub)
     scrubbed.setattr(app_module, "create_app", lambda **kwargs: object())
-    for name, value in DSNS.items():
+    for name, value in LOCAL.items():
         scrubbed.setenv(name, value)
-    scrubbed.setenv(MODE, "local")
     code, evidence = _run(["runtime", "serve"])
     assert served == [], "the API was started for a LOCAL install"
     assert code == 1
@@ -314,9 +323,8 @@ def test_runtime_status_under_the_local_mode_probes_no_broker(
                              "install, which has no broker")
 
     monkeypatch.setattr(oidc, "build_verifier", _no_broker)
-    for name, value in DSNS.items():
+    for name, value in LOCAL.items():
         scrubbed.setenv(name, value)
-    scrubbed.setenv(MODE, "local")
     code, evidence = _run(["runtime", "status", "--probe-timeout", "0.2"])
     assert evidence.get("refusal") is None, evidence
     assert evidence["broker_keys"] == "not configured (local mode)"
@@ -324,8 +332,13 @@ def test_runtime_status_under_the_local_mode_probes_no_broker(
     assert evidence["settings"][MODE] == INSTALL_MODE_LOCAL
     assert evidence["settings"][PREFIX + "OIDC_ISSUER"] == ""
     assert evidence["settings"][PREFIX + "OIDC_JWKS_URL"] == ""
-    # the database half (port 1, unreachable) is the ONLY reason `ok` is false
-    assert evidence["database"].startswith("unreachable"), evidence
+    # the database half is the ONLY reason `ok` is false: no bundled server
+    # is running on this (nonexistent) state directory, and `status` reports
+    # that rather than starting one. It says so WITHOUT connecting: a local
+    # socket is judged before it is asked (adversarial review of #69).
+    assert evidence["database"].startswith(
+        "not probed: no bundled server is running"), evidence
+    assert evidence["database_bundle"]["pid"] is None, evidence
     assert code == 1
 
 
@@ -339,9 +352,11 @@ def test_migrate_and_reset_refuse_a_broker_setting_beside_the_local_mode(
         scrubbed, verb: list[str], name: str) -> None:
     """The migration loader asks what every other loader asks of `local`
     (Copilot review of openDox-code#67): refused at CONFIGURATION, before any
-    database is reached — `reset` included, confirmation and all."""
-    scrubbed.setenv(PREFIX + "MIGRATION_DATABASE_URL", DSNS[PREFIX + "MIGRATION_DATABASE_URL"])
-    scrubbed.setenv(MODE, "local")
+    database is reached — `reset` included, confirmation and all. The local
+    shape supplies its own migration DSN (T072), so the broker setting is the
+    only fault."""
+    for local_name, value in LOCAL.items():
+        scrubbed.setenv(local_name, value)
     scrubbed.setenv(name, "https://issuer.example.invalid/realms/x"
                     if name != PREFIX + "OIDC_AUDIENCE" else "fixture")
     code, evidence = _run(verb)
@@ -352,8 +367,8 @@ def test_migrate_and_reset_refuse_a_broker_setting_beside_the_local_mode(
 
 def test_migrate_refuses_a_non_loopback_bind_beside_the_local_mode(
         scrubbed) -> None:
-    scrubbed.setenv(PREFIX + "MIGRATION_DATABASE_URL", DSNS[PREFIX + "MIGRATION_DATABASE_URL"])
-    scrubbed.setenv(MODE, "local")
+    for name, value in LOCAL.items():
+        scrubbed.setenv(name, value)
     scrubbed.setenv(PREFIX + "BIND_HOST", "0.0.0.0")
     code, evidence = _run(["runtime", "migrate"])
     assert code == 1 and evidence["refusal"] == "configuration", evidence
@@ -361,15 +376,23 @@ def test_migrate_refuses_a_non_loopback_bind_beside_the_local_mode(
 
 
 def test_runtime_status_of_a_healthy_local_install_exits_zero(
-        scrubbed, monkeypatch: pytest.MonkeyPatch, postgres_dsn: str,
-        database) -> None:
+        scrubbed, monkeypatch: pytest.MonkeyPatch) -> None:
     """THE EXIT CODE IS THE DATABASE'S VERDICT ALONE (Copilot review of
     openDox-code#67). A migrated, reachable database is the only thing a
     local install's `status` needs, and with it the verb exits 0. The broker
     is reported as not configured and is never probed, so F13.1's `set -e`
     survives. The other local cases force a database fault and exit 1, so
     they cannot tell a broker counted as a fault from a database that failed.
+
+    The database is the local install's OWN (T072): a local install refuses
+    an operator's DSN, so the case starts the bundled server on a fresh state
+    directory and asks `status` about it.
     """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from opendox.runtime import bundle as bundle_mod
     from opendox.runtime import oidc
 
     def _no_broker(_settings):
@@ -377,16 +400,14 @@ def test_runtime_status_of_a_healthy_local_install_exits_zero(
                              "install, which has no broker")
 
     monkeypatch.setattr(oidc, "build_verifier", _no_broker)
-    # `make_conninfo`, NOT a `?options=` suffix: `OPENDOX_TEST_DATABASE_URL`
-    # may be libpq's keyword/value form as well as a URI, and a suffix on
-    # `… dbname=opendox` names the database `opendox?options=…` instead of
-    # selecting the schema (Copilot review of openDox-code#67).
-    from psycopg.conninfo import make_conninfo
-
-    scrubbed.setenv(PREFIX + "DATABASE_URL", make_conninfo(
-        postgres_dsn, options=f"-c search_path={database.schema},public"))
-    scrubbed.setenv(MODE, "local")
-    code, evidence = _run(["runtime", "status", "--probe-timeout", "5"])
+    state = Path(tempfile.mkdtemp(prefix="odx-s-", dir="/tmp"))
+    try:
+        scrubbed.setenv(MODE, "local")
+        scrubbed.setenv(PREFIX + "STATE_DIR", str(state))
+        with bundle_mod.BundledServer(load_settings()):
+            code, evidence = _run(["runtime", "status", "--probe-timeout", "10"])
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
     assert evidence["database"] == "reachable", evidence
     assert evidence["pending_migrations"] == [], evidence
     assert not evidence["migration_drift"], evidence
@@ -407,7 +428,7 @@ def test_runtime_status_without_the_runtime_extra_reports_the_broker_by_mode(
     import sys
 
     scrubbed.setitem(sys.modules, "opendox.runtime.db", None)
-    for name, value in (HOSTED if mode == INSTALL_MODE_HOSTED else DSNS).items():
+    for name, value in (HOSTED if mode == INSTALL_MODE_HOSTED else LOCAL).items():
         scrubbed.setenv(name, value)
     scrubbed.setenv(MODE, mode)
     code, evidence = _run(["runtime", "status", "--probe-timeout", "0.2"])
@@ -418,9 +439,12 @@ def test_runtime_status_without_the_runtime_extra_reports_the_broker_by_mode(
         assert evidence["broker_keys"] == "not configured (local mode)", evidence
         assert "broker_discovery" in evidence, evidence
         assert evidence["broker_discovery"] is None
+        # and the bundle is reported before the early return (T072)
+        assert evidence["database_bundle"] is not None, evidence
     else:
         assert evidence["broker_keys"] == "not probed", evidence
         assert "broker_discovery" not in evidence, evidence
+        assert evidence["database_bundle"] is None, evidence
 
 
 def test_runtime_status_reports_the_hosted_mode_it_loaded(scrubbed) -> None:
