@@ -24,11 +24,11 @@ WHAT IT DOES NOT WIDEN, also deliberately: the BINDING's closed record
 (`doxbench_binding.BINDING_FIELDS`) and the CATALOG entry's closed public
 shape (`doxbench_model.DECLARABLE_ENTRY_FIELDS`). Each count is named by its
 tuple rather than restated here, because both shapes have grown since this
-module was written. The catalog's grew twice by governing release (the routing
-declaration at contract-v1.38 and the input-modality declaration at
-contract-v2.2), and the binding's grew once, by `model` (#1144 box 16.2, plan
-034 T079). This paragraph's claim is that THIS module widens nothing, which is
-unchanged by any of them. Proposed-versus-
+module was written. The catalog entry's shape grew twice by governing release
+(the routing declaration at contract-v1.38 and the input-modality declaration
+at contract-v2.2), and the binding's record grew once, by `model` (#1144 box
+16.2, plan 034 T079). This paragraph's claim is that THIS module widens
+nothing, which is unchanged by any of them. Proposed-versus-
 approved is a SERVER-SIDE distinction and a pending declaration is simply not in
 the catalog, so NEITHER SHAPE GAINS A FIELD FROM THIS MODULE and this module
 needs no release act. (Both statements are scoped to this module deliberately.
