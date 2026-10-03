@@ -1,0 +1,1128 @@
+name: release
+
+# ---------------------------------------------------------------------------
+# PUBLISH openDox TO PyPI, BY TRUSTED PUBLISHING — plan 034 T099 (openxFactory
+# `specs/034-opendox-standalone-operation/tasks.md`), on RULED openxFactory#656
+# comment 5962754358, item 1 (Brett Heap, 2026-10-02): "Publish to PyPI at the
+# cut (Recommended)". Release 1's ruled install line is
+# `pip install "opendox[local]"` (#1144 10.3, as T007's batch H addendum
+# reads, R1Q15 (b) and R1Q16 (iii), comment 5850003126), and this workflow is
+# what makes that line work as written.
+#
+# DISPATCH ONLY. A publish is an outward-facing act that Brett Heap approves,
+# so nothing here runs on a push, a tag or a pull request. `version` must
+# equal `pyproject.toml`'s `[project] version`, or the build job refuses
+# before it builds anything.
+#
+# ONLY THE COMMIT THE openDox ROOT PINS (RULED openxFactory#656 comment
+# 5963162921, with release 1's version, "0.1.0 (Recommended)"). The root's
+# `contracts/code-pin.yaml` names the commit of this leg that the project IS,
+# so the build job refuses any other commit. Release 1's order is: the bump of
+# `version` to 0.1.0 lands last among phase 3's openDox-code landings, the
+# openDox root pins that commit (plan 034 T087), and then this workflow is
+# dispatched at the cut. `main`'s head may have moved past the pinned commit by
+# then (T095 lands later), so the head is never required: the run's commit
+# must equal the root's pin and be on `main`. A dispatch runs at the head of
+# the ref it names, so it names the tag `v<version>`, created at the pinned
+# commit, or `main` only while `main`'s head is still that commit. No other
+# tag is accepted. The pin is checked in the build job and AGAIN right before
+# each upload, so a pin that moves while the run waits (on an approval, or on
+# TestPyPI) stops the upload.
+#
+# FOUR JOBS, EACH GATED ON THE ONE BEFORE IT:
+#   build            builds the sdist and the wheel in a clean job, runs
+#                    `twine check`, VERIFIES both before any upload, and
+#                    installs the wheel into a fresh venv. It mints no
+#                    identity token, and its GITHUB_TOKEN reads only.
+#   testpypi         the dry run: re-checks the root's pin, then publishes
+#                    those exact bytes to TestPyPI, in the `testpypi`
+#                    environment.
+#   testpypi-install installs `opendox[local]` from TestPyPI into a fresh
+#                    venv, as plan 034's T099 falsifier does, and runs it.
+#   pypi             re-checks the root's pin, publishes the same bytes to
+#                    PyPI, in the `pypi` environment, then requires PyPI to
+#                    serve exactly those two files, by digest.
+#
+# NO PyPI TOKEN AND NO STORED SECRET, ANYWHERE. Both uploads use PyPI's
+# trusted publishing (OIDC): the job asks GitHub for a short-lived identity
+# token, and the index accepts it only for the publisher configured on its side
+# (owner `opensoft`, repository `openDox-code`, workflow `release.yml`, and the
+# environment the job runs in). `id-token: write` is granted to the two publish
+# jobs and to no other job. The one other credential is GitHub's own automatic
+# `GITHUB_TOKEN`, passed to `gh` for reads of THIS repository's API only: in
+# the build job, the compare with `main` and the environments (`contents:
+# read`, `actions: read`); in each publish job, its environment and this run's
+# review history (`actions: read`). The openDox root's
+# pin, in another repository, is read over git with no credential at all, in
+# the build job and again right before each upload.
+#
+# EVERY ACTION IS PINNED BY FULL COMMIT SHA, with its release tag beside it.
+# (`validate.yml` pins by tag. A tag can be moved after review, and a commit
+# cannot, which matters most in the one workflow whose output is published.)
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          The version to publish. It must equal pyproject.toml's [project]
+          version, in PEP 440's normalized form, or the build job refuses.
+        required: true
+        type: string
+
+# Nothing by default. Each job grants itself exactly what it uses.
+permissions: {}
+
+# One release at a time, and a running one is never cancelled halfway.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # `bash -eo pipefail`: a failed command anywhere in a pipeline fails the step.
+    shell: bash
+
+env:
+  # The input reaches every script through the environment, never through an
+  # expression pasted into a script, so no input value can become shell or
+  # Python source.
+  VERSION: ${{ inputs.version }}
+  PYTHONUTF8: '1'
+
+jobs:
+  build:
+    name: build and verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read # the step that reads both environments' protection rules
+    outputs:
+      wheel: ${{ steps.digests.outputs.wheel }}
+      wheel-sha256: ${{ steps.digests.outputs.wheel-sha256 }}
+      sdist: ${{ steps.digests.outputs.sdist }}
+      sdist-sha256: ${{ steps.digests.outputs.sdist-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # THE RELEASE IS THE PINNED COMMIT, ON `main`. A dispatch may name any
+      # ref, and the commit it names is what would be published, so these two
+      # steps come first. This one: a dispatch on a tag must name
+      # `v<version>`, and the run's commit must be on this repository's
+      # `main`, as `main` or an ancestor of it (`main`'s head need not be that
+      # commit). The compare reads this repository, through the API.
+      - name: the dispatched commit is on main, dispatched on v<version> or a branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/*)
+              if [ "$GITHUB_REF" != "refs/tags/v$VERSION" ]; then
+                echo "::error::a release dispatched on a tag names v$VERSION, and this run names $GITHUB_REF"
+                exit 1
+              fi
+              ;;
+          esac
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq .status)"
+          case "$status" in
+            identical|ahead) echo "$GITHUB_SHA is on main ($status), dispatched on $GITHUB_REF" ;;
+            *)
+              echo "::error::$GITHUB_SHA is not on this repository's main (compare: $status)"
+              exit 1
+              ;;
+          esac
+
+      # And this one: the run's commit must equal `commit:` in opensoft/openDox
+      # `main`'s `contracts/code-pin.yaml`, whose `source_repository` must be
+      # this repository. The two publish jobs run this same step again, right
+      # before their upload.
+      #
+      # THE ROOT'S PIN IS READ ANONYMOUSLY, OVER GIT. opensoft/openDox is
+      # public, and a job's GITHUB_TOKEN is an installation token scoped to
+      # this repository, so the read of another repository uses no token: a
+      # fetch of `main`, depth 1, with every credential helper cleared and no
+      # prompt, in a repository of its own under `$RUNNER_TEMP`.
+      - name: the dispatched commit is the one the openDox root pins
+        timeout-minutes: 3
+        run: |
+          root="$RUNNER_TEMP/opendox-root"
+          rm -rf "$root"
+          git init -q -b main "$root"
+          if ! GIT_TERMINAL_PROMPT=0 git -C "$root" -c credential.helper= \
+              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git main \
+              || ! pin="$(git -C "$root" show FETCH_HEAD:contracts/code-pin.yaml)"; then
+            echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
+            exit 1
+          fi
+          PIN="$pin" python3 - <<'PY'
+          import os, re, sys
+
+          pin = os.environ["PIN"]
+
+          def field(name):
+              found = re.search(rf'^{name}:[ \t]*"?([^"\s#]+)"?[ \t]*(?:#.*)?$', pin, re.M)
+              return found.group(1) if found else None
+
+          source, pinned = field("source_repository"), field("commit")
+          here, this = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
+          if source != here:
+              sys.exit(f"::error::the openDox root's code pin names {source!r}, not {here!r}")
+          if not pinned or not re.fullmatch(r"[0-9a-f]{40}", pinned):
+              sys.exit(f"::error::the openDox root's code pin names no full commit: {pinned!r}")
+          if pinned != this:
+              sys.exit(f"::error::this run is at {this}, and the openDox root pins {pinned}; "
+                       "a release publishes only the pinned commit. A dispatch runs at the "
+                       "head of the ref it names, so dispatch on the tag v<version> created "
+                       f"at {pinned}")
+          print(f"{this} is the commit opensoft/openDox main pins for {here}")
+          PY
+
+      # BOTH ENVIRONMENTS MUST ASK A REVIEWER. GitHub creates an environment a
+      # job names if it does not exist yet, and creates it with no protection
+      # rule, so a dispatch made before Brett configured `pypi` would publish
+      # with nobody approving it. This step refuses that case, before anything
+      # is built. The environments are public metadata of a public repository.
+      - name: both environments ask a reviewer before they deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rc=0
+          for environment in testpypi pypi; do
+            if ! reviewers=$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment" \
+                --jq '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[]] | length'); then
+              echo "::error::the $environment environment cannot be read (it does not exist yet, or this job cannot see it); create it with a required reviewer first"
+              rc=1
+              continue
+            fi
+            if [ "$reviewers" -lt 1 ]; then
+              echo "::error::the $environment environment names no required reviewer, so a deployment to it would not wait for an approval"
+              rc=1
+            else
+              echo "$environment: $reviewers required reviewer(s)"
+            fi
+          done
+          exit $rc
+
+      # THE RELEASE TOOLS, FROM THEIR HASH LOCK, IN A VENV OF THEIR OWN. The
+      # build below runs with `--no-isolation` in this venv, so its backend is
+      # the hash-locked `setuptools` and not whatever an index serves today
+      # (`.github/release-tools-cpython312-linux.txt` says why).
+      - name: install the release tools from their hash lock
+        run: |
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/python" -m pip install --disable-pip-version-check \
+            --only-binary :all: --require-hashes \
+            -r .github/release-tools-cpython312-linux.txt
+
+      # THE VERSION GATE. The input must be a PEP 440 version in normalized
+      # form (the form the files are named by), with no epoch and no local
+      # label, must be a final release, must equal what `pyproject.toml`
+      # declares, and must not be `0.0.0`, the scaffold's placeholder, which
+      # is never a release. An epoch (`1!2.0`) is refused because a wheel's
+      # file name escapes its `!`, so the files would not carry the version as
+      # written, and every check below names them by it. A pre-release or a
+      # development release (`0.2.0rc1`, `0.2.0.dev1`) is refused because the
+      # dry run installs the unversioned `opendox[local]`, as 10.3's line
+      # reads, and pip passes over a pre-release once any final release
+      # exists, so the dry run could never install what was uploaded.
+      - name: the version input is pyproject's version
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" - <<'PY'
+          import os, sys, tomllib
+          from packaging.version import InvalidVersion, Version
+
+          asked = os.environ["VERSION"]
+          with open("pyproject.toml", "rb") as handle:
+              declared = tomllib.load(handle)["project"]["version"]
+          try:
+              parsed = Version(asked)
+          except InvalidVersion:
+              sys.exit(f"::error::{asked!r} is not a PEP 440 version")
+          if str(parsed) != asked:
+              sys.exit(f"::error::{asked!r} is not in PEP 440's normalized form, "
+                       f"which is {str(parsed)!r}; the files would be named by that")
+          if parsed.local is not None:
+              sys.exit(f"::error::{asked!r} carries a local label, which no index accepts")
+          if parsed.epoch:
+              sys.exit(f"::error::{asked!r} carries an epoch, which a wheel's file name "
+                       "escapes; this workflow names the files by the version as written")
+          if parsed.is_prerelease:
+              sys.exit(f"::error::{asked!r} is a pre-release or a development release; "
+                       "the dry run installs the unversioned \"opendox[local]\", which "
+                       "pip resolves to a final release once one exists")
+          if parsed == Version("0.0.0"):
+              sys.exit("::error::0.0.0 is the scaffold's placeholder version, never a release")
+          if asked != declared:
+              sys.exit(f"::error::the input names {asked!r}, and pyproject.toml "
+                       f"declares {declared!r}; they must be equal")
+          print(f"version {asked}: pyproject.toml declares it")
+          PY
+
+      # `python -m build` builds the sdist, then builds the wheel FROM THAT
+      # SDIST, so a file the sdist lost is missing from the wheel too, and the
+      # wheel's checks below see it. `SOURCE_DATE_EPOCH` is the commit's time,
+      # so the wheel's bytes depend on the commit and not on the clock.
+      - name: build the sdist and the wheel
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
+          "$RUNNER_TEMP/tools/bin/python" -m build --no-isolation --outdir dist .
+
+      # `--strict` makes a warning a refusal, such as a long description that
+      # is missing (pyproject's `readme` supplies it) or does not render.
+      - name: twine check
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" -m twine check --strict dist/*
+
+      # THE ARTIFACT CHECKS, BEFORE ANY UPLOAD. Each prints what it read.
+      #   1. dist/ holds exactly the sdist and the wheel named for VERSION;
+      #   2. the wheel's metadata names `opendox` at VERSION;
+      #   3. the wheel declares exactly the requirements `pyproject.toml` does,
+      #      for the base install and for every extra, compared as normalized
+      #      requirements: the name, the extras, the version specifier or
+      #      direct URL, and the marker, less only the `extra == "..."` clause
+      #      setuptools adds to say which extra a requirement belongs to; and
+      #      its `local` extra (T072) carries `opendox[runtime]` and the
+      #      bundled server's package;
+      #   4. the console script `opendox` is declared, as `opendox.cli:main`;
+      #   5. every file under `src/opendox/web/` that git tracks is in the
+      #      wheel, dotfiles included (T075's `web/**/.*`): 42 of 42 at
+      #      openDox-code#73's head;
+      #   6. every other file git tracks under `src/` is in the wheel, at its
+      #      import path (the package, `opendox.contracts`' packaged copies,
+      #      and the two top-level modules `route_extension` and
+      #      `subcommand_extension`), less `src/.gitkeep`, which is no
+      #      package's; and the wheel carries nothing else but its
+      #      `.dist-info` and its `.data` directory;
+      #   7. every `migrations/*.sql` git tracks is in the wheel's data
+      #      directory, `share/opendox/migrations/` (T072).
+      # The tracked tree is the reference, so a bundle file added later is
+      # checked with no edit here.
+      - name: verify the artifacts
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" - <<'PY'
+          import configparser, email.parser, os, pathlib, re, subprocess, sys, tomllib, zipfile
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
+          version = os.environ["VERSION"]
+          wheel = f"opendox-{version}-py3-none-any.whl"
+          sdist = f"opendox-{version}.tar.gz"
+          found = sorted(p.name for p in pathlib.Path("dist").iterdir())
+          if found != sorted([sdist, wheel]):
+              sys.exit(f"::error::dist/ holds {found}; a release is exactly {sorted([sdist, wheel])}")
+          print(f"1. dist/: {found}")
+
+          def tracked(*paths):
+              out = subprocess.run(["git", "ls-files", "-z", "--", *paths],
+                                   capture_output=True, text=True, check=True).stdout
+              return {p for p in out.split("\0") if p}
+
+          problems = []
+          with zipfile.ZipFile(pathlib.Path("dist") / wheel) as archive:
+              names = {n for n in archive.namelist() if not n.endswith("/")}
+              info = f"opendox-{version}.dist-info"
+              data = f"opendox-{version}.data/data"
+
+              meta = email.parser.Parser().parsestr(
+                  archive.read(f"{info}/METADATA").decode("utf-8"))
+              print(f"2. metadata: Name {meta['Name']}, Version {meta['Version']}")
+              if meta["Name"] != "opendox" or meta["Version"] != version:
+                  problems.append(f"the wheel's metadata names {meta['Name']} {meta['Version']}, "
+                                  f"not opendox {version}")
+
+              def named(requirement):
+                  extras = ",".join(sorted(canonicalize_name(e) for e in requirement.extras))
+                  return canonicalize_name(requirement.name) + (f"[{extras}]" if extras else "")
+
+              # A MARKER IS COMPARED WHOLE, less only the clause that says which
+              # extra a requirement belongs to. setuptools writes a requirement
+              # of extra X as `<its own marker> and extra == "X"`, wrapping its
+              # own marker in parentheses where it needs them. The parsed marker
+              # (packaging's `Marker._markers`: comparisons as triples, `and`
+              # and `or` as strings, parentheses as nested lists; the hash lock
+              # pins packaging) loses that top-level clause, and what is left is
+              # written out in one form for both sides. An `extra` anywhere else
+              # (under an `or`, or nested) is refused: it is not setuptools'
+              # form, and its ownership would not be plain.
+              def is_extra(node):
+                  return isinstance(node, tuple) and any(
+                      getattr(part, "value", None) == "extra" and type(part).__name__ == "Variable"
+                      for part in (node[0], node[2]))
+
+              def mentions_extra(nodes):
+                  return any(mentions_extra(n) if isinstance(n, list) else is_extra(n) for n in nodes)
+
+              def unwrap(nodes):
+                  while len(nodes) == 1 and isinstance(nodes[0], list):
+                      nodes = nodes[0]
+                  return nodes
+
+              def written(nodes):
+                  return " ".join(f"({written(unwrap(n))})" if isinstance(n, list)
+                                  else n if isinstance(n, str)
+                                  else " ".join(part.serialize() for part in n)
+                                  for n in nodes)
+
+              def split_marker(requirement):
+                  if requirement.marker is None:
+                      return "", []
+                  nodes = list(requirement.marker._markers)
+                  if any(is_extra(n) and n[1].value != "==" for n in nodes):
+                      raise ValueError("an extra clause that is not `extra == ...`")
+                  owners = [n[2].value if type(n[0]).__name__ == "Variable" else n[0].value
+                            for n in nodes if is_extra(n)]
+                  if owners and "or" in nodes:
+                      raise ValueError("an extra clause under a top-level `or`")
+                  rest = []
+                  for n in nodes:
+                      if is_extra(n):
+                          if rest and rest[-1] == "and":
+                              rest.pop()
+                          continue
+                      if not rest and n == "and":
+                          continue
+                      rest.append(n)
+                  if mentions_extra(rest):
+                      raise ValueError("an extra clause nested in the marker")
+                  return written(unwrap(rest)), sorted({canonicalize_name(o) for o in owners})
+
+              def normal(requirement, marker):
+                  pinned = f"@ {requirement.url}" if requirement.url else str(requirement.specifier)
+                  return named(requirement) + pinned + (f"; {marker}" if marker else "")
+
+              def declared_form(text):
+                  requirement = Requirement(text)
+                  marker, owners = split_marker(requirement)
+                  if owners:
+                      raise ValueError(f"pyproject.toml's {text!r} names an extra in its marker")
+                  return normal(requirement, marker)
+
+              with open("pyproject.toml", "rb") as handle:
+                  project = tomllib.load(handle)["project"]
+              declared = {"": {declared_form(r) for r in project.get("dependencies", [])}}
+              for extra, requirements in project.get("optional-dependencies", {}).items():
+                  declared[canonicalize_name(extra)] = {declared_form(r) for r in requirements}
+              carried = {""} | {canonicalize_name(e) for e in meta.get_all("Provides-Extra") or []}
+              carried = {extra: set() for extra in carried}
+              local_names = set()
+              for raw in meta.get_all("Requires-Dist") or []:
+                  requirement = Requirement(raw)
+                  try:
+                      marker, owners = split_marker(requirement)
+                  except ValueError as error:
+                      problems.append(f"the requirement {raw!r} carries {error}")
+                      continue
+                  if any(owner not in carried for owner in owners):
+                      problems.append(f"the requirement {raw!r} names an extra the wheel does not provide")
+                      continue
+                  for owner in owners or [""]:
+                      carried[owner].add(normal(requirement, marker))
+                      if owner == "local":
+                          local_names.add(named(requirement))
+              print(f"3. requirements: the local extra carries {sorted(carried.get('local', ()))}")
+              if carried != declared:
+                  problems.append(f"the wheel's requirements {carried} are not "
+                                  f"pyproject.toml's {declared}")
+              if not {"opendox[runtime]", "pixeltable-pgserver"} <= local_names:
+                  problems.append(f"the `local` extra carries {sorted(local_names)}, not "
+                                  "opendox[runtime] and the bundled server's package, "
+                                  "pixeltable-pgserver")
+
+              entry_points = configparser.ConfigParser(delimiters=("=",))
+              entry_points.optionxform = str
+              entry_points.read_string(archive.read(f"{info}/entry_points.txt").decode("utf-8"))
+              scripts = dict(entry_points["console_scripts"]) if entry_points.has_section(
+                  "console_scripts") else {}
+              print(f"4. console scripts: {scripts}")
+              if scripts.get("opendox") != "opendox.cli:main":
+                  problems.append("the console script `opendox = opendox.cli:main` is not declared")
+
+              web = {p.removeprefix("src/") for p in tracked("src/opendox/web")}
+              web_missing = sorted(web - names)
+              print(f"5. web bundle: {len(web) - len(web_missing)} of {len(web)} tracked files "
+                    f"are in the wheel")
+              if not web or web_missing:
+                  problems.append(f"the wheel lacks web files: {web_missing}")
+
+              source = {p.removeprefix("src/") for p in tracked("src")} - {".gitkeep"}
+              source_missing = sorted(source - names)
+              stray = sorted(n for n in names - source
+                             if not n.startswith((f"{info}/", f"{data}/")))
+              print(f"6. source tree: {len(source) - len(source_missing)} of {len(source)} "
+                    f"tracked files under src/ are in the wheel; {len(stray)} other entries")
+              if source_missing:
+                  problems.append(f"the wheel lacks tracked files: {source_missing}")
+              if stray:
+                  problems.append(f"the wheel carries files the tree does not track: {stray}")
+
+              migrations = {f"{data}/share/opendox/{p}" for p in tracked("migrations/*.sql")}
+              migrations_missing = sorted(migrations - names)
+              print(f"7. migrations: {len(migrations) - len(migrations_missing)} of "
+                    f"{len(migrations)} are in the wheel's data directory")
+              if not migrations or migrations_missing:
+                  problems.append(f"the wheel lacks migrations: {migrations_missing}")
+
+          for problem in problems:
+              print(f"::error::{problem}")
+          if problems:
+              sys.exit(1)
+          print("the artifacts carry what an install runs from")
+          PY
+
+      # THE WHEEL INSTALLS, AND RUNS, OUTSIDE THE CHECKOUT. A fresh venv,
+      # `opendox[local]` from the built file (10.3's line, from a file), the
+      # dependencies through this package's own lock, and every command run
+      # from `$RUNNER_TEMP`, so nothing can import from `src/`.
+      - name: the built wheel installs into a fresh venv, and opendox --help works
+        run: |
+          python -m venv "$RUNNER_TEMP/fresh"
+          "$RUNNER_TEMP/fresh/bin/python" -m pip install --disable-pip-version-check \
+            --only-binary :all: -c constraints-cpython312-linux.txt \
+            "$PWD/dist/opendox-$VERSION-py3-none-any.whl[local]"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/fresh/bin/python" - <<'PY'
+          import importlib.metadata, os, pathlib, sys
+          import opendox
+          where = pathlib.Path(opendox.__file__).resolve()
+          if pathlib.Path(sys.prefix).resolve() not in where.parents:
+              sys.exit(f"::error::opendox imported from {where}, outside the fresh venv")
+          if importlib.metadata.version("opendox") != os.environ["VERSION"]:
+              sys.exit("::error::the installed opendox is not the version being released")
+          print(f"opendox {importlib.metadata.version('opendox')} imports from {where.parent}")
+          PY
+          # EVERY REQUIREMENT OF `opendox[local]` IS INSTALLED AND SATISFIED,
+          # walked from the wheel's own metadata, extras and markers included,
+          # with the tools' `packaging` over the fresh venv's distributions.
+          "$RUNNER_TEMP/tools/bin/python" - "$("$RUNNER_TEMP/fresh/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" <<'PY'
+          import importlib.metadata, sys
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
+          installed = {canonicalize_name(d.metadata["Name"]): d
+                       for d in importlib.metadata.distributions(path=[sys.argv[1]])}
+          problems, seen = [], set()
+
+          def need(name, extras):
+              key = (canonicalize_name(name), frozenset(extras))
+              if key in seen:
+                  return
+              seen.add(key)
+              for raw in installed[key[0]].requires or []:
+                  requirement = Requirement(raw)
+                  if requirement.marker and not any(
+                          requirement.marker.evaluate({"extra": extra})
+                          for extra in (sorted(extras) or [""])):
+                      continue
+                  dependency = installed.get(canonicalize_name(requirement.name))
+                  if dependency is None:
+                      problems.append(f"{raw} is not installed")
+                  elif not requirement.specifier.contains(dependency.version, prereleases=True):
+                      problems.append(f"{raw} is not satisfied by {dependency.version}")
+                  else:
+                      need(requirement.name, requirement.extras)
+
+          need("opendox", {"local"})
+          for problem in problems:
+              print(f"::error::{problem}")
+          if problems:
+              sys.exit(1)
+          print(f"opendox[local]: {len({name for name, _ in seen})} distributions, "
+                "every requirement installed and satisfied")
+          PY
+          # THE BUNDLED SERVER ARRIVED WITH THE EXTRA, and its binaries run:
+          # the product's own locator (`opendox.runtime.bundle`, T072), then
+          # each binary's `--version`.
+          for binary in initdb postgres; do
+            "$("$RUNNER_TEMP/fresh/bin/python" -c 'from opendox.runtime.bundle import server_binaries; print(server_binaries())')/$binary" --version
+          done
+          "$RUNNER_TEMP/fresh/bin/opendox" --help
+          "$RUNNER_TEMP/fresh/bin/opendox" generate-and-open --help > help.txt
+          if ! grep -q -- '--local' help.txt; then
+            echo "::error::opendox generate-and-open has no --local, so 10.3's command does not parse"
+            exit 1
+          fi
+          echo "opendox generate-and-open --help names --local"
+
+      - name: record the files and their digests
+        id: digests
+        run: |
+          wheel="opendox-$VERSION-py3-none-any.whl"
+          sdist="opendox-$VERSION.tar.gz"
+          {
+            echo "wheel=$wheel"
+            echo "wheel-sha256=$(sha256sum "dist/$wheel" | cut -d' ' -f1)"
+            echo "sdist=$sdist"
+            echo "sdist-sha256=$(sha256sum "dist/$sdist" | cut -d' ' -f1)"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  testpypi:
+    name: publish to TestPyPI (the dry run)
+    needs: build
+    runs-on: ubuntu-latest
+    # THE BUDGET: every step declares its own timeout, and the job's covers
+    # their sum (5 + 2 + 2 + 2 + 3 + 10 = 24 min); the upload's is 10 minutes.
+    # tests/test_release_workflow.py reads each bound from this file.
+    timeout-minutes: 25
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/opendox/${{ inputs.version }}/
+    permissions:
+      id-token: write # trusted publishing: the OIDC token TestPyPI accepts
+      actions: read # this environment's reviewer rule and this run's review history
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        timeout-minutes: 5
+        with:
+          name: dist
+          path: dist
+
+      # The files about to be uploaded are the two the build job verified,
+      # byte for byte, and nothing else.
+      - name: the files are the ones the build job verified
+        timeout-minutes: 2
+        env:
+          WHEEL: ${{ needs.build.outputs.wheel }}
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+          SDIST: ${{ needs.build.outputs.sdist }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist-sha256 }}
+        run: |
+          found="$(find dist -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')"
+          wanted="$(printf '%s\n%s\n' "$SDIST" "$WHEEL" | sort | tr '\n' ' ')"
+          if [ "$found" != "$wanted" ]; then
+            echo "::error::dist/ holds $found, and the build job verified $wanted"
+            exit 1
+          fi
+          printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
+            | sha256sum --strict -c -
+
+      # THE APPROVAL, AT USE TIME. The build job's check that both
+      # environments ask a reviewer goes stale while the run waits: a rule
+      # removed meanwhile would let this job start with nobody approving it.
+      # So, right before the preflight, the pin check and the upload, this
+      # step requires that this job's environment still names a required
+      # reviewer AND that this run's review history holds an approval of a
+      # deployment to it. Either missing refuses, and nothing is uploaded.
+      - name: this environment still asks a reviewer, and this run's deployment to it was approved
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: testpypi
+        run: |
+          if ! reviewers=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT" \
+              --jq '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[]] | length'); then
+            echo "::error::the $ENVIRONMENT environment cannot be read, so its reviewer rule is unknown"
+            exit 1
+          fi
+          if [ "$reviewers" -lt 1 ]; then
+            echo "::error::the $ENVIRONMENT environment names no required reviewer now, so this deployment did not wait for an approval"
+            exit 1
+          fi
+          if ! approvals=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals"); then
+            echo "::error::this run's review history cannot be read"
+            exit 1
+          fi
+          APPROVALS="$approvals" python3 - <<'PY'
+          import json, os, sys
+
+          environment = os.environ["ENVIRONMENT"]
+          approved = [review["user"]["login"] for review in json.loads(os.environ["APPROVALS"])
+                      if review.get("state") == "approved"
+                      and any(e.get("name") == environment for e in review.get("environments", []))]
+          if not approved:
+              sys.exit(f"::error::this run's review history holds no approval of a deployment "
+                       f"to {environment}, so nothing is uploaded")
+          print(f"{environment}: a required reviewer is named, and this run's deployment "
+                f"was approved by {', '.join(approved)}")
+          PY
+
+      # BEFORE THE UPLOAD, NOTHING ELSE HELD. skip-existing skips a file name
+      # the index already holds, so the index must hold no file for this
+      # version but the verified ones, at the verified digests: otherwise the
+      # upload would put a verified file beside one nobody verified, and an
+      # index never replaces a file. A 404 is a version with no file yet. A
+      # re-run after a partial upload passes, and uploads only what is missing.
+      - name: TestPyPI holds no file of this version but the verified ones
+        timeout-minutes: 2
+        env:
+          INDEX: TestPyPI
+          JSON_BASE: https://test.pypi.org/pypi/opendox/
+          WHEEL: ${{ needs.build.outputs.wheel }}
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+          SDIST: ${{ needs.build.outputs.sdist }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist-sha256 }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.error, urllib.request
+
+          index = os.environ["INDEX"]
+          url = f"{os.environ['JSON_BASE']}{os.environ['VERSION']}/json"
+          wanted = {os.environ["WHEEL"]: os.environ["WHEEL_SHA256"],
+                    os.environ["SDIST"]: os.environ["SDIST_SHA256"]}
+          try:
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  release = json.load(response)
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+              print(f"{index} holds no file of opendox {os.environ['VERSION']} yet")
+              sys.exit(0)
+          held = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
+          other = {name: digest for name, digest in held.items() if wanted.get(name) != digest}
+          if other:
+              sys.exit(f"::error::{index} already holds {other} for opendox "
+                       f"{os.environ['VERSION']}, which the build job did not verify; "
+                       "an upload now would make a mixed release, so nothing is uploaded")
+          print(f"{index} holds {sorted(held)} for opendox {os.environ['VERSION']}, each at "
+                "the verified digest; skip-existing uploads only what is missing")
+          PY
+
+      # THE PIN, AGAIN, RIGHT BEFORE THE UPLOAD: the build job's step, the same
+      # script. Between the build job's check and this upload the run waits on
+      # an approval (and, before PyPI, on TestPyPI too), and the openDox root
+      # may pin another commit meanwhile. An upload cannot be taken back, so a
+      # moved pin stops it here.
+      - name: the dispatched commit is the one the openDox root pins
+        timeout-minutes: 3
+        run: |
+          root="$RUNNER_TEMP/opendox-root"
+          rm -rf "$root"
+          git init -q -b main "$root"
+          if ! GIT_TERMINAL_PROMPT=0 git -C "$root" -c credential.helper= \
+              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git main \
+              || ! pin="$(git -C "$root" show FETCH_HEAD:contracts/code-pin.yaml)"; then
+            echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
+            exit 1
+          fi
+          PIN="$pin" python3 - <<'PY'
+          import os, re, sys
+
+          pin = os.environ["PIN"]
+
+          def field(name):
+              found = re.search(rf'^{name}:[ \t]*"?([^"\s#]+)"?[ \t]*(?:#.*)?$', pin, re.M)
+              return found.group(1) if found else None
+
+          source, pinned = field("source_repository"), field("commit")
+          here, this = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
+          if source != here:
+              sys.exit(f"::error::the openDox root's code pin names {source!r}, not {here!r}")
+          if not pinned or not re.fullmatch(r"[0-9a-f]{40}", pinned):
+              sys.exit(f"::error::the openDox root's code pin names no full commit: {pinned!r}")
+          if pinned != this:
+              sys.exit(f"::error::this run is at {this}, and the openDox root pins {pinned}; "
+                       "a release publishes only the pinned commit. A dispatch runs at the "
+                       "head of the ref it names, so dispatch on the tag v<version> created "
+                       f"at {pinned}")
+          print(f"{this} is the commit opensoft/openDox main pins for {here}")
+          PY
+
+      # skip-existing: a re-run after a partial upload skips a file the index
+      # already holds, instead of stopping on it, and uploads the rest. The
+      # step before the pin's re-check refused any file but a verified one at
+      # its verified digest, and the JSON step after the upload requires the
+      # index to serve exactly the build job's two digests.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        timeout-minutes: 10
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  testpypi-install:
+    name: install opendox[local] from TestPyPI
+    needs: [build, testpypi]
+    runs-on: ubuntu-latest
+    # THE BUDGET, in full, so no retry this job promises is cut short. Every
+    # step declares its own timeout, each retrying step's covers its retries,
+    # and the job's covers their sum (5 + 5 + 16 + 60 = 86 min):
+    #   the JSON step: 20 reads, each up to 30 s, 15 s apart   15 min  (16)
+    #   the install:   10 tries, each up to 300 s, 30 s apart  55 min  (60)
+    # tests/test_release_workflow.py reads each bound from this file.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      WHEEL: ${{ needs.build.outputs.wheel }}
+      WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+      SDIST: ${{ needs.build.outputs.sdist }}
+      SDIST_SHA256: ${{ needs.build.outputs.sdist-sha256 }}
+    steps:
+      # For `constraints-cpython312-linux.txt` alone.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        timeout-minutes: 5
+        with:
+          python-version: '3.12'
+
+      # TestPyPI serves exactly the two files the build job verified. Its JSON
+      # API can lag the upload, answering 404 or a partial release for a
+      # while, so it is read up to READS times, PAUSE seconds apart, until it
+      # serves exactly those two files, before this step refuses. The `pypi`
+      # job runs the same script against PyPI after its upload.
+      - name: TestPyPI serves the files the build job verified
+        timeout-minutes: 16
+        env:
+          INDEX: TestPyPI
+          JSON_BASE: https://test.pypi.org/pypi/opendox/
+          READS: '20'
+          PAUSE: '15'
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time, urllib.error, urllib.request
+
+          index = os.environ["INDEX"]
+          url = f"{os.environ['JSON_BASE']}{os.environ['VERSION']}/json"
+          reads, pause = int(os.environ["READS"]), float(os.environ["PAUSE"])
+          wanted = {os.environ["WHEEL"]: os.environ["WHEEL_SHA256"],
+                    os.environ["SDIST"]: os.environ["SDIST_SHA256"]}
+          served = None
+          for attempt in range(1, reads + 1):
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as response:
+                      release = json.load(response)
+                  served = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
+                  if served == wanted:
+                      break
+                  print(f"attempt {attempt}: {index} serves {served} so far")
+              except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+                  code = getattr(error, "code", None)
+                  if code is not None and code != 404 and code < 500:
+                      raise
+                  print(f"attempt {attempt}: {url} did not answer yet ({error})")
+              time.sleep(pause)
+          else:
+              sys.exit(f"::error::after {reads} reads, {index} serves {served}, "
+                       f"and the build job verified {wanted}")
+          print(f"{index} serves exactly the verified files: {served}")
+          PY
+
+      # T099's DRY-RUN FALSIFIER, as plan 034 writes it, in a fresh venv:
+      # `pip install --index-url https://test.pypi.org/simple/
+      # --extra-index-url https://pypi.org/simple/ "opendox[local]"`. The
+      # requirement is the install line as written, unversioned. The step adds
+      # this package's lock for the dependencies, wheels only (so no package's
+      # code runs at install time), and `--report`. The simple index can lag
+      # the JSON API, so each try is a fresh venv, up to ten tries, 30 seconds
+      # apart, and each try is cut off after 300 seconds, so the job's budget
+      # holds.
+      #
+      # THE INSTALLED opendox IS THE VERIFIED WHEEL, proven before anything
+      # from it runs. pip merges candidates from both indexes, and `opendox`
+      # is not reserved on PyPI before its first release, so the line could
+      # resolve an `opendox` PyPI serves. This job's own Python, never the
+      # venv's, reads pip's report: the `opendox` installed must come from
+      # TestPyPI's file host, at VERSION, with the sha256 of the wheel the
+      # build job verified. An `opendox` from any other host, or at VERSION
+      # or above with another digest, refuses at once; an older one (an index
+      # that lags) is tried again. Only then does `opendox --help` run.
+      #
+      # THE TRADE, stated: with two indexes, pip may take a dependency from
+      # either. The lock pins every dependency's version. This step receives
+      # no token, no OIDC grant and no secret: the job's GITHUB_TOKEN
+      # (`contents: read`) is used only by the checkout above, which does not
+      # persist it, and the job publishes nothing. What it can spoil is its
+      # own verdict, and the files PyPI receives are still the build job's,
+      # checked by digest in the `pypi` job.
+      - name: install opendox[local] from TestPyPI into a fresh venv, and run it
+        timeout-minutes: 60
+        run: |
+          installed=0
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            rm -rf "$RUNNER_TEMP/fresh" "$RUNNER_TEMP/report.json"
+            python -m venv "$RUNNER_TEMP/fresh"
+            if timeout 300 "$RUNNER_TEMP/fresh/bin/python" -m pip install --disable-pip-version-check \
+                --no-cache-dir --only-binary :all: -c constraints-cpython312-linux.txt \
+                --report "$RUNNER_TEMP/report.json" \
+                --index-url https://test.pypi.org/simple/ \
+                --extra-index-url https://pypi.org/simple/ \
+                "opendox[local]"; then
+              verdict=0
+              python3 - "$RUNNER_TEMP/report.json" <<'PY' || verdict=$?
+          # 0: the verified TestPyPI wheel; 1: an older opendox, try again;
+          # 2: anything else, which refuses at once.
+          import json, os, sys, urllib.parse
+          from pip._vendor.packaging.utils import canonicalize_name
+          from pip._vendor.packaging.version import InvalidVersion, Version
+
+          version, wheel_sha256 = os.environ["VERSION"], os.environ["WHEEL_SHA256"]
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              report = json.load(handle)
+          items = [item for item in report.get("install", [])
+                   if canonicalize_name(item["metadata"]["name"]) == "opendox"]
+          if len(items) != 1:
+              print(f"::error::pip's report names {len(items)} opendox distributions, not one")
+              sys.exit(2)
+          item = items[0]
+          got = item["metadata"]["version"]
+          info = item.get("download_info") or {}
+          host = urllib.parse.urlsplit(info.get("url", "")).hostname
+          digest = ((info.get("archive_info") or {}).get("hashes") or {}).get("sha256")
+          try:
+              newer = Version(got) >= Version(version)
+          except InvalidVersion:
+              newer = True
+          if host == "test-files.pythonhosted.org" and got == version and digest == wheel_sha256:
+              print(f"opendox {got} is the verified wheel, from {host}, sha256 {digest}")
+              sys.exit(0)
+          if host == "test-files.pythonhosted.org" and not newer:
+              print(f"TestPyPI resolved opendox {got} so far, not {version}")
+              sys.exit(1)
+          if host != "test-files.pythonhosted.org" and not newer:
+              print(f"opendox {got} came from {host}, older than {version}; TestPyPI lags")
+              sys.exit(1)
+          print(f"::error::the install line installed opendox {got} from {host}, sha256 "
+                f"{digest}, which is not the verified wheel (opendox {version}, sha256 "
+                f"{wheel_sha256}, from TestPyPI); nothing from it is run")
+          sys.exit(2)
+          PY
+              if [ "$verdict" = 0 ]; then
+                installed=1
+                break
+              fi
+              if [ "$verdict" != 1 ]; then
+                exit 1
+              fi
+            fi
+            echo "attempt $attempt: opendox $VERSION is not installed yet; retrying in 30 seconds"
+            sleep 30
+          done
+          if [ "$installed" != 1 ]; then
+            echo "::error::the install line did not install opendox $VERSION from TestPyPI"
+            exit 1
+          fi
+          cd "$RUNNER_TEMP"
+          echo "opendox $VERSION installed from TestPyPI by the install line as written"
+          "$RUNNER_TEMP/fresh/bin/opendox" --help
+
+  pypi:
+    name: publish to PyPI
+    needs: [build, testpypi-install]
+    runs-on: ubuntu-latest
+    # THE BUDGET: every step declares its own timeout, and the job's covers
+    # their sum (5 + 2 + 2 + 2 + 3 + 10 + 16 = 40 min). The upload is bounded at
+    # 10 minutes, so the JSON step after it always has its 20 reads, each up
+    # to 30 s, 15 s apart (15 min, bounded at 16). A cut-off upload stays
+    # recoverable: a re-run's preflight and skip-existing upload the rest.
+    # tests/test_release_workflow.py reads each bound from this file.
+    timeout-minutes: 45
+    environment:
+      name: pypi
+      url: https://pypi.org/project/opendox/${{ inputs.version }}/
+    permissions:
+      id-token: write # trusted publishing: the OIDC token PyPI accepts
+      actions: read # this environment's reviewer rule and this run's review history
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        timeout-minutes: 5
+        with:
+          name: dist
+          path: dist
+
+      - name: the files are the ones the build job verified
+        timeout-minutes: 2
+        env:
+          WHEEL: ${{ needs.build.outputs.wheel }}
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+          SDIST: ${{ needs.build.outputs.sdist }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist-sha256 }}
+        run: |
+          found="$(find dist -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')"
+          wanted="$(printf '%s\n%s\n' "$SDIST" "$WHEEL" | sort | tr '\n' ' ')"
+          if [ "$found" != "$wanted" ]; then
+            echo "::error::dist/ holds $found, and the build job verified $wanted"
+            exit 1
+          fi
+          printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
+            | sha256sum --strict -c -
+
+      # THE APPROVAL, AT USE TIME. The build job's check that both
+      # environments ask a reviewer goes stale while the run waits: a rule
+      # removed meanwhile would let this job start with nobody approving it.
+      # So, right before the preflight, the pin check and the upload, this
+      # step requires that this job's environment still names a required
+      # reviewer AND that this run's review history holds an approval of a
+      # deployment to it. Either missing refuses, and nothing is uploaded.
+      - name: this environment still asks a reviewer, and this run's deployment to it was approved
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: pypi
+        run: |
+          if ! reviewers=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT" \
+              --jq '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[]] | length'); then
+            echo "::error::the $ENVIRONMENT environment cannot be read, so its reviewer rule is unknown"
+            exit 1
+          fi
+          if [ "$reviewers" -lt 1 ]; then
+            echo "::error::the $ENVIRONMENT environment names no required reviewer now, so this deployment did not wait for an approval"
+            exit 1
+          fi
+          if ! approvals=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals"); then
+            echo "::error::this run's review history cannot be read"
+            exit 1
+          fi
+          APPROVALS="$approvals" python3 - <<'PY'
+          import json, os, sys
+
+          environment = os.environ["ENVIRONMENT"]
+          approved = [review["user"]["login"] for review in json.loads(os.environ["APPROVALS"])
+                      if review.get("state") == "approved"
+                      and any(e.get("name") == environment for e in review.get("environments", []))]
+          if not approved:
+              sys.exit(f"::error::this run's review history holds no approval of a deployment "
+                       f"to {environment}, so nothing is uploaded")
+          print(f"{environment}: a required reviewer is named, and this run's deployment "
+                f"was approved by {', '.join(approved)}")
+          PY
+
+      # BEFORE THE UPLOAD, NOTHING ELSE HELD. skip-existing skips a file name
+      # the index already holds, so the index must hold no file for this
+      # version but the verified ones, at the verified digests: otherwise the
+      # upload would put a verified file beside one nobody verified, and an
+      # index never replaces a file. A 404 is a version with no file yet. A
+      # re-run after a partial upload passes, and uploads only what is missing.
+      - name: PyPI holds no file of this version but the verified ones
+        timeout-minutes: 2
+        env:
+          INDEX: PyPI
+          JSON_BASE: https://pypi.org/pypi/opendox/
+          WHEEL: ${{ needs.build.outputs.wheel }}
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+          SDIST: ${{ needs.build.outputs.sdist }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist-sha256 }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.error, urllib.request
+
+          index = os.environ["INDEX"]
+          url = f"{os.environ['JSON_BASE']}{os.environ['VERSION']}/json"
+          wanted = {os.environ["WHEEL"]: os.environ["WHEEL_SHA256"],
+                    os.environ["SDIST"]: os.environ["SDIST_SHA256"]}
+          try:
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  release = json.load(response)
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+              print(f"{index} holds no file of opendox {os.environ['VERSION']} yet")
+              sys.exit(0)
+          held = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
+          other = {name: digest for name, digest in held.items() if wanted.get(name) != digest}
+          if other:
+              sys.exit(f"::error::{index} already holds {other} for opendox "
+                       f"{os.environ['VERSION']}, which the build job did not verify; "
+                       "an upload now would make a mixed release, so nothing is uploaded")
+          print(f"{index} holds {sorted(held)} for opendox {os.environ['VERSION']}, each at "
+                "the verified digest; skip-existing uploads only what is missing")
+          PY
+
+      # THE PIN, AGAIN, RIGHT BEFORE THE UPLOAD: the build job's step, the same
+      # script. Between the build job's check and this upload the run waits on
+      # an approval (and, before PyPI, on TestPyPI too), and the openDox root
+      # may pin another commit meanwhile. An upload cannot be taken back, so a
+      # moved pin stops it here.
+      - name: the dispatched commit is the one the openDox root pins
+        timeout-minutes: 3
+        run: |
+          root="$RUNNER_TEMP/opendox-root"
+          rm -rf "$root"
+          git init -q -b main "$root"
+          if ! GIT_TERMINAL_PROMPT=0 git -C "$root" -c credential.helper= \
+              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git main \
+              || ! pin="$(git -C "$root" show FETCH_HEAD:contracts/code-pin.yaml)"; then
+            echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
+            exit 1
+          fi
+          PIN="$pin" python3 - <<'PY'
+          import os, re, sys
+
+          pin = os.environ["PIN"]
+
+          def field(name):
+              found = re.search(rf'^{name}:[ \t]*"?([^"\s#]+)"?[ \t]*(?:#.*)?$', pin, re.M)
+              return found.group(1) if found else None
+
+          source, pinned = field("source_repository"), field("commit")
+          here, this = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
+          if source != here:
+              sys.exit(f"::error::the openDox root's code pin names {source!r}, not {here!r}")
+          if not pinned or not re.fullmatch(r"[0-9a-f]{40}", pinned):
+              sys.exit(f"::error::the openDox root's code pin names no full commit: {pinned!r}")
+          if pinned != this:
+              sys.exit(f"::error::this run is at {this}, and the openDox root pins {pinned}; "
+                       "a release publishes only the pinned commit. A dispatch runs at the "
+                       "head of the ref it names, so dispatch on the tag v<version> created "
+                       f"at {pinned}")
+          print(f"{this} is the commit opensoft/openDox main pins for {here}")
+          PY
+
+      # skip-existing: a re-run after a partial upload skips a file the index
+      # already holds, instead of stopping on it, and uploads the rest. The
+      # step before the pin's re-check refused any file but a verified one at
+      # its verified digest, and the JSON step after the upload requires the
+      # index to serve exactly the build job's two digests.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        timeout-minutes: 10
+        with:
+          skip-existing: true
+
+      # PyPI serves exactly the two files the build job verified: the same
+      # script as the TestPyPI check, against PyPI.
+      - name: PyPI serves the files the build job verified
+        timeout-minutes: 16
+        env:
+          INDEX: PyPI
+          JSON_BASE: https://pypi.org/pypi/opendox/
+          READS: '20'
+          PAUSE: '15'
+          WHEEL: ${{ needs.build.outputs.wheel }}
+          WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+          SDIST: ${{ needs.build.outputs.sdist }}
+          SDIST_SHA256: ${{ needs.build.outputs.sdist-sha256 }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time, urllib.error, urllib.request
+
+          index = os.environ["INDEX"]
+          url = f"{os.environ['JSON_BASE']}{os.environ['VERSION']}/json"
+          reads, pause = int(os.environ["READS"]), float(os.environ["PAUSE"])
+          wanted = {os.environ["WHEEL"]: os.environ["WHEEL_SHA256"],
+                    os.environ["SDIST"]: os.environ["SDIST_SHA256"]}
+          served = None
+          for attempt in range(1, reads + 1):
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as response:
+                      release = json.load(response)
+                  served = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
+                  if served == wanted:
+                      break
+                  print(f"attempt {attempt}: {index} serves {served} so far")
+              except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+                  code = getattr(error, "code", None)
+                  if code is not None and code != 404 and code < 500:
+                      raise
+                  print(f"attempt {attempt}: {url} did not answer yet ({error})")
+              time.sleep(pause)
+          else:
+              sys.exit(f"::error::after {reads} reads, {index} serves {served}, "
+                       f"and the build job verified {wanted}")
+          print(f"{index} serves exactly the verified files: {served}")
+          PY
