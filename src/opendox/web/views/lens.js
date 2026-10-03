@@ -26,7 +26,7 @@
 
 import {
   buildLensModel, docSummaries, railStats, termMatches,
-  savePlan, clusterPlan, WORKBENCH_DIR,
+  savePlan, clusterPlan,
 } from "./lens-model.js";
 // The SVG bullseye renderer lives in ONE place (add-workbench-bullseye-and-create
 // design D1): this view and the staging workbench's lens panel consume the same
@@ -267,9 +267,13 @@ function renderPlan(container, plan, opts) {
   if (gateLive(o.caps) && o.mountLensGate) {
     o.mountLensGate(box, { plan, caps: o.caps, fetcher: o.fetcher });
   } else {
+    // NEUTRAL WORDS (plan 034 T102, gap G8): this note used to name the engine
+    // module (`lens.py`) and "the boundary", which are the build's words and
+    // not a reader's. What it says is the same fact: here the plan is shown,
+    // and nothing carries it out.
     box.appendChild(el("div", "dc-note",
-      "The tested engine (lens.py) materialises this through the boundary; the " +
-      "read-only surface confirms the plan — nothing is written from the browser."));
+      "Shown for confirmation only: this console cannot carry the plan out "
+      + "from the browser, so nothing is written."));
   }
   container.appendChild(box);
 }
@@ -1533,9 +1537,14 @@ export function renderLens(root, snapshot, opts) {
       });
       box.appendChild(save);
       box.appendChild(cluster);
+      // NEUTRAL WORDS (plan 034 T102, gap G8): this line named a host's
+      // surfaces -- the workbench folder, "the register", "any queue" -- which
+      // a standalone install does not have. What stays true everywhere is what
+      // the two buttons do: each shows its plan first, and the pane itself
+      // writes nothing. Where the plan lands is the plan's own `lands at` line.
       box.appendChild(el("div", "lens-pending",
-        "Persisted through the interactivity boundary to " + WORKBENCH_DIR +
-        " (gitignored). Nothing enters the register or any queue from here."));
+        "Each button shows its plan below before anything is written; this "
+        + "pane itself writes nothing."));
       pane.appendChild(box);
     },
     setName() {

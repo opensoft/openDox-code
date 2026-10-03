@@ -99,6 +99,13 @@ const SAVE_UNAVAILABLE =
 const SAVE_CONTEXT_ONLY =
   "this document is read-only context in the opened tile, not the tile's own "
   + "material, so it is not offered to the governed Save";
+// T102 (RULED openxFactory#656 `5963618568`): where editing is offered BY
+// SCOPE, the `edit` verb is offered on exactly the documents the scope lets be
+// edited, and a document outside that set states why rather than failing when
+// pressed. Under the gate no entry carries `editable`, so this never shows.
+const LOAD_NOT_THE_TILES_OWN =
+  "this document is context in the opened tile, not one of the tile's own, "
+  + "so it is not offered for editing here";
 const SAVE_NOT_LOADED =
   "load this document for editing before saving it";
 const SAVE_NOTHING_TO_DO =
@@ -345,7 +352,13 @@ export function renderDocWheel(host, entries, opts = {}) {
     // answer wins when one exists (design D2): a context-only document is
     // LOADABLE for grounding and conversation, and its buffer carries
     // `owned: false`, which the governed Save already withholds.
-    const owned = live && typeof live.owned === "boolean"
+    //
+    // T102: a LIVE answer is a loaded buffer's. The shell answers an unloaded
+    // path with a placeholder (`owned: true`, `loaded: false`), which used to
+    // win here, so a by-scope tile outside the scope read "load this document
+    // for editing before saving it" beside an `edit` verb it does not offer.
+    // Under the gate no entry carries `owned`, so this reads as before.
+    const owned = live && live.loaded && typeof live.owned === "boolean"
       ? live.owned
       : entry.owned !== false;
 
@@ -369,7 +382,7 @@ export function renderDocWheel(host, entries, opts = {}) {
     // route in (design D5). Labelled with Brett's own word.
     const load = el("button", "swb-docload", loaded ? "loaded" : "edit");
     load.type = "button";
-    if (onLoad && entry.resolved) {
+    if (onLoad && entry.resolved && entry.editable !== false) {
       load.title = loaded
         ? entry.path + " is loaded for editing — selecting it here brings the "
           + "chat and the canvas back to it"
@@ -380,7 +393,9 @@ export function renderDocWheel(host, entries, opts = {}) {
       });
     } else {
       load.disabled = true;
-      load.title = entry.resolved ? LOAD_UNAVAILABLE : NOT_CATALOGUED;
+      load.title = !entry.resolved ? NOT_CATALOGUED
+        : (onLoad && entry.editable === false
+          ? LOAD_NOT_THE_TILES_OWN : LOAD_UNAVAILABLE);
     }
     row.appendChild(load);
 
