@@ -35,8 +35,9 @@ proof.
 So this module is the RUNNABLE half, in the shape its four neighbours on the
 explicit list `validate` ran until plan 034 T036 already use (`test_leg_shape.py`,
 `test_consumer_reach.py`, `test_web_boundary.py`, `test_view_registry.py`): it
-PARSES `src/opendox/serve.py` and reads the live `opendox.consumer_reach`, and
-it imports `opendox.serve` nowhere. It was written while `opendox.serve` could
+PARSES `src/opendox/serve.py`, and it imports `opendox.serve` nowhere
+(it read the live `opendox.consumer_reach` too, until plan 034 T084 retired
+that module). It was written while `opendox.serve` could
 not be imported at either leg: `from ideation_dashboard import
 serve_openxfactory_lanes` named openxFactory's PRE-CARVE package, a
 `stays_openxfactory_adapter` row (RULING DQ-1) present at neither destination,
@@ -51,11 +52,12 @@ WHAT IT HOLDS, and why each is here rather than implied:
 1. THE ROUTE IS DECLARED HERE, with the pre-carve strings. Two constants and
    three methods, defined in `serve.py` rather than forwarded — the difference
    between "openDox owns this route" and "openDox can reach a leg that does".
-2. THE COLUMN NO LONGER CARRIES THEM. Asserted on the LIVE
-   `consumer_reach.LateProjectionRoutes`, as an absence: a forwarder left behind
-   would be invisible, because the route would go on working wherever openXdox
-   happens to be installed — which is every developer machine, and neither claim
-   this slice makes.
+2. THE COLUMN NO LONGER CARRIES THEM. Asserted as an absence, on the
+   handler's own bases since plan 034 T084 retired `consumer_reach`'s
+   `LateProjectionRoutes` (it was asserted on that live stand-in before): a
+   forwarder left behind would be invisible, because the route would go on
+   working wherever openXdox happens to be installed — which is every
+   developer machine, and neither claim this slice makes.
 3. THE ORDER IS THE ONE THE BINDINGS HAD. `collect_bindings` groups every EXACT
    binding ahead of every PREFIX one, so `/source` refused with a message and
    `/source/` (empty tail) 404'd with divergence headers and a zero-length body.
@@ -99,9 +101,9 @@ WHAT IT HOLDS, and why each is here rather than implied:
 
 `--noconftest` SAFE, deliberately, like its neighbours on the explicit list
 `validate` ran until plan 034 T036:
-nothing here needs a fixture, a path insertion or an installed consumer, and the
-one import (`opendox.consumer_reach`) is the module whose whole point is that
-importing it resolves nothing.
+nothing here needs a fixture, a path insertion or an installed consumer, and it
+imports nothing of the package's (its one import, `opendox.consumer_reach`,
+went with that module at plan 034 T084).
 
 A CREATED file: no carve-manifest row (RULED OQ-C) — it declares what a
 destination assembles, which the manifest never carries.
@@ -194,33 +196,43 @@ def test_the_three_handlers_are_defined_on_this_handler(name):
         "layer that PINS openDox")
 
 
-@pytest.mark.parametrize("name", SOURCE_METHODS)
-def test_the_consumer_column_no_longer_forwards_them(name):
-    """The absence, on the LIVE seam — see this module's point 2."""
-    from opendox import consumer_reach
+#: `DashboardHandler`'s bases since plan 034 T084: openDox's own two route
+#: mixins and the stdlib handler. The gate and projection columns' late
+#: stand-ins (`consumer_reach.LateGateRoutes`, `LateProjectionRoutes`) are
+#: gone with `consumer_reach`, and those columns are a host's, composed in
+#: through the handler-contribution facet (R1Q1 (a)).
+HANDLER_BASES = ("serve_workbench.WorkbenchRoutes", "serve_project.ProjectRoutes",
+                 "http.server.SimpleHTTPRequestHandler")
 
-    _module, _cls, methods = consumer_reach.LateProjectionRoutes.LATE_COLUMN
-    assert name not in methods, (
-        f"consumer_reach.LateProjectionRoutes still forwards {name} into "
-        "openxdox.serve_projection. A forwarder left behind keeps the route "
-        "working on any machine that happens to have openXdox installed, which "
-        "is how a move looks complete and is not")
+
+@pytest.mark.parametrize("name", SOURCE_METHODS)
+def test_no_consumer_column_is_a_base_to_forward_them(name):
+    """The absence, on the handler's own bases (this module's point 2): with
+    no late column among them, nothing can forward `name` into openXdox's
+    projection column, so the route is answered here or nowhere."""
+    bases = tuple(ast.unparse(base) for base in _handler_class().bases)
+    assert bases == HANDLER_BASES, (
+        f"DashboardHandler's bases are {bases}. A late consumer column among "
+        f"them could forward {name} into openxdox.serve_projection, which keeps "
+        "the route working on any machine that happens to have openXdox "
+        "installed: how a move looks complete and is not")
+    assert _method(name) is not None
 
 
 SNAPSHOT_METHODS = ("_query_key", "_read_snapshot", "_serve_snapshot",
                     "_hosted_entry_refused")
 
 
-def test_the_column_keeps_only_its_own_contributed_route():
+def test_the_contributed_index_route_stays_the_columns():
     """`_serve_index` stays the projection column's: its contributed
-    `/snapshot-index.json` binding names it. Since plan 034 T055 it is the ONE
-    method forwarded. The core `/snapshot.json` arm's four handlers, which S6
-    left on the column, are this handler's own, because forwarded they refused
-    every `/snapshot.json` of a standalone server."""
-    from opendox import consumer_reach
-
-    _module, _cls, methods = consumer_reach.LateProjectionRoutes.LATE_COLUMN
-    assert methods == ("_serve_index",), methods
+    `/snapshot-index.json` binding names it, and since plan 034 T084 the
+    column arrives with the binding through the handler-contribution facet,
+    not as a base here. The core `/snapshot.json` arm's four handlers, which S6
+    left on the column, are this handler's own (T055), because forwarded they
+    refused every `/snapshot.json` of a standalone server."""
+    assert _method("_serve_index") is None, (
+        "DashboardHandler defines _serve_index, which is the projection "
+        "column's handler for its own contributed /snapshot-index.json binding")
 
 
 @pytest.mark.parametrize("name", SNAPSHOT_METHODS)

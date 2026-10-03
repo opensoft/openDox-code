@@ -67,7 +67,6 @@ from opendox import rfc3339
 from opendox import serve
 from opendox import workbench
 from opendox import branch_session as bs
-from opendox import consumer_reach
 from opendox.boundary import BoundaryViolation, OutputBoundary
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1550,7 +1549,12 @@ def test_openDoxs_own_kind_meets_openDoxs_own_validator(tmp_path, capsys) -> Non
     assert cli._validate(written, _validate_args(tmp_path)) == 1
     err = capsys.readouterr().err
     assert "REJECTED" in err and "This is the SNAPSHOT" in err
-    assert "[envelope-keys] <root>: 'documents' is required" in err, err
+    # ONE line per broken rule, with its count (T084; RULED 5920216845 item
+    # 3), and each further place it is broken beneath it, so every missing
+    # key is still named.
+    assert "6 × [envelope-keys] <root>: " in err, err
+    assert err.count("[envelope-keys]") == 1, err
+    assert "<root>: 'documents' is required" in err, err
     assert "6 violation(s) of the opendox-snapshot contract, by opendox.validator" in err
     assert "validation SKIPPED" not in err
 
@@ -1723,15 +1727,23 @@ def test_an_explicit_manifest_validator_script_still_runs(tmp_path) -> None:
 # 9 — no proxy over a seam is read at import time
 # ---------------------------------------------------------------------------
 
+#: The modules whose seams are `projection_seams._Seam`s, so whose proxies
+#: this rule holds: the projection mechanism's, and the consumer columns'
+#: (`opendox.column_seams`, plan 034 T084), which took over the import-time
+#: guard `tests/test_consumer_reach.py` kept over the `consumer_reach`
+#: stand-ins those proxies replace.
+SEAM_MODULES = ("projection_seams", "column_seams")
+
+
 def _proxy_bindings(tree: ast.Module) -> set[str]:
-    """Module-level names bound to `projection_seams.<seam>.proxy`."""
+    """Module-level names bound to `<seam module>.<seam>.proxy`."""
     bound = set()
     for node in tree.body:
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Attribute) \
                 and node.value.attr == "proxy" \
                 and isinstance(node.value.value, ast.Attribute) \
                 and isinstance(node.value.value.value, ast.Name) \
-                and node.value.value.value.id == "projection_seams":
+                and node.value.value.value.id in SEAM_MODULES:
             bound |= {t.id for t in node.targets if isinstance(t, ast.Name)}
     return bound
 
@@ -1789,18 +1801,20 @@ def test_no_proxy_over_a_seam_is_read_at_import_time() -> None:
         if names:
             found[path.relative_to(PACKAGE).as_posix()] = (
                 sorted(names), _import_time_reads(tree, names))
-    assert found == {"serve.py": (["registry_mod"], []),
+    assert found == {"branch_session.py": (["gate_console"], []),
+                     "cli.py": (["gate_mod"], []),
+                     "serve.py": (["registry_mod"], []),
                      "serve_workbench.py": (["registry_mod"], [])}, found
 
 
-def test_the_retired_stand_ins_are_gone_from_consumer_reach() -> None:
-    for name in ("snapshot", "snapshot_registry", "corpus_root", "generator",
-                 "find_validator", "corpus_root_refusal", "generate_snapshot",
-                 "is_rfc3339_datetime", "hosted_ref_refused", "scanned_roots",
-                 "function", "constant"):
-        assert not hasattr(consumer_reach, name), name
-        assert name not in consumer_reach.__all__, name
-    assert consumer_reach.LateProjectionRoutes.LATE_COLUMN[2] == ("_serve_index",)
+def test_the_stand_ins_module_is_retired() -> None:
+    """T055 retired the projection mechanism's stand-ins, and T084 the last
+    three: the gate console's module stand-in and the gate and projection
+    columns' late bases. So `consumer_reach` itself is gone (F4.1 whole: "the
+    file is absent"), and nothing in the package can import it."""
+    import importlib.util
+    assert not (PACKAGE / "consumer_reach.py").exists()
+    assert importlib.util.find_spec("opendox.consumer_reach") is None
 
 
 # ---------------------------------------------------------------------------

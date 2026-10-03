@@ -74,13 +74,17 @@ from typing import Any, Iterable, Mapping, Sequence
 import yaml
 
 from . import doxbench_hash
-# THE GATE COLUMN, NAMED LATE (BUILD slice 2b, `split-opendox-two-layer-product`
-# § 3.5/3.6). `gate_console` is openXdox's — the layer that PINS this one — so an
-# import statement here made `import opendox.branch_session` require openXdox to
-# be installed, which `design.md`:243 refuses: *"what must not survive is the
-# direction, not the calls."* The stand-in resolves on first attribute access and
-# refuses naming the layering; every `gate_console.X` below is unchanged.
-from .consumer_reach import gate_console
+# THE GATE COLUMN, THROUGH ITS SEAM (plan 034 T084; #1144 4.3, R1Q10 (a)).
+# `gate_console` is openXdox's, the layer that PINS this one, so an import
+# statement here would make `import opendox.branch_session` require openXdox,
+# which `design.md`:243 refuses. BUILD slice 2b named it late through
+# `consumer_reach`'s stand-in, which still raised where openXdox was absent.
+# It is now a proxy over `column_seams.gate`: each `gate_console.X` below reads
+# the registration current when it runs, a host's or openDox's own default
+# (`default_columns.GATE`, whose governed record functions refuse by name).
+# Every `gate_console.X` below is unchanged. Stdlib-only, so no edge.
+from . import column_seams
+gate_console = column_seams.gate.proxy
 
 # ...EXCEPT the nine `records_dir` DEFAULTS at :1740, :1859, :1878, :4179, :4217,
 # :4254, :4287, :4504 and :4991, which no stand-in can defer: a default argument
@@ -1588,8 +1592,13 @@ def _active_pick_fallbacks(
 
     A change picked from two staging ids is ambiguous and is refused instead of
     selecting whichever register row happened to be encountered first.
+
+    The register is the one registered at `column_seams.register` (plan 034
+    T084): a host's, or openDox's own default, whose register holds no row,
+    so a lone openDox proves no fallback.
     """
-    from openxdox.register import CrossReferenceIndexAdapter
+    CrossReferenceIndexAdapter = (
+        column_seams.register.current().CrossReferenceIndexAdapter)
 
     rows = rows if rows is not None else _change_rows(checkout_root)
     active_without_origin = {
@@ -2007,7 +2016,9 @@ def proposal_state_for(tile: "Tile", *, records_root: Path | str | None = None,
 
     Only a STAGED-TOPIC tile can carry a proposal: both signals are keyed on a
     staging id, and a cluster or possible tile has none."""
-    from openxdox import kickoff as kickoff_mod   # lazy: mirrors gate_console's cycle note
+    # Kickoff through its seam (plan 034 T084): a host's commission reader, or
+    # openDox's own default, which reads no dispatched commission.
+    kickoff_mod = column_seams.kickoff.current()
 
     staged = tile.scope_kind == STAGED_TOPIC
     landed = None
