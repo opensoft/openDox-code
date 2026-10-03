@@ -877,3 +877,56 @@ def test_the_stop_must_exit_zero(tmp_path: Path, rc, expected) -> None:
     verdict = harness.Verdict(keep_going=True)
     harness.stop_and_look(server, ctx, verdict)
     assert _failures(verdict) == expected
+
+
+# ---------------------------------------------------------------------------
+# Every document names its path (Copilot review of #75 at 33841d4a,
+# r4174621535), and a diagnostic never echoes the entry point's output
+# (r4174621486).
+# ---------------------------------------------------------------------------
+
+_HTML_INDEX = harness.Answer(200, {"content-type": "text/html; charset=utf-8"},
+                             b"<html><body></body></html>", None)
+_CAPS = json.dumps({"install": {"mode": "local"}})
+
+
+def _snapshot_server(documents) -> dict:
+    return {"/snapshot.json": ("application/json",
+                               json.dumps({"kind": "opendox-snapshot",
+                                           "documents": documents})),
+            "/capabilities": ("application/json", _CAPS)}
+
+
+@pytest.mark.parametrize("documents, expected", [
+    ([{"path": "a.md"}, {"path": "b/c.md"}], []),
+    ([{}], ["t.snapshot documents each name a path"]),
+    ([{"path": ""}], ["t.snapshot documents each name a path"]),
+    ([{"path": 1}], ["t.snapshot documents each name a path"]),
+    (["a.md"], ["t.snapshot documents each name a path"]),
+    ([{"path": "a.md"}, {"title": "no path"}],
+     ["t.snapshot documents each name a path"]),
+], ids=["named", "empty-object", "empty-path", "number-path", "string-entry",
+        "one-of-two"])
+def test_a_document_without_a_path_is_a_named_failure(
+        tmp_path: Path, documents, expected) -> None:
+    out, err = tmp_path / "out", tmp_path / "err"
+    out.write_text("", encoding="utf-8")
+    err.write_text("", encoding="utf-8")
+    verdict = harness.Verdict(keep_going=True)
+    with served(_snapshot_server(documents)) as port:
+        server = harness.Server("t", None, port, out, err)
+        harness.check_pages(server, _HTML_INDEX, verdict)
+    assert _failures(verdict) == expected
+
+
+def test_a_diagnostic_names_where_the_output_is_and_never_echoes_it(
+        tmp_path: Path) -> None:
+    out, err = tmp_path / "t-server.out", tmp_path / "t-server.err"
+    out.write_text(f"  console file:///x\n  token {TOKEN}\n", encoding="utf-8")
+    err.write_text(f"Traceback: {TOKEN}\n", encoding="utf-8")
+    server = harness.Server("t", None, PORT, out, err)
+    said = server.said()
+    assert TOKEN not in said
+    assert str(out) in said and str(err) in said
+    # the after-stop check still reads all of it
+    assert TOKEN in server.printed()

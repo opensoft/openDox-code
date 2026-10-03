@@ -1102,8 +1102,15 @@ class Server:
         self.err = err
 
     def said(self) -> str:
-        return (f"\n--- stdout ---\n{tail(self.out.read_text('utf-8', 'replace'))}"
-                f"\n--- stderr ---\n{tail(self.err.read_text('utf-8', 'replace'))}")
+        """Where the entry point's output is, for a diagnostic, and never
+        the output itself: it may hold the console token, and a diagnostic
+        reaches the CI log before the after-stop check could catch a printed
+        token (Copilot review of openDox-code#75 at 33841d4a,
+        r4174621486). `printed()` still reads the whole output for that
+        check."""
+        return (f" (the entry point's output is in {self.out} and "
+                f"{self.err}, not echoed here because it may hold the console "
+                "token; run with --keep to keep it)")
 
     def printed(self) -> str:
         """Everything the entry point has written so far, both streams."""
@@ -1214,6 +1221,18 @@ def check_pages(server: Server, index: Answer,
                   isinstance(documents, list) and bool(documents),
                   f"the snapshot's documents are not a non-empty list: "
                   f"{documents!r:.200}")
+    # EVERY DOCUMENT NAMES ITS PATH, or `requests_for` would skip its source
+    # reads and the run would pass on less than it claims (Copilot review of
+    # openDox-code#75 at 33841d4a, r4174621535).
+    pathless = [index for index, document in enumerate(as_list(documents))
+                if not (isinstance(document, dict)
+                        and isinstance(document.get("path"), str)
+                        and document["path"])]
+    verdict.check(f"{label}.snapshot documents each name a path",
+                  not pathless,
+                  f"the snapshot's documents at {pathless[:10]} are not "
+                  "objects with a non-empty string `path`, so no source read "
+                  "can be asked for them")
     leaks = sorted({m.group(1) for v in string_values(snapshot)
                     for m in F53_PATTERN.finditer(v.lower())})
     verdict.check(f"{label}.snapshot neutral (F5.3)", not leaks,
