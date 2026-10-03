@@ -1010,12 +1010,12 @@ def _post_to_provider(*, endpoint: str, dialect: str,
         if status == PROVIDER_STATUS_TOKEN_EXPIRED:
             raise _TokenExpired from None
         raise BrokerRefused(DIAG_PROVIDER_REFUSED) from None
-    # An `http.client.HTTPException` too: a status line, a protocol or a
-    # header line `http.client` cannot read raises one, which is no OSError,
-    # and it escaped with the request's headers in `do_open`'s frame (the
+    # `urllib.error.URLError` is an `OSError`, so it is caught here too. And
+    # an `http.client.HTTPException`: a status line, a protocol or a header
+    # line `http.client` cannot read raises one, which is no OSError, and it
+    # escaped with the request's headers in `do_open`'s frame (the
     # adversarial review of openDox-code#63, L4).
-    except (urllib.error.URLError, http.client.HTTPException, OSError,
-            ValueError) as error:
+    except (http.client.HTTPException, OSError, ValueError) as error:
         raise BrokerRefused(DIAG_PROVIDER_UNREACHABLE) from error
     if not isinstance(payload, (bytes, bytearray)):
         raise BrokerRefused(DIAG_PROVIDER_MALFORMED)

@@ -2114,8 +2114,9 @@ def test_a_stored_document_whose_reference_is_a_raw_key_does_not_read(
     path.write_text(json.dumps({"schema_version": 1,
                                 "kind": binding_mod.BINDINGS_KIND,
                                 "bindings": [record]}), encoding="utf-8")
+    store = binding_mod.BindingStore(path)
     with pytest.raises(binding_mod.BindingRefused) as caught:
-        binding_mod.BindingStore(path).list()
+        store.list()
     assert str(caught.value) == binding_mod.CREDENTIAL_REF_IS_A_RAW_KEY
     assert _STAND_IN_PROVIDER_KEY not in str(caught.value)
 
@@ -2181,8 +2182,9 @@ def test_a_key_anywhere_in_the_endpoint_is_refused_and_never_repeated(
     the scheme, so a key in the path, glued to a path word, in the fragment,
     in a parameter with an innocent name, or in place of the URL, is refused
     with the fixed sentence."""
+    endpoint = _KEYED_ENDPOINTS[place].format(key=key)
     with pytest.raises(binding_mod.BindingRefused) as caught:
-        _binding(endpoint=_KEYED_ENDPOINTS[place].format(key=key))
+        _binding(endpoint=endpoint)
     assert str(caught.value) == binding_mod.ENDPOINT_CARRIES_A_CREDENTIAL
     assert key not in str(caught.value)
 
@@ -2557,9 +2559,10 @@ def test_a_broker_reference_the_record_would_refuse_is_malformed(tmp_path,
         "'created_at':'x','max_lifetime_seconds':300,'issued_by':'i',"
         "'approved_by':'a','audit_ref':'opaud-x'}))\n",
         encoding="utf-8")
+    binding = _broker_binding(script)
+    source = io.StringIO("x")
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.hand_off_credential(_broker_binding(script),
-                                         io.StringIO("x"))
+        provider_mod.hand_off_credential(binding, source)
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
     assert reference not in str(caught.value)
 
@@ -3082,8 +3085,9 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
             binding, install_mod.brokered_catalog(binding),
             runner=_refusing_runner, notice=lambda _text: None,
             environ={ENV_NAME: KEY_SENTINEL})
+        envelope = _Envelope()
         with pytest.raises(provider_mod.BrokerRefused) as caught:
-            port.dispatch(_Envelope())
+            port.dispatch(envelope)
     assert caught.value.diagnostic == provider_mod.DIAG_PROVIDER_UNREACHABLE
     if resolver == "built-in":
         assert caught.value.__cause__ is None
