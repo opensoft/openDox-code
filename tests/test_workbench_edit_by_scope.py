@@ -68,6 +68,11 @@ VENDOR = WEB / "vendor"
 #   g5     a group whose edge names a document by an ID that is not its path
 #          (T084 fix round 3), claimed by candidate p4; selection s2 names the
 #          same document by its PATH
+#   g6, s3 the two namespaces kept apart (T084 fix round 4): `real-p.md` has
+#          the ID `p.md`, and another document has the PATH `p.md`. g6's edge
+#          `p.md` is the id, so `real-p.md`; s3's file `p.md` is the path, and
+#          its file `notes/soil-test` is an id, not a path, so it resolves to
+#          nothing
 BINDINGS = "ideation/dashboard/model-provider-bindings.yaml"
 DECLARATIONS = "ideation/dashboard/model-declarations.yaml"
 SNAPSHOT = {
@@ -79,7 +84,9 @@ SNAPSHOT = {
     ] + [{"id": "decl.md", "path": "decl.md", "topics": ["barrel"],
           "destinations": {"staged_topics": ["s1"]}},
          {"id": BINDINGS, "path": BINDINGS, "topics": []},
-         {"id": "notes/soil-test", "path": "notes/soil-test.md", "topics": []}],
+         {"id": "notes/soil-test", "path": "notes/soil-test.md", "topics": []},
+         {"id": "p.md", "path": "real-p.md", "topics": []},
+         {"id": "other-p", "path": "p.md", "topics": []}],
     "clusters": [
         {"id": "g1", "name": "Group one", "topics": ["barrel"],
          "document_edges": [{"document": "a.md"}, {"document": "b.md"}]},
@@ -94,6 +101,8 @@ SNAPSHOT = {
                             {"document": DECLARATIONS}]},
         {"id": "g5", "name": "Group five", "topics": [],
          "document_edges": [{"document": "notes/soil-test"}, {"document": "b.md"}]},
+        {"id": "g6", "name": "Group six", "topics": [],
+         "document_edges": [{"document": "p.md"}]},
     ],
     "possibles": [
         {"id": "p1", "title": "Candidate one",
@@ -108,20 +117,22 @@ SNAPSHOT = {
          "supporting_evidence": [], "claiming_clusters": ["g5"]},
     ],
     "staged_topics": [{"staging_id": "s1", "files": ["sel.md", "notes.yaml"]},
-                      {"staging_id": "s2", "files": ["notes/soil-test.md"]}],
+                      {"staging_id": "s2", "files": ["notes/soil-test.md"]},
+                      {"staging_id": "s3", "files": ["p.md", "notes/soil-test"]}],
 }
 
 # Every file the scope resolves inside the checkout. `gone.md` is listed by g2
 # and catalogued by nothing, so it is neither here nor in `documents`.
 ON_DISK = ("a.md", "b.md", "c.md", "sel.md", "cited.md", "both.md", "decl.md",
-           BINDINGS, DECLARATIONS, "notes/soil-test.md")
+           BINDINGS, DECLARATIONS, "notes/soil-test.md", "real-p.md", "p.md")
 
 PARITY_TILES = [
     ("cluster", "g1"), ("cluster", "g2"), ("cluster", "g3"),
-    ("cluster", "gbad"), ("cluster", "g4"), ("cluster", "g5"), ("cluster", "nope"),
+    ("cluster", "gbad"), ("cluster", "g4"), ("cluster", "g5"), ("cluster", "g6"),
+    ("cluster", "nope"),
     ("possible", "p1"), ("possible", "p2"), ("possible", "p3"),
     ("possible", "p4"), ("possible", "nope"),
-    ("staged", "s1"), ("staged", "s2"), ("staged", "nope"),
+    ("staged", "s1"), ("staged", "s2"), ("staged", "s3"), ("staged", "nope"),
 ]
 
 
@@ -469,6 +480,9 @@ def test_the_parity_fixture_reaches_every_branch(model, corpus) -> None:
     assert parity["cluster/g5"] == ["notes/soil-test.md", "b.md"]
     assert parity["possible/p4"] == ["notes/soil-test.md", "b.md"]
     assert parity["staged/s2"] == ["notes/soil-test.md"]
+    # T084 fix round 4: an edge is looked up as an id, a file as a path, apart
+    assert parity["cluster/g6"] == ["real-p.md"]
+    assert parity["staged/s3"] == ["p.md"], "a file that is only an id resolves to nothing"
     # a governed host's projection of s1 keeps its outline (the shell's own
     # derivation finds one), so the by-scope null is reached, not vacuous
     assert model["hostOutline"]["s1"] == "sel.md"

@@ -1570,8 +1570,9 @@ export const OWN_SETTINGS_DOCUMENTS = Object.freeze([
 // This MIRRORS `opendox.default_columns.resolve_scope` and `editable_paths`,
 // read off the same snapshot fields in the same order: a group's
 // `document_edges`, a selection's `files`, and the members of the groups that
-// claim a candidate. Each reference is resolved to its document's path (by id
-// or by path, `_document_index`), deduplicated and kept in order, and an
+// claim a candidate. Each reference is resolved to its document's path in the
+// namespace it is written in (`_document_index`: an edge by id, a selection's
+// file by path), deduplicated and kept in order, and an
 // unknown tile, an unknown group or a path the scope cannot name answers what
 // the server answers. A node-and-Python parity test holds the two together
 // (`tests/test_workbench_edit_by_scope.py`).
@@ -1581,7 +1582,10 @@ export const OWN_SETTINGS_DOCUMENTS = Object.freeze([
 // see is whether a catalogued path still RESOLVES inside the checkout (the
 // server's `resolve_within`); a document deleted since the snapshot was taken
 // is therefore offered here and refused there, by the server's own scope
-// refusal.
+// refusal. The same holds for an in-root SYMLINK that reaches a settings
+// document (T084 fix round 5): the server compares the file a row resolves to
+// and moves the alias into the settings section, and the browser, which sees
+// only spellings, offers it until the server refuses it.
 export function tileOwnEditablePaths(snapshot, kind, id) {
   return tileOwnScope(snapshot, kind, id).editable;
 }
@@ -1594,20 +1598,29 @@ function tileOwnScope(snapshot, kind, id) {
   const s = snapshot || {};
   const wanted = asId(id);
   if (!wanted) return none;
-  // `_document_index`: each listed document's PATH, by its id and then by its
-  // path (T084 fix round 3). A group's edges name a document by ID and a
-  // selection's files by PATH, and the two need not be equal; an id is indexed
-  // first, so a path that equals another document's id cannot take its place.
-  const index = new Map();
+  // `_document_index`: each listed document's PATH, in TWO namespaces kept
+  // apart (T084 fix rounds 3 and 4). A group's edges name a document by ID and
+  // a selection's files by PATH, and the two need not be equal. `ids` answers
+  // an id first and then, for an edge written as a path, a path: an id is
+  // indexed first, so a path that equals another document's id cannot take
+  // its place. `paths` answers a path only, so a selection's file `x` never
+  // resolves to the document whose ID is `x`.
+  const ids = new Map();
+  const paths = new Map();
   const listed = (Array.isArray(s.documents) ? s.documents : [])
     .map((d) => (d && typeof d === "object" ? d : {}));
   for (const field of ["id", "path"]) {
     for (const d of listed) {
       const key = scopeText(d[field]);
       const path = scopeText(d.path);
-      if (key && path && !index.has(key)) index.set(key, path);
+      if (key && path && !ids.has(key)) ids.set(key, path);
     }
   }
+  for (const d of listed) {
+    const path = scopeText(d.path);
+    if (path && !paths.has(path)) paths.set(path, path);
+  }
+  let index = ids;
   // `{_text(g.get("id")): g}` on the server: a repeated id keeps the last.
   const groups = new Map();
   for (const g of Array.isArray(s.clusters) ? s.clusters : []) {
@@ -1625,6 +1638,7 @@ function tileOwnScope(snapshot, kind, id) {
       .find((t) => scopeText(t && t.staging_id) === wanted);
     if (!selection) return none;
     refs = Array.isArray(selection.files) ? selection.files : [];
+    index = paths;
   } else if (kind === SCOPE_KINDS.candidate) {
     const candidate = (Array.isArray(s.possibles) ? s.possibles : [])
       .find((p) => scopeText(p && p.id) === wanted);
