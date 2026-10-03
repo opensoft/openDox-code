@@ -347,6 +347,12 @@ def test_the_default_state_dir_is_the_users_own(monkeypatch) -> None:
 # -- 13.1 and R1Q16 (i), (ii), (iv): F13.1's two blocks, on the real entry point
 
 
+# LINUX'S `/proc`, FOR THE KERNEL'S OWN ANSWERS (Copilot review of #69): the
+# server's parent, its TCP listeners and `status`'s pid are read from it, so
+# a POSIX platform without it skips this case rather than failing it.
+# F13.1 names Linux's socket table; the lifecycle it shares with every POSIX
+# platform is held by the cases around it.
+@pytest.mark.skipif(not Path("/proc/self").exists(), reason="asks Linux's /proc")
 def test_the_entry_point_owns_a_migrated_server_with_no_tcp_listener(
         corpus: Path, state_dir: Path, tmp_path: Path) -> None:
     """F13.1's `runtime status` block and its TCP-listener block, against the
@@ -544,6 +550,33 @@ def test_the_bundle_authenticates_by_peer_through_the_one_map(
     assert mappings == [
         (bundle_mod.IDENT_MAP, user, config.BUNDLE_OWNER_ROLE, None),
         (bundle_mod.IDENT_MAP, user, config.BUNDLE_SERVED_ROLE, None)], mappings
+
+
+@pytest.mark.parametrize("user", ["DOMAIN\\alice", "alice\\", "a\\\\b"])
+def test_the_server_reads_a_backslash_in_the_map_literally(
+        state_dir: Path, user: str) -> None:
+    """A user name holding a backslash, the shape an NSS or AD account takes
+    (`DOMAIN\\alice`), is written into `pg_ident.conf` as it is. PostgreSQL
+    16 reads a quoted field's backslash LITERALLY: its tokenizer treats a
+    backslash specially only at the end of a line, as a continuation, and
+    never inside quotes. So the name is NOT escaped, and escaping it would
+    map a different name (Copilot review of #69, which suggested escaping,
+    answered by measurement). The server's own reading of the file is
+    asked, for each shape."""
+    settings = config.load_settings({MODE: "local", STATE: str(state_dir)})
+    with bundle_mod.BundledServer(settings) as server:
+        data = server.bundle.data_dir
+        (data / "pg_ident.conf").write_text(
+            bundle_mod.authentication_files(user)["pg_ident.conf"], encoding="utf-8")
+        try:
+            with _owner(server) as conn:
+                mappings = conn.execute(
+                    "select sys_name, pg_username, error from pg_ident_file_mappings "
+                    "order by map_number").fetchall()
+        finally:
+            bundle_mod.write_authentication(data, bundle_mod.os_user())
+    assert mappings == [(user, config.BUNDLE_OWNER_ROLE, None),
+                        (user, config.BUNDLE_SERVED_ROLE, None)], mappings
 
 
 def test_a_role_outside_the_map_is_refused_even_for_this_os_user(

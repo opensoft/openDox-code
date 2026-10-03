@@ -866,6 +866,12 @@ def test_the_authentication_files_admit_one_os_user_as_the_two_roles() -> None:
         [bundle_mod.IDENT_MAP, '"alice"', config.BUNDLE_OWNER_ROLE],
         [bundle_mod.IDENT_MAP, '"alice"', config.BUNDLE_SERVED_ROLE]]
     assert "trust" not in " ".join(" ".join(r) for rows in active.values() for r in rows)
+    # A BACKSLASH IS WRITTEN AS IT IS, never escaped: PostgreSQL 16 reads a
+    # quoted field's backslash literally (`test_bundled_postgres.py` asks
+    # the server's own reading; Copilot review of #69).
+    domain = bundle_mod.authentication_files("DOMAIN\\alice")["pg_ident.conf"]
+    assert f'{bundle_mod.IDENT_MAP}  "DOMAIN\\alice"  {config.BUNDLE_OWNER_ROLE}' \
+        in domain.splitlines(), domain
 
 
 def test_the_files_are_written_0600_and_replace_what_was_there(
