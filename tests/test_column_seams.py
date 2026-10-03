@@ -166,6 +166,25 @@ def test_a_registration_lacking_a_name_is_refused_naming_it(isolated) -> None:
     assert "column_seams.scope.register()" in str(caught.value)
 
 
+def test_a_gate_verb_on_the_default_gate_is_refused_not_a_traceback(
+        isolated, tmp_path, capsys) -> None:
+    """`cli._commission_cli`, the shared half a contributed gate verb runs,
+    over openDox's own gate default: the governed `GateConsole` refuses at
+    construction, inside the verb's refusal boundary, so the verb answers
+    `<verb> refused: ...` and exit status 1 (Copilot review of
+    openDox-code#77, r4170914922)."""
+    import argparse
+    from opendox import cli
+    cs.register_defaults()
+    args = argparse.Namespace(repo_root=str(tmp_path), records_dir="records/",
+                              actor="brett", outline=None, workflow=None,
+                              note=None)
+    assert cli._commission_cli("propose", args, "some-topic") == 1
+    err = capsys.readouterr().err
+    assert err.startswith("propose refused: "), err
+    assert "opendox.column_seams.gate.register(" in err, err
+
+
 def test_a_gate_whose_refusal_is_not_an_exception_class_is_refused(
         isolated) -> None:
     """`except gate.GateRefused` needs a class: a function would pass the name
