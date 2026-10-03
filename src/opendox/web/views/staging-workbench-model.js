@@ -1562,7 +1562,8 @@ export const OWN_SETTINGS_DOCUMENTS = Object.freeze([
 // This MIRRORS `opendox.default_columns.resolve_scope` and `editable_paths`,
 // read off the same snapshot fields in the same order: a group's
 // `document_edges`, a selection's `files`, and the members of the groups that
-// claim a candidate. Each is resolved, deduplicated and kept in order, and an
+// claim a candidate. Each reference is resolved to its document's path (by id
+// or by path, `_document_index`), deduplicated and kept in order, and an
 // unknown tile, an unknown group or a path the scope cannot name answers what
 // the server answers. A node-and-Python parity test holds the two together
 // (`tests/test_workbench_edit_by_scope.py`).
@@ -1585,10 +1586,19 @@ function tileOwnScope(snapshot, kind, id) {
   const s = snapshot || {};
   const wanted = asId(id);
   if (!wanted) return none;
-  const known = new Set();
-  for (const d of Array.isArray(s.documents) ? s.documents : []) {
-    const path = scopeText(d && d.path);
-    if (path) known.add(path);
+  // `_document_index`: each listed document's PATH, by its id and then by its
+  // path (T084 fix round 3). A group's edges name a document by ID and a
+  // selection's files by PATH, and the two need not be equal; an id is indexed
+  // first, so a path that equals another document's id cannot take its place.
+  const index = new Map();
+  const listed = (Array.isArray(s.documents) ? s.documents : [])
+    .map((d) => (d && typeof d === "object" ? d : {}));
+  for (const field of ["id", "path"]) {
+    for (const d of listed) {
+      const key = scopeText(d[field]);
+      const path = scopeText(d.path);
+      if (key && path && !index.has(key)) index.set(key, path);
+    }
   }
   // `{_text(g.get("id")): g}` on the server: a repeated id keeps the last.
   const groups = new Map();
@@ -1623,11 +1633,14 @@ function tileOwnScope(snapshot, kind, id) {
   const settings = [];
   const seen = new Set();
   for (const raw of refs) {
-    const path = canonicalScopePath(raw);
+    // the document the reference names, by its path; an unlisted reference
+    // stays under its own spelling, unresolved, and must still be nameable
+    const found = typeof raw === "string" ? index.get(scopeText(raw)) : undefined;
+    const path = canonicalScopePath(found !== undefined ? found : raw);
     if (path === null) return none;   // the server refuses the whole tile
     if (seen.has(path)) continue;
     seen.add(path);
-    if (!known.has(path)) continue;
+    if (found === undefined) continue;
     (OWN_SETTINGS_DOCUMENTS.includes(path) ? settings : editable).push(path);
   }
   return { editable, settings };

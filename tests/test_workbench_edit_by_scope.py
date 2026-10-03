@@ -65,6 +65,9 @@ VENDOR = WEB / "vendor"
 #   s1     a selection naming one catalogued file and one that is not
 #   g4     a group naming openDox's own settings documents (T084's M1): the
 #          catalogued one stays readable and is never editable
+#   g5     a group whose edge names a document by an ID that is not its path
+#          (T084 fix round 3), claimed by candidate p4; selection s2 names the
+#          same document by its PATH
 BINDINGS = "ideation/dashboard/model-provider-bindings.yaml"
 DECLARATIONS = "ideation/dashboard/model-declarations.yaml"
 SNAPSHOT = {
@@ -75,7 +78,8 @@ SNAPSHOT = {
         for p in ("a.md", "b.md", "c.md", "sel.md", "cited.md", "both.md")
     ] + [{"id": "decl.md", "path": "decl.md", "topics": ["barrel"],
           "destinations": {"staged_topics": ["s1"]}},
-         {"id": BINDINGS, "path": BINDINGS, "topics": []}],
+         {"id": BINDINGS, "path": BINDINGS, "topics": []},
+         {"id": "notes/soil-test", "path": "notes/soil-test.md", "topics": []}],
     "clusters": [
         {"id": "g1", "name": "Group one", "topics": ["barrel"],
          "document_edges": [{"document": "a.md"}, {"document": "b.md"}]},
@@ -88,6 +92,8 @@ SNAPSHOT = {
         {"id": "g4", "name": "Group four", "topics": [],
          "document_edges": [{"document": BINDINGS}, {"document": "a.md"},
                             {"document": DECLARATIONS}]},
+        {"id": "g5", "name": "Group five", "topics": [],
+         "document_edges": [{"document": "notes/soil-test"}, {"document": "b.md"}]},
     ],
     "possibles": [
         {"id": "p1", "title": "Candidate one",
@@ -98,21 +104,24 @@ SNAPSHOT = {
          "claiming_clusters": []},
         {"id": "p3", "title": "Candidate three",
          "supporting_evidence": [], "claiming_clusters": ["nope"]},
+        {"id": "p4", "title": "Candidate four",
+         "supporting_evidence": [], "claiming_clusters": ["g5"]},
     ],
-    "staged_topics": [{"staging_id": "s1", "files": ["sel.md", "notes.yaml"]}],
+    "staged_topics": [{"staging_id": "s1", "files": ["sel.md", "notes.yaml"]},
+                      {"staging_id": "s2", "files": ["notes/soil-test.md"]}],
 }
 
 # Every file the scope resolves inside the checkout. `gone.md` is listed by g2
 # and catalogued by nothing, so it is neither here nor in `documents`.
 ON_DISK = ("a.md", "b.md", "c.md", "sel.md", "cited.md", "both.md", "decl.md",
-           BINDINGS, DECLARATIONS)
+           BINDINGS, DECLARATIONS, "notes/soil-test.md")
 
 PARITY_TILES = [
     ("cluster", "g1"), ("cluster", "g2"), ("cluster", "g3"),
-    ("cluster", "gbad"), ("cluster", "g4"), ("cluster", "nope"),
+    ("cluster", "gbad"), ("cluster", "g4"), ("cluster", "g5"), ("cluster", "nope"),
     ("possible", "p1"), ("possible", "p2"), ("possible", "p3"),
-    ("possible", "nope"),
-    ("staged", "s1"), ("staged", "nope"),
+    ("possible", "p4"), ("possible", "nope"),
+    ("staged", "s1"), ("staged", "s2"), ("staged", "nope"),
 ]
 
 
@@ -439,6 +448,10 @@ def test_the_parity_fixture_reaches_every_branch(model, corpus) -> None:
     # T084's M1: the catalogued settings document is readable, never editable
     assert parity["cluster/g4"] == ["a.md"]
     assert model["parityProjection"]["cluster/g4"]["context"] == ["a.md", BINDINGS]
+    # T084 fix round 3: an edge names its document by id, a file by path
+    assert parity["cluster/g5"] == ["notes/soil-test.md", "b.md"]
+    assert parity["possible/p4"] == ["notes/soil-test.md", "b.md"]
+    assert parity["staged/s2"] == ["notes/soil-test.md"]
     with pytest.raises(ScopeConfinementError):
         dc.resolve_scope(SNAPSHOT, ScopeKey(repository="fixture", ref="main",
                                             tile_kind="cluster", tile_id="gbad"),
