@@ -172,31 +172,33 @@ def _args(*extra: str):
 
 
 def test_the_local_shape_needs_no_broker_and_no_setting_at_all() -> None:
-    """13.4: `local` needs no broker. Resolved with an EMPTY environment."""
-    assert cli_mod._resolve_install_shape(
-        _args(runtime_config.LOCAL_FLAG), env={}) == \
-        runtime_config.INSTALL_MODE_LOCAL
-    assert cli_mod._resolve_install_shape(
-        _args(), env={MODE: "local"}) == runtime_config.INSTALL_MODE_LOCAL
+    """13.4: `local` needs no broker. Resolved with an EMPTY environment, and
+    (plan 034 T072) with both DSNs supplied by the install itself."""
+    for args, env in ((_args(runtime_config.LOCAL_FLAG), {}),
+                      (_args(), {MODE: "local"})):
+        settings = cli_mod._resolve_install_shape(args, env=env)
+        assert settings.install_mode == runtime_config.INSTALL_MODE_LOCAL
+        assert settings.oidc_issuer == ""
+        assert settings.database_url != settings.migration_database_url
 
 
 @pytest.mark.parametrize("host", sorted(serve_mod.LOOPBACK_HOSTS))
 def test_the_local_shape_accepts_each_loopback_host(host: str) -> None:
     assert cli_mod._resolve_install_shape(
-        _args(runtime_config.LOCAL_FLAG, "--host", host), env={}) == \
-        runtime_config.INSTALL_MODE_LOCAL
+        _args(runtime_config.LOCAL_FLAG, "--host", host), env={}
+    ).install_mode == runtime_config.INSTALL_MODE_LOCAL
 
 
 def test_a_complete_hosted_configuration_resolves_hosted_unchanged() -> None:
     """13.6: a hosted install with its broker configured serves as before."""
     env = {**HOSTED_WITHOUT_ISSUER,
            PREFIX + "OIDC_ISSUER": "https://issuer.example.invalid/realms/x"}
-    assert cli_mod._resolve_install_shape(_args(), env=env) == \
+    assert cli_mod._resolve_install_shape(_args(), env=env).install_mode == \
         runtime_config.INSTALL_MODE_HOSTED
     # a hosted document server may still bind beyond loopback, as it always
     # could: the loopback rule is the LOCAL mode's
     assert cli_mod._resolve_install_shape(
-        _args("--host", "0.0.0.0"), env=env) == \
+        _args("--host", "0.0.0.0"), env=env).install_mode == \
         runtime_config.INSTALL_MODE_HOSTED
 
 

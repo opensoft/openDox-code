@@ -285,11 +285,17 @@ def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path
         child.wait_for_line(_SERVING)
         assert child.process.poll() is None, "the server exited after saying it serves"
         _assert_the_server_answers(base, run_dir / "snapshot.json", repo)
+        # THE LOCAL INSTALL'S DATABASE IS THE CHILD'S OWN (plan 034 T072): its
+        # bundled server was started under the private state directory the
+        # harness gave this child, never under the user's.
+        assert (child.state_dir / "postgres" / "data" / "PG_VERSION").is_file(), \
+            "the bundled server was not started under the child's state dir"
         assert child.interrupt() == 0, child.stderr_text()
     finally:
         child.kill()
     _assert_the_port_is_closed(base)
     assert child.refused() == [], child.refused()
+    assert not child.state_dir.exists(), "the child's state dir outlived it"
 
 
 # ---------------------------------------------------------------------------
@@ -327,27 +333,35 @@ def test_a_child_inherits_none_of_the_runners_runtime_settings(
     """The runner exports a HOSTED install's settings, and the child sees
     none of them (plan 034 T070; Copilot review of openDox-code#67). The
     `--local` cases above would otherwise refuse before they reach what they
-    test, for a reason that is the runner's configuration and not theirs."""
+    test, for a reason that is the runner's configuration and not theirs.
+    The one runtime setting a child does see is the state directory the
+    harness gives it (plan 034 T072), never the runner's own."""
     from opendox.runtime.config import PREFIX, SETTING_NAMES
 
+    state_setting = PREFIX + "STATE_DIR"
     exported = {PREFIX + "INSTALL_MODE": "hosted",
                 PREFIX + "OIDC_ISSUER": "https://issuer.example.invalid/realms/x",
                 PREFIX + "OIDC_AUDIENCE": "fixture",
-                PREFIX + "DATABASE_URL": "postgresql://s@127.0.0.1:1/x"}
+                PREFIX + "DATABASE_URL": "postgresql://s@127.0.0.1:1/x",
+                state_setting: str(tmp_path / "runners-own-state")}
     for name, value in exported.items():
         monkeypatch.setenv(name, value)
     blocker = tmp_path / "sibling-blocker"
     blocker.mkdir()
-    (blocker / "t070_env_probe.py").write_text(textwrap.dedent("""
+    (blocker / "t070_env_probe.py").write_text(textwrap.dedent(f"""
         import json, os
-        print(json.dumps(sorted(n for n in os.environ if n.startswith("OPENDOX_"))),
-              flush=True)
+        print(json.dumps([sorted(n for n in os.environ if n.startswith("OPENDOX_")),
+                          os.environ.get({state_setting!r})]), flush=True)
         """), encoding="utf-8")
-    child, status = run_module(tmp_path, "t070_env_probe")
+    child = Child(tmp_path, "t070_env_probe")
+    state_dir = child.state_dir
+    status = child.wait()
     assert status == 0, child.stderr_text()
-    seen = set(json.loads(child.stdout_text().strip().splitlines()[-1]))
-    assert not seen & set(SETTING_NAMES), sorted(seen & set(SETTING_NAMES))
+    names, state_value = json.loads(child.stdout_text().strip().splitlines()[-1])
+    assert set(names) & set(SETTING_NAMES) == {state_setting}, names
+    assert state_value == str(state_dir) != exported[state_setting]
     assert set(exported) <= set(SETTING_NAMES)
+    assert not state_dir.exists(), "the child's state directory outlived it"
 
 
 def test_a_child_that_ignores_the_interrupt_is_killed_at_the_deadline(
