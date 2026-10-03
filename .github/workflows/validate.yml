@@ -260,17 +260,17 @@ jobs:
           # left these floors where they were, so the declared three-test
           # margin had grown to several hundred. T082 adds 34 cases and
           # re-pins by the rule above: three below the lower of two greens
-          # of one tree. The tree is `87a753a8`, T082 after merging `main`
-          # at `390e2c28` (T084 and T103 included). Read from run
-          # 37149982938: attempt 1 (job 111281569958) and its re-run (job
-          # 111283040579). Both printed `triple: selected=3936 passed=3925
+          # of one tree. The tree is `a25606bb`, T082 after merging `main`
+          # at `0116293a` (T084, T103 and T102 included). Read from run
+          # 37152269851: attempt 1 (job 111288409713) and its re-run (job
+          # 111296677742). Both printed `triple: selected=3980 passed=3969
           # skipped=11 failures=0 errors=0`, so no jitter was measured, and
-          # three below is 3933 / 3922. A local run of the same tree read
-          # 3759 passed and 177 skipped (3936 selected), with no PostgreSQL
+          # three below is 3977 / 3966. A local run of the same tree read
+          # 3803 passed and 177 skipped (3980 selected), with no PostgreSQL
           # service, so the runtime cases skip there. That is a check, not
           # the source.
-          MIN_SELECTED: "3933"
-          MIN_PASSED: "3922"
+          MIN_SELECTED: "3977"
+          MIN_PASSED: "3966"
           # EXACT — the load-bearing number. Moves only with its reason.
           #
           # HELD AT 11 by plan 034 T082. While T082 was stacked ahead of T084
