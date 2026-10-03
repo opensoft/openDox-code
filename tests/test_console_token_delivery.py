@@ -1025,3 +1025,76 @@ def test_a_static_link_out_of_the_bundle_never_serves_a_private_copy(
         httpd.shutdown()
         httpd.server_close()
         worker.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# 9 — no overlap in EITHER direction (the holder's ruling on batch N's
+#     Copilot r4174345203)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("inside", ["console", "postgres/run", "anything/else/deep",
+                                    "."])
+def test_a_served_root_inside_the_state_directory_is_refused(tmp_path, inside) -> None:
+    """The REVERSE nesting. A served root that IS, or lies inside, the state
+    directory (`<state>/console` itself, the bundle's socket tree, anything)
+    would let the plane serve the state directory's contents, the copy among
+    them. The state directory and every served root may not overlap in either
+    direction: refused by name, before anything is written."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    served = (state / inside).resolve() if inside != "." else state.resolve()
+    served.mkdir(parents=True, exist_ok=True, mode=0o700)
+    before = _tree(state)
+    with pytest.raises(console_access.ConsoleAccessRefused,
+                       match="OPENDOX_STATE_DIR") as refused:
+        console_access.write_private_copy(
+            state, page_url="http://127.0.0.1:8080/index.html", port=8080,
+            token=_token(), served_roots=(served,))
+    assert str(served) in str(refused.value), str(refused.value)
+    assert _tree(state) == before, "something was written"
+
+
+def test_a_source_link_into_the_state_directory_never_serves_the_copy(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """Pinned: `/source` confines every path to its root AFTER resolving links
+    (`default_registry.resolve_within`), so a link inside the served checkout
+    that points at the state directory reaches nothing in it. The copy, its
+    directory and the state directory itself answer 404, unkeyed and keyed,
+    for GET and HEAD, and no answer carries the token."""
+    from opendox import console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = _state(tmp_path)
+    (repo / "state-link").symlink_to(state)
+    (repo / "copy-link.md").symlink_to(
+        console_access.private_copy_path(state, 1))      # dangling until written
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    httpd = serve.build_server(WEB, snapshot, repo, port=0, quiet=True)
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    try:
+        base = httpd.server_address[:2]
+        copy = console_access.publish(
+            httpd, page_url=serve.server_url(httpd, "/index.html"),
+            env={"OPENDOX_STATE_DIR": str(state)})
+        _write(state, port=1)                              # copy-link.md now resolves
+        token = httpd.console_token
+        name = copy.path.name
+        for tail in (f"state-link/console/{name}", "state-link/console/1.html",
+                     "copy-link.md", "state-link/console/", "state-link/"):
+            for prefix in ("/source/", "/source/fixture@main/"):
+                for method in ("GET", "HEAD"):
+                    status, headers, raw = _call(base, method, prefix + tail)
+                    assert status == 404, (method, prefix + tail, status, raw[:200])
+                    assert token.encode() not in raw
+                    assert all(token not in str(v) for v in headers.values())
+        document = next(p.name for p in sorted(repo.glob("*.md")) if not p.is_symlink())
+        status, _headers, raw = _call(base, "GET", f"/source/{document}")
+        assert status == 200 and raw == (repo / document).read_bytes()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join(timeout=10)

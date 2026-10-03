@@ -368,38 +368,43 @@ def _opener_html(record: Mapping[str, Any]) -> str:
 def _refuse_a_served_state_dir(state_dir: Path,
                                served_roots: Iterable[Path | str], *,
                                port: int) -> None:
-    """The state directory may not BE, or lie inside, a root this plane serves.
+    """The state directory and every root this plane serves may not overlap,
+    in EITHER direction, or the copy is refused before anything is written.
 
     RULED by the holder on openxFactory#1220's review (Copilot
     `r4171166321`), mirroring T100's served-repository boundary
     (`doxbench_trust`'s state directory): the token's copy must never sit
-    inside what `/source` can serve, nor where a clone or an accidental commit
-    could carry it. Asked of the RESOLVED paths, before anything is written."""
+    inside what the plane can serve, nor where a clone or an accidental
+    commit could carry it. So the state directory may not BE a served root
+    or lie inside one. And, by the holder's ruling on batch N's review
+    (Copilot `r4174345203`), no served root may be or lie inside the state
+    directory either: `<state>/console` itself, or the bundle's tree beside
+    it, served as a root, would serve the copy (Copilot at openDox-code#84,
+    `r4173889265`, found the first of these). Asked of the RESOLVED paths, so
+    a link counts as where it leads. `port` names the copy the refusal is
+    about."""
     resolved = Path(state_dir).resolve()
+    copy = private_copy_path(resolved, port)
     for root in served_roots:
         served = Path(root).resolve()
-        if resolved == served or served in resolved.parents:
-            where = ("is the served repository" if resolved == served
-                     else "lies inside the served repository")
-            raise ConsoleAccessRefused(
-                f"{runtime_config.PREFIX}STATE_DIR ({state_dir}) {where} "
-                f"({served}), which this plane serves through `/source` and a "
-                "clone or a commit could carry, so the console token's private "
-                "copy is refused there and nothing is written. Set "
-                f"{runtime_config.PREFIX}STATE_DIR to a directory outside the "
-                "repositories this machine serves")
-        # AND THE COPY ITSELF (Copilot at openDox-code#84, r4173889265): a
-        # served root may be the state directory's `console/`, or anything
-        # else that holds the copy, while the state directory lies outside
-        # every served root. The copy's own resolved path is judged.
-        target = private_copy_path(resolved, port).resolve()
-        if served in target.parents:
-            raise ConsoleAccessRefused(
-                f"{runtime_config.PREFIX}STATE_DIR ({state_dir}) would put the "
-                f"console token's private copy at {target}, inside {served}, "
-                "which this plane serves, so the copy is refused there and "
-                f"nothing is written. Set {runtime_config.PREFIX}STATE_DIR to "
-                "a directory whose `console/` no served root holds")
+        if resolved == served:
+            where = f"is the served repository ({served})"
+        elif served in resolved.parents:
+            where = f"lies inside the served repository ({served})"
+        elif resolved in served.parents:
+            where = (f"holds {served}, a root this plane serves, so the plane "
+                     f"would serve what the state directory keeps, the copy "
+                     f"{copy} among it")
+        else:
+            continue
+        raise ConsoleAccessRefused(
+            f"{runtime_config.PREFIX}STATE_DIR ({state_dir}) {where}. The "
+            "state directory and every root this plane serves (through "
+            "`/source` or the static bundle) may not overlap, and a clone or a "
+            "commit could carry what lies inside a repository, so the console "
+            "token's private copy is refused there and nothing is written. Set "
+            f"{runtime_config.PREFIX}STATE_DIR to a directory apart from the "
+            "repositories and the bundle this machine serves")
 
 
 def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
