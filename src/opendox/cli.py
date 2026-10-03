@@ -937,21 +937,24 @@ def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
                       "above manually)")
 
         if args.no_serve:
-            httpd.server_close()
             return 0
 
         print("  serving until interrupted (Ctrl-C to stop)", flush=True)
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            httpd.server_close()
+        # A plain `kill` stops a standalone console the way Ctrl-C does, so
+        # the copy below is removed (`terminate_as_interrupt`); a plane that
+        # wrote no copy keeps SIGTERM's default action.
+        with console_access.terminate_as_interrupt(console is not None):
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                pass
         return 0
     finally:
         # The copy goes with the server: its token is this serve's, and dies
-        # with it.
+        # with it. It goes FIRST, while this process still holds the port, so
+        # no later serve can bind it and write its own copy in between.
         console_access.remove_private_copy(console)
+        httpd.server_close()
 
 
 # ---- gate console (US9): human-only executable gate actions ----------------

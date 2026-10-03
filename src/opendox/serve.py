@@ -2443,9 +2443,23 @@ def build_server(
     # uses. Both `None` where no token was minted.
     httpd.console_token = console_token
     httpd.console_token_delivery = console_delivery
-    # ...and the roots `/source` serves, which the token's copy may not sit in.
-    httpd.served_roots = (checkout_root, *(
-        Path(path).resolve() for path in (source_roots or {}).values()))
+    # ...and EVERY root this plane serves files from, which the token's copy
+    # may not sit in (Copilot at openDox-code#84, r4173806506): the checkout,
+    # the static bundle's directory, each declared source root, the root of
+    # each entry the registry holds now (the bootstrapped session worktrees
+    # among them), and, on a loopback plane, the sessions container every
+    # later session worktree is made in (`branch_session.sessions_root`).
+    served = [checkout_root, web_dir,
+              *(Path(path).resolve() for path in (source_roots or {}).values())]
+    if loopback:
+        from opendox import branch_session as session_mod
+        served.append(session_mod.sessions_root(checkout_root))
+    entries = getattr(source.registry, "entries", None)
+    for entry in (entries() if callable(entries) else ()):
+        root = getattr(entry, "source_root", None)
+        if root:
+            served.append(Path(root).resolve())
+    httpd.served_roots = tuple(dict.fromkeys(served))
     return httpd
 
 
@@ -2572,14 +2586,18 @@ def serve(
         # never reaches a wrapper while the server runs, and the wrapper cannot
         # learn an ephemeral port or tell that the server started.
         print(f"serving ideation dashboard at {page}", flush=True)
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            httpd.server_close()
+        # A plain `kill` stops a standalone console the way Ctrl-C does, so the
+        # copy is removed; a plane that wrote none keeps SIGTERM's default.
+        with console_access.terminate_as_interrupt(console is not None):
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                pass
     finally:
+        # The copy FIRST, while this process still holds the port, then the
+        # socket (`console_access.remove_private_copy`).
         console_access.remove_private_copy(console)
+        httpd.server_close()
 
 
 def _source_roots_from_args(values) -> dict:

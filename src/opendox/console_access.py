@@ -71,6 +71,7 @@ import html
 import json
 import os
 import re
+import signal
 import stat
 import urllib.parse
 from collections.abc import Iterable, Mapping
@@ -80,10 +81,12 @@ from typing import Any
 from opendox.runtime import config as runtime_config
 
 __all__ = [
-    "CONSOLE_DIRNAME", "ConsoleAccessRefused", "DELIVERY_CAPABILITIES",
+    "CONSOLE_DIRNAME", "ConsoleAccessRefused", "ConsoleTerminated",
+    "DELIVERY_CAPABILITIES",
     "DELIVERY_OPENED_URL", "FRAGMENT_KEY", "PrivateCopy", "RECORD_ELEMENT_ID",
     "RECORD_KIND", "delivery_for", "opened_url", "private_copy_path", "publish",
-    "read_private_copy", "remove_private_copy", "write_private_copy",
+    "read_private_copy", "remove_private_copy", "terminate_as_interrupt",
+    "write_private_copy",
 ]
 
 #: The token rides on `/capabilities`, as a host's plane has always read it.
@@ -538,13 +541,76 @@ def remove_private_copy(copy: PrivateCopy | None) -> None:
     """Remove `copy` when the server stops, if it is still the file written.
 
     A later serve on the same port writes a file of its own, and that one is
-    left alone. Never raises: a copy already gone is the goal reached."""
+    left alone. Never raises: a copy already gone is the goal reached.
+
+    THE NAME IS TAKEN BEFORE IT IS JUDGED (Copilot at openDox-code#84,
+    r4173806552). Checking the name's identity and
+    then unlinking it are two steps, and a replacement written between them
+    would be the file unlinked. So the name is first RENAMED to a name only
+    this process uses, atomically, and what was renamed is judged: this
+    process's own file is removed, and anything else is linked back under the
+    name (never over a still newer copy) and its temporary name removed. The
+    entry points also remove the copy BEFORE they close the listening socket,
+    so no later serve can bind the port, and write its own copy, until this
+    one is gone."""
     if copy is None:
         return
-    with contextlib.suppress(OSError):
-        info = os.lstat(copy.path)
-        if (info.st_dev, info.st_ino) == copy.identity:
-            os.unlink(copy.path)
+    try:
+        directory = os.open(copy.path.parent,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return
+    name = copy.path.name
+    taken = f".{name}.removing-{os.getpid()}-{os.urandom(6).hex()}"
+    try:
+        try:
+            os.rename(name, taken, src_dir_fd=directory, dst_dir_fd=directory)
+        except OSError:
+            return                          # nothing there: already gone
+        with contextlib.suppress(OSError):
+            info = os.stat(taken, dir_fd=directory, follow_symlinks=False)
+            if (info.st_dev, info.st_ino) != copy.identity:
+                # ANOTHER SERVE'S COPY: put it back under its name, unless a
+                # still newer one has arrived there, which then stands.
+                with contextlib.suppress(FileExistsError):
+                    os.link(taken, name, src_dir_fd=directory,
+                            dst_dir_fd=directory, follow_symlinks=False)
+        with contextlib.suppress(OSError):
+            os.unlink(taken, dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
+class ConsoleTerminated(KeyboardInterrupt):
+    """SIGTERM, raised as the interrupt the serve loops already stop on."""
+
+
+def _terminate_as_interrupt(signum, frame):
+    raise ConsoleTerminated
+
+
+@contextlib.contextmanager
+def terminate_as_interrupt(enabled: bool):
+    """While a standalone console's private copy exists, read SIGTERM as the
+    Ctrl-C the serve loops already stop cleanly on, so a plain `kill <pid>`
+    unwinds through the code that removes the copy (Copilot at
+    openDox-code#84, r4173806590). The handler it replaces is put back on the
+    way out. `enabled` is False wherever no copy was written, a host's plane
+    or a plane with no token, and then nothing changes: those planes keep the
+    signal's default action exactly as before. Off the main thread no handler
+    can be installed, and nothing is."""
+    if not enabled:
+        yield
+        return
+    try:
+        previous = signal.signal(signal.SIGTERM, _terminate_as_interrupt)
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def publish(httpd: Any, *, page_url: str,

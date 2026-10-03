@@ -33,6 +33,7 @@ import http.client
 import json
 import os
 import re
+import signal
 import stat
 import threading
 import urllib.parse
@@ -619,6 +620,17 @@ def test_every_route_that_requires_the_token_still_requires_it(
         assert json.loads(raw).get("error") != DOXBENCH_ERR_CONSOLE_REQUIRED, raw
 
 
+def _stop(child: Child, signum: int) -> int:
+    """Signal the child and wait for it, WITHOUT `Child.interrupt()`, whose
+    `kill()` deletes the child's state directory and would hide a copy the
+    child failed to remove (Copilot at openDox-code#84, r4173806621). The
+    case's own `finally: child.kill()` cleans up afterwards."""
+    import standalone_child
+
+    child.process.send_signal(signum)
+    return child.process.wait(timeout=standalone_child.STOP_DEADLINE_SECONDS)
+
+
 # ---------------------------------------------------------------------------
 # 5 — the documented command, as a user runs it
 # ---------------------------------------------------------------------------
@@ -649,7 +661,8 @@ def test_the_documented_command_delivers_the_token_only_through_its_copy(
         assert token.encode() not in raw
         status, _h, raw = _call(base, "GET", "/workbench/model-catalog", token=token)
         assert status == 200, raw
-        assert child.interrupt() == 0, child.stderr_text()
+        # STOPPED, and looked at BEFORE `Child.kill()` deletes the state dir
+        assert _stop(child, signal.SIGINT) == 0, child.stderr_text()
         assert not copy_path.exists(), "the copy outlived the server"
     finally:
         child.kill()
@@ -686,7 +699,7 @@ def test_the_servers_own_entry_point_delivers_the_token_the_same_way(
         assert status == 200 and token.encode() not in raw
         status, _h, raw = _call(base, "GET", "/workbench/model-catalog", token=token)
         assert json.loads(raw).get("error") != "console_required", raw
-        assert child.interrupt() == 0, child.stderr_text()
+        assert _stop(child, signal.SIGINT) == 0, child.stderr_text()
         assert not copy_path.exists(), "the copy outlived the server"
     finally:
         child.kill()
@@ -787,18 +800,157 @@ def test_generate_and_open_refuses_a_state_directory_inside_the_served_repositor
 
 def test_the_plane_reports_every_root_it_serves(tmp_path, monkeypatch,
                                                 standalone_profile) -> None:
-    """`publish` reads the plane's own served roots: its checkout, and each
-    declared source root, resolved."""
-    from opendox import serve
+    """`publish` reads every root the plane serves files from (Copilot at
+    openDox-code#84, r4173806506): the checkout, the static bundle's
+    directory, each declared source root, each registry entry's root, and the
+    sessions container every session worktree is made in."""
+    from opendox import branch_session, serve
 
     with _serving(tmp_path, monkeypatch) as (httpd, _base, repo):
-        assert httpd.served_roots == (repo.resolve(),)
+        sessions = branch_session.sessions_root(repo)
+        assert httpd.served_roots[:2] == (repo.resolve(), WEB.resolve())
+        assert sessions in httpd.served_roots
+        entries = httpd.RequestHandlerClass.func.source.registry.entries()
+        assert entries and all(Path(e.source_root).resolve() in httpd.served_roots
+                               for e in entries if e.source_root)
         other = tmp_path / "other-source-root"
         other.mkdir()
         snapshot = tmp_path / "snapshot.json"
         declared = serve.build_server(WEB, snapshot, repo, port=0, quiet=True,
                                       source_roots={"other": str(other)})
         try:
-            assert declared.served_roots == (repo.resolve(), other.resolve())
+            assert other.resolve() in declared.served_roots
+            assert repo.resolve() in declared.served_roots
         finally:
             declared.server_close()
+
+
+@pytest.mark.parametrize("inside", ["the static bundle", "the sessions container"])
+def test_a_state_directory_in_another_served_root_is_refused_by_the_entry_point(
+        tmp_path, monkeypatch, standalone_profile, inside) -> None:
+    """The static handler serves every file under `--web-dir`, and `/source`
+    serves every session worktree, so a copy there would be served to anyone
+    who asks, its 0600 notwithstanding: the server reads it as its owner.
+    `publish` refuses both, before anything is written."""
+    import shutil as _shutil
+
+    from opendox import branch_session, console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    web = tmp_path / "web"
+    _shutil.copytree(WEB, web)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    httpd = serve.build_server(web, snapshot, repo, port=0, quiet=True)
+    try:
+        assert httpd.console_token
+        state = (web / "state" if inside == "the static bundle"
+                 else branch_session.sessions_root(repo) / "state")
+        with pytest.raises(console_access.ConsoleAccessRefused,
+                           match="lies inside the served repository"):
+            console_access.publish(
+                httpd, page_url=serve.server_url(httpd, "/index.html"),
+                env={"OPENDOX_STATE_DIR": str(state)})
+        assert not state.exists(), "something was written"
+    finally:
+        httpd.server_close()
+
+
+# ---------------------------------------------------------------------------
+# 7 — the copy's removal: exact under a race, and on a plain kill
+# ---------------------------------------------------------------------------
+
+def test_a_replacement_written_while_the_old_copy_is_removed_survives(
+        tmp_path, monkeypatch) -> None:
+    """Copilot at openDox-code#84, r4173806552. A replacement serve publishes
+    its copy for the same port at the instant the old serve removes its own:
+    the old serve takes the NAME first (an atomic rename), finds a file that
+    is not its own, and puts it back. The replacement's copy stands, whole."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    first = _write(state)
+    second_token = _token()
+    real_rename = os.rename
+    raced: list = []
+
+    def racing(src, dst, *args, **kwargs):
+        if src == first.path.name and not raced:
+            raced.append(_write(state, token=second_token))   # the replacement
+        return real_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(console_access.os, "rename", racing)
+    console_access.remove_private_copy(first)
+    monkeypatch.undo()
+    assert raced, "the race was never staged"
+    record = console_access.read_private_copy(first.path)
+    assert record["console_token"] == second_token
+    assert sorted(p.name for p in first.path.parent.iterdir()) == [first.path.name]
+    console_access.remove_private_copy(raced[0])
+    assert not first.path.exists()
+
+
+def test_terminate_as_interrupt_reads_sigterm_as_ctrl_c_and_restores_the_handler(
+        ) -> None:
+    from opendox import console_access
+
+    def sentinel(signum, frame):
+        raise AssertionError("the previous handler ran")
+
+    previous = signal.signal(signal.SIGTERM, sentinel)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            with console_access.terminate_as_interrupt(True):
+                os.kill(os.getpid(), signal.SIGTERM)
+                signal.pthread_sigmask(signal.SIG_BLOCK, [])   # deliver now
+        assert signal.getsignal(signal.SIGTERM) is sentinel
+        with console_access.terminate_as_interrupt(False):
+            assert signal.getsignal(signal.SIGTERM) is sentinel
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+_HOSTED = {
+    "OPENDOX_INSTALL_MODE": "hosted",
+    "OPENDOX_DATABASE_URL": "postgresql://serve@127.0.0.1:1/opendox",
+    "OPENDOX_MIGRATION_DATABASE_URL": "postgresql://migrate@127.0.0.1:1/opendox",
+    "OPENDOX_OIDC_AUDIENCE": "fixture",
+    "OPENDOX_OIDC_ISSUER": "https://issuer.example.invalid/realms/fixture",
+}
+
+
+@pytest.mark.parametrize("entry", ["serve", "generate-and-open --local",
+                                   "generate-and-open, hosted"])
+def test_a_plain_kill_removes_the_copy(tmp_path, monkeypatch, entry) -> None:
+    """Copilot at openDox-code#84, r4173806590. SIGTERM, which `kill` sends,
+    stops every standalone entry point through the code that removes its
+    copy, and the copy is looked for BEFORE the helper deletes the state
+    directory. Each exits 0, as Ctrl-C does."""
+    from opendox import console_access
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    if entry == "serve":
+        snapshot = tmp_path / "snapshot.json"
+        snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+        child = Child(tmp_path, "opendox.serve", "--snapshot", str(snapshot),
+                      "--checkout-root", str(repo), "--port", "0")
+        url = _SERVE_URL
+    else:
+        local = ["--local"] if entry.endswith("--local") else []
+        child = Child(tmp_path, "opendox.cli", "generate-and-open", *local,
+                      "--repo-root", str(repo), "--repository", "fixture",
+                      "--no-open", "--port", "0", "--run-dir", str(tmp_path / "run"),
+                      extra_env=None if local else _HOSTED)
+        url = _URL
+    try:
+        match = child.wait_for_line(url)
+        port = int(match.group(3))
+        copy_path = console_access.private_copy_path(child.state_dir, port)
+        assert copy_path.exists(), child.stdout_text() + child.stderr_text()
+        assert _stop(child, signal.SIGTERM) == 0, child.stderr_text()
+        assert not copy_path.exists(), "a plain kill left the token's copy behind"
+        assert "Traceback" not in child.stderr_text(), child.stderr_text()
+    finally:
+        child.kill()
