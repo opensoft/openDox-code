@@ -89,15 +89,20 @@ graph a browser loads. Every module is fetched from the server under test:
 a static import must answer 200, since a failed one is a module-load
 `pageerror`, which AT-R1 step 8 forbids and no declaration can excuse; a
 dynamic import may be refused (10.2a's `intent-feed.js` is not owed, and its
-importer degrades), but never with a 5xx. Then, in every module of that graph,
-with comments stripped, every string literal that is a same-origin path (a
-leading `/` or `./` and a letter, not a module or stylesheet) is a route the
-bundle can request. A static read cannot tell which of them fire on load and
-which on a click, so ALL of them are requested, a superset of the three
-panes' load-time reads. The action routes (`/actions/…`) are requested with a
-GET too, which never executes them (a GET there finds no handler, and their
-POST is a user's act, not a load). Two kinds take values the panes fill from
-the snapshot, and the harness fills them the same way:
+importer degrades), but never with a 5xx. A module the server DOES serve
+(200) must be served as JavaScript, and a linked stylesheet as `text/css`,
+parameters such as `charset` aside: a browser refuses a module script of any
+other type, and a standards-mode page applies no stylesheet of any other type
+(Copilot review of openDox-code#75 at f29b4ddd). Then, in every module of
+that graph, with comments stripped, every string literal that is a
+same-origin path (a leading `/` or `./` and a letter, not a module or
+stylesheet) is a route the bundle can request. A static read cannot tell
+which of them fire on load and which on a click, so ALL of them are
+requested, a superset of the three panes' load-time reads. The action
+routes (`/actions/…`) are requested with a GET too, which never executes
+them (a GET there finds no handler, and their POST is a user's act, not a
+load). Two kinds take values the panes fill from the snapshot, and the
+harness fills them the same way:
  * a route ending in `/` (`/source/`) is a prefix the wheel, the viewer and
    the workbench's source loader complete with a document path, so it is also
    requested once per document the snapshot lists, plain and keyed by the
@@ -667,6 +672,28 @@ def _graph_roots(index_html: str, capabilities: dict) -> tuple[list, list]:
     return roots, [_resolve("/", sheet) for sheet in links.sheets]
 
 
+#: The JavaScript MIME type essences the HTML standard lists, as
+#: `tests_runtime/test_served_bundle.py`'s `JAVASCRIPT_TYPES` lists them. A
+#: browser refuses a module script served under any other type.
+JAVASCRIPT_TYPES = frozenset({
+    "application/ecmascript", "application/javascript",
+    "application/x-ecmascript", "application/x-javascript",
+    "text/ecmascript", "text/javascript", "text/javascript1.0",
+    "text/javascript1.1", "text/javascript1.2", "text/javascript1.3",
+    "text/javascript1.4", "text/javascript1.5", "text/jscript",
+    "text/livescript", "text/x-ecmascript", "text/x-javascript",
+})
+#: The one type a standards-mode page applies a linked stylesheet under.
+STYLESHEET_TYPE = "text/css"
+
+
+def media_type(answer: Answer) -> str:
+    """The answer's MIME type essence: `Content-Type` without parameters
+    such as `charset`, lowercased; empty where there is none."""
+    value = answer.headers.get("content-type", "")
+    return value.split(";", 1)[0].strip().lower()
+
+
 def _judge_module(answer: Answer, path: str, static: bool, importer: str,
                   verdict: Verdict, label: str) -> None:
     if static:
@@ -675,15 +702,26 @@ def _judge_module(answer: Answer, path: str, static: bool, importer: str,
             f"{path}, imported statically by {importer}, answers "
             f"{answer.describe()}; a failed static import is a module-load "
             "pageerror (AT-R1 step 8)")
-        return
-    verdict.check(
-        f"{label}.bundle.dynamic {path}",
-        answer.status is not None and answer.status < 500,
-        f"{path}, imported dynamically by {importer}, answers "
-        f"{answer.describe()}")
-    if answer.status != 200:
-        note(f"{path} (dynamic, from {importer}) answers {answer.describe()}: "
-             "refused, and its importer degrades")
+    else:
+        verdict.check(
+            f"{label}.bundle.dynamic {path}",
+            answer.status is not None and answer.status < 500,
+            f"{path}, imported dynamically by {importer}, answers "
+            f"{answer.describe()}")
+        if answer.status != 200:
+            note(f"{path} (dynamic, from {importer}) answers "
+                 f"{answer.describe()}: refused, and its importer degrades")
+    if answer.status == 200:
+        # SERVED, so it must be runnable: a module of any other type is
+        # refused by the browser as surely as a 404 (Copilot review of
+        # openDox-code#75 at f29b4ddd, r4173769822).
+        verdict.check(
+            f"{label}.bundle.module-type {path}",
+            media_type(answer) in JAVASCRIPT_TYPES,
+            f"{path}, imported {'statically' if static else 'dynamically'} "
+            f"by {importer}, is served as "
+            f"{answer.headers.get('content-type')!r}, which a browser "
+            "refuses for a module script")
 
 
 def _scan_module(path: str, body: bytes, pending: collections.deque,
@@ -712,6 +750,14 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
         answer = get(port, sheet)
         verdict.check(f"{label}.bundle.sheet {sheet}", answer.status == 200,
                       f"the stylesheet `/` links answers {answer.describe()}")
+        if answer.status == 200:
+            # (Copilot review of openDox-code#75 at f29b4ddd, r4173769844.)
+            verdict.check(
+                f"{label}.bundle.sheet-type {sheet}",
+                media_type(answer) == STYLESHEET_TYPE,
+                f"the stylesheet `/` links is served as "
+                f"{answer.headers.get('content-type')!r}, which a "
+                "standards-mode page does not apply as CSS")
     # Each path is FETCHED and scanned once, but JUDGED once per way it is
     # imported: a module refused as a dynamic import must still answer 200
     # where another module imports it statically (Copilot review of

@@ -843,6 +843,12 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     # v2 seam: the startup capability verdict, whether the bind is loopback (the
     # write-route gate), and an injectable adapter factory (tests supply a fake).
     capabilities: dict = _DEFAULT_CAPABILITIES
+    # THE SERVING PROCESS'S OWN INSTALL SHAPE (plan 034 T073; #1144 13.4a):
+    # a zero-argument callable answering `/capabilities`' `install` block, or
+    # None where the process that built this server resolved no install shape
+    # (a library caller or a test), which publishes no block. See
+    # `build_server(install_report=)`.
+    install_report = None
     loopback: bool = True
     adapter_factory = None
     # The session's remote-write port supplier (T082). None means "build the real
@@ -1095,6 +1101,12 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             # display does not make this credential-free surface a credential
             # holder or an auth authority (design D16 nuance).
             payload["hosted_actor"] = self.headers.get("X-Auth-Request-User") or None
+            # THE INSTALL BLOCK (plan 034 T073; #1144 13.4a), read PER REQUEST
+            # from the serving process's own settings and its own bundled
+            # server, so the pid it names is the server's at the moment it is
+            # asked: a child that has gone is reported as gone.
+            if self.install_report is not None:
+                payload["install"] = self.install_report()
             self._serve_bytes(json.dumps(payload).encode("utf-8"),
                               JSON_CTYPE, head_only)
             return True
@@ -1721,6 +1733,7 @@ def build_server(
     knowledge_declaration=None,
     packet_assembler=None,
     route_extensions: tuple = (),
+    install_report=None,
 ) -> http.server.ThreadingHTTPServer:
     """Build (but do not start) the loopback server. `port=0` binds an ephemeral
     port (read it back from `httpd.server_address`). `head` is injectable so a
@@ -1757,6 +1770,18 @@ def build_server(
     the same discipline `real_notebook_adapter` carries, and for the same
     reason: an operator must be able to read what their install talks to, and a
     library default that quietly built one would defeat that.
+
+    `install_report` is THE SERVING PROCESS'S OWN INSTALL SHAPE (plan 034
+    T073; #1144 13.4a; RULED R1Q16 (i), `5850003126`): a zero-argument callable
+    answering `/capabilities`' `install` block, `{"mode": ...,
+    "database_bundle": ...}`, asked on each request. The ENTRY POINT supplies
+    it, from the settings it loaded and the bundled server it started as its
+    own child (`cli._install_report`), so the block describes the process a
+    user reached and not a second process that read the same settings.
+    Unset, the payload carries no `install` block: nothing in this process
+    resolved an install shape, and none is invented. This module reads no
+    runtime setting itself (research R9: the document surface never imports
+    the runtime).
 
     `route_extensions` is the ROUTE EXTENSION POINT
     (`split-opendox-two-layer-product` § 2.4, design § D2): the tuple of
@@ -2145,6 +2170,10 @@ def build_server(
         # The contributed routes, already in consult order (§ 2.4). One more
         # injected class attribute, exactly like the seams above it.
         "route_bindings": route_bindings,
+        # THE SERVING PROCESS'S OWN INSTALL SHAPE (T073; 13.4a), asked per
+        # request by the `/capabilities` arm.
+        "install_report": (staticmethod(install_report)
+                           if install_report is not None else None),
     })
     # A ROUTE THAT CANNOT BE SERVED MUST NOT START. Resolved against the bound
     # class — the object the dispatch will `getattr` on — so a binding naming a
