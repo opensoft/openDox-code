@@ -739,6 +739,9 @@ def free_port() -> int:
 _REGEX_AFTER_WORDS = frozenset({
     "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
     "throw", "case", "do", "else", "yield", "await"})
+#: The keywords whose `(…)` is a condition, after which a statement, and so
+#: a regular expression, may start.
+_CONDITION_WORDS = frozenset({"if", "while", "for", "with"})
 #: ... and so does a `/` after one of these characters, or at the start.
 _REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
 
@@ -833,6 +836,10 @@ class JsStrings:
         # closes at and whether its template is tagged.
         self.depth = 0
         self.interpolations: list[tuple[int, bool]] = []
+        # For each `(` open in code, whether it opens the condition of an
+        # `if`, `while`, `for` or `with`; and whether the last `)` closed one.
+        self.parens: list[bool] = []
+        self.closed_condition = False
 
     def scan(self) -> list[tuple[str, str, str]]:
         while self.i < len(self.src):
@@ -866,6 +873,12 @@ class JsStrings:
                 self.depth += 1
             elif c == "}":
                 self.depth -= 1
+            elif c == "(":
+                word = re.search(r"([A-Za-z_$][\w$]*) ?$", self._recent())
+                self.parens.append(word is not None and word.group(1)
+                                   in _CONDITION_WORDS)
+            elif c == ")":
+                self.closed_condition = bool(self.parens and self.parens.pop())
             self.code.append(c)
             self.last = c
             self.i += 1
@@ -884,10 +897,30 @@ class JsStrings:
         self.i = end
 
     def _regex_may_start(self) -> bool:
+        """Whether a `/` here opens a regular expression, not a division:
+        where no operand ends just before it. After `)`, only where it closed
+        the condition of an `if`, `while`, `for` or `with`; after `++` or
+        `--`, only where the operator is a prefix, with no operand before it
+        (Copilot review of openDox-code#75 at b7b9b843, r4179348386: `n++ /
+        2` divides)."""
+        if self.last == ")":
+            return self.closed_condition
+        code = self._recent().rstrip(" ")
+        if code.endswith(("++", "--")):
+            return not self._ends_an_operand(code[:-2].rstrip(" "))
         if self.last == "" or self.last in _REGEX_AFTER_PUNCTUATION:
             return True
         word = re.search(r"([A-Za-z_$][\w$]*)\s*$", self._recent())
         return word is not None and word.group(1) in _REGEX_AFTER_WORDS
+
+    @staticmethod
+    def _ends_an_operand(code: str) -> bool:
+        """Whether `code` ends with an operand: a name or a literal that is
+        no keyword before an expression, a `)`, a `]`, or a string."""
+        if code.endswith((")", "]")):
+            return True
+        word = re.search(r"([A-Za-z_$0-9][\w$]*)$", code)
+        return word is not None and word.group(1) not in _REGEX_AFTER_WORDS
 
     def _skip_regex(self) -> None:
         src, j, in_class = self.src, self.i + 1, False
@@ -1261,7 +1294,8 @@ def _external(where: str) -> bool:
 
 
 def _check_page_resolution(links: "_IndexLinks", origin: str,
-                           verdict: Verdict, label: str) -> None:
+                           verdict: Verdict, label: str,
+                           page: str = "/") -> None:
     """A `<base>` other than the page's own root, or an import map, would
     send the browser elsewhere than the harness resolves to: refused by
     name (the self-pass after Copilot's review of openDox-code#75 at
@@ -1290,7 +1324,8 @@ def _check_page_resolution(links: "_IndexLinks", origin: str,
                   "script inside a <template>, a data block, or one with an "
                   "empty `src`")
     for base in links.bases[:1]:            # only the first one counts
-        verdict.check(f"{label}.bundle.base", _resolve("/", base, origin) == "/",
+        verdict.check(f"{label}.bundle.base",
+                      _resolve(page, base, origin) == "/",
                       "`/` sets a base URL other than its own root (not "
                       "quoted); a browser then resolves the page's links "
                       "against it, and this harness resolves them against "
@@ -1308,14 +1343,21 @@ def _graph_roots(index_html: str, capabilities: dict,
     links = _IndexLinks()
     links.feed(index_html)
     if verdict is not None:
-        _check_page_resolution(links, origin, verdict, label)
-    roots = [(_resolve(page, m, origin), True, "/") for m in links.modules]
+        _check_page_resolution(links, origin, verdict, label, page)
+    # THE DOCUMENT'S BASE URL resolves the page's scripts and stylesheets: a
+    # `<base href>`'s, resolved against the page, where it names a path of
+    # this plane, and the page's own otherwise (Copilot review of
+    # openDox-code#75 at b7b9b843, r4179348414: on `/index.html` with
+    # `<base href="/">`, `src="?m=1"` is `/?m=1`).
+    base = _resolve(page, links.bases[0], origin) if links.bases else page
+    base = base if base.startswith("/") else page
+    roots = [(_resolve(base, m, origin), True, "/") for m in links.modules]
     for view in as_list(as_object(capabilities.get("views")).get("views")):
         module = as_object(view).get("module")
         if isinstance(module, str) and module:
             roots.append((_resolve("/", module, origin), True,
                           "/capabilities"))
-    return roots, [_resolve(page, sheet, origin) for sheet in links.sheets]
+    return roots, [_resolve(base, sheet, origin) for sheet in links.sheets]
 
 
 #: The JavaScript MIME type essences the HTML standard lists, as

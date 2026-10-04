@@ -1942,7 +1942,9 @@ def test_the_page_s_links_are_read_as_a_browser_reads_them(
 @pytest.mark.parametrize("head, expected", [
     ('<base href="/">', []),
     ('<base href="https://cdn.invalid/">', ["t.bundle.base"]),
-    ('<base href="/elsewhere/">', ["t.bundle.base"]),
+    # refused, and judged as the browser resolves under it
+    ('<base href="/elsewhere/">', ["t.bundle.base",
+                                   "t.bundle.module /elsewhere/app.js"]),
     ('<script type="importmap">{"imports": {}}</script>', ["t.bundle.importmap"]),
     ('<script type=" ImportMap ">{"imports": {}}</script>',
      ["t.bundle.importmap"]),
@@ -2753,3 +2755,65 @@ def test_a_page_reference_with_an_unterminated_reference_is_refused(
 ], ids=["ipv4", "localhost", "ipv6"])
 def test_a_page_s_origin_brackets_an_ipv6_host(host: str, origin: str) -> None:
     assert harness.plane_origin(8080, host) == origin
+
+
+# ---------------------------------------------------------------------------
+# Copilot review of #75 at b7b9b843: a `/` after an operand divides, and
+# one after a statement's condition opens a regular expression
+# (r4179348386); the page's links resolve against its base URL
+# (r4179348414).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("source, queued, routes", [
+    ('let n = 2; const ratio = n++ / 2; import "./missing.js";\n',
+     ["/views/missing.js"], set()),
+    ('let n = 2; const ratio = n-- / 2; import "./missing.js";\n',
+     ["/views/missing.js"], set()),
+    ('const q = a[0]++ / 2; import "./e.js";\n', ["/views/e.js"], set()),
+    ('x = ++/a"/.lastIndex; import "./b.js";\n', ["/views/b.js"], set()),
+    ('function f() { return ++/a"/.lastIndex; } import "./b.js";\n',
+     ["/views/b.js"], set()),
+    ('if (ok) /"/.test(s); import "./c.js";\n', ["/views/c.js"], set()),
+    ('while (a(b)) /"/.test(s); import "./c.js";\n', ["/views/c.js"], set()),
+    ('const q = f(x) / 2; const R = "/route";\n', [], {"/route"}),
+    ('const q = (a + b) / 2; const R = "/route";\n', [], {"/route"}),
+], ids=["postfix-increment", "postfix-decrement", "postfix-after-index",
+        "prefix-increment", "prefix-after-return", "after-if", "after-while",
+        "after-a-call", "after-a-group"])
+def test_a_slash_is_read_as_division_or_a_regular_expression_by_what_ends_before_it(
+        source: str, queued: list, routes: set) -> None:
+    pending: collections.deque = collections.deque()
+    found: set[str] = set()
+    harness._scan_module("/views/x.js", source.encode("utf-8"), pending, found)
+    assert [path for path, _static, _importer in pending] == queued
+    assert found == routes
+
+
+@pytest.mark.parametrize("head, served_as", [
+    ('<base href="/"><script type="module" src="?m=1"></script>',
+     {"/?m=1": (JS, "export const x = 1;\n")}),
+    (f'<base href="/"><link rel="stylesheet" href="?s=1">{_ENTRY}',
+     {"/?s=1": ("text/css", ""), "/app.js": (JS, "export const x = 1;\n")}),
+    ('<base href="./"><script type="module" src="?m=1"></script>',
+     {"/?m=1": (JS, "export const x = 1;\n")}),
+], ids=["script", "stylesheet", "relative-base"])
+def test_the_page_s_links_resolve_against_its_base_url(head: str,
+                                                       served_as: dict) -> None:
+    """On `/index.html` with `<base href="/">`, `?m=1` is `/?m=1`, and
+    never the page's own `/index.html?m=1`, which is not served here."""
+    verdict = harness.Verdict(keep_going=True)
+    with served(served_as) as port:
+        harness.derive_bundle(port, f"<html><head>{head}</head></html>", {},
+                              verdict, "t", page="/index.html")
+    assert _failures(verdict) == []
+
+
+def test_an_empty_base_is_the_page_itself_and_refused() -> None:
+    """`<base href="">` is the page's own URL, `/index.html`, not `/`."""
+    files = {"/app.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, f'<html><head><base href="">{_ENTRY}'
+                                    "</head></html>", {}, verdict, "t",
+                              page="/index.html")
+    assert _failures(verdict) == ["t.bundle.base"]
