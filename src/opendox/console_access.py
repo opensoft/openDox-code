@@ -225,7 +225,10 @@ class PrivateCopy:
 
     path: Path
     page_url: str
-    opened_url: str
+    #: The URL with the token in its fragment. Kept out of the copy's `repr`,
+    #: so a log line, a traceback or a failed assertion that prints a copy
+    #: never prints its token.
+    opened_url: str = dataclasses.field(repr=False)
     #: `(st_dev, st_ino)` of the file this process wrote, so a removal at
     #: shutdown removes that file and never one written after it.
     identity: tuple[int, int]

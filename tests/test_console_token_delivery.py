@@ -3147,3 +3147,62 @@ def test_the_start_prints_the_unopenable_hint_and_never_the_token(
     assert sum(console_access.UNOPENABLE_HINT in line for line in lines) == 1, lines
     assert all(token not in line for line in (out + err).splitlines()), \
         "a line the start printed carries the token"
+
+
+def _held_open(copy) -> int:
+    """The descriptor that reserves `copy`, checked to be the copy's own."""
+    fd = copy.reservation._fd
+    assert fd is not None, "the copy was written unreserved"
+    info = os.fstat(fd)
+    assert (info.st_dev, info.st_ino) == copy.identity
+    return fd
+
+
+def _assert_released(fd: int, identity: tuple[int, int]) -> None:
+    """No descriptor `fd` of this process is still the copy's file: it is
+    closed, or the number has gone to another file since."""
+    try:
+        info = os.fstat(fd)
+    except OSError as exc:
+        assert exc.errno == errno.EBADF, exc
+        return
+    assert (info.st_dev, info.st_ino) != identity, \
+        "the removal kept the copy's reservation open"
+
+
+@pytest.mark.parametrize("how", ["removed", "its directory gone"])
+def test_a_removal_releases_the_copys_reservation(tmp_path, how) -> None:
+    """The reservation goes with the copy (mutant run 18's M36c). Removing a
+    copy closes the descriptor that reserved it, so a stopped console holds
+    no file of its own open, and the token's file, unlinked, is not kept
+    alive by it. The same holds where the directory is gone already and there
+    is nothing to remove. A second release is harmless."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    copy = _write(state)
+    fd = _held_open(copy)
+    if how == "its directory gone":
+        os.rename(state, tmp_path / "moved")
+    console_access.remove_private_copy(copy)
+    _assert_released(fd, copy.identity)
+    copy.reservation.close()
+    console_access.remove_private_copy(copy)
+    if how == "removed":
+        assert not copy.path.exists()
+
+
+def test_a_copys_repr_never_carries_its_token(tmp_path) -> None:
+    """A log line, a traceback or a failed assertion that prints a
+    `PrivateCopy` prints its path, its page and its identity, and never the
+    token: the opened URL is kept out of its `repr`."""
+    from opendox import console_access
+
+    token = _token()
+    copy = _write(_state(tmp_path), token=token)
+    try:
+        assert token in copy.opened_url
+        assert token not in repr(copy) and token not in str(copy)
+        assert str(copy.path) in repr(copy)
+    finally:
+        console_access.remove_private_copy(copy)
