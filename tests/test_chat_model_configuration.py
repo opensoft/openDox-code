@@ -55,7 +55,6 @@ A CREATED FILE: no carve-manifest row (RULED OQ-C).
 from __future__ import annotations
 
 import copy
-import dataclasses
 import http.client
 import json
 import os
@@ -65,7 +64,6 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -547,31 +545,26 @@ class _TurnRoute(WorkbenchRoutes):
 
 @pytest.fixture
 def scope_stand_in(monkeypatch):
-    """openxdox's scope module, which openDox's suite does not install (T084
-    routes step 5 without it): a key type, the confinement error, and a scope
-    that resolves. Revalidation against that projection is a no-op here, so
-    step 5's verdict is exactly the registry's: found, or not."""
-    scope = types.ModuleType("openxdox.doxbench_scope")
-
-    @dataclasses.dataclass(frozen=True)
-    class ScopeKey:
-        repository: str
-        ref: str
-        tile_kind: str
-        tile_id: str
-
-    class ScopeConfinementError(ValueError):
-        pass
-
-    scope.ScopeKey = ScopeKey
-    scope.ScopeConfinementError = ScopeConfinementError
-    scope.session_created_paths_for_scope = lambda *args, **kwargs: ()
-    scope.resolve_scope = lambda *args, **kwargs: SimpleNamespace()
-    package = types.ModuleType("openxdox")
-    package.doxbench_scope = scope
-    monkeypatch.setitem(sys.modules, "openxdox", package)
-    monkeypatch.setitem(sys.modules, "openxdox.doxbench_scope", scope)
+    """A scope authority at openDox's scope seam (`opendox.column_seams.scope`,
+    plan 034 T084), standing in for openDox's own default and for any host's:
+    a scope that resolves, no live session, and no session-created path.
+    Revalidation against that projection is a no-op here, so step 5's verdict
+    is exactly the registry's: found, or not. The seam's state is restored
+    exactly afterwards, so a default another case registered and read is put
+    back as it was."""
+    from opendox import column_seams
+    seam = column_seams.scope
+    held = (seam._registered, seam._is_default, seam._default_read)
+    seam.unregister()
+    seam.register(SimpleNamespace(
+        resolve_scope=lambda *args, **kwargs: SimpleNamespace(),
+        is_live_session_ref=lambda *args, **kwargs: False,
+        session_created_paths_for_scope=lambda *args, **kwargs: ()))
     monkeypatch.setattr(doxbench_turns, "revalidate_scope", lambda **kwargs: None)
+    try:
+        yield
+    finally:
+        seam._registered, seam._is_default, seam._default_read = held
 
 
 def _defective(defect: str) -> tuple[dict | None, dict]:

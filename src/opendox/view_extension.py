@@ -37,8 +37,9 @@ this module is symmetrical in that way: openDox DECLARES the view seam and
 openXdox CONSUMES it, and openXdox already pins openDox
 (`openXdox-code` `af15f712`'s `opendox` pin -> `a99eba03`). A consumer importing
 the product it pins is the direction the split is FOR; it is the reverse — the
-product reaching its consumer — that `consumer_reach.py` exists to make late,
-named and refusable. So `from opendox import view_extension` is a legal downward
+product reaching its consumer — that `consumer_reach.py` existed to make late,
+named and refusable, and that declared seams carry since plan 034 T084 retired
+it. So `from opendox import view_extension` is a legal downward
 import for a contributing column, and no replica is needed.
 
 THE THREE THINGS A CONTRIBUTED VIEW BRINGS WITH IT, and why each is a field

@@ -10,8 +10,9 @@ WHAT IT ASSERTS, AND WHY EACH IS HERE RATHER THAN IMPLIED
 
 1. NOTHING RESOLVES AT IMPORT TIME. The whole value of a lazy proxy is that
    importing it cannot fail for want of a host, so the check is an import in a
-   SUBPROCESS that then reads the registry — `consumer_reach`'s own
-   `test_importing_the_seam_resolves_nothing` for the same reason.
+   SUBPROCESS that then reads the registry, as `consumer_reach`'s
+   `test_importing_the_seam_resolves_nothing` did for the same reason, until
+   plan 034 T084 retired that seam.
 2. THE UNREGISTERED READ REFUSES, AND THE MESSAGE NAMES THE CALL. A refusal
    whose text does not name the fix is a stack trace with extra steps, so the
    assertion is on the CONTENT — the registration call, the ruling, the runbook,
@@ -544,8 +545,8 @@ def _import_time_nodes(body: list[ast.stmt]):
     """Every node evaluated when the module is IMPORTED.
 
     A function's BODY defers; its decorators and default arguments do not, and a
-    class body runs outright. `tests/test_consumer_reach.py::_import_time_uses`
-    draws the line in the same place for the consumer seam, and for the same
+    class body runs outright. `tests/test_projection_seams.py::_import_time_reads`
+    draws the line in the same place for every seam proxy, and for the same
     reason: `ast.walk` over a module descends into function bodies and would
     call every deferred binding an import-time one.
     """

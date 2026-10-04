@@ -51,6 +51,14 @@ from opendox import doxbench_threads
 # moment, openDox's own where no host has contributed one, so the workbench
 # routes confine by the same rule `/source` does, in a lone openDox too.
 from opendox import projection_seams
+# THE CONSUMER COLUMNS' SEAMS (plan 034 T084; #1144 4.3, R1Q10 (a)): the gate
+# primitives, the doxBench scope authority, kickoff and the register. Each
+# reach below that named `openxdox.gate_console`, `gate_routes` or
+# `doxbench_scope` inside a function now reads the registration current at the
+# moment it runs, a host's or openDox's own default. Stdlib-only, so the
+# import adds no edge. The scope VALUE types are openDox's own.
+from opendox import column_seams
+from opendox.doxbench_scope_types import ScopeConfinementError, ScopeKey
 registry_mod = projection_seams.registry.proxy
 from opendox.serve_wire import (
     DOXBENCH_ABSTRACT_REFUSED_PROSE_BYTES,
@@ -355,13 +363,15 @@ class WorkbenchRoutes:
     def _is_live_session_ref(self, key, entry) -> bool:
         """Whether `key.ref` is one of this tile's LIVE session branches.
 
-        ONE spelling, in `doxbench_scope` beside the other consumer of the same
-        question (re-verify N-6). This method had grown as a second copy and had
+        ONE spelling, in the registered scope authority (`column_seams.scope`:
+        openXdox's `doxbench_scope`, or openDox's own default) beside the other
+        consumer of the same question (re-verify N-6). This method had grown as a second copy and had
         already diverged from it — different ref comparison, different exception
         breadth — which is precisely how the two would have drifted apart on the
         next change to what counts as a live session."""
-        from openxdox import doxbench_scope
-        return doxbench_scope.is_live_session_ref(
+        # THROUGH THE SCOPE SEAM (T084): the registered authority's one
+        # spelling of the question, a host's or openDox's default.
+        return column_seams.scope.current().is_live_session_ref(
             self.source.registry, key,
             repository=entry.repository or key.repository, ref=key.ref)
 
@@ -420,10 +430,9 @@ class WorkbenchRoutes:
         it — the one gate on this surface whose allowlist carries the thread
         prefix (`gate_routes.first_edit_gate_factory`, task 9.5). Built through
         that factory rather than beside it, so the widening has one spelling."""
-        from openxdox import gate_console
-        from openxdox import gate_routes
-        return gate_routes.first_edit_gate_factory(
-            self.actor, gate_console.DEFAULT_RECORDS_DIR)(worktree)
+        gate = column_seams.gate.current()       # THROUGH THE GATE SEAM (T084)
+        return gate.first_edit_gate_factory(
+            self.actor, gate.DEFAULT_RECORDS_DIR)(worktree)
 
     def _mirror_turn_into_sidecar(self, key, *, document: str, turn_id: str,
                                   model_id: str, bound_buffer_key: str,
@@ -557,10 +566,20 @@ class WorkbenchRoutes:
                 doxbench_error_status(DOXBENCH_ERR_INVALID_TURN_REQUEST),
                 doxbench_error_body(DOXBENCH_ERR_INVALID_TURN_REQUEST))
             return
-        from openxdox import doxbench_scope
-        key = doxbench_scope.ScopeKey(
-            repository=fields["repository"], ref=fields["ref"],
-            tile_kind=fields["tile_kind"], tile_id=fields["tile_id"])
+        # openDox's OWN scope type (`doxbench_scope_types`), no seam (T084).
+        # It refuses a `tile_kind` outside its closed vocabulary with a
+        # `ValueError`, which used to escape and drop the connection
+        # (adversarial review 2, L1). An unknown kind is a malformed query,
+        # answered as a missing field is.
+        try:
+            key = ScopeKey(
+                repository=fields["repository"], ref=fields["ref"],
+                tile_kind=fields["tile_kind"], tile_id=fields["tile_id"])
+        except ValueError:
+            self._send_json(
+                doxbench_error_status(DOXBENCH_ERR_INVALID_TURN_REQUEST),
+                doxbench_error_body(DOXBENCH_ERR_INVALID_TURN_REQUEST))
+            return
         worktree = self._session_worktree_for(key)
         if worktree is None:
             # No live session on this scope. A DISTINCT cause (adversarial
@@ -962,7 +981,14 @@ class WorkbenchRoutes:
             # on top of one would be offering to write into a file it could not
             # read first.
             disclosure = None
-        offered = bool(disclosure and disclosure.get("broker"))
+        # NOT OFFERED WHERE IT COULD NOT FINISH (plan 034 T084; RULED by
+        # Brett Heap, 2026-10-02, "Refuse by name, hide intake
+        # (Recommended)"): the enrolment ends in a recorded approval, a
+        # governed gate-action record only a host's gate writes, so with none
+        # registered the flow is not offered, even beside a hand-written
+        # broker block, and the reason names the seam.
+        records = column_seams.gate_records_writable()
+        offered = bool(disclosure and disclosure.get("broker")) and records
         from opendox import doxbench_binding
         envelope: dict = {
             "kind": "workbench-model-intake",
@@ -980,7 +1006,8 @@ class WorkbenchRoutes:
             "declarations": (disclosure or {}).get("declarations", []),
         }
         if not offered:
-            envelope["reason"] = doxbench_intake.NO_BROKER_NOTICE
+            envelope["reason"] = (doxbench_intake.NO_BROKER_NOTICE if records
+                                  else column_seams.GATE_RECORDS_REFUSAL)
         self._serve_bytes(json.dumps(envelope).encode("utf-8"), JSON_CTYPE,
                           head_only)
 
@@ -1085,6 +1112,22 @@ class WorkbenchRoutes:
             # an empty source on purpose and is refused — or not — by the
             # broker's own declared flow rather than by this check.
             self._send_error_or_intake(DOXBENCH_ERR_INVALID_INTAKE_REQUEST)
+            return
+        if not column_seams.gate_records_writable():
+            # AN ENROLMENT THIS INSTALL COULD NEVER APPROVE IS NOT STARTED
+            # (plan 034 T084; RULED by Brett Heap, 2026-10-02, "Refuse by name,
+            # hide intake (Recommended)"). Enrolling writes a PENDING
+            # declaration, which suppresses its binding until a recorded
+            # approval, and the approval is a governed gate-action record that
+            # openDox's default does not write. So with no host's gate
+            # registered the act refuses here, naming the seam, before a
+            # broker is spawned or a declaration is written, and the body it
+            # sent is drained unread. The surface already answered
+            # `offered: false` with the same sentence.
+            if length > 0:
+                _drain_refused_body(self.rfile, length)
+            self._intake_refusal(DOXBENCH_ERR_INTAKE_REFUSED,
+                                 column_seams.GATE_RECORDS_REFUSAL)
             return
         try:
             broker = store.broker()
@@ -1228,7 +1271,27 @@ class WorkbenchRoutes:
                             doxbench_error_body(refusal))
             return
         from opendox import doxbench_intake
-        from openxdox import gate_console
+        # THROUGH THE GATE SEAM (plan 034 T084; #1144 4.3 as T007 batch L's
+        # addendum reads). This was `from openxdox import gate_console`, which
+        # dropped the connection of every standalone approval. The approval
+        # IS a governed gate-action record, which openDox's own default does
+        # not write (`default_columns.GATE`), so with no host's gate registered
+        # the act refuses here, NAMING THE SEAM (4.2), before it parses a body
+        # or reads a store, and no record is written. RULED by Brett Heap,
+        # 2026-10-02: "Refuse by name, hide intake (Recommended)". The body is
+        # drained unread first, as the intake act drains a refused one, so the
+        # refusal is not lost to a reset of a socket closed with bytes unread.
+        if not column_seams.gate_records_writable():
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                length = 0
+            if length > 0:
+                _drain_refused_body(self.rfile, length)
+            self._intake_refusal(DOXBENCH_ERR_APPROVAL_REFUSED,
+                                 column_seams.GATE_RECORDS_REFUSAL)
+            return
+        gate_console = column_seams.gate.current()
         store = self._workbench_declaration_store()
         if store is None:
             self._send_json(
@@ -1272,18 +1335,21 @@ class WorkbenchRoutes:
             approved_by=str(self.actor),
             expires_at=doxbench_intake.approval_expiry(),
             audit_ref=binding.credential_ref)
-        record = gate_console.build_gate_action_record(
-            actor=str(self.actor),
-            action=doxbench_intake.GATE_ACTION_APPROVE_MODEL,
-            at=at,
-            model_declaration=binding_id,
-            model_approval=approved.approval_block(),
-            provenance=gate_console.HTTP_CONSOLE_TOKEN,
-            artifacts=[{"kind": "other",
-                        "reference": doxbench_intake.declarations_path(
-                            Path(self.checkout_root)).relative_to(
-                                Path(self.checkout_root)).as_posix()}])
         try:
+            # INSIDE the refusal net (T084): a gate that refuses to build the
+            # record is answered as a stated refusal, never a dropped
+            # connection.
+            record = gate_console.build_gate_action_record(
+                actor=str(self.actor),
+                action=doxbench_intake.GATE_ACTION_APPROVE_MODEL,
+                at=at,
+                model_declaration=binding_id,
+                model_approval=approved.approval_block(),
+                provenance=gate_console.HTTP_CONSOLE_TOKEN,
+                artifacts=[{"kind": "other",
+                            "reference": doxbench_intake.declarations_path(
+                                Path(self.checkout_root)).relative_to(
+                                    Path(self.checkout_root)).as_posix()}])
             gate_console.validate_gate_action_record(record)
             human = gate_console.HumanGate(
                 Path(self.checkout_root),
@@ -1702,13 +1768,26 @@ class WorkbenchRoutes:
 
         from opendox import doxbench_hash
         from opendox import doxbench_model
-        from openxdox import doxbench_scope
+        # The scope authority through its seam (plan 034 T084; #1144 4.3,
+        # batch L): a host's registration or openDox's own default, never a
+        # deferred `openxdox` import that drops the connection where openXdox
+        # is not installed.
+        scope_authority = column_seams.scope.current()
         from opendox import doxbench_turns
 
-        key = doxbench_scope.ScopeKey(repository=scope_fields["repository"],
-                                      ref=scope_fields["ref"],
-                                      tile_kind=scope_fields["tile_kind"],
-                                      tile_id=scope_fields["tile_id"])
+        try:
+            key = ScopeKey(repository=scope_fields["repository"],
+                           ref=scope_fields["ref"],
+                           tile_kind=scope_fields["tile_kind"],
+                           tile_id=scope_fields["tile_id"])
+        except ValueError:
+            # A scope outside `ScopeKey`'s closed vocabulary (an unknown
+            # `tile_kind`, an empty field) is a malformed request, refused in
+            # the released envelope, never a dropped connection (adversarial
+            # review 2, L1). The released schema refuses most of these first.
+            self._refuse_turn(validators, DOXBENCH_ERR_INVALID_TURN_REQUEST,
+                              turn_id, failure_kind=failure_kind)
+            return
         # ---- step 5: scope, all from SERVER truth ----
         projection = None
         session_base = None
@@ -1759,11 +1838,11 @@ class WorkbenchRoutes:
                 # cannot add a path to this set. With no live session on the
                 # scope's own branch family the answer is empty and this
                 # projection is what it was before T107.
-                created_paths = doxbench_scope.session_created_paths_for_scope(
+                created_paths = scope_authority.session_created_paths_for_scope(
                     self.source.registry, key,
                     repository=entry.repository, ref=entry.ref,
                     source_root=Path(entry.source_root))
-                projection = doxbench_scope.resolve_scope(
+                projection = scope_authority.resolve_scope(
                     snapshot, key, source_root=Path(entry.source_root),
                     created_paths=created_paths)
                 if projection is None:
@@ -1786,7 +1865,7 @@ class WorkbenchRoutes:
                             doxbench_turns.buffer_key_for(b) for b in turn_buffers),
                         paths=tuple(b.path for b in turn_buffers),
                     )
-        except (doxbench_turns.TurnScopeError, doxbench_scope.ScopeConfinementError,
+        except (doxbench_turns.TurnScopeError, ScopeConfinementError,
                 ValueError, OSError):
             scope_refused = True
 
@@ -2639,7 +2718,6 @@ class WorkbenchRoutes:
         only then a provider."""
         from opendox import doxbench_hash
         from opendox import doxbench_model
-        from openxdox import doxbench_scope
         from opendox import doxbench_turns
 
         # ---- step 1: the plane. The SAME three-part verdict the catalog and
@@ -2694,9 +2772,26 @@ class WorkbenchRoutes:
         subject_path = fields["subject_path"]
         model_id = fields["model_id"]
         refresh = fields["refresh"]
-        key = doxbench_scope.ScopeKey(**fields["scope"])
+        try:
+            key = ScopeKey(**fields["scope"])
+        except ValueError:
+            # An unknown `tile_kind` is outside `ScopeKey`'s closed vocabulary:
+            # the request is malformed, and is answered so rather than with a
+            # dropped connection (adversarial review 2, L1).
+            self._send_json(
+                doxbench_error_status(DOXBENCH_ERR_INVALID_ABSTRACT_REQUEST),
+                doxbench_error_body(DOXBENCH_ERR_INVALID_ABSTRACT_REQUEST))
+            return
 
         # ---- step 4: scope, all from SERVER truth ----
+        # THE SCOPE AUTHORITY IS READ HERE, BELOW STEP 1 (plan 034 T084; #1144
+        # batch L, RULED `5920216845`). It was a deferred import at the top of
+        # this handler, above the plane check, so in an openDox with no
+        # openXdox installed every request, even one step 1 would have
+        # refused, ended in a dropped connection. It is now the registration
+        # current at `column_seams.scope`, a host's or openDox's own default,
+        # and a plane that refuses never reads it.
+        scope_authority = column_seams.scope.current()
         projection = None
         source_root = None
         snapshot = None
@@ -2708,15 +2803,15 @@ class WorkbenchRoutes:
             else:
                 source_root = Path(entry.source_root)
                 snapshot = json.loads(entry.read_bytes())
-                created_paths = doxbench_scope.session_created_paths_for_scope(
+                created_paths = scope_authority.session_created_paths_for_scope(
                     self.source.registry, key, repository=entry.repository,
                     ref=entry.ref, source_root=source_root)
-                projection = doxbench_scope.resolve_scope(
+                projection = scope_authority.resolve_scope(
                     snapshot, key, source_root=source_root,
                     created_paths=created_paths)
                 if projection is None:
                     scope_refused = True
-        except (doxbench_scope.ScopeConfinementError, ValueError, OSError):
+        except (ScopeConfinementError, ValueError, OSError):
             scope_refused = True
         if scope_refused:
             # The same fail-closed refusal the chat route gives, so no response

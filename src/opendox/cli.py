@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import signal
 import sys
 import tempfile
@@ -71,8 +73,14 @@ from opendox import authoring as authoring_mod  # noqa: E402
 from opendox import branch_session as branch_session_mod  # noqa: E402
 from opendox import doxbench_install as install_mod  # noqa: E402
 from opendox import doxbench_knowledge as knowledge_mod  # noqa: E402
-from opendox import consumer_reach  # noqa: E402
-gate_mod = consumer_reach.gate_console  # noqa: E402
+# THE GATE PRIMITIVES, THROUGH THEIR SEAM (plan 034 T084; #1144 4.3, R1Q10
+# (a)). This was `consumer_reach.gate_console`, a late stand-in over openXdox's
+# `gate_console` that still raised where openXdox was absent. `gate_mod.X` now
+# reads the registration current at `column_seams.gate` when it runs, a host's
+# or openDox's own default, which `build_parser()` and `main()` register.
+# Stdlib-only, so this adds no reach.
+from opendox import column_seams  # noqa: E402
+gate_mod = column_seams.gate.proxy  # noqa: E402
 from opendox import serve as serve_mod  # noqa: E402
 from opendox import workbench as workbench_mod  # noqa: E402
 # THE HOME-CORPUS SEAM'S DEFAULT (4.1a; plan 034 T022) -- see
@@ -494,16 +502,65 @@ def _warn_validator_could_not_run(result, validator) -> None:
         print(f"      {sys.executable} -m {remedy}", file=sys.stderr)
 
 
+#: One broken rule, as a validator's report names it: `[<rule>] <where>:
+#: <detail>`, the line `opendox.validator.Violation.line()` prints.
+_RULE_LINE = re.compile(r"^\[(?P<rule>[^\[\]\s]+)\] (?P<rest>.+)$")
+
+#: How many of a report's other lines (its summary, or a validator's own
+#: words where it names no rule) are printed.
+_REPORT_TAIL = 20
+
+#: How many places each broken rule is shown at: the first on the rule's own
+#: line, and the next ones beneath it. A rule broken at more places than this
+#: says how many more, so its count stays exact and the report stays short.
+_PLACES_SHOWN = 5
+
+
 def _report_non_conformance(written: Path, result) -> None:
     """NOT CONFORMANT — the validator ran, reached a verdict, and rejected the
     snapshot. The one thing this message must never be mistaken for is the
     warning above it, so it says whose fault it is out loud and prints the
     findings themselves; "1 error(s)" alone told a human nothing he could act
-    on."""
+    on.
+
+    EVERY BROKEN RULE, ONCE, WITH ITS COUNT (plan 034 T084; RULED
+    openxFactory#656 `5920216845`, item 3, *"Show every rule, grouped
+    (Recommended)"*). This printed the validator's LAST 20 LINES, so a
+    snapshot that broke one rule a hundred times and a second rule once
+    showed twenty copies of the first and never named the second. Now each
+    rule id the report names is printed ONCE, on a line of its own,
+    `<count> × [<rule>] <where>: <detail>`, in the order the validator found
+    them, with where it is first broken. The next places it is broken follow
+    beneath it, without the id, up to `_PLACES_SHOWN` in all, because one rule
+    can be broken in different ways (a missing key, then another), and a
+    count beside the first place alone would read as that place repeated.
+    The report's other lines (the validator's summary) follow. A validator
+    whose output names no rule id has nothing to group, so its own last lines
+    are printed, as before."""
     print(f"  validation FAILED — the pinned validator REJECTED {written}. This "
           f"is the SNAPSHOT, not the environment: the validator ran fine and "
           f"found the data non-conformant.", file=sys.stderr)
-    for line in (result.stdout or result.stderr).strip().splitlines()[-20:]:
+    lines = (result.stdout or result.stderr).strip().splitlines()
+    places: dict[str, list[str]] = {}
+    others: list[str] = []
+    for line in lines:
+        named = _RULE_LINE.match(line.strip())
+        if named is None:
+            others.append(line)
+            continue
+        places.setdefault(named["rule"], []).append(named["rest"])
+    if places:
+        total = sum(len(where) for where in places.values())
+        print(f"    {total} violation(s) of {len(places)} rule(s), each rule "
+              f"once, with its count and where it is broken:", file=sys.stderr)
+        for rule, where in places.items():
+            print(f"    {len(where)} × [{rule}] {where[0]}", file=sys.stderr)
+            for place in where[1:_PLACES_SHOWN]:
+                print(f"          {place}", file=sys.stderr)
+            if len(where) > _PLACES_SHOWN:
+                print(f"          … and {len(where) - _PLACES_SHOWN} more of "
+                      "this rule", file=sys.stderr)
+    for line in others[-_REPORT_TAIL:]:
         print(f"    {line}", file=sys.stderr)
 
 
@@ -704,16 +761,66 @@ def _run_the_local_lifecycle(args: argparse.Namespace, server, *, opener) -> int
         server.stop()
 
 
+def _install_report(args: argparse.Namespace):
+    """`/capabilities`' `install` block for THIS process, as a callable the
+    server asks on each request, or None where no install shape was resolved
+    (plan 034 T073; #1144 13.4a; RULED R1Q16 (i), `5850003126`).
+
+    It is read from the settings `cmd_generate_and_open` resolved and loaded
+    (`args.runtime_settings`) and from the bundled server it started as its
+    own child (`args.database_bundle`), so the served process reports its own
+    install shape: a status probe from a second process could be right about
+    the settings while the server ignored them. `mode` is the install mode
+    those settings carry. `database_bundle` is the bundled server's report,
+    `data_dir`, `socket_dir` and its `pid` while it lives
+    (`bundle.BundledServer.report`), and it is None for a hosted install,
+    which bundles no server, as `runtime status` reports it."""
+    settings = getattr(args, "runtime_settings", None)
+    if settings is None:
+        return None
+    server = getattr(args, "database_bundle", None)
+
+    def report() -> dict:
+        return {"mode": settings.install_mode,
+                "database_bundle": (server.report() if server is not None
+                                    else None)}
+
+    return report
+
+
+#: The prefix of the temporary run directory `generate-and-open` mints when
+#: no `--run-dir` is given: the installed command's own name (plan 034 T084,
+#: adversarial review 2, G7), not openxFactory's pre-carve one.
+RUN_DIR_PREFIX = "opendox-"
+
+
 def _generate_and_open(args: argparse.Namespace, *, opener) -> int:
-    """`generate-and-open`'s generate-then-serve half, once the install is known."""
+    """`generate-and-open`'s generate-then-serve half, once the install is known.
+
+    A RUN DIRECTORY THIS PROCESS MINTED IS REMOVED WHEN IT IS DONE WITH IT
+    (plan 034 T084, adversarial review 2, G7): when the server stops, on a
+    `--no-serve` run, on a refusal and on a failure. It used to be left under
+    the system's temporary directory on every run. A `--run-dir` the caller
+    names is the caller's, and is left exactly as this run wrote it."""
     # Ahead of minting the run dir, so a refused root leaves not even an empty
     # temp directory behind. `_generate_and_write` is still the guard that MATTERS
     # (it is the one no caller can skip); these are the same checks, earlier.
     _refuse_non_corpus_repo_root(args)
     _refuse_malformed_generated_at(args)
     _refuse_empty_source_options(args)
-    run_dir = Path(args.run_dir).resolve() if args.run_dir else Path(
-        tempfile.mkdtemp(prefix="ideation-dashboard-"))
+    if args.run_dir:
+        return _generate_and_serve(args, Path(args.run_dir).resolve(),
+                                   opener=opener)
+    minted = Path(tempfile.mkdtemp(prefix=RUN_DIR_PREFIX))
+    try:
+        return _generate_and_serve(args, minted, opener=opener)
+    finally:
+        shutil.rmtree(minted, ignore_errors=True)
+
+
+def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
+                        opener) -> int:
+    """Generate into `run_dir`, serve it, and stop, for `_generate_and_open`."""
     run_dir.mkdir(parents=True, exist_ok=True)
     output = run_dir / "snapshot.json"
 
@@ -778,7 +885,12 @@ def _generate_and_open(args: argparse.Namespace, *, opener) -> int:
                                    # the self-hosted half of the ratified
                                    # two-case principle
                                    knowledge_declaration=(
-                                       knowledge_mod.SELF_HOSTED_LOCAL_EMBEDDED))
+                                       knowledge_mod.SELF_HOSTED_LOCAL_EMBEDDED),
+                                   # and THIS process's own install shape, on
+                                   # `/capabilities` (plan 034 T073; #1144
+                                   # 13.4a): the settings it loaded, and the
+                                   # bundled server it started as its child.
+                                   install_report=_install_report(args))
     url = serve_mod.server_url(httpd, "/index.html")
     print(f"  serving {url}")
     print(f"  snapshot {serve_mod.server_url(httpd, '/snapshot.json')}")
@@ -869,9 +981,14 @@ def _commission_cli(verb: str, args: argparse.Namespace, target: str,
     engine, same guards. The CLI adds nothing of its own except the printing —
     which is exactly what makes the two surfaces equivalent."""
     repo_root = Path(args.repo_root).resolve()
-    console = gate_mod.GateConsole(_human_gate(repo_root, args),
-                                   records_dir=args.records_dir)
+    human = _human_gate(repo_root, args)
     try:
+        # INSIDE the refusal boundary (plan 034 T084): openDox's own gate
+        # default refuses the governed `GateConsole` at construction
+        # (`GateRecordsNotRegistered`, a `GateRefused`), so a contributed gate
+        # verb that reaches it with no host's gate registered answers
+        # "<verb> refused: ..." rather than a traceback.
+        console = gate_mod.GateConsole(human, records_dir=args.records_dir)
         res = getattr(console, verb.replace("-", "_"))(
             target, outline=args.outline, workflow=args.workflow,
             note=args.note, provenance=cli_provenance(), **engine_kwargs)
@@ -1207,6 +1324,21 @@ def _default_home_factory(root):
             corpus_adapter.CorpusRef(name="home", location=str(root)))
 
 
+#: THE INSTALLED COMMAND'S OWN NAME AND WORDS (plan 034 T084; found by T099's
+#: PyPI writer). `opendox --help` is what a published install prints, so the
+#: usage line names the console script `pyproject.toml` installs, `opendox`,
+#: and the description and epilog name openDox only. They used to print
+#: `usage: ideation-dashboard` and this module's docstring, which is
+#: openxFactory's pre-carve history, not a user's help.
+PROG = "opendox"
+PARSER_DESCRIPTION = (
+    "openDox, a document workbench over a corpus of documents: regenerate "
+    "the corpus's deterministic snapshot, serve it locally and open it in a "
+    "browser, create and edit its documents, declare the model providers a "
+    "chat may use, and run the identity and coordination runtime.")
+PARSER_EPILOG = "Run `opendox <command> --help` for a command's own options."
+
+
 def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParser:
     """The command line, plus whatever this invocation was ASSEMBLED with.
 
@@ -1270,8 +1402,12 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     # T085; R1Q10 (a) and R1Q12 (a), the same pattern), each only where no
     # host has registered its own, and replaceable by a host until read.
     doxbench_defaults.register_defaults()
-    parser = argparse.ArgumentParser(prog="ideation-dashboard", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    # AND the consumer columns' defaults (plan 034 T084; #1144 4.3,
+    # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
+    # the cross-reference register, the same way.
+    column_seams.register_defaults()
+    parser = argparse.ArgumentParser(prog=PROG, description=PARSER_DESCRIPTION,
+                                     epilog=PARSER_EPILOG)
     sub = parser.add_subparsers(dest="command", required=True)
 
     gen = sub.add_parser("generate", help="regenerate the deterministic snapshot")
@@ -1317,7 +1453,7 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     gao.set_defaults(func=cmd_generate_and_open)
 
     create = sub.add_parser(
-        "create", help="scaffold a new header-compliant ideation doc and open it for editing")
+        "create", help="scaffold a new header-compliant document and open it for editing")
     create.add_argument("--repo-root", required=True, help="repository to scaffold into")
     create.add_argument("--area", default=authoring_mod.DEFAULT_AREA,
                         help=f"target ideation area (default: {authoring_mod.DEFAULT_AREA})")
@@ -1390,6 +1526,10 @@ def main(argv: list[str] | None = None, *,
     projection_seams.register_defaults()
     # AND openDox's own doxBench defaults (4.3, T085), the same way.
     doxbench_defaults.register_defaults()
+    # AND the consumer columns' defaults (plan 034 T084; #1144 4.3,
+    # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
+    # the cross-reference register, the same way.
+    column_seams.register_defaults()
     args = build_parser(
         subcommand_extensions=subcommand_extensions).parse_args(argv)
     try:

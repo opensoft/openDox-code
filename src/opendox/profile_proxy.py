@@ -15,17 +15,18 @@ package openxFactory publishes (option 3: "the shape every future
 `<Domainx>Dox` profile may want; not now"). This module is that proxy, and
 `domain_profile.py` beside it is the registration it resolves through.
 
-THE PATTERN IS THIS REPOSITORY'S OWN. `consumer_reach.py` (§ 4.1, landed)
-already defers a name to first use — `_LateConsumerModule` defers an attribute
-read, `_LateConsumerValue` defers the first OPERATION on a value — and refuses
-with the layering spelled out instead of raising `ModuleNotFoundError` from an
-import line a thousand lines away from the call. `_LateProfile` below is the
-same shape pointed at a different question. It is NOT in `consumer_reach.py`,
-deliberately: that module is for reaches into `openxdox`, the package that PINS
-openDox, and every name in it is counted in a ratchet that must reach zero. A
-host profile is not a reach into the consumer at all — the host may be an
-openxFactory, a `MedxDox`, or a test — so filing it there would corrupt the one
-number `tests/test_consumer_reach.py` exists to hold.
+THE PATTERN IS THIS REPOSITORY'S OWN. `consumer_reach.py` (§ 4.1; retired at
+plan 034 T084, when its last reaches became declared seams) deferred a name to
+first use — `_LateConsumerModule` deferred an attribute read,
+`_LateConsumerValue` the first OPERATION on a value — and refused with the
+layering spelled out instead of raising `ModuleNotFoundError` from an import
+line a thousand lines away from the call. `_LateProfile` below is the same
+shape pointed at a different question. It was NOT in `consumer_reach.py`,
+deliberately: that module was for reaches into `openxdox`, the package that
+PINS openDox, and every name in it was counted in a ratchet that had to reach
+zero, as it did at T084. A host profile is not a reach into the consumer at
+all — the host may be an openxFactory, a `MedxDox`, or a test — so filing it
+there would have corrupted the one number that ratchet held.
 
 WHAT IT RESOLVES, AND WHEN. Nothing at import time. `import
 opendox.profile_proxy` performs no lookup, touches no registry and cannot fail
@@ -166,8 +167,9 @@ class _LateProfile:
         # because something asked for `__wrapped__` would fire the composition
         # point at a moment no caller chose — and would raise
         # `ProfileNotRegistered` where the prober was testing for
-        # `AttributeError`. `consumer_reach._LateConsumerModule` holds the same
-        # line for the same reason.
+        # `AttributeError`. `projection_seams._SeamProxy` holds the same line
+        # for the same reason (as `consumer_reach._LateConsumerModule` did,
+        # until plan 034 T084 retired it).
         if attr.startswith("__") and attr.endswith("__"):
             raise AttributeError(attr)
         # A composition point's read of the facet it composes from IS the build

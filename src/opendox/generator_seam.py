@@ -9,7 +9,8 @@ generator of its own, while the consumer KEEPS its governed generator and
 contributes it *"through a DECLARED GENERATOR SEAM"*. That seam *"SHALL BE
 DECLARED BY THIS ARC, naming the operation it hands over, the registration
 point, and what a conformant implementation must satisfy"*. `consumer_reach.py`
-names the same gap from the other side. The injection that would retire its
+named the same gap from the other side (until plan 034 T084 retired it). The
+injection that would retire its
 `generator` reach, *"openDox naming a protocol and being handed an
 implementation"*, *"does not exist yet and is BUILD-arc work"*. This module is
 that declaration (plan 034's T052).
