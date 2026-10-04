@@ -328,14 +328,28 @@ BROKER_WORKING_DIRECTORY = trust_mod.BROKER_WORKING_DIRECTORY
 WORKING_DIRECTORY_VARIABLES: frozenset[str] = frozenset({"PWD", "OLDPWD"})
 
 
-def broker_environment(base) -> dict:
+def broker_environment(base, *, root=None) -> dict:
     """A broker's whole environment: the harness child's allowlist
     (`doxbench_bridge.child_environment`), without the variables that name a
     working directory (`WORKING_DIRECTORY_VARIABLES`), whatever that
-    allowlist comes to hold."""
-    return {name: value
-            for name, value in bridge_mod.child_environment(base).items()
-            if name not in WORKING_DIRECTORY_VARIABLES}
+    allowlist comes to hold. Given the served `root`, it carries no path
+    inside it either (F16.1 as T007 batch P amends it): an entry of a path
+    list (`PATH`) that names one is dropped, and so is a variable whose
+    whole value does (`doxbench_trust.names_a_path_inside`), so nothing the
+    broker finds through its environment is a file a pull changes."""
+    environment: dict = {}
+    for name, value in bridge_mod.child_environment(base).items():
+        if name in WORKING_DIRECTORY_VARIABLES:
+            continue
+        if root is not None:
+            kept = [part for part in value.split(os.pathsep)
+                    if not (part and trust_mod.names_a_path_inside(
+                        part, root=root))]
+            if not any(kept) and value:
+                continue
+            value = os.pathsep.join(kept)
+        environment[name] = value
+    return environment
 
 FIXED_DIAGNOSTICS: frozenset[str] = frozenset({
     DIAG_BROKER_UNREACHABLE, DIAG_BROKER_REFUSED, DIAG_BROKER_MALFORMED,
@@ -600,8 +614,8 @@ def _close_quietly(stream) -> None:
         pass
 
 
-def _run_broker(argv, *, source, timeout: float,
-                read=None) -> tuple[object | None, str | None]:
+def _run_broker(argv, *, source, timeout: float, read=None,
+                root=None) -> tuple[object | None, str | None]:
     """The work of `subprocess_broker_runner`: `(answer, None)`, or
     `(None, sentence)` for a refusal. It raises no refusal itself, so no
     refusal keeps its frame, which holds the child and what the child
@@ -633,7 +647,7 @@ def _run_broker(argv, *, source, timeout: float,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            env=broker_environment(os.environ),
+            env=broker_environment(os.environ, root=root),
             # OUTSIDE EVERY SERVED REPOSITORY (BROKER_WORKING_DIRECTORY).
             cwd=BROKER_WORKING_DIRECTORY,
             text=True,
@@ -933,7 +947,7 @@ def _broker_operation(binding, operation: str, read, *, runner, trust,
     if runner is subprocess_broker_runner:
         result, failure = _run_broker(argv, source=source,
                                       timeout=BROKER_TIMEOUT_SECONDS,
-                                      read=read)
+                                      read=read, root=trust.root)
         if failure is None:
             return result
         raise BrokerRefused(failure, operation=operation)

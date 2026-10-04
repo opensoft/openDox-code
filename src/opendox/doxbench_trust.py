@@ -169,6 +169,7 @@ __all__ = [
     "in_repository_argv",
     "inline_script",
     "in_repository_program",
+    "names_a_path_inside",
     "intake_admissible",
     "intake_refusal_reason",
     "restored_for",
@@ -309,7 +310,10 @@ REMEDY_IN_REPOSITORY = (
 #: ruling, openxFactory#656 comment 5984069416). THE ACCEPTED LIMIT (same
 #: ruling, item 4): a general program that runs code from its own arguments
 #: (`awk`, `sed`, `find -exec`, and the like) is not judged as an inline
-#: script.
+#: script. An `env -S` string env would not split as a shell does (one
+#: holding a backslash, a `$` or a `#`, or quotes that do not close) is
+#: refused as one too: what it runs cannot be read (F16.1 as T007 batch P
+#: amends it; the holder's ruling, openxFactory#656 comment 5985046107, C1).
 REASON_INLINE_SCRIPT = (
     "its broker command gives a shell or an interpreter an inline script, "
     "which is no file a review can pin and can run whatever the repository "
@@ -320,17 +324,16 @@ REASON_INLINE_SCRIPT = (
 #: openDox-code#86, r4179366319; the holder's ruling, openxFactory#656
 #: comment 5985046107, C1): an option its launcher does not have, or has by
 #: more than one name; an option after which what runs cannot be judged
-#: from its words (`env --argv0`, `sudo --chroot`, `sudo -i`); an `env -S`
-#: string env would not split as a shell does (a backslash, a `$` or a
-#: `#`); or launchers nested past what is unwrapped. What it runs cannot be
-#: judged, so it is refused FAIL-CLOSED, as an inline script is, with the
-#: inline-script remedy.
+#: from its words (`env --argv0`, `sudo --chroot`, `sudo -i`); or launchers
+#: nested past what is unwrapped. What it runs cannot be judged, so it is
+#: refused FAIL-CLOSED, with the inline-script remedy. (An `env -S` string
+#: env would not split as a shell does is an inline script:
+#: `REASON_INLINE_SCRIPT`.)
 REASON_UNREADABLE_COMMAND = (
     "its broker command cannot be read to the program it runs (a launcher "
     "option it does not have, or has by more than one name, an option after "
-    "which what runs cannot be judged, an env -S string env would not split "
-    "as a shell does, or launchers nested too deeply), so what it runs "
-    "cannot be judged")
+    "which what runs cannot be judged, or launchers nested too deeply), so "
+    "what it runs cannot be judged")
 
 #: What an operator is told to do about such a binding.
 REMEDY_INLINE_SCRIPT = (
@@ -994,6 +997,12 @@ def _traversed(path: str) -> list[Path]:
     return names
 
 
+def _has_a_separator(candidate: str) -> bool:
+    """Whether `candidate` is a path rather than a bare word."""
+    return candidate in (".", "..") or os.sep in candidate or bool(
+        os.altsep and os.altsep in candidate)
+
+
 def _located(candidate: str, *, first: bool, context: _Context) -> list[str]:
     """The file one argv member could name, as an absolute path, or
     nothing: a path (with a separator) joined to the context's working
@@ -1001,8 +1010,7 @@ def _located(candidate: str, *, first: bool, context: _Context) -> list[str]:
     bare word as the program the context's search path finds (`_which`),
     for the command's program; and any other bare word that names an
     existing file in the working directory."""
-    if candidate in (".", "..") or os.sep in candidate or (
-            os.altsep and os.altsep in candidate):
+    if _has_a_separator(candidate):
         return [os.path.join(context.cwd, candidate)]
     if first:
         located = _which(candidate, context)
@@ -1067,6 +1075,23 @@ def in_repository_program(binding, *, root: Path | str) -> str | None:
     return in_repository_argv(binding.substituted_argv(), root=root)
 
 
+def _from_the_root(candidate: str, *, program: bool, served: Path) -> bool:
+    """Whether a relative `candidate` is judged from the served root as
+    well: where it reads as a path the repository's author wrote, its first
+    name being one the root holds (`tools/broker.py`, `tools`) or `.` or
+    `..`. Not an absolute path, which names one place; not the program's
+    own bare name, which the search path finds; and not a word whose first
+    name the root does not hold: a URL (`https:`), or the rest of an option
+    cluster (`I/usr/lib` of `-wI/usr/lib`)."""
+    if os.path.isabs(candidate):
+        return False
+    if program and not _has_a_separator(candidate):
+        return False
+    head = candidate.replace(os.altsep or os.sep, os.sep).split(os.sep)[0]
+    return head in (os.curdir, os.pardir) or os.path.lexists(
+        os.path.join(served, head))
+
+
 def in_repository_argv(members, *, root: Path | str) -> str | None:
     """The member of a broker command `members` that names a file inside
     the served repository, or None: `in_repository_program`'s rule, for a
@@ -1074,7 +1099,11 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
 
     It is judged as it runs (`_Context`; Copilot at openDox-code#86,
     r4179241532, r4179366288): from `BROKER_WORKING_DIRECTORY`, on the
-    search path the broker inherits. A member names a file inside the
+    search path the broker inherits. A relative path whose first name the
+    served root holds is judged from the root as well, FAIL-CLOSED, as the
+    repository's author would have written it (F16.1 as T007 batch P amends
+    it; `_from_the_root`), and so is a bare word, other than the program's
+    own, that names a file there. A member names a file inside the
     repository where any name on the way to it (`_traversed`) is the
     served root or lies under it, for every file the member could name
     (`_candidates`): an option's value, attached or after `=`, and every
@@ -1090,15 +1119,32 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
     served = Path(resolved_root(root))
 
     def inside(found: list[str]) -> bool:
-        return any(name == served or served in name.parents
-                   for path in found for name in _traversed(path))
+        # A name on the way counts where it lies INSIDE the root (a link the
+        # repository holds); the root itself is passed through by every path
+        # joined to it, so only the end may be the root itself.
+        for path in found:
+            *on_the_way, end = _traversed(path)
+            if end == served or served in end.parents:
+                return True
+            if any(served in name.parents for name in on_the_way):
+                return True
+        return False
+
+    from_the_root = _Context(str(served), None)
 
     def named(member: str, *, option: bool, first: bool,
               context: _Context) -> list[str]:
-        return [path for candidate in _candidates(member, option=option)
-                for path in _located(candidate,
-                                     first=first and candidate == member,
-                                     context=context)]
+        found: list[str] = []
+        for candidate in _candidates(member, option=option):
+            program = first and candidate == member
+            found += _located(candidate, first=program, context=context)
+            if _from_the_root(candidate, program=program, served=served):
+                # FAIL-CLOSED: also as the repository's author wrote it,
+                # from the served root (F16.1 as T007 batch P amends it:
+                # `["python3", "tools/broker.py"]` is refused)
+                found += _located(candidate, first=False,
+                                  context=from_the_root)
+        return found
 
     unwrapped = _unwrapped(members)
     for launcher, context in unwrapped.launchers:
@@ -1122,6 +1168,17 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
         if inside(found):
             return member
     return None
+
+
+def names_a_path_inside(value: str, *, root: Path | str) -> bool:
+    """Whether `value`, or any entry of it as a path list, names a path
+    inside the served repository at `root`, by `in_repository_argv`'s rule
+    for an option's value: from `BROKER_WORKING_DIRECTORY` and from the
+    served root, every name on the way, links followed. A broker's
+    environment carries no such value (F16.1 as T007 batch P amends it)."""
+    return any(part and in_repository_argv(
+        ["opendox-environment", f"--value={part}"], root=root) is not None
+        for part in value.split(os.pathsep))
 
 
 #: Shells: an option cluster holding `c` gives one an inline script.
@@ -1352,14 +1409,20 @@ class _Unwrapped(NamedTuple):
     command: tuple[str, ...]
     context: _Context
     unreadable: str | None = None
+    unreadable_because: str = ""
 
 
 class _Unreadable(Exception):
-    """A launcher's argument that cannot be read (`_Unwrapped.unreadable`)."""
+    """A launcher's argument that cannot be read (`_Unwrapped.unreadable`),
+    and the reason it is refused for: `REASON_UNREADABLE_COMMAND`, or, for
+    an `env -S` string env would not split as a shell does,
+    `REASON_INLINE_SCRIPT` (F16.1 as T007 batch P amends it, for the
+    holder's ruling, openxFactory#656 comment 5985046107, C1)."""
 
-    def __init__(self, member: str):
+    def __init__(self, member: str, reason: str | None = None):
         super().__init__(member)
         self.member = member
+        self.reason = reason or REASON_UNREADABLE_COMMAND
 
 
 def _long_option(grammar: _Launcher, spelled: str) -> _Option | None:
@@ -1402,11 +1465,11 @@ def _launcher_options(name: str, rest: tuple[str, ...], context: _Context,
             return None
         if name == "env" and key == "S":
             if _UNSPLITTABLE & set(value):
-                raise _Unreadable(value)
+                raise _Unreadable(value, REASON_INLINE_SCRIPT)
             try:
                 return shlex.split(value)
             except ValueError:
-                raise _Unreadable(value) from None
+                raise _Unreadable(value, REASON_INLINE_SCRIPT) from None
         values.append((value, context))
         if (name, key) in (("env", "C"), ("sudo", "D")):
             # the directory as the system enters it, links followed
@@ -1492,7 +1555,8 @@ def _unwrapped(members) -> _Unwrapped:
                                                       values)
         except _Unreadable as unreadable:
             return _Unwrapped(tuple(launchers), tuple(values), (), context,
-                              unreadable=unreadable.member)
+                              unreadable=unreadable.member,
+                              unreadable_because=unreadable.reason)
         if split is not None:
             # `env -S STRING`: STRING's words are env's own arguments, read
             # again by env's grammar, before what followed them.
@@ -1515,7 +1579,8 @@ def _unwrapped(members) -> _Unwrapped:
         if command and _launcher_name(command[0],
                                       context=context) is not None:
             return _Unwrapped(tuple(launchers), tuple(values), command,
-                              context, unreadable=command[0])
+                              context, unreadable=command[0],
+                              unreadable_because=REASON_UNREADABLE_COMMAND)
     return _Unwrapped(tuple(launchers), tuple(values), command, context)
 
 
@@ -1630,14 +1695,16 @@ def inline_script(members, *, root: Path | str | None = None) -> str | None:
 def broker_command_refused(members, *,
                            root: Path | str | None) -> str | None:
     """Why the broker command `members` may never be trusted, or None: it
-    cannot be read to the program it runs (`REASON_UNREADABLE_COMMAND`), it
-    gives a shell or an interpreter an inline script
-    (`REASON_INLINE_SCRIPT`), or, at a known `root`, it names a file inside
+    cannot be read to the program it runs (`REASON_UNREADABLE_COMMAND`; an
+    `env -S` string env would not split as a shell does is
+    `REASON_INLINE_SCRIPT`), it gives a shell or an interpreter an inline
+    script (`REASON_INLINE_SCRIPT`), or, at a known `root`, it names a file inside
     the served repository (`REASON_IN_REPOSITORY`). Asked where trust is
     recorded and wherever it is judged, and of the console intake's
     broker."""
-    if _unwrapped(members).unreadable is not None:
-        return REASON_UNREADABLE_COMMAND
+    unwrapped = _unwrapped(members)
+    if unwrapped.unreadable is not None:
+        return unwrapped.unreadable_because
     if inline_script(members, root=root) is not None:
         return REASON_INLINE_SCRIPT
     if root is not None and in_repository_argv(members,
