@@ -254,9 +254,31 @@ jobs:
           #    margin lets through is up to three tests that stop being
           #    COLLECTED at all, and a lost file is dozens of tests, never
           #    three.
-          MIN_SELECTED: "2476"
-          MIN_PASSED: "2465"
+          #
+          # RE-PINNED BY plan 034 T082 (Copilot at openDox-code#76 947411fd,
+          # r4170556888). Since T037, the cases added by later changes had
+          # left these floors where they were, so the declared three-test
+          # margin had grown to several hundred. T082 adds 34 cases and
+          # re-pins by the rule above: three below the lower of two greens
+          # of one tree. The tree is `a25606bb`, T082 after merging `main`
+          # at `0116293a` (T084, T103 and T102 included). Read from run
+          # 37152269851: attempt 1 (job 111288409713) and its re-run (job
+          # 111296677742). Both printed `triple: selected=3980 passed=3969
+          # skipped=11 failures=0 errors=0`, so no jitter was measured, and
+          # three below is 3977 / 3966. A local run of the same tree read
+          # 3803 passed and 177 skipped (3980 selected), with no PostgreSQL
+          # service, so the runtime cases skip there. That is a check, not
+          # the source.
+          MIN_SELECTED: "3977"
+          MIN_PASSED: "3966"
           # EXACT — the load-bearing number. Moves only with its reason.
+          #
+          # HELD AT 11 by plan 034 T082. While T082 was stacked ahead of T084
+          # this pin read 16: five of `tests/test_chat_model_configuration.py`'s
+          # 16.5 cases ran as strict xfails naming T084, and JUnit writes an
+          # xfail as a skip. T084 landed (openDox-code#77, `e49b17c3`), T082
+          # merged `main` and removed the five markers in that merge, and the
+          # five now pass. So T082 adds no skip.
           #
           # MOVED FROM 11 TO 14 BY plan 034 T100 (#1144 16.3a), for its three
           # strict-xfail cases in `tests/test_model_binding_trust.py`, each of
@@ -277,9 +299,10 @@ jobs:
           # default-home case runs and passes. One remains: #77's.
           # BACK FROM 12 TO 11: #77 landed on `main` (`e49b17c3`) and this
           # branch merged it, so the served-turn case runs and passes. All
-          # three are in, and the pin is `main`'s again. The floors are not
-          # moved: CI read 3327 / 3316 on this change's first base (#64, run
-          # 37072154936), already 851 above them.
+          # three are in, and the pin is `main`'s again. T100 moves neither
+          # floor: the floors are T082's re-pin above (3977 / 3966, #76), and
+          # T100 only adds cases, so its selected and passed counts sit above
+          # them.
           EXPECT_SKIPPED: "11"
         run: |
           python3 - <<'PY' > triple.env
