@@ -666,19 +666,27 @@ class DeclarationStore:
 
     # -- the document -------------------------------------------------------
 
+    def _refuse_a_link(self) -> None:
+        """No link on the way to the document, which a clone could carry, so
+        an approval never writes outside the repository (T100 follow-on, N1;
+        `doxbench_binding.linked_component`)."""
+        link = binding_mod.linked_component(self.path,
+                                            DEFAULT_DECLARATIONS_RELPATH)
+        if link is not None:
+            raise IntakeRefused(binding_mod.LINKED_DOCUMENT.format(
+                what="declarations document", path=self.path, link=link))
+
     def _load(self) -> tuple[BrokerDeclaration | None, list[ModelDeclaration]]:
+        self._refuse_a_link()
         if not self.path.is_file():
             # THE HOSTED PATH, and the reason the import below is lazy: an
             # install with no declarations answers here and never needs a YAML
             # parser at all.
             return None, []
         yaml = _yaml_or_refused()
-        try:
-            document = yaml.safe_load(self.path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as error:
-            raise IntakeRefused(
-                f"the declarations document at {self.path} is not readable "
-                "YAML") from error
+        document = binding_mod.read_settings_document(
+            self.path, what="declarations document", yaml=yaml,
+            refused=IntakeRefused)
         if document is None:
             return None, []
         if not isinstance(document, Mapping):
@@ -714,6 +722,7 @@ class DeclarationStore:
 
     def _save(self, broker: BrokerDeclaration | None,
               declarations: Iterable[ModelDeclaration]) -> None:
+        self._refuse_a_link()
         yaml = _yaml_or_refused()
         document = {
             "schema_version": SCHEMA_VERSION,

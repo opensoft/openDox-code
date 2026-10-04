@@ -817,11 +817,34 @@ def host_gate():
         column_seams.gate.unregister()
 
 
+class _HostTrust:
+    """A HOST's trust policy that admits the console intake's hand-off, as a
+    host offering the intake registers one (T100 follow-on, A5): openDox's
+    own per-machine trust admits no intake, so under it the surface is not
+    offered. It trusts no binding."""
+
+    def verdict(self, binding, *, root):
+        from opendox import doxbench_trust
+        return doxbench_trust.TrustVerdict.untrusted_for(
+            binding, root=root, basis=doxbench_trust.BASIS_HOST,
+            reason="this stand-in host trusts no binding")
+
+    def record(self, binding, *, root):
+        return self.verdict(binding, root=root)
+
+    def intake_verdict(self, binding, *, root):
+        from opendox import doxbench_trust
+        return doxbench_trust.TrustVerdict.trusted_for(
+            binding, root=root, basis=doxbench_trust.BASIS_HOST)
+
+
 def test_a_host_that_registers_its_gate_is_offered_intake_and_approves(
         tmp_path, host_gate) -> None:
     import yaml
-    from opendox import doxbench_intake, serve
+    from opendox import doxbench_intake, doxbench_trust, serve
 
+    doxbench_trust.unregister()
+    doxbench_trust.register(_HostTrust())
     repo = _repository(tmp_path, identity=True)
     document = _declare(tmp_path, repo)
     out = _snapshot(tmp_path, repo)

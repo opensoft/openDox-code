@@ -988,7 +988,15 @@ class WorkbenchRoutes:
         # registered the flow is not offered, even beside a hand-written
         # broker block, and the reason names the seam.
         records = column_seams.gate_records_writable()
-        offered = bool(disclosure and disclosure.get("broker")) and records
+        broker = bool(disclosure and disclosure.get("broker"))
+        # NOR WHERE NO REGISTERED TRUST POLICY COULD ADMIT ITS HAND-OFF (T100
+        # follow-on, A5). openDox's own per-machine trust admits no intake
+        # broker, so under it every submission would be refused
+        # INTAKE_BROKER_UNTRUSTED: a form that cannot complete. Read once,
+        # and nothing is registered.
+        from opendox import doxbench_trust
+        admissible = doxbench_trust.intake_admissible()
+        offered = broker and records and admissible
         from opendox import doxbench_binding
         envelope: dict = {
             "kind": "workbench-model-intake",
@@ -1006,8 +1014,10 @@ class WorkbenchRoutes:
             "declarations": (disclosure or {}).get("declarations", []),
         }
         if not offered:
-            envelope["reason"] = (doxbench_intake.NO_BROKER_NOTICE if records
-                                  else column_seams.GATE_RECORDS_REFUSAL)
+            envelope["reason"] = (
+                column_seams.GATE_RECORDS_REFUSAL if not records
+                else doxbench_intake.NO_BROKER_NOTICE if not broker
+                else doxbench_trust.INTAKE_NOT_ADMISSIBLE)
         self._serve_bytes(json.dumps(envelope).encode("utf-8"), JSON_CTYPE,
                           head_only)
 
@@ -1413,22 +1423,31 @@ class WorkbenchRoutes:
         the remedy and no command that trusts (Copilot at openDox-code#82,
         r4175203889). That judgement reads no store.
 
-        ASKED OF A REGISTERED POLICY ONLY. This act is not one of the
-        consumers that register openDox's default (`doxbench_trust.policy`),
-        so where nothing is registered no binding has been judged trusted in
-        this process, and the result says it is not, rather than read a
-        store no consumer has asked for. The registration is read ONCE, and
-        the verdict is that policy's (`registered_verdict_for`), so a host
-        that unregisters meanwhile never has the default installed in its
-        place by this act (Copilot at openDox-code#82, r4177946288)."""
+        NOTHING IS REGISTERED BY THIS ACT. It is not one of the consumers
+        that register openDox's default (`doxbench_trust.policy`). Where
+        nothing is registered it asks the default WITHOUT registering it,
+        which is what this console's next start would ask, so a binding this
+        machine's store trusts is never called untrusted (T100 follow-on,
+        A19). The registration is read ONCE (`registered_verdict_for`), so a
+        host that unregisters meanwhile never has the default installed in
+        its place by this act (Copilot at openDox-code#82, r4177946288).
+
+        A binding untrusted for a reason `trust` cannot repair (the store,
+        the platform, the host's policy, a broker inside the repository)
+        answers `APPROVED_UNTRUSTABLE_NOTICE`, which names no command that
+        trusts (T100 follow-on, A1)."""
         from opendox import doxbench_intake
         from opendox import doxbench_trust
         if doxbench_trust.unservable_because(binding) is not None:
             return doxbench_trust.APPROVED_UNSERVABLE_NOTICE
         verdict = doxbench_trust.registered_verdict_for(
             binding, root=Path(self.checkout_root))
-        if verdict is not None and verdict.admits(binding):
+        if verdict.admits(binding):
             return doxbench_intake.APPROVAL_NOTICE
+        if not doxbench_trust.trust_can_repair(verdict.reason):
+            # A reason `trust` would be refused for too: no command that
+            # trusts is named (T100 follow-on, A1).
+            return doxbench_trust.APPROVED_UNTRUSTABLE_NOTICE
         return doxbench_trust.APPROVED_UNTRUSTED_NOTICE
 
     def _approval_binding(self, binding_id: str):

@@ -338,9 +338,11 @@ def trust_gated_model_port_factory(binding, *, checkout_root: Path | str,
     the store says (Copilot at openDox-code#82, r4174783280): its id or its
     label is not one `brokered_catalog` can list, so the verdict refuses it
     before any policy is asked (`doxbench_trust.unservable_because`), and
-    the start declares the refusing port over an empty catalog rather than
-    fail on what a repository wrote. So `brokered_catalog` below is only
-    ever built for a binding it accepts.
+    this declares the refusing port over an empty catalog rather than fail
+    on what a repository wrote. So `brokered_catalog` below is only ever
+    built for a binding it accepts. The console's start never hands one
+    here: `declared_model_port_factory` passes it over (T100 follow-on, A3),
+    and this refusal is the defence beneath that, for any other caller.
 
     `bindings_path` is the document the binding was read from, where a
     caller named one, so the command the refusal prints reads that document
@@ -405,6 +407,13 @@ def declared_model_port_factory(session_root: Path | str, *,
     at a time. Choosing among several declared bindings needs a selection rule
     this change does not have and must not invent — see tasks.md 2.5.
 
+    A BINDING THE MODEL CATALOG CANNOT LIST IS PASSED OVER as a pending one
+    is (T100 follow-on, A3). It is no model at all: no turn could name it,
+    and declaring it would leave the console with an empty catalog whose
+    rail line ("No model configured") offers two remedies, a harness on PATH
+    or another binding, neither of which could then take effect. Passed
+    over, both do. It is said on stderr, by name, with its remedy.
+
     A PENDING DECLARATION IS SKIPPED (add-doxchat-model-intake task 3.1). A
     binding the intake flow wrote is DECLARED and not yet APPROVED, and "not yet
     approved" has to mean something at the one seam where availability is
@@ -434,17 +443,29 @@ def declared_model_port_factory(session_root: Path | str, *,
             f"[model-provider] the bindings document could not be read "
             f"({error}); reading it as declaring no binding\n")
         declared = ()
+    from opendox import doxbench_trust as trust_mod
+
     pending = intake_mod.pending_binding_ids(checkout_root)
+    unservable = tuple(binding for binding in declared
+                       if binding.id not in pending
+                       and trust_mod.unservable_because(binding) is not None)
+    for binding in unservable:
+        sys.stderr.write(
+            f"[model-provider] model binding {trust_mod.shown(binding.id)} "
+            f"is passed over: {trust_mod.REASON_UNSERVABLE}. "
+            f"{trust_mod.REMEDY_UNSERVABLE}\n")
     approved = tuple(binding for binding in declared
-                     if binding.id not in pending)
-    if len(approved) != len(declared):
+                     if binding.id not in pending
+                     and binding not in unservable)
+    if len(approved) + len(unservable) != len(declared):
         # SAID OUT LOUD, on the same stderr channel the unreadable-document
         # fallback uses: an operator who declared a model through the wizard and
         # then wondered why the selector still has nothing in it deserves to
         # read the reason in their own console rather than infer it.
         sys.stderr.write(
             "[model-provider] "
-            f"{len(declared) - len(approved)} declared binding(s) are pending "
+            f"{len(declared) - len(approved) - len(unservable)} declared "
+            "binding(s) are pending "
             "human approval and contribute no available model; approve them "
             "from the console's model intake flow\n")
     if not approved:

@@ -1617,7 +1617,7 @@ class BrokeredProviderPort:
 
         A BINDING THE TRUST VERDICT DOES NOT COVER IS NEVER AVAILABLE (#1144
         16.3a), so no turn can select it."""
-        if self._available and isinstance(self._trust, trust_mod.TrustVerdict) \
+        if self._available and type(self._trust) is trust_mod.TrustVerdict \
                 and self._trust.admits(self._binding):
             return self._declared_catalog
         return model_mod.ModelCatalog.from_entries([
@@ -1730,9 +1730,8 @@ class BrokeredProviderPort:
                 credential = _PresentedCredential(resolve_credential_reference(
                     self._binding, trust=self._trust, environ=self._environ,
                     keyring_backend=self._keyring_backend))
-            except BrokerRefused:
-                with self._lock:
-                    self._available = False
+            except BrokerRefused as refusal:
+                self._now_unavailable(refusal.diagnostic)
                 raise
             with self._lock:
                 self._available = True
@@ -1811,13 +1810,36 @@ class BrokeredProviderPort:
             try:
                 minted = mint(self._binding, trust=self._trust,
                               retry_of=retry_of, runner=self._runner)
-            except BrokerRefused:
-                self._available = False
+            except BrokerRefused as refusal:
+                self._now_unavailable(refusal.diagnostic, locked=True)
                 raise
             self._available = True
             self._token = minted
         self._record(reason, audit_ref=minted.audit_ref)
         return minted
+
+    def _now_unavailable(self, diagnostic: str, *,
+                         locked: bool = False) -> None:
+        """Mark the catalog unavailable, and SAY SO, once, as the port turns
+        unavailable (T100 follow-on, A4). The chat rail tells an operator
+        whose binding is trusted, and still unavailable, to read "the reason
+        this console printed when its provider refused": this is that line.
+        ONE fixed `[model-provider]` line, through the port's notice seam,
+        naming the binding's id and the refusal's FIXED diagnostic, which is
+        one of `FIXED_DIAGNOSTICS` and carries nothing a broker, a reference
+        or a provider wrote. A refusal while already unavailable says
+        nothing more; a later success makes the next refusal say it again.
+        `locked` says the caller already holds the port's lock."""
+        if locked:
+            was_available, self._available = self._available, False
+        else:
+            with self._lock:
+                was_available, self._available = self._available, False
+        if was_available:
+            self._notice(
+                f"[model-provider] model binding "
+                f"{trust_mod.shown(self._binding.id)} is unavailable: "
+                f"{diagnostic}\n")
 
     def _forget_token(self) -> None:
         with self._lock:

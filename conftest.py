@@ -13,8 +13,11 @@ A CREATED file: no manifest row (RULED OQ-C).
 
 from __future__ import annotations
 
+import itertools
 import sys
 from pathlib import Path
+
+import pytest
 
 SRC = Path(__file__).resolve().parent / "src"
 
@@ -102,3 +105,47 @@ class _SuiteProfile:
 
 if _domain_profile is not None and not _domain_profile.is_registered():
     _domain_profile.register(_SuiteProfile())
+
+
+# ---------------------------------------------------------------------------
+# NO CASE READS OR WRITES THIS MACHINE'S TRUST (T100 follow-on, A15).
+#
+# The per-machine trust store (`opendox.doxbench_trust.MachineTrust`) lives in
+# openDox's state directory, `OPENDOX_STATE_DIR` or, where that is unset, the
+# per-user one under the operator's home. A case that serves a console through
+# the trust-gated factory without naming a state directory of its own read
+# the OPERATOR'S store: what the case saw depended on what this machine
+# trusts, and a case that recorded trust wrote it there. So every case gets
+# a scratch state directory of its own, which does not exist until something
+# records into it (an absent store trusts nothing), and the session gets one
+# too, for what a module- or session-scoped fixture builds before any case.
+# The trust seam is emptied after every case, so no policy a case registered,
+# and no default a case's console registered over a scratch directory, is
+# the next case's.
+#
+# `tests_runtime/conftest.py` clears every `OPENDOX_*` setting before each of
+# its cases, this one included; those cases name the state directory they
+# mean. A case that names its own (`monkeypatch.setenv`) wins, as it runs
+# after this fixture.
+_STATE_SETTING = "OPENDOX_STATE_DIR"
+_scratch_cases = itertools.count()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _scratch_state_base(tmp_path_factory: pytest.TempPathFactory):
+    """The session's scratch state directory, and the base of each case's."""
+    base = tmp_path_factory.mktemp("opendox-state")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(_STATE_SETTING, str(base / "session"))
+        yield base
+
+
+@pytest.fixture(autouse=True)
+def _scratch_state_directory(_scratch_state_base, monkeypatch: pytest.MonkeyPatch):
+    """A case's own scratch state directory; the trust seam emptied after."""
+    monkeypatch.setenv(_STATE_SETTING, str(
+        _scratch_state_base / f"case-{next(_scratch_cases)}"))
+    yield
+    trust = sys.modules.get("opendox.doxbench_trust")
+    if trust is not None:
+        trust.unregister()

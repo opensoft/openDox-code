@@ -529,6 +529,53 @@ class BindingRefused(ValueError):
     caller declaring a binding has exactly one thing to catch."""
 
 
+def linked_component(path: Path | str, relpath: str) -> Path | None:
+    """The symbolic link on the way to a settings document, or None (T100
+    follow-on, N1): the document itself and, where its path ends with
+    `relpath` (a checkout's own default for it), every directory of `relpath`
+    above it. A clone carries a link as readily as a file, so a document
+    reached through one could be read from, or written to, anywhere the link
+    points: a write through it would create or overwrite a file outside the
+    repository. Directories above `relpath`, the checkout's own path, are
+    the operator's."""
+    path = Path(path)
+    candidates = [path]
+    parts = Path(relpath).parts
+    if len(path.parts) > len(parts) and path.parts[-len(parts):] == parts:
+        candidates += list(path.parents)[:len(parts) - 1]
+    for candidate in candidates:
+        if candidate.is_symlink():
+            return candidate
+    return None
+
+
+#: What a store says of a settings document reached through a link.
+LINKED_DOCUMENT = (
+    "the {what} at {path} is reached through a symbolic link ({link}), which "
+    "a clone can carry to point anywhere, so it is neither read nor written; "
+    "replace the link with the file or directory itself")
+
+
+def read_settings_document(path: Path, *, what: str, yaml, refused):
+    """The YAML document at `path`, parsed, or a refusal BY NAME (`refused`,
+    the caller's own refusal class) for one that cannot be read (T100
+    follow-on, N2): one the system will not read for this user, not UTF-8,
+    nested past what the parser can descend, or not YAML. A console's start
+    reads it, so none of these may surface as a raw error there."""
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise refused(f"the {what} at {path} cannot be read "
+                      f"({error.strerror or type(error).__name__})") from None
+    except UnicodeDecodeError:
+        raise refused(f"the {what} at {path} is not UTF-8 text") from None
+    except RecursionError:
+        raise refused(f"the {what} at {path} nests too deeply to "
+                      "read") from None
+    except yaml.YAMLError as error:
+        raise refused(f"the {what} at {path} is not readable YAML") from error
+
+
 def _require_non_blank_str(field: str, value: object) -> str:
     if not isinstance(value, str):
         raise BindingRefused(
@@ -1027,19 +1074,25 @@ class BindingStore:
 
     # -- the document ------------------------------------------------------
 
+    def _refuse_a_link(self) -> None:
+        """No link on the way to the document, which a clone could carry
+        (T100 follow-on, N1; `linked_component`)."""
+        link = linked_component(self.path, DEFAULT_BINDINGS_RELPATH)
+        if link is not None:
+            raise BindingRefused(LINKED_DOCUMENT.format(
+                what="bindings document", path=self.path, link=link))
+
     def _load(self) -> list[ModelProviderBinding]:
+        self._refuse_a_link()
         if not self.path.is_file():
             # THE HOSTED PATH, and the reason the import below is lazy: an
             # install with no bindings document answers here and never needs a
             # YAML parser at all.
             return []
         yaml = _yaml_or_refused()
-        try:
-            document = yaml.safe_load(self.path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as error:
-            raise BindingRefused(
-                f"the bindings document at {self.path} is not readable YAML"
-            ) from error
+        document = read_settings_document(
+            self.path, what="bindings document", yaml=yaml,
+            refused=BindingRefused)
         if document is None:
             return []
         if not isinstance(document, Mapping):
@@ -1071,6 +1124,7 @@ class BindingStore:
         return bindings
 
     def _save(self, bindings: Iterable[ModelProviderBinding]) -> None:
+        self._refuse_a_link()
         yaml = _yaml_or_refused()
         document = {
             "schema_version": SCHEMA_VERSION,

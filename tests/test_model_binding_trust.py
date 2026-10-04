@@ -290,9 +290,21 @@ class _Served:
         return binding_mod.BindingStore(
             binding_mod.bindings_path(root or self.repo)).list()[0]
 
-    def port(self, root: Path | None = None):
+    def port(self, root: Path | None = None, *, harness: bool = False):
+        """The port the console's start declares. Whether the local harness
+        is installed is ANSWERED (`harness`, no by default), so what a case
+        sees never depends on what this machine has on its `PATH`."""
         return install_mod.declared_model_port_factory(
-            self.tmp / "sessions", checkout_root=root or self.repo)()
+            self.tmp / "sessions", checkout_root=root or self.repo,
+            harness_present=lambda: harness)()
+
+    def gated_port(self, root: Path | None = None):
+        """The port the trust gate resolves for the declared binding itself,
+        as a host that hands it one binding resolves it. The start passes
+        over a binding the catalog cannot list (T100 follow-on, A3); this
+        port is the defence beneath it, and still refuses such a binding."""
+        return install_mod.trust_gated_model_port_factory(
+            self.declared(root), checkout_root=root or self.repo)()
 
     def nothing_was_touched(self) -> None:
         """No broker ran, the variable was never read, the keyring was never
@@ -636,11 +648,16 @@ def test_a_binding_carrying_control_characters_is_shown_escaped(served,
     by `list` and in the refusal, and no raw control byte reaches the
     output. The catalog refuses such an id, so `trust` shows it and then
     refuses it (Copilot at openDox-code#82, r4174783280)."""
+    from opendox import doxbench_model
+
     hostile = "evil\n\x1b[2J"
     served.hand_write(served.record(
         "broker", id=hostile, label=f"Label{hostile}",
         broker_argv=[sys.executable, str(served.broker), f"--x{hostile}"]))
-    port = served.port()
+    # the start passes it over, saying so (T100 follow-on, A3) ...
+    assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+    # ... and the gate beneath still refuses it
+    port = served.gated_port()
     with pytest.raises(_trust_mod().BindingUntrusted) as refused:
         port.dispatch(_Envelope())
     assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
@@ -705,6 +722,11 @@ def _plant_link_to_the_file(served):
 
 
 def _plant_link_to_the_directory(served):
+    """The state directory replaced by a link of this user's own, to a
+    private directory of this user's own holding a private store: F16.1's
+    ratified text refuses even this one (T100 follow-on, A8; the holder's
+    ruling on openxFactory#656 comment 5982436447). Before A8 the case
+    passed only because the target was made writable by every user."""
     real = served.tmp / "real-state"
     real.mkdir(mode=0o700)
     (real / _trust_mod().TRUST_FILENAME).write_text(_planted(served),
@@ -712,11 +734,7 @@ def _plant_link_to_the_directory(served):
     os.chmod(real / _trust_mod().TRUST_FILENAME, 0o600)
     os.chmod(served.tmp, 0o700)
     served.state_dir.symlink_to(real, target_is_directory=True)
-    # A link of this user's own, to a directory of this user's own, is a
-    # path #69's tree check accepts, so the directory is made writable by
-    # every user too: the check judges what the link reaches.
-    os.chmod(real, 0o777)
-    return "is writable by every user"
+    return "the directory that holds the store is a symbolic link"
 
 
 def _plant_a_writable_file(served, mode=0o666):
@@ -1303,10 +1321,15 @@ def test_an_id_the_catalog_refuses_prints_no_command_and_is_never_trusted(
     refused turn, `list`), each says why instead, and `trust` refuses it with
     nothing recorded. The catalog lists nothing, and the start does not
     fail."""
+    from opendox import doxbench_model
+
     trust_mod = _trust_mod()
     binding_id = HOSTILE_IDS[name]
     served.hand_write(served.record("env", id=binding_id))
-    port = served.port()
+    # The start passes it over, saying why (T100 follow-on, A3), and the
+    # gate beneath refuses it.
+    assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+    port = served.gated_port()
     notice = capsys.readouterr().err
     with pytest.raises(trust_mod.BindingUntrusted) as refused:
         port.dispatch(_Envelope())
@@ -1356,10 +1379,14 @@ def test_a_binding_the_catalog_refuses_is_never_trusted_nor_fails_the_start(
     document = served.hand_write(record)
     # recorded straight into the store, as a store written before this check
     served.trust.record(served.declared(), root=served.repo)
+    from opendox import doxbench_model
+
     for policy in (served.trust, _TrustsEveryBinding()):
         trust_mod.unregister()
         trust_mod.register(policy)
-        port = served.port()
+        # passed over at the start (T100 follow-on, A3); refused beneath it
+        assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+        port = served.gated_port()
         assert list(port.catalog().entries) == []
         with pytest.raises(trust_mod.BindingUntrusted) as refused:
             port.dispatch(_Envelope())
@@ -1451,8 +1478,12 @@ def test_a_link_to_nothing_on_the_way_to_the_store_is_refused_by_name(
     trust_mod.register(policy)
     with pytest.raises(trust_mod.TrustStoreRefused) as refused:
         policy.record(served.declared(), root=served.repo)
-    assert (f"refuses {json.dumps(str(link))}: it is a symbolic link to "
-            "nothing") in str(refused.value)
+    # The state directory itself is never a link, whatever it reaches (T100
+    # follow-on, A8), so that is its refusal; above it, a link to nothing.
+    said = ("the directory that holds the store is a symbolic link"
+            if where == "state-directory" else
+            "it is a symbolic link to nothing")
+    assert f"refuses {json.dumps(str(link))}: {said}" in str(refused.value)
     verdict = policy.verdict(served.declared(), root=served.repo)
     assert not verdict.trusted and verdict.reason == str(refused.value)
     assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
@@ -2353,6 +2384,11 @@ FIXED_SENTENCES = {
     "UNSERVABLE_TURN_MESSAGE": (["list"], ["edit"]),
     "APPROVED_UNSERVABLE_NOTICE": (["list"], ["edit", "remove"]),
     "REMEDY_UNSERVABLE": ([], ["edit", "remove"]),
+    # T100 follow-on, A1 and A2: where trusting cannot help, none quotes it
+    "UNTRUSTABLE_TURN_MESSAGE": (["list"], []),
+    "APPROVED_UNTRUSTABLE_NOTICE": (["list"], []),
+    "REMEDY_NOT_BY_TRUST": ([], []),
+    "REMEDY_IN_REPOSITORY": ([], ["edit"]),
 }
 
 
@@ -2390,7 +2426,10 @@ def test_an_approval_reads_the_trust_seam_once(served, monkeypatch):
     unregisters between two reads (here, a registration check that answers
     yes and tears the host down) must not have openDox's default installed
     in its place by the approval, nor that store's answer given as the
-    host's: the store trusts the binding, and the host does not."""
+    host's: the store trusts the binding, and the host does not.
+
+    The host declines for a reason of its own, which `trust` cannot repair,
+    so the approval names no command that trusts (T100 follow-on, A1)."""
     trust_mod = _trust_mod()
     _caps, answer = _served_intake(served, host_policy=_AdmitsTheIntake())
     assert answer.get("error") is None, answer
@@ -2406,12 +2445,13 @@ def test_an_approval_reads_the_trust_seam_once(served, monkeypatch):
     monkeypatch.setattr(trust_mod, "is_registered", registered_then_torn_down)
     approval = _post_an_approval(served, BINDING_ID)
     assert approval.get("ok") is True, approval
-    assert approval["availability"] == trust_mod.APPROVED_UNTRUSTED_NOTICE
+    assert approval["availability"] == trust_mod.APPROVED_UNTRUSTABLE_NOTICE
     assert trust_mod.current() is host
 
 
 @pytest.mark.parametrize("sentence", ["UNTRUSTED_TURN_MESSAGE",
-                                      "UNSERVABLE_TURN_MESSAGE"])
+                                      "UNSERVABLE_TURN_MESSAGE",
+                                      "UNTRUSTABLE_TURN_MESSAGE"])
 def test_each_turn_sentence_fits_the_released_failure_envelope(sentence):
     """A refused turn's sentence rides the RELEASED failure envelope, whose
     `message` the schema bounds; one past it would fail the envelope's own
@@ -2639,11 +2679,18 @@ def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served,
     and nothing is contacted. Where the catalog cannot list the binding (a
     label past its bound), trust cannot help, so the sentence names the
     remedy and no command that trusts (Copilot at openDox-code#82,
-    r4175203889)."""
+    r4175203889).
+
+    SINCE THE T100 FOLLOW-ON (A3) the start passes such a binding over, as
+    it does a pending one, so the console serves no model: the turn is
+    refused as a plane with no model capability refuses it, and the start
+    said why on stderr. Whether the local harness is installed is answered
+    (no), so the case never depends on this machine's `PATH`."""
     import http.client
 
     from opendox import doxbench_hash, serve
     from opendox.serve_wire import (DOXBENCH_CHAT_TURN_V2_KIND,
+                                    DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
                                     DOXBENCH_ERR_MODEL_UNAVAILABLE)
     from standalone_child import fresh_repository, git, run_module
 
@@ -2663,7 +2710,8 @@ def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served,
         REPO_ROOT / "src" / "opendox" / "web", out, repo, port=0,
         actor="brett", schema_validator_factory=_EveryKind,
         model_port_factory=install_mod.declared_model_port_factory(
-            install_mod.session_root_beside(out), checkout_root=repo))
+            install_mod.session_root_beside(out), checkout_root=repo,
+            harness_present=lambda: False))
     worker = threading.Thread(target=httpd.serve_forever, daemon=True)
     worker.start()
     try:
@@ -2710,12 +2758,1069 @@ def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served,
         httpd.shutdown()
         httpd.server_close()
         worker.join(timeout=10)
-    assert body.get("error") == DOXBENCH_ERR_MODEL_UNAVAILABLE, body
     if binding == "unservable":
+        assert body.get("error") == (
+            DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE), body
         assert "model-binding trust" not in body.get("message", ""), body
-        assert body.get("message") == _trust_mod().UNSERVABLE_TURN_MESSAGE, (
-            body)
     else:
+        assert body.get("error") == DOXBENCH_ERR_MODEL_UNAVAILABLE, body
         assert body.get("message") == _trust_mod().UNTRUSTED_TURN_MESSAGE, (
             body)
     served.nothing_was_touched()
+
+
+# ===========================================================================
+# 6. THE T100 FOLLOW-ON: the holder's adversarial review of openDox-code#82
+#    (findings A1 to A19, N1 and N2; rulings on openxFactory#656 comment
+#    5982436447: A2 and A14 Brett Heap's, A8 the holder's). Each case fails at
+#    openDox-code `38d3350e`, where #82 landed, for its finding's reason.
+#    A14 is RULED "Served repo only, limit": no case, no change.
+# ===========================================================================
+
+
+class _OsWith:
+    """`os`, as the trust module sees it, with some names replaced (a spy, or
+    a system that answers otherwise). Everything else is the real `os`."""
+
+    def __init__(self, **replaced) -> None:
+        self._replaced = replaced
+
+    def __getattr__(self, name):
+        if name in self._replaced:
+            return self._replaced[name]
+        return getattr(os, name)
+
+
+def _no_trust_command_in(*texts: str) -> None:
+    for text in texts:
+        assert _printed_commands(text) == [], text
+        assert "opendox model-binding trust" not in text, text
+
+
+def _store_holding(served, document) -> Path:
+    served.state_dir.mkdir(mode=0o700, exist_ok=True)
+    store = served.state_dir / _trust_mod().TRUST_FILENAME
+    store.write_text(document if isinstance(document, str)
+                     else json.dumps(document), encoding="utf-8")
+    os.chmod(store, 0o600)
+    return store
+
+
+# --- A1: no `trust` command where `trust` cannot repair the refusal --------
+
+
+def test_A1_an_unsupported_platform_is_told_no_trust_command(
+        served, capsys, monkeypatch):
+    """On a platform that cannot keep the store, `trust` is refused too, so
+    no command that trusts is printed: not by `list`, the start's notice, a
+    refused turn, nor the turn's fixed sentence (`UNTRUSTABLE_TURN_MESSAGE`).
+    Each names the cause and says to resolve it first."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    monkeypatch.setattr(trust_mod, "fcntl", None)         # as on Windows
+    port = served.port()
+    assert isinstance(port, trust_mod.UntrustedBindingPort)
+    with pytest.raises(trust_mod.BindingUntrusted) as refused:
+        port.dispatch(_Envelope())
+    assert trust_mod.turn_message_for(port) == (
+        trust_mod.UNTRUSTABLE_TURN_MESSAGE)
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    captured = capsys.readouterr()
+    _no_trust_command_in(captured.out, captured.err, str(refused.value))
+    for text in (captured.out, captured.err, str(refused.value)):
+        assert "POSIX" in text, text
+        assert trust_mod.REMEDY_NOT_BY_TRUST in text, text
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    served.nothing_was_touched()
+
+
+def test_A1_a_hosts_own_refusal_is_told_no_trust_command(served, capsys):
+    """A host's policy that declines (a governed host, for a pending
+    declaration) declines `trust` too, so `list` prints the host's reason
+    and no command, and the approval names none either."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    _propose(served.repo, BINDING_ID)
+    trust_mod.unregister()
+    trust_mod.register(_GovernedHostPolicy())
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    listed = capsys.readouterr().out
+    _no_trust_command_in(listed)
+    assert "its declaration is not approved" in listed
+    assert trust_mod.REMEDY_NOT_BY_TRUST in listed
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    class _Fails:
+        def verdict(self, binding, *, root):
+            raise RuntimeError(SECRET)
+
+        record = verdict
+
+    # the turn's sentence, for a host's refusal and for a host that fails
+    for policy in (_GovernedHostPolicy(), _Fails()):
+        trust_mod.unregister()
+        trust_mod.register(policy)
+        port = served.gated_port()
+        assert isinstance(port, trust_mod.UntrustedBindingPort)
+        assert trust_mod.turn_message_for(port) == (
+            trust_mod.UNTRUSTABLE_TURN_MESSAGE)
+    assert SECRET not in capsys.readouterr().err
+
+
+def test_A1_an_unusable_store_is_told_no_trust_command(served, capsys):
+    """A torn store refuses `trust` as it refuses the verdict, so the
+    start's notice prints its cause and recovery, and no command."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    _store_holding(served, "{")                      # a torn copy
+    served.port()
+    notice = capsys.readouterr().err
+    _no_trust_command_in(notice)
+    assert "does not read as JSON" in notice
+    assert trust_mod.RECOVER_MOVE_ASIDE in notice
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+
+
+@pytest.mark.parametrize("reason", ["never", "changed", "record-form",
+                                    "not-covered", "no-verdict"])
+def test_A1_each_reason_trust_repairs_prints_the_command_that_repairs_it(
+        served, capsys, reason):
+    """The other side of A1: where `trust` CAN repair the refusal, the
+    command is printed, and, run as printed, it trusts the binding."""
+    import shlex
+
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    words = {"never": trust_mod.REASON_NEVER_TRUSTED,
+             "changed": trust_mod.REASON_CHANGED,
+             "record-form": trust_mod.REASON_RECORD_FORM,
+             "not-covered": trust_mod.REASON_NOT_COVERED,
+             "no-verdict": trust_mod.REASON_NO_VERDICT}[reason]
+    assert trust_mod.trust_can_repair(words)
+    remedy = trust_mod.trust_remedy(BINDING_ID, str(served.repo), words)
+    [command] = _printed_commands(remedy)
+    assert _cli(*shlex.split(command)[1:]) == 0
+    capsys.readouterr()
+    assert trust_mod.verdict_for(served.declared(), root=served.repo).trusted
+
+
+# --- A2: a broker program inside the served repository is never trusted ----
+
+
+def _in_repository_argv(served, where, monkeypatch):
+    """A broker command naming a file inside the served repository, `where`
+    each way a command can name one. The repository holds a copy of the
+    marker broker at `tools/broker.py`."""
+    tool = served.repo / "tools" / "broker.py"
+    tool.parent.mkdir(exist_ok=True)
+    shutil.copy(served.broker, tool)
+    if where == "absolute":
+        return [sys.executable, str(tool)]
+    if where == "relative-to-the-working-directory":
+        monkeypatch.chdir(served.repo)
+        return [sys.executable, "tools/broker.py"]
+    if where == "relative-from-deeper-in-it":
+        # as written from the working directory, and from no other
+        monkeypatch.chdir(served.repo / "tools")
+        return [sys.executable, "../tools/broker.py"]
+    if where == "bare-word-in-the-working-directory":
+        monkeypatch.chdir(served.repo / "tools")
+        return [sys.executable, "broker.py"]
+    if where == "module-after-dash-m":
+        monkeypatch.chdir(served.repo)
+        return [sys.executable, "-m", "tools.broker"]
+    if where == "flag-value":
+        return [sys.executable, str(served.broker), f"--config={tool}"]
+    if where == "link-from-outside":
+        link = served.tmp / "outside-link.py"
+        link.symlink_to(tool)
+        return [sys.executable, str(link)]
+    if where == "first-word-on-path":
+        program = served.repo / "bin" / "opref-broker"
+        program.parent.mkdir()
+        program.write_text(f"#!{sys.executable}\n"
+                           + tool.read_text(encoding="utf-8"),
+                           encoding="utf-8")
+        os.chmod(program, 0o755)
+        monkeypatch.setenv("PATH", f"{program.parent}{os.pathsep}"
+                           f"{os.environ.get('PATH', '')}")
+        return ["opref-broker"]
+    raise AssertionError(where)
+
+
+IN_REPOSITORY = ("absolute", "relative-to-the-working-directory",
+                 "relative-from-deeper-in-it",
+                 "bare-word-in-the-working-directory", "module-after-dash-m",
+                 "flag-value", "link-from-outside", "first-word-on-path")
+
+
+@pytest.mark.parametrize("where", IN_REPOSITORY)
+def test_A2_a_broker_inside_the_repository_is_refused_by_name(
+        served, capsys, monkeypatch, where):
+    """RULED by Brett Heap, openxFactory#656 comment 5982436447, item 2,
+    "Refuse in-repo programs". Trust is of the binding's record, and a pull
+    can change a program inside the repository after the record was
+    trusted, so a binding whose broker command names one is refused BY NAME
+    where trust is recorded (`trust`, `add`) and where it is checked (the
+    verdict, under any policy, a host's that trusts everything included),
+    with the remedy "install the broker outside the repository"."""
+    trust_mod = _trust_mod()
+    argv = _in_repository_argv(served, where, monkeypatch)
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.in_repository_program(binding, root=served.repo)
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    err = capsys.readouterr().err
+    assert trust_mod.REASON_IN_REPOSITORY in err
+    assert "install the broker outside the repository" in err
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+    for policy in (served.trust, _TrustsEveryBinding()):
+        trust_mod.unregister()
+        trust_mod.register(policy)
+        verdict = trust_mod.verdict_for(binding, root=served.repo)
+        assert not verdict.trusted
+        assert verdict.reason == trust_mod.REASON_IN_REPOSITORY
+    served.nothing_was_touched()
+
+
+def test_A2_a_broker_outside_the_repository_is_trusted_as_before(
+        served, capsys):
+    """The rule names files, so what names none is not refused: an option's
+    absolute value outside the repository, a URL, a bare word that names no
+    file, and options with no value. `trust` records it, and a turn uses
+    it."""
+    trust_mod = _trust_mod()
+    argv = [sys.executable, str(served.broker), "--config=/etc/opref.conf",
+            "--issuer=https://auth.example/v1", "-v", "--quiet", "plain-word"]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.in_repository_program(binding, root=served.repo) is None
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 0
+    capsys.readouterr()
+    assert trust_mod.verdict_for(binding, root=served.repo).trusted
+    assert isinstance(served.port(), provider_mod.BrokeredProviderPort)
+
+
+def test_A2_a_trusted_broker_edited_in_the_repository_never_runs(
+        served, capsys, monkeypatch):
+    """The review's case: the binding trusted (here, straight into the
+    store, as a store written before the rule), then a pull edits the
+    program it runs. Nothing runs: the start refuses it, the gate beneath
+    refuses even a verdict that admits it, and so does the console intake's
+    own question."""
+    trust_mod = _trust_mod()
+    argv = _in_repository_argv(served, "absolute", monkeypatch)
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    served.trust.record(binding, root=served.repo)
+    canary = served.tmp / "CANARY"
+    tool = Path(argv[1])
+    tool.write_text(f"open({str(canary)!r}, 'w').close()\n"
+                    + tool.read_text(encoding="utf-8"), encoding="utf-8")
+    port = served.port()
+    assert isinstance(port, trust_mod.UntrustedBindingPort)
+    with pytest.raises(trust_mod.BindingUntrusted) as refused:
+        port.dispatch(_Envelope())
+    assert "install the broker outside the repository" in str(refused.value)
+    _no_trust_command_in(str(refused.value), capsys.readouterr().err)
+    admitted = trust_mod.TrustVerdict.trusted_for(
+        binding, root=served.repo, basis=trust_mod.BASIS_HOST)
+    with pytest.raises(trust_mod.BindingUntrusted) as beneath:
+        trust_mod.require_admitted(binding, admitted)
+    assert trust_mod.REASON_IN_REPOSITORY in str(beneath.value)
+    with pytest.raises(binding_mod.BindingRefused):
+        provider_mod.mint(binding, trust=admitted)
+    trust_mod.unregister()
+    trust_mod.register(_AdmitsTheIntake())
+    intake = trust_mod.intake_verdict_for(binding, root=served.repo)
+    assert not intake.trusted
+    assert intake.reason == trust_mod.REASON_IN_REPOSITORY
+    assert not canary.exists()
+    served.nothing_was_touched()
+
+
+def test_A2_add_refuses_a_broker_inside_the_repository_and_writes_nothing(
+        served, capsys, monkeypatch):
+    trust_mod = _trust_mod()
+    argv = _in_repository_argv(served, "absolute", monkeypatch)
+    adding = served.add_argv("broker")
+    adding = adding[:adding.index("--") + 1] + argv
+    assert _cli(*adding) == 1
+    assert trust_mod.REMEDY_IN_REPOSITORY in capsys.readouterr().err
+    assert not binding_mod.bindings_path(served.repo).exists()
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+
+
+# --- A3: an unservable binding is passed over, so 16.4's remedies work -----
+
+
+def test_A3_the_start_passes_over_a_binding_the_catalog_cannot_list(
+        served, capsys):
+    """The rail's "No model configured" line offers two remedies, the local
+    harness on PATH and another binding. With a binding the catalog cannot
+    list declared first, the start declared a refusing port for it and
+    neither remedy could take effect. It is passed over, as a pending one
+    is, and the start says so by name."""
+    from opendox import doxbench_model
+
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env", label="L" * 201))
+    assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+    notice = capsys.readouterr().err
+    assert (f"[model-provider] model binding {trust_mod.shown(BINDING_ID)} "
+            f"is passed over: {trust_mod.REASON_UNSERVABLE}. "
+            f"{trust_mod.REMEDY_UNSERVABLE}") in notice
+    # remedy (1): the local harness, installed, is what the start declares
+    harness = served.port(harness=True)
+    assert not isinstance(harness, trust_mod.UntrustedBindingPort)
+    assert [entry.model_id for entry in harness.catalog().entries] == [
+        "omp-local"]
+    # remedy (2): another binding, added, is what the start declares
+    second = served.add_argv("env")
+    second[second.index("--id") + 1] = "second-model"
+    assert _cli(*second) == 0
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    listed = capsys.readouterr().out
+    assert "passes over it: the model catalog cannot list" in listed
+    port = served.port()
+    assert isinstance(port, provider_mod.BrokeredProviderPort)
+    assert [entry.model_id for entry in port.catalog().entries] == [
+        "second-model"]
+
+
+# --- A4: a trusted binding's refusal is printed where the rail says --------
+
+
+@pytest.mark.parametrize("kind", ["env", "broker"])
+def test_A4_a_trusted_bindings_refusal_is_printed_once_by_name(
+        served, capsys, kind):
+    """`UNTRUSTED_BINDING_REMEDY` says a trusted binding is unavailable "for
+    the reason this console printed when its provider refused". The broker's
+    stderr is not read and the turn's refusal is not printed, so the port
+    prints it: one fixed line naming the binding and its fixed diagnostic,
+    as it turns unavailable, and not again while it stays so. Here the
+    `env:` reference resolves to nothing, or the broker exits without an
+    answer."""
+    from opendox import doxbench_model
+
+    adding = served.add_argv(kind)
+    if kind == "env":
+        served.environ.pop(SECRET_NAME)   # the reference resolves to nothing
+    else:
+        failing = served.tmp / "failing-broker.py"
+        failing.write_text("import sys\nsys.exit(3)\n", encoding="utf-8")
+        adding[-1] = str(failing)
+    assert _cli(*adding) == 0
+    capsys.readouterr()
+    port = served.port()
+    entry = port.catalog().entries[0]
+    for _ in range(2):
+        outcome = doxbench_model.dispatch_turn(port, _Envelope(), entry=entry,
+                                               clock=time.monotonic)
+        assert isinstance(outcome, doxbench_model.TurnDispatchFailure)
+    printed = capsys.readouterr().err.splitlines()
+    lead = (f"[model-provider] model binding "
+            f"{_trust_mod().shown(BINDING_ID)} is unavailable: ")
+    said = [line for line in printed if line.startswith(lead)]
+    assert len(said) == 1, printed
+    assert said[0][len(lead):] in provider_mod.FIXED_DIAGNOSTICS
+    assert all(not e.available for e in port.catalog().entries)
+    assert SECRET not in "\n".join(printed)
+
+
+# --- A5: the intake is not offered where no policy could admit it ----------
+
+
+def _intake_surface(served) -> dict:
+    import http.client
+
+    from opendox import serve
+
+    snapshot = served.tmp / "out" / "snapshot.json"
+    httpd = serve.build_server(
+        REPO_ROOT / "src" / "opendox" / "web", snapshot, served.repo,
+        port=0, actor="brett", model_port_factory=lambda: None)
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    try:
+        base = httpd.server_address[:2]
+        connection = http.client.HTTPConnection(*base, timeout=30)
+        connection.request("GET", "/capabilities")
+        own = json.loads(connection.getresponse().read())
+        connection.close()
+        connection = http.client.HTTPConnection(*base, timeout=30)
+        connection.request("GET", "/workbench/model-intake", headers={
+            serve.CONSOLE_TOKEN_HEADER: own.get("console_token", "")})
+        surface = json.loads(connection.getresponse().read())
+        connection.close()
+        return surface
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join(timeout=10)
+
+
+@pytest.mark.parametrize("policy", ["none-registered", "strict-default",
+                                    "no-intake-verdict", "admits"])
+def test_A5_the_intake_is_offered_only_where_a_policy_could_admit_it(
+        served, policy):
+    """A host registers a gate (#77) and a broker is declared. Under
+    openDox's own trust (registered or not), or a host policy with no
+    `intake_verdict`, every hand-off is refused, so the surface is NOT
+    offered and says why; a host policy that answers `intake_verdict` is
+    offered it. Asking registers nothing."""
+    from opendox import column_seams
+
+    trust_mod = _trust_mod()
+    intake_mod.DeclarationStore(intake_mod.declarations_path(
+        served.repo)).declare_broker(intake_mod.BrokerDeclaration(
+            argv=(sys.executable, str(served.broker))))
+    snapshot = served.tmp / "out" / "snapshot.json"
+    snapshot.parent.mkdir()
+    snapshot.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    trust_mod.unregister()
+    if policy == "strict-default":
+        trust_mod.register(served.trust)
+    elif policy == "no-intake-verdict":
+        trust_mod.register(_TrustsEveryBinding())
+    elif policy == "admits":
+        trust_mod.register(_AdmitsTheIntake())
+    column_seams.gate.unregister()
+    column_seams.gate.register(_HostGate())
+    try:
+        surface = _intake_surface(served)
+    finally:
+        column_seams.gate.unregister()
+    if policy == "admits":
+        assert surface.get("offered") is True and "reason" not in surface, (
+            surface)
+    else:
+        assert surface.get("offered") is False, surface
+        assert surface.get("reason") == trust_mod.INTAKE_NOT_ADMISSIBLE
+    assert trust_mod.is_registered() == (policy != "none-registered")
+    assert not served.marker.exists()
+
+
+# --- A6: set-credential's refusal names the document it read --------------
+
+
+def test_A6_set_credential_prints_the_command_for_the_document_it_read(
+        served, capsys):
+    import shlex
+
+    trust_mod = _trust_mod()
+    record = served.record("broker")
+    elsewhere = served.tmp / "elsewhere.yaml"
+    elsewhere.write_text(json.dumps({
+        "schema_version": 1, "kind": "model-provider-bindings",
+        "bindings": [record]}), encoding="utf-8")
+    served.hand_write({**record, "label": "Another form"})
+    assert _cli("model-binding", "set-credential", "--repo-root",
+                str(served.repo), "--bindings", str(elsewhere),
+                "--id", BINDING_ID) == 1
+    [command] = _printed_commands(capsys.readouterr().err)
+    assert "--bindings" in command, command
+    assert _cli(*shlex.split(command)[1:]) == 0
+    capsys.readouterr()
+    refused_for = binding_mod.BindingStore(elsewhere).list()[0]
+    assert trust_mod.verdict_for(refused_for, root=served.repo).trusted
+    assert not trust_mod.verdict_for(served.declared(),
+                                     root=served.repo).trusted
+
+
+# --- A7: a store refusal names its actual cause ----------------------------
+
+
+@pytest.mark.parametrize("case", ["torn-json", "newer-schema", "older-schema",
+                                  "another-kind", "state-dir-0500",
+                                  "state-dir-0500-once-locked"])
+def test_A7_a_store_refusal_names_its_cause_and_recovery(served, case):
+    """Only a link, an owner or a mode is blamed on another user. A torn
+    copy, a newer store, another kind of document and a directory this user
+    cannot write each name their own cause, and how to recover. Each is
+    refused, by `record` and by the verdict (A9: the kind and the version
+    are both checked)."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    planted = json.loads(_planted(served))
+    if case == "torn-json":
+        _store_holding(served, '{"schema_version": 1, "kind"')
+        cause, recovery = "does not read as JSON", trust_mod.RECOVER_MOVE_ASIDE
+    elif case == "newer-schema":
+        _store_holding(served, {**planted, "schema_version": 2})
+        cause, recovery = "schema_version 2", trust_mod.RECOVER_NEWER
+    elif case == "older-schema":
+        _store_holding(served, {**planted, "schema_version": 0})
+        cause = "is not a trust store this install writes"
+        recovery = trust_mod.RECOVER_MOVE_ASIDE
+    elif case == "another-kind":
+        _store_holding(served, {**planted, "kind": "something-else"})
+        cause = "is not a trust store this install writes"
+        recovery = trust_mod.RECOVER_MOVE_ASIDE
+    elif case == "state-dir-0500":
+        served.state_dir.mkdir(mode=0o700)
+        os.chmod(served.state_dir, 0o500)
+        cause, recovery = "cannot be opened", trust_mod.RECOVER_PERMISSIONS
+    else:
+        # the lock file exists, so it opens; the store's new copy cannot be
+        # created beside it
+        served.trust.record(_a_binding(id="another-model"), root=served.repo)
+        os.chmod(served.state_dir, 0o500)
+        cause = "could not be created"
+        recovery = trust_mod.RECOVER_PERMISSIONS
+    try:
+        with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+            served.trust.record(served.declared(), root=served.repo)
+        verdict = served.trust.verdict(served.declared(), root=served.repo)
+    finally:
+        os.chmod(served.state_dir, 0o700)
+    words = str(refused.value)
+    assert "another user could change" not in words, words
+    assert cause in words and recovery in words, words
+    if not case.startswith("state-dir-0500"):
+        assert not verdict.trusted and cause in verdict.reason, verdict
+
+
+# --- A8: a state directory that is a link trusts nothing -------------------
+
+
+def test_A8_a_state_directory_that_is_a_link_trusts_nothing(served):
+    """F16.1's ratified text (the holder's ruling, openxFactory#656 comment
+    5982436447): "With the trust file, or a directory that holds it,
+    replaced by a symbolic link ... every binding reads untrusted". Here
+    the link is this user's own and reaches a private directory of this
+    user's own holding a store that would trust the binding."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    real = served.tmp / "real-state"
+    real.mkdir(mode=0o700)
+    planted = real / trust_mod.TRUST_FILENAME
+    planted.write_text(_planted(served), encoding="utf-8")
+    os.chmod(planted, 0o600)
+    served.state_dir.symlink_to(real, target_is_directory=True)
+    verdict = served.trust.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted
+    assert "the directory that holds the store is a symbolic link" in (
+        verdict.reason)
+    held = planted.read_bytes()
+    with pytest.raises(trust_mod.TrustStoreRefused):
+        served.trust.record(served.declared(), root=served.repo)
+    assert planted.read_bytes() == held
+
+
+# --- A9: the store rules the suite did not pin ------------------------------
+
+
+def test_A9_an_ancestor_others_could_write_trusts_nothing_unless_sticky(
+        served):
+    """G1. A directory above the store that another user could write, and
+    that is not sticky, could have the store's directory renamed away and
+    replaced; with the sticky bit set, it could not."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    shared = served.tmp / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o777)
+    (shared / "st").mkdir(mode=0o700)
+    store = shared / "st" / trust_mod.TRUST_FILENAME
+    store.write_text(_planted(served), encoding="utf-8")
+    os.chmod(store, 0o600)
+    policy = trust_mod.MachineTrust(state_dir=shared / "st")
+    verdict = policy.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted and "is not sticky" in verdict.reason, verdict
+    os.chmod(shared, 0o1777)
+    assert policy.verdict(served.declared(), root=served.repo).trusted
+
+
+def test_A9_a_link_above_the_store_in_a_directory_others_could_write(served):
+    """G2. The directories judged include those the state directory is
+    SPELLED under, not only those it resolves under: a link above it, in a
+    directory another user could write, could be repointed."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    real = served.tmp / "real"
+    (real / "st").mkdir(mode=0o700, parents=True)
+    os.chmod(real, 0o700)
+    store = real / "st" / trust_mod.TRUST_FILENAME
+    store.write_text(_planted(served), encoding="utf-8")
+    os.chmod(store, 0o600)
+    shared = served.tmp / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o777)
+    (shared / "link").symlink_to(real, target_is_directory=True)
+    policy = trust_mod.MachineTrust(state_dir=shared / "link" / "st")
+    verdict = policy.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted and "is not sticky" in verdict.reason, verdict
+    os.chmod(shared, 0o755)
+    assert policy.verdict(served.declared(), root=served.repo).trusted
+
+
+def test_A9_a_link_above_the_store_owned_by_another_user_trusts_nothing(
+        served, monkeypatch):
+    """A link above the state directory that another user owns could be
+    pointed elsewhere by them. The other owner is the system's answer, so
+    `lstat` answers it here."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    real = served.tmp / "real"
+    (real / "st").mkdir(mode=0o700, parents=True)
+    store = real / "st" / trust_mod.TRUST_FILENAME
+    store.write_text(_planted(served), encoding="utf-8")
+    os.chmod(store, 0o600)
+    link = served.tmp / "link"
+    link.symlink_to(real, target_is_directory=True)
+    policy = trust_mod.MachineTrust(state_dir=link / "st")
+    assert policy.verdict(served.declared(), root=served.repo).trusted
+
+    def lstat(path, *args, **kwargs):
+        info = os.lstat(path, *args, **kwargs)
+        if os.fspath(path) != str(link):
+            return info
+        fields = list(info[:10])
+        fields[4] = os.getuid() + 4242
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(trust_mod, "os", _OsWith(lstat=lstat))
+    verdict = policy.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted, verdict
+    assert f"owned by uid {os.getuid() + 4242}" in verdict.reason
+
+
+def test_A9_the_lock_and_the_store_are_opened_without_waiting(
+        served, monkeypatch):
+    """Round 8 (r4178064601): both are opened non-blocking, so a FIFO in
+    either's place is refused by its type rather than waited on. Opening a
+    FIFO for reading and writing never waits on Linux, so the flag itself is
+    what is held."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    opened: dict[str, int] = {}
+
+    def spy(path, flags, *args, **kwargs):
+        opened[os.path.basename(os.fspath(path))] = flags
+        return os.open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(trust_mod, "os", _OsWith(open=spy))
+    served.trust.record(served.declared(), root=served.repo)
+    assert served.trust.verdict(served.declared(), root=served.repo).trusted
+    for name in (trust_mod.TRUST_LOCK_FILENAME, trust_mod.TRUST_FILENAME):
+        assert opened[name] & os.O_NONBLOCK, (name, opened)
+
+
+def test_A9_a_refused_intake_body_is_drained_unread(served, monkeypatch):
+    """The console intake refused at its hand-off drains the body it was
+    sent, unread, so the connection answers rather than stalls."""
+    from opendox import serve_workbench
+
+    drained = []
+    real = serve_workbench._drain_refused_body
+
+    def spy(rfile, length):
+        drained.append(length)
+        return real(rfile, length)
+
+    monkeypatch.setattr(serve_workbench, "_drain_refused_body", spy)
+    _caps, answer = _served_intake(served)
+    assert answer.get("reason") == _trust_mod().INTAKE_BROKER_UNTRUSTED
+    assert drained == [len(b"sk-stand-in-NOT-A-KEY")]
+    assert not served.marker.exists()
+
+
+def test_A9_a_directory_made_for_the_store_is_judged_once_made(
+        served, monkeypatch):
+    """`_make_private_directories` judges each directory it makes by its
+    own descriptor once made. A system that leaves one writable by others
+    (here, a chmod between the make and the open) has it refused."""
+    trust_mod = _trust_mod()
+
+    def mkdir(name, mode=0o777, *, dir_fd=None):
+        os.mkdir(name, mode, dir_fd=dir_fd)
+        os.chmod(name, 0o770, dir_fd=dir_fd)
+
+    monkeypatch.setattr(trust_mod, "os", _OsWith(mkdir=mkdir))
+    with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+        trust_mod._make_private_directories(served.tmp / "made" / "st")
+    assert "is writable by its group" in str(refused.value)
+
+
+def test_A9_and_A17_the_store_and_its_directory_are_synced(
+        served, monkeypatch):
+    """The store's bytes are synced before the replace (A9), and the state
+    directory after it (A17), so a crash after `record` returns can neither
+    lose the new store's bytes nor bring back the store it replaced."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    served.trust.record(_a_binding(id="another-model"), root=served.repo)
+    events: list[tuple] = []
+
+    def fsync(descriptor):
+        info = os.fstat(descriptor)
+        events.append(("fsync", stat.S_ISDIR(info.st_mode), info.st_ino))
+        return os.fsync(descriptor)
+
+    def replace(source, target, *args, **kwargs):
+        events.append(("replace", os.path.basename(os.fspath(target))))
+        return os.replace(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(trust_mod, "os", _OsWith(fsync=fsync,
+                                                 replace=replace))
+    served.trust.record(served.declared(), root=served.repo)
+    at = events.index(("replace", trust_mod.TRUST_FILENAME))
+    assert any(event[0] == "fsync" and not event[1]
+               for event in events[:at]), events
+    directory = os.stat(served.state_dir).st_ino
+    assert ("fsync", True, directory) in events[at + 1:], events
+
+
+# --- A10: no raw path reaches the terminal ---------------------------------
+
+
+def test_A10_a_repositorys_path_is_printed_escaped(served, capsys):
+    root = served.fresh_repository("r\x1b[8m\n  forged line")
+    served.hand_write(served.record("env"), root=root)
+    assert _cli("model-binding", "list", "--repo-root", str(root)) == 0
+    assert _cli("model-binding", "trust", "--repo-root", str(root),
+                "no-such-binding") == 1
+    adding = served.add_argv("env")
+    adding[adding.index("--repo-root") + 1] = str(root)
+    adding[adding.index("--id") + 1] = "second-model"
+    assert _cli(*adding) == 0
+    captured = capsys.readouterr()
+    for text in (captured.out, captured.err):
+        assert "\x1b" not in text and "\n  forged line" not in text, (
+            repr(text[:300]))
+        assert "\\u001b[8m" in text
+
+
+# --- A11: a failed edit leaves the trusted form trusted ---------------------
+
+
+def test_A11_an_edit_whose_write_fails_keeps_the_trusted_form_trusted(
+        served, capsys):
+    trust_mod = _trust_mod()
+    assert _cli(*served.add_argv("env")) == 0
+    capsys.readouterr()
+    before = served.declared()
+    document = binding_mod.bindings_path(served.repo)
+    editing = served.add_argv("env")
+    editing[1] = "edit"
+    editing[editing.index("--label") + 1] = "Renamed"
+    os.chmod(document, 0o444)
+    os.chmod(document.parent, 0o555)
+    try:
+        rc = _cli(*editing)
+    finally:
+        os.chmod(document.parent, 0o755)
+        os.chmod(document, 0o644)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "could not be written" in err and "nothing in it changed" in err
+    assert served.declared() == before
+    assert trust_mod.verdict_for(before, root=served.repo).trusted
+
+
+# --- A12: a verdict subclass admits nothing --------------------------------
+
+
+def test_A12_a_verdict_subclass_cannot_admit_another_binding(served):
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+
+    class Lax(trust_mod.TrustVerdict):
+        def admits(self, binding):
+            return True
+
+    lax = Lax(binding_id="some-other-binding", digest="sha256:0",
+              root=trust_mod.resolved_root(served.repo), trusted=True,
+              basis=trust_mod.BASIS_HOST)
+
+    class Host:
+        def verdict(self, binding, *, root):
+            return lax
+
+        def record(self, binding, *, root):
+            return lax
+
+    trust_mod.unregister()
+    trust_mod.register(Host())
+    port = served.port()
+    assert isinstance(port, trust_mod.UntrustedBindingPort), port
+    with pytest.raises(trust_mod.BindingUntrusted):
+        trust_mod.require_admitted(served.declared(), lax)
+    # beneath both: the provider's port lists nothing available for one,
+    # even a subclass that names this very binding
+    exact = trust_mod.TrustVerdict.trusted_for(
+        served.declared(), root=served.repo, basis=trust_mod.BASIS_HOST)
+    lookalike = Lax(**{field.name: getattr(exact, field.name)
+                       for field in dataclasses.fields(exact)})
+    brokered = provider_mod.BrokeredProviderPort(
+        served.declared(), install_mod.brokered_catalog(served.declared()),
+        trust=lookalike)
+    assert not any(entry.available for entry in brokered.catalog().entries)
+    served.nothing_was_touched()
+
+
+# --- A13: the seam is read once, inside the refusal net ---------------------
+
+
+def test_A13_a_host_torn_down_while_the_default_registers_records_anyway(
+        served, monkeypatch):
+    """`policy()` registered the default, then read the seam: a host that
+    unregistered between the two left the read nothing, and `recorded_for`
+    raised a `RuntimeError` no verb catches. It is one operation now."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    real = trust_mod.register_default
+
+    def then_torn_down():
+        held = real()
+        trust_mod.unregister()
+        return held
+
+    monkeypatch.setattr(trust_mod, "register_default", then_torn_down)
+    trust_mod.unregister()
+    verdict = trust_mod.recorded_for(served.declared(), root=served.repo)
+    assert verdict.admits(served.declared())
+
+
+def test_A13_a_seam_that_fails_is_refused_by_name(served, monkeypatch):
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+
+    def fails():
+        raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(trust_mod, "policy", fails)
+    with pytest.raises(trust_mod.TrustNotRecorded) as refused:
+        trust_mod.recorded_for(served.declared(), root=served.repo)
+    assert SECRET not in str(refused.value)
+
+
+# --- A15: no case reads this machine's own trust ----------------------------
+
+
+_A15_SEEN: list[str] = []
+
+
+@pytest.fixture(scope="module")
+def _a15_module_setting():
+    """`OPENDOX_STATE_DIR` as a module-scoped fixture sees it: set up before
+    any case's own fixtures, so it is the session's."""
+    return os.environ.get("OPENDOX_STATE_DIR")
+
+
+def test_A15_a_case_has_a_scratch_state_directory_of_its_own(
+        tmp_path_factory, _a15_module_setting):
+    """The root conftest gives the session, and every case, a scratch
+    `OPENDOX_STATE_DIR` under this run's own temporary directory, so no
+    case and no wider fixture reads or writes the operator's trust. This
+    case also leaves a policy registered, which the next one proves was
+    dropped."""
+    trust_mod = _trust_mod()
+    trust_mod.unregister()
+    trust_mod.register(_TrustsEveryBinding())
+    setting = os.environ.get("OPENDOX_STATE_DIR")
+    assert setting, "no scratch state directory: the operator's is read"
+    assert _a15_module_setting, "a module fixture reads the operator's"
+    base = tmp_path_factory.getbasetemp().resolve()
+    for each in (setting, _a15_module_setting):
+        assert base in Path(each).resolve().parents, each
+    assert setting != _a15_module_setting
+    assert trust_mod.MachineTrust().state_dir() == Path(setting)
+    _A15_SEEN.append(setting)
+
+
+def test_A15_the_seam_is_emptied_after_every_case():
+    """Runs after the case above, which left a policy registered, and has a
+    state directory of its own."""
+    assert not _trust_mod().is_registered()
+    assert os.environ.get("OPENDOX_STATE_DIR") not in _A15_SEEN
+
+
+# --- A16: a digest of another scheme is not a "changed" binding -------------
+
+
+def test_A16_a_digest_of_another_scheme_reads_as_another_record_form(
+        served, capsys):
+    import shlex
+
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    planted = json.loads(_planted(served))
+    digest = planted["entries"][0]["digest"]
+    assert digest.startswith(trust_mod.DIGEST_PREFIX)
+    planted["entries"][0]["digest"] = "sha256/2:" + digest.split(":", 1)[1]
+    _store_holding(served, planted)
+    verdict = served.trust.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted
+    assert verdict.reason == trust_mod.REASON_RECORD_FORM
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    [command] = _printed_commands(capsys.readouterr().out)
+    assert _cli(*shlex.split(command)[1:]) == 0
+    assert served.trust.verdict(served.declared(), root=served.repo).trusted
+
+
+def test_A16_the_digest_scheme_names_every_field_of_the_record():
+    """Adding a field to the binding record changes every digest, so it
+    must change the digest's scheme too: the scheme's field list is pinned to
+    the record's."""
+    trust_mod = _trust_mod()
+    assert trust_mod.DIGEST_SCHEME_FIELDS == binding_mod.BINDING_FIELDS
+    assert set(_a_binding().as_record()) == {
+        "kind", *trust_mod.DIGEST_SCHEME_FIELDS}
+
+
+# --- A18: the directory the store's tree is made from is judged ------------
+
+
+def test_A18_the_directory_the_store_is_made_in_is_judged_first(served):
+    trust_mod = _trust_mod()
+    shared = served.tmp / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o777)
+    with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+        trust_mod._make_private_directories(shared / "st")
+    assert "is not sticky" in str(refused.value)
+    assert not (shared / "st").exists()
+
+
+# --- A19: an approval never calls a trusted binding untrusted --------------
+
+
+def test_A19_an_approval_reads_this_machines_store_where_nothing_registered(
+        served):
+    """Nothing registered in the serving process yet (its console started
+    with only the pending binding, so the factory never asked), and this
+    machine's store trusts the approved binding: the approval says it is
+    available, and registers nothing."""
+    trust_mod = _trust_mod()
+    _caps, answer = _served_intake(served, host_policy=_AdmitsTheIntake())
+    assert answer.get("error") is None, answer
+    served.trust.record(served.declared(), root=served.repo)
+    trust_mod.unregister()
+    approval = _post_an_approval(served, BINDING_ID)
+    assert approval.get("ok") is True, approval
+    assert approval["availability"] == intake_mod.APPROVAL_NOTICE
+    assert not trust_mod.is_registered()
+
+
+# --- N1: a settings document reached through a link is refused -------------
+
+
+@pytest.mark.parametrize("link", ["document", "its-directory"])
+def test_N1_add_never_writes_through_a_link_a_clone_carries(
+        served, capsys, link):
+    """A clone carries a link as readily as a file. One at the bindings
+    document's path, or at a directory of its default path, would have
+    `add` create or overwrite a file wherever it points."""
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    document = binding_mod.bindings_path(served.repo)
+    if link == "document":
+        document.parent.mkdir(parents=True)
+        document.symlink_to(outside / "created-by-add")
+        named = document
+    else:
+        document.parent.parent.mkdir(parents=True)
+        document.parent.symlink_to(outside, target_is_directory=True)
+        named = document.parent
+    assert _cli(*served.add_argv("env")) == 1
+    err = capsys.readouterr().err
+    assert "symbolic link" in err and str(named) in err, err
+    assert list(outside.iterdir()) == []
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 1
+    assert "symbolic link" in capsys.readouterr().err
+
+
+def test_N1_each_stores_write_refuses_a_link_by_itself(served):
+    """The read refuses a link first, so the write's own refusal is asked
+    directly: a link planted after a read is never written through."""
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    for path, store, refused, write in (
+            (binding_mod.bindings_path(served.repo), binding_mod.BindingStore,
+             binding_mod.BindingRefused,
+             lambda store: store._save([_a_binding()])),
+            (intake_mod.declarations_path(served.repo),
+             intake_mod.DeclarationStore, intake_mod.IntakeRefused,
+             lambda store: store._save(None, []))):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(outside / path.name)
+        with pytest.raises(refused) as said:
+            write(store(path))
+        assert "symbolic link" in str(said.value)
+    assert list(outside.iterdir()) == []
+
+
+def test_N1_the_declarations_document_is_never_written_through_a_link(
+        served):
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    document = intake_mod.declarations_path(served.repo)
+    document.parent.mkdir(parents=True)
+    document.symlink_to(outside / "created-by-intake")
+    with pytest.raises(intake_mod.IntakeRefused) as refused:
+        _propose(served.repo, BINDING_ID)
+    assert "symbolic link" in str(refused.value)
+    assert list(outside.iterdir()) == []
+
+
+# --- N2: an unreadable settings document is refused by name ---------------
+
+
+UNREADABLE = {"not-utf-8": (b"\xff\xfe\x00schema_version: 1\n", "not UTF-8"),
+              "nested": (b"[" * 1000 + b"]" * 1000, "nests too deeply"),
+              "no-permission": (b"schema_version: 1\n", "cannot be read")}
+
+
+@contextlib.contextmanager
+def _unreadable(document: Path, case: str):
+    """`document` holding `case`'s bytes, and, for "no-permission", a mode
+    this user cannot read, restored afterwards."""
+    raw, _said = UNREADABLE[case]
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_bytes(raw)
+    if case == "no-permission":
+        os.chmod(document, 0)
+    try:
+        yield
+    finally:
+        os.chmod(document, 0o644)
+
+
+@pytest.mark.parametrize("case", sorted(UNREADABLE))
+def test_N2_an_unreadable_bindings_document_is_refused_by_name(
+        served, capsys, case):
+    """Not UTF-8, or nested past what the parser can descend: refused BY
+    NAME, never a raw error, and the console's start reads it as declaring
+    no binding and says why."""
+    from opendox import doxbench_model
+
+    _raw, said = UNREADABLE[case]
+    document = binding_mod.bindings_path(served.repo)
+    with _unreadable(document, case):
+        with pytest.raises(binding_mod.BindingRefused) as refused:
+            binding_mod.BindingStore(document).list()
+        assert said in str(refused.value)
+        assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+        assert said in capsys.readouterr().err
+        assert _cli("model-binding", "list", "--repo-root",
+                    str(served.repo)) == 1
+        assert said in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("case", sorted(UNREADABLE))
+def test_N2_an_unreadable_declarations_document_is_refused_by_name(
+        served, case):
+    _raw, said = UNREADABLE[case]
+    document = intake_mod.declarations_path(served.repo)
+    with _unreadable(document, case):
+        with pytest.raises(intake_mod.IntakeRefused) as refused:
+            intake_mod.DeclarationStore(document).get(BINDING_ID)
+        assert said in str(refused.value)
+        # the console's start reads it as declaring nothing pending
+        assert not intake_mod.pending_binding_ids(served.repo)

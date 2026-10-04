@@ -66,6 +66,23 @@ def _record_trust(binding: "binding_mod.ModelProviderBinding",
     return trust_mod.recorded_for(binding, root=_repo_root(args))
 
 
+def _named_document(store: "binding_mod.BindingStore",
+                    args: argparse.Namespace) -> str | None:
+    """The bindings document this invocation read, where `--bindings` named
+    it, for every command printed from it: a command that read another
+    document would act on another binding (T100 follow-on, A6)."""
+    return str(store.path) if getattr(args, "bindings", None) else None
+
+
+def _cannot_write(store: "binding_mod.BindingStore", error: OSError) -> str:
+    """The refusal of a bindings document the system will not write, by the
+    system's own short word for why (T100 follow-on, A11). Raised by the
+    write itself, after nothing in it changed."""
+    return (f"the bindings document {trust_mod.shown(str(store.path))} could "
+            f"not be written ({error.strerror or type(error).__name__}), so "
+            "nothing in it changed")
+
+
 def _trusted_line(binding: "binding_mod.ModelProviderBinding", verdict) -> str:
     return (f"  trusted {trust_mod.shown(binding.id)} on this machine for "
             f"{trust_mod.shown(verdict.root)}")
@@ -108,6 +125,8 @@ CONSOLE_DECLARES_THIS = (
     "declares this one, the first binding not pending approval")
 CONSOLE_PASSES_OVER_PENDING = (
     "passes over it: its declaration is pending approval")
+CONSOLE_PASSES_OVER_UNSERVABLE = (
+    "passes over it: the model catalog cannot list its id or its label")
 CONSOLE_DECLARES_ANOTHER = (
     "declares {binding_id}, the first binding not pending approval, and "
     "declares one binding at a time")
@@ -132,7 +151,7 @@ def cmd_model_binding_list(args: argparse.Namespace) -> int:
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(f"  bindings {store.path}")
+    print(f"  bindings {trust_mod.shown(str(store.path))}")
     if not bindings:
         print("  (none declared — this install talks to no brokered provider)")
         return 0
@@ -173,7 +192,7 @@ def _trust_lines(bindings, store: "binding_mod.BindingStore",
     when a binding is declared, so an empty store never touches the state
     directory."""
     root = _repo_root(args)
-    named = (str(store.path) if getattr(args, "bindings", None) else None)
+    named = _named_document(store, args)
     lines: dict[str, str] = {}
     for binding in bindings:
         verdict = trust_mod.verdict_for(binding, root=root)
@@ -196,7 +215,8 @@ def _console_lines(bindings, store: "binding_mod.BindingStore",
     the one in use. The pending set is the factory's own
     (`doxbench_intake.pending_binding_ids`), which reads a declarations
     document that cannot be read as declaring nothing pending, as the
-    factory does."""
+    factory does, and so is its passing over a binding the model catalog
+    cannot list (T100 follow-on, A3)."""
     from opendox import doxbench_intake as intake_mod
 
     root = _repo_root(args)
@@ -207,11 +227,17 @@ def _console_lines(bindings, store: "binding_mod.BindingStore",
             path=shown(str(console_reads)))
         return {binding.id: line for binding in bindings}
     pending = intake_mod.pending_binding_ids(root)
-    approved = [binding for binding in bindings if binding.id not in pending]
+    unservable = {binding.id for binding in bindings
+                  if binding.id not in pending
+                  and trust_mod.unservable_because(binding) is not None}
+    approved = [binding for binding in bindings
+                if binding.id not in pending and binding.id not in unservable]
     lines: dict[str, str] = {}
     for binding in bindings:
         if binding.id in pending:
             lines[binding.id] = CONSOLE_PASSES_OVER_PENDING
+        elif binding.id in unservable:
+            lines[binding.id] = CONSOLE_PASSES_OVER_UNSERVABLE
         elif binding is approved[0]:
             lines[binding.id] = CONSOLE_DECLARES_THIS
         else:
@@ -234,11 +260,16 @@ def cmd_model_binding_add(args: argparse.Namespace) -> int:
         if store.get(binding.id) is not None:
             store.add(binding)      # refuses the repeated id, in its own words
         verdict = _record_trust(binding, args)
-        store.add(binding)
+        try:
+            store.add(binding)
+        except OSError as error:
+            raise binding_mod.BindingRefused(
+                _cannot_write(store, error)) from None
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(f"  declared {trust_mod.shown(binding.id)} in {store.path}")
+    print(f"  declared {trust_mod.shown(binding.id)} in "
+          f"{trust_mod.shown(str(store.path))}")
     print(f"  {binding.custody_notice()}")
     print(_trusted_line(binding, verdict))
     return 0
@@ -247,18 +278,37 @@ def cmd_model_binding_add(args: argparse.Namespace) -> int:
 def cmd_model_binding_edit(args: argparse.Namespace) -> int:
     """Replace a binding, and trust it on this machine in the form written
     (#1144 16.3a). As `add`, the trust is recorded first, once the binding is
-    known to exist, so a store that refuses leaves nothing written."""
+    known to exist, so a store that refuses leaves nothing written.
+
+    A WRITE THAT FAILS AFTER THE TRUST WAS RECORDED UNDOES IT (T100
+    follow-on, A11). The store holds one form per binding, so recording the
+    new form untrusted the old one; where the old form was trusted, it is
+    trusted again, so a failed edit changes neither the document nor what
+    this machine trusts. The refusal names the write's cause, never a raw
+    error."""
     store = _binding_store(args)
     try:
         binding = _declared_binding(args)
-        if store.get(binding.id) is None:
+        existing = store.get(binding.id)
+        if existing is None:
             store.edit(binding)     # refuses the unknown id, in its own words
+        was_trusted = trust_mod.verdict_for(
+            existing, root=_repo_root(args)).admits(existing)
         verdict = _record_trust(binding, args)
-        store.edit(binding)
+        try:
+            store.edit(binding)
+        except (binding_mod.BindingRefused, OSError) as error:
+            if was_trusted:
+                _record_trust(existing, args)
+            if isinstance(error, OSError):
+                raise binding_mod.BindingRefused(
+                    _cannot_write(store, error)) from None
+            raise
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(f"  updated {trust_mod.shown(binding.id)} in {store.path}")
+    print(f"  updated {trust_mod.shown(binding.id)} in "
+          f"{trust_mod.shown(str(store.path))}")
     print(_trusted_line(binding, verdict))
     return 0
 
@@ -270,7 +320,8 @@ def cmd_model_binding_remove(args: argparse.Namespace) -> int:
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(f"  retired {binding.id} from {store.path}")
+    print(f"  retired {trust_mod.shown(binding.id)} from "
+          f"{trust_mod.shown(str(store.path))}")
     print(f"  {binding.removal_notice()}")
     return 0
 
@@ -312,12 +363,22 @@ def cmd_model_binding_set_credential(args: argparse.Namespace, *,
             raise binding_mod.BindingRefused(NO_BROKER_TO_HAND_TO.format(
                 binding_id=binding.id, custody=binding.custody_notice()))
         verdict = trust_mod.verdict_for(binding, root=_repo_root(args))
-        trust_mod.require_admitted(binding, verdict)
+        if not verdict.admits(binding):
+            # BY NAME, and the command it prints reads the document this
+            # invocation read (T100 follow-on, A6).
+            raise trust_mod.BindingUntrusted(trust_mod.refusal_message(
+                binding.id, verdict.root,
+                verdict.reason or trust_mod.REASON_NEVER_TRUSTED,
+                bindings=_named_document(store, args)))
         reference = provider_mod.hand_off_credential(
             binding, source if source is not None else sys.stdin,
             trust=verdict)
-        rewritten = store.edit(dataclasses.replace(binding,
-                                                   credential_ref=reference))
+        try:
+            rewritten = store.edit(dataclasses.replace(
+                binding, credential_ref=reference))
+        except OSError as error:
+            raise binding_mod.BindingRefused(
+                _cannot_write(store, error)) from None
     except (binding_mod.BindingRefused, provider_mod.BrokerRefused) as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -409,7 +470,7 @@ def cmd_model_binding_trust(args: argparse.Namespace) -> int:
         if binding is None:
             raise binding_mod.BindingRefused(
                 f"no binding with id {trust_mod.shown(args.binding_id)} is "
-                f"declared in {store.path}")
+                f"declared in {trust_mod.shown(str(store.path))}")
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
