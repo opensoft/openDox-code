@@ -67,9 +67,10 @@ from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 from opendox import defaults
 from opendox.column_seams import GATE_RECORDS_REFUSAL
 # openDox's OWN SETTINGS DOCUMENTS, never a tile's editable material (plan 034
-# T084, adversarial review 2, M1). Both modules are stdlib-only at import.
-from opendox.doxbench_binding import DEFAULT_BINDINGS_RELPATH
-from opendox.doxbench_intake import DEFAULT_DECLARATIONS_RELPATH
+# T084, adversarial review 2, M1). Imported, not copied: the list is declared
+# once, beside the two paths it names (plan 034 T082). `doxbench_intake` is
+# stdlib-only at import.
+from opendox.doxbench_intake import SETTINGS_DOCUMENTS as _SETTINGS_DOCUMENTS
 from opendox.boundary import GATE_SIDE_EFFECT, BoundaryViolation, HumanGate, Refusal
 from opendox.doxbench_scope_types import (
     ScopeConfinementError,
@@ -367,8 +368,7 @@ def _section(key: str, label: str, note: str, references: Iterable[Any], *,
 #: refuses them whatever section carries them. An in-root symlink that reaches
 #: one is treated as the document it reaches (`_settings_test`). The corpus
 #: scan's own exclusion (openDox-code#76) is a second layer, not this one.
-SETTINGS_DOCUMENTS: frozenset[str] = frozenset({
-    DEFAULT_BINDINGS_RELPATH, DEFAULT_DECLARATIONS_RELPATH})
+SETTINGS_DOCUMENTS: frozenset[str] = frozenset(_SETTINGS_DOCUMENTS)
 
 _SETTINGS_SECTION = ("settings", "openDox's own settings documents",
                      "the install's settings: readable here, and never "

@@ -1913,9 +1913,11 @@ def _default_home_factory(root):
     already shows worktree bytes, so the standalone default matches it rather
     than reading the session's git HEAD. `WorkingTreeCorpus`
     (`local_git_adapter.py`) is `LocalGitCorpus` with `list_documents`/`read`
-    aimed at the filesystem instead of a resolved commit; see its own
-    docstring for what stays unchanged (`resolve`, `classify`, `check`,
-    `write_back`) and what does not.
+    aimed at the filesystem instead of a resolved commit, and with openDox's
+    own settings documents (`doxbench_intake.SETTINGS_DOCUMENTS`, plan 034
+    T082) left out of its listing and out of a whole-corpus `check`; see its
+    own docstring for what stays unchanged (`resolve`, `classify`,
+    `write_back`, and a `check` of named subjects) and what does not.
 
     A FRESH ADAPTER EVERY CALL, ON PURPOSE: nothing here is held onto across
     calls, so there is no listing cache keyed on whatever HEAD was at an
