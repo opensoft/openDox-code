@@ -17,12 +17,13 @@ is what research R7 measured as refused, and this file holds the lifted limit:
    role keys, the verb reports it, naming the document, the value and the six
    keys, and the snapshot it writes reads that document as a source. T054
    tests the projection's half in process.
-3. `python -m opendox.cli generate-and-open --no-open` STARTS a server, which
+3. `python -m opendox.cli generate-and-open --local --no-open` STARTS a server, which
    answers `/index.html`, `/snapshot.json`, `/capabilities` and `/source/`,
    refuses `/source/.git/config`, and stops on an interrupt with status 0.
 4. `python -m opendox.serve`, the server's own entry point, starts and answers
    the same way.
-5. The harness itself: a child that ignores the interrupt is killed at the
+5. The harness itself: a child inherits none of the runner's runtime
+   settings, and a child that ignores the interrupt is killed at the
    deadline, and the timeout is raised, so a server that will not stop is
    reported rather than waited out. And a child stops on the interrupt even
    when the RUNNER ignores SIGINT, as a suite started as a background job
@@ -46,8 +47,14 @@ server had started (measured at openDox-code#59 `e3ef506a`: zero lines in 20
 seconds). T056 flushes it in both entry points, and cases 3 and 4 fail
 without that.
 
-NOT HERE: F10.1's run through a plain install, with the console script and no
-`--local`, arrives in phase 3 (T070, and T077 as batch H amends it).
+`--local` (plan 034 T070; #1144 13.4, 13.5): case 3 is the single-user install,
+so it says so. Since T070, `generate-and-open` with neither `--local` nor
+`OPENDOX_INSTALL_MODE=local` is a HOSTED install, which refuses without its
+broker's issuer. That refusal is what an unflagged run of this case would now
+hit, and it is T070's own subject, held in `tests/test_install_mode_entrypoint.py`.
+
+NOT HERE: F10.1's run through a plain install, with the console script, arrives
+in phase 3 (T077, as batch H amends it).
 
 A CREATED FILE: no carve-manifest row (RULED OQ-C).
 """
@@ -145,7 +152,11 @@ def _assert_the_server_answers(base: tuple[str, int], written: Path,
     assert status == 200, status
     capabilities = json.loads(body)
     assert capabilities["refresh"]["binding"] == "regenerate"
-    assert capabilities["actions"]["refresh"] is True
+    # FALSE STANDALONE (plan 034 T084; #1144 4.3 as T007 batch L's addendum
+    # reads, RULED openxFactory#656 5920216845 item 1): the plane would
+    # regenerate, but `POST /actions/refresh` is a host's contributed route,
+    # and a standalone server carries none, so no refresh is offered.
+    assert capabilities["actions"]["refresh"] is False
     document = "notes-toolshed-inventory.md"
     status, kind, body = _get(base, f"/source/{document}")
     assert status == 200, status
@@ -256,9 +267,10 @@ def test_the_unedited_fixture_declares_that_document_a_candidate(tmp_path) -> No
 # ---------------------------------------------------------------------------
 
 def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path) -> None:
-    """`python -m opendox.cli generate-and-open --no-open`, with no
+    """`python -m opendox.cli generate-and-open --local --no-open`, with no
     `--no-serve`: the server starts, says where on a buffered pipe, answers
-    the core routes, and stops on an interrupt with status 0.
+    the core routes, and stops on an interrupt with status 0. `--local`
+    because this is the single-user install (T070).
 
     Both lines it prints before blocking in `serve_forever()`, the URL and
     "serving until interrupted", are read WHILE IT RUNS, before the
@@ -267,7 +279,7 @@ def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path
     e3574774, r4146289331)."""
     repo = _fresh_repository(tmp_path)
     run_dir = tmp_path / "run"
-    child = Child(tmp_path, "opendox.cli", "generate-and-open",
+    child = Child(tmp_path, "opendox.cli", "generate-and-open", "--local",
                    "--repo-root", str(repo), "--repository", "fixture",
                    "--no-open", "--port", "0", "--run-dir", str(run_dir))
     try:
@@ -277,11 +289,17 @@ def test_generate_and_open_starts_a_server_that_answers_with_no_sibling(tmp_path
         child.wait_for_line(_SERVING)
         assert child.process.poll() is None, "the server exited after saying it serves"
         _assert_the_server_answers(base, run_dir / "snapshot.json", repo)
+        # THE LOCAL INSTALL'S DATABASE IS THE CHILD'S OWN (plan 034 T072): its
+        # bundled server was started under the private state directory the
+        # harness gave this child, never under the user's.
+        assert (child.state_dir / "postgres" / "data" / "PG_VERSION").is_file(), \
+            "the bundled server was not started under the child's state dir"
         assert child.interrupt() == 0, child.stderr_text()
     finally:
         child.kill()
     _assert_the_port_is_closed(base)
     assert child.refused() == [], child.refused()
+    assert not child.state_dir.exists(), "the child's state dir outlived it"
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +331,42 @@ def test_serve_main_starts_a_server_that_answers_with_no_sibling(tmp_path) -> No
 # ---------------------------------------------------------------------------
 # 5 — the harness itself: an ignored interrupt is reported, not waited out
 # ---------------------------------------------------------------------------
+
+def test_a_child_inherits_none_of_the_runners_runtime_settings(
+        tmp_path, monkeypatch) -> None:
+    """The runner exports a HOSTED install's settings, and the child sees
+    none of them (plan 034 T070; Copilot review of openDox-code#67). The
+    `--local` cases above would otherwise refuse before they reach what they
+    test, for a reason that is the runner's configuration and not theirs.
+    The one runtime setting a child does see is the state directory the
+    harness gives it (plan 034 T072), never the runner's own."""
+    from opendox.runtime.config import PREFIX, SETTING_NAMES
+
+    state_setting = PREFIX + "STATE_DIR"
+    exported = {PREFIX + "INSTALL_MODE": "hosted",
+                PREFIX + "OIDC_ISSUER": "https://issuer.example.invalid/realms/x",
+                PREFIX + "OIDC_AUDIENCE": "fixture",
+                PREFIX + "DATABASE_URL": "postgresql://s@127.0.0.1:1/x",
+                state_setting: str(tmp_path / "runners-own-state")}
+    for name, value in exported.items():
+        monkeypatch.setenv(name, value)
+    blocker = tmp_path / "sibling-blocker"
+    blocker.mkdir()
+    (blocker / "t070_env_probe.py").write_text(textwrap.dedent(f"""
+        import json, os
+        print(json.dumps([sorted(n for n in os.environ if n.startswith("OPENDOX_")),
+                          os.environ.get({state_setting!r})]), flush=True)
+        """), encoding="utf-8")
+    child = Child(tmp_path, "t070_env_probe")
+    state_dir = child.state_dir
+    status = child.wait()
+    assert status == 0, child.stderr_text()
+    names, state_value = json.loads(child.stdout_text().strip().splitlines()[-1])
+    assert set(names) & set(SETTING_NAMES) == {state_setting}, names
+    assert state_value == str(state_dir) != exported[state_setting]
+    assert set(exported) <= set(SETTING_NAMES)
+    assert not state_dir.exists(), "the child's state directory outlived it"
+
 
 def test_a_child_that_ignores_the_interrupt_is_killed_at_the_deadline(
         tmp_path, monkeypatch) -> None:

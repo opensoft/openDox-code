@@ -19,6 +19,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
+import signal
 import sys
 import tempfile
 import webbrowser
@@ -70,8 +73,14 @@ from opendox import authoring as authoring_mod  # noqa: E402
 from opendox import branch_session as branch_session_mod  # noqa: E402
 from opendox import doxbench_install as install_mod  # noqa: E402
 from opendox import doxbench_knowledge as knowledge_mod  # noqa: E402
-from opendox import consumer_reach  # noqa: E402
-gate_mod = consumer_reach.gate_console  # noqa: E402
+# THE GATE PRIMITIVES, THROUGH THEIR SEAM (plan 034 T084; #1144 4.3, R1Q10
+# (a)). This was `consumer_reach.gate_console`, a late stand-in over openXdox's
+# `gate_console` that still raised where openXdox was absent. `gate_mod.X` now
+# reads the registration current at `column_seams.gate` when it runs, a host's
+# or openDox's own default, which `build_parser()` and `main()` register.
+# Stdlib-only, so this adds no reach.
+from opendox import column_seams  # noqa: E402
+gate_mod = column_seams.gate.proxy  # noqa: E402
 from opendox import serve as serve_mod  # noqa: E402
 from opendox import workbench as workbench_mod  # noqa: E402
 # THE HOME-CORPUS SEAM'S DEFAULT (4.1a; plan 034 T022) -- see
@@ -83,6 +92,17 @@ from opendox import workbench as workbench_mod  # noqa: E402
 # `opendox.corpus_adapter` besides the stdlib.
 from opendox import corpus_adapter  # noqa: E402
 from opendox.runtime import local_git_adapter  # noqa: E402
+# THE INSTALL SHAPE (plan 034 T070; #1144 13.4-13.6): `generate-and-open`
+# resolves `--local` against `OPENDOX_INSTALL_MODE` here, before it generates
+# or serves anything. Stdlib-only, like `local_git_adapter` above, which
+# already imports it, so this adds no reach and no import weight.
+from opendox.runtime import config as runtime_config  # noqa: E402
+# THE LOCAL INSTALL'S BUNDLED POSTGRESQL SERVER (plan 034 T072; #1144 13.1,
+# R1Q16 (i)-(iv)): started as THIS process's child by `generate-and-open
+# --local`, and stopped with it. Stdlib-only at import, like `runtime_config`;
+# the driver is imported when the server is started, never here.
+from opendox.runtime import bundle as bundle_mod  # noqa: E402
+from opendox.runtime import migrations as migrations_mod  # noqa: E402
 from opendox.boundary import (  # noqa: E402
     BoundaryViolation, HumanGate, OutputBoundary,
 )
@@ -97,6 +117,10 @@ from opendox.boundary import (  # noqa: E402
 # register the defaults where no host has. `is_rfc3339_datetime` is not a seam:
 # it is the neutral contract's own date-time rule, and openDox owns it.
 from opendox import projection_seams  # noqa: E402
+# openDox's own defaults for the two doxBench seams (plan 034 T085), which
+# the entry points below register the same way. Importing it registers
+# nothing.
+from opendox import doxbench_defaults  # noqa: E402
 from opendox.rfc3339 import is_rfc3339_datetime  # noqa: E402
 
 # THE COMPOSITION POINT, BOUND AT LAST (§ 4.3; RULED ASK-2 option (2),
@@ -478,16 +502,65 @@ def _warn_validator_could_not_run(result, validator) -> None:
         print(f"      {sys.executable} -m {remedy}", file=sys.stderr)
 
 
+#: One broken rule, as a validator's report names it: `[<rule>] <where>:
+#: <detail>`, the line `opendox.validator.Violation.line()` prints.
+_RULE_LINE = re.compile(r"^\[(?P<rule>[^\[\]\s]+)\] (?P<rest>.+)$")
+
+#: How many of a report's other lines (its summary, or a validator's own
+#: words where it names no rule) are printed.
+_REPORT_TAIL = 20
+
+#: How many places each broken rule is shown at: the first on the rule's own
+#: line, and the next ones beneath it. A rule broken at more places than this
+#: says how many more, so its count stays exact and the report stays short.
+_PLACES_SHOWN = 5
+
+
 def _report_non_conformance(written: Path, result) -> None:
     """NOT CONFORMANT — the validator ran, reached a verdict, and rejected the
     snapshot. The one thing this message must never be mistaken for is the
     warning above it, so it says whose fault it is out loud and prints the
     findings themselves; "1 error(s)" alone told a human nothing he could act
-    on."""
+    on.
+
+    EVERY BROKEN RULE, ONCE, WITH ITS COUNT (plan 034 T084; RULED
+    openxFactory#656 `5920216845`, item 3, *"Show every rule, grouped
+    (Recommended)"*). This printed the validator's LAST 20 LINES, so a
+    snapshot that broke one rule a hundred times and a second rule once
+    showed twenty copies of the first and never named the second. Now each
+    rule id the report names is printed ONCE, on a line of its own,
+    `<count> × [<rule>] <where>: <detail>`, in the order the validator found
+    them, with where it is first broken. The next places it is broken follow
+    beneath it, without the id, up to `_PLACES_SHOWN` in all, because one rule
+    can be broken in different ways (a missing key, then another), and a
+    count beside the first place alone would read as that place repeated.
+    The report's other lines (the validator's summary) follow. A validator
+    whose output names no rule id has nothing to group, so its own last lines
+    are printed, as before."""
     print(f"  validation FAILED — the pinned validator REJECTED {written}. This "
           f"is the SNAPSHOT, not the environment: the validator ran fine and "
           f"found the data non-conformant.", file=sys.stderr)
-    for line in (result.stdout or result.stderr).strip().splitlines()[-20:]:
+    lines = (result.stdout or result.stderr).strip().splitlines()
+    places: dict[str, list[str]] = {}
+    others: list[str] = []
+    for line in lines:
+        named = _RULE_LINE.match(line.strip())
+        if named is None:
+            others.append(line)
+            continue
+        places.setdefault(named["rule"], []).append(named["rest"])
+    if places:
+        total = sum(len(where) for where in places.values())
+        print(f"    {total} violation(s) of {len(places)} rule(s), each rule "
+              f"once, with its count and where it is broken:", file=sys.stderr)
+        for rule, where in places.items():
+            print(f"    {len(where)} × [{rule}] {where[0]}", file=sys.stderr)
+            for place in where[1:_PLACES_SHOWN]:
+                print(f"          {place}", file=sys.stderr)
+            if len(where) > _PLACES_SHOWN:
+                print(f"          … and {len(where) - _PLACES_SHOWN} more of "
+                      "this rule", file=sys.stderr)
+    for line in others[-_REPORT_TAIL:]:
         print(f"    {line}", file=sys.stderr)
 
 
@@ -548,19 +621,206 @@ def _validate(written: Path, args: argparse.Namespace, *,
     return 0
 
 
+def _resolve_install_shape(args: argparse.Namespace,
+                           env=None) -> runtime_config.RuntimeSettings:
+    """The settings this run serves with, or `ConfigurationError` naming why.
+
+    `--local` and `OPENDOX_INSTALL_MODE` are resolved by
+    `runtime_config.install_mode`, the one reading of the selector, which
+    refuses the two disagreeing (plan 034 T070's fail-closed reading) and
+    defaults to HOSTED (#1144 13.4, 13.5). Then each shape asks what it needs:
+
+      * LOCAL binds loopback only, with no opt-in: a non-loopback `--host` is
+        refused naming the rule (13.4), and so is anything a local install
+        cannot be (`refuse_what_a_local_install_cannot_be`: a broker setting
+        beside it, a DSN beside it, or a non-loopback `OPENDOX_BIND_HOST`). It
+        needs no broker, and it supplies BOTH DSNs itself, from the server it
+        bundles under `OPENDOX_STATE_DIR` (13.1; plan 034 T072).
+      * HOSTED, set or by default, refuses with no issuer, NAMING THE ISSUER
+        (13.5), and then loads the runtime's whole configuration.
+        Otherwise unchanged (13.6).
+
+    Either way the result is the runtime's own `load_settings`, because the
+    serving process is the one whose settings are the install's (13.4a;
+    R1Q16 (i)).
+
+    Asked before anything is scanned, minted or bound, so a refused run leaves
+    nothing behind and exits at once rather than starting a server that a
+    bound would have to kill (F13.1's `test "$rc" -ne 124`).
+    """
+    env = os.environ if env is None else env
+    local_flag = bool(getattr(args, "local", False))
+    mode = runtime_config.install_mode(env, local_flag=local_flag)
+    if mode == runtime_config.INSTALL_MODE_LOCAL:
+        runtime_config.refuse_a_non_loopback_local_bind("--host", args.host)
+        runtime_config.refuse_what_a_local_install_cannot_be(env)
+    else:
+        runtime_config.require_the_hosted_issuer(env)
+    return runtime_config.load_settings(env, local_flag=local_flag)
+
+
+class _Terminated(KeyboardInterrupt):
+    """SIGTERM, raised as the interrupt the serve loop already stops cleanly on.
+
+    A subclass, so the serve loop's own `except KeyboardInterrupt` still ends
+    a served run with 0 (F13.1's `kill "$SERVER"; wait "$SERVER"`). An
+    interrupt that arrives BEFORE the serve loop can still say which signal
+    it was.
+    """
+
+
+def _terminate_as_interrupt(signum, frame):
+    """SIGTERM, read as the Ctrl-C the serve loop already stops cleanly on."""
+    raise _Terminated
+
+
 def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -> int:
     """Regenerate the snapshot from the working tree into a run dir, start the
     local server, print the URL (ALWAYS), and open the browser. `--no-open`
     suppresses the browser; `--no-serve` returns after printing the URL without
-    blocking (used by tests). `opener` is injectable for testing."""
+    blocking (used by tests). `opener` is injectable for testing.
+
+    THE INSTALL SHAPE IS RESOLVED FIRST (plan 034 T070): `--local`, or
+    `OPENDOX_INSTALL_MODE=local`, selects the local single-user install, and
+    with neither the install is hosted — see `_resolve_install_shape`. A
+    refusal there is printed on stderr and the command exits 1, before any
+    other work.
+
+    A LOCAL RUN OWNS ITS DATABASE (plan 034 T072; #1144 13.1, R1Q16 (i)-(iv)).
+    Once the corpus root and the anchors are known good, the bundled
+    PostgreSQL server is started as THIS process's child, bootstrapped and
+    migrated — starting and migrating it is all release 1 asks of it — and it
+    is stopped when this command returns, however it returns: a served run
+    ended by Ctrl-C or by SIGTERM (read here as the same interrupt), a
+    `--no-serve` run, or a failure. A refused start exits 1 on stderr, like
+    every other refusal of this verb."""
+    try:
+        settings = _resolve_install_shape(args)
+    except runtime_config.ConfigurationError as exc:
+        print(f"generate-and-open refused: {exc}", file=sys.stderr)
+        return 1
+    args.install_mode = settings.install_mode
+    args.runtime_settings = settings
+    if settings.install_mode != runtime_config.INSTALL_MODE_LOCAL:
+        return _generate_and_open(args, opener=opener)
+    # THE CHEAP REFUSALS FIRST, so a mistyped root never costs a database
+    # start: every one `_generate_and_open` asks before it mints its run
+    # directory, main's empty-source-option refusal (T055) included.
+    _refuse_non_corpus_repo_root(args)
+    _refuse_malformed_generated_at(args)
+    _refuse_empty_source_options(args)
+    server = bundle_mod.BundledServer(settings)
+    args.database_bundle = server
+    # NO `PG*` DEFAULT REACHES THE BUNDLE'S CONNECTIONS while this process
+    # runs its database (Copilot review of openDox-code#69): see
+    # `bundle.isolated_from_libpq_environment`.
+    with bundle_mod.isolated_from_libpq_environment():
+        return _run_the_local_lifecycle(args, server, opener=opener)
+
+
+def _run_the_local_lifecycle(args: argparse.Namespace, server, *, opener) -> int:
+    """Start the bundled server, generate and serve, and stop it, however
+    this ends: a served run ended by Ctrl-C or SIGTERM, a `--no-serve` run, a
+    refusal, a failure, or an interrupt before anything was served."""
+    try:
+        previous = signal.signal(signal.SIGTERM, _terminate_as_interrupt)
+    except ValueError:                  # not the main thread: no handler to own
+        previous = None
+    try:
+        try:
+            server.start()
+        except (bundle_mod.BundleRefused, runtime_config.ConfigurationError,
+                migrations_mod.MigrationError) as exc:
+            print(f"generate-and-open refused: {exc}", file=sys.stderr)
+            return 1
+        report = server.report()
+        print(f"  database {report['socket_dir']} (bundled, pid {report['pid']}, "
+              f"migrations applied now: {server.applied or 'none pending'})")
+        return _generate_and_open(args, opener=opener)
+    except KeyboardInterrupt as interrupt:
+        # AN INTERRUPT ANYWHERE IN THE LOCAL LIFECYCLE IS A CLEAN STOP (Copilot
+        # review of openDox-code#69). SIGTERM, or Ctrl-C, can arrive while the
+        # server is initializing or migrating, or while the snapshot is being
+        # generated, all before the serve loop's own handler. It is a stop
+        # that was asked for, so it is not a traceback: the `finally` below
+        # stops the bundled server and restores the handler. Nothing was
+        # served, so the exit is the signal's conventional status (128 + its
+        # number) and not 0.
+        signum = (signal.SIGTERM if isinstance(interrupt, _Terminated)
+                  else signal.SIGINT)
+        print(f"generate-and-open interrupted ({signum.name}) before it "
+              "served; its bundled PostgreSQL server stops with it",
+              file=sys.stderr)
+        return 128 + int(signum)
+    finally:
+        # THE HANDLER FIRST, so a second SIGTERM during the stop takes the
+        # default action at once; the parent-death signal still stops the
+        # server if this process goes before `stop()` has finished.
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+        server.stop()
+
+
+def _install_report(args: argparse.Namespace):
+    """`/capabilities`' `install` block for THIS process, as a callable the
+    server asks on each request, or None where no install shape was resolved
+    (plan 034 T073; #1144 13.4a; RULED R1Q16 (i), `5850003126`).
+
+    It is read from the settings `cmd_generate_and_open` resolved and loaded
+    (`args.runtime_settings`) and from the bundled server it started as its
+    own child (`args.database_bundle`), so the served process reports its own
+    install shape: a status probe from a second process could be right about
+    the settings while the server ignored them. `mode` is the install mode
+    those settings carry. `database_bundle` is the bundled server's report,
+    `data_dir`, `socket_dir` and its `pid` while it lives
+    (`bundle.BundledServer.report`), and it is None for a hosted install,
+    which bundles no server, as `runtime status` reports it."""
+    settings = getattr(args, "runtime_settings", None)
+    if settings is None:
+        return None
+    server = getattr(args, "database_bundle", None)
+
+    def report() -> dict:
+        return {"mode": settings.install_mode,
+                "database_bundle": (server.report() if server is not None
+                                    else None)}
+
+    return report
+
+
+#: The prefix of the temporary run directory `generate-and-open` mints when
+#: no `--run-dir` is given: the installed command's own name (plan 034 T084,
+#: adversarial review 2, G7), not openxFactory's pre-carve one.
+RUN_DIR_PREFIX = "opendox-"
+
+
+def _generate_and_open(args: argparse.Namespace, *, opener) -> int:
+    """`generate-and-open`'s generate-then-serve half, once the install is known.
+
+    A RUN DIRECTORY THIS PROCESS MINTED IS REMOVED WHEN IT IS DONE WITH IT
+    (plan 034 T084, adversarial review 2, G7): when the server stops, on a
+    `--no-serve` run, on a refusal and on a failure. It used to be left under
+    the system's temporary directory on every run. A `--run-dir` the caller
+    names is the caller's, and is left exactly as this run wrote it."""
     # Ahead of minting the run dir, so a refused root leaves not even an empty
     # temp directory behind. `_generate_and_write` is still the guard that MATTERS
     # (it is the one no caller can skip); these are the same checks, earlier.
     _refuse_non_corpus_repo_root(args)
     _refuse_malformed_generated_at(args)
     _refuse_empty_source_options(args)
-    run_dir = Path(args.run_dir).resolve() if args.run_dir else Path(
-        tempfile.mkdtemp(prefix="ideation-dashboard-"))
+    if args.run_dir:
+        return _generate_and_serve(args, Path(args.run_dir).resolve(),
+                                   opener=opener)
+    minted = Path(tempfile.mkdtemp(prefix=RUN_DIR_PREFIX))
+    try:
+        return _generate_and_serve(args, minted, opener=opener)
+    finally:
+        shutil.rmtree(minted, ignore_errors=True)
+
+
+def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
+                        opener) -> int:
+    """Generate into `run_dir`, serve it, and stop, for `_generate_and_open`."""
     run_dir.mkdir(parents=True, exist_ok=True)
     output = run_dir / "snapshot.json"
 
@@ -625,7 +885,12 @@ def cmd_generate_and_open(args: argparse.Namespace, *, opener=webbrowser.open) -
                                    # the self-hosted half of the ratified
                                    # two-case principle
                                    knowledge_declaration=(
-                                       knowledge_mod.SELF_HOSTED_LOCAL_EMBEDDED))
+                                       knowledge_mod.SELF_HOSTED_LOCAL_EMBEDDED),
+                                   # and THIS process's own install shape, on
+                                   # `/capabilities` (plan 034 T073; #1144
+                                   # 13.4a): the settings it loaded, and the
+                                   # bundled server it started as its child.
+                                   install_report=_install_report(args))
     url = serve_mod.server_url(httpd, "/index.html")
     print(f"  serving {url}")
     print(f"  snapshot {serve_mod.server_url(httpd, '/snapshot.json')}")
@@ -716,9 +981,14 @@ def _commission_cli(verb: str, args: argparse.Namespace, target: str,
     engine, same guards. The CLI adds nothing of its own except the printing —
     which is exactly what makes the two surfaces equivalent."""
     repo_root = Path(args.repo_root).resolve()
-    console = gate_mod.GateConsole(_human_gate(repo_root, args),
-                                   records_dir=args.records_dir)
+    human = _human_gate(repo_root, args)
     try:
+        # INSIDE the refusal boundary (plan 034 T084): openDox's own gate
+        # default refuses the governed `GateConsole` at construction
+        # (`GateRecordsNotRegistered`, a `GateRefused`), so a contributed gate
+        # verb that reaches it with no host's gate registered answers
+        # "<verb> refused: ..." rather than a traceback.
+        console = gate_mod.GateConsole(human, records_dir=args.records_dir)
         res = getattr(console, verb.replace("-", "_"))(
             target, outline=args.outline, workflow=args.workflow,
             note=args.note, provenance=cli_provenance(), **engine_kwargs)
@@ -1054,6 +1324,21 @@ def _default_home_factory(root):
             corpus_adapter.CorpusRef(name="home", location=str(root)))
 
 
+#: THE INSTALLED COMMAND'S OWN NAME AND WORDS (plan 034 T084; found by T099's
+#: PyPI writer). `opendox --help` is what a published install prints, so the
+#: usage line names the console script `pyproject.toml` installs, `opendox`,
+#: and the description and epilog name openDox only. They used to print
+#: `usage: ideation-dashboard` and this module's docstring, which is
+#: openxFactory's pre-carve history, not a user's help.
+PROG = "opendox"
+PARSER_DESCRIPTION = (
+    "openDox, a document workbench over a corpus of documents: regenerate "
+    "the corpus's deterministic snapshot, serve it locally and open it in a "
+    "browser, create and edit its documents, declare the model providers a "
+    "chat may use, and run the identity and coordination runtime.")
+PARSER_EPILOG = "Run `opendox <command> --help` for a command's own options."
+
+
 def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParser:
     """The command line, plus whatever this invocation was ASSEMBLED with.
 
@@ -1113,8 +1398,16 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     # only where no host has registered its own. Registering reads nothing, so
     # a host that registers after this parser is built still replaces them.
     projection_seams.register_defaults()
-    parser = argparse.ArgumentParser(prog="ideation-dashboard", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    # AND openDox's OWN doxBench validators and status-exemption rail (4.3,
+    # T085; R1Q10 (a) and R1Q12 (a), the same pattern), each only where no
+    # host has registered its own, and replaceable by a host until read.
+    doxbench_defaults.register_defaults()
+    # AND the consumer columns' defaults (plan 034 T084; #1144 4.3,
+    # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
+    # the cross-reference register, the same way.
+    column_seams.register_defaults()
+    parser = argparse.ArgumentParser(prog=PROG, description=PARSER_DESCRIPTION,
+                                     epilog=PARSER_EPILOG)
     sub = parser.add_subparsers(dest="command", required=True)
 
     gen = sub.add_parser("generate", help="regenerate the deterministic snapshot")
@@ -1130,6 +1423,17 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     gao.add_argument("--actor", default=None,
                      help="human identity for loopback gate actions "
                           "(default: the checkout's git user.name)")
+    # THE INSTALL SHAPE'S FLAG (plan 034 T070; R1Q15 (b), as T007 batch H's
+    # 13.4 addendum reads): the documented command is
+    # `opendox generate-and-open --local …`. The same selection as
+    # `OPENDOX_INSTALL_MODE=local`; with neither the install is hosted, and the
+    # flag beside `OPENDOX_INSTALL_MODE=hosted` is refused.
+    gao.add_argument(runtime_config.LOCAL_FLAG, action="store_true",
+                     dest="local",
+                     help="the LOCAL single-user install: no identity broker, "
+                          "loopback only (the same selection as "
+                          "OPENDOX_INSTALL_MODE=local; with neither, the "
+                          "install is hosted and needs its broker's issuer)")
     gao.add_argument("--host", default=serve_mod.DEFAULT_HOST,
                      help="bind host (default: 127.0.0.1, loopback only)")
     gao.add_argument("--port", type=int, default=0, help="bind port (default: ephemeral)")
@@ -1149,7 +1453,7 @@ def build_parser(*, subcommand_extensions: tuple = ()) -> argparse.ArgumentParse
     gao.set_defaults(func=cmd_generate_and_open)
 
     create = sub.add_parser(
-        "create", help="scaffold a new header-compliant ideation doc and open it for editing")
+        "create", help="scaffold a new header-compliant document and open it for editing")
     create.add_argument("--repo-root", required=True, help="repository to scaffold into")
     create.add_argument("--area", default=authoring_mod.DEFAULT_AREA,
                         help=f"target ideation area (default: {authoring_mod.DEFAULT_AREA})")
@@ -1220,6 +1524,12 @@ def main(argv: list[str] | None = None, *,
     generator_seam.register_default(default_generator.GENERATOR)
     # AND openDox's own projection defaults (5.5, T055), the same way.
     projection_seams.register_defaults()
+    # AND openDox's own doxBench defaults (4.3, T085), the same way.
+    doxbench_defaults.register_defaults()
+    # AND the consumer columns' defaults (plan 034 T084; #1144 4.3,
+    # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
+    # the cross-reference register, the same way.
+    column_seams.register_defaults()
     args = build_parser(
         subcommand_extensions=subcommand_extensions).parse_args(argv)
     try:

@@ -26,7 +26,7 @@
 
 import {
   buildLensModel, docSummaries, railStats, termMatches,
-  savePlan, clusterPlan, WORKBENCH_DIR,
+  savePlan, clusterPlan,
 } from "./lens-model.js";
 // The SVG bullseye renderer lives in ONE place (add-workbench-bullseye-and-create
 // design D1): this view and the staging workbench's lens panel consume the same
@@ -59,6 +59,60 @@ export const DTN_SEED_ROUTE = "/actions/dtn-seed";
 // selected in the matrix. Same discipline as the register seed — loopback,
 // write-nothing, TEXT the human places.
 export const STAGING_SEED_ROUTE = "/actions/staging-seed";
+
+// WHETHER A BINDING ANSWERS A ROUTE (R1Q19 (a), plan 034 T088). The two seed
+// routes above are answered by nothing openDox ships: they exist where a host
+// contributes them, and a standalone install has no host. So a control that
+// calls one is OFFERED ONLY WHERE A BINDING ANSWERS IT, and the census's `?` row
+// for this file stands until R1Q19 (b) moves the controls into a view extension.
+//
+// `/capabilities` already says which routes a host contributes
+// (`views.contributed_routes`). `serve.build_server()` builds that list from the
+// very table its POST dispatch consults, so the lens reads its answer off the
+// payload the shell has already fetched: no second fetch and no new field.
+//
+// This mirrors `RouteBinding.matches` (`src/route_extension.py`): the method,
+// then the path, exact or under a prefix, and a GET binding answers HEAD too. A
+// test holds it to `route_extension.match()` itself.
+//
+// IT FAILS CLOSED, and on the WHOLE manifest, as `manifestRoutes()` does: a
+// payload that is absent, that carries no manifest, or in which ANY route is not
+// the shape the server would have accepted answers no for every route. A list
+// with one malformed entry beside a good one is a list this cannot vouch for, so
+// the good one is not taken on trust (Copilot, #65). That shape is
+// `RouteBinding.__post_init__`'s, entry by entry; a test holds the two to each
+// other. Unlike `manifestRoutes()` it never throws, because it gates a control,
+// and a control that cannot be justified is left out rather than made a reason
+// to lose the whole lens (`probeCapabilityPath`'s own posture: a missing payload
+// is an unmet requirement, not an error).
+
+// `route_extension.METHODS`.
+const ROUTE_METHODS = ["GET", "HEAD", "POST"];
+
+// One manifest entry, held to what `RouteBinding.__post_init__` accepts: a known
+// method, a pattern rooted at a slash with no query or fragment, a boolean
+// `is_prefix`, and a prefix that ends in a slash.
+function wellFormedRoute(route) {
+  return route !== null && typeof route === "object"
+    && ROUTE_METHODS.includes(route.method)
+    && typeof route.pattern === "string" && route.pattern.startsWith("/")
+    && !/[?#]/.test(route.pattern)
+    && typeof route.is_prefix === "boolean"
+    && (!route.is_prefix || route.pattern.endsWith("/"));
+}
+
+function routeMatches(route, method, path) {
+  const sameMethod = route.method === method
+    || (route.method === "GET" && method === "HEAD");
+  if (!sameMethod) return false;
+  return route.is_prefix ? path.startsWith(route.pattern) : path === route.pattern;
+}
+
+export function bindingAnswers(capabilities, method, path) {
+  const routes = capabilities?.views?.contributed_routes;
+  if (!Array.isArray(routes) || !routes.every(wellFormedRoute)) return false;
+  return routes.some((route) => routeMatches(route, method, path));
+}
 
 //: How many of the ranked relationships the rail offers. Enough to choose
 //: from, short enough to read; the whole list is the model's `pairs`.
@@ -213,9 +267,13 @@ function renderPlan(container, plan, opts) {
   if (gateLive(o.caps) && o.mountLensGate) {
     o.mountLensGate(box, { plan, caps: o.caps, fetcher: o.fetcher });
   } else {
+    // NEUTRAL WORDS (plan 034 T102, gap G8): this note used to name the engine
+    // module (`lens.py`) and "the boundary", which are the build's words and
+    // not a reader's. What it says is the same fact: here the plan is shown,
+    // and nothing carries it out.
     box.appendChild(el("div", "dc-note",
-      "The tested engine (lens.py) materialises this through the boundary; the " +
-      "read-only surface confirms the plan — nothing is written from the browser."));
+      "Shown for confirmation only: this console cannot carry the plan out "
+      + "from the browser, so nothing is written."));
   }
   container.appendChild(box);
 }
@@ -499,8 +557,11 @@ function matrix(model, ctx) {
   const table = el("table", "lensmatrix");
   table.setAttribute("aria-label", "Keyword membership matrix (flat view of the bullseye)");
   const head = el("tr");
+  // THE SELECTION COLUMN IS OFFERED WITH THE SELECTION (R1Q19 (a), T088): where no
+  // binding answers the staging seed there is nothing to select for, so the
+  // column is not drawn at all rather than left as an empty gutter.
   const pickHead = el("th", "pickcol");
-  head.appendChild(pickHead);
+  if (ctx.pickDoc) head.appendChild(pickHead);
   head.appendChild(el("th", null, "#"));
   // THE MATRIX'S OWN COLUMN HEADING (Copilot round 2). It was the literal
   // `doc` — openxFactory's short spelling of the source station, rendered as a
@@ -535,8 +596,8 @@ function matrix(model, ctx) {
     // SELECTION (Brett, 2026-08-08: "I should have a checkbox on each one to
     // generate the seed from checked"). The row's own box, so the set is
     // built where the evidence is read rather than retyped somewhere else.
-    const pick = el("td", "pickcol");
     if (ctx.pickDoc) {
+      const pick = el("td", "pickcol");
       const box = el("input");
       box.type = "checkbox";
       box.checked = ctx.isPicked(r.document);
@@ -544,8 +605,8 @@ function matrix(model, ctx) {
       box.setAttribute("aria-label", "select " + r.document);
       box.addEventListener("change", () => ctx.pickDoc(r.document, box.checked));
       pick.appendChild(box);
+      tr.appendChild(pick);
     }
-    tr.appendChild(pick);
     // the matrix IS the radar's legend: #N here is the number on that dot
     tr.appendChild(el("td", "docnum", String(r.number)));
     tr.appendChild(el("td", null, String(r.document).split("/").pop() || r.document));
@@ -562,7 +623,8 @@ function matrix(model, ctx) {
     const td = el("td", "empty", model.checked.length
       ? "no " + display.many(SOURCE) + " match the checked keywords"
       : "this view carries no " + display.many(SOURCE));
-    td.setAttribute("colspan", String(model.checked.length + 4));
+    // the selection column, when it is drawn, is one of the four fixed columns
+    td.setAttribute("colspan", String(model.checked.length + (ctx.pickDoc ? 4 : 3)));
     tr.appendChild(td);
     table.appendChild(tr);
   }
@@ -812,8 +874,12 @@ function drillPane(model, ctx) {
   pane.appendChild(el("div", "drill-note",
     "Each row is the " + ctx.display.many(SOURCE) + " carried by one "
     + "combination of repositories. "
-    + "Drill in scopes the whole dashboard to that set; the seed drafts a "
-    + "candidate-register entry for a set two or more repositories share."));
+    + "Drill in scopes the whole dashboard to that set"
+    // the sentence about the seed is there only where the seed is (R1Q19 (a))
+    + (ctx.onSeed
+      ? "; the seed drafts a candidate-register entry for a set two or more "
+        + "repositories share."
+      : ".")));
 
   // Group the dots by their repository combination; the centre is the
   // combination that IS the whole checked set.
@@ -872,6 +938,8 @@ function drillPane(model, ctx) {
         + " repositories share (text you merge; nothing is written)";
       seed.addEventListener("click", () => ctx.onSeed(row.keywords, seed));
       seed.dataset.carriers = String(row.matchCount);
+      // the hook the browser half reads the control by (T096, AT-R1 step 6)
+      seed.dataset.seedAction = "dtn-seed";
       acts.appendChild(seed);
     }
     line.appendChild(acts);
@@ -982,6 +1050,8 @@ function pickBar(model, ctx) {
     // rather than implying a second, separate seed.
     ctx.hasDraft() ? "re-draft" : "draft staging seed");
   draft.type = "button";
+  // the hook the browser half reads the control by (T096, AT-R1 step 6)
+  draft.dataset.seedAction = "staging-seed";
   draft.disabled = !n;
   draft.title = "Draft a staging-queue fragment covering the selected "
     + ctx.display.many(SOURCE) + " and the terms they share. Nothing is "
@@ -1058,6 +1128,14 @@ export function renderLens(root, snapshot, opts) {
   // S4). Null where no gate column is registered, which is exactly what a
   // student install is — the plan panel then renders plan-only.
   const mountLensGate = options.mountLensGate || null;
+  // WHICH OF THE TWO SEED ACTIONS THIS PLANE OFFERS (R1Q19 (a), T088). Each is
+  // offered only where a binding answers its route, and read off the SAME
+  // `caps` the gate verdict above is: the D10 read-only projection keeps the
+  // `views` block, so a composed view asks the same question a single one does.
+  // Standalone, no host has contributed either route, so neither is offered, and
+  // nothing whose only use is to feed one is offered either.
+  const registerSeedOffered = bindingAnswers(caps, "POST", DTN_SEED_ROUTE);
+  const stagingSeedOffered = bindingAnswers(caps, "POST", STAGING_SEED_ROUTE);
   // THE STATION VOCABULARY, from the shell's one read of `/capabilities`
   // (§ 4.3 step 3). `app.js` has passed `display: ctx.display` on this mount
   // since slice S7; this view is the last one in the bundle to read it.
@@ -1252,7 +1330,7 @@ export function renderLens(root, snapshot, opts) {
     // affordance is legitimately available on the read-only composed view
     // (nothing is written, exactly as the neutrality lane drafts seeds a
     // human merges).
-    onSeed: vocab.id === "repositories" && composed
+    onSeed: registerSeedOffered && vocab.id === "repositories" && composed
       ? async (repositories, button) => {
           const label = button.textContent;
           button.disabled = true;
@@ -1295,10 +1373,18 @@ export function renderLens(root, snapshot, opts) {
     // ---- the matrix selection (Brett, 2026-08-08) ----
     isPicked(doc) { return state.picked.has(doc); },
     pickedCount() { return state.picked.size; },
-    pickDoc(doc, on) {
-      if (on) state.picked.add(doc); else state.picked.delete(doc);
-      draw();
-    },
+    // NULL WHERE NO BINDING ANSWERS THE STAGING SEED (R1Q19 (a), T088). The
+    // selection exists to feed that one action, and every site that offers it is
+    // guarded by this member: the matrix's checkbox column and its select-all,
+    // the bullseye's clickable dots, the `picked` mark and the pick bar. So
+    // nulling it withdraws the whole selection along with the button, and a
+    // standalone lens never says "tick documents to draft from them".
+    pickDoc: stagingSeedOffered
+      ? (doc, on) => {
+        if (on) state.picked.add(doc); else state.picked.delete(doc);
+        draw();
+      }
+      : null,
     pickDocs(docs, on) {
       for (const doc of docs || []) {
         if (on) state.picked.add(doc); else state.picked.delete(doc);
@@ -1451,9 +1537,14 @@ export function renderLens(root, snapshot, opts) {
       });
       box.appendChild(save);
       box.appendChild(cluster);
+      // NEUTRAL WORDS (plan 034 T102, gap G8): this line named a host's
+      // surfaces -- the workbench folder, "the register", "any queue" -- which
+      // a standalone install does not have. What stays true everywhere is what
+      // the two buttons do: each shows its plan first, and the pane itself
+      // writes nothing. Where the plan lands is the plan's own `lands at` line.
       box.appendChild(el("div", "lens-pending",
-        "Persisted through the interactivity boundary to " + WORKBENCH_DIR +
-        " (gitignored). Nothing enters the register or any queue from here."));
+        "Each button shows its plan below before anything is written; this "
+        + "pane itself writes nothing."));
       pane.appendChild(box);
     },
     setName() {

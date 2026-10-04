@@ -2884,12 +2884,20 @@ def test_staging_workbench_composes_the_doxbench_canvas_without_new_transport():
     # answers false and the canvas is withheld with a stated posture instead of
     # the whole module failing to load. Every clause of the derivation is
     # untouched; what moved is the gate predicate's PROVENANCE.
+    #
+    # PIN EVOLUTION (plan 034 T102; RULED openxFactory#656 `5963618568`, "Edit
+    # and chat by scope"): the first two clauses are now read through ONE
+    # posture, `editingNow().editors`, because where no gate column is
+    # registered the editors are offered BY SCOPE rather than never. The gate
+    # clause and the hidden-plane clause are still both asked, and still of the
+    # same two predicates on the same `caps`, which is what the two `in view`
+    # lines below pin; `editingPosture` answers `editors` from them exactly as
+    # the old conjunction did wherever the gate is live, and its whole matrix
+    # is measured in `tests/test_workbench_edit_by_scope.py`.
     assert "function canvasOffered() {" in view
-    assert (
-        "return !!scope && createColumn.createGateLive(caps) "
-        "&& !sessionSurfaceHidden(caps)"
-        in view
-    )
+    assert "return !!scope && editingNow().editors" in view
+    assert "gateLive: createColumn.createGateLive(caps)," in view
+    assert "surfaceHidden: sessionSurfaceHidden(caps)," in view
     assert "&& !!active?.repository && !!active?.ref;" in view
     # …and the column the predicate is read off is the CONTRIBUTED one, with the
     # null column as the only fallback — never a re-imported module

@@ -80,8 +80,12 @@ active entry's freshness (`X-Snapshot-Repository`, `X-Snapshot-Ref`,
 `X-Snapshot-Origin`, `X-Snapshot-Generated-At`, `X-Snapshot-Stale`), the
 transport half of the freshness header the renderer displays (design D11).
 
-Security posture: binds LOOPBACK only by default (127.0.0.1); every write route
-is loopback-gated; the source route is read-only and confined PER REGISTRY ENTRY
+Security posture: binds LOOPBACK only by default (127.0.0.1); on a loopback
+plane EVERY request, whatever its route or method, is refused unless its one
+`Host` names this serve's own loopback authority at the bound port, so a
+DNS-rebinding page cannot read the corpus through the engineer's browser (plan
+034 T103; see `host_names_this_loopback_serve`); every write route is
+loopback-gated; the source route is read-only and confined PER REGISTRY ENTRY
 (an entry with no declared root serves no documents at all); the actions
 validate their request body and confine every path through the read-side guard
 before touching the filesystem.
@@ -102,6 +106,7 @@ import functools
 import http.server
 import json
 import secrets
+import socket
 import subprocess
 import sys
 import urllib.parse
@@ -148,9 +153,13 @@ from opendox import doxbench_telemetry  # noqa: E402
 # evaluated where the `def` sits, at import time. openDox owns those two
 # values (`defaults.py`), and openXdox-code's drift guard holds the literals
 # together.
-from opendox import consumer_reach  # noqa: E402
 from opendox import defaults  # noqa: E402
 from opendox import projection_seams  # noqa: E402
+from opendox import column_seams  # noqa: E402
+# openDox's own defaults for the two doxBench seams (plan 034 T085), which
+# `build_server()` and `main()` register where no host has. Importing it
+# registers nothing.
+from opendox import doxbench_defaults  # noqa: E402
 # § 3.4 slice S5: `build_server()` publishes the VIEW MANIFEST on
 # `/capabilities`, the one line slice S3 built both ends of and left for the
 # slice at which a contribution first exists to deliver.
@@ -452,6 +461,65 @@ WORKBENCH_MODEL_INTAKE_ROUTE = "/workbench/model-intake"
 ACTIONS_WORKBENCH_MODEL_INTAKE_ROUTE = "/actions/workbench/model-intake"
 ACTIONS_WORKBENCH_MODEL_APPROVAL_ROUTE = "/actions/workbench/model-approval"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+# THE TWO ROUTES THE `actions` MAP NAMES THAT A HOST CONTRIBUTES (plan 034
+# T084; #1144 4.3 as T007 batch L's addendum reads, RULED openxFactory#656
+# `5920216845`, item 1). Neither is a fixed core arm: a gate verb is
+# `POST /actions/gate/<verb>` and the refresh is `POST /actions/refresh`, and
+# each answers only where a route binding the assembly collected carries it.
+# Everything else `do_POST` reaches is core. So `gate` and `refresh` are true
+# only where such a binding is assembled (`compute_capabilities`), and a
+# standalone server, which carries neither, reports both false rather than
+# offering two affordances that would answer `404 unknown_action`.
+ACTIONS_GATE_PREFIX = "/actions/gate/"
+ACTIONS_REFRESH_ROUTE = "/actions/refresh"
+
+# THE STATIC BUNDLE'S CONTENT TYPES, PINNED (plan 034 T084, the holder's
+# addition for #1144 10.2, "reachable in a browser from an openDox-only
+# install", from T075's finding on openDox-code#73). The static route is
+# `SimpleHTTPRequestHandler`'s, whose `guess_type` reads the handler's
+# `extensions_map` FIRST and the platform's `mimetypes` table only for an
+# extension that map lacks. The platform table is the host's: on Linux and
+# in CI it answers `text/javascript` for `.js`, but a host whose table
+# differs, and Windows reads its table from the registry, can serve an ES
+# module as `text/plain`, which a browser refuses to run, so the console
+# opens blank. Every extension the wheel's bundle carries is pinned here
+# (measured at T084: 41 files under `opendox/web/`, 39 `.js`, one `.html` and
+# one `.css`), with the types the bundle's own kinds of file take beside
+# them. Each value is the one the standard library's built-in table gives
+# (`.woff2`, which it lacks, takes its registered type, RFC 8081), so a host
+# whose table was already right serves exactly what it served before. Any
+# other extension still falls back to the platform table.
+STATIC_CONTENT_TYPES: dict[str, str] = {
+    ".html": "text/html",
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".json": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/vnd.microsoft.icon",
+    ".woff2": "font/woff2",
+}
+
+
+def answers_a_gate_verb(binding) -> bool:
+    """Whether a contributed route binding answers `POST /actions/gate/<verb>`
+    for some verb: a POST prefix at or under `ACTIONS_GATE_PREFIX`, or one that
+    covers it, or an exact POST naming one verb under it. The match rule is the
+    binding's own (`RouteBinding.matches`), read for a family of paths."""
+    if binding.method != "POST":
+        return False
+    pattern = binding.pattern
+    if binding.is_prefix:
+        return (pattern.startswith(ACTIONS_GATE_PREFIX)
+                or ACTIONS_GATE_PREFIX.startswith(pattern))
+    return (pattern.startswith(ACTIONS_GATE_PREFIX)
+            and len(pattern) > len(ACTIONS_GATE_PREFIX))
+
+
+def answers_the_refresh(binding) -> bool:
+    """Whether a contributed route binding answers `POST /actions/refresh`."""
+    return binding.matches("POST", ACTIONS_REFRESH_ROUTE)
 
 _DEFAULT_CAPABILITIES = {"actions": {"notebook": False, "gate": False, "refresh": False,
                                     "session": False, "edit": False,
@@ -463,7 +531,8 @@ _DEFAULT_CAPABILITIES = {"actions": {"notebook": False, "gate": False, "refresh"
 
 def compute_capabilities(*, nlm_present: bool, checkout_real: bool, loopback: bool,
                          actor: str | None = None,
-                         refresh_binding: str | None = None) -> dict:
+                         refresh_binding: str | None = None,
+                         route_bindings: tuple = ()) -> dict:
     """The startup capability verdict. The notebook action is available only on
     a loopback bind with `nlm` reachable and a real checkout — the served static
     image satisfies none of these, so the UI hides the affordance there. GATE
@@ -522,16 +591,39 @@ def compute_capabilities(*, nlm_present: bool, checkout_real: bool, loopback: bo
         corpus. (The committed-intent FEED does read the checkout, but a feed
         with nothing in it is an empty feed, not an absent capability.)
 
-    So the predicate is the plane itself, and nothing else."""
+    So the predicate is the plane itself, and nothing else.
+
+    A FLAG WHOSE AFFORDANCE IS A ROUTE THIS SERVER SERVES IS TRUE ONLY WHERE
+    SUCH A ROUTE ANSWERS (plan 034 T084; #1144 4.3 as T007 batch L's addendum
+    reads, RULED openxFactory#656 `5920216845`, item 1). `gate` and `refresh`
+    govern routes a HOST contributes, `POST /actions/gate/<verb>` and
+    `POST /actions/refresh`, so each is true only when `route_bindings`, the
+    bindings the assembly collected, carry a route it governs
+    (`answers_a_gate_verb`, `answers_the_refresh`), and otherwise its
+    conditions above stand as they were. Measured at openDox-code `047bb4fa`,
+    a standalone server answered both true while every such POST answered
+    `404 unknown_action`, and the gate flag followed the checkout's git
+    identity alone. Standalone both now read false, which also hides the
+    workbench's session controls (`sessionActionsLive` reads `actions.gate`),
+    and a composed host that contributes the routes reads as before.
+    `notebook`, `edit` and `session` govern core routes and keep their
+    conditions. `intent` governs a POST to ANOTHER plane's intent API, which
+    that plane answers, so its condition, the served plane, stands. The
+    `refresh` block below still names the plane's binding: it says which
+    binding a contributed refresh would use, and the flag says whether one is
+    offered."""
     binding = refresh_binding
     if binding == registry_mod.BINDING_REGENERATE and not (loopback and checkout_real):
         binding = None
     local_human = bool(actor and checkout_real and loopback)
+    bindings = tuple(route_bindings or ())
+    gate_routed = any(answers_a_gate_verb(b) for b in bindings)
+    refresh_routed = any(answers_the_refresh(b) for b in bindings)
     return {
         "actions": {
             "notebook": bool(nlm_present and checkout_real and loopback),
-            "gate": local_human,
-            "refresh": bool(binding),
+            "gate": local_human and gate_routed,
+            "refresh": bool(binding) and refresh_routed,
             "session": local_human,
             "edit": local_human,
             # THE HOSTED WRITE-REQUEST SEAM, and the only capability here that
@@ -616,18 +708,97 @@ def mint_console_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def loopback_authorities(port: int) -> frozenset[str]:
-    """Normalized ``Host``/origin authorities for this loopback serve."""
+def loopback_authorities(port: int, bound_host: str | None = None) -> frozenset[str]:
+    """Normalized ``Host``/origin authorities for this loopback serve.
+
+    `bound_host` is the address the socket is actually bound to
+    (`server_address[0]`). Given one, the IPv6 literal ``[::1]`` is an
+    authority only where the socket is bound to ``::1`` (plan 034 T103): a
+    browser that names ``[::1]`` connects to ``::1``, which an IPv4 bind never
+    answers, so on that bind no legitimate page names it. ``127.0.0.1`` and
+    ``localhost`` stay authorities on every loopback bind. With no
+    `bound_host` the set is every loopback spelling, as it always was."""
+    hosts = (LOOPBACK_HOSTS if bound_host is None else
+             frozenset(host for host in LOOPBACK_HOSTS
+                       if ":" not in host or host == bound_host))
     authorities = {
         f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-        for host in LOOPBACK_HOSTS
+        for host in hosts
     }
     if port == 80:
         authorities |= {
             f"[{host}]" if ":" in host else host
-            for host in LOOPBACK_HOSTS
+            for host in hosts
         }
     return frozenset(authorities)
+
+
+# --------------------------- the loopback Host gate (plan 034 T103) ---------------------------
+#
+# DNS REBINDING READ THE WHOLE CORPUS (adversarial review 2, 2026-10-03, M4,
+# measured at openDox-code#77 `b1db1965`). A page on `evil.example` whose name
+# is re-pointed at 127.0.0.1 makes the engineer's own browser send
+# `GET /source/<doc>.md` with `Host: evil.example:<port>` to this loopback
+# socket, and the page may read the answer, because to the browser it is
+# same-origin. Only `/capabilities` (and only when a console token had been
+# minted) and the console routes asked whether the `Host` named this serve, so
+# `/source/*`, `/snapshot.json` and the static bundle answered 200 to any
+# `Host`. And L2: with no git identity a local serve mints no token, so
+# `/capabilities` skipped its own check and handed the install block (the data
+# directory, the socket directory and the bundled server's pid, which name
+# the OS user) to any `Host` as well.
+#
+# THE GATE IS ONE CHECK AT ONE PLACE, ahead of every route:
+# `DashboardHandler.parse_request`, which the standard library runs on every
+# request before it looks for a `do_<METHOD>` at all. So the static bundle
+# (`index.html`, `app.js`, `views/*`), `/source/*`, `/snapshot.json`,
+# `/capabilities` whatever the token state, every `/workbench` and
+# `/actions` route, a route a host contributes, HEAD, OPTIONS and any other
+# method are refused alike, and a route added tomorrow is behind it without
+# its author doing anything.
+#
+# WHAT IT ACCEPTS: exactly one `Host` line naming one of the plane's own
+# loopback authorities at the BOUND port (`loopback_authorities`, the same
+# set the console's Origin test reads): `127.0.0.1:<port>`,
+# `localhost:<port>` in any case, and `[::1]:<port>` only where the socket is
+# bound to `::1`. Exact match after trimming the optional whitespace RFC 9110
+# allows around a field value, and lower-casing, which is all `localhost`
+# needs. No suffix, no prefix, no other port, no missing or empty `Host`, no
+# second `Host` line (RFC 9112 § 3.2 refuses that too).
+#
+# WHAT IT ANSWERS: one fixed status and one fixed body, built from constants
+# below, so a refusal never echoes the `Host` it refused and never says which
+# test failed. 403 and `invalid_host`, the code `/capabilities` already
+# answered a rebinding `Host` with, so a client that read that refusal reads
+# this one. A declared request body is drained, bounded, first, as every other
+# refusal here drains one, so the refusal survives its own transport.
+#
+# A HOSTED PLANE IS UNTOUCHED. Off loopback the bind is `0.0.0.0` behind an
+# ingress, whose `Host` is the public name, and the hosted plane's rules are
+# its own (`hosted_ref_refused`, the gateway's identity): `parse_request` asks
+# `self.loopback` first and does nothing else when it is false.
+FOREIGN_HOST_STATUS = 403
+FOREIGN_HOST_ERROR = "invalid_host"
+FOREIGN_HOST_MESSAGE = "the request Host does not name this loopback server"
+FOREIGN_HOST_BODY = json.dumps({"ok": False, "error": FOREIGN_HOST_ERROR,
+                                "message": FOREIGN_HOST_MESSAGE}).encode("utf-8")
+
+
+def host_names_this_loopback_serve(host_lines, port: int,
+                                   bound_host: str | None = None) -> bool:
+    """Whether a request's `Host` header lines name this loopback serve.
+
+    `host_lines` is every `Host` line the request carried, in order
+    (`headers.get_all("Host")`, which is None when there is none). True only
+    for exactly one line whose value, with the surrounding spaces and tabs
+    trimmed and lower-cased, is one of `loopback_authorities(port,
+    bound_host)`. Pure, so the table of crafted `Host`s is asserted on it
+    directly as well as through a live server."""
+    lines = list(host_lines or ())
+    if len(lines) != 1:
+        return False
+    value = str(lines[0]).strip(" \t").lower()
+    return value in loopback_authorities(port, bound_host)
 
 
 # --------------------------- source-path containment (pure) ---------------------------
@@ -789,22 +960,19 @@ def _head_of(checkout_root: Path, git=None) -> str | None:
 
 class DashboardHandler(serve_workbench.WorkbenchRoutes,
                        serve_project.ProjectRoutes,
-                       # BUILD slice 2b: these two read `serve_gate.GateRoutes`
-                       # and `serve_projection.ProjectionRoutes` — openXdox
-                       # classes, and a base expression is evaluated when the
-                       # class statement runs, so these two lines alone made
-                       # `import opendox.serve` require the layer that PINS
-                       # openDox. The stand-ins carry the same method names and
-                       # forward to the same functions with the same `self` on
-                       # first call, so every contributed binding behaves
-                       # exactly as before. Since plan 034 T055 the core
-                       # `/snapshot.json` arm's handlers are THIS class's own
-                       # (`_serve_snapshot` below), and the projection stand-in
-                       # forwards one method, `_serve_index`, the one its
-                       # contributed `/snapshot-index.json` binding names
-                       # (T084 hands the column to the handler facet).
-                       consumer_reach.LateGateRoutes,
-                       consumer_reach.LateProjectionRoutes,
+                       # Plan 034 T084 (#1144 4.3; R1Q1 (a), openxFactory#656
+                       # comment 5817152735): openXdox's gate and projection
+                       # columns, `serve_gate.GateRoutes` and
+                       # `serve_projection.ProjectionRoutes`, stood here, as
+                       # `consumer_reach`'s late stand-ins since BUILD slice 2b
+                       # and as the classes themselves before it. They are a
+                       # HOST's columns, so they are composed in at build
+                       # time through the handler-contribution facet, beside
+                       # the route bindings that name their methods
+                       # (`_handle_gate_action`, `_serve_index`). A host that
+                       # contributes a binding without its column is refused
+                       # at wiring, before a socket (`route_extension.
+                       # resolve_handlers`). A lone openDox carries neither.
                        # Plan 034 T011 (#1144 task 2.2): openxFactory's
                        # `serve_openxfactory_lanes.LaneRoutes` stood here.
                        # It is a descendant's column in a package openDox
@@ -826,6 +994,11 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     # waits, and a healthy local client is orders of magnitude faster.
     timeout = 30
 
+    # The static bundle's types, pinned ahead of the platform's table (see
+    # `STATIC_CONTENT_TYPES`). The stdlib's own compression entries stay.
+    extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map,
+                      **STATIC_CONTENT_TYPES}
+
     checkout_root: Path = Path(".")
     snapshot_path: Path = Path("snapshot.json")
     snapshot_route: str = SNAPSHOT_ROUTE
@@ -839,6 +1012,12 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     # v2 seam: the startup capability verdict, whether the bind is loopback (the
     # write-route gate), and an injectable adapter factory (tests supply a fake).
     capabilities: dict = _DEFAULT_CAPABILITIES
+    # THE SERVING PROCESS'S OWN INSTALL SHAPE (plan 034 T073; #1144 13.4a):
+    # a zero-argument callable answering `/capabilities`' `install` block, or
+    # None where the process that built this server resolved no install shape
+    # (a library caller or a test), which publishes no block. See
+    # `build_server(install_report=)`.
+    install_report = None
     loopback: bool = True
     adapter_factory = None
     # The session's remote-write port supplier (T082). None means "build the real
@@ -1058,14 +1237,15 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             self._serve_project_register(head_only)
             return True
         if path == CAPABILITIES_ROUTE:
-            # The loopback console token is process-launch authority. Never
-            # disclose it to a DNS-rebinding Host, even though the connection
-            # itself arrived on the loopback socket.
-            if self.console_token and not self._trusted_console_host():
-                self._send_json(403, {"ok": False, "error": "invalid_host",
-                                      "message": "the request Host is not this "
-                                                 "loopback console"})
-                return True
+            # NO HOST TEST OF ITS OWN HERE ANY MORE (plan 034 T103). One stood
+            # here, run only when a console token had been minted, so a local
+            # serve with no git identity handed its install block to a
+            # DNS-rebinding `Host` (adversarial review 2, L2). On a loopback
+            # plane `parse_request` has refused every such request before any
+            # route is reached, whatever the token state; on a hosted plane
+            # no token is ever minted (the `session` capability needs
+            # loopback), so the old test could not fire there either.
+            #
             # THE ONE REPOSITORY THIS SERVE CAN WRITE TO, reported from the
             # SAME authority a create is refused against (`_session_repository`
             # — a session lives in one tree, the served checkout), so the
@@ -1091,6 +1271,12 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             # display does not make this credential-free surface a credential
             # holder or an auth authority (design D16 nuance).
             payload["hosted_actor"] = self.headers.get("X-Auth-Request-User") or None
+            # THE INSTALL BLOCK (plan 034 T073; #1144 13.4a), read PER REQUEST
+            # from the serving process's own settings and its own bundled
+            # server, so the pid it names is the server's at the moment it is
+            # asked: a child that has gone is reported as gone.
+            if self.install_report is not None:
+                payload["install"] = self.install_report()
             self._serve_bytes(json.dumps(payload).encode("utf-8"),
                               JSON_CTYPE, head_only)
             return True
@@ -1151,12 +1337,12 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     # at § 2.4 PR 3, because it tests `path == self.snapshot_route`, a
     # per-server keyword a frozen `RouteBinding.pattern` cannot carry, while
     # its handlers travelled to openXdox's projection column and were reached
-    # through `consumer_reach.LateProjectionRoutes`. So a standalone server
-    # refused every `/snapshot.json`. The four methods below are that route's
-    # handlers, answering from the REGISTERED snapshot source: the query key,
-    # the active snapshot's bytes, the route itself, and FR-048's per-entry
-    # hosted refusal, which `_serve_source` asks too. The rules they consult
-    # are the registry's, through its seam.
+    # through a late stand-in for it (`consumer_reach`, retired at T084). So
+    # a standalone server refused every `/snapshot.json`. The four methods
+    # below are that route's handlers, answering from the REGISTERED snapshot
+    # source: the query key, the active snapshot's bytes, the route itself,
+    # and FR-048's per-entry hosted refusal, which `_serve_source` asks too.
+    # The rules they consult are the registry's, through its seam.
     def _query_key(self) -> tuple[str | None, str | None]:
         """The optional `?repository=&ref=` of a read route. No repository
         means the ACTIVE entry, which is what a query-less request asks for."""
@@ -1384,17 +1570,77 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             return
         self._send_error_code(action_errors.ERR_UNKNOWN_ACTION)
 
+    # ---- the loopback Host gate (plan 034 T103), ahead of every route ----
+    def parse_request(self) -> bool:
+        """The standard library's request parse, then THE LOOPBACK HOST GATE.
+
+        `BaseHTTPRequestHandler.handle_one_request` calls this for every
+        request and dispatches to `do_<METHOD>` only when it answers True, so
+        a refusal here is ahead of every route and every method, the ones a
+        host contributes included (see the gate's banner beside
+        `host_names_this_loopback_serve`). `DashboardHandler` is the first
+        base of every bound class (`route_extension.compose_handler`), so no
+        contributed mixin comes ahead of it.
+
+        Off loopback it is the standard parse and nothing else: the hosted
+        plane keeps its own rules."""
+        if not super().parse_request():
+            return False
+        if self.loopback and not self._trusted_console_host():
+            self._refuse_foreign_host()
+            return False
+        return True
+
+    def _refuse_foreign_host(self) -> None:
+        """The gate's ONE answer: a fixed status and body, never the `Host`.
+
+        The declared body, if any, is drained (bounded) first, as every other
+        refusal on this surface drains one: answering with bytes unread can
+        reset the connection under the refusal before the client reads it. The
+        connection closes after it, so nothing left on the socket is read as
+        a next request. The server log gets one fixed line, so the refusal is
+        reported as well as made, and that line names no request-derived
+        value either."""
+        try:
+            declared = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            declared = 0
+        if declared > 0:
+            _drain_refused_body(self.rfile, declared)
+        sys.stderr.write("[loopback] refused a request whose Host does not "
+                         "name this loopback server\n")
+        self.close_connection = True
+        self.send_response(FOREIGN_HOST_STATUS)
+        self.send_header("Content-Type", JSON_CTYPE)
+        self.send_header("Content-Length", str(len(FOREIGN_HOST_BODY)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(FOREIGN_HOST_BODY)
+
+    def _bound_authorities(self) -> frozenset[str]:
+        """This serve's own loopback authorities, from the BOUND socket: its
+        port and its address, never anything the request said."""
+        bound = self.server.server_address
+        return loopback_authorities(int(bound[1]), str(bound[0]))
+
     # ---- the human-console test (FR-019's third clause) ----
     def _trusted_console_host(self) -> bool:
-        """Whether ``Host`` names this server's bound loopback port."""
-        raw = str(self.headers.get("Host") or "").strip().lower()
-        return raw in loopback_authorities(int(self.server.server_address[1]))
+        """Whether the request's ONE ``Host`` line names this server's bound
+        loopback port (`host_names_this_loopback_serve`). The gate in
+        `parse_request` asks it of every request on a loopback plane, and the
+        console test asks it again, so the console's answer never depends on
+        the gate having run (a hand-built handler)."""
+        bound = self.server.server_address
+        return host_names_this_loopback_serve(
+            self.headers.get_all("Host"), int(bound[1]), str(bound[0]))
 
     def _own_origin_authorities(self) -> set[str]:
         """The `host:port` spellings a request from THIS serve's own page can
-        legitimately name. Derived from the bound port, never from the request's
-        untrusted ``Host``, so DNS rebinding cannot define its own origin."""
-        return set(loopback_authorities(int(self.server.server_address[1])))
+        legitimately name. Derived from the bound socket, never from the
+        request's untrusted ``Host``, so DNS rebinding cannot define its own
+        origin."""
+        return set(self._bound_authorities())
 
     def _foreign_origin(self) -> bool:
         """Whether the caller declares an origin that is not this serve's own.
@@ -1717,6 +1963,7 @@ def build_server(
     knowledge_declaration=None,
     packet_assembler=None,
     route_extensions: tuple = (),
+    install_report=None,
 ) -> http.server.ThreadingHTTPServer:
     """Build (but do not start) the loopback server. `port=0` binds an ephemeral
     port (read it back from `httpd.server_address`). `head` is injectable so a
@@ -1753,6 +2000,18 @@ def build_server(
     the same discipline `real_notebook_adapter` carries, and for the same
     reason: an operator must be able to read what their install talks to, and a
     library default that quietly built one would defeat that.
+
+    `install_report` is THE SERVING PROCESS'S OWN INSTALL SHAPE (plan 034
+    T073; #1144 13.4a; RULED R1Q16 (i), `5850003126`): a zero-argument callable
+    answering `/capabilities`' `install` block, `{"mode": ...,
+    "database_bundle": ...}`, asked on each request. The ENTRY POINT supplies
+    it, from the settings it loaded and the bundled server it started as its
+    own child (`cli._install_report`), so the block describes the process a
+    user reached and not a second process that read the same settings.
+    Unset, the payload carries no `install` block: nothing in this process
+    resolved an install shape, and none is invented. This module reads no
+    runtime setting itself (research R9: the document surface never imports
+    the runtime).
 
     `route_extensions` is the ROUTE EXTENSION POINT
     (`split-opendox-two-layer-product` § 2.4, design § D2): the tuple of
@@ -1801,6 +2060,15 @@ def build_server(
     # from the registered registry, which is what lets a server be BUILT with
     # nothing else installed (plan 034, research R7).
     projection_seams.register_defaults()
+    # AND openDox's OWN doxBench validators and status-exemption rail (4.3,
+    # T085; R1Q10 (a) and R1Q12 (a), the same pattern), each only where no host
+    # has registered its own. So the served model catalog answers standalone,
+    # validated by openDox's own validator over its packaged copies.
+    doxbench_defaults.register_defaults()
+    # AND the consumer columns' defaults (plan 034 T084; #1144 4.3,
+    # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
+    # the cross-reference register, the same way.
+    column_seams.register_defaults()
 
     from opendox import doxbench_turns
     # Imported HERE rather than at module scope, for the reason that is
@@ -1960,6 +2228,9 @@ def build_server(
         loopback=loopback,
         actor=resolved_actor,
         refresh_binding=source.refresh_binding,
+        # THE ROUTES THIS ASSEMBLY COLLECTED, so a flag whose affordance is a
+        # contributed route is true only where one answers (T084; batch L).
+        route_bindings=route_bindings,
     )
     # The human console's per-serve token (FR-019's third clause, review finding
     # 2). Minted only where session verbs exist at all, and published on
@@ -2136,6 +2407,10 @@ def build_server(
         # The contributed routes, already in consult order (§ 2.4). One more
         # injected class attribute, exactly like the seams above it.
         "route_bindings": route_bindings,
+        # THE SERVING PROCESS'S OWN INSTALL SHAPE (T073; 13.4a), asked per
+        # request by the `/capabilities` arm.
+        "install_report": (staticmethod(install_report)
+                           if install_report is not None else None),
     })
     # A ROUTE THAT CANNOT BE SERVED MUST NOT START. Resolved against the bound
     # class — the object the dispatch will `getattr` on — so a binding naming a
@@ -2143,13 +2418,47 @@ def build_server(
     # trace on the first live connection.
     route_extension.resolve_handlers(route_bindings, bound)
     factory = functools.partial(bound, directory=str(web_dir))
-    return http.server.ThreadingHTTPServer((host, port), factory)
+    return _server_class_for(host)((host, port), factory)
+
+
+class _IPv6ThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    """`ThreadingHTTPServer` over `AF_INET6`, for a bind to an IPv6 literal
+    (plan 034 T103; Copilot at openDox-code#80, r4171161548).
+
+    The standard class is `AF_INET` only, so `host="::1"`, which
+    `LOOPBACK_HOSTS` and the local install's `LOCAL_BIND_HOSTS` both name,
+    failed at the bind with `gaierror`, and `generate-and-open --local --host
+    ::1` ended in a traceback. The loopback Host gate accepts `[::1]:<port>`
+    exactly where the socket is bound to `::1`, so the bind it names has to
+    be one this module can make."""
+
+    address_family = socket.AF_INET6
+
+
+def _server_class_for(host: str) -> type[http.server.ThreadingHTTPServer]:
+    """The server class a bind to `host` takes: `AF_INET6` for an IPv6
+    literal (the one spelling of a host that contains a colon), and the
+    standard `AF_INET` class for everything else, exactly as before."""
+    return (_IPv6ThreadingHTTPServer if ":" in str(host)
+            else http.server.ThreadingHTTPServer)
 
 
 def server_url(httpd: http.server.ThreadingHTTPServer, path: str = "/") -> str:
     host, port = httpd.server_address[:2]
-    if host in ("0.0.0.0", "", "::"):
+    # A WILDCARD BIND IS ANNOUNCED AT ITS OWN FAMILY'S LOOPBACK (Copilot at
+    # openDox-code#80, r4173481146). Since T103's fix round 1 `::` binds an
+    # `AF_INET6` socket, which is IPv6-only on some platforms, so announcing
+    # it at `127.0.0.1` could print a URL nothing answers. `::` is `::1`;
+    # the IPv4 wildcard stays `127.0.0.1`.
+    if host == "::":
+        host = "::1"
+    elif host in ("0.0.0.0", ""):
         host = "127.0.0.1"
+    # AN IPv6 LITERAL IS BRACKETED in a URL (RFC 3986 § 3.2.2): `::1` is
+    # `http://[::1]:<port>/`, and `[::1]:<port>` is also the `Host` a browser
+    # then sends, which the loopback gate accepts on that bind (T103).
+    if ":" in str(host):
+        host = f"[{host}]"
     # plain-HTTP by design (S5332): a loopback-only local dev server — TLS adds
     # nothing on 127.0.0.1; the scheme is composed so no insecure-URL literal
     # exists for a copy-paste into non-loopback code.
@@ -2294,6 +2603,21 @@ def _refuse_impossible_checkout_root(value: Path | str) -> int:
     return 0
 
 
+#: THE SERVER ENTRY POINT'S OWN NAME AND WORDS (plan 034 T084, with
+#: `cli.PROG`; adversarial review 2). `python -m opendox.serve --help` printed
+#: `usage: ideation-dashboard-serve` and this module's docstring, which is
+#: openxFactory's pre-carve history. It names how it is run and openDox only.
+#: Loopback is the DEFAULT bind, not a promise: `--host` takes any address, and
+#: a hosted install serves through this entry point (Copilot review of
+#: openDox-code#77, r4173844338).
+SERVE_PROG = "python -m opendox.serve"
+SERVE_DESCRIPTION = (
+    "Serve an openDox snapshot: the browser bundle, the snapshot and the "
+    "read-only source of the checkout it was generated from, on a loopback "
+    "address unless --host names another. `opendox generate-and-open` "
+    "generates a snapshot and serves it in one command.")
+
+
 def main(argv: list[str] | None = None) -> int:
     # The process entry point registers openDox's own default where no host has
     # (R1Q3 (a)), exactly where a host would register its own. Nothing is BUILT
@@ -2313,8 +2637,14 @@ def main(argv: list[str] | None = None) -> int:
     # BEFORE the parser: its option defaults below read the registered
     # registry (`registry_mod.DEFAULT_REF` and the data source's defaults).
     projection_seams.register_defaults()
-    parser = argparse.ArgumentParser(prog="ideation-dashboard-serve", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    # AND openDox's own doxBench defaults (4.3, T085), the same way.
+    doxbench_defaults.register_defaults()
+    # AND the consumer columns' defaults (plan 034 T084; #1144 4.3,
+    # R1Q10 (a)): the gate primitives, the doxBench scope, kickoff and
+    # the cross-reference register, the same way.
+    column_seams.register_defaults()
+    parser = argparse.ArgumentParser(prog=SERVE_PROG,
+                                     description=SERVE_DESCRIPTION)
     parser.add_argument("--web-dir", default=str(Path(__file__).resolve().parent / "web"),
                         help="static bundle directory (default: the packaged web/)")
     parser.add_argument("--snapshot", required=True,

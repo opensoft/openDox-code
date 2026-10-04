@@ -73,7 +73,7 @@ import { mountStagingWorkbench } from "./views/staging-workbench.js";
 // resolved in `render()` below, off the `gate.workbench.session` binding, and
 // `refusalTransport` is the fallback.
 import { createModelIntakeTransports } from "./views/swb-model-intake.js";
-import { CONSOLE_TOKEN_FIELD } from "./views/staging-workbench-model.js";
+import { CONSOLE_TOKEN_FIELD, GATELESS_SAVE_REFUSAL } from "./views/staging-workbench-model.js";
 // THE TWO MODELS THE CONTRIBUTED GATE COLUMN REACHES THROUGH `ctx` — RULED
 // counterpart Q6 (opensoft/openxFactory#656 comment `5649094228`, Brett Heap,
 // 2026-09-12): "what a CONTRIBUTED view module may IMPORT from openDox's
@@ -372,6 +372,30 @@ export function createDoxBenchThreadLoader(consoleTokenOf, injectedFetch) {
     if (!response.ok) return null;
     return response.json().catch(() => null);
   };
+}
+
+// THE THREAD READ IS WIRED ONLY WHERE A SESSION COLUMN IS (plan 034 T102
+// follow-on; holder ruling F1 (i) on openxFactory#656). A thread is a branch
+// session's record, one sidecar per document on the session branch, and only a
+// host that contributes `gate.workbench.session` has branch sessions. A
+// standalone plane has none, so every thread read it made answered 403
+// `thread_capability_unavailable`, and the browser logged one console error per
+// switch of the rail's loaded document (the T096 dry run's finding F1). The
+// condition is `refusalTransport`'s: `workbenchGate.session`. A composed host
+// keeps reading threads exactly as before.
+//
+// NOT AN ABSENT SEAM. The rail reads an absent `thread` as the pre-§11 rail,
+// which keeps the previous document's transcript across a switch, and carrying
+// one document's turns into another's next request is the defect the switch
+// exists to close (`switchThread` in views/doxbench-chat.js). So a plane with
+// no session column gets a seam that answers "no readable thread" itself, and
+// sends nothing: the same `null` the 403 produced, so the rail still adopts the
+// empty transcript, without the request or its console error.
+export function doxbenchThreadSeam(session, consoleTokenOf, injectedFetch) {
+  if (!session) {
+    return async function noThreadWithoutABranchSession() { return null; };
+  }
+  return createDoxBenchThreadLoader(consoleTokenOf, injectedFetch);
 }
 
 export function createDoxBenchTurnSubmitter(consoleTokenOf, injectedFetch) {
@@ -952,14 +976,20 @@ function ensurePageOverlayHost(doc) {
 // column has no transport at all, and a Save that silently did nothing would be
 // the worst answer available. This stands in for it and REFUSES in the shape
 // `runSave` already understands, naming the layering rather than the symptom.
+//
+// SINCE T102 THIS IS EVERY STANDALONE SAVE (RULED openxFactory#656
+// `5963618568`: "only creating documents and Save stay behind the gate, so Save
+// is refused by name"). A standalone workbench now offers its editors by scope,
+// so a human really does press Save here, and the refusal is the model's one
+// sentence: what is missing and which binding would supply it. It is picked on
+// the session half alone, so the sentence names only that half. It used to end
+// "Run the CLI verb in your pinned checkout", a remedy a standalone install
+// does not have.
 function refusalTransport() {
   return async () => ({
     ok: false,
     error: "no_gate_column",
-    message: "this shell was assembled without the column that contributes the "
-      + "first-edit transport (`gate.workbench.session`), so a governed Save "
-      + "cannot be sent. Run the CLI verb in your pinned checkout, where the "
-      + "authority lives.",
+    message: GATELESS_SAVE_REFUSAL,
   });
 }
 
@@ -1461,8 +1491,11 @@ async function render() {
       // add-doxbench-editing-phase-b task 7.2: the rail's loaded-document
       // selector switches the transcript to that document's thread, and this
       // is where it reads one. A READ seam only — there is no thread write on
-      // this bundle, because a thread is written by a turn.
-      thread: createDoxBenchThreadLoader(() => caps?.console_token),
+      // this bundle, because a thread is written by a turn. Read only where a
+      // session column is (T102 follow-on, ruling F1 (i)): elsewhere the seam
+      // answers "no readable thread" without a request (`doxbenchThreadSeam`).
+      thread: doxbenchThreadSeam(workbenchGate.session,
+        () => caps?.console_token),
       // add-doxbench-distilled-abstract §7: the docs subpane's model-derived
       // abstract. One seam, one route, one call site -- and no second provider
       // path: the route sits behind the SAME three-part verdict the catalog and
