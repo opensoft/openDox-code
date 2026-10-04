@@ -2488,16 +2488,24 @@ def build_server(
     # each entry the registry holds now (the bootstrapped session worktrees
     # among them), and, on a loopback plane, the sessions container every
     # later session worktree is made in (`branch_session.sessions_root`).
-    served = [checkout_root, web_dir,
+    #
+    # AND THE SNAPSHOT FILES `/snapshot.json` READS DIRECTLY (Copilot at
+    # openDox-code#84, r4175213798), not through the static handler: the
+    # configured snapshot, each registered entry's, and, on a loopback plane,
+    # the container every session's snapshot is written in. A snapshot named
+    # at an earlier copy would otherwise be replaced by the new one and served.
+    served = [checkout_root, web_dir, snapshot_path,
               *(Path(path).resolve() for path in (source_roots or {}).values())]
     if loopback:
         from opendox import branch_session as session_mod
         served.append(session_mod.sessions_root(checkout_root))
+        served.append(session_mod.snapshots_root(checkout_root))
     entries = getattr(source.registry, "entries", None)
     for entry in (entries() if callable(entries) else ()):
-        root = getattr(entry, "source_root", None)
-        if root:
-            served.append(Path(root).resolve())
+        for root in (getattr(entry, "source_root", None),
+                     getattr(entry, "snapshot_path", None)):
+            if root:
+                served.append(Path(root).resolve())
     httpd.served_roots = tuple(dict.fromkeys(served))
     return httpd
 
@@ -2611,18 +2619,18 @@ def serve(
     # as `cli.cmd_generate_and_open` writes it: its PATH is printed, never the
     # token, and it goes when the server does. A copy that cannot be written
     # safely refuses the start (`console_access.ConsoleAccessRefused`).
-    try:
-        console = console_access.publish(httpd, page_url=page)
-    except BaseException:
-        httpd.server_close()
-        raise
-    try:
-        # A plain `kill`, or a closed terminal, stops a standalone console the
-        # way Ctrl-C does, so the copy is removed; a plane that wrote none
-        # keeps the signals' defaults. It covers the whole window from the
-        # write to the stop (T104's self-pass).
-        with console_access.terminate_as_interrupt(console is not None):
+    #
+    # A plain `kill`, or a closed terminal, stops a standalone console the way
+    # Ctrl-C does, from BEFORE the copy is written to after it is removed, and
+    # a stop that arrives while the copy is written or removed is held until
+    # that is done (Copilot at openDox-code#84, r4175213864). A plane that
+    # writes no copy keeps the signals' defaults.
+    console = None
+    with console_access.terminate_as_interrupt(console_access.needs_copy(httpd)):
+        try:
             try:
+                with console_access.deferred_termination():
+                    console = console_access.publish(httpd, page_url=page)
                 if console is not None:
                     print(f"console {console.file_url} (this user's private "
                           "copy, mode 0600: open it to open the console page)")
@@ -2635,11 +2643,13 @@ def serve(
                 httpd.serve_forever()
             except KeyboardInterrupt:
                 pass
-    finally:
-        # The copy FIRST, while this process still holds the port, then the
-        # socket (`console_access.remove_private_copy`).
-        console_access.remove_private_copy(console)
-        httpd.server_close()
+        finally:
+            # The copy FIRST, while this process still holds the port, then
+            # the socket (`console_access.remove_private_copy`). A stop that
+            # arrives meanwhile lets both finish.
+            with console_access.deferred_termination(raise_pending=False):
+                console_access.remove_private_copy(console)
+                httpd.server_close()
 
 
 def _source_roots_from_args(values) -> dict:

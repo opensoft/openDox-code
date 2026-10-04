@@ -882,17 +882,18 @@ def test_a_replacement_written_while_the_old_copy_is_removed_survives(
 
     def racing(src, dst, *args, **kwargs):
         if src == first.path.name and not raced:
-            raced.append(_write(state, token=second_token))   # the replacement
+            raced.append(_publish_concurrently(state, second_token))
         return real_rename(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(console_access.os, "rename", racing)
     console_access.remove_private_copy(first)
     monkeypatch.undo()
     assert raced, "the race was never staged"
+    second = _settle(raced[0])
     record = console_access.read_private_copy(first.path)
     assert record["console_token"] == second_token
     assert sorted(p.name for p in first.path.parent.iterdir()) == [first.path.name]
-    console_access.remove_private_copy(raced[0])
+    console_access.remove_private_copy(second)
     assert not first.path.exists()
 
 
@@ -1210,6 +1211,32 @@ def test_a_fifo_at_the_copy_is_refused_without_blocking(tmp_path) -> None:
 #      bdd0f586), clause by clause, and the opener file's lifecycle
 # ---------------------------------------------------------------------------
 
+def _publish_concurrently(state: Path, token: str, port: int = 8080) -> dict:
+    """Publish a copy from ANOTHER thread, as another serve would, and give it
+    time to finish or to wait on the console directory's lock."""
+    import time
+
+    outcome: dict = {}
+
+    def publish() -> None:
+        try:
+            outcome["copy"] = _write(state, port=port, token=token)
+        except BaseException as exc:  # noqa: BLE001 — judged by `_settle`
+            outcome["error"] = exc
+
+    outcome["thread"] = threading.Thread(target=publish, daemon=True)
+    outcome["thread"].start()
+    time.sleep(0.5)
+    return outcome
+
+
+def _settle(outcome: dict):
+    outcome["thread"].join(timeout=30)
+    assert not outcome["thread"].is_alive(), "the concurrent publication never finished"
+    assert "error" not in outcome, outcome.get("error")
+    return outcome["copy"]
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -1510,22 +1537,14 @@ def test_another_serves_copy_survives_a_removal_where_hard_links_fail(
     state = _state(tmp_path)
     first = _write(state)
     second_token = _token()
-    real_rename = os.rename
-    raced: list = []
-
-    def racing(src, dst, *args, **kwargs):
-        if src == first.path.name and not raced:
-            raced.append(_write(state, token=second_token))   # the replacement
-        return real_rename(src, dst, *args, **kwargs)
+    _write(state, token=second_token)        # another serve's, over the first
 
     def no_hard_links(*args, **kwargs):
         raise PermissionError(errno.EPERM, "Operation not permitted")
 
-    monkeypatch.setattr(console_access.os, "rename", racing)
     monkeypatch.setattr(console_access.os, "link", no_hard_links)
     console_access.remove_private_copy(first)
     monkeypatch.undo()
-    assert raced, "the race was never staged"
     assert console_access.read_private_copy(first.path)["console_token"] == second_token
     assert sorted(p.name for p in first.path.parent.iterdir()) == [first.path.name]
 
@@ -1745,3 +1764,225 @@ def test_a_link_swapped_after_the_checks_never_redirects_the_write(
     expected = (layout["private"] / "state").resolve()
     assert copy.path == console_access.private_copy_path(expected, 8080)
     assert console_access.read_private_copy(copy.path)["port"] == 8080
+
+
+# ---------------------------------------------------------------------------
+# 13 — Copilot's review at 182cac76: the snapshot files are served roots;
+#      publication and removal are serialized; a stop during publication
+# ---------------------------------------------------------------------------
+
+def test_a_snapshot_inside_the_state_directory_refuses_the_start(
+        tmp_path, monkeypatch, capsys, standalone_profile) -> None:
+    """Copilot at openDox-code#84, r4175213798. `/snapshot.json` reads its
+    file directly, not through the static handler, so a `--snapshot` named
+    at an earlier copy, `<state>/console/<port>.html`, would have been
+    replaced by the new copy and served to anyone. The snapshot file, each
+    registered entry's snapshot and the session snapshots' container are
+    served roots, so the start is refused by name, through a link to it as
+    well, and the earlier copy is left as it was."""
+    from opendox import console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = _state(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    monkeypatch.setattr(serve, "real_notebook_adapter", lambda *a, **k: None)
+
+    def served(self, *args, **kwargs):
+        raise AssertionError("the server served")
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", served)
+    port = _free_port()
+    earlier = _write(state, port=port)
+    alias = tmp_path / "snapshot-alias.json"
+    alias.symlink_to(earlier.path)
+    for named in (earlier.path, alias):
+        before = (earlier.path.read_bytes(), _fingerprint(earlier.path))
+        assert serve.main(["--snapshot", str(named), "--checkout-root", str(repo),
+                           "--port", str(port)]) == 1
+        err = capsys.readouterr().err
+        assert "serve refused:" in err and "OPENDOX_STATE_DIR" in err, err
+        assert str(earlier.path.resolve()) in err, err
+        assert (earlier.path.read_bytes(), _fingerprint(earlier.path)) == before
+        assert _port_is_free(port)
+
+
+def test_the_plane_reports_its_snapshot_files_as_served_roots(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """The roots `/snapshot.json` serves from: the configured snapshot, each
+    registered entry's snapshot file, and, on a loopback plane, the container
+    each session's snapshot is written in."""
+    from opendox import branch_session
+
+    with _serving(tmp_path, monkeypatch) as (httpd, _base, repo):
+        snapshot = (tmp_path / "snapshot.json").resolve()
+        assert snapshot in httpd.served_roots
+        assert branch_session.snapshots_root(repo) in httpd.served_roots
+        entries = httpd.RequestHandlerClass.func.source.registry.entries()
+        for entry in entries:
+            if getattr(entry, "snapshot_path", None):
+                assert Path(entry.snapshot_path).resolve() in httpd.served_roots
+        # ...and a registered entry whose snapshot is ANOTHER file
+        from opendox import default_registry, serve
+
+        other = tmp_path / "elsewhere" / "other.snapshot.json"
+        other.parent.mkdir()
+        other.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+        source = default_registry.SnapshotSource(
+            baked_snapshot=tmp_path / "snapshot.json", checkout_root=repo)
+        source.registry.register(default_registry.entry_from_snapshot_file(
+            other, repository="other", ref="main"))
+        declared = serve.build_server(WEB, tmp_path / "snapshot.json", repo,
+                                      port=0, quiet=True, snapshot_source=source)
+        try:
+            assert other.resolve() in declared.served_roots
+        finally:
+            declared.server_close()
+
+
+def test_a_copy_published_during_a_rename_back_is_never_overwritten(
+        tmp_path, monkeypatch) -> None:
+    """Copilot at openDox-code#84, r4175213842. Where a hard link cannot be
+    made, another serve's copy is put back by a rename where the name is
+    free, and a still newer copy published between that check and the
+    rename would have been overwritten by the older one. Publication and
+    removal are serialized on the console directory's lock, so the newer
+    copy, published at exactly that moment, waits and then stands."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    first = _write(state)
+    second_token, third_token = _token(), _token()
+    _write(state, token=second_token)        # another serve's, over the first
+    real_exists = console_access._name_exists
+    raced: list = []
+
+    def then_publish(name, directory):
+        free = real_exists(name, directory)
+        if not raced:
+            raced.append(_publish_concurrently(state, third_token))
+        return free
+
+    def no_hard_links(*args, **kwargs):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(console_access, "_name_exists", then_publish)
+    monkeypatch.setattr(console_access.os, "link", no_hard_links)
+    console_access.remove_private_copy(first)
+    monkeypatch.undo()
+    assert raced, "the race was never staged"
+    _settle(raced[0])
+    record = console_access.read_private_copy(first.path)
+    assert record["console_token"] == third_token, "an older copy overwrote the newest"
+    assert sorted(p.name for p in first.path.parent.iterdir()) == [first.path.name]
+
+
+def test_deferred_termination_holds_a_stop_until_the_block_ends() -> None:
+    """While a copy is being published or removed, SIGTERM is held and not
+    raised in the middle of it: publication raises it once the copy is
+    in hand, and removal, already a stop, lets it go."""
+    from opendox import console_access
+
+    with console_access.terminate_as_interrupt(True):
+        assert signal.getsignal(signal.SIGTERM) not in (signal.SIG_DFL, signal.SIG_IGN)
+        with pytest.raises(KeyboardInterrupt):
+            with console_access.deferred_termination():
+                os.kill(os.getpid(), signal.SIGTERM)
+                signal.pthread_sigmask(signal.SIG_BLOCK, [])   # deliver now
+                reached = True                                  # not raised here
+        assert reached
+        with console_access.deferred_termination(raise_pending=False):
+            os.kill(os.getpid(), signal.SIGTERM)
+            signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        with console_access.deferred_termination():
+            pass                                                # nothing left over
+
+
+@pytest.mark.parametrize("entry", ["serve", "generate-and-open"])
+def test_a_stop_during_publication_removes_the_copy(
+        tmp_path, monkeypatch, capsys, standalone_profile, entry) -> None:
+    """Copilot at openDox-code#84, r4175213864. SIGTERM's handling began
+    only after the copy was published, so a SIGTERM during publication (here
+    in the copy's read-back, after its rename into place) took its default
+    action and left the token's copy behind. It is installed BEFORE
+    publication on a plane that writes a copy, and held through it, so the
+    stop ends the start cleanly, before the startup line, with no copy left."""
+    from opendox import cli, console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = _state(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    monkeypatch.setattr(serve, "real_notebook_adapter", lambda *a, **k: None)
+    real_read = console_access.read_private_copy
+    stopped: list = []
+
+    def read_back(path):
+        if not stopped:
+            stopped.append(path)
+            # never deliver a SIGTERM that would END this test process
+            assert signal.getsignal(signal.SIGTERM) not in (
+                signal.SIG_DFL, signal.SIG_IGN), "no handler during publication"
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real_read(path)
+
+    def served(self, *args, **kwargs):
+        raise AssertionError("the server served after a stop")
+
+    monkeypatch.setattr(console_access, "read_private_copy", read_back)
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", served)
+    if entry == "serve":
+        snapshot = tmp_path / "snapshot.json"
+        snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+        assert serve.main(["--snapshot", str(snapshot), "--checkout-root", str(repo),
+                           "--port", "0"]) == 0
+        startup = "serving ideation dashboard at"
+    else:
+        args = cli.build_parser().parse_args([
+            "generate-and-open", "--repo-root", str(repo), "--repository", "fixture",
+            "--run-dir", str(tmp_path / "run"), "--port", "0", "--no-validate",
+            "--no-open"])
+        assert cli._generate_and_open(args, opener=lambda url: None) == 0
+        startup = "  serving "
+    out = capsys.readouterr().out
+    assert stopped, "the stop was never staged"
+    assert startup not in out and "console " not in out, out
+    assert list((state / console_access.CONSOLE_DIRNAME).iterdir()) == []
+
+
+def test_a_stop_during_removal_lets_the_removal_finish(
+        tmp_path, monkeypatch, capsys, standalone_profile) -> None:
+    """The handler stays installed through removal, and a SIGTERM that
+    arrives while the copy is being removed is held, not raised in the middle
+    of it: the removal finishes, nothing is left, and the stop is clean."""
+    from opendox import console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = _state(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    monkeypatch.setattr(serve, "real_notebook_adapter", lambda *a, **k: None)
+
+    def stopped_at_once(self, *args, **kwargs):
+        raise KeyboardInterrupt                       # Ctrl-C, at once
+
+    real_rename = os.rename
+    taken: list = []
+
+    def take(src, dst, *args, **kwargs):
+        if not taken and ".removing-" in str(dst):
+            taken.append(dst)
+            assert signal.getsignal(signal.SIGTERM) not in (
+                signal.SIG_DFL, signal.SIG_IGN), "no handler during removal"
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", stopped_at_once)
+    monkeypatch.setattr(console_access.os, "rename", take)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    assert serve.main(["--snapshot", str(snapshot), "--checkout-root", str(repo),
+                       "--port", "0"]) == 0
+    monkeypatch.undo()
+    assert taken, "the stop was never staged"
+    assert list((state / console_access.CONSOLE_DIRNAME).iterdir()) == []

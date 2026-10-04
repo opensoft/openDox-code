@@ -65,7 +65,10 @@ are that module's private helpers and its refusal names a socket:
   * every refusal names its path, an operating-system one included, so an
     entry point refuses its start by name; and the copy is removed when the
     server stops, by Ctrl-C, SIGTERM or SIGHUP, or when its start is refused
-    after it was written.
+    after it was written. A stop is read as Ctrl-C from before the copy is
+    written to after it is removed, and held while a copy is being written or
+    removed (`deferred_termination`), and every writer and remover of
+    `console/` takes the directory's lock (`_lock`).
 
 #1144 12.4a, as T007 batch N amends it (openxFactory#1222), is the normative
 text this module realizes.
@@ -90,13 +93,18 @@ from typing import Any
 
 from opendox.runtime import config as runtime_config
 
+try:                                    # POSIX; the copy's rules are POSIX's
+    import fcntl
+except ImportError:                     # pragma: no cover
+    fcntl = None
+
 __all__ = [
     "CONSOLE_DIRNAME", "ConsoleAccessRefused", "ConsoleTerminated",
     "DELIVERY_CAPABILITIES",
     "DELIVERY_OPENED_URL", "FRAGMENT_KEY", "PrivateCopy", "RECORD_ELEMENT_ID",
-    "RECORD_KIND", "delivery_for", "opened_url", "private_copy_path", "publish",
-    "read_private_copy", "remove_private_copy", "terminate_as_interrupt",
-    "write_private_copy",
+    "RECORD_KIND", "deferred_termination", "delivery_for", "needs_copy",
+    "opened_url", "private_copy_path", "publish", "read_private_copy",
+    "remove_private_copy", "terminate_as_interrupt", "write_private_copy",
 ]
 
 #: The token rides on `/capabilities`, as a host's plane has always read it.
@@ -233,6 +241,23 @@ def _console_dir_unsafe_because(info: os.stat_result, *, uid: int) -> str | None
     if reason is None and permissions != CONSOLE_DIR_MODE:
         reason = f"has mode {permissions:o}, not {CONSOLE_DIR_MODE:o}"
     return reason
+
+
+def _lock(directory: int) -> None:
+    """Hold the console directory's lock on its descriptor until it closes.
+
+    PUBLICATION AND REMOVAL ARE SERIALIZED (Copilot at openDox-code#84,
+    r4175213842). The copy's name is per PORT, and two serves can share one
+    (127.0.0.1 and ::1), so one serve's removal can find another's copy at
+    the name and must put it back. Where that takes a rename, a check that
+    the name is free and the rename are two steps, and a third copy published
+    between them would be overwritten by an older one. Every writer and
+    remover of `console/` takes this exclusive lock, an advisory `flock` the
+    kernel drops when the descriptor closes or the process dies. Where the
+    filesystem keeps no such locks, nothing is held, as before."""
+    if fcntl is not None:
+        with contextlib.suppress(OSError):
+            fcntl.flock(directory, fcntl.LOCK_EX)
 
 
 def _unsafe(path: Path, reason: str) -> ConsoleAccessRefused:
@@ -580,6 +605,7 @@ def _write_the_copy(state: Path, target: Path,
         reason = _console_dir_unsafe_because(os.fstat(directory), uid=uid)
         if reason is not None:
             raise _unsafe(target.parent, reason)
+        _lock(directory)            # until the copy is in place (`_lock`)
         try:
             present = os.stat(target.name, dir_fd=directory,
                               follow_symlinks=False)
@@ -724,7 +750,8 @@ def remove_private_copy(copy: PrivateCopy | None) -> None:
     A filesystem without hard links refuses the link (EPERM), and so does a
     directory, and the other serve's copy used to be deleted with the
     temporary name. It is renamed back instead, where the name is still
-    free."""
+    free, and the console directory's lock (`_lock`) keeps any newer copy
+    from being published between that check and the rename."""
     if copy is None:
         return
     try:
@@ -735,6 +762,7 @@ def remove_private_copy(copy: PrivateCopy | None) -> None:
     name = copy.path.name
     taken = f".{name}.removing-{os.getpid()}-{os.urandom(6).hex()}"
     try:
+        _lock(directory)            # no copy is published meanwhile (`_lock`)
         try:
             os.rename(name, taken, src_dir_fd=directory, dst_dir_fd=directory)
         except OSError:
@@ -772,8 +800,38 @@ class ConsoleTerminated(KeyboardInterrupt):
     stop on."""
 
 
+#: Whether a stop is being HELD (`deferred_termination`), and the one that
+#: arrived meanwhile. Python runs signal handlers in the main thread only, as
+#: the entry points publish and remove there, so plain module state serves.
+_held = {"depth": 0, "pending": None}
+
+
 def _terminate_as_interrupt(signum, frame):
+    if _held["depth"]:
+        _held["pending"] = signum
+        return
     raise ConsoleTerminated
+
+
+@contextlib.contextmanager
+def deferred_termination(*, raise_pending: bool = True):
+    """Hold a SIGTERM or SIGHUP that arrives inside the block, rather than
+    raising it in the middle of publishing or removing a copy (Copilot at
+    openDox-code#84, r4175213864): a copy half published, or half removed,
+    is one nothing cleans up. On the way out, a held stop is raised as
+    `ConsoleTerminated` once the block is done, when the copy is in the
+    caller's hands, or dropped with `raise_pending=False`, for a removal,
+    which is a stop already. Only the handler `terminate_as_interrupt`
+    installs holds anything; Ctrl-C keeps Python's own."""
+    _held["depth"] += 1
+    try:
+        yield
+    finally:
+        _held["depth"] -= 1
+    if not _held["depth"]:
+        pending, _held["pending"] = _held["pending"], None
+        if pending is not None and raise_pending:
+            raise ConsoleTerminated
 
 
 @contextlib.contextmanager
@@ -814,6 +872,14 @@ def terminate_as_interrupt(enabled: bool):
             signal.signal(signum, handler)
 
 
+def needs_copy(httpd: Any) -> bool:
+    """Whether the plane `httpd` delivers its console token through a
+    private copy: a standalone plane that minted one. The entry points ask it
+    BEFORE `publish`, to read a stop as Ctrl-C from before the copy exists."""
+    return bool(getattr(httpd, "console_token", None)) and getattr(
+        httpd, "console_token_delivery", None) == DELIVERY_OPENED_URL
+
+
 def publish(httpd: Any, *, page_url: str,
             env: Mapping[str, str] | None = None) -> PrivateCopy | None:
     """What an ENTRY POINT does after `serve.build_server`: on a standalone
@@ -823,10 +889,9 @@ def publish(httpd: Any, *, page_url: str,
     A state directory that cannot be named, or a tree that is not this user's
     alone, refuses (`ConsoleAccessRefused`), and the entry point refuses with
     it: a console nobody can open is not served as if it could be."""
-    token = getattr(httpd, "console_token", None)
-    if not token or getattr(httpd, "console_token_delivery",
-                            None) != DELIVERY_OPENED_URL:
+    if not needs_copy(httpd):
         return None
+    token = httpd.console_token
     try:
         state = runtime_config.state_dir(env)
     except runtime_config.ConfigurationError as exc:

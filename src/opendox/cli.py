@@ -908,21 +908,19 @@ def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
     # the page. `None` on a host's plane and where no token was minted, and
     # then nothing changes. A copy that cannot be written safely refuses the
     # run before it serves.
-    try:
-        console = console_access.publish(httpd, page_url=url)
-    except console_access.ConsoleAccessRefused as exc:
-        httpd.server_close()
-        print(f"generate-and-open refused: {exc}", file=sys.stderr)
-        return 1
-    try:
-        # A plain `kill`, or a closed terminal, stops a standalone console the
-        # way Ctrl-C does, so the copy below is removed
-        # (`terminate_as_interrupt`); a plane that wrote no copy keeps the
-        # signals' default actions. It covers the WHOLE window from the write
-        # to the stop, the browser opener included, which can take seconds
-        # (T104's self-pass), and a stop asked for there is a clean stop too.
-        with console_access.terminate_as_interrupt(console is not None):
+    #
+    # A plain `kill`, or a closed terminal, stops a standalone console the way
+    # Ctrl-C does (`terminate_as_interrupt`), from BEFORE the copy is written
+    # to after it is removed (Copilot at openDox-code#84, r4175213864), and a
+    # stop that arrives while the copy is being written or removed is held
+    # until that is done (`deferred_termination`), so no copy is ever left
+    # half handled. A plane that writes no copy keeps the signals' defaults.
+    console = None
+    with console_access.terminate_as_interrupt(console_access.needs_copy(httpd)):
+        try:
             try:
+                with console_access.deferred_termination():
+                    console = console_access.publish(httpd, page_url=url)
                 print(f"  serving {url}")
                 print(f"  snapshot {serve_mod.server_url(httpd, '/snapshot.json')}")
                 if console is not None:
@@ -952,15 +950,20 @@ def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
 
                 print("  serving until interrupted (Ctrl-C to stop)", flush=True)
                 httpd.serve_forever()
+            except console_access.ConsoleAccessRefused as exc:
+                print(f"generate-and-open refused: {exc}", file=sys.stderr)
+                return 1
             except KeyboardInterrupt:
                 pass
-        return 0
-    finally:
-        # The copy goes with the server: its token is this serve's, and dies
-        # with it. It goes FIRST, while this process still holds the port, so
-        # no later serve can bind it and write its own copy in between.
-        console_access.remove_private_copy(console)
-        httpd.server_close()
+            return 0
+        finally:
+            # The copy goes with the server: its token is this serve's, and
+            # dies with it. It goes FIRST, while this process still holds the
+            # port, so no later serve can bind it and write its own copy in
+            # between. A stop that arrives meanwhile lets it finish.
+            with console_access.deferred_termination(raise_pending=False):
+                console_access.remove_private_copy(console)
+                httpd.server_close()
 
 
 # ---- gate console (US9): human-only executable gate actions ----------------
