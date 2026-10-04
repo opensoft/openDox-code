@@ -1168,8 +1168,33 @@ def terminate_as_interrupt(enabled: bool):
         _held.update(pending=None, stopping=False)
 
 
+def _carries_a_console_record(handle: int, info: os.stat_result) -> bool:
+    """Whether the regular file open on `handle` IS a console token's private
+    copy by what it holds: a console record (`RECORD_KIND`) in the element a
+    copy keeps it in, wherever the file lies and whatever its name.
+
+    Read with `pread`, from the descriptor already open, so it needs no new
+    descriptor and does not move the offset the caller then reads from. A
+    regular file whose head cannot be read is judged to be a copy: a check
+    that cannot be made denies, never allows."""
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    try:
+        head = os.pread(handle, _READ_LIMIT, 0)
+    except OSError:
+        return True
+    found = _RECORD_PATTERN.search(head.decode("utf-8", "replace"))
+    if found is None:
+        return False
+    try:
+        record = json.loads(found.group("record"))
+    except ValueError:
+        return False
+    return isinstance(record, dict) and record.get("kind") == RECORD_KIND
+
+
 def is_private_file(handle: int, private_roots: Iterable[Path | str]) -> bool:
-    """Whether the file open on `handle` lives in a private-copy directory.
+    """Whether the file open on `handle` is a console token's private copy.
 
     Judged by the FILE'S OWN IDENTITY, `(st_dev, st_ino)`, against every name
     in each directory `publish` marked private (Copilot at openDox-code#84,
@@ -1178,20 +1203,42 @@ def is_private_file(handle: int, private_roots: Iterable[Path | str]) -> bool:
     made anywhere under a served root all reach the copy by a name that looks
     like something else. The identity of what was OPENED cannot be swapped
     afterwards. Every name in the directory counts, every port's copy and a
-    temporary name included. A directory that cannot be listed counts for
-    nothing, as no copy can be published in it either."""
+    temporary name included.
+
+    AND BY WHAT THE FILE HOLDS (Copilot at openDox-code#84, r4179239380 and
+    r4179239411). A copy in ANOTHER state directory (a second standalone
+    plane of the same user, with its own `OPENDOX_STATE_DIR`) is in no
+    directory this plane marked, and a copy removed between this open and
+    the directory's scan has no name left there to match. Both are still a
+    file that holds a console record, so the file open on `handle` is judged
+    by its own bytes first (`_carries_a_console_record`), and by its
+    identity after.
+
+    A SCAN THAT FAILS DENIES (Copilot at openDox-code#84, r4179239424). A
+    private directory that does not exist holds no copy, and counts for
+    nothing. One that exists and cannot be listed (out of descriptors, say)
+    cannot clear the file, so the file is judged to be a copy; so is a name
+    in it whose status cannot be read for any reason but its removal."""
     info = os.fstat(handle)
+    if _carries_a_console_record(handle, info):
+        return True
     key = (info.st_dev, info.st_ino)
     for root in private_roots:
         try:
             with os.scandir(root) as entries:
                 for entry in entries:
-                    with contextlib.suppress(OSError):
+                    try:
                         found = entry.stat(follow_symlinks=False)
-                        if (found.st_dev, found.st_ino) == key:
-                            return True
+                    except FileNotFoundError:
+                        continue                # removed meanwhile
+                    except OSError:
+                        return True             # cannot be cleared: denied
+                    if (found.st_dev, found.st_ino) == key:
+                        return True
+        except FileNotFoundError:
+            continue                            # no directory: no copy in it
         except OSError:
-            continue
+            return True                         # cannot be listed: denied
     return False
 
 

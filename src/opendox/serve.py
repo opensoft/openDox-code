@@ -1460,9 +1460,16 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
     def _entry_bytes(self, entry) -> bytes | None:
         """A registered entry's snapshot bytes, read as `read_unless_private`
         reads, where this plane marked a private-copy directory and the entry
-        names its file. Otherwise the entry reads itself, as before."""
+        names its file. Otherwise the entry reads itself, as before.
+
+        THE IN-MEMORY PAYLOAD STILL COMES FIRST (Copilot at openDox-code#84,
+        at af2a2efb): `SnapshotEntry.read_bytes` serves an entry's payload
+        before its file, and only the FILE is guarded, so an entry with both
+        serves its payload whether or not the file exists."""
         private = getattr(self.server, "private_roots", ())
         path = getattr(entry, "snapshot_path", None)
+        if getattr(entry, "payload", None) is not None:
+            return entry.read_bytes()
         if private and path is not None:
             try:
                 return read_unless_private(path, private)

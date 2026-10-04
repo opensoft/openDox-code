@@ -3351,3 +3351,197 @@ def test_a_tokenless_start_without_the_posix_primitives_refuses_by_name(
     assert "Traceback" not in text, text
     assert rc == 1 and "serve refused:" in text, text
     assert "needs a POSIX platform" in text and "os.O_NONBLOCK" in text, text
+
+
+# ---------------------------------------------------------------------------
+# 19 — Copilot's review at af2a2efb: a copy is known by what it holds, in any
+#      state directory (r4179239380) and mid-removal (r4179239411); a scan
+#      that fails denies (r4179239424); an entry's payload comes first
+# ---------------------------------------------------------------------------
+
+def test_another_state_directorys_copy_is_never_served(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """r4179239380, Copilot's layout: two standalone planes of one user with
+    DIFFERENT state directories. Plane A's `--web-dir` links to plane B's
+    state directory, and A's checkout holds a hard link to B's copy. B's
+    copy lies in no directory A marked, but it holds a console record, so A
+    answers 404 for it through the static handler and `/source`, for GET and
+    HEAD, while its bundle still answers."""
+    import shutil as _shutil
+
+    from opendox import console_access, serve
+
+    web = tmp_path / "web"
+    _shutil.copytree(WEB, web)
+    state_a = _state(tmp_path / "a")
+    state_b = _state(tmp_path / "b")
+    (web / "state-b").symlink_to(state_b)
+    httpd, repo, worker = _guarded_plane(tmp_path, monkeypatch, web=web)
+    try:
+        base = httpd.server_address[:2]
+        own = console_access.publish(
+            httpd, page_url=serve.server_url(httpd, "/index.html"),
+            env={"OPENDOX_STATE_DIR": str(state_a)})
+        assert own is not None
+        theirs = _write(state_b, port=9)           # plane B's copy
+        token = console_access.read_private_copy(theirs.path)["console_token"]
+        os.link(theirs.path, repo / "theirs.md")
+        _assert_never_served(base, token, (
+            f"/state-b/console/{theirs.path.name}", "/source/theirs.md"))
+        assert _call(base, "GET", "/index.html")[0] == 200
+        console_access.remove_private_copy(theirs)
+        console_access.remove_private_copy(own)
+    finally:
+        _stop_plane(httpd, worker)
+
+
+def test_a_copy_removed_during_the_scan_is_never_served(
+        tmp_path, monkeypatch) -> None:
+    """r4179239411, the interleaving: a read opens the copy, and the copy is
+    removed (taken under another name, then unlinked) before the private
+    directory's scan can stat its name. Nothing in the directory matches
+    then, but the file already open is still the copy, and is judged by what
+    it holds: the read is refused."""
+    from opendox import console_access, serve
+
+    state = _state(tmp_path)
+    copy = _write(state)
+    roots = (copy.path.parent,)
+    real_open = open
+    staged: list[str] = []
+
+    def opened_then_removed(path, mode="r", *args, **kwargs):
+        stream = real_open(path, mode, *args, **kwargs)
+        if not staged:                      # removed after the open
+            staged.append(str(path))
+            console_access.remove_private_copy(copy)
+        return stream
+
+    monkeypatch.setattr("builtins.open", opened_then_removed)
+    try:
+        assert serve.read_unless_private(copy.path, roots) is None
+    finally:
+        monkeypatch.undo()
+    assert staged, "the removal was never staged"
+    assert not copy.path.exists()
+    assert list(copy.path.parent.iterdir()) == [], "the removal left a name"
+
+
+@pytest.mark.parametrize("failure", [errno.EMFILE, errno.EACCES], ids=["EMFILE", "EACCES"])
+def test_a_private_directory_that_cannot_be_scanned_denies_the_read(
+        tmp_path, monkeypatch, failure) -> None:
+    """r4179239424: a private directory that exists and cannot be listed
+    (out of descriptors, EMFILE, simulated here; or refused) cannot clear the
+    file being read, so the read is denied, an ordinary file's as well as a
+    copy's. A private directory that does not exist holds no copy, and the
+    ordinary file is read as before."""
+    from opendox import console_access, serve
+
+    state = _state(tmp_path)
+    copy = _write(state)
+    ordinary = tmp_path / "ordinary.md"
+    ordinary.write_text("# plain\n", encoding="utf-8")
+    roots = (copy.path.parent,)
+
+    def cannot_list(path):
+        raise OSError(failure, os.strerror(failure), str(path))
+
+    monkeypatch.setattr(console_access.os, "scandir", cannot_list)
+    assert serve.read_unless_private(ordinary, roots) is None
+    assert serve.read_unless_private(copy.path, roots) is None
+    monkeypatch.undo()
+    absent = (tmp_path / "no-such-state" / console_access.CONSOLE_DIRNAME,)
+    assert serve.read_unless_private(ordinary, absent) == b"# plain\n"
+    assert serve.read_unless_private(ordinary, roots) == b"# plain\n"
+    console_access.remove_private_copy(copy)
+
+
+def test_a_name_whose_status_cannot_be_read_denies_the_read(
+        tmp_path, monkeypatch) -> None:
+    """r4179239424, per name: a name in the private directory whose status
+    cannot be read, for any reason but its removal, cannot be told apart
+    from the file being read, so the read is denied. A name removed
+    meanwhile is skipped."""
+    from opendox import console_access, serve
+
+    state = _state(tmp_path)
+    copy = _write(state)
+    ordinary = tmp_path / "ordinary.md"
+    ordinary.write_text("# plain\n", encoding="utf-8")
+    roots = (copy.path.parent,)
+    real_scandir = os.scandir
+
+    class _Entry:
+        def __init__(self, raised):
+            self.raised = raised
+
+        def stat(self, follow_symlinks=True):
+            raise self.raised
+
+    def entries_failing(raised):
+        def scandir(path):
+            listing = [*real_scandir(path), _Entry(raised)]
+            return contextlib.nullcontext(iter(listing))
+        return scandir
+
+    monkeypatch.setattr(console_access.os, "scandir",
+                        entries_failing(PermissionError(errno.EACCES, "denied")))
+    assert serve.read_unless_private(ordinary, roots) is None
+    monkeypatch.setattr(console_access.os, "scandir",
+                        entries_failing(FileNotFoundError(errno.ENOENT, "gone")))
+    assert serve.read_unless_private(ordinary, roots) == b"# plain\n"
+    monkeypatch.undo()
+    console_access.remove_private_copy(copy)
+
+
+@pytest.mark.parametrize("file", ["missing", "present", "a copy"])
+def test_an_entrys_payload_comes_before_its_guarded_file(
+        tmp_path, file) -> None:
+    """Copilot's review at af2a2efb ("previously missed"): an entry with an
+    in-memory payload serves that payload first, as `SnapshotEntry.
+    read_bytes` does, whether its file is missing, present, or even a
+    private copy; only the file fallback is guarded. An entry with no
+    payload reads its file through the guard."""
+    import types
+
+    from opendox import console_access, default_registry, serve
+
+    state = _state(tmp_path)
+    copy = _write(state)
+    path = {"missing": tmp_path / "missing.json",
+            "present": tmp_path / "present.json",
+            "a copy": copy.path}[file]
+    if file == "present":
+        path.write_bytes(b'{"from": "file"}')
+    handler = types.SimpleNamespace(
+        server=types.SimpleNamespace(private_roots=(copy.path.parent,)))
+    with_payload = default_registry.SnapshotEntry(
+        repository="fixture", snapshot_path=path, payload=b'{"from": "payload"}')
+    assert serve.DashboardHandler._entry_bytes(handler, with_payload) == \
+        b'{"from": "payload"}'
+    without = default_registry.SnapshotEntry(repository="fixture", snapshot_path=path)
+    expected = {"missing": None, "present": b'{"from": "file"}', "a copy": None}[file]
+    assert serve.DashboardHandler._entry_bytes(handler, without) == expected
+    console_access.remove_private_copy(copy)
+
+
+def test_a_file_whose_head_cannot_be_read_is_denied(tmp_path, monkeypatch) -> None:
+    """r4179239424, by content: a regular file whose head cannot be read
+    cannot be cleared of holding a console record, so the read is denied.
+    A file that holds none is read as before."""
+    from opendox import console_access, serve
+
+    state = _state(tmp_path)
+    copy = _write(state)
+    ordinary = tmp_path / "ordinary.md"
+    ordinary.write_text("# plain\n", encoding="utf-8")
+    roots = (copy.path.parent,)
+    assert serve.read_unless_private(ordinary, roots) == b"# plain\n"
+
+    def unreadable(*args, **kwargs):
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr(console_access.os, "pread", unreadable)
+    assert serve.read_unless_private(ordinary, roots) is None
+    monkeypatch.undo()
+    console_access.remove_private_copy(copy)
