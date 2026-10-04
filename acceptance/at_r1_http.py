@@ -654,8 +654,12 @@ def browser_target(target: str) -> str:
     return encode(path, _PATH_ENCODED) + mark + encode(query, _QUERY_ENCODED)
 
 
-def get(port: int, target: str, *, token: str | None = None) -> Answer:
-    conn = http.client.HTTPConnection("127.0.0.1", port,
+def get(port: int, target: str, *, token: str | None = None,
+        host: str = "127.0.0.1") -> Answer:
+    """`target` asked of the plane on `port` at `host`, as a browser on a
+    page of that origin asks it: `http.client` sends that host in `Host`,
+    which the plane's loopback gate reads."""
+    conn = http.client.HTTPConnection(host, port,
                                       timeout=REQUEST_TIMEOUT_SECONDS)
     headers = {"Accept": "*/*", "Cache-Control": "no-store"}
     if token:
@@ -809,8 +813,11 @@ class JsStrings:
     the preceding code is the last 40 characters of code before it (other
     strings blanked, comments and every run of JavaScript whitespace read
     as ONE space, so no run is too long for it), so an import specifier can
-    be told from an ordinary string. A template literal's value is its leading static text, before
-    any `${`. Each value is read as a browser reads a URL from it
+    be told from an ordinary string. A template literal's value is its
+    leading static text, before any `${`; each `${…}` in it is CODE, and is
+    read as code is, so an import or a route inside one is found (Copilot
+    review of openDox-code#75 at 3392f93a, r4179115282), and a `}` in its
+    strings closes nothing. Each value is read as a browser reads a URL from it
     (`scalar_values`). `malformed` is set where a string holds an escape a
     module refuses (`js_escape`), as an untagged template does too. It is a
     lexer for this bundle's own idioms, not a parser."""
@@ -822,6 +829,10 @@ class JsStrings:
         self.last = ""
         self.found: list[tuple[str, str, str]] = []
         self.malformed = False
+        # `{` open in code; and, for each `${` being read, the depth its `}`
+        # closes at and whether its template is tagged.
+        self.depth = 0
+        self.interpolations: list[tuple[int, bool]] = []
 
     def scan(self) -> list[tuple[str, str, str]]:
         while self.i < len(self.src):
@@ -847,7 +858,14 @@ class JsStrings:
         elif c in _JS_WHITESPACE:
             self._space()
             self.i += 1
+        elif (c == "}" and self.interpolations
+                and self.interpolations[-1][0] == self.depth):
+            self._template(resume=self.interpolations.pop()[1])
         else:
+            if c == "{":
+                self.depth += 1
+            elif c == "}":
+                self.depth -= 1
             self.code.append(c)
             self.last = c
             self.i += 1
@@ -903,38 +921,41 @@ class JsStrings:
             j += 1
         self._emit(quote, "".join(buf), j + 1)
 
-    def _template(self) -> None:
-        src, j, buf, static = self.src, self.i + 1, [], True
+    def _template(self, resume: bool | None = None) -> None:
+        """A template's text from `self.i` (its opening backtick, or, where
+        `resume` holds its taggedness, the `}` that closed a `${`) to its
+        closing backtick or its next `${`. Its leading static text is its
+        value; at a `${` the scan goes back to reading code, until the `}`
+        that closes it at the same depth calls this again."""
+        src, j, buf = self.src, self.i + 1, []
         # A TAGGED template (`String.raw` before one) may hold an escape a
         # module otherwise refuses. Its tag is an expression, so it stands
         # where a regular expression could not start.
-        tagged = not self._regex_may_start()
+        tagged = (not self._regex_may_start()) if resume is None else resume
         while j < len(src) and src[j] != "`":
             if src[j] == "\\" and j + 1 < len(src):
                 text, j = js_escape(src, j)
                 if text is None:
                     self.malformed = self.malformed or not tagged
                     text = ""
-                if static:
-                    buf.append(text)
+                buf.append(text)
             elif src.startswith("${", j):
-                static = False
-                j = self._after_braces(j + 2)
+                self._close_text(resume, "".join(buf), j + 2)
+                self.interpolations.append((self.depth, tagged))
+                return
             else:
-                if static:
-                    buf.append(src[j])
+                buf.append(src[j])
                 j += 1
-        self._emit("`", "".join(buf), j + 1)
+        self._close_text(resume, "".join(buf), j + 1)
 
-    def _after_braces(self, j: int) -> int:
-        depth = 1
-        while j < len(self.src) and depth:
-            if self.src[j] == "{":
-                depth += 1
-            elif self.src[j] == "}":
-                depth -= 1
-            j += 1
-        return j
+    def _close_text(self, resume: bool | None, value: str, end: int) -> None:
+        # The LEADING text is the template's value; a later one is not.
+        if resume is None:
+            self._emit("`", value, end)
+        else:
+            self.code.append(" s ")
+            self.last = "s"
+            self.i = end
 
 
 #: The code before an import's specifier, whitespace already read as one
@@ -1169,10 +1190,11 @@ _ENCODED_DOT = re.compile(r"(?:^|/)(?:%2e|\.%2e|%2e\.|%2e%2e)(?=/|$)",
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
-def plane_origin(port: int) -> str:
-    """The origin of the page the harness loads: the loopback address it
-    fetches `/` from, on the launched plane's port."""
-    return f"http://127.0.0.1:{port}"
+def plane_origin(port: int, host: str = "127.0.0.1") -> str:
+    """The origin of the page the harness loads: the loopback host the
+    opener's forward names (`127.0.0.1` for `/` itself), on the launched
+    plane's port."""
+    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
 
 
 def _origin_of(url: str) -> tuple | None:
@@ -1265,18 +1287,18 @@ def _check_page_resolution(links: "_IndexLinks", origin: str,
 
 def _graph_roots(index_html: str, capabilities: dict,
                  origin: str = _SAME_ORIGIN, verdict: Verdict | None = None,
-                 label: str = "") -> tuple[list, list]:
+                 label: str = "", page: str = "/") -> tuple[list, list]:
     links = _IndexLinks()
     links.feed(index_html)
     if verdict is not None:
         _check_page_resolution(links, origin, verdict, label)
-    roots = [(_resolve("/", m, origin), True, "/") for m in links.modules]
+    roots = [(_resolve(page, m, origin), True, "/") for m in links.modules]
     for view in as_list(as_object(capabilities.get("views")).get("views")):
         module = as_object(view).get("module")
         if isinstance(module, str) and module:
             roots.append((_resolve("/", module, origin), True,
                           "/capabilities"))
-    return roots, [_resolve("/", sheet, origin) for sheet in links.sheets]
+    return roots, [_resolve(page, sheet, origin) for sheet in links.sheets]
 
 
 #: The JavaScript MIME type essences the HTML standard lists, as
@@ -1402,14 +1424,19 @@ def _judge_divergent(where: str, importer: str, how: str, verdict: Verdict,
 
 def derive_bundle(port: int, index_html: str, capabilities: dict,
                   verdict: Verdict, label: str,
-                  literals: set[str] | None = None) -> tuple[list[str], int]:
+                  literals: set[str] | None = None, *,
+                  host: str = "127.0.0.1",
+                  page: str = "/") -> tuple[list[str], int]:
     """Walk the module graph the served `/` loads, fetching each module from
     the server, and return `(routes, modules)`: every same-origin path
     literal the graph names, and how many modules it holds. Every string
     literal of the graph is added to `literals` where one is given."""
-    origin = plane_origin(port)
+    # The page's own origin and path: the browser resolves and asks every
+    # module, sheet and route there (Copilot review of openDox-code#75 at
+    # 3392f93a, r4179115311).
+    origin = plane_origin(port, host)
     roots, sheets = _graph_roots(index_html, capabilities, origin, verdict,
-                                 label)
+                                 label, page)
     for sheet in sheets:
         if sheet.startswith(DIVERGENT_PREFIX):
             _judge_divergent(sheet, "/", "links the stylesheet", verdict,
@@ -1422,7 +1449,7 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
                 "which a clean machine with only openDox installed cannot be "
                 "assumed to reach")
             continue
-        answer = get(port, sheet)
+        answer = get(port, sheet, host=host)
         verdict.check(f"{label}.bundle.sheet {sheet}", answer.status == 200,
                       f"the stylesheet `/` links answers {answer.describe()}")
         if answer.status == 200:
@@ -1471,7 +1498,7 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
             continue
         first = path not in answers
         if first:
-            answers[path] = get(port, path)
+            answers[path] = get(port, path, host=host)
         answer = answers[path]
         _judge_module(answer, path, static, importer, verdict, label)
         if (first and answer.status == 200
@@ -2417,9 +2444,12 @@ def _decodings(text: str, rounds: int = 5) -> set[str]:
 def check_console_opener(label: str, port: int, printed: str, state_dir: Path,
                          served_root: Path, verdict: Verdict, *,
                          hosts: tuple[str, ...],
+                         forward: list[str] | None = None,
                          ) -> tuple[Path | None, str | None]:
     """Step 6: the opener the start printed, and the token its forward
-    carries, read from the file as the user's browser reads it."""
+    carries, read from the file as the user's browser reads it. Where the
+    forward is the one a browser follows to this plane's console page, it
+    is appended to `forward`, for `check_console_page`."""
     path = opener_location(printed)
     verdict.check(f"{label}.console opener printed", path is not None,
                   "the start printed no `console <file URL>` line naming the "
@@ -2475,20 +2505,61 @@ def check_console_opener(label: str, port: int, printed: str, state_dir: Path,
                                              targets[0], token)
         verdict.check(f"{label}.console opener record agrees with its forward",
                       disagrees is None, disagrees or "")
+    if token is not None and forward is not None:
+        forward.append(targets[0])
     return path, token
 
 
-def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
+def console_page_of(target: str) -> tuple[str, str]:
+    """`(host, page)` of a forward `token_in_fragment` has validated: its
+    loopback host, and its path and query without the fragment, as a
+    browser requests it."""
+    parts = urllib.parse.urlsplit(target)
+    return (parts.hostname or "127.0.0.1",
+            (parts.path or "/") + (f"?{parts.query}" if parts.query else ""))
+
+
+def check_console_page(server: Server, target: str,
+                       verdict: Verdict) -> tuple[Answer, str, str]:
+    """Step 6's PAGE: the one the opener's forward opens, asked as the
+    browser asks it, of the forward's own host with its path and query.
+    It must answer 200 as HTML, and be UTF-8; its module graph and the
+    routes are then read from it, at its origin, never from `/` in its
+    place (Copilot review of openDox-code#75 at 3392f93a, r4179115311).
+    Returns `(answer, host, page)`. The query is not quoted: it is the
+    product's output."""
+    label = server.label
+    host, page = console_page_of(target)
+    shown = f"{urllib.parse.urlsplit(target).path or '/'} on {host}"
+    answer = get(server.port, page, host=host)
+    body = answer.body.decode("utf-8", "replace")
+    verdict.check(f"{label}.console page is HTML",
+                  answer.status == 200 and media_type(answer) == "text/html"
+                  and "<html" in body.lower(),
+                  f"the page the opener forwards to, {shown}, answers "
+                  f"{answer.describe()} as {shown_type(answer)}, not "
+                  "text/html with an <html> element, so the user's browser "
+                  "opens no console there")
+    encoding = not_utf8_because(answer.body,
+                                answer.headers.get("content-type"))
+    verdict.check(f"{label}.console page is UTF-8", encoding is None,
+                  f"the page the opener forwards to, {shown}, may be decoded "
+                  f"other than as UTF-8, as this harness reads it: {encoding}")
+    return answer, host, page
+
+
+def check_catalog(server: Server, token: str | None, verdict: Verdict, *,
+                  host: str = "127.0.0.1") -> None:
     """Step 7: the catalog, asked as the console, offers nothing available,
     and asked without the token, refuses."""
     label = server.label
-    bare = get(server.port, CATALOG_ROUTE)
+    bare = get(server.port, CATALOG_ROUTE, host=host)
     verdict.check(f"{label}.catalog refuses a caller without the console token",
                   bare.status is not None and 400 <= bare.status < 500,
                   f"{CATALOG_ROUTE} without the token answers "
                   f"{bare.describe()}, so the token the opener carries would "
                   "guard nothing")
-    catalog = get(server.port, CATALOG_ROUTE, token=token)
+    catalog = get(server.port, CATALOG_ROUTE, token=token, host=host)
     asked = ("with the console token" if token else
              "with no console token to present (step 6 found none)")
     # No reason here quotes the catalog's body: it answers a request that
@@ -2605,13 +2676,17 @@ def check_no_thread_read(label: str, caps: dict, verdict: Verdict) -> None:
 
 
 def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
-                 token: str | None, verdict: Verdict) -> None:
-    """Step 8: every route the served bundle names answers, below 5xx."""
+                 token: str | None, verdict: Verdict, *,
+                 host: str = "127.0.0.1", page: str = "/") -> None:
+    """Step 8: every route the served bundle names answers, below 5xx. The
+    bundle is the one `index` loads, the page at `page` on `host` (the one
+    the opener opens), and every request goes to that origin."""
     label = server.label
     literals: set[str] = set()
     routes, modules = derive_bundle(server.port,
                                     index.body.decode("utf-8", "replace"),
-                                    caps, verdict, label, literals)
+                                    caps, verdict, label, literals,
+                                    host=host, page=page)
     verdict.note(f"derived from the served bundle: {modules} modules, "
                  f"{len(routes)} routes: {', '.join(routes)}")
     verdict.check(f"{label}.bundle names the catalog route",
@@ -2624,7 +2699,7 @@ def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
                   "this harness's catalog envelope check is stale")
     check_no_thread_read(label, caps, verdict)
     for target in requests_for(routes, snapshot):
-        answer = get(server.port, target, token=token)
+        answer = get(server.port, target, token=token, host=host)
         verdict.note(f"GET {target} -> {answer.describe()}")
         dropped = ("; a dropped connection is a handler that raised"
                    if answer.status is None
@@ -2707,13 +2782,21 @@ def serve_one(label: str, repo: Path, ctx: Context, verdict: Verdict) -> None:
     learn_opener_tokens(server.printed(), verdict)
     snapshot, caps, caps_raw = check_pages(server, index, verdict)
     check_grouping(label, snapshot, caps, verdict)
+    forward: list[str] = []
     opener, token = check_console_opener(
         label, server.port, server.printed(), ctx.state_dir, repo, verdict,
-        hosts=served_loopback_hosts(server.port))
+        hosts=served_loopback_hosts(server.port), forward=forward)
+    # The page the user's browser opens is the forward's, not `/`: the
+    # catalog, the module graph and the routes are read from it, at its
+    # origin. With no forward to follow (a failure already named), `/`.
+    console, host, page = index, "127.0.0.1", "/"
+    if forward:
+        console, host, page = check_console_page(server, forward[0], verdict)
     if token is not None:
         check_no_token_value(label, caps, caps_raw, token, verdict)
-    check_catalog(server, token, verdict)
-    check_routes(server, index, snapshot, caps, token, verdict)
+    check_catalog(server, token, verdict, host=host)
+    check_routes(server, console, snapshot, caps, token, verdict, host=host,
+                 page=page)
     stop_and_look(server, ctx, verdict, opener, token)
 
 

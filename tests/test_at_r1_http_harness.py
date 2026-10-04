@@ -93,15 +93,19 @@ harness = _load_harness()
 
 
 @contextlib.contextmanager
-def served(files: dict[str, tuple[str, str]], guarded: frozenset = frozenset()):
+def served(files: dict[str, tuple[str, str]], guarded: frozenset = frozenset(),
+           seen: list | None = None):
     """A loopback server answering `files` (`path -> (content type, body)`,
     or `(content type, body, status)`, where a tuple of content types sends
     the header once for each), and 404 for anything else. A path in
     `guarded` answers 403 to a request without the console header, as the
-    product's console check does. Yields its port."""
+    product's console check does. Each request's `(path, Host)` is added to
+    `seen` where one is given. Yields its port."""
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
+            if seen is not None:
+                seen.append((self.path, self.headers.get("Host")))
             entry = files.get(self.path)
             if self.path in guarded and not self.headers.get(
                     harness.CONSOLE_TOKEN_HEADER):
@@ -1868,7 +1872,7 @@ def test_json_is_decoded_as_a_browser_decodes_it(body: bytes,
         label, port = "t", 0
     original = harness.get
     try:
-        harness.get = lambda _port, target, token=None: (
+        harness.get = lambda _port, target, token=None, host=None: (
             answer if token else harness.Answer(403, {}, b"", None))
         harness.check_catalog(_Fixed(), "token", verdict)
     finally:
@@ -2569,3 +2573,138 @@ def test_a_line_comment_ends_where_javascript_ends_it(source: str) -> None:
     harness._scan_module("/views/x.js", source.encode("utf-8"), pending, routes)
     assert [(path, static) for path, static, _importer in pending] == [
         ("/views/a.js", True)]
+
+
+# ---------------------------------------------------------------------------
+# Copilot review of #75 at 3392f93a: a template's `${…}` is code
+# (r4179115282), and the page walked is the one the opener opens, at its
+# own origin (r4179115311).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("source, queued, routes", [
+    ('const t = `${await import("./child.js")}`;\n',
+     [("/views/child.js", False)], set()),
+    ('const t = `a${ "}" }b${ {k: 1}["/inner"] }c`;\nconst R = "/after";\n',
+     [], {"/inner", "/after"}),
+    ('const t = `${ `in${ import("./deep.js") }` }`;\n',
+     [("/views/deep.js", False)], set()),
+    ('const t = `${x}`;\nimport "./after.js";\n',
+     [("/views/after.js", True)], set()),
+], ids=["dynamic-import", "brace-in-a-string-and-an-object",
+        "nested-template", "code-after-the-template"])
+def test_a_template_s_interpolation_is_read_as_code(
+        source: str, queued: list, routes: set) -> None:
+    pending: collections.deque = collections.deque()
+    found: set[str] = set()
+    harness._scan_module("/views/x.js", source.encode("utf-8"), pending, found)
+    assert [(path, static) for path, static, _importer in pending] == queued
+    assert found == routes
+
+
+def test_a_dependency_imported_inside_an_interpolation_is_judged() -> None:
+    """Copilot's example: the child, imported only inside `${…}`, imports a
+    module that is missing, which the browser's import fails on."""
+    files = {"/app.js": (JS, 'const t = `${await import("./child.js")}`;\n'),
+             "/child.js": (JS, 'import "./missing.js";\n')}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(
+            port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == ["t.bundle.module /missing.js"]
+    assert modules == 2
+
+
+_LOCAL_PAGE = ('<html><head><link rel="stylesheet" href="./s.css">'
+               '<script type="module" src="./app.js"></script></head></html>')
+
+
+def test_the_page_its_modules_routes_and_catalog_go_to_the_forward_s_host(
+        tmp_path: Path) -> None:
+    """A browser asks everything of the origin the opener opens, with its
+    host in `Host`, which the plane's loopback gate reads; and it asks the
+    forward's own path and query."""
+    seen: list = []
+    files = {"/index.html?v=1": ("text/html; charset=utf-8", _LOCAL_PAGE),
+             "/app.js": (JS, 'const R = "/snapshot.json";\n'
+                             f'const C = "{harness.CATALOG_ROUTE}";\n'
+                             f'const K = "{harness.CATALOG_KIND}";\n'),
+             "/s.css": ("text/css", "body { margin: 0; }\n"),
+             "/snapshot.json": ("application/json", "{}"),
+             harness.CATALOG_ROUTE: ("application/json",
+                                     '{%s, "models": []}' % _ENVELOPE)}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files, guarded=frozenset({harness.CATALOG_ROUTE}),
+                seen=seen) as port:
+        server = _quiet_server(tmp_path, port)
+        answer, host, page = harness.check_console_page(
+            server, f"http://localhost:{port}/index.html?v=1"
+                    f"#console_token={TOKEN}", verdict)
+        harness.check_catalog(server, TOKEN, verdict, host=host)
+        harness.check_routes(server, answer, {"documents": []}, {}, TOKEN,
+                             verdict, host=host, page=page)
+    assert (host, page) == ("localhost", "/index.html?v=1")
+    assert _failures(verdict) == []
+    assert {path for path, _host in seen} == {
+        "/index.html?v=1", "/app.js", "/s.css", "/snapshot.json",
+        harness.CATALOG_ROUTE}
+    assert {sent for _path, sent in seen} == {f"localhost:{port}"}
+
+
+@pytest.mark.parametrize("index_html, expected", [
+    (None, ["t.console page is HTML", "t.bundle.entry",
+            "t.bundle names the catalog route",
+            "t.bundle names the catalog kind"]),
+    (("text/html; charset=iso-2022-kr", _LOCAL_PAGE),
+     ["t.console page is UTF-8"]),
+    (("text/html", _LOCAL_PAGE), []),
+], ids=["missing", "not-utf-8", "served"])
+def test_one_serve_walks_the_page_the_opener_opens(
+        tmp_path: Path, monkeypatch, index_html, expected: list) -> None:
+    """`/` loads a good bundle; the opener opens `/index.html`, which is the
+    page a user's browser shows, so it is the one judged and walked."""
+    files = _pages(json.dumps({"install": {"mode": "local"}}))
+    files["/snapshot.json"] = ("application/json", json.dumps(_SNAPSHOT))
+    files.update({
+        "/": ("text/html", _LOCAL_PAGE),
+        "/app.js": (JS, f'const C = "{harness.CATALOG_ROUTE}";\n'
+                        f'const K = "{harness.CATALOG_KIND}";\n'),
+        "/s.css": ("text/css", ""),
+        harness.CATALOG_ROUTE: ("application/json",
+                                '{%s, "models": []}' % _ENVELOPE)})
+    if index_html is not None:
+        files["/index.html"] = index_html
+    with served(files, guarded=frozenset({harness.CATALOG_ROUTE})) as port:
+        target = f"http://127.0.0.1:{port}/index.html#console_token={TOKEN}"
+        state = tmp_path / "state"
+        console = state / harness.CONSOLE_DIRNAME
+        console.mkdir(parents=True)
+        tmp_path.chmod(0o700)
+        state.chmod(0o700)
+        console.chmod(0o700)
+        opener = console / f"{port}.html"
+        opener.write_text(_opener_page(target, records=[
+            _record(target, port=port)]), encoding="utf-8")
+        opener.chmod(0o600)
+        server = _quiet_server(tmp_path, port)
+        server.out.write_text(f"  console {opener.as_uri()}\n",
+                              encoding="utf-8")
+        index = harness.get(port, "/")
+        monkeypatch.setattr(harness, "launch", lambda *_args: (server, index))
+        monkeypatch.setattr(harness, "stop_and_look", lambda *_a, **_k: None)
+        verdict = harness.Verdict(keep_going=True)
+        harness.serve_one("t", tmp_path / "repo",
+                          types.SimpleNamespace(state_dir=state), verdict)
+    assert [failed for failed in _failures(verdict)
+            if not failed.startswith("t.route ")] == expected
+
+
+def test_a_page_reference_is_resolved_against_the_page() -> None:
+    """A query-only reference names the page's own path, `/index.html`."""
+    files = {"/index.html?m=1": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(
+            port, '<html><head><script type="module" src="?m=1"></script>'
+                  "</head></html>", {}, verdict, "t", page="/index.html")
+    assert _failures(verdict) == []
+    assert modules == 1
