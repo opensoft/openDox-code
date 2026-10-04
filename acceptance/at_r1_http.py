@@ -526,6 +526,18 @@ def stop_processes(pids: list[int]) -> None:
 # HTTP, against loopback only, with the status of every answer kept.
 # ---------------------------------------------------------------------------
 
+def _no_constant(name: str):
+    raise ValueError(f"{name} is no JSON value")
+
+
+def strict_json(text: str):
+    """`text` parsed as a browser's `JSON.parse` and `response.json()`
+    parse it: `NaN`, `Infinity` and `-Infinity`, which `json.loads` admits,
+    are refused as malformed (Copilot review of openDox-code#75 at
+    2dcb98d3, r4178069345)."""
+    return json.loads(text, parse_constant=_no_constant)
+
+
 class Answer:
     def __init__(self, status: int | None, headers: dict[str, str],
                  body: bytes, error: str | None) -> None:
@@ -540,13 +552,39 @@ class Answer:
         named failure takes it, never a harness ERROR (Copilot review of
         openDox-code#75 at ec95f451, r4175016692)."""
         try:
-            return json.loads(self.body.decode("utf-8"))
+            # A browser's `response.json()` decodes UTF-8 as the Encoding
+            # standard does: a leading BOM dropped, and invalid bytes read as
+            # U+FFFD, never an error.
+            return strict_json(self.body.decode("utf-8-sig", "replace"))
         except RecursionError as exc:
             raise ValueError("JSON nested past the parser's depth") from exc
 
     def describe(self) -> str:
         return f"HTTP {self.status}" if self.status is not None else (
             f"no answer ({self.error})")
+
+
+#: What a browser's URL parser percent-encodes in a path, and in a special
+#: URL's query, beside C0 controls, space and every code point past U+007E
+#: (the URL standard's path and special-query percent-encode sets).
+_PATH_ENCODED = frozenset('"#<>?`{}')
+_QUERY_ENCODED = frozenset('"#<>\'')
+
+
+def browser_target(target: str) -> str:
+    """`target` (a path, perhaps with a query) as a browser requests it:
+    a space, a non-ASCII character or a control percent-encoded, and every
+    `%` left as it is. `http.client` refuses such a target, or raises on a
+    non-ASCII one, where a browser sends it encoded (the self-pass after
+    Copilot's review of openDox-code#75 at 2dcb98d3)."""
+    path, mark, query = target.partition("?")
+
+    def encode(text: str, extra: frozenset) -> str:
+        return "".join(
+            urllib.parse.quote(c, safe="")
+            if ord(c) <= 0x20 or ord(c) > 0x7E or c in extra else c
+            for c in text)
+    return encode(path, _PATH_ENCODED) + mark + encode(query, _QUERY_ENCODED)
 
 
 def get(port: int, target: str, *, token: str | None = None) -> Answer:
@@ -556,13 +594,13 @@ def get(port: int, target: str, *, token: str | None = None) -> Answer:
     if token:
         headers[CONSOLE_TOKEN_HEADER] = token
     try:
-        conn.request("GET", target, headers=headers)
+        conn.request("GET", browser_target(target), headers=headers)
         response = conn.getresponse()
         body = response.read()
         return Answer(response.status,
                       {k.lower(): v for k, v in response.getheaders()},
                       body, None)
-    except (OSError, http.client.HTTPException) as exc:
+    except (OSError, http.client.HTTPException, ValueError) as exc:
         return Answer(None, {}, b"", error_name(exc))
     finally:
         conn.close()
@@ -620,6 +658,40 @@ _REGEX_AFTER_WORDS = frozenset({
     "throw", "case", "do", "else", "yield", "await"})
 #: ... and so does a `/` after one of these characters, or at the start.
 _REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
+
+
+#: JavaScript's single-character escapes (`\0` only where no digit follows).
+_JS_SINGLE_ESCAPES = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+                      "v": "\v", "0": "\0"}
+_JS_LINE_TERMINATORS = "\r\n\u2028\u2029"
+_JS_HEX2 = re.compile(r"[0-9A-Fa-f]{2}")
+_JS_UNICODE = re.compile(r"\{([0-9A-Fa-f]{1,6})\}|([0-9A-Fa-f]{4})")
+
+
+def js_escape(src: str, j: int) -> tuple[str, int]:
+    r"""The text the escape sequence at `src[j]` (a backslash) stands for in
+    a JavaScript string or template, and the index after it: `\n`, `\t` and
+    the other single escapes, `\xHH`, `\uHHHH`, `\u{H…}`, a line
+    continuation (nothing), and any other character as itself. A specifier
+    is read as the browser reads it, so `"./ch\tild.js"` holds a TAB, and
+    `"./\u0063hild.js"` is `./child.js` (found while answering Copilot's
+    review of openDox-code#75 at 2dcb98d3, r4178069374)."""
+    c = src[j + 1]
+    if c in _JS_LINE_TERMINATORS:
+        end = j + 2
+        if c == "\r" and src.startswith("\n", end):
+            end += 1
+        return "", end
+    if c in _JS_SINGLE_ESCAPES and not (c == "0"
+                                        and src[j + 2:j + 3].isdigit()):
+        return _JS_SINGLE_ESCAPES[c], j + 2
+    if c == "x" and _JS_HEX2.fullmatch(src[j + 2:j + 4]):
+        return chr(int(src[j + 2:j + 4], 16)), j + 4
+    if c == "u":
+        match = _JS_UNICODE.match(src, j + 2)
+        if match and int(match.group(1) or match.group(2), 16) <= 0x10FFFF:
+            return chr(int(match.group(1) or match.group(2), 16)), match.end()
+    return c, j + 2
 
 
 class JsStrings:
@@ -703,8 +775,8 @@ class JsStrings:
         src, j, buf = self.src, self.i + 1, []
         while j < len(src) and src[j] not in (quote, "\n"):
             if src[j] == "\\" and j + 1 < len(src):
-                buf.append(src[j + 1])
-                j += 2
+                text, j = js_escape(src, j)
+                buf.append(text)
                 continue
             buf.append(src[j])
             j += 1
@@ -714,9 +786,9 @@ class JsStrings:
         src, j, buf, static = self.src, self.i + 1, [], True
         while j < len(src) and src[j] != "`":
             if src[j] == "\\" and j + 1 < len(src):
+                text, j = js_escape(src, j)
                 if static:
-                    buf.append(src[j + 1])
-                j += 2
+                    buf.append(text)
             elif src.startswith("${", j):
                 static = False
                 j = self._after_braces(j + 2)
@@ -744,17 +816,32 @@ _MODULE_OR_SHEET = re.compile(r"\.(?:m?js|css)(?:[?#].*)?$")
 
 
 class _IndexLinks(html.parser.HTMLParser):
+    """The page's scripts, stylesheets, `<base>` and import maps, read as a
+    browser reads them: the FIRST of a repeated attribute, `rel` as a set of
+    ASCII-case-insensitive tokens, a script's `type` trimmed and compared
+    the same way. A `<base href>` or an import map changes how a browser
+    resolves what the page loads, and this harness models neither, so each
+    is a named failure (`derive_bundle`)."""
+
     def __init__(self) -> None:
         super().__init__()
         self.modules: list[str] = []
         self.sheets: list[str] = []
+        self.bases: list[str] = []
+        self.import_maps = 0
 
     def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
-        if tag == "script" and a.get("src"):
-            self.modules.append(a["src"])
-        if tag == "link" and "stylesheet" in (a.get("rel") or "") and a.get("href"):
+        a = _first_attributes(attrs)
+        if tag == "script":
+            if a.get("type", "").strip(_ASCII_WHITESPACE).lower() == "importmap":
+                self.import_maps += 1
+            elif a.get("src"):
+                self.modules.append(a["src"])
+        rel = re.split(r"[ \t\n\f\r]+", a.get("rel", "").lower())
+        if tag == "link" and "stylesheet" in rel and a.get("href"):
             self.sheets.append(a["href"])
+        if tag == "base" and "href" in a:
+            self.bases.append(a["href"])
 
 
 #: The origin a reference is resolved against where no server is named (a
@@ -763,6 +850,24 @@ class _IndexLinks(html.parser.HTMLParser):
 _SAME_ORIGIN = "http://loopback"
 #: What a reference this harness cannot parse resolves to: never a path.
 UNPARSEABLE_PREFIX = "unparseable:"
+#: What a reference a browser reads differently resolves to: never a path.
+#: A browser reads a backslash in an http URL as `/`, so
+#: `http://external.invalid\@127.0.0.1:<port>/x.js` goes to
+#: `external.invalid` and `/\host/x.js` to `host`, and it drops tab and
+#: newline characters and trims spaces and control characters, while
+#: `urllib.parse` keeps them all (Copilot review of openDox-code#75 at
+#: 2dcb98d3, r4178069374). Such a reference is refused by name.
+DIVERGENT_PREFIX = "divergent:"
+#: The URL standard's divergences from `urllib.parse`: a backslash (read as
+#: `/` in an http URL), a tab or newline anywhere (removed), and a C0
+#: control or space at either end (trimmed). An inner space is encoded, not
+#: dropped, so it is no divergence.
+_DIVERGENT_REFERENCE = re.compile(r"\\|[\t\n\r]|^[\x00-\x20]|[\x00-\x20]$")
+#: A percent-encoded dot in a path, which a browser's URL parser reads as a
+#: `.` or `..` segment and urljoin does not. And a URL with user
+#: information, which a browser refuses to fetch a module or a stylesheet
+#: from, is divergent too (`_resolve`).
+_ENCODED_DOT = re.compile(r"%2e", re.IGNORECASE)
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
@@ -795,11 +900,17 @@ def _resolve(base: str, ref: str, origin: str = _SAME_ORIGIN) -> str:
     `http://127.0.0.1:<port>/app.js` is a path of this plane, as it is to
     the browser (Copilot review of openDox-code#75 at 82869769,
     r4177924129). A reference no parser here can read is never a path."""
+    if (_DIVERGENT_REFERENCE.search(ref)
+            or _ENCODED_DOT.search(re.split(r"[?#]", ref, maxsplit=1)[0])):
+        return DIVERGENT_PREFIX + ref
     try:
         joined = urllib.parse.urljoin(origin + base, ref)
         parts = urllib.parse.urlsplit(joined)
+        credentials = parts.username is not None or parts.password is not None
     except ValueError:
         return UNPARSEABLE_PREFIX + ref
+    if credentials or "@" in parts.netloc:
+        return DIVERGENT_PREFIX + ref
     if _origin_of(joined) != _origin_of(origin):
         return joined
     return parts.path + (f"?{parts.query}" if parts.query else "")
@@ -809,10 +920,31 @@ def _external(where: str) -> bool:
     return not where.startswith("/")
 
 
+def _check_page_resolution(links: "_IndexLinks", origin: str,
+                           verdict: Verdict, label: str) -> None:
+    """A `<base>` other than the page's own root, or an import map, would
+    send the browser elsewhere than the harness resolves to: refused by
+    name (the self-pass after Copilot's review of openDox-code#75 at
+    2dcb98d3)."""
+    for base in links.bases[:1]:            # only the first one counts
+        verdict.check(f"{label}.bundle.base", _resolve("/", base, origin) == "/",
+                      f"`/` sets its base URL to {base!r:.120}; a browser then "
+                      "resolves the page's links against it, and this "
+                      "harness resolves them against `/`")
+    if links.import_maps:
+        verdict.check(f"{label}.bundle.importmap", False,
+                      "`/` declares an import map, which this harness does "
+                      "not resolve: a browser maps bare specifiers through it "
+                      "and may remap relative ones")
+
+
 def _graph_roots(index_html: str, capabilities: dict,
-                 origin: str = _SAME_ORIGIN) -> tuple[list, list]:
+                 origin: str = _SAME_ORIGIN, verdict: Verdict | None = None,
+                 label: str = "") -> tuple[list, list]:
     links = _IndexLinks()
     links.feed(index_html)
+    if verdict is not None:
+        _check_page_resolution(links, origin, verdict, label)
     roots = [(_resolve("/", m, origin), True, "/") for m in links.modules]
     for view in as_list(as_object(capabilities.get("views")).get("views")):
         module = as_object(view).get("module")
@@ -907,6 +1039,17 @@ def _scan_module(path: str, body: bytes, pending: collections.deque,
             routes.add(_resolve("/", value))
 
 
+def _judge_divergent(where: str, importer: str, how: str, verdict: Verdict,
+                     label: str) -> None:
+    ref = where[len(DIVERGENT_PREFIX):]
+    verdict.check(
+        f"{label}.bundle.divergent {ref!r}", False,
+        f"{importer} {how} {ref!r}, which a browser reads as another URL "
+        "than this harness would, or refuses (a backslash, a tab or newline, "
+        "whitespace or a control character at an end, a percent-encoded dot "
+        "segment, or user information): refused, never resolved or fetched")
+
+
 def derive_bundle(port: int, index_html: str, capabilities: dict,
                   verdict: Verdict, label: str,
                   literals: set[str] | None = None) -> tuple[list[str], int]:
@@ -915,8 +1058,13 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
     literal the graph names, and how many modules it holds. Every string
     literal of the graph is added to `literals` where one is given."""
     origin = plane_origin(port)
-    roots, sheets = _graph_roots(index_html, capabilities, origin)
+    roots, sheets = _graph_roots(index_html, capabilities, origin, verdict,
+                                 label)
     for sheet in sheets:
+        if sheet.startswith(DIVERGENT_PREFIX):
+            _judge_divergent(sheet, "/", "links the stylesheet", verdict,
+                             label)
+            continue
         if _external(sheet):
             verdict.check(
                 f"{label}.bundle.external {sheet}", False,
@@ -955,6 +1103,11 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
                 f"{'statically' if static else 'dynamically'} as a bare "
                 "specifier, which a browser with no import map refuses; a "
                 "relative one starts with `./` or `../`")
+            continue
+        if path.startswith(DIVERGENT_PREFIX):
+            _judge_divergent(path, importer,
+                             f"imports {'statically' if static else 'dynamically'}",
+                             verdict, label)
             continue
         if _external(path):
             # Never fetched from loopback by its path, where a local file of
@@ -1342,7 +1495,7 @@ def check_pages(server: Server, index: Answer,
     page = index.body.decode("utf-8", "replace")
     verdict.check(f"{label}.http / is HTML",
                   "<html" in page.lower()
-                  and "text/html" in index.headers.get("content-type", ""),
+                  and media_type(index) == "text/html",
                   f"`/` answered {shown_type(index)}, not text/html with an "
                   "<html> element")
     snapshot, _raw = fetch_object(server, "/snapshot.json", verdict)
@@ -1491,6 +1644,10 @@ _TEXT_CONTENT = _INERT_CONTENT - {"template", "select", "frameset"}
 _NEVER_CLOSED = frozenset({"plaintext", "frameset"})
 
 
+#: A named character reference not ended by `;` (`&amp` before a letter).
+_UNTERMINATED_REFERENCE = re.compile(r"&[A-Za-z][A-Za-z0-9]*(?![A-Za-z0-9;])")
+
+
 def _first_attributes(attrs) -> dict[str, str]:
     """A tag's attributes as a browser keeps them: where a name repeats,
     the FIRST value, never the last."""
@@ -1534,7 +1691,13 @@ class _RefreshContents(html.parser.HTMLParser):
             return
         equiv = named.get("http-equiv", "")
         if tag == "meta" and equiv.isascii() and equiv.lower() == "refresh":
-            self.contents.append(named.get("content", ""))
+            # A named character reference with no `;` is decoded by
+            # `html.unescape` and, in an attribute, left as text by a browser
+            # where `=` or a letter or digit follows (`&ampconsole_token=`),
+            # so the two read different URLs: no URL is read from it.
+            raw = self.get_starttag_text() or ""
+            self.contents.append(None if _UNTERMINATED_REFERENCE.search(raw)
+                                 else named.get("content", ""))
 
     def handle_startendtag(self, tag, attrs) -> None:
         # A browser ignores `/>` on any element but a void one.
@@ -1592,7 +1755,7 @@ def record_disagrees_because(records: list[str], port: int,
 _ASCII_WHITESPACE = " \t\n\f\r"
 
 
-def refresh_target(content: str) -> str | None:
+def refresh_target(content: str | None) -> str | None:
     """The URL a browser's refresh follows from `content`, or `None` where a
     browser follows none: the HTML standard's "shared declarative refresh
     steps", for the forms a refresh takes (`0;url=<target>`, `0; URL='…'`,
@@ -1603,6 +1766,8 @@ def refresh_target(content: str) -> str | None:
     nothing, and a user is left on the opener (Copilot review of
     openDox-code#75 at 5636eb8d, r4173894317). A `content` with no URL part
     refreshes the opener itself, which opens no console either."""
+    if content is None:          # unreadable alike (`_RefreshContents`)
+        return None
     rest = content.lstrip(_ASCII_WHITESPACE)
     digits = len(rest) - len(rest.lstrip("0123456789"))
     if digits == 0 and not rest.startswith("."):
@@ -1799,7 +1964,9 @@ def token_in_fragment(targets: list[str | None], port: int,
     if len(targets) != 1 or targets[0] is None:
         return None, (f"the opener has {len(targets)} meta-refresh forwards, "
                       "not one a browser follows to a URL (a delay that "
-                      "does not start with a digit or `.` aborts it)")
+                      "does not start with a digit or `.` aborts it, and a "
+                      "named character reference with no `;` reads "
+                      "differently in a browser)")
     answering = " and ".join(hosts) or "no host"
     elsewhere = (f"the opener does not forward to this plane on loopback "
                  f"port {port}, which answers on {answering} (its forward is "
@@ -1871,7 +2038,7 @@ def _json_or_none(text: str):
     the parser's depth, which is the product's output and so a named
     failure, never a harness error."""
     try:
-        return json.loads(text)
+        return strict_json(text)
     except (ValueError, RecursionError):
         return None
 
@@ -2026,8 +2193,10 @@ def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
                   f"kind={envelope.get('kind')!r}; the chat rail adopts only "
                   f"schema_version={CATALOG_SCHEMA_VERSION}, "
                   f"kind={CATALOG_KIND!r}")
+    # As the rail reads it: `m.available === true`, and nothing else
+    # (`views/doxbench-chat-model.js`).
     available = [as_object(m).get("model_id") for m in as_list(models)
-                 if as_object(m).get("available")]
+                 if as_object(m).get("available") is True]
     verdict.check(f"{label}.catalog offers no available entry", not available,
                   f"no model is configured, yet the catalog offers {available}")
 

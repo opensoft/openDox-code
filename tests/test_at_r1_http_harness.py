@@ -162,6 +162,28 @@ def test_the_lexer_skips_comments_and_regular_expressions() -> None:
     assert values == ["/a-real-route", "/source/", "single"], values
 
 
+@pytest.mark.parametrize("source, value", [
+    (r'"a\tb"', "a\tb"),
+    (r'"\x41"', "A"),
+    (r'"B"', "B"),
+    (r'"\u{43}"', "C"),
+    (r'"\u{1F600}"', "\U0001F600"),
+    ('"line\\\ncontinued"', "linecontinued"),
+    (r'"back\\slash"', "back\\slash"),
+    (r'"\d\/"', "d/"),
+    (r'"\0"', "\0"),
+    (r'`./child.js`', "./child.js"),
+], ids=["tab", "hex", "unicode", "code-point", "astral", "continuation",
+        "backslash", "identity", "nul", "template"])
+def test_the_lexer_reads_escapes_as_javascript_does(source: str,
+                                                   value: str) -> None:
+    """A specifier is read as the browser reads it (found while answering
+    Copilot's review of #75 at 2dcb98d3, r4178069374)."""
+    values = [found for _quote, found, _before in
+              harness.JsStrings(f"const s = {source};\n").scan()]
+    assert values == [value]
+
+
 def test_an_import_specifier_is_told_from_a_route_literal() -> None:
     source = (
         'import { a } from "./a.js";\n'
@@ -1718,3 +1740,278 @@ def test_an_import_from_another_origin_is_still_external(make,
         wanted = expected(port)
     assert _failures(verdict) == [wanted]
     assert modules == 1
+
+
+# ---------------------------------------------------------------------------
+# Copilot review of #75 at 2dcb98d3: JSON as a browser parses it
+# (r4178069345), and a reference a browser reads differently is refused,
+# never resolved (r4178069374).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_a_catalog_with_a_non_json_constant_is_a_named_failure(
+        constant: str) -> None:
+    """`response.json()` refuses it, so the chat rail reads the catalog as
+    unreadable, though `json.loads` admits it."""
+    body = '{%s, "models": [], "extra": %s}' % (_ENVELOPE, constant)
+    files = {harness.CATALOG_ROUTE: ("application/json", body)}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files, guarded=frozenset({harness.CATALOG_ROUTE})) as port:
+        harness.check_catalog(_Server(port), "token", verdict)
+    assert _failures(verdict) == _NOT_A_CATALOG
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_a_page_with_a_non_json_constant_is_a_named_failure(
+        tmp_path: Path, constant: str) -> None:
+    files = _pages(json.dumps({"install": {"mode": "local"}}))
+    files["/snapshot.json"] = (
+        "application/json",
+        '{"documents": [{"path": "a.md", "weight": %s}]}' % constant)
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        with pytest.raises(harness.Failed) as failed:
+            harness.check_pages(_quiet_server(tmp_path, port), _HTML_INDEX,
+                                verdict)
+    assert failed.value.ident == "t./snapshot.json is a JSON object"
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_a_record_with_a_non_json_constant_is_no_record(tmp_path: Path,
+                                                        constant: str) -> None:
+    record = json.dumps(_record(), sort_keys=True).replace(
+        '"pid": 4242', f'"pid": {constant}')
+    page = _opener_page(FORWARD, records=[]).replace(
+        "</head>", '<script type="application/json" id="opendox-console">'
+                   f"{record}</script></head>")
+    state, opener = _opener(tmp_path, page)
+    failures, _path, token = _read(state, _printed(opener))
+    assert failures == [RECORD]
+    assert token == TOKEN
+
+
+@pytest.mark.parametrize("where", [
+    "page-script", "stylesheet", "static", "dynamic", "view-module",
+    "slash-backslash", "tab"])
+def test_a_reference_a_browser_reads_differently_is_refused(where: str) -> None:
+    """`external.invalid\\@127.0.0.1` goes to `external.invalid` in a
+    browser, and `/\\host` to `host`; urllib.parse resolves both to this
+    plane's own `/child.js`, which is served. Each is refused by name and
+    never fetched."""
+    files = {"/child.js": (JS, "export const x = 1;\n"),
+             "/app.js": (JS, "export const x = 1;\n"),
+             "/styles.css": ("text/css", "body { margin: 0; }\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        divergent = f"http://external.invalid\\@127.0.0.1:{port}/child.js"
+        page, caps = _page("./app.js"), {}
+        if where == "page-script":
+            page = _page(divergent)
+        elif where == "stylesheet":
+            divergent = divergent.replace("child.js", "styles.css")
+            page = page.replace(
+                "<head>", f'<head><link rel="stylesheet" href="{divergent}">')
+        elif where == "view-module":
+            caps = {"views": {"views": [{"id": "x", "module": divergent}]}}
+        else:
+            if where == "slash-backslash":
+                divergent = "/\\external.invalid/child.js"
+            elif where == "tab":
+                divergent = "./ch\tild.js"
+            escaped = divergent.replace("\\", "\\\\").replace("\t", "\\t")
+            files["/app.js"] = (JS, f'import("{escaped}");\n'
+                                if where == "dynamic"
+                                else f'import "{escaped}";\n')
+        _routes, modules = harness.derive_bundle(port, page, caps, verdict,
+                                                 "t")
+    assert _failures(verdict) == [f"t.bundle.divergent {divergent!r}"]
+    assert modules == (0 if where == "page-script" else 1)
+
+
+# ---------------------------------------------------------------------------
+# The self-pass after Copilot's review of #75 at 2dcb98d3: every parser
+# reads as the browser reads, or refuses by name what it does not model.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("body, expected", [
+    (b"\xef\xbb\xbf" + ('{%s, "models": []}' % _ENVELOPE).encode(), []),
+    (('{%s, "models": [], "note": "' % _ENVELOPE).encode() + b"\xff\"}", []),
+    (b"\xef\xbb\xbf" + b"NaN", _NOT_A_CATALOG),
+], ids=["leading-bom", "invalid-utf8-in-a-string", "bom-then-nan"])
+def test_json_is_decoded_as_a_browser_decodes_it(body: bytes,
+                                                 expected: list) -> None:
+    """UTF-8 as the Encoding standard decodes it: a BOM dropped, an invalid
+    byte read as U+FFFD, as `response.json()` does."""
+    answer = harness.Answer(200, {"content-type": "application/json"}, body,
+                            None)
+    verdict = harness.Verdict(keep_going=True)
+
+    class _Fixed:
+        label, port = "t", 0
+    original = harness.get
+    try:
+        harness.get = lambda _port, target, token=None: (
+            answer if token else harness.Answer(403, {}, b"", None))
+        harness.check_catalog(_Fixed(), "token", verdict)
+    finally:
+        harness.get = original
+    assert _failures(verdict) == expected
+
+
+@pytest.mark.parametrize("models, offered", [
+    ('[{"model_id": "m", "available": true}]', ["m"]),
+    ('[{"model_id": "m", "available": 1}]', []),
+    ('[{"model_id": "m", "available": "true"}]', []),
+    ('[{"model_id": "m", "available": [1]}]', []),
+], ids=["true", "one", "a-string", "a-list"])
+def test_an_entry_is_available_only_as_the_rail_reads_it(models: str,
+                                                         offered: list) -> None:
+    """`m.available === true` (`views/doxbench-chat-model.js`)."""
+    body = '{%s, "models": %s}' % (_ENVELOPE, models)
+    files = {harness.CATALOG_ROUTE: ("application/json", body)}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files, guarded=frozenset({harness.CATALOG_ROUTE})) as port:
+        harness.check_catalog(_Server(port), "token", verdict)
+    assert _failures(verdict) == (
+        ["t.catalog offers no available entry"] if offered else [])
+
+
+@pytest.mark.parametrize("content_type, html", [
+    ("text/html; charset=utf-8", True),
+    ("TEXT/HTML", True),
+    ("text/htmlx", False),
+    ("application/xhtml+xml; profile=text/html", False),
+    ("text/plain", False),
+], ids=["html", "upper-case", "longer-type", "html-in-a-parameter", "plain"])
+def test_the_page_is_html_by_its_type_s_essence(tmp_path: Path,
+                                               content_type: str,
+                                               html: bool) -> None:
+    index = harness.Answer(200, {"content-type": content_type},
+                           b"<html><body></body></html>", None)
+    verdict = harness.Verdict(keep_going=True)
+    with served(_snapshot_server([{"path": "a.md"}])) as port:
+        harness.check_pages(_quiet_server(tmp_path, port), index, verdict)
+    assert ("t.http / is HTML" in _failures(verdict)) is not html
+
+
+@pytest.mark.parametrize("page, expected", [
+    ('<script type="module" src="./ok.js" src="./missing.js"></script>', []),
+    ('<script type="module" src="./missing.js" src="./ok.js"></script>',
+     ["t.bundle.module /missing.js"]),
+    ('<link rel="Stylesheet" href="./missing.css">',
+     ["t.bundle.sheet /missing.css"]),
+    ('<link rel="preload stylesheet" href="./missing.css">',
+     ["t.bundle.sheet /missing.css"]),
+    ('<link rel="nostylesheet" href="./missing.css">', []),
+    ('<link rel="icon" href="data:,">', []),
+], ids=["first-src-served", "first-src-missing", "rel-upper-case",
+        "rel-among-tokens", "rel-not-a-token", "icon"])
+def test_the_page_s_links_are_read_as_a_browser_reads_them(
+        page: str, expected: list) -> None:
+    files = {"/ok.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, f"<html><head>{page}</head></html>", {},
+                              verdict, "t")
+    assert _failures(verdict) == expected
+
+
+@pytest.mark.parametrize("head, expected", [
+    ('<base href="/">', []),
+    ('<base href="https://cdn.invalid/">', ["t.bundle.base"]),
+    ('<base href="/elsewhere/">', ["t.bundle.base"]),
+    ('<script type="importmap">{"imports": {}}</script>', ["t.bundle.importmap"]),
+    ('<script type=" ImportMap ">{"imports": {}}</script>',
+     ["t.bundle.importmap"]),
+], ids=["own-root", "another-origin", "another-path", "import-map",
+        "import-map-type-spaced"])
+def test_a_page_that_resolves_its_links_elsewhere_is_a_named_failure(
+        head: str, expected: list) -> None:
+    files = {"/app.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(
+            port, f'<html><head>{head}<script type="module" src="./app.js">'
+                  "</script></head></html>", {}, verdict, "t")
+    assert _failures(verdict) == expected
+
+
+@pytest.mark.parametrize("make", [
+    lambda port: f"http://user@127.0.0.1:{port}/child.js",
+    lambda port: f"http://user:pass@127.0.0.1:{port}/child.js",
+    lambda port: "./%2e%2e/child.js",
+    lambda port: "./%2E/child.js",
+    lambda port: "./sub/%2e%2E/child.js",
+], ids=["user", "user-and-password", "encoded-dot-dot", "encoded-dot",
+        "encoded-mixed-case"])
+def test_a_reference_a_browser_refuses_or_reads_elsewhere_is_refused(
+        make) -> None:
+    files = {"/child.js": (JS, "export const x = 1;\n"),
+             "/sub/child.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        ref = make(port)
+        files["/app.js"] = (JS, f'import "{ref}";\n')
+        _routes, modules = harness.derive_bundle(
+            port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == [f"t.bundle.divergent {ref!r}"]
+    assert modules == 1
+
+
+def test_an_encoded_dot_in_a_query_is_no_divergence() -> None:
+    files = {"/child.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        files["/app.js"] = (JS, 'import "./child.js?v=%2e";\n')
+        files["/child.js?v=%2e"] = files["/child.js"]
+        _routes, modules = harness.derive_bundle(
+            port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == []
+    assert modules == 2
+
+
+@pytest.mark.parametrize("target, sent", [
+    ("/café.js", "/caf%C3%A9.js"),
+    ("/my file.js", "/my%20file.js"),
+    ("/a.js?q=a b&c='d'", "/a.js?q=a%20b&c=%27d%27"),
+    ("/a%20b.js", "/a%20b.js"),
+    ("/{x}`.js", "/%7Bx%7D%60.js"),
+], ids=["non-ascii", "space", "query", "already-encoded", "path-set"])
+def test_a_request_target_is_encoded_as_a_browser_encodes_it(
+        target: str, sent: str) -> None:
+    assert harness.browser_target(target) == sent
+
+
+def test_a_non_ascii_import_is_fetched_as_the_browser_fetches_it() -> None:
+    """`http.client` raised on it before (exit 2); a browser sends it
+    percent-encoded."""
+    files = {"/caf%C3%A9.js": (JS, "export const x = 1;\n"),
+             "/app.js": (JS, 'import "./café.js";\n')}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(
+            port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == []
+    assert modules == 2
+
+
+@pytest.mark.parametrize("content, delivered", [
+    (f"0;url=http://127.0.0.1:{PORT}/index.html#x=1&amp;console_token={TOKEN}",
+     True),
+    (f"0;url=http://127.0.0.1:{PORT}/index.html#x=1&ampconsole_token={TOKEN}",
+     False),
+    (f"0;url=http://127.0.0.1:{PORT}/index.html#console_token={TOKEN}&copy=1",
+     False),
+], ids=["terminated", "unterminated-before-a-letter",
+        "unterminated-before-equals"])
+def test_a_refresh_with_an_unterminated_reference_is_not_followed(
+        tmp_path: Path, content: str, delivered: bool) -> None:
+    """`html.unescape` decodes `&amp` before a letter; a browser leaves it,
+    so the page would get no `console_token` where the harness found one."""
+    page = _page_with(f'<meta http-equiv="refresh" content="{content}">')
+    state, opener = _opener(tmp_path, page)
+    failures, _path, token = _read(state, _printed(opener))
+    if delivered:
+        assert token == TOKEN and FRAGMENT not in failures
+    else:
+        assert token is None and FRAGMENT in failures
