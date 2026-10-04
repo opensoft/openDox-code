@@ -3035,6 +3035,7 @@ def test_a_no_serve_run_publishes_opens_and_prints_no_copy(
     assert written == [], "a --no-serve run wrote a copy"
     assert not (state / console_access.CONSOLE_DIRNAME).exists()
     assert "  console " not in out and "console_token" not in out, out
+    assert console_access.UNOPENABLE_HINT not in out, out
     (url,), = [opened]
     assert url.startswith("http://") and url.endswith("/index.html"), url
     assert url in out.splitlines(), out
@@ -3099,3 +3100,50 @@ def test_a_sigkilled_serves_copy_is_swept_by_the_next_serve(tmp_path) -> None:
     finally:
         assert _adv_stop(second) == 0
     assert list((state / "console").iterdir()) == []
+
+
+@pytest.mark.parametrize("entry", ["serve", "generate-and-open"])
+def test_the_start_prints_the_unopenable_hint_and_never_the_token(
+        tmp_path, monkeypatch, capsys, standalone_profile, entry) -> None:
+    """B3, RULED by Brett ("Hint line, accepted limit", 2026-10-04): a snap
+    or Flatpak browser cannot open a file under a hidden directory such as
+    `~/.local/state`, and a Windows browser under WSL may not open a Linux
+    path at all. The token is never printed, so beside the copy's path the
+    start prints ONE line saying how to move the state directory, and no
+    line it prints, that one included, carries the token."""
+    from opendox import cli, console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = _state(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    monkeypatch.setattr(serve, "real_notebook_adapter", lambda *a, **k: None)
+    tokens: list[str] = []
+
+    def serve_forever(self, *args, **kwargs):
+        copy = console_access.private_copy_path(state, self.server_address[1])
+        tokens.append(console_access.read_private_copy(copy)["console_token"])
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", serve_forever)
+    if entry == "serve":
+        snapshot = tmp_path / "snapshot.json"
+        snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+        assert serve.main(["--snapshot", str(snapshot), "--checkout-root", str(repo),
+                           "--port", "0"]) == 0
+        prefix = "console file://"
+    else:
+        assert cli._generate_and_open(
+            _generate_and_open_args(tmp_path, repo, "--no-open"),
+            opener=lambda url: None) == 0
+        prefix = "  console file://"
+    out, err = capsys.readouterr()
+    (token,) = tokens
+    lines = out.splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(prefix))
+    hint = lines[at + 1]
+    assert hint.strip() == console_access.UNOPENABLE_HINT, lines
+    assert "OPENDOX_STATE_DIR" in hint and "not hidden" in hint, hint
+    assert sum(console_access.UNOPENABLE_HINT in line for line in lines) == 1, lines
+    assert all(token not in line for line in (out + err).splitlines()), \
+        "a line the start printed carries the token"

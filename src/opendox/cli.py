@@ -937,6 +937,9 @@ def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
                     print(f"  console {console.file_url} (this user's private "
                           "copy, mode 0600: open it to open the console page "
                           "again)")
+                    # A browser that cannot open it is told the way past it,
+                    # in one line with no token (RULED, B3).
+                    print(f"  {console_access.UNOPENABLE_HINT}")
                 # The URL is ALWAYS printed on its own line, AND FLUSHED (plan
                 # 034 T056). Where standard output is a pipe or a file, Python
                 # buffers it by block, and the process is about to block in

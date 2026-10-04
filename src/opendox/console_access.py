@@ -33,7 +33,10 @@ the private copy, an HTML page that forwards to it, and the browser is handed
 the copy's `file://` path. That is Jupyter's own redirect file, and for the
 same reason. The start prints the copy's PATH, never the token, with or
 without `--no-open`, and opening that file again is how a user re-opens the
-page while the server runs. The copy is removed when the server stops.
+page while the server runs. The copy is removed when the server stops. Beside
+the path, one line with no token tells a user whose browser cannot open that
+file (a snap or Flatpak browser, a Windows browser under WSL) to move the
+state directory (`UNOPENABLE_HINT`, RULED as an accepted limit).
 
 THE COPY IS CHECKED THE WAY openDox-code#69's BUNDLE CHECKS ITS TREE
 (`opendox.runtime.bundle`: `refuse_an_unsafe_tree`, `_make_private_directories`,
@@ -115,7 +118,8 @@ __all__ = [
     "CONSOLE_DIRNAME", "ConsoleAccessRefused", "ConsoleTerminated",
     "DELIVERY_CAPABILITIES",
     "DELIVERY_OPENED_URL", "FRAGMENT_KEY", "PrivateCopy", "RECORD_ELEMENT_ID",
-    "RECORD_KIND", "deferred_termination", "delivery_for", "guard_private_roots",
+    "RECORD_KIND", "UNOPENABLE_HINT", "deferred_termination", "delivery_for",
+    "guard_private_roots",
     "is_private_file", "needs_copy", "opens_a_private_file",
     "opened_url", "private_copy_path", "publish", "read_private_copy",
     "remove_private_copy", "terminate_as_interrupt", "unsupported_platform",
@@ -141,6 +145,17 @@ PRIVATE_MODE = 0o600
 #: The one mode the copies' directory, `console/`, may have (#1144 12.4a: the
 #: copy is mode 0600 "in a directory of mode 0700").
 CONSOLE_DIR_MODE = 0o700
+#: The one line a start prints beside the copy's path, and it carries no token.
+#: Some browsers cannot open the copy where it is: a snap or Flatpak browser
+#: is kept out of a hidden directory such as `~/.local/state`, and a Windows
+#: browser under WSL may not open a Linux path at all. The token is never
+#: printed, so this line is the way past it (RULED by Brett on the adversarial
+#: review of openDox-code#84, B3, 2026-10-04: "Hint line, accepted limit").
+UNOPENABLE_HINT = (
+    "if your browser cannot open this file (a snap or Flatpak browser, or a "
+    "Windows browser under WSL), set "
+    f"{runtime_config.PREFIX}STATE_DIR to a folder that is not hidden and "
+    "start again")
 #: A copy is a few hundred bytes; a read stops well past that.
 _READ_LIMIT = 64 * 1024
 #: `secrets.token_urlsafe` spells a token in these characters only, so a token

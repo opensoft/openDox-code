@@ -2703,6 +2703,9 @@ def serve(
                 if console is not None:
                     print(f"console {console.file_url} (this user's private "
                           "copy, mode 0600: open it to open the console page)")
+                    # A browser that cannot open it is told the way past it,
+                    # in one line with no token (RULED, B3).
+                    print(console_access.UNOPENABLE_HINT)
                 # FLUSHED before the process blocks (plan 034 T056): where
                 # standard output is a pipe or a file it is block-buffered, so
                 # an unflushed line never reaches a wrapper while the server
