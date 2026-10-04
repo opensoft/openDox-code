@@ -905,9 +905,10 @@ def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
     # to `webbrowser.open` sits on a command line every user can read
     # (`/proc/<pid>/cmdline`). The path is printed with or without
     # `--no-open`, and the token never is: opening that file again re-opens
-    # the page. `None` on a host's plane and where no token was minted, and
-    # then nothing changes. A copy that cannot be written safely refuses the
-    # run before it serves.
+    # the page. `None` on a host's plane, where no token was minted (a
+    # standalone plane still keeps every console's copy unserved then,
+    # `console_access.guard_private_roots`), and under `--no-serve`. A copy
+    # that cannot be written safely refuses the run before it serves.
     #
     # A plain `kill`, or a closed terminal, stops a standalone console the way
     # Ctrl-C does (`terminate_as_interrupt`), from BEFORE the copy is written
@@ -915,12 +916,21 @@ def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
     # stop that arrives while the copy is being written or removed is held
     # until that is done (`deferred_termination`), so no copy is ever left
     # half handled. A plane that writes no copy keeps the signals' defaults.
+    #
+    # `--no-serve` SERVES NOTHING, SO IT PUBLISHES NOTHING (adversarial review
+    # of openDox-code#84, B8). It closes the server as soon as it has printed
+    # the URL, so a copy written for it opened a console page nothing
+    # answered, and was deleted as the run returned. No copy is written, none
+    # is opened, and no console line is printed.
     console = None
-    with console_access.terminate_as_interrupt(console_access.needs_copy(httpd)):
+    serving = not args.no_serve
+    with console_access.terminate_as_interrupt(
+            serving and console_access.needs_copy(httpd)):
         try:
             try:
                 with console_access.deferred_termination():
-                    console = console_access.publish(httpd, page_url=url)
+                    if serving:
+                        console = console_access.publish(httpd, page_url=url)
                 print(f"  serving {url}")
                 print(f"  snapshot {serve_mod.server_url(httpd, '/snapshot.json')}")
                 if console is not None:

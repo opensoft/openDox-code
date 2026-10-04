@@ -822,8 +822,7 @@ def read_unless_private(path: Path | str, private_roots) -> bytes | None:
     resolved again on every request, and could be re-pointed at the state
     directory after the copy was published; a hard link reaches the copy by
     another name. The file actually opened is judged, so neither is served.
-    With no private root (a host's plane, or a plane that wrote no copy) it
-    reads as before."""
+    With no private root (a host's plane) it reads as before."""
     with open(path, "rb") as stream:
         if private_roots and console_access.is_private_file(
                 stream.fileno(), private_roots):
@@ -1362,9 +1361,16 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         serve the token's copy (plan 034 T104; Copilot at openDox-code#84,
         r4173889294): a target whose RESOLVED path is a directory the entry
         point marked private (`console_access.publish` sets
-        `private_roots` on the server), or lies inside one, is a 404, for GET
-        and HEAD, files and listings alike. A server with no copy marks
-        nothing, and serves exactly as before.
+        `private_roots` on the server, on every standalone plane, whether it
+        wrote a copy or not), or lies inside one, is a 404, for GET and HEAD,
+        files and listings alike. A host's plane marks nothing, and serves
+        exactly as before.
+
+        BY NAME AND BY IDENTITY (adversarial review of openDox-code#84, B4):
+        a case-insensitive filesystem spells the copies' directory more than
+        one way, so where the resolved target, or a directory above it, is a
+        private root by `(st_dev, st_ino)`, it is that root
+        (`console_access.within_private_roots`).
 
         A DIRECTORY REQUEST IS JUDGED BY WHAT IT SERVES (Copilot at
         openDox-code#84, r4174674625). For `/sub/` the stdlib handler serves
@@ -1391,9 +1397,7 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
                         judged.append(path / name)
                         break
             for candidate in judged:
-                target = candidate.resolve()
-                if (any(target == root or root in target.parents
-                        for root in private)
+                if (console_access.within_private_roots(candidate, private)
                         or console_access.opens_a_private_file(candidate, private)):
                     self.send_error(404, "File not found")
                     return None
@@ -2352,10 +2356,15 @@ def build_server(
     # entry point writes it into a 0600 private copy instead and opens the page
     # with it in the URL's fragment (`console_access.publish`). The routes that
     # require it require it exactly as before; only the delivery differs.
+    #
+    # THE DELIVERY IS THE PLANE'S, TOKEN OR NOT (adversarial review of
+    # openDox-code#84, B1): a standalone plane that minted none still keeps
+    # the state directory's boundary and never serves another plane's copy
+    # (`console_access.guard_private_roots`), so it is named a standalone
+    # plane's whether or not a token was minted.
     console_token = (mint_console_token()
                      if capabilities["actions"]["session"] else None)
-    console_delivery = (console_access.delivery_for(domain_profile.current())
-                        if console_token else None)
+    console_delivery = console_access.delivery_for(domain_profile.current())
     if console_token and console_delivery == console_access.DELIVERY_CAPABILITIES:
         capabilities[CONSOLE_TOKEN_FIELD] = console_token
     # THE ONE REPOSITORY THIS SERVE CAN WRITE TO. A plane reaching several
@@ -2538,8 +2547,8 @@ def build_server(
     factory = functools.partial(bound, directory=str(web_dir))
     httpd = _server_class_for(host)((host, port), factory)
     # FOR THE ENTRY POINT, which delivers the token where `/capabilities` does
-    # not (`console_access.publish`): the token, and which delivery this plane
-    # uses. Both `None` where no token was minted.
+    # not (`console_access.publish`): the token (`None` where none was
+    # minted), and which delivery this plane uses, whether or not it was.
     httpd.console_token = console_token
     httpd.console_token_delivery = console_delivery
     # ...and EVERY root this plane serves files from, which the token's copy

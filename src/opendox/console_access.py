@@ -58,17 +58,29 @@ are that module's private helpers and its refusal names a socket:
     descriptor, opened without blocking: a regular file, this user's,
     exactly 0600, one link;
   * the state directory and every root the plane serves may not overlap in
-    either direction, by name and before any write, as T100's
-    served-repository boundary refuses its own (holder's rulings on
-    openxFactory#1220's review, Copilot `r4171166321`, and on batch N's,
-    `r4174345203`);
+    either direction, before any write, as T100's served-repository boundary
+    refuses its own (holder's rulings on openxFactory#1220's review, Copilot
+    `r4171166321`, and on batch N's, `r4174345203`), judged by name AND by
+    the directories' own identities, so a second spelling of one directory
+    (a case-insensitive filesystem's) is the same directory;
+  * EVERY standalone plane keeps that boundary and never serves a copy, the
+    planes that minted no token included (`publish`): a sibling plane of the
+    same user shares the state directory, and serves what another plane
+    wrote there unless it refuses it too;
+  * a publication sweeps the copies their servers left when they died
+    (`_sweep_stale_copies`): a copy whose reservation is free is no running
+    console's;
   * every refusal names its path, an operating-system one included, so an
     entry point refuses its start by name; and the copy is removed when the
     server stops, by Ctrl-C, SIGTERM or SIGHUP, or when its start is refused
     after it was written. A stop is read as Ctrl-C from before the copy is
     written to after it is removed, and held while a copy is being written or
-    removed (`deferred_termination`), and every writer and remover of
-    `console/` takes the directory's lock (`_lock`).
+    removed (`deferred_termination`); the first stop is the only one raised
+    (`_terminate_as_interrupt`), and every writer and remover of `console/`
+    takes the directory's lock (`_lock`);
+  * a platform without the POSIX primitives these rules rest on is named and
+    refused before anything is written or read (`unsupported_platform`), as
+    the bundle refuses its own.
 
 #1144 12.4a, as T007 batch N amends it (openxFactory#1222), is the normative
 text this module realizes.
@@ -86,6 +98,7 @@ import os
 import re
 import signal
 import stat
+import sys
 import urllib.parse
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -102,10 +115,11 @@ __all__ = [
     "CONSOLE_DIRNAME", "ConsoleAccessRefused", "ConsoleTerminated",
     "DELIVERY_CAPABILITIES",
     "DELIVERY_OPENED_URL", "FRAGMENT_KEY", "PrivateCopy", "RECORD_ELEMENT_ID",
-    "RECORD_KIND", "deferred_termination", "delivery_for", "is_private_file",
-    "needs_copy", "opens_a_private_file",
+    "RECORD_KIND", "deferred_termination", "delivery_for", "guard_private_roots",
+    "is_private_file", "needs_copy", "opens_a_private_file",
     "opened_url", "private_copy_path", "publish", "read_private_copy",
-    "remove_private_copy", "terminate_as_interrupt", "write_private_copy",
+    "remove_private_copy", "terminate_as_interrupt", "unsupported_platform",
+    "within_private_roots", "write_private_copy",
 ]
 
 #: The token rides on `/capabilities`, as a host's plane has always read it.
@@ -136,6 +150,54 @@ _RECORD_PATTERN = re.compile(
     r'<script type="application/json" id="' + RECORD_ELEMENT_ID
     + r'">(?P<record>[^<]*)</script>')
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+#: The names a publication may sweep when their servers are gone
+#: (`_sweep_stale_copies`): a copy, a writer's temporary file, and a remover's
+#: taken name. Each holds a token, and nothing else is ever touched.
+_SWEEPABLE = re.compile(r"[0-9]+\.html|\.[0-9]+\.html\.opendox-[0-9]+"
+                        r"|\.[0-9]+\.html\.removing-[0-9]+-[0-9a-f]{12}")
+
+#: Whether every call the copy's rules make relative to a directory's
+#: descriptor takes one here, read ONCE at import, as `opendox.runtime.bundle`
+#: reads its own: a case that stands a wrapper in for one of them must not
+#: read as another platform.
+_DIR_FD_CALLS = all(call in os.supports_dir_fd for call in (
+    os.open, os.mkdir, os.stat, os.rename, os.unlink, os.link))
+
+
+def unsupported_platform() -> str | None:
+    """Why this platform cannot keep a console token's private copy, or `None`.
+
+    The copy is a POSIX design, as openDox-code#69's bundle is, and every one
+    of its rules rests on a POSIX primitive: its directories and the file are
+    judged by owner (`os.getuid`), made and opened without following a link
+    (`O_DIRECTORY`, `O_NOFOLLOW`, calls relative to a directory's
+    descriptor), set to 0600 by descriptor (`fchmod`), and read without
+    blocking (`O_NONBLOCK`). Without them (Windows) the standalone start
+    ended in an `AttributeError` traceback (adversarial review of
+    openDox-code#84, B2). So the writer and the reader name the gap first,
+    and refuse, as `opendox.runtime.bundle.unsupported_platform` names its
+    own (holder's ruling)."""
+    missing = [name for name, present in (
+        ("os.getuid", hasattr(os, "getuid")),
+        ("os.O_DIRECTORY", hasattr(os, "O_DIRECTORY")),
+        ("os.O_NOFOLLOW", hasattr(os, "O_NOFOLLOW")),
+        ("os.O_NONBLOCK", hasattr(os, "O_NONBLOCK")),
+        ("os.fchmod", hasattr(os, "fchmod")),
+        ("calls relative to a directory's descriptor", _DIR_FD_CALLS),
+    ) if not present]
+    if not missing:
+        return None
+    return (f"the console token's private copy needs a POSIX platform, and "
+            f"this one ({sys.platform}) lacks {', '.join(missing)}: the copy "
+            "and its directories are judged by owner and made without "
+            "following a link, so a standalone console cannot hand its token "
+            "to this user alone here, and is not started")
+
+
+def _refuse_an_unsupported_platform() -> None:
+    reason = unsupported_platform()
+    if reason is not None:
+        raise ConsoleAccessRefused(reason)
 
 
 class ConsoleAccessRefused(Exception):
@@ -523,9 +585,24 @@ def _opener_html(record: Mapping[str, Any]) -> str:
         "</html>\n")
 
 
+def _identity(path: Path | str) -> tuple[int, int] | None:
+    """`(st_dev, st_ino)` of what `path` names, or `None` where nothing
+    there can be asked."""
+    try:
+        info = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _identities_above(path: Path) -> set[tuple[int, int]]:
+    """The identities of every directory above `path` that exists."""
+    return {key for key in map(_identity, Path(path).parents) if key is not None}
+
+
 def _refuse_a_served_state_dir(state_dir: Path,
                                served_roots: Iterable[Path | str], *,
-                               port: int) -> None:
+                               port: int | None) -> None:
     """The state directory and every root this plane serves may not overlap,
     in EITHER direction, or the copy is refused before anything is written.
 
@@ -540,19 +617,33 @@ def _refuse_a_served_state_dir(state_dir: Path,
     it, served as a root, would serve the copy (Copilot at openDox-code#84,
     `r4173889265`, found the first of these). Asked of the RESOLVED paths, so
     a link counts as where it leads. `port` names the copy the refusal is
-    about."""
+    about, and `None`, on a plane that writes none, names every console's.
+
+    AND OF THE DIRECTORIES' OWN IDENTITIES (adversarial review of
+    openDox-code#84, B4). On a case-insensitive filesystem (macOS's default)
+    `<root>/STATE` and `<root>/state` are one directory, and resolving a
+    path keeps the case it was given, so names alone let the second
+    spelling of the state directory, or of a root, through. Every directory
+    that exists on either path is also compared by `(st_dev, st_ino)`
+    (`_identity`): the same directory is the same, however it is spelled."""
     resolved = Path(state_dir).resolve()
-    copy = private_copy_path(resolved, port)
+    copy = (f"the copy {private_copy_path(resolved, port)}" if port is not None
+            else f"every console's private copy in {resolved / CONSOLE_DIRNAME}")
+    state_is = _identity(resolved)
+    above_state = _identities_above(resolved)
     for root in served_roots:
         served = Path(root).resolve()
-        if resolved == served:
+        served_is = _identity(served)
+        if resolved == served or (state_is is not None and state_is == served_is):
             where = f"is the served repository ({served})"
-        elif served in resolved.parents:
+        elif served in resolved.parents or (served_is is not None
+                                             and served_is in above_state):
             where = f"lies inside the served repository ({served})"
-        elif resolved in served.parents:
+        elif resolved in served.parents or (state_is is not None
+                                             and state_is in _identities_above(served)):
             where = (f"holds {served}, a root this plane serves, so the plane "
-                     f"would serve what the state directory keeps, the copy "
-                     f"{copy} among it")
+                     f"would serve what the state directory keeps, {copy} "
+                     "among it")
         else:
             continue
         raise ConsoleAccessRefused(
@@ -593,7 +684,11 @@ def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
 
     THE WALK IS INSIDE THE CONVERSION TOO (Copilot at openDox-code#84,
     r4177975898): an overlong component (ENAMETOOLONG) or an unsearchable
-    parent (EACCES) on the way is a refusal by name, like any other."""
+    parent (EACCES) on the way is a refusal by name, like any other.
+
+    A PLATFORM WITHOUT THE POSIX PRIMITIVES is refused first, by name
+    (`unsupported_platform`)."""
+    _refuse_an_unsupported_platform()
     target = private_copy_path(state_dir, port)
     try:
         state = _walked(state_dir)
@@ -643,6 +738,7 @@ def _write_the_copy(state: Path, target: Path,
         if reason is not None:
             raise _unsafe(target.parent, reason)
         _lock(directory)            # until the copy is in place (`_lock`)
+        _sweep_stale_copies(directory, spare=target.name)
         try:
             present = os.stat(target.name, dir_fd=directory,
                               follow_symlinks=False)
@@ -735,6 +831,47 @@ def _refuse_a_running_consoles_copy(target: Path, directory: int,
         os.close(held)
 
 
+def _sweep_stale_copies(directory: int, *, spare: str) -> None:
+    """Remove every copy in `console/` whose console is gone, `spare` aside.
+
+    A SERVER THAT DIED LEFT ITS COPY (adversarial review of openDox-code#84,
+    B9). A SIGKILL, an out-of-memory kill or a power cut runs no cleanup, so
+    its copy, a token in it, stayed until a later serve happened to take the
+    same port. A publication now sweeps them. It runs with the console
+    directory's lock held (`_lock`), so no publication or removal is under
+    way: a copy whose lock is free belongs to no running console
+    (`_Reservation`), and a writer's temporary file or a remover's taken name
+    found then belongs to a process that died mid-way. Only this user's own
+    regular files of mode 0600 with one link, named as those are named
+    (`_SWEEPABLE`), are swept, each only while its name is still the file
+    whose lock was taken. A lock still held, or a filesystem that keeps no
+    locks, tells nothing, and the file stays. `spare` is the name this
+    publication judges itself (`_refuse_a_running_consoles_copy`)."""
+    if fcntl is None:
+        return
+    uid = os.getuid()
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if name == spare or not _SWEEPABLE.fullmatch(name):
+            continue
+        with contextlib.suppress(OSError):
+            handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory)
+            try:
+                info = os.fstat(handle)
+                if _file_unsafe_because(info, uid=uid) is not None:
+                    continue
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)  # held: stays
+                still = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if (still.st_dev, still.st_ino) == (info.st_dev, info.st_ino):
+                    os.unlink(name, dir_fd=directory)
+            finally:
+                os.close(handle)
+
+
 def _writer_of(handle: int) -> str:
     """`" (pid N)"` from the copy's own record, or nothing."""
     with contextlib.suppress(OSError, ValueError, AttributeError):
@@ -749,7 +886,10 @@ def _writer_of(handle: int) -> str:
 def read_private_copy(path: Path | str) -> dict:
     """The record in the copy at `path`, or a refusal naming why: an
     operating-system error on the way (an overlong component, an unsearchable
-    parent) included (Copilot at openDox-code#84, r4177975898)."""
+    parent) included (Copilot at openDox-code#84, r4177975898). A platform
+    without the POSIX primitives is refused first, by name
+    (`unsupported_platform`)."""
+    _refuse_an_unsupported_platform()
     try:
         return _read_the_copy(path)
     except OSError as exc:
@@ -913,16 +1053,27 @@ class ConsoleTerminated(KeyboardInterrupt):
     already stop on."""
 
 
-#: Whether a stop is being HELD (`deferred_termination`), and the one that
-#: arrived meanwhile. Python runs signal handlers in the main thread only, as
-#: the entry points publish and remove there, so plain module state serves.
-_held = {"depth": 0, "pending": None}
+#: Whether a stop is being HELD (`deferred_termination`), the one that
+#: arrived meanwhile, and whether a stop has already been RAISED. Python runs
+#: signal handlers in the main thread only, as the entry points publish and
+#: remove there, so plain module state serves.
+_held = {"depth": 0, "pending": None, "stopping": False}
 
 
 def _terminate_as_interrupt(signum, frame):
-    if _held["depth"]:
+    """A stop, raised once.
+
+    THE FIRST STOP IS THE ONLY ONE RAISED (adversarial review of
+    openDox-code#84, B5). A double Ctrl-C, or a SIGTERM and then the SIGHUP
+    of a closing terminal, could land its second signal after the first had
+    unwound the serve loop and before the cleanup's `deferred_termination`
+    held anything, and that second interrupt escaped the `finally` and left
+    the copy. Once one stop is raised, every later one is only recorded, and
+    the cleanup runs to its end."""
+    if _held["depth"] or _held["stopping"]:
         _held["pending"] = signum
         return
+    _held["stopping"] = True
     raise ConsoleTerminated
 
 
@@ -944,7 +1095,8 @@ def deferred_termination(*, raise_pending: bool = True):
         _held["depth"] -= 1
     if not _held["depth"]:
         pending, _held["pending"] = _held["pending"], None
-        if pending is not None and raise_pending:
+        if pending is not None and raise_pending and not _held["stopping"]:
+            _held["stopping"] = True        # raised once (`_terminate_as_interrupt`)
             raise ConsoleTerminated
 
 
@@ -989,11 +1141,13 @@ def terminate_as_interrupt(enabled: bool):
             signal.signal(signum, handler)
         yield
         return
+    _held.update(pending=None, stopping=False)
     try:
         yield
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
+        _held.update(pending=None, stopping=False)
 
 
 def is_private_file(handle: int, private_roots: Iterable[Path | str]) -> bool:
@@ -1023,6 +1177,29 @@ def is_private_file(handle: int, private_roots: Iterable[Path | str]) -> bool:
     return False
 
 
+def within_private_roots(path: Path | str,
+                         private_roots: Iterable[Path | str]) -> bool:
+    """Whether `path`, where it leads, IS a private-copy directory or lies
+    inside one: by name, and by the identity of every directory on its way.
+
+    A case-insensitive filesystem (macOS's default) has more than one
+    spelling for each directory, and resolving a path keeps the case it was
+    given, so `<web>/state-alias/CONSOLE/` named the copies' directory under
+    a name no private root spells (adversarial review of openDox-code#84,
+    B4). So the resolved path is also judged by `(st_dev, st_ino)`: where it,
+    or any directory above it, is a private root by identity, it is that
+    root, however it is spelled. A private root that does not exist yet is
+    judged by name alone, as nothing can lie inside it."""
+    target = Path(path).resolve()
+    roots = [Path(root) for root in private_roots]
+    if any(target == root or root in target.parents for root in roots):
+        return True
+    marked = {key for key in map(_identity, roots) if key is not None}
+    if not marked:
+        return False
+    return bool(marked & ({_identity(target)} | _identities_above(target)))
+
+
 def opens_a_private_file(path: Path | str,
                          private_roots: Iterable[Path | str]) -> bool:
     """Whether what opens at `path` is a file in a private-copy directory
@@ -1043,28 +1220,56 @@ def needs_copy(httpd: Any) -> bool:
     """Whether the plane `httpd` delivers its console token through a
     private copy: a standalone plane that minted one. The entry points ask it
     BEFORE `publish`, to read a stop as Ctrl-C from before the copy exists."""
-    return bool(getattr(httpd, "console_token", None)) and getattr(
-        httpd, "console_token_delivery", None) == DELIVERY_OPENED_URL
+    return bool(getattr(httpd, "console_token", None)) and _standalone(httpd)
+
+
+def _standalone(httpd: Any) -> bool:
+    return getattr(httpd, "console_token_delivery", None) == DELIVERY_OPENED_URL
+
+
+def guard_private_roots(httpd: Any, state_dir: Path | str) -> None:
+    """Keep a standalone plane that WRITES NO COPY from serving another's.
+
+    A SIBLING PLANE SERVED ANOTHER PLANE'S COPY (adversarial review of
+    openDox-code#84, B1). Two standalone planes of one user share the state
+    directory. One that minted no token (no git identity, so no session
+    verbs) wrote no copy, so it asked no boundary and marked no private
+    root, and a root it served that held the state directory served the
+    other plane's copy, token and all, to any local caller. The boundary is
+    the PLANE's, not the copy's: this one is asked of the state directory as
+    `write_private_copy` asks it, by name and by identity, and refuses the
+    start by name, and the copies' directory is marked private
+    (`httpd.private_roots`), so the static handler, `/source` and
+    `/snapshot.json` refuse every console's copy here too."""
+    _refuse_a_served_state_dir(state_dir, tuple(getattr(httpd, "served_roots", ())),
+                               port=None)
+    httpd.private_roots = (Path(state_dir).resolve() / CONSOLE_DIRNAME,)
 
 
 def publish(httpd: Any, *, page_url: str,
             env: Mapping[str, str] | None = None) -> PrivateCopy | None:
-    """What an ENTRY POINT does after `serve.build_server`: on a standalone
+    """What an ENTRY POINT does after `serve.build_server`. On a standalone
     plane that minted a token, write the private copy into the install's
-    state directory and return it; otherwise `None`, and nothing is written.
+    state directory and return it. On a standalone plane that minted none,
+    write nothing, and still keep the boundary and mark every console's copy
+    private (`guard_private_roots`), so the DELIVERY'S RULES do not depend on
+    the token. Otherwise, a host's plane, `None`, and nothing changes.
 
     A state directory that cannot be named, or a tree that is not this user's
     alone, refuses (`ConsoleAccessRefused`), and the entry point refuses with
     it: a console nobody can open is not served as if it could be."""
-    if not needs_copy(httpd):
+    if not _standalone(httpd):
         return None
-    token = httpd.console_token
     try:
         state = runtime_config.state_dir(env)
     except runtime_config.ConfigurationError as exc:
         raise ConsoleAccessRefused(
-            f"the console token's private copy has no state directory: {exc}"
-        ) from None
+            "the console tokens' private copies have no state directory, so "
+            f"this standalone plane cannot keep them unserved: {exc}") from None
+    if not needs_copy(httpd):
+        guard_private_roots(httpd, state)
+        return None
+    token = httpd.console_token
     copy = write_private_copy(state, page_url=page_url,
                               port=int(httpd.server_address[1]), token=token,
                               served_roots=getattr(httpd, "served_roots", ()))
@@ -1072,7 +1277,8 @@ def publish(httpd: Any, *, page_url: str,
     # r4173889294). It follows links inside `--web-dir` (a governed host's
     # composed web root is made of them), so a link out of the bundle into the
     # state directory would reach the copies. The handler refuses every static
-    # request whose resolved target is this directory or lies inside it
-    # (`serve.DashboardHandler.send_head`), every port's copy included.
+    # request whose resolved target is this directory or lies inside it, by
+    # name or by identity (`within_private_roots`), every port's copy included
+    # (`serve.DashboardHandler.send_head`).
     httpd.private_roots = (copy.path.parent.resolve(),)
     return copy
