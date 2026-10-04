@@ -99,6 +99,12 @@ from pathlib import Path, PurePosixPath
 from typing import IO
 
 from opendox.runtime import config
+# openDox's own settings documents, which `WorkingTreeCorpus` (the standalone
+# default) leaves out of its listing (plan 034 T082). Imported, not copied: the
+# list is declared once, beside the two paths it names. `doxbench_intake` and
+# the `doxbench_binding` it reads import the standard library only, so this
+# module still costs the standard library alone to import.
+from opendox.doxbench_intake import SETTINGS_DOCUMENTS
 from opendox.corpus_adapter import (
     CORPUS_ABSENT,
     CORPUS_READ_ONLY,
@@ -3013,8 +3019,10 @@ class WorkingTreeCorpus(LocalGitCorpus):
     matches it instead of reading a commit a local session has since edited
     past.
 
-    `resolve()`, `check()` and `write_back()` are UNCHANGED, inherited from
-    `LocalGitCorpus` exactly. So is `classify()`: its header read
+    `resolve()` and `write_back()` are UNCHANGED, inherited from
+    `LocalGitCorpus` exactly. So is `check()`, except that a WHOLE-corpus
+    check leaves out the paths `excluded` names (see below). So is
+    `classify()`: its header read
     (`_header_of`) goes THROUGH `self.read()`, which is why overriding `read`
     alone is enough to make classification see the same bytes this adapter
     lists and serves. Only WHERE `list_documents`/`read` get their bytes
@@ -3081,15 +3089,65 @@ class WorkingTreeCorpus(LocalGitCorpus):
     `WorkingTreeCorpus()`, hands every standalone caller an adapter whose
     `classify` obliges them, and `authoring.required_header_fields()` answers
     them. Nothing else about the class changes: a document without them is
-    still listed and read, and `classify` reports what is missing."""
+    still listed and read, and `classify` reports what is missing.
+
+    OPENDOX'S OWN SETTINGS DOCUMENTS ARE NOT LISTED (plan 034 T082; #1144
+    16.5, RULED by the holder 2026-10-02, option (a)). `excluded` names the
+    paths the listing leaves out, by EXACT corpus-relative key, whether the
+    file is tracked or untracked and whatever revision the listing reads. Its
+    default is `doxbench_intake.SETTINGS_DOCUMENTS`: the model bindings
+    document and the intake declarations document, at their default paths.
+    `opendox model-binding add` writes the first into the checkout, where its
+    operator can read and commit it. Before this rule it joined the corpus as
+    a `source` document, so the snapshot, the generated output and every view
+    changed the moment a model was configured. This class's only constructor
+    is openDox's standalone default (`cli.py`'s and `serve.py`'s
+    `_default_home_factory`), so the default is that default's rule. A host
+    that brings its own corpus adapter decides for itself, and `excluded=()`
+    lists everything. A path left out is still a file, and the source route
+    still serves it by name: the rule is about what the corpus LISTS, not
+    what exists."""
 
     def __init__(self, *, executable: str = "git",
                  write_path: str | None = WRITE_PATH,
                  kind_field: str | None = None,
-                 required_fields: tuple[str, ...] = NEUTRAL_FIELDS) -> None:
+                 required_fields: tuple[str, ...] = NEUTRAL_FIELDS,
+                 excluded: tuple[str, ...] = SETTINGS_DOCUMENTS) -> None:
         super().__init__(executable=executable, write_path=write_path,
                          kind_field=kind_field,
                          required_fields=required_fields)
+        self._excluded = frozenset(excluded)
+
+    def list_documents(self, corpus: ResolvedCorpus,
+                       scope: str = SCOPE_ALL) -> tuple[DocumentId, ...]:
+        """The parent's listing, minus `excluded`. Applied here, after both
+        of `_list_documents_bound`'s branches, so a pinned revision leaves
+        the same paths out as the working tree does."""
+        listed = super().list_documents(corpus, scope)
+        if not self._excluded:
+            return listed
+        return tuple(d for d in listed if d.key not in self._excluded)
+
+    def check(self, corpus: ResolvedCorpus,
+              subjects: tuple[DocumentId, ...] | None = None) -> tuple[Finding, ...]:
+        """The parent's verdict, over the documents this corpus LISTS.
+
+        `subjects=None` means the whole corpus (`CorpusAdapter.check`), and
+        an excluded path is not in the corpus this class lists. So a finding
+        on an excluded path is left out of a whole-corpus check, and an
+        edited, committed bindings document is not reported as an uncommitted
+        document the corpus does not hold (Copilot at openDox-code#76,
+        r4170556938). THAT IS ALL THIS FILTER DOES: every other finding the
+        parent reports stands as it did before T082, including one on a
+        tracked path deleted from the working tree, which the listing omits
+        (`_list_documents_bound`) and the parent's diff still reports as a
+        divergence from the resolved commit. A subject the caller NAMES is
+        answered whether or not it is excluded: asking about one file by name
+        is not asking about the corpus."""
+        findings = super().check(corpus, subjects)
+        if subjects is not None or not self._excluded:
+            return findings
+        return tuple(f for f in findings if f.subject not in self._excluded)
 
     def _list_documents_bound(self, git: GitRunner, corpus: ResolvedCorpus,
                               scope: str) -> tuple[DocumentId, ...]:
