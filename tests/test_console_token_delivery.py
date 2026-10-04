@@ -38,6 +38,7 @@ import signal
 import socket
 import socketserver
 import stat
+import sys
 import threading
 import urllib.parse
 from pathlib import Path
@@ -2604,9 +2605,12 @@ def _adv_serve(tmp: Path, repo: Path, state: Path, port: int, name: str,
         cmd = [sys.executable, "-m", "opendox.serve", *argv]
     else:
         cmd = [sys.executable, "-c", code + f"\nsys.exit(serve.main({argv!r}))"]
+    parent = os.getpid()
     proc = subprocess.Popen(cmd, cwd=tmp, env=_adv_env(state),
                             stdout=out.open("w"), stderr=subprocess.STDOUT,
-                            preexec_fn=_default_stops)
+                            start_new_session=True,
+                            preexec_fn=lambda: _child_setup(parent))
+    _SPAWNED.append(proc)
     for _ in range(300):
         if "serving ideation dashboard" in out.read_text() or proc.poll() is not None:
             break
@@ -2614,17 +2618,65 @@ def _adv_serve(tmp: Path, repo: Path, state: Path, port: int, name: str,
     return proc, out
 
 
-def _default_stops() -> None:
-    """A child started from a background job inherits SIGINT ignored, and
-    one under `nohup` SIGHUP: give it a terminal's, so its stops are read."""
+#: Every server child `_adv_serve` started, reaped after each case
+#: (`_reap_spawned_servers`), whether the case passed, failed or raised.
+_SPAWNED: list = []
+#: `prctl(2)`, loaded in the test process, before any fork, on Linux only.
+_PRCTL = None
+if sys.platform.startswith("linux"):
+    import ctypes as _ctypes
+
+    with contextlib.suppress(OSError, AttributeError):
+        _PRCTL = _ctypes.CDLL(None, use_errno=True).prctl
+_PR_SET_PDEATHSIG = 1
+
+
+def _child_setup(parent: int) -> None:
+    """In the child, before it runs. A child started from a background job
+    inherits SIGINT ignored, and one under `nohup` SIGHUP: give it a
+    terminal's, so its stops are read. And on Linux, have the kernel send it
+    SIGTERM if the test process dies first (a killed run runs no teardown),
+    so no server outlives the run that started it."""
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    if _PRCTL is not None:
+        _PRCTL(_PR_SET_PDEATHSIG, int(signal.SIGTERM), 0, 0, 0)
+        if os.getppid() != parent:          # the parent died before prctl
+            os._exit(1)
 
 
 def _adv_stop(proc) -> int:
     if proc.poll() is None:
         proc.send_signal(signal.SIGTERM)
     return proc.wait(30)
+
+
+def _reap(proc, wait: float = 15) -> None:
+    """Stop `proc` and its process group (its own session, so nothing else
+    is in it): SIGTERM, a bounded wait, then SIGKILL. A child that already
+    ended is only collected."""
+    import subprocess
+
+    if proc.poll() is not None:
+        return
+    for sent in (signal.SIGTERM, signal.SIGKILL):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, sent)
+        try:
+            proc.wait(wait)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+@pytest.fixture(autouse=True)
+def _reap_spawned_servers():
+    """No server child outlives its case: every one `_adv_serve` started is
+    stopped with its process group at teardown, the failing cases' included
+    (a refusal that did not come, say, leaves a plane serving)."""
+    yield
+    while _SPAWNED:
+        _reap(_SPAWNED.pop())
 
 
 def test_b1_a_tokenless_sibling_plane_never_serves_another_planes_copy(
@@ -2655,7 +2707,7 @@ def test_b1_a_tokenless_sibling_plane_never_serves_another_planes_copy(
         assert _port_is_free(port_b), "the refused plane kept its socket"
         assert a.poll() is None, "plane A went down with B's refusal"
     finally:
-        _adv_stop(a)
+        _adv_stop(a)          # B, if it never refused, is reaped at teardown
 
 
 def test_a_tokenless_standalone_plane_keeps_the_boundary(
@@ -3545,3 +3597,85 @@ def test_a_file_whose_head_cannot_be_read_is_denied(tmp_path, monkeypatch) -> No
     assert serve.read_unless_private(ordinary, roots) is None
     monkeypatch.undo()
     console_access.remove_private_copy(copy)
+
+
+# ---------------------------------------------------------------------------
+# 20 — no test server outlives its case, or its run
+# ---------------------------------------------------------------------------
+
+def test_a_server_left_running_is_reaped_with_its_group(tmp_path) -> None:
+    """The teardown's reaper: a server child still serving is stopped by
+    its process group, SIGTERM first, so it removes its copy and frees its
+    port. A child that ignores SIGTERM is killed after the bounded wait."""
+    import subprocess
+
+    repo = _adv_repo(tmp_path / "r")
+    state = _state(tmp_path)
+    port = _free_port()
+    proc, out = _adv_serve(tmp_path, repo, state, port, "left")
+    assert proc.poll() is None, out.read_text()
+    assert os.getpgid(proc.pid) == proc.pid, "the server is not in its own group"
+    assert (state / "console" / f"{port}.html").exists()
+    _reap(proc)
+    assert proc.returncode == 0, out.read_text()
+    assert not (state / "console" / f"{port}.html").exists()
+    assert _port_is_free(port)
+    stubborn = subprocess.Popen(
+        [sys.executable, "-c",
+         "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+         "print('ready', flush=True); time.sleep(120)"],
+        stdout=subprocess.PIPE, start_new_session=True)
+    try:
+        assert stubborn.stdout.readline().strip() == b"ready"
+        _reap(stubborn, wait=2)
+        assert stubborn.returncode == -signal.SIGKILL
+    finally:
+        if stubborn.poll() is None:
+            stubborn.kill()
+            stubborn.wait(10)
+        stubborn.stdout.close()
+
+
+def test_a_server_outlives_no_killed_run(tmp_path) -> None:
+    """A run that is killed runs no teardown. On Linux the kernel stops a
+    server child when the process that started it dies (`_child_setup`'s
+    parent-death signal): here an intermediate process starts a child the
+    way `_adv_serve` does and is SIGKILLed, and the child ends with it.
+    Elsewhere the teardown alone answers for it."""
+    import subprocess
+    import time
+
+    if _PRCTL is None:
+        return                          # no parent-death signal on this platform
+    script = (
+        "import os, subprocess, sys, time\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
+        "import test_console_token_delivery as t\n"
+        "parent = os.getpid()\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+        "    start_new_session=True, preexec_fn=lambda: t._child_setup(parent))\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(120)\n")
+    middle = subprocess.Popen([sys.executable, "-c", script],
+                              stdout=subprocess.PIPE, cwd=tmp_path,
+                              env=_adv_env())
+    try:
+        child = int(middle.stdout.readline())
+        middle.kill()
+        middle.wait(10)
+        for _ in range(150):
+            try:
+                state = Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except FileNotFoundError:
+                break
+            if state == "Z":
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(child, signal.SIGKILL)
+            pytest.fail("the child outlived the killed run that started it")
+    finally:
+        if middle.poll() is None:
+            middle.kill()
+            middle.wait(10)
+        middle.stdout.close()
