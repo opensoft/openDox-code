@@ -558,20 +558,25 @@ def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
     openDox-code#84, r4174785933), and the served-root boundary, the tree's
     rules and the write all work on the path that walk returned. A link on
     the configured path that is re-pointed after the checks cannot redirect
-    the write. The copy's `path` is that walked path."""
-    state = _walked(state_dir)
-    _refuse_a_served_state_dir(state, tuple(served_roots), port=port)
-    record = {
-        "schema_version": RECORD_SCHEMA_VERSION,
-        "kind": RECORD_KIND,
-        "page_url": page_url,
-        "opened_url": opened_url(page_url, token),
-        "port": int(port),
-        "pid": os.getpid(),
-        FRAGMENT_KEY: token,
-    }
-    target = private_copy_path(state, port)
+    the write. The copy's `path` is that walked path.
+
+    THE WALK IS INSIDE THE CONVERSION TOO (Copilot at openDox-code#84,
+    r4177975898): an overlong component (ENAMETOOLONG) or an unsearchable
+    parent (EACCES) on the way is a refusal by name, like any other."""
+    target = private_copy_path(state_dir, port)
     try:
+        state = _walked(state_dir)
+        _refuse_a_served_state_dir(state, tuple(served_roots), port=port)
+        record = {
+            "schema_version": RECORD_SCHEMA_VERSION,
+            "kind": RECORD_KIND,
+            "page_url": page_url,
+            "opened_url": opened_url(page_url, token),
+            "port": int(port),
+            "pid": os.getpid(),
+            FRAGMENT_KEY: token,
+        }
+        target = private_copy_path(state, port)
         identity = _write_the_copy(state, target, record)
     except OSError as exc:
         raise ConsoleAccessRefused(
@@ -652,6 +657,18 @@ def _write_the_copy(state: Path, target: Path,
 
 
 def read_private_copy(path: Path | str) -> dict:
+    """The record in the copy at `path`, or a refusal naming why: an
+    operating-system error on the way (an overlong component, an unsearchable
+    parent) included (Copilot at openDox-code#84, r4177975898)."""
+    try:
+        return _read_the_copy(path)
+    except OSError as exc:
+        raise ConsoleAccessRefused(
+            f"{path} cannot be read ({exc}), so it is not a private copy this "
+            "user can use") from None
+
+
+def _read_the_copy(path: Path | str) -> dict:
     """The record in the copy at `path`, or a refusal naming why.
 
     The tree is judged again, and the file by its own descriptor, opened

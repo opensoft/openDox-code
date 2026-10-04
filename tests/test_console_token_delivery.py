@@ -1986,3 +1986,88 @@ def test_a_stop_during_removal_lets_the_removal_finish(
     monkeypatch.undo()
     assert taken, "the stop was never staged"
     assert list((state / console_access.CONSOLE_DIRNAME).iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# 14 — Copilot's review at ddb26c34: every operating-system refusal on the
+#      way to the copy is a refusal by name, the walk's included
+# ---------------------------------------------------------------------------
+
+def _overlong(tmp_path: Path) -> Path:
+    return tmp_path / ("x" * 300) / "state"          # ENAMETOOLONG (errno 36)
+
+
+def _unsearchable(tmp_path: Path) -> Path:
+    locked = tmp_path / "unsearchable"
+    locked.mkdir(mode=0o700)
+    locked.chmod(0o600)                               # no search (x) bit
+    return locked / "state"
+
+
+@pytest.mark.parametrize("make", [_overlong, _unsearchable],
+                         ids=["an overlong component", "an unsearchable parent"])
+def test_a_state_path_the_walk_cannot_take_is_refused_by_name(tmp_path, make) -> None:
+    """Copilot at openDox-code#84, r4177975898. The walk and the served-root
+    check ran outside the writer's conversion of operating-system errors, so
+    an overlong component (ENAMETOOLONG) or an unsearchable parent (EACCES)
+    escaped as a raw `OSError`, a traceback and no refusal by name. Each is
+    a `ConsoleAccessRefused` naming the copy, for the writer and the reader."""
+    from opendox import console_access
+
+    if make is _unsearchable and os.geteuid() == 0:
+        pytest.skip("root searches any directory")
+    state = make(tmp_path)
+    try:
+        with pytest.raises(console_access.ConsoleAccessRefused,
+                           match="cannot be written") as refused:
+            _write(state)
+        assert str(console_access.private_copy_path(state, 8080)) in str(refused.value)
+        with pytest.raises(console_access.ConsoleAccessRefused, match="cannot be read"):
+            console_access.read_private_copy(
+                console_access.private_copy_path(state, 8080))
+    finally:
+        if make is _unsearchable:
+            state.parent.chmod(0o700)
+
+
+@pytest.mark.parametrize("make", [_overlong, _unsearchable],
+                         ids=["an overlong component", "an unsearchable parent"])
+@pytest.mark.parametrize("entry", ["serve", "generate-and-open"])
+def test_a_state_path_the_walk_cannot_take_refuses_the_start(
+        tmp_path, monkeypatch, capsys, standalone_profile, make, entry) -> None:
+    """The same, through both entry points: exit 1 with the refusal named,
+    nothing printed that serves, and the listening socket closed."""
+    from opendox import cli, serve
+
+    if make is _unsearchable and os.geteuid() == 0:
+        pytest.skip("root searches any directory")
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = make(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    monkeypatch.setattr(serve, "real_notebook_adapter", lambda *a, **k: None)
+
+    def served(self, *args, **kwargs):
+        raise AssertionError("the server served")
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", served)
+    port = _free_port()
+    try:
+        if entry == "serve":
+            snapshot = tmp_path / "snapshot.json"
+            snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+            assert serve.main(["--snapshot", str(snapshot), "--checkout-root",
+                               str(repo), "--port", str(port)]) == 1
+            refused, startup = "serve refused:", "serving ideation dashboard at"
+        else:
+            assert cli._generate_and_open(
+                _generate_and_open_args(tmp_path, repo, "--port", str(port)),
+                opener=lambda url: None) == 1
+            refused, startup = "generate-and-open refused:", "  serving "
+        out, err = capsys.readouterr()
+        assert refused in err and "cannot be written" in err, err
+        assert startup not in out, out
+        assert _port_is_free(port), "the refused start kept its socket"
+    finally:
+        if make is _unsearchable:
+            state.parent.chmod(0o700)
