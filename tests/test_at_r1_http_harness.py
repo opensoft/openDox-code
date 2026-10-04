@@ -95,7 +95,8 @@ harness = _load_harness()
 @contextlib.contextmanager
 def served(files: dict[str, tuple[str, str]], guarded: frozenset = frozenset()):
     """A loopback server answering `files` (`path -> (content type, body)`,
-    or `(content type, body, status)`), and 404 for anything else. A path in
+    or `(content type, body, status)`, where a tuple of content types sends
+    the header once for each), and 404 for anything else. A path in
     `guarded` answers 403 to a request without the console header, as the
     product's console check does. Yields its port."""
 
@@ -115,8 +116,10 @@ def served(files: dict[str, tuple[str, str]], guarded: frozenset = frozenset()):
                 return
             body = entry[1].encode("utf-8")
             self.send_response(entry[2] if len(entry) > 2 else 200)
-            if entry[0]:
-                self.send_header("Content-Type", entry[0])
+            for value in ((entry[0],) if isinstance(entry[0], str)
+                          else entry[0]):
+                if value:
+                    self.send_header("Content-Type", value)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -173,8 +176,13 @@ def test_the_lexer_skips_comments_and_regular_expressions() -> None:
     (r'"\d\/"', "d/"),
     (r'"\0"', "\0"),
     (r'`./child.js`', "./child.js"),
+    (r'"\uD83D\uDE00"', "\U0001F600"),
+    (r'"\uD83D"', "\ufffd"),
+    (r'"\uDE00\uD83D"', "\ufffd\ufffd"),
+    (r'"\u{0000000041}"', "A"),
 ], ids=["tab", "hex", "unicode", "code-point", "astral", "continuation",
-        "backslash", "identity", "nul", "template"])
+        "backslash", "identity", "nul", "template", "surrogate-pair",
+        "lone-surrogate", "reversed-surrogates", "long-code-point"])
 def test_the_lexer_reads_escapes_as_javascript_does(source: str,
                                                    value: str) -> None:
     """A specifier is read as the browser reads it (found while answering
@@ -1911,8 +1919,9 @@ def test_the_page_s_links_are_read_as_a_browser_reads_them(
     files = {"/ok.js": (JS, "export const x = 1;\n")}
     verdict = harness.Verdict(keep_going=True)
     with served(files) as port:
-        harness.derive_bundle(port, f"<html><head>{page}</head></html>", {},
-                              verdict, "t")
+        harness.derive_bundle(
+            port, f'<html><head>{page}<script type="module" src="./ok.js">'
+                  "</script></head></html>", {}, verdict, "t")
     assert _failures(verdict) == expected
 
 
@@ -1976,7 +1985,10 @@ def test_an_encoded_dot_in_a_query_is_no_divergence() -> None:
     ("/a.js?q=a b&c='d'", "/a.js?q=a%20b&c=%27d%27"),
     ("/a%20b.js", "/a%20b.js"),
     ("/{x}`.js", "/%7Bx%7D%60.js"),
-], ids=["non-ascii", "space", "query", "already-encoded", "path-set"])
+    ("/\ud83d\ude00.js", "/%F0%9F%98%80.js"),
+    ("/\ud83d.js?q=\ude00", "/%EF%BF%BD.js?q=%EF%BF%BD"),
+], ids=["non-ascii", "space", "query", "already-encoded", "path-set",
+        "surrogate-pair", "lone-surrogates"])
 def test_a_request_target_is_encoded_as_a_browser_encodes_it(
         target: str, sent: str) -> None:
     assert harness.browser_target(target) == sent
@@ -2015,3 +2027,332 @@ def test_a_refresh_with_an_unterminated_reference_is_not_followed(
         assert token == TOKEN and FRAGMENT not in failures
     else:
         assert token is None and FRAGMENT in failures
+
+
+# ---------------------------------------------------------------------------
+# Copilot review of #75 at 4bdb41fb: only a live module script is an entry
+# (r4178395669), and a reference is read in Unicode scalar values
+# (r4178395690); and the self-pass that closed each class: what the page
+# runs, the markup and encodings this harness does not model, a string
+# escape a module refuses, a redirect, a `Content-Type` a browser parses
+# otherwise, and a printed line a server could forge.
+# ---------------------------------------------------------------------------
+
+_ENTRY = '<script type="module" src="./app.js"></script>'
+_CLASSIC = ["t.bundle.classic-script './app.js'", "t.bundle.entry"]
+
+
+@pytest.mark.parametrize("head, expected", [
+    ('<script src="./app.js"></script>', _CLASSIC),
+    ('<script type="text/javascript" src="./app.js"></script>', _CLASSIC),
+    ('<script type="" src="./app.js"></script>', _CLASSIC),
+    ('<script language="javascript" src="./app.js"></script>', _CLASSIC),
+    ('<script language="json" src="./app.js"></script>', ["t.bundle.entry"]),
+    ('<script type="application/json" src="./app.js"></script>',
+     ["t.bundle.entry"]),
+    ('<script type="  " src="./app.js"></script>', ["t.bundle.entry"]),
+    ('<script type="module; x" src="./app.js"></script>', ["t.bundle.entry"]),
+    (f"<template>{_ENTRY}</template>", ["t.bundle.entry"]),
+    (f"<noscript>{_ENTRY}</noscript>", ["t.bundle.entry"]),
+    ('<script type="module" src=""></script>', ["t.bundle.entry"]),
+    ('<script type="module">import "./app.js";</script>',
+     ["t.bundle.inline-module", "t.bundle.entry"]),
+    (f"<script>document.title = 1;</script>{_ENTRY}",
+     ["t.bundle.classic-script (inline)"]),
+    (f'<script nomodule src="./legacy.js"></script>{_ENTRY}', []),
+    ('<script type="module" nomodule src="./app.js"></script>', []),
+    ('<script type=" MODULE " src="./app.js"></script>', []),
+    ('<script type="module" src="./app.js">import "./gone.js";</script>', []),
+], ids=["no-type", "javascript-type", "empty-type", "language",
+        "language-of-a-data-block", "data-block",
+        "blank-type", "module-with-a-parameter", "in-a-template",
+        "in-a-noscript", "empty-src", "inline-module", "inline-classic",
+        "classic-nomodule", "module-nomodule", "module-type-spaced",
+        "src-over-inline-code"])
+def test_only_a_live_module_script_is_an_entry(head: str,
+                                              expected: list) -> None:
+    """A browser runs a module only from a live `<script type="module">`
+    with a `src`: one without a type, or of a JavaScript type, is a classic
+    script, whose imports are a SyntaxError; a data block and a template's
+    script run nothing (Copilot review of #75 at 4bdb41fb, r4178395669)."""
+    files = {"/app.js": (JS, "export const x = 1;\n"),
+             "/legacy.js": (JS, "var legacy = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, f"<html><head>{head}</head></html>", {},
+                              verdict, "t")
+    assert _failures(verdict) == expected
+
+
+def test_a_view_module_is_no_entry() -> None:
+    """A module `/capabilities` declares is walked, but it stands in for no
+    application entry the page lacks."""
+    caps = {"views": {"views": [{"id": "x", "module": "./app.js"}]}}
+    files = {"/app.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(port, "<html></html>", caps,
+                                                 verdict, "t")
+    assert _failures(verdict) == ["t.bundle.entry"]
+    assert modules == 1
+
+
+@pytest.mark.parametrize("body, unmodeled", [
+    ('<svg><script type="module" src="./app.js"></script></svg>', True),
+    ("<math><mi>x</mi></math>", True),
+    ('<select><script type="module" src="./other.js"></script></select>',
+     True),
+    ('<select><link rel="stylesheet" href="./a.css"></select>', True),
+    ("<frameset></frameset>", True),
+    ("<select><option>x</option></select>", False),
+    ("<template><svg></svg></template>", False),
+    ('<template><select><script type="module" src="./other.js"></script>'
+     "</select></template>", False),
+    ('<select><template><script type="module" src="./other.js"></script>'
+     "</template></select>", False),
+], ids=["svg", "math", "script-in-select", "link-in-select", "frameset",
+        "plain-select", "svg-in-a-template", "select-in-a-template",
+        "template-in-a-select"])
+def test_markup_this_harness_does_not_model_is_refused_by_name(
+        body: str, unmodeled: bool) -> None:
+    files = {"/app.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(
+            port, f"<html><head>{_ENTRY}</head><body>{body}</body></html>",
+            {}, verdict, "t")
+    assert _failures(verdict) == (["t.bundle.unmodeled"] if unmodeled
+                                  else [])
+
+
+@pytest.mark.parametrize("content_type, body, utf8", [
+    ("text/html", b'<html><head><meta charset="utf-8"></head></html>', True),
+    ("text/html; charset=UTF-8", b"<html></html>", True),
+    ("text/html", b'<html><head><meta charset="UTF8"></head></html>', True),
+    ("text/html; charset=iso-2022-kr", b"<html></html>", False),
+    ("text/html", b'<html><head><meta charset="windows-1252"></head></html>',
+     False),
+    ("text/html", b'<html><head><meta http-equiv="Content-Type" '
+                  b'content="text/html; charset=shift_jis"></head></html>',
+     False),
+    ("text/html", b"\xff\xfe<\x00h\x00t\x00m\x00l\x00>\x00", False),
+    ("text/html; charset=iso-2022-kr", b"\xef\xbb\xbf<html></html>", True),
+], ids=["meta-utf-8", "header-utf-8", "meta-utf8-label", "header-other",
+        "meta-other", "http-equiv-other", "utf-16-bom", "utf-8-bom-outranks"])
+def test_the_page_must_be_utf_8_as_the_harness_reads_it(
+        tmp_path: Path, content_type: str, body: bytes, utf8: bool) -> None:
+    index = harness.Answer(200, {"content-type": content_type}, body, None)
+    verdict = harness.Verdict(keep_going=True)
+    with served(_snapshot_server([{"path": "a.md"}])) as port:
+        harness.check_pages(_quiet_server(tmp_path, port), index, verdict)
+    assert ("t.http / is UTF-8" in _failures(verdict)) is not utf8
+
+
+@pytest.mark.parametrize("head, delivered", [
+    (f"{_LIVE_META}<svg></svg>", False),
+    (f"<math></math>{_LIVE_META}", False),
+    (f'<meta charset="iso-2022-kr">{_LIVE_META}', False),
+    ('<meta http-equiv="content-type" content="text/html; '
+     f'charset=windows-1252">{_LIVE_META}', False),
+    (f'<meta charset="UTF8">{_LIVE_META}', True),
+], ids=["svg", "math", "replacement-encoding", "another-encoding",
+        "utf8-label"])
+def test_an_opener_this_harness_cannot_read_forwards_nothing(
+        tmp_path: Path, head: str, delivered: bool) -> None:
+    state, opener = _opener(tmp_path, _page_with(head))
+    failures, _path, token = _read(state, _printed(opener))
+    if delivered:
+        assert token == TOKEN and failures == []
+    else:
+        assert token is None and failures == [FRAGMENT]
+
+
+def test_an_opener_in_utf_16_forwards_nothing(tmp_path: Path) -> None:
+    state, opener = _opener(tmp_path)
+    opener.write_bytes(b"\xff\xfe" + _opener_page(FORWARD).encode("utf-16-le"))
+    failures, _path, token = _read(state, _printed(opener))
+    assert token is None and failures == [FRAGMENT]
+
+
+@pytest.mark.parametrize("escape, served_as", [
+    (r"\uD83D\uDE00", "%F0%9F%98%80"),
+    (r"\u{1F600}", "%F0%9F%98%80"),
+    (r"\uD83D", "%EF%BF%BD"),
+], ids=["surrogate-pair", "code-point", "lone-surrogate"])
+def test_a_surrogate_import_is_fetched_as_the_browser_fetches_it(
+        escape: str, served_as: str) -> None:
+    """Copilot's example: `\\uD83D\\uDE00` is one code point to the browser,
+    and `browser_target` raised on it before (r4178395690)."""
+    files = {f"/{served_as}.js": (JS, "export const x = 1;\n"),
+             "/app.js": (JS, f'import "./{escape}.js";\n')}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(
+            port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == []
+    assert modules == 2
+
+
+def test_a_lone_surrogate_from_json_is_read_as_the_browser_reads_it() -> None:
+    """JSON keeps a lone `\\ud83d` too: as a view module, and as a document
+    path that `requests_for` completes a source read with."""
+    caps = json.loads('{"views": {"views": [{"id": "x", '
+                      '"module": "./\\ud83d.js"}]}}')
+    # ... and the module the page imports as U+FFFD is the same one, judged
+    # once, as the browser loads it once.
+    files = {"/%EF%BF%BD.js": (JS, "export const x = 1;\n"),
+             "/app.js": (JS, 'import "./\\uFFFD.js";\n')}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(port, _page("./app.js"),
+                                                 caps, verdict, "t")
+    assert _failures(verdict) == []
+    assert modules == 2
+    snapshot = json.loads('{"repository": "r\\udc80", '
+                          '"documents": [{"path": "\\ud83d.md"}]}')
+    assert harness.requests_for(["/source/"], snapshot) == [
+        "/source/", "/source/%EF%BF%BD.md",
+        "/source/r%EF%BF%BD%40main/%EF%BF%BD.md"]
+
+
+@pytest.mark.parametrize("source, malformed", [
+    (r'"\1"', True), (r'"\00"', True), (r'"\08"', True), (r'"\8"', True),
+    (r'"\9"', True), (r'"\x4"', True), (r'"\xZZ"', True), (r'"\u12"', True),
+    (r'"\u{110000}"', True), (r'"\u{}"', True), (r"`\1`", True),
+    (r"() => { return `\8`; }", True),
+    (r"String.raw`\1`", False), (r"tag`\u{zz}`", False), (r'"\0"', False),
+    (r'"\u{0000000041}"', False), (r'"\d"', False), (r'"\x41\u0041"', False),
+], ids=["octal", "octal-zero", "zero-then-eight", "eight", "nine",
+        "short-hex", "bad-hex", "short-unicode", "past-u10ffff",
+        "empty-code-point", "untagged-template", "returned-template",
+        "tagged-raw", "tagged", "nul", "long-code-point", "identity",
+        "well-formed"])
+def test_an_escape_a_module_refuses_is_malformed(source: str,
+                                                malformed: bool) -> None:
+    strings = harness.JsStrings(f"const s = {source};\n")
+    strings.scan()
+    assert strings.malformed is malformed
+
+
+def test_a_module_with_a_malformed_escape_is_a_named_failure() -> None:
+    """A module is strict code, so a legacy octal escape is a SyntaxError
+    and the browser loads none of it."""
+    files = {"/app.js": (JS, 'import "./child.js";\n'),
+             "/child.js": (JS, 'export const s = "\\1";\n')}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == ["t.bundle.syntax /child.js"]
+
+
+def test_the_lexer_reads_u_feff_as_whitespace() -> None:
+    """JavaScript's whitespace includes U+FEFF, so a regular expression
+    after `=` and a U+FEFF is still one, and the string inside it is no
+    route."""
+    pending: collections.deque = collections.deque()
+    routes: set[str] = set()
+    source = ('const ok =\ufeff/"\\/hidden"/.test(s);\n'
+              'const R = "/route";\n')
+    harness._scan_module("/app.js", source.encode("utf-8"), pending, routes)
+    assert routes == {"/route"}
+
+
+@pytest.mark.parametrize("static", [True, False], ids=["static", "dynamic"])
+def test_a_redirected_module_is_a_named_failure(static: bool) -> None:
+    """A browser follows a redirect to a module this harness would have to
+    judge in its place: refused by name, never judged as its status."""
+    importer = ('import "./child.js";\n' if static
+                else 'import("./child.js").catch(() => null);\n')
+    files = {"/app.js": (JS, importer), "/child.js": ("", "", 302)}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, _page("./app.js"), {}, verdict, "t")
+        answer = harness.get(port, "/child.js")
+    assert _failures(verdict) == [
+        f"t.bundle.{'module' if static else 'dynamic'} /child.js"]
+    assert answer.status is None
+    assert answer.error == f"HTTP 302, {harness.REDIRECTED}"
+
+
+@pytest.mark.parametrize("value, essence", [
+    (" text/javascript ; charset=utf-8", "text/javascript"),
+    ("TEXT/JAVASCRIPT", "text/javascript"),
+    ("text/javascript\xa0", ""),
+    ("text /javascript", ""),
+    ("text/ javascript", ""),
+    ("text/javascript, text/html", ""),
+    ("text/javascript;x=1, text/html", ""),
+    ("/javascript", ""),
+    ("text/", ""),
+    ("text", ""),
+], ids=["whitespace", "upper-case", "nbsp", "space-before-slash",
+        "space-after-slash", "two-values", "parameter-then-value",
+        "no-type", "no-subtype", "no-slash"])
+def test_a_content_type_is_parsed_as_a_browser_parses_it(
+        value: str, essence: str) -> None:
+    answer = harness.Answer(200, {"content-type": value}, b"", None)
+    assert harness.media_type(answer) == essence
+
+
+def test_a_repeated_content_type_is_read_as_one() -> None:
+    """A browser joins a repeated header's values, then takes the last that
+    parses; this harness joins them and does not split them, so a module
+    sent with two types is refused by name, never judged by one of them."""
+    files = {"/app.js": (JS, 'import "./child.js";\n'),
+             "/child.js": ((JS, "text/html"), "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, _page("./app.js"), {}, verdict, "t")
+        answer = harness.get(port, "/child.js")
+    assert answer.headers["content-type"] == f"{JS}, text/html"
+    assert _failures(verdict) == ["t.bundle.module-type /child.js"]
+
+
+def test_no_line_the_harness_prints_can_be_forged_or_raise(capsys) -> None:
+    """A name or a reason may hold what a server sent: a newline, an ANSI
+    escape, a bidirectional override, a lone surrogate. None of it reaches
+    the log as itself, so no line can be forged and none raises."""
+    verdict = harness.Verdict(keep_going=True)
+    verdict.check("t.bundle.bare x\ud83d\nAT-R1 HTTP half: PASS", False,
+                  "a\x1b[32m\u202eb\nAT-R1 HTTP half: PASS (1 assertions held)")
+    verdict.note("GET /\ud83d\r\nAT-R1 HTTP half: PASS")
+    verdict.report()
+    out = capsys.readouterr().out
+    out.encode("utf-8")                 # no lone surrogate reached the stream
+    assert "\x1b" not in out and "\u202e" not in out and "\r" not in out
+    assert not [line for line in out.splitlines()
+                if line.startswith("AT-R1 HTTP half: PASS")]
+    assert "      | AT-R1 HTTP half: PASS (1 assertions held)" in out
+
+
+def test_a_redirected_route_is_named_as_a_redirect(tmp_path: Path) -> None:
+    """Never as a dropped connection, which names a handler that raised."""
+    index = harness.Answer(200, {"content-type": "text/html"},
+                           _page("./app.js").encode("utf-8"), None)
+    files = {"/app.js": (JS, 'const R = "/moved";\n'),
+             "/moved": ("", "", 302)}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.check_routes(_quiet_server(tmp_path, port), index,
+                             {"documents": []}, {}, None, verdict)
+    moved = [failure for failure in verdict.failures
+             if failure.ident == "t.route /moved"]
+    assert len(moved) == 1
+    assert harness.REDIRECTED in moved[0].why
+    assert "dropped connection" not in moved[0].why
+
+
+@pytest.mark.parametrize("body, expected", [
+    (f"<frameset></frameset>{_ENTRY}", ["t.bundle.unmodeled", "t.bundle.entry"]),
+    (f"<plaintext></plaintext>{_ENTRY}", ["t.bundle.entry"]),
+], ids=["after-a-frameset", "after-a-plaintext"])
+def test_a_module_script_nothing_closes_the_way_to_is_no_entry(
+        body: str, expected: list) -> None:
+    """Nothing closes a `<frameset>` or a `<plaintext>`: a browser ignores
+    a script after `</frameset>`, and reads one after `<plaintext>` as text."""
+    files = {"/app.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, f"<html><body>{body}</body></html>", {},
+                              verdict, "t")
+    assert _failures(verdict) == expected

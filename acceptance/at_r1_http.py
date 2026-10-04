@@ -360,13 +360,14 @@ class Verdict:
         ident, why = self.redact(ident), self.redact(why)
         if condition:
             self.passed += 1
-            print(f"ok    [{ident}]", flush=True)
+            print(f"ok    [{printable(ident)}]", flush=True)
             return True
         failure = Failed(ident, why)
         if not self.keep_going:
             raise failure
         self.failures.append(failure)
-        print(f"FAIL  [{ident}]: {why}", flush=True)
+        print(f"FAIL  [{printable(ident)}]: {printable_lines(why)}",
+              flush=True)
         return False
 
     def require(self, ident: str, condition: object, why: str) -> None:
@@ -385,21 +386,65 @@ class Verdict:
             return 0
         # Again here: a token learned after a failure was recorded.
         first = self.failures[0]
-        print(self.redact(f"\nAT-R1 HTTP half: FAIL [{first.ident}]: "
-                          f"{first_line(first.why)}"))
+        print("\nAT-R1 HTTP half: FAIL "
+              + self._shown(first.ident, first_line(first.why)))
         for later in self.failures[1:]:
-            print(self.redact(f"      also FAIL [{later.ident}]: "
-                              f"{first_line(later.why)}"))
+            print("      also FAIL "
+                  + self._shown(later.ident, first_line(later.why)))
         print(f"      {len(self.failures)} failed, {self.passed} held")
         return 1
 
+    def _shown(self, ident: str, why: str) -> str:
+        return (f"[{printable(self.redact(ident))}]: "
+                f"{printable(self.redact(why))}")
+
 
 def note(text: str) -> None:
-    print(f"      {text}", flush=True)
+    print(f"      {printable(text)}", flush=True)
 
 
 def first_line(text: str) -> str:
     return (text.splitlines() or [""])[0]
+
+
+def printable(text: str) -> str:
+    """`text` as one line of the CI log carries it: every character that is
+    not printable written as its escape (a control, a newline, a format
+    character such as a bidirectional override, a lone surrogate, a line or
+    paragraph separator), so nothing a server sends can end a line, forge
+    one, or raise while it is printed (the self-pass after Copilot's review
+    of openDox-code#75 at 4bdb41fb, r4178395690)."""
+    return "".join(c if c.isprintable()
+                   else c.encode("unicode_escape").decode("ascii")
+                   for c in text)
+
+
+def printable_lines(text: str) -> str:
+    """A reason of several lines (the install's output tails), each line
+    `printable`, and every line after the first indented under a `|`, so no
+    line of it can stand at the start of a line of the log."""
+    return "\n      | ".join(printable(line) for line in text.split("\n"))
+
+
+#: ASCII upper case to lower case, and nothing else: `str.lower` also folds
+#: non-ASCII letters, where the HTML and MIME standards compare
+#: ASCII-case-insensitively.
+_ASCII_LOWER = {code: code + 32 for code in range(ord("A"), ord("Z") + 1)}
+
+
+def ascii_lower(text: str) -> str:
+    return text.translate(_ASCII_LOWER)
+
+
+def scalar_values(text: str) -> str:
+    """`text` as a browser reads a URL from a JavaScript or JSON string: as
+    a USVString (WebIDL), a surrogate pair joined into the one code point it
+    encodes and a lone surrogate replaced by U+FFFD. Python keeps
+    `"\\uD83D\\uDE00"`, decoded escape by escape, as two code points that no
+    codec encodes (Copilot review of openDox-code#75 at 4bdb41fb,
+    r4178395690)."""
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le",
+                                                            "replace")
 
 
 def as_object(value) -> dict:
@@ -571,13 +616,19 @@ _PATH_ENCODED = frozenset('"#<>?`{}')
 _QUERY_ENCODED = frozenset('"#<>\'')
 
 
+#: What a 3xx answer reads as: no answer this harness judges.
+REDIRECTED = "a redirect, which this harness does not follow"
+
+
 def browser_target(target: str) -> str:
     """`target` (a path, perhaps with a query) as a browser requests it:
     a space, a non-ASCII character or a control percent-encoded, and every
     `%` left as it is. `http.client` refuses such a target, or raises on a
     non-ASCII one, where a browser sends it encoded (the self-pass after
-    Copilot's review of openDox-code#75 at 2dcb98d3)."""
-    path, mark, query = target.partition("?")
+    Copilot's review of openDox-code#75 at 2dcb98d3). A lone surrogate,
+    which no codec encodes, is first read as the browser reads it
+    (`scalar_values`)."""
+    path, mark, query = scalar_values(target).partition("?")
 
     def encode(text: str, extra: frozenset) -> str:
         return "".join(
@@ -597,9 +648,21 @@ def get(port: int, target: str, *, token: str | None = None) -> Answer:
         conn.request("GET", browser_target(target), headers=headers)
         response = conn.getresponse()
         body = response.read()
-        return Answer(response.status,
-                      {k.lower(): v for k, v in response.getheaders()},
-                      body, None)
+        if 300 <= response.status < 400:
+            # A browser follows it, to a URL this harness would have to
+            # judge in its place: refused by name, never judged as the
+            # status it is (the self-pass after Copilot's review of
+            # openDox-code#75 at 4bdb41fb).
+            return Answer(None, {}, b"", f"HTTP {response.status}, "
+                          f"{REDIRECTED}")
+        # A header sent twice is read as one, its values joined by `, `, as
+        # a browser joins them (Fetch's "get" on a header list).
+        received: dict[str, str] = {}
+        for name, value in response.getheaders():
+            name = name.lower()
+            received[name] = (f"{received[name]}, {value}"
+                              if name in received else value)
+        return Answer(response.status, received, body, None)
     except (OSError, http.client.HTTPException, ValueError) as exc:
         return Answer(None, {}, b"", error_name(exc))
     finally:
@@ -660,37 +723,52 @@ _REGEX_AFTER_WORDS = frozenset({
 _REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
 
 
-#: JavaScript's single-character escapes (`\0` only where no digit follows).
+#: JavaScript's single-character escapes.
 _JS_SINGLE_ESCAPES = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
-                      "v": "\v", "0": "\0"}
+                      "v": "\v"}
 _JS_LINE_TERMINATORS = "\r\n\u2028\u2029"
+_JS_DIGITS = "0123456789"
 _JS_HEX2 = re.compile(r"[0-9A-Fa-f]{2}")
-_JS_UNICODE = re.compile(r"\{([0-9A-Fa-f]{1,6})\}|([0-9A-Fa-f]{4})")
+_JS_UNICODE = re.compile(r"\{([0-9A-Fa-f]+)\}|([0-9A-Fa-f]{4})")
 
 
-def js_escape(src: str, j: int) -> tuple[str, int]:
+def js_escape(src: str, j: int) -> tuple[str | None, int]:
     r"""The text the escape sequence at `src[j]` (a backslash) stands for in
     a JavaScript string or template, and the index after it: `\n`, `\t` and
-    the other single escapes, `\xHH`, `\uHHHH`, `\u{H…}`, a line
+    the other single escapes, `\0` where no digit follows, `\xHH`,
+    `\uHHHH`, `\u{H…}` (any number of digits, up to U+10FFFF), a line
     continuation (nothing), and any other character as itself. A specifier
     is read as the browser reads it, so `"./ch\tild.js"` holds a TAB, and
     `"./\u0063hild.js"` is `./child.js` (found while answering Copilot's
-    review of openDox-code#75 at 2dcb98d3, r4178069374)."""
+    review of openDox-code#75 at 2dcb98d3, r4178069374).
+
+    `None` where a MODULE refuses the escape, as it is strict code: a legacy
+    octal escape (`\1`, `\00`), `\8` and `\9`, and a `\x` or `\u` that is
+    not well formed are each a SyntaxError, and a browser loads none of the
+    module (the self-pass after Copilot's review of openDox-code#75 at
+    4bdb41fb)."""
     c = src[j + 1]
     if c in _JS_LINE_TERMINATORS:
         end = j + 2
         if c == "\r" and src.startswith("\n", end):
             end += 1
         return "", end
-    if c in _JS_SINGLE_ESCAPES and not (c == "0"
-                                        and src[j + 2:j + 3].isdigit()):
+    if c in _JS_DIGITS:
+        following = src[j + 2:j + 3]
+        if c == "0" and not (following and following in _JS_DIGITS):
+            return "\0", j + 2
+        return None, j + 2
+    if c in _JS_SINGLE_ESCAPES:
         return _JS_SINGLE_ESCAPES[c], j + 2
-    if c == "x" and _JS_HEX2.fullmatch(src[j + 2:j + 4]):
-        return chr(int(src[j + 2:j + 4], 16)), j + 4
+    if c == "x":
+        if _JS_HEX2.fullmatch(src[j + 2:j + 4]):
+            return chr(int(src[j + 2:j + 4], 16)), j + 4
+        return None, j + 2
     if c == "u":
         match = _JS_UNICODE.match(src, j + 2)
         if match and int(match.group(1) or match.group(2), 16) <= 0x10FFFF:
             return chr(int(match.group(1) or match.group(2), 16)), match.end()
+        return None, j + 2
     return c, j + 2
 
 
@@ -702,7 +780,10 @@ class JsStrings:
     the preceding code is the last 40 characters of code before it (other
     strings blanked), so an import specifier can be told from an ordinary
     string. A template literal's value is its leading static text, before
-    any `${`. It is a lexer for this bundle's own idioms, not a parser."""
+    any `${`. Each value is read as a browser reads a URL from it
+    (`scalar_values`). `malformed` is set where a string holds an escape a
+    module refuses (`js_escape`), as an untagged template does too. It is a
+    lexer for this bundle's own idioms, not a parser."""
 
     def __init__(self, source: str) -> None:
         self.src = source
@@ -710,6 +791,7 @@ class JsStrings:
         self.code: list[str] = []
         self.last = ""
         self.found: list[tuple[str, str, str]] = []
+        self.malformed = False
 
     def scan(self) -> list[tuple[str, str, str]]:
         while self.i < len(self.src):
@@ -733,7 +815,7 @@ class JsStrings:
             self._template()
         else:
             self.code.append(c)
-            if not c.isspace():
+            if not (c.isspace() or c == "\ufeff"):    # U+FEFF is JS whitespace
                 self.last = c
             self.i += 1
 
@@ -741,7 +823,7 @@ class JsStrings:
         return "".join(self.code[-40:])
 
     def _emit(self, quote: str, value: str, end: int) -> None:
-        self.found.append((quote, value, self._recent()))
+        self.found.append((quote, scalar_values(value), self._recent()))
         self.code.append(" s ")
         self.last = "s"
         self.i = end
@@ -776,6 +858,8 @@ class JsStrings:
         while j < len(src) and src[j] not in (quote, "\n"):
             if src[j] == "\\" and j + 1 < len(src):
                 text, j = js_escape(src, j)
+                if text is None:
+                    self.malformed, text = True, ""
                 buf.append(text)
                 continue
             buf.append(src[j])
@@ -784,9 +868,16 @@ class JsStrings:
 
     def _template(self) -> None:
         src, j, buf, static = self.src, self.i + 1, [], True
+        # A TAGGED template (`String.raw` before one) may hold an escape a
+        # module otherwise refuses. Its tag is an expression, so it stands
+        # where a regular expression could not start.
+        tagged = not self._regex_may_start()
         while j < len(src) and src[j] != "`":
             if src[j] == "\\" and j + 1 < len(src):
                 text, j = js_escape(src, j)
+                if text is None:
+                    self.malformed = self.malformed or not tagged
+                    text = ""
                 if static:
                     buf.append(text)
             elif src.startswith("${", j):
@@ -815,13 +906,170 @@ _PATH_LITERAL = re.compile(r"^\.?/[A-Za-z][\w\-./%@~]*(?:\?\S*)?$")
 _MODULE_OR_SHEET = re.compile(r"\.(?:m?js|css)(?:[?#].*)?$")
 
 
-class _IndexLinks(html.parser.HTMLParser):
-    """The page's scripts, stylesheets, `<base>` and import maps, read as a
-    browser reads them: the FIRST of a repeated attribute, `rel` as a set of
-    ASCII-case-insensitive tokens, a script's `type` trimmed and compared
-    the same way. A `<base href>` or an import map changes how a browser
-    resolves what the page loads, and this harness models neither, so each
-    is a named failure (`derive_bundle`)."""
+#: Elements whose content a browser that runs scripts (as the console page
+#: needs) never makes live, by the HTML standard's parsing rules: a
+#: `<template>`'s content is inert, a `<noscript>`'s is text where scripts
+#: run, and a raw-text or escapable raw-text element holds text, never
+#: elements. A refresh or a record inside one forwards and records nothing
+#: (Copilot review of openDox-code#75 at 4809b3d2, r4174671390). Two more
+#: are not modeled: `select`, whose content parsers have dropped or kept as
+#: they changed, and `frameset`, after which no other element is inserted,
+#: once the page has allowed one. A tag a reader watches inside a live
+#: `select`, and a live `frameset`, are each refused by name (`_LivePage`).
+_INERT_CONTENT = frozenset({"template", "noscript", "script", "style",
+                            "textarea", "title", "xmp", "iframe", "noembed",
+                            "noframes", "plaintext", "select", "frameset"})
+#: ... and of those, the ones whose content is TEXT: nothing inside opens an
+#: element, and only their own end tag closes them.
+_TEXT_CONTENT = _INERT_CONTENT - {"template", "select", "frameset"}
+#: ... and the ones nothing closes, to the end of the page.
+_NEVER_CLOSED = frozenset({"plaintext", "frameset"})
+
+
+#: A named character reference not ended by `;` (`&amp` before a letter).
+_UNTERMINATED_REFERENCE = re.compile(r"&[A-Za-z][A-Za-z0-9]*(?![A-Za-z0-9;])")
+
+
+def _first_attributes(attrs) -> dict[str, str]:
+    """A tag's attributes as a browser keeps them: where a name repeats,
+    the FIRST value, never the last."""
+    named: dict[str, str] = {}
+    for key, value in attrs:
+        named.setdefault(key.lower(), value or "")
+    return named
+
+
+#: The Encoding standard's labels of UTF-8, the one encoding this harness
+#: reads a page in.
+_UTF8_LABELS = frozenset({"unicode-1-1-utf-8", "unicode11utf8",
+                          "unicode20utf8", "utf-8", "utf8", "x-unicode20utf8"})
+#: A `charset=` as a `Content-Type`, a `<meta charset>`, a `<meta
+#: http-equiv="content-type">` or the encoding prescan of a page's first
+#: bytes reads one.
+_CHARSET = re.compile(
+    r"charset[\t\n\f\r ]*=[\t\n\f\r ]*[\"']?([^\"'\t\n\f\r ;>]*)",
+    re.IGNORECASE | re.ASCII)
+
+
+def not_utf8_because(body: bytes, content_type: str | None) -> str | None:
+    """Why a browser may decode `body` other than as UTF-8, which is how
+    this harness reads a page, or `None`. A UTF-8 byte order mark decides it
+    (it outranks every declaration). Otherwise a UTF-16 one, or any
+    `charset=` in `content_type` or anywhere in the page that names no
+    UTF-8 label, is refused by name: a browser may read such a page's bytes
+    as other characters, or, for a label of the replacement encoding
+    (`iso-2022-kr`), as nothing at all (the self-pass after Copilot's review
+    of openDox-code#75 at 4bdb41fb). The label is not quoted."""
+    if body.startswith(b"\xef\xbb\xbf"):
+        return None
+    if body.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "it starts with a UTF-16 byte order mark"
+    for where, text in (("its Content-Type", content_type or ""),
+                        ("the page", body.decode("utf-8", "replace"))):
+        for match in _CHARSET.finditer(text):
+            label = ascii_lower(match.group(1).strip(_ASCII_WHITESPACE))
+            if label not in _UTF8_LABELS:
+                return (f"{where} declares a charset other than UTF-8 (not "
+                        "quoted)")
+    return None
+
+
+#: Foreign content, whose parsing this harness does not model: inside `<svg>`
+#: and `<math>`, `<script>` and `<link>` are not HTML elements, `<style>`
+#: and `<title>` hold markup, and `<meta>` breaks out as a live HTML element.
+_FOREIGN_CONTENT = frozenset({"svg", "math"})
+
+
+class _LivePage(html.parser.HTMLParser):
+    """A page's LIVE elements, as a browser that runs scripts parses it:
+    `live_tag(tag, attributes)` is called for each, with the FIRST of a
+    repeated attribute, and nothing inside `_INERT_CONTENT` is live. `/>`
+    closes only a void element, so `<template/>` stays open.
+
+    What this harness does not model is named in `unmodeled`, and each
+    reader refuses the page by name on it, never reading it as an
+    approximation: a live `<svg>` or `<math>`, a live `<frameset>`, and a
+    tag the reader WATCHES inside a live `<select>` (the self-pass after
+    Copilot's review of openDox-code#75 at 4bdb41fb, r4178395669)."""
+
+    WATCHED: frozenset = frozenset()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._inert: list[str] = []
+        self.unmodeled: list[str] = []
+
+    def handle_starttag(self, tag, attrs) -> None:
+        if self._inert and self._inert[-1] in _TEXT_CONTENT:
+            return                      # text to a browser, not an element
+        live = not self._inert
+        if (not live and tag in self.WATCHED and self._inert[0] == "select"
+                and "template" not in self._inert):
+            self.unmodeled.append(f"a <{tag}> inside a <select>")
+        if tag in _INERT_CONTENT:
+            self._inert.append(tag)
+        if not live:
+            return
+        if tag in _FOREIGN_CONTENT or tag == "frameset":
+            self.unmodeled.append(f"<{tag}> content")
+        self.live_tag(tag, _first_attributes(attrs))
+
+    def handle_startendtag(self, tag, attrs) -> None:
+        # A browser ignores `/>` on any element but a void one.
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag) -> None:
+        if self._inert and tag == self._inert[-1] and tag not in _NEVER_CLOSED:
+            self._inert.pop()
+            self.closed(tag)
+
+    def live_tag(self, tag: str, named: dict[str, str]) -> None:
+        """A live element's start tag."""
+
+    def closed(self, tag: str) -> None:
+        """The end of an inert element's content."""
+
+
+def script_type(named: dict[str, str]) -> str | None:
+    """What a browser makes of a `<script>`, by its `type` and `language`
+    (the HTML standard's "prepare the script element"): `"classic"`,
+    `"module"` or `"importmap"`, or `None` for a data block, which it never
+    runs. A `type` is trimmed of ASCII whitespace and compared
+    ASCII-case-insensitively, so `" Module "` is a module, and
+    `"application/json"` and `"  "` are data blocks."""
+    if "type" in named:
+        if named["type"] == "":
+            return "classic"
+        kind = named["type"].strip(_ASCII_WHITESPACE)
+    elif named.get("language", ""):
+        kind = "text/" + named["language"]
+    else:
+        return "classic"
+    kind = ascii_lower(kind)
+    if kind in JAVASCRIPT_TYPES:
+        return "classic"
+    if kind in ("module", "importmap"):
+        return kind
+    return None
+
+
+class _IndexLinks(_LivePage):
+    """The page's LIVE scripts, stylesheets and `<base>`, read as a browser
+    reads them (`_LivePage`): `rel` as a set of ASCII-case-insensitive
+    tokens, and a script by what a browser makes of it (`script_type`).
+
+    Only a live MODULE script with a `src` is a root of the module graph:
+    a script inside a `<template>` runs nothing, a data block runs nothing,
+    and one with an empty `src` fails to load (Copilot review of
+    openDox-code#75 at 4bdb41fb, r4178395669). A CLASSIC script, by its
+    `src` or inline, and an INLINE module script each run code this harness
+    does not read, so each is a named failure, except a classic script
+    marked `nomodule`, which a browser that runs modules skips. A `<base
+    href>` or an import map changes how a browser resolves what the page
+    loads, and this harness models neither, so each is a named failure too
+    (`_check_page_resolution`)."""
+
+    WATCHED = frozenset({"script", "link", "base"})
 
     def __init__(self) -> None:
         super().__init__()
@@ -829,19 +1077,26 @@ class _IndexLinks(html.parser.HTMLParser):
         self.sheets: list[str] = []
         self.bases: list[str] = []
         self.import_maps = 0
+        self.classic: list[str] = []        # each `src`, or "" where inline
+        self.inline_modules = 0
 
-    def handle_starttag(self, tag, attrs):
-        a = _first_attributes(attrs)
+    def live_tag(self, tag, named):
         if tag == "script":
-            if a.get("type", "").strip(_ASCII_WHITESPACE).lower() == "importmap":
+            kind = script_type(named)
+            if kind == "importmap":
                 self.import_maps += 1
-            elif a.get("src"):
-                self.modules.append(a["src"])
-        rel = re.split(r"[ \t\n\f\r]+", a.get("rel", "").lower())
-        if tag == "link" and "stylesheet" in rel and a.get("href"):
-            self.sheets.append(a["href"])
-        if tag == "base" and "href" in a:
-            self.bases.append(a["href"])
+            elif kind == "module" and "src" not in named:
+                self.inline_modules += 1
+            elif kind == "module" and named["src"]:
+                self.modules.append(named["src"])
+            elif (kind == "classic" and "nomodule" not in named
+                    and named.get("src", "x")):
+                self.classic.append(named.get("src", ""))
+        rel = re.split(r"[ \t\n\f\r]+", ascii_lower(named.get("rel", "")))
+        if tag == "link" and "stylesheet" in rel and named.get("href"):
+            self.sheets.append(named["href"])
+        if tag == "base" and "href" in named:
+            self.bases.append(named["href"])
 
 
 #: The origin a reference is resolved against where no server is named (a
@@ -899,7 +1154,10 @@ def _resolve(base: str, ref: str, origin: str = _SAME_ORIGIN) -> str:
     is the RUNNING server's origin, so an absolute
     `http://127.0.0.1:<port>/app.js` is a path of this plane, as it is to
     the browser (Copilot review of openDox-code#75 at 82869769,
-    r4177924129). A reference no parser here can read is never a path."""
+    r4177924129). A reference no parser here can read is never a path. A
+    lone surrogate is read first as the browser reads it (`scalar_values`;
+    Copilot review of openDox-code#75 at 4bdb41fb, r4178395690)."""
+    ref = scalar_values(ref)
     if (_DIVERGENT_REFERENCE.search(ref)
             or _ENCODED_DOT.search(re.split(r"[?#]", ref, maxsplit=1)[0])):
         return DIVERGENT_PREFIX + ref
@@ -925,7 +1183,30 @@ def _check_page_resolution(links: "_IndexLinks", origin: str,
     """A `<base>` other than the page's own root, or an import map, would
     send the browser elsewhere than the harness resolves to: refused by
     name (the self-pass after Copilot's review of openDox-code#75 at
-    2dcb98d3)."""
+    2dcb98d3). So is what the page runs that this harness does not read,
+    and a page that runs no module at all (Copilot review of
+    openDox-code#75 at 4bdb41fb, r4178395669)."""
+    if links.unmodeled:
+        verdict.check(f"{label}.bundle.unmodeled", False,
+                      f"`/` holds {', '.join(sorted(set(links.unmodeled)))},"
+                      " whose parsing this harness does not model, so it "
+                      "cannot tell which scripts and links a browser loads")
+    for src in links.classic:
+        shown = repr(src) if src else "(inline)"
+        verdict.check(f"{label}.bundle.classic-script {shown}", False,
+                      f"`/` runs {shown} as a CLASSIC script, which this "
+                      "harness does not read: a browser runs it as a script, "
+                      "not a module, and an import in it is a SyntaxError")
+    if links.inline_modules:
+        verdict.check(f"{label}.bundle.inline-module", False,
+                      f"`/` holds {links.inline_modules} inline module "
+                      "script(s), whose imports this harness does not read")
+    verdict.check(f"{label}.bundle.entry", bool(links.modules),
+                  "`/` loads no live module script (`<script type=\"module\" "
+                  "src>`), so a browser runs no application; a view module "
+                  "/capabilities declares is no entry, and neither is a "
+                  "script inside a <template>, a data block, or one with an "
+                  "empty `src`")
     for base in links.bases[:1]:            # only the first one counts
         verdict.check(f"{label}.bundle.base", _resolve("/", base, origin) == "/",
                       f"`/` sets its base URL to {base!r:.120}; a browser then "
@@ -969,11 +1250,31 @@ JAVASCRIPT_TYPES = frozenset({
 STYLESHEET_TYPE = "text/css"
 
 
+#: HTTP whitespace, and an HTTP token, as the MIME Sniffing standard reads a
+#: type and a subtype.
+_HTTP_WHITESPACE = " \t\r\n"
+_HTTP_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+
+
 def media_type(answer: Answer) -> str:
-    """The answer's MIME type essence: `Content-Type` without parameters
-    such as `charset`, lowercased; empty where there is none."""
-    value = answer.headers.get("content-type", "")
-    return value.split(";", 1)[0].strip().lower()
+    """The answer's MIME type essence as a browser parses it (the MIME
+    Sniffing standard): HTTP whitespace trimmed, a type and a subtype of
+    HTTP token code points, ASCII-lowercased, parameters such as `charset`
+    aside. EMPTY where there is none, where it does not parse
+    (`text/javascript\\xa0`, which `str.strip` would have trimmed), and
+    where `Content-Type` holds more than one value: a browser takes the
+    last that parses (Fetch's "extract a MIME type"), and this harness
+    does not split them (the self-pass after Copilot's review of
+    openDox-code#75 at 4bdb41fb)."""
+    value = answer.headers.get("content-type")
+    if value is None or "," in value:
+        return ""
+    essence = value.split(";", 1)[0].strip(_HTTP_WHITESPACE)
+    kind, slash, subtype = essence.partition("/")
+    if not (slash and _HTTP_TOKEN.fullmatch(kind)
+            and _HTTP_TOKEN.fullmatch(subtype)):
+        return ""
+    return ascii_lower(essence)
 
 
 def _judge_module(answer: Answer, path: str, static: bool, importer: str,
@@ -1026,9 +1327,13 @@ def _specifier(importer: str, value: str,
 
 def _scan_module(path: str, body: bytes, pending: collections.deque,
                  routes: set[str], literals: set[str] | None = None,
-                 origin: str = _SAME_ORIGIN) -> None:
-    for _quote, value, before in JsStrings(
-            body.decode("utf-8", "replace")).scan():
+                 origin: str = _SAME_ORIGIN) -> bool:
+    """Queue the module's imports and collect its routes. It is decoded as a
+    browser decodes a module script, as UTF-8 with a leading BOM dropped.
+    Returns whether it holds a string escape a module refuses
+    (`JsStrings.malformed`)."""
+    strings = JsStrings(body.decode("utf-8-sig", "replace"))
+    for _quote, value, before in strings.scan():
         if literals is not None:
             literals.add(value)
         if _DYNAMIC_IMPORT_CONTEXT.search(before):
@@ -1037,6 +1342,7 @@ def _scan_module(path: str, body: bytes, pending: collections.deque,
             pending.append((_specifier(path, value, origin), True, path))
         elif _PATH_LITERAL.match(value) and not _MODULE_OR_SHEET.search(value):
             routes.add(_resolve("/", value))
+    return strings.malformed
 
 
 def _judge_divergent(where: str, importer: str, how: str, verdict: Verdict,
@@ -1124,9 +1430,15 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
             answers[path] = get(port, path)
         answer = answers[path]
         _judge_module(answer, path, static, importer, verdict, label)
-        if first and answer.status == 200:
-            _scan_module(path, answer.body, pending, routes, literals,
-                         origin)
+        if (first and answer.status == 200
+                and _scan_module(path, answer.body, pending, routes, literals,
+                                 origin)):
+            verdict.check(
+                f"{label}.bundle.syntax {path}", False,
+                f"{path} holds a string escape a module refuses (a legacy "
+                "octal escape, `\\8` or `\\9`, or a `\\x` or `\\u` that is "
+                "not well formed): a SyntaxError, so a browser loads none "
+                "of it")
     modules = sum(1 for answer in answers.values() if answer.status == 200)
     return sorted(routes), modules
 
@@ -1493,6 +1805,11 @@ def check_pages(server: Server, index: Answer,
     is returned with it, for step 6's by-value check."""
     label = server.label
     page = index.body.decode("utf-8", "replace")
+    encoding = not_utf8_because(index.body,
+                                index.headers.get("content-type"))
+    verdict.check(f"{label}.http / is UTF-8", encoding is None,
+                  f"`/` may be decoded other than as UTF-8, as this harness "
+                  f"reads it: {encoding}")
     verdict.check(f"{label}.http / is HTML",
                   "<html" in page.lower()
                   and media_type(index) == "text/html",
@@ -1626,71 +1943,31 @@ def check_grouping(label: str, snapshot: dict, caps: dict,
 # Step 6: the console token, as the user's browser is handed it (T104).
 # ---------------------------------------------------------------------------
 
-#: Elements whose content a browser that runs scripts (as the console page
-#: needs) never makes live, by the HTML standard's parsing rules: a
-#: `<template>`'s content is inert, a `<noscript>`'s is text where scripts
-#: run, and a raw-text or escapable raw-text element holds text, never
-#: elements. A refresh or a record inside one forwards and records nothing
-#: (Copilot review of openDox-code#75 at 4809b3d2, r4174671390). Two more
-#: fail closed: `select`, whose content parsers have dropped or kept as they
-#: changed, and `frameset`, after which no other element is ever inserted.
-_INERT_CONTENT = frozenset({"template", "noscript", "script", "style",
-                            "textarea", "title", "xmp", "iframe", "noembed",
-                            "noframes", "plaintext", "select", "frameset"})
-#: ... and of those, the ones whose content is TEXT: nothing inside opens an
-#: element, and only their own end tag closes them.
-_TEXT_CONTENT = _INERT_CONTENT - {"template", "select", "frameset"}
-#: ... and the ones nothing closes, to the end of the page.
-_NEVER_CLOSED = frozenset({"plaintext", "frameset"})
-
-
-#: A named character reference not ended by `;` (`&amp` before a letter).
-_UNTERMINATED_REFERENCE = re.compile(r"&[A-Za-z][A-Za-z0-9]*(?![A-Za-z0-9;])")
-
-
-def _first_attributes(attrs) -> dict[str, str]:
-    """A tag's attributes as a browser keeps them: where a name repeats,
-    the FIRST value, never the last."""
-    named: dict[str, str] = {}
-    for key, value in attrs:
-        named.setdefault(key.lower(), value or "")
-    return named
-
-
-class _RefreshContents(html.parser.HTMLParser):
+class _RefreshContents(_LivePage):
     """The `content` of every LIVE `<meta http-equiv="refresh">` in a page,
     unescaped, and the text of every live JSON `<script>` whose id is the
-    console record's. Live as a browser that runs scripts parses the page:
-    nothing inside `_INERT_CONTENT` counts, the first of a repeated
-    attribute is the one read, `http-equiv` is `refresh` exactly (ASCII
-    case aside, and no whitespace trimmed), and `/>` closes only a void
-    element, so `<template/>` stays open."""
+    console record's (`_LivePage`): `http-equiv` is `refresh` exactly
+    (ASCII case aside, and no whitespace trimmed)."""
+
+    WATCHED = frozenset({"meta", "script"})
 
     def __init__(self) -> None:
         super().__init__()
-        self.contents: list[str] = []
+        self.contents: list[str | None] = []
         self.records: list[str] = []
         self._in_record = False
-        self._inert: list[str] = []
 
-    def handle_starttag(self, tag, attrs) -> None:
-        if self._inert and self._inert[-1] in _TEXT_CONTENT:
-            return                      # text to a browser, not an element
-        live = not self._inert
-        if tag in _INERT_CONTENT:
-            self._inert.append(tag)
-        if not live:
-            return
-        named = _first_attributes(attrs)
+    def live_tag(self, tag, named) -> None:
         if tag == "script":
             self._in_record = (
                 named.get("id") == CONSOLE_RECORD_ID
-                and named.get("type", "").strip().lower() == "application/json")
+                and ascii_lower(named.get("type", "").strip(_ASCII_WHITESPACE))
+                == "application/json")
             if self._in_record:
                 self.records.append("")
             return
         equiv = named.get("http-equiv", "")
-        if tag == "meta" and equiv.isascii() and equiv.lower() == "refresh":
+        if tag == "meta" and ascii_lower(equiv) == "refresh":
             # A named character reference with no `;` is decoded by
             # `html.unescape` and, in an attribute, left as text by a browser
             # where `=` or a letter or digit follows (`&ampconsole_token=`),
@@ -1699,15 +1976,9 @@ class _RefreshContents(html.parser.HTMLParser):
             self.contents.append(None if _UNTERMINATED_REFERENCE.search(raw)
                                  else named.get("content", ""))
 
-    def handle_startendtag(self, tag, attrs) -> None:
-        # A browser ignores `/>` on any element but a void one.
-        self.handle_starttag(tag, attrs)
-
-    def handle_endtag(self, tag) -> None:
-        if self._inert and tag == self._inert[-1] and tag not in _NEVER_CLOSED:
-            self._inert.pop()
-            if tag == "script":
-                self._in_record = False
+    def closed(self, tag) -> None:
+        if tag == "script":
+            self._in_record = False
 
     def handle_data(self, data) -> None:
         if self._in_record:
@@ -1906,7 +2177,7 @@ def opener_unsafe_because(path: Path) -> tuple[Path, str] | None:
 
 
 def _read_without_following(path: Path,
-                            limit: int = OPENER_READ_LIMIT) -> str:
+                            limit: int = OPENER_READ_LIMIT) -> bytes:
     """The file at `path`, opened without following a link and WITHOUT
     BLOCKING, and read only if what opened is a regular file: a FIFO with no
     writer would otherwise hang the harness before its verdict and its
@@ -1931,7 +2202,7 @@ def _read_without_following(path: Path,
     if size > limit:
         raise OSError(errno.EFBIG, f"larger than the {limit} bytes this "
                       "harness reads whole")
-    return b"".join(chunks).decode("utf-8", "replace")
+    return b"".join(chunks)
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -2033,6 +2304,25 @@ def token_in_fragment(targets: list[str | None], port: int,
     return values[0], ""
 
 
+def opener_unread_because(page: bytes,
+                          contents: "_RefreshContents") -> str | None:
+    """Why this harness cannot read the opener as the user's browser reads
+    it, or `None`: an encoding other than UTF-8, or markup it does not model
+    (`_LivePage.unmodeled`). Either is a named failure of the forward check,
+    never a reading by approximation (the self-pass after Copilot's review
+    of openDox-code#75 at 4bdb41fb)."""
+    encoding = not_utf8_because(page, None)
+    if encoding:
+        return (f"the opener may be decoded other than as UTF-8, as this "
+                f"harness reads it: {encoding}")
+    if contents.unmodeled:
+        return (f"the opener holds "
+                f"{', '.join(sorted(set(contents.unmodeled)))}, whose "
+                "parsing this harness does not model, so it cannot tell "
+                "which refresh a browser follows")
+    return None
+
+
 def _json_or_none(text: str):
     """`text` parsed as JSON, or `None` where it is not JSON or nests past
     the parser's depth, which is the product's output and so a named
@@ -2123,14 +2413,16 @@ def check_console_opener(label: str, port: int, printed: str, state_dir: Path,
                       f"{exc.strerror})")
         return path, None
     contents = _RefreshContents()
-    contents.feed(page)
+    contents.feed(page.decode("utf-8", "replace"))
     contents.close()
     targets = [refresh_target(content) for content in contents.contents]
     # Every token the opener carries, delivered or refused, is never printed
     # from here on, whatever answer or path later echoes it.
     for carried in carried_tokens(targets, contents.records):
         verdict.keep_secret(carried)
-    token, why = token_in_fragment(targets, port, hosts)
+    unread = opener_unread_because(page, contents)
+    token, why = ((None, unread) if unread
+                  else token_in_fragment(targets, port, hosts))
     verdict.check(f"{label}.console opener forwards with the token in its "
                   "fragment", token is not None, why)
     if token is not None:
@@ -2220,11 +2512,11 @@ def requests_for(routes: list[str], snapshot: dict) -> list[str]:
     """Every route literal, and every `/`-ended one completed with each
     document the snapshot lists. No thread read is completed with a query:
     a standalone plane's rail sends none (`check_no_thread_read`)."""
-    documents = [urllib.parse.quote(str(d["path"]))
+    documents = [urllib.parse.quote(scalar_values(str(d["path"])))
                  for d in map(as_object, as_list(snapshot.get("documents")))
                  if d.get("path")]
-    key = urllib.parse.quote(f"{snapshot.get('repository') or ''}@main",
-                             safe="")
+    key = urllib.parse.quote(
+        scalar_values(f"{snapshot.get('repository') or ''}@main"), safe="")
     targets: list[str] = []
     for route in routes:
         targets.append(route)
@@ -2280,7 +2572,8 @@ def check_routes(server: Server, index: Answer, snapshot: dict, caps: dict,
         answer = get(server.port, target, token=token)
         verdict.note(f"GET {target} -> {answer.describe()}")
         dropped = ("; a dropped connection is a handler that raised"
-                   if answer.status is None else "")
+                   if answer.status is None
+                   and not (answer.error or "").endswith(REDIRECTED) else "")
         verdict.check(f"{label}.route {target}",
                       answer.status is not None and answer.status < 500,
                       f"GET {target} answers {answer.describe()}{dropped}"
@@ -2346,7 +2639,7 @@ def learn_opener_tokens(printed: str, verdict: Verdict) -> None:
     except OSError:
         return
     contents = _RefreshContents()
-    contents.feed(page)
+    contents.feed(page.decode("utf-8", "replace"))
     contents.close()
     targets = [refresh_target(content) for content in contents.contents]
     for carried in carried_tokens(targets, contents.records):
@@ -2489,7 +2782,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         cleanup(ctx, args.keep)
     if error is not None:
-        print(verdict.redact(f"\nAT-R1 HTTP half: ERROR: {error}"),
+        print("\nAT-R1 HTTP half: ERROR: " + printable(verdict.redact(error)),
               flush=True)
         return 2
     return verdict.report()
