@@ -118,8 +118,8 @@ __all__ = [
     "CONSOLE_DIRNAME", "ConsoleAccessRefused", "ConsoleTerminated",
     "DELIVERY_CAPABILITIES",
     "DELIVERY_OPENED_URL", "FRAGMENT_KEY", "PrivateCopy", "RECORD_ELEMENT_ID",
-    "RECORD_KIND", "UNOPENABLE_HINT", "deferred_termination", "delivery_for",
-    "guard_private_roots",
+    "COPY_MARKER", "RECORD_KIND", "UNOPENABLE_HINT", "deferred_termination",
+    "delivery_for", "guard_private_roots", "is_copy_bytes",
     "is_private_file", "needs_copy", "opens_a_private_file",
     "opened_url", "private_copy_path", "publish", "read_private_copy",
     "remove_private_copy", "terminate_as_interrupt", "unsupported_platform",
@@ -140,6 +140,14 @@ FRAGMENT_KEY = "console_token"
 RECORD_KIND = "opendox-console-access"
 RECORD_SCHEMA_VERSION = 1
 RECORD_ELEMENT_ID = "opendox-console"
+#: The copy's FIRST bytes, before any byte of the token (Copilot at
+#: openDox-code#84, r4179793524). A copy is written from its start, so any
+#: part of one that holds a byte of the token holds this whole line first: a
+#: file that begins with it is a copy, written in full or caught part way
+#: (`is_copy_bytes`), and a file shorter than it holds no token yet. An HTML
+#: comment, which a browser reads before the doctype without effect.
+COPY_MARKER = (b"<!-- opendox-console-access: a console token's private copy, "
+               b"never served -->\n")
 #: The one mode a private copy may have.
 PRIVATE_MODE = 0o600
 #: The one mode the copies' directory, `console/`, may have (#1144 12.4a: the
@@ -585,7 +593,8 @@ def _record_json(record: Mapping[str, Any]) -> str:
 def _opener_html(record: Mapping[str, Any]) -> str:
     target = html.escape(str(record["opened_url"]), quote=True)
     return (
-        "<!doctype html>\n"
+        COPY_MARKER.decode("ascii")
+        + "<!doctype html>\n"
         '<html lang="en">\n'
         "<head>\n"
         '<meta charset="utf-8">\n'
@@ -1168,22 +1177,16 @@ def terminate_as_interrupt(enabled: bool):
         _held.update(pending=None, stopping=False)
 
 
-def _carries_a_console_record(handle: int, info: os.stat_result) -> bool:
-    """Whether the regular file open on `handle` IS a console token's private
-    copy by what it holds: a console record (`RECORD_KIND`) in the element a
-    copy keeps it in, wherever the file lies and whatever its name.
-
-    Read with `pread`, from the descriptor already open, so it needs no new
-    descriptor and does not move the offset the caller then reads from. A
-    regular file whose head cannot be read is judged to be a copy: a check
-    that cannot be made denies, never allows."""
-    if not stat.S_ISREG(info.st_mode):
-        return False
-    try:
-        head = os.pread(handle, _READ_LIMIT, 0)
-    except OSError:
+def is_copy_bytes(data: bytes) -> bool:
+    """Whether `data`, a file's bytes from its start, are a console token's
+    private copy's: they begin with its `COPY_MARKER`, written in full or
+    caught part way through its write (Copilot at openDox-code#84,
+    r4179793524), or they carry a whole console record (`RECORD_KIND`) in
+    the element a copy keeps it in. Fewer bytes than the marker hold no
+    token, and are not a copy's."""
+    if data.startswith(COPY_MARKER):
         return True
-    found = _RECORD_PATTERN.search(head.decode("utf-8", "replace"))
+    found = _RECORD_PATTERN.search(data[:_READ_LIMIT].decode("utf-8", "replace"))
     if found is None:
         return False
     try:
@@ -1191,6 +1194,26 @@ def _carries_a_console_record(handle: int, info: os.stat_result) -> bool:
     except ValueError:
         return False
     return isinstance(record, dict) and record.get("kind") == RECORD_KIND
+
+
+def _carries_a_console_record(handle: int, info: os.stat_result) -> bool:
+    """Whether the regular file open on `handle` IS a console token's private
+    copy by what it holds (`is_copy_bytes`), wherever the file lies and
+    whatever its name, a copy still being written included.
+
+    Read with `pread`, from the descriptor already open, so it needs no new
+    descriptor and does not move the offset the caller then reads from. A
+    regular file whose head cannot be read is judged to be a copy: a check
+    that cannot be made denies, never allows. What the caller then SENDS is
+    judged again by its own bytes (`serve.read_unless_private`,
+    `serve.DashboardHandler.copyfile`), since a file can grow after this."""
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    try:
+        head = os.pread(handle, _READ_LIMIT, 0)
+    except OSError:
+        return True
+    return is_copy_bytes(head)
 
 
 def is_private_file(handle: int, private_roots: Iterable[Path | str]) -> bool:

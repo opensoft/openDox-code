@@ -3681,26 +3681,249 @@ def test_a_server_outlives_no_killed_run(tmp_path) -> None:
         middle.stdout.close()
 
 
-def test_a_partly_written_copy_is_refused_by_its_place(tmp_path) -> None:
-    """A file in the copies' directory is refused by its identity even when
-    it holds no whole record: a copy caught part way through its write has
-    the token and not yet the end of its element, so it cannot be known by
-    what it holds, only by where it is. Hard-linked under a served root, it
-    is still never read out."""
+def test_a_file_in_the_copies_directory_is_refused_by_its_place(tmp_path) -> None:
+    """Defence in depth: a file in the copies' directory is refused by its
+    identity whatever it holds, even where its bytes are not recognized as a
+    copy's (here a token-bearing line with no marker and no record).
+    Hard-linked under a served root, it is still never read out."""
     from opendox import console_access, serve
 
     state = _state(tmp_path)
     copy = _write(state)
-    text = copy.path.read_text(encoding="utf-8")
     token = console_access.read_private_copy(copy.path)["console_token"]
-    partial = copy.path.parent / f".{copy.path.name}.opendox-424242"
-    partial.write_text(text[:text.index(token) + len(token)], encoding="utf-8")
-    partial.chmod(0o600)
+    stray = copy.path.parent / f".{copy.path.name}.opendox-424242"
+    stray.write_text(f"<a href=\"{copy.opened_url}\">\n", encoding="utf-8")
+    stray.chmod(0o600)
+    assert token in stray.read_text(encoding="utf-8")
     served = tmp_path / "served"
     served.mkdir()
-    os.link(partial, served / "partial.md")
-    with open(served / "partial.md", "rb") as stream:
-        assert not console_access._carries_a_console_record(
-            stream.fileno(), os.fstat(stream.fileno())), "the case is vacuous"
-    assert serve.read_unless_private(served / "partial.md", (copy.path.parent,)) is None
+    os.link(stray, served / "stray.md")
+    with open(served / "stray.md", "rb") as stream:
+        assert not console_access.is_copy_bytes(stream.read()), "the case is vacuous"
+    assert serve.read_unless_private(served / "stray.md", (copy.path.parent,)) is None
     console_access.remove_private_copy(copy)
+
+
+# ---------------------------------------------------------------------------
+# 21 — Copilot's review at 1e114a19 (r4179793524): a copy caught part way
+#      through its write, in another state directory, and a file that grows
+#      after it was judged
+# ---------------------------------------------------------------------------
+
+def _partial_copy_bytes(tmp_path: Path) -> tuple[bytes, str]:
+    """A real copy's bytes, cut just after the token's first appearance (the
+    meta refresh), before the record's element is written: what another
+    plane's writer leaves for a moment in its temporary file."""
+    from opendox import console_access
+
+    scratch = _state(tmp_path / "scratch")
+    copy = _write(scratch, port=7)
+    data = copy.path.read_bytes()
+    token = console_access.read_private_copy(copy.path)["console_token"]
+    console_access.remove_private_copy(copy)
+    cut = data.index(token.encode()) + len(token)
+    assert b"</script>" not in data[:cut], "the cut is not part way"
+    return data[:cut], token
+
+
+def test_a_copy_starts_with_its_marker_before_any_token_byte(tmp_path) -> None:
+    """r4179793524: every copy is written from `COPY_MARKER`, so any part of
+    one that holds a byte of the token holds the whole marker first, and is
+    known for a copy (`is_copy_bytes`); fewer bytes than the marker hold no
+    token and are not."""
+    from opendox import console_access
+
+    copy = _write(_state(tmp_path))
+    data = copy.path.read_bytes()
+    token = console_access.read_private_copy(copy.path)["console_token"].encode()
+    assert data.startswith(console_access.COPY_MARKER)
+    assert data.index(token) >= len(console_access.COPY_MARKER)
+    for cut in range(len(console_access.COPY_MARKER), len(data) + 1, 37):
+        assert console_access.is_copy_bytes(data[:cut]), cut
+    for cut in range(len(console_access.COPY_MARKER)):
+        assert token not in data[:cut]
+        assert not console_access.is_copy_bytes(data[:cut]), cut
+    assert not console_access.is_copy_bytes(b"# a document\n")
+    console_access.remove_private_copy(copy)
+
+
+def test_another_state_directorys_partial_copy_is_never_served(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """r4179793524, Copilot's layout: plane B's writer has its temporary file
+    part written, the token in its meta refresh and no record yet, in B's own
+    state directory. Plane A's `--web-dir` links there, A's checkout holds a
+    hard link to it, and A's snapshot file is one too. The static handler,
+    `/source` and `/snapshot.json` all refuse it, for GET and HEAD."""
+    import shutil as _shutil
+
+    from opendox import console_access, serve
+
+    partial, token = _partial_copy_bytes(tmp_path)
+    web = tmp_path / "web"
+    _shutil.copytree(WEB, web)
+    state_a = _state(tmp_path / "a")
+    state_b = _state(tmp_path / "b")
+    console_b = state_b / console_access.CONSOLE_DIRNAME
+    console_b.mkdir(mode=0o700)
+    temporary = console_b / ".9.html.opendox-4242"
+    temporary.write_bytes(partial)
+    temporary.chmod(0o600)
+    (web / "state-b").symlink_to(state_b)
+    httpd, repo, worker = _guarded_plane(tmp_path, monkeypatch, web=web)
+    try:
+        base = httpd.server_address[:2]
+        own = console_access.publish(
+            httpd, page_url=serve.server_url(httpd, "/index.html"),
+            env={"OPENDOX_STATE_DIR": str(state_a)})
+        os.link(temporary, repo / "partial.md")
+        snapshot = tmp_path / "snapshot.json"
+        snapshot.unlink()
+        os.link(temporary, snapshot)
+        for path in (f"/state-b/console/{temporary.name}", "/source/partial.md",
+                     "/snapshot.json"):
+            for method in ("GET", "HEAD"):
+                status, headers, raw = _call(base, method, path)
+                assert token.encode() not in raw, (method, path, status)
+                assert all(token not in str(v) for v in headers.values()), path
+                assert status != 200, (method, path, status)
+        assert token.encode() not in _raw_get(base, f"/state-b/console/{temporary.name}")
+        assert _call(base, "GET", "/index.html")[0] == 200
+        console_access.remove_private_copy(own)
+    finally:
+        _stop_plane(httpd, worker)
+
+
+def test_a_file_that_grows_after_its_static_check_never_sends_a_token(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """r4179793524, a file that grows: when the static handler judges it, both
+    before the stdlib opens it and after, the other plane's temporary file
+    holds only the start of the marker, and no token; it grows to hold one
+    right after the second judgment, before the body is copied. The body
+    sent is judged again as it is read, and never carries the token, whatever
+    reaches the wire."""
+    import shutil as _shutil
+
+    from opendox import console_access
+
+    partial, token = _partial_copy_bytes(tmp_path)
+    first = partial[:10]
+    web = tmp_path / "web"
+    _shutil.copytree(WEB, web)
+    state_b = _state(tmp_path / "b")
+    console_b = state_b / console_access.CONSOLE_DIRNAME
+    console_b.mkdir(mode=0o700)
+    growing = console_b / ".9.html.opendox-4242"
+    growing.write_bytes(first)
+    growing.chmod(0o600)
+    (web / "state-b").symlink_to(state_b)
+    real = console_access.is_private_file
+    judged: list[bool] = []
+    grown: list[int] = []
+
+    def then_grow(handle, roots):
+        answer = real(handle, roots)
+        info = os.fstat(handle)
+        if (info.st_dev, info.st_ino) == (growing.stat().st_dev,
+                                          growing.stat().st_ino):
+            judged.append(answer)
+            if len(judged) == 2 and not grown:      # after the backstop
+                grown.append(1)
+                with open(growing, "ab") as more:
+                    more.write(partial[len(first):])
+        return answer
+
+    httpd, _repo, worker = _guarded_plane(tmp_path, monkeypatch, web=web)
+    try:
+        base = httpd.server_address[:2]
+        own = console_access.publish(
+            httpd, page_url="http://127.0.0.1:%d/index.html" % base[1],
+            env={"OPENDOX_STATE_DIR": str(_state(tmp_path / "a"))})
+        monkeypatch.setattr(console_access, "is_private_file", then_grow)
+        raw = _raw_get(base, f"/state-b/console/{growing.name}")
+        assert grown and judged == [False, False], ("the growth was never "
+                                                    "staged after both checks", judged)
+        assert token.encode() not in raw
+        console_access.remove_private_copy(own)
+    finally:
+        _stop_plane(httpd, worker)
+
+
+def test_a_copy_replaced_after_its_read_is_never_returned(
+        tmp_path, monkeypatch) -> None:
+    """r4179793524, the other way round: the bytes read are a copy's, and the
+    file is emptied right after the read, before anything judges it by its
+    descriptor. What was read is judged too, so the copy's bytes are never
+    returned."""
+    from opendox import console_access, serve
+
+    own = _write(_state(tmp_path / "a"))
+    other = _write(_state(tmp_path / "b"), port=9)
+    token = console_access.read_private_copy(other.path)["console_token"]
+    served = tmp_path / "served.json"
+    os.link(other.path, served)
+    real_open = open
+    emptied: list[int] = []
+
+    class _EmptiedAfterRead:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.stream.close()
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, *args):
+            data = self.stream.read(*args)
+            os.truncate(served, 0)          # emptied right after the read
+            emptied.append(1)
+            return data
+
+    def opening(path, mode="r", *args, **kwargs):
+        stream = real_open(path, mode, *args, **kwargs)
+        return _EmptiedAfterRead(stream) if str(path) == str(served) else stream
+
+    monkeypatch.setattr("builtins.open", opening)
+    try:
+        data = serve.read_unless_private(served, (own.path.parent,))
+    finally:
+        monkeypatch.undo()
+    assert emptied, "the replacement was never staged"
+    assert data is None or token.encode() not in data
+    console_access.remove_private_copy(own)
+    console_access.remove_private_copy(other)
+
+
+def test_a_file_that_grows_after_its_read_check_never_returns_a_token(
+        tmp_path, monkeypatch) -> None:
+    """r4179793524, for `/source` and `/snapshot.json`'s reader: the file is
+    read first and the bytes read are judged, so a file that holds no token
+    when it is judged cannot hand one out after."""
+    from opendox import console_access, serve
+
+    partial, token = _partial_copy_bytes(tmp_path)
+    own = _write(_state(tmp_path / "a"))
+    growing = tmp_path / "growing.json"
+    growing.write_bytes(partial[:10])
+    real = console_access.is_private_file
+    grown: list[int] = []
+
+    def then_grow(handle, roots):
+        answer = real(handle, roots)
+        if not grown:
+            grown.append(1)
+            with open(growing, "ab") as more:
+                more.write(partial[10:])
+        return answer
+
+    monkeypatch.setattr(console_access, "is_private_file", then_grow)
+    data = serve.read_unless_private(growing, (own.path.parent,))
+    assert grown, "the growth was never staged"
+    assert data is None or token.encode() not in data
+    monkeypatch.undo()
+    assert serve.read_unless_private(growing, (own.path.parent,)) is None
+    console_access.remove_private_copy(own)

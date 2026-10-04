@@ -105,6 +105,7 @@ import argparse
 import functools
 import http.server
 import json
+import os
 import secrets
 import socket
 import subprocess
@@ -822,12 +823,21 @@ def read_unless_private(path: Path | str, private_roots) -> bytes | None:
     resolved again on every request, and could be re-pointed at the state
     directory after the copy was published; a hard link reaches the copy by
     another name. The file actually opened is judged, so neither is served.
-    With no private root (a host's plane) it reads as before."""
+    With no private root (a host's plane) it reads as before.
+
+    THE BYTES READ ARE JUDGED, NOT ONLY THE FILE (Copilot at
+    openDox-code#84, r4179793524). A copy being written in another state
+    directory grows: judged before the read, it could hold no token yet, and
+    hold one by the time it was read. So the file is read first, and what
+    was read is judged by its own bytes (`console_access.is_copy_bytes`) as
+    well as the file by its identity."""
     with open(path, "rb") as stream:
-        if private_roots and console_access.is_private_file(
-                stream.fileno(), private_roots):
+        data = stream.read()
+        if private_roots and (
+                console_access.is_copy_bytes(data)
+                or console_access.is_private_file(stream.fileno(), private_roots)):
             return None
-        return stream.read()
+        return data
 
 
 def resolve_source_path(checkout_root: Path, url_tail: str) -> Path | None:
@@ -1388,6 +1398,9 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         are already sent by then, so it is closed unread and its bytes are
         never written."""
         private = getattr(self.server, "private_roots", ())
+        # Judged afresh for every request: a length judged for an earlier one
+        # never bounds this one's body, should a handler ever serve several.
+        self._judged_length = None
         if private:
             path = Path(self.translate_path(self.path))
             judged = [path]
@@ -1411,7 +1424,51 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
                 stream.close()
                 self.close_connection = True    # its promised body never comes
                 return None
+            if handle is not None:
+                # What `copyfile` may send: the file as long as it was when
+                # judged, and its own first bytes judged again as they are
+                # sent (`copyfile`).
+                self._judged_length = os.fstat(handle).st_size
         return stream
+
+    def copyfile(self, source, outputfile):
+        """The static body, as `SimpleHTTPRequestHandler` copies it, except
+        on a plane that marked a private-copy directory.
+
+        A FILE CAN GROW AFTER IT WAS JUDGED (Copilot at openDox-code#84,
+        r4179793524). A copy being written in another state directory holds
+        no token in its first bytes, and the stdlib copies to the end of the
+        file as it is when it reads, not as it was when `send_head` judged it.
+        So no more than the judged length is sent, and the body's first bytes,
+        read before anything is sent, are judged by what they are: a copy's
+        (`console_access.is_copy_bytes`) are never sent, and the connection
+        is closed, as the backstop closes it. Bytes shorter than a copy's
+        marker hold no token, and only they are sent."""
+        limit = getattr(self, "_judged_length", None)
+        self._judged_length = None
+        if limit is None:
+            return super().copyfile(source, outputfile)
+        need = min(limit, len(console_access.COPY_MARKER))
+        head = b""
+        while len(head) < need:
+            chunk = source.read(need - len(head))
+            if not chunk:
+                break
+            head += chunk
+        if console_access.is_copy_bytes(head):
+            self.close_connection = True
+            return None
+        outputfile.write(head)
+        remaining = limit - len(head)
+        if len(head) < need:
+            return None
+        while remaining > 0:
+            chunk = source.read(min(64 * 1024, remaining))
+            if not chunk:
+                break
+            outputfile.write(chunk)
+            remaining -= len(chunk)
+        return None
 
     def do_GET(self):  # noqa: N802
         if not self._route(head_only=False):
