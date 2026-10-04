@@ -55,6 +55,14 @@ from conftest import REPO_ROOT  # noqa: F401  (path setup)
 from opendox import doxbench_binding as binding_mod
 from opendox import doxbench_install as install_mod
 from opendox import doxbench_provider as provider_mod
+from opendox import doxbench_trust as trust_mod
+
+
+def _trusted(binding):
+    """A verdict trusting exactly `binding` (#1144 16.3a; plan 034 T100): the
+    provider acts on a binding only when a verdict covers it."""
+    return trust_mod.TrustVerdict.trusted_for(binding, root=None,
+                                              basis="test")
 
 #: The credential this test enrols. A SENTINEL: long, unique, and impossible to
 #: produce by accident, so a sweep that finds it has found the real thing. On
@@ -260,7 +268,7 @@ def test_an_oauth_intake_is_refused_before_the_secret_is_read(binding,
     oauth = dataclasses.replace(binding, auth_kind="oauth")
     with pytest.raises(provider_mod.BrokerRefused) as caught:
         provider_mod.hand_off_credential(
-            oauth, io.StringIO("x" * 4_000_000))
+            oauth, io.StringIO("x" * 4_000_000), trust=_trusted(oauth))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_REFUSED
     assert caught.value.diagnostic != provider_mod.DIAG_BROKER_UNREACHABLE
     # and nothing was taken into custody
@@ -282,7 +290,7 @@ def test_the_whole_custody_lifecycle_against_the_real_broker(binding,
     # --- INTAKE: the credential crosses to the broker and nothing else ------
     started = time.time()
     reference = provider_mod.hand_off_credential(
-        binding, io.StringIO(SENTINEL_SECRET))
+        binding, io.StringIO(SENTINEL_SECRET), trust=_trusted(binding))
     assert reference.startswith("opref-"), reference
     assert len(reference) == len("opref-") + 24
     held = dataclasses.replace(binding, credential_ref=reference)
@@ -305,7 +313,7 @@ def test_the_whole_custody_lifecycle_against_the_real_broker(binding,
     assert SENTINEL_SECRET not in json.dumps(intake_records)
 
     # --- MINT: the token, its expiry, and the audit reference ---------------
-    minted = provider_mod.mint(held)
+    minted = provider_mod.mint(held, trust=_trusted(held))
     # On the api_key path the declaration is explicit: the minted token IS the
     # stored key, verbatim. It says so rather than burying it, and this asserts
     # the consumer is not being handed something else.
@@ -329,7 +337,7 @@ def test_the_whole_custody_lifecycle_against_the_real_broker(binding,
     opener = _Opener(_expired_error(), {"assistant_prose": "the retried answer"})
     port = provider_mod.BrokeredProviderPort(
         held, install_mod.brokered_catalog(held),
-        opener=opener, notice=printed.append)
+        opener=opener, notice=printed.append, trust=_trusted(held))
     assert port.dispatch(_Envelope()) == {
         "assistant_prose": "the retried answer", "proposals": []}
     assert len(opener.requests) == 2, "exactly one paid retry"
@@ -369,7 +377,7 @@ def test_the_whole_custody_lifecycle_against_the_real_broker(binding,
     aged = provider_mod.BrokeredProviderPort(
         held, install_mod.brokered_catalog(held),
         opener=_Opener({"assistant_prose": "a"}, {"assistant_prose": "b"}),
-        clock=lambda: far_future, notice=lambda _text: None)
+        clock=lambda: far_future, notice=lambda _text: None, trust=_trusted(held))
     aged.dispatch(_Envelope())
     aged.dispatch(_Envelope())
     assert [event.reason for event in aged.ledger] == [
@@ -381,15 +389,15 @@ def test_the_whole_custody_lifecycle_against_the_real_broker(binding,
             if record["event"] == "mint"][-2:] == [None, None]
 
     # --- LIST: the non-secret index, which never opens a custody file -------
-    listed = provider_mod.list_references(held)
+    listed = provider_mod.list_references(held, trust=_trusted(held))
     assert [entry["reference"] for entry in listed] == [reference]
     assert listed[0]["binding"] == binding.id
     assert SENTINEL_SECRET not in json.dumps(listed)
 
     # --- REVOKE: custody is destroyed and the trail survives ----------------
-    revocation_ref = provider_mod.revoke(held)
+    revocation_ref = provider_mod.revoke(held, trust=_trusted(held))
     assert revocation_ref.startswith("opaud-")
-    assert provider_mod.list_references(held) == []
+    assert provider_mod.list_references(held, trust=_trusted(held)) == []
 
     # THE SENTINEL IS NOW NOWHERE — not in the store, not in the audit trail
     # that outlives it, and not anywhere else this test wrote.
@@ -402,7 +410,7 @@ def test_the_whole_custody_lifecycle_against_the_real_broker(binding,
 
     # --- and a mint against a revoked reference refuses ---------------------
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.mint(held)
+        provider_mod.mint(held, trust=_trusted(held))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_REFUSED
     assert reference not in str(caught.value), \
         "the refusal is fixed and redacted; the broker's own words are dropped"
