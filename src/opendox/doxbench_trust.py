@@ -147,9 +147,12 @@ __all__ = [
     "UNTRUSTED_TURN_MESSAGE",
     "UntrustedBindingPort",
     "INTAKE_BROKER_UNTRUSTED",
+    "INTAKE_BROKER_REFUSED",
     "INTAKE_NOT_ADMISSIBLE",
+    "REASON_INLINE_SCRIPT",
     "REASON_IN_REPOSITORY",
     "REASON_RECORD_FORM",
+    "REMEDY_INLINE_SCRIPT",
     "REMEDY_IN_REPOSITORY",
     "REMEDY_NOT_BY_TRUST",
     "UNTRUSTABLE_TURN_MESSAGE",
@@ -157,8 +160,13 @@ __all__ = [
     "REMEDY_UNSERVABLE",
     "binding_digest",
     "command_safe_id",
+    "broker_command_refused",
+    "broker_refusal",
+    "in_repository_argv",
+    "inline_script",
     "in_repository_program",
     "intake_admissible",
+    "restored_for",
     "trust_can_repair",
     "current",
     "is_registered",
@@ -285,6 +293,25 @@ REMEDY_IN_REPOSITORY = (
     "repository, then declare the binding with that command with \"opendox "
     "model-binding edit\", which records trust for what it writes")
 
+#: Why a binding whose broker command gives a shell or an interpreter an
+#: INLINE script is never trusted (T100 follow-on, A2 extended; RULED by
+#: Brett Heap, openxFactory#656 comment 5983805990, "Refuse inline scripts
+#: (Recommended)"). The script is text, not a file a review can pin, and it
+#: can run whatever the repository holds (`/bin/sh -c "exec
+#: ./tools/broker.py"`), so the program must be a real file outside the
+#: served repository.
+REASON_INLINE_SCRIPT = (
+    "its broker command gives a shell or an interpreter an inline script, "
+    "which is no file a review can pin and can run whatever the repository "
+    "holds")
+
+#: What an operator is told to do about such a binding.
+REMEDY_INLINE_SCRIPT = (
+    "Trusting it cannot make it usable: name the broker program itself, for "
+    "example [\"pass\", \"show\", \"key\"], or a script kept outside the "
+    "repository, then declare the binding with that command with \"opendox "
+    "model-binding edit\", which records trust for what it writes")
+
 #: What every refusal says, in place of a command, where `trust` itself would
 #: be refused for the same reason (T100 follow-on, A1): the store cannot be
 #: used, the platform cannot keep it, or a host's policy declines. No command
@@ -405,10 +432,10 @@ UNSERVABLE_TURN_MESSAGE = (
 UNTRUSTABLE_TURN_MESSAGE = (
     "the model binding this install declares is not usable on this machine, "
     "and trusting it cannot help yet: the trust store, the platform or the "
-    "host's trust policy refuses it, or its broker lies inside the "
-    "repository. Nothing was sent and nothing was contacted. Run \"opendox "
-    "model-binding list --repo-root <repository>\" to see why and what to "
-    "do, and restart this console")
+    "host's trust policy refuses it, or its broker command runs a program "
+    "inside the repository or an inline script. Nothing was sent and "
+    "nothing was contacted. Run \"opendox model-binding list --repo-root "
+    "<repository>\" to see why and what to do, and restart this console")
 
 
 #: What the chat rail says when the catalog lists a declared model and none is
@@ -471,11 +498,24 @@ APPROVED_UNSERVABLE_NOTICE = (
 APPROVED_UNTRUSTABLE_NOTICE = (
     "the model is approved for this console, but its binding is not usable "
     "on this machine, and trusting it cannot help yet: the trust store, the "
-    "platform or the host's trust policy refuses it, or its broker lies "
-    "inside the repository. \"opendox model-binding list --repo-root "
+    "platform or the host's trust policy refuses it, or its broker command "
+    "runs a program inside the repository or an inline script. \"opendox "
+    "model-binding list --repo-root "
     "<repository>\" shows why and what to do; then restart this console. The "
     "credential remains in the broker's custody and this act neither mints "
     "nor reads one")
+
+#: Why the console intake is not offered where the broker command the
+#: served repository's declarations document names runs a program inside
+#: the repository, or an inline script (T100 follow-on, A2 and its
+#: extension; Copilot at openDox-code#86, r4179077029): every hand-off to it
+#: is refused before any policy is asked. A FIXED sentence.
+INTAKE_BROKER_REFUSED = (
+    "the console intake is not offered: the broker command the served "
+    "repository's declarations document names runs a program inside the "
+    "repository, or an inline script, which no review can pin, so no "
+    "hand-off to it is ever admitted. Name a broker program installed "
+    "outside the repository")
 
 #: Why the console intake is not offered where the trust policy registered
 #: now could not admit its hand-off (T100 follow-on, A5). openDox's own
@@ -642,11 +682,14 @@ def _command_from_the_root(binding_id: str, root: str | None,
 
 #: The reasons `trust` repairs (T100 follow-on, A1): openDox's own "never
 #: trusted here", "changed since", "trusted under another form of the
-#: record", and a verdict that covered another binding or none at all. Every
-#: other reason is one `trust` would be refused for as well.
+#: record", and no verdict at all. Every other reason is one `trust` would
+#: be refused for as well. A verdict that covers another binding
+#: (`REASON_NOT_COVERED`) is a policy's invalid answer, which the same
+#: policy gives when asked to record, so it is not one (Copilot at
+#: openDox-code#86, r4179077004).
 TRUST_REPAIRS: frozenset[str] = frozenset({
     REASON_NEVER_TRUSTED, REASON_CHANGED, REASON_RECORD_FORM,
-    REASON_NOT_COVERED, REASON_NO_VERDICT})
+    REASON_NO_VERDICT})
 
 
 def trust_can_repair(reason: str | None) -> bool:
@@ -678,6 +721,8 @@ def trust_remedy(binding_id: str, root: str | None,
         return REMEDY_UNSERVABLE
     if reason == REASON_IN_REPOSITORY:
         return REMEDY_IN_REPOSITORY
+    if reason == REASON_INLINE_SCRIPT:
+        return REMEDY_INLINE_SCRIPT
     if reason is not None and not trust_can_repair(reason):
         return REMEDY_NOT_BY_TRUST
     command = trust_command(binding_id, root, bindings=bindings)
@@ -765,15 +810,16 @@ def require_admitted(binding, trust: TrustVerdict | None) -> None:
     trust. A verdict is a `TrustVerdict` EXACTLY: a subclass could answer
     `admits` as it liked (T100 follow-on, A12).
 
-    A BROKER INSIDE THE REPOSITORY IS REFUSED HERE TOO, by the verdict's own
-    root, so the defence beneath the factory holds even for a verdict a
-    policy gave before the rule existed (T100 follow-on, A2;
-    `in_repository_program`)."""
+    A BROKER COMMAND THE RULES REFUSE IS REFUSED HERE TOO (a program inside
+    the repository, by the verdict's own root, or an inline script), so the
+    defence beneath the factory holds even for a verdict a policy gave
+    before the rule existed (T100 follow-on, A2 and its extension;
+    `broker_refusal`)."""
     if type(trust) is TrustVerdict and trust.admits(binding):
-        if (trust.root is not None
-                and in_repository_program(binding, root=trust.root)):
+        refused = broker_refusal(binding, root=trust.root)
+        if refused is not None:
             raise BindingUntrusted(refusal_message(
-                trust.binding_id, trust.root, REASON_IN_REPOSITORY))
+                trust.binding_id, trust.root, refused))
         return
     binding_id = getattr(binding, "id", "<not a binding>")
     if type(trust) is not TrustVerdict:
@@ -880,11 +926,15 @@ def _module_paths(name: str, *, root: Path) -> list[Path]:
 
 
 def _resolved(found: list[str]) -> list[Path]:
+    """Each path resolved, links followed, or as written, made absolute,
+    where it cannot be resolved: a loop, or an embedded NUL, which no
+    program can be run with anyway (Copilot at openDox-code#86,
+    r4179077018)."""
     paths: list[Path] = []
     for path in found:
         try:
             paths.append(Path(path).resolve())
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             paths.append(Path(os.path.abspath(path)))
     return paths
 
@@ -903,7 +953,9 @@ def in_repository_program(binding, *, root: Path | str) -> str | None:
     repository" (`REMEDY_IN_REPOSITORY`).
 
     Every member of the base invocation is asked, placeholders filled; of a
-    member that is an option (`-v`, `--config=VALUE`), only its value is. A
+    member that is an option (`-v`, `--config=VALUE`), only its value is. The
+    program itself is never an option, whatever its name, and nothing after
+    a `--` member is one (Copilot at openDox-code#86, r4179076944). A
     member names a file inside
     the repository where what it resolves to (`_program_path`) is the served
     root or lies under it, and so does a module named after `-m` that would
@@ -911,10 +963,21 @@ def in_repository_program(binding, *, root: Path | str) -> str | None:
     has no command."""
     if binding.credential_source() != binding_mod.CREDENTIAL_FROM_BROKER:
         return None
+    return in_repository_argv(binding.substituted_argv(), root=root)
+
+
+def in_repository_argv(members, *, root: Path | str) -> str | None:
+    """The member of a broker command `members` that names a file inside
+    the served repository, or None: `in_repository_program`'s rule, for a
+    command no binding carries yet (the console intake's broker)."""
     served = Path(resolved_root(root))
-    members = binding.substituted_argv()
+    members = tuple(members)
+    positional = False
     for index, member in enumerate(members):
-        if member.startswith("-"):
+        if index and member == "--" and not positional:
+            positional = True
+            continue
+        if index and member.startswith("-") and not positional:
             candidates = ([member.split("=", 1)[1]] if "=" in member
                           else [])
         else:
@@ -922,11 +985,137 @@ def in_repository_program(binding, *, root: Path | str) -> str | None:
         paths = [path for candidate in candidates if candidate
                  for path in _program_path(candidate, first=index == 0,
                                            root=served)]
-        if index and members[index - 1] == "-m":
+        if index and members[index - 1] == "-m" and not positional:
             paths += _module_paths(member, root=served)
         if any(path == served or served in path.parents for path in paths):
             return member
     return None
+
+
+#: Shells: an option cluster holding `c` gives one an inline script.
+_SHELLS = frozenset({"sh", "bash", "rbash", "zsh", "dash", "ksh", "mksh",
+                     "pdksh", "ash", "yash", "posh", "fish", "csh", "tcsh"})
+
+#: Each interpreter, by its file name without a version suffix, and the
+#: letters of a short option cluster that give it an inline script
+#: (`python -c`, `perl -e`, `node -e`/`-p`, `php -r`, `env -S`).
+_INLINE_LETTERS: dict[str, str] = {
+    **{shell: "c" for shell in _SHELLS},
+    "python": "c", "pypy": "c", "jython": "c",
+    "perl": "eE", "ruby": "e", "php": "r", "lua": "e", "luajit": "e",
+    "node": "ep", "nodejs": "ep", "bun": "ep", "osascript": "e",
+    "env": "S",
+}
+
+#: The long options that give an interpreter an inline script, as a member
+#: or as `--option=VALUE`. PowerShell's are matched without regard to case.
+_INLINE_LONG: dict[str, tuple[str, ...]] = {
+    "node": ("--eval", "--print"), "nodejs": ("--eval", "--print"),
+    "bun": ("--eval", "--print"), "fish": ("--command",),
+    "env": ("--split-string",),
+    "pwsh": ("-c", "-command", "--command", "-e", "-ec", "-encodedcommand",
+             "--encodedcommand", "-cwa", "-commandwithargs"),
+}
+_INLINE_LONG["powershell"] = _INLINE_LONG["pwsh"]
+
+#: Programs whose own first operand IS a script, unless a file is named for
+#: it (`-f FILE`), judged where they are the command's program.
+_SCRIPT_OPERAND = frozenset({"awk", "gawk", "mawk", "nawk", "sed"})
+
+_SHORT_CLUSTER = re.compile(r"-[A-Za-z]+")
+
+
+def _unversioned(name: str) -> str:
+    """A program's file name without a version suffix: `python3.12` and
+    `python3` are `python`, `perl5.36` is `perl`."""
+    return re.sub(r"[-.\d]+$", "", name) or name
+
+
+def _program_names(member: str, *, first: bool, root: Path) -> set[str]:
+    """The names `member` could run as: its own file name and, where it
+    resolves to a file, that file's (`/bin/sh` may be `dash`, and a link
+    named `broker` may be `python3`), each without a version suffix."""
+    names = {Path(member).name}
+    names.update(path.name for path in _program_path(member, first=first,
+                                                    root=root))
+    return {_unversioned(name) for name in names if name}
+
+
+def _gives_an_inline_script(name: str, rest: tuple[str, ...], *,
+                            first: bool) -> bool:
+    """Whether a program named `name`, followed by `rest`, is given an inline
+    script. Only its options are read, up to a `--` member."""
+    options = []
+    for member in rest:
+        if member == "--":
+            break
+        options.append(member)
+    if name in _SCRIPT_OPERAND:
+        return first and bool(rest) and not any(
+            member in ("-f", "--file") or member.startswith("--file=")
+            or (_SHORT_CLUSTER.fullmatch(member) and "f" in member[1:])
+            for member in rest)
+    if name == "deno":
+        return bool(rest) and rest[0] == "eval"
+    longs = _INLINE_LONG.get(name, ())
+    letters = _INLINE_LETTERS.get(name, "")
+    for member in options:
+        spelled = member.lower() if name in ("pwsh", "powershell") else member
+        if spelled in longs or any(
+                long.startswith("--") and spelled.startswith(long + "=")
+                for long in longs):
+            return True
+        if letters and _SHORT_CLUSTER.fullmatch(member) and any(
+                letter in member[1:] for letter in letters):
+            return True
+    return False
+
+
+def inline_script(members, *, root: Path | str | None = None) -> str | None:
+    """The member of a broker command `members` that is a shell or an
+    interpreter given an INLINE script, or None (T100 follow-on, A2
+    extended; RULED by Brett Heap, openxFactory#656 comment 5983805990,
+    "Refuse inline scripts (Recommended)").
+
+    Every member is asked, not the program alone, so a wrapper (`env sh -c`,
+    `timeout 5 bash -c`, `busybox sh -c`) hides none. A member's name is its
+    own file name and, where it resolves to a file, that file's, each
+    without a version suffix (`_program_names`)."""
+    members = tuple(members)
+    where = Path(resolved_root(root)) if root is not None else Path(
+        os.path.abspath(os.sep))
+    for index, member in enumerate(members):
+        if not member or (index and member.startswith("-")):
+            continue
+        for name in _program_names(member, first=index == 0, root=where):
+            if _gives_an_inline_script(name, members[index + 1:],
+                                       first=index == 0):
+                return member
+    return None
+
+
+def broker_command_refused(members, *,
+                           root: Path | str | None) -> str | None:
+    """Why the broker command `members` may never be trusted, or None: it
+    gives a shell or an interpreter an inline script
+    (`REASON_INLINE_SCRIPT`), or, at a known `root`, it names a file inside
+    the served repository (`REASON_IN_REPOSITORY`). Asked where trust is
+    recorded and wherever it is judged, and of the console intake's
+    broker."""
+    if inline_script(members, root=root) is not None:
+        return REASON_INLINE_SCRIPT
+    if root is not None and in_repository_argv(members,
+                                               root=root) is not None:
+        return REASON_IN_REPOSITORY
+    return None
+
+
+def broker_refusal(binding, *, root: Path | str | None) -> str | None:
+    """`broker_command_refused` for `binding`'s broker command, placeholders
+    filled, or None for a binding no broker answers."""
+    if binding.credential_source() != binding_mod.CREDENTIAL_FROM_BROKER:
+        return None
+    return broker_command_refused(binding.substituted_argv(), root=root)
 
 
 def _judged(policy_of, binding, *, root: Path | str) -> TrustVerdict:
@@ -941,10 +1130,11 @@ def _judged(policy_of, binding, *, root: Path | str) -> TrustVerdict:
         return TrustVerdict.untrusted_for(binding, root=root,
                                           basis=BASIS_CATALOG,
                                           reason=unservable)
-    if in_repository_program(binding, root=root) is not None:
+    refused = broker_refusal(binding, root=root)
+    if refused is not None:
         return TrustVerdict.untrusted_for(binding, root=root,
                                           basis=BASIS_REPOSITORY,
-                                          reason=REASON_IN_REPOSITORY)
+                                          reason=refused)
     try:
         verdict = policy_of().verdict(binding, root=root)
     except Exception as error:  # noqa: BLE001 - a policy that fails trusts nothing
@@ -1011,11 +1201,12 @@ def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
             f"model binding {shown(binding.id)} is not trusted on this "
             f"machine, and no trust was recorded for it: {unservable}. "
             f"{REMEDY_UNSERVABLE}")
-    if in_repository_program(binding, root=root) is not None:
+    refused = broker_refusal(binding, root=root)
+    if refused is not None:
         raise TrustNotRecorded(
             f"model binding {shown(binding.id)} is not trusted on this "
-            f"machine, and no trust was recorded for it: "
-            f"{REASON_IN_REPOSITORY}. {REMEDY_IN_REPOSITORY}")
+            f"machine, and no trust was recorded for it: {refused}. "
+            f"{trust_remedy(binding.id, str(root), refused)}")
     registered = None
     try:
         # INSIDE the refusal net (T100 follow-on, A13): whatever the seam
@@ -1048,6 +1239,22 @@ def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
         "on this machine and nothing was written")
 
 
+def restored_for(binding, *, replacing, root: Path | str) -> None:
+    """After a write that failed, trust `binding` (the form the document
+    still holds) again in place of `replacing` (the form trust was recorded
+    for, for that write), where `binding` was trusted before (T100
+    follow-on, A11). openDox's own store does it only while it still holds
+    `replacing`'s digest, under its lock (`MachineTrust.restore`), so a
+    trust another process recorded meanwhile is never overwritten (Copilot
+    at openDox-code#86, r4179076901). A host's policy is asked to record it
+    again, as `recorded_for` asks. Refused BY NAME where it cannot be done."""
+    registered = _registered_now()
+    if type(registered) is MachineTrust:
+        registered.restore(binding, root=root, replacing=replacing)
+        return
+    recorded_for(binding, root=root)
+
+
 def intake_admissible() -> bool:
     """Whether the policy registered NOW could admit a console intake at all
     (T100 follow-on, A5): one that answers `intake_verdict` with something
@@ -1077,11 +1284,13 @@ def intake_verdict_for(binding, *, root: Path | str) -> TrustVerdict:
     trusted, admits nothing here. A policy answers it only through its own
     `intake_verdict`. `MachineTrust` always answers no; a policy without one
     admits no intake; one that raises admits nothing. A broker inside the
-    repository is refused before any policy is asked (T100 follow-on, A2)."""
-    if in_repository_program(binding, root=root) is not None:
+    repository, or an inline script, is refused before any policy is asked
+    (T100 follow-on, A2 and its extension)."""
+    refused = broker_refusal(binding, root=root)
+    if refused is not None:
         return TrustVerdict.untrusted_for(binding, root=root,
                                           basis=BASIS_REPOSITORY,
-                                          reason=REASON_IN_REPOSITORY)
+                                          reason=refused)
     try:
         ask = getattr(policy(), "intake_verdict", None)
         if not callable(ask):
@@ -1573,6 +1782,32 @@ class MachineTrust:
                 raise _store_failed(state, error, writing=True) from None
         return TrustVerdict.trusted_for(binding, root=key_root,
                                         basis=BASIS_MACHINE_TRUST)
+
+    def restore(self, binding, *, root: Path | str, replacing) -> bool:
+        """Trust `binding` at `root` again IN PLACE OF `replacing`, and only
+        while the store still holds `replacing`'s digest for its id: one
+        read, comparison and write under the store's lock (Copilot at
+        openDox-code#86, r4179076901). A failed edit asks this, so a trust
+        another process recorded meanwhile stands. Returns whether the
+        store was changed."""
+        key_root = resolved_root(root)
+        held_for = (key_root, replacing.id)
+        with self._lock:
+            state = self._state_dir_outside(key_root)
+            try:
+                _refuse_an_unsafe_tree(state, existing_only=True)
+                _make_private_directories(state)
+                _refuse_an_unsafe_tree(state, existing_only=False)
+                with _store_locked(state):
+                    entries = self._read(state)
+                    if entries.get(held_for) != binding_digest(replacing):
+                        return False
+                    del entries[held_for]
+                    entries[(key_root, binding.id)] = binding_digest(binding)
+                    self._write(state, entries)
+            except OSError as error:
+                raise _store_failed(state, error, writing=True) from None
+        return True
 
     def intake_verdict(self, binding, *, root: Path | str) -> TrustVerdict:
         """The console intake's own question, which this policy always

@@ -996,7 +996,15 @@ class WorkbenchRoutes:
         # and nothing is registered.
         from opendox import doxbench_trust
         admissible = doxbench_trust.intake_admissible()
-        offered = broker and records and admissible
+        # NOR WHERE THE BROKER COMMAND IT WOULD HAND OFF TO IS ONE THE
+        # RULES REFUSE (T100 follow-on, A2 and its extension; Copilot at
+        # openDox-code#86, r4179077029): a program inside the served
+        # repository, or an inline script. Every hand-off to it is refused
+        # before any policy is asked, whatever the host's policy answers.
+        refused = broker and doxbench_trust.broker_command_refused(
+            (disclosure["broker"] or {}).get("argv") or (),
+            root=Path(self.checkout_root)) is not None
+        offered = broker and records and not refused and admissible
         from opendox import doxbench_binding
         envelope: dict = {
             "kind": "workbench-model-intake",
@@ -1017,6 +1025,7 @@ class WorkbenchRoutes:
             envelope["reason"] = (
                 column_seams.GATE_RECORDS_REFUSAL if not records
                 else doxbench_intake.NO_BROKER_NOTICE if not broker
+                else doxbench_trust.INTAKE_BROKER_REFUSED if refused
                 else doxbench_trust.INTAKE_NOT_ADMISSIBLE)
         self._serve_bytes(json.dumps(envelope).encode("utf-8"), JSON_CTYPE,
                           head_only)

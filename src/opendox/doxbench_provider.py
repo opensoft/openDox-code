@@ -308,6 +308,16 @@ DIAG_PROVIDER_REDIRECTED = (
 #: grammar can no longer reach a mint. Keeping a sentence here that no path can
 #: raise would be a refusal nobody can trigger, asserted by a test that proves
 #: nothing.
+#: The working directory every broker starts in (T100 follow-on, A2
+#: extended; RULED by Brett Heap, openxFactory#656 comment 5983805990,
+#: "Refuse inline scripts (Recommended)", item 2): the file system's root,
+#: which lies outside every served repository. So nothing a broker, or an
+#: interpreter it runs, finds relative to its working directory (a relative
+#: path, `python -m`'s first import) can be a file a pull changes, whatever
+#: directory the console was started from. Defence in depth beneath
+#: `doxbench_trust.broker_refusal`, which refuses such a command outright.
+BROKER_WORKING_DIRECTORY = os.path.abspath(os.sep)
+
 FIXED_DIAGNOSTICS: frozenset[str] = frozenset({
     DIAG_BROKER_UNREACHABLE, DIAG_BROKER_REFUSED, DIAG_BROKER_MALFORMED,
     DIAG_BROKER_TIMEOUT, DIAG_PROVIDER_UNREACHABLE,
@@ -605,6 +615,8 @@ def _run_broker(argv, *, source, timeout: float,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env=bridge_mod.child_environment(os.environ),
+            # OUTSIDE EVERY SERVED REPOSITORY (BROKER_WORKING_DIRECTORY).
+            cwd=BROKER_WORKING_DIRECTORY,
             text=True,
             # Its own process group, so a refusal can kill its descendants
             # too (`_kill_the_group`). The session, and so the terminal, is

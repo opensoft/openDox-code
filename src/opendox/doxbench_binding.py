@@ -89,7 +89,10 @@ parser at all, so an install with no bindings never needs the dependency.
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
+import stat
+import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import NamedTuple
@@ -537,11 +540,13 @@ def linked_component(path: Path | str, relpath: str) -> Path | None:
     reached through one could be read from, or written to, anywhere the link
     points: a write through it would create or overwrite a file outside the
     repository. Directories above `relpath`, the checkout's own path, are
-    the operator's."""
+    the operator's. A path that IS `relpath`, relative to the working
+    directory, is judged the same way (Copilot at openDox-code#86,
+    r4179076919)."""
     path = Path(path)
     candidates = [path]
     parts = Path(relpath).parts
-    if len(path.parts) > len(parts) and path.parts[-len(parts):] == parts:
+    if len(path.parts) >= len(parts) and path.parts[-len(parts):] == parts:
         candidates += list(path.parents)[:len(parts) - 1]
     for candidate in candidates:
         if candidate.is_symlink():
@@ -549,11 +554,66 @@ def linked_component(path: Path | str, relpath: str) -> Path | None:
     return None
 
 
-#: What a store says of a settings document reached through a link.
+#: What a store says of a settings document reached through a link. Both
+#: paths are filled in `shown_path`'s form.
 LINKED_DOCUMENT = (
     "the {what} at {path} is reached through a symbolic link ({link}), which "
     "a clone can carry to point anywhere, so it is neither read nor written; "
     "replace the link with the file or directory itself")
+
+
+def shown_path(path: Path | str) -> str:
+    """A path as a refusal prints it: in a JSON string's form, as
+    `doxbench_trust.shown` prints every value a repository wrote, so a
+    newline or a terminal control sequence in a checkout's path is escaped
+    and cannot forge or hide output (Copilot at openDox-code#86,
+    r4179076973, r4179076986)."""
+    return json.dumps(str(path), ensure_ascii=True)
+
+
+def _write_all(handle, text: str) -> None:
+    """Write `text` to the open file `handle`. A seam of its own, so a case
+    can fail a write part way, as a full disk does."""
+    handle.write(text)
+
+
+def write_settings_document(path: Path, text: str) -> None:
+    """Replace the settings document at `path` with `text`, ATOMICALLY
+    (Copilot at openDox-code#86, r4179076956): written whole to a new file
+    beside it, created exclusively and never through a link, then renamed
+    over it, keeping the document's mode. A write that fails part way (a
+    full disk, an I/O error) leaves the document as it was, and the new
+    file is removed, so a refusal can say nothing in it changed. A document
+    this user cannot write is refused as it always was, by the system's own
+    error, rather than replaced. A document that does not exist yet is
+    written in place, and removed again if that write fails."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        try:
+            with path.open("x", encoding="utf-8") as handle:
+                _write_all(handle, text)
+        except FileExistsError:
+            pass                # made meanwhile: replaced below instead
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        else:
+            return
+    with path.open("a", encoding="utf-8"):
+        pass                    # this user may write it, or PermissionError
+    mode = stat.S_IMODE(path.stat().st_mode)
+    handle = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+        suffix=".opendox-new", delete=False)
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            _write_all(handle, text)
+        temporary.chmod(mode)
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def read_settings_document(path: Path, *, what: str, yaml, refused):
@@ -562,18 +622,20 @@ def read_settings_document(path: Path, *, what: str, yaml, refused):
     follow-on, N2): one the system will not read for this user, not UTF-8,
     nested past what the parser can descend, or not YAML. A console's start
     reads it, so none of these may surface as a raw error there."""
+    shown = shown_path(path)
     try:
         return yaml.safe_load(path.read_text(encoding="utf-8"))
     except OSError as error:
-        raise refused(f"the {what} at {path} cannot be read "
+        raise refused(f"the {what} at {shown} cannot be read "
                       f"({error.strerror or type(error).__name__})") from None
     except UnicodeDecodeError:
-        raise refused(f"the {what} at {path} is not UTF-8 text") from None
+        raise refused(f"the {what} at {shown} is not UTF-8 text") from None
     except RecursionError:
-        raise refused(f"the {what} at {path} nests too deeply to "
+        raise refused(f"the {what} at {shown} nests too deeply to "
                       "read") from None
     except yaml.YAMLError as error:
-        raise refused(f"the {what} at {path} is not readable YAML") from error
+        raise refused(f"the {what} at {shown} is not readable "
+                      "YAML") from error
 
 
 def _require_non_blank_str(field: str, value: object) -> str:
@@ -1080,7 +1142,8 @@ class BindingStore:
         link = linked_component(self.path, DEFAULT_BINDINGS_RELPATH)
         if link is not None:
             raise BindingRefused(LINKED_DOCUMENT.format(
-                what="bindings document", path=self.path, link=link))
+                what="bindings document", path=shown_path(self.path),
+                link=shown_path(link)))
 
     def _load(self) -> list[ModelProviderBinding]:
         self._refuse_a_link()
@@ -1131,10 +1194,8 @@ class BindingStore:
             "kind": BINDINGS_KIND,
             "bindings": [binding.as_record() for binding in bindings],
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
-            encoding="utf-8")
+        write_settings_document(self.path, yaml.safe_dump(
+            document, sort_keys=False, allow_unicode=True))
 
 
 #: What a removal does and does not do, stated once so no surface invents its

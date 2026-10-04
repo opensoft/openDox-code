@@ -40,8 +40,13 @@ from opendox import doxbench_trust as trust_mod
 
 def _binding_store(args: argparse.Namespace) -> "binding_mod.BindingStore":
     """The store this invocation acts on. `--bindings` when given, else the
-    checkout's own declared path — ONE rule, shared with the entrypoints."""
-    path = (Path(args.bindings).resolve() if getattr(args, "bindings", None)
+    checkout's own declared path — ONE rule, shared with the entrypoints.
+
+    `--bindings` is made absolute, NOT resolved (Copilot at openDox-code#86,
+    r4179076934): resolving it would follow a link at the document, or at a
+    directory above it, before the store could refuse one."""
+    path = (Path(args.bindings).absolute()
+            if getattr(args, "bindings", None)
             else binding_mod.bindings_path(Path(args.repo_root).resolve()))
     return binding_mod.BindingStore(path)
 
@@ -283,9 +288,11 @@ def cmd_model_binding_edit(args: argparse.Namespace) -> int:
     A WRITE THAT FAILS AFTER THE TRUST WAS RECORDED UNDOES IT (T100
     follow-on, A11). The store holds one form per binding, so recording the
     new form untrusted the old one; where the old form was trusted, it is
-    trusted again, so a failed edit changes neither the document nor what
-    this machine trusts. The refusal names the write's cause, never a raw
-    error."""
+    trusted again, so a failed edit changes neither the document (its write
+    is atomic) nor what this machine trusts. The undoing never overwrites a
+    trust recorded meanwhile (`doxbench_trust.restored_for`, Copilot at
+    openDox-code#86, r4179076901). The refusal names the write's cause,
+    never a raw error."""
     store = _binding_store(args)
     try:
         binding = _declared_binding(args)
@@ -298,12 +305,17 @@ def cmd_model_binding_edit(args: argparse.Namespace) -> int:
         try:
             store.edit(binding)
         except (binding_mod.BindingRefused, OSError) as error:
+            refusal = (binding_mod.BindingRefused(_cannot_write(store, error))
+                       if isinstance(error, OSError) else error)
             if was_trusted:
-                _record_trust(existing, args)
-            if isinstance(error, OSError):
-                raise binding_mod.BindingRefused(
-                    _cannot_write(store, error)) from None
-            raise
+                try:
+                    trust_mod.restored_for(existing, replacing=binding,
+                                           root=_repo_root(args))
+                except binding_mod.BindingRefused as restoring:
+                    raise binding_mod.BindingRefused(
+                        f"{refusal}; and the trust its earlier form held "
+                        f"could not be restored: {restoring}") from None
+            raise refusal from None
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1

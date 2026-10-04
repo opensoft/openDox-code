@@ -674,7 +674,9 @@ class DeclarationStore:
                                             DEFAULT_DECLARATIONS_RELPATH)
         if link is not None:
             raise IntakeRefused(binding_mod.LINKED_DOCUMENT.format(
-                what="declarations document", path=self.path, link=link))
+                what="declarations document",
+                path=binding_mod.shown_path(self.path),
+                link=binding_mod.shown_path(link)))
 
     def _load(self) -> tuple[BrokerDeclaration | None, list[ModelDeclaration]]:
         self._refuse_a_link()
@@ -730,10 +732,8 @@ class DeclarationStore:
             "broker": broker.as_record() if broker is not None else None,
             "declarations": [d.as_record() for d in declarations],
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
-            encoding="utf-8")
+        binding_mod.write_settings_document(self.path, yaml.safe_dump(
+            document, sort_keys=False, allow_unicode=True))
 
 
 def declarations_path(checkout_root: Path | str) -> Path:
