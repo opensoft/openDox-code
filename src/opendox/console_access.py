@@ -813,8 +813,8 @@ def _name_exists(name: str, directory: int) -> bool:
 
 
 class ConsoleTerminated(KeyboardInterrupt):
-    """SIGTERM or SIGHUP, raised as the interrupt the serve loops already
-    stop on."""
+    """SIGTERM, SIGHUP or Ctrl-C, raised as the interrupt the serve loops
+    already stop on."""
 
 
 #: Whether a stop is being HELD (`deferred_termination`), and the one that
@@ -839,7 +839,8 @@ def deferred_termination(*, raise_pending: bool = True):
     `ConsoleTerminated` once the block is done, when the copy is in the
     caller's hands, or dropped with `raise_pending=False`, for a removal,
     which is a stop already. Only the handler `terminate_as_interrupt`
-    installs holds anything; Ctrl-C keeps Python's own."""
+    installs holds anything: SIGTERM, SIGHUP where it has its default, and
+    Ctrl-C where it has Python's own."""
     _held["depth"] += 1
     try:
         yield
@@ -865,7 +866,15 @@ def terminate_as_interrupt(enabled: bool):
     AND SIGHUP (T104's self-pass), which a closed terminal sends and whose
     default action ends the process with the copy left behind. It is read the
     same way, but only where it still has its default action: a process
-    started ignoring it (`nohup`) keeps ignoring it."""
+    started ignoring it (`nohup`) keeps ignoring it.
+
+    AND CTRL-C (Copilot at openDox-code#84, r4178041022). Python's own
+    SIGINT handler raises at once, so a Ctrl-C just after the copy's rename
+    into place, or just after a removal's take, bypassed
+    `deferred_termination` and left a copy, or a `.removing-*` file, behind.
+    It is taken the same way, still raised as a `KeyboardInterrupt`, but only
+    where it still has Python's own handler: an ignored SIGINT, or a host's
+    own handler, is left exactly as it was."""
     if not enabled:
         yield
         return
@@ -873,6 +882,8 @@ def terminate_as_interrupt(enabled: bool):
     hangup = getattr(signal, "SIGHUP", None)
     if hangup is not None and signal.getsignal(hangup) == signal.SIG_DFL:
         signals.append(hangup)
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        signals.append(signal.SIGINT)
     previous: dict = {}
     try:
         for signum in signals:

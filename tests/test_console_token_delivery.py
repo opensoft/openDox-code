@@ -2071,3 +2071,132 @@ def test_a_state_path_the_walk_cannot_take_refuses_the_start(
     finally:
         if make is _unsearchable:
             state.parent.chmod(0o700)
+
+
+# ---------------------------------------------------------------------------
+# 15 — Copilot's review at 9f328892: Ctrl-C is held like SIGTERM while a copy
+#      is written or removed (r4178041022)
+# ---------------------------------------------------------------------------
+
+def _ctrl_c_is_held() -> None:
+    """Never send a SIGINT that Python's own handler would raise at once: a
+    raw KeyboardInterrupt aborts the whole pytest session, not one case."""
+    assert signal.getsignal(signal.SIGINT) is not signal.default_int_handler, (
+        "Ctrl-C still has Python's immediate handler")
+
+
+def test_terminate_as_interrupt_takes_ctrl_c_only_from_its_default() -> None:
+    """Ctrl-C is held like SIGTERM, where it still has Python's own handler;
+    an ignored one, or a host's own handler, is left exactly as it was."""
+    from opendox import console_access
+
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        with console_access.terminate_as_interrupt(True):
+            _ctrl_c_is_held()
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+        def host(signum, frame):                   # a host's own handler
+            raise AssertionError("never sent")
+
+        for kept in (signal.SIG_IGN, host):
+            signal.signal(signal.SIGINT, kept)
+            with console_access.terminate_as_interrupt(True):
+                assert signal.getsignal(signal.SIGINT) is kept
+            assert signal.getsignal(signal.SIGINT) is kept
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+@pytest.mark.parametrize("entry", ["serve", "generate-and-open"])
+def test_ctrl_c_just_after_the_copys_rename_leaves_no_copy(
+        tmp_path, monkeypatch, capsys, standalone_profile, entry) -> None:
+    """The publication window: Ctrl-C right after the copy is renamed into
+    place, before the caller holds it, used to raise at once, and the
+    caller's cleanup, holding nothing, left the copy behind. It is held until
+    the copy is in hand, then the start stops cleanly with no copy left."""
+    from opendox import cli, console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = _state(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    monkeypatch.setattr(serve, "real_notebook_adapter", lambda *a, **k: None)
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    real_replace = os.replace
+    sent: list = []
+
+    def then_ctrl_c(src, dst, *args, **kwargs):
+        real_replace(src, dst, *args, **kwargs)
+        if not sent and str(dst).endswith(".html"):
+            sent.append(dst)
+            _ctrl_c_is_held()
+            os.kill(os.getpid(), signal.SIGINT)
+            signal.pthread_sigmask(signal.SIG_BLOCK, [])   # deliver now
+
+    def served(self, *args, **kwargs):
+        raise AssertionError("the server served after a stop")
+
+    monkeypatch.setattr(console_access.os, "replace", then_ctrl_c)
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", served)
+    try:
+        if entry == "serve":
+            snapshot = tmp_path / "snapshot.json"
+            snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+            assert serve.main(["--snapshot", str(snapshot), "--checkout-root",
+                               str(repo), "--port", "0"]) == 0
+        else:
+            args = cli.build_parser().parse_args([
+                "generate-and-open", "--repo-root", str(repo), "--repository",
+                "fixture", "--run-dir", str(tmp_path / "run"), "--port", "0",
+                "--no-validate", "--no-open"])
+            assert cli._generate_and_open(args, opener=lambda url: None) == 0
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    out = capsys.readouterr().out
+    assert sent, "the Ctrl-C was never staged"
+    assert "console " not in out, out
+    assert list((state / console_access.CONSOLE_DIRNAME).iterdir()) == []
+
+
+def test_a_second_ctrl_c_after_the_removal_rename_leaves_nothing(
+        tmp_path, monkeypatch, capsys, standalone_profile) -> None:
+    """The removal window: a second Ctrl-C right after the removal renamed
+    the copy to its temporary name used to raise there and leave a
+    `.removing-*` file holding the token. It is held, the removal finishes,
+    and `console/` is left empty."""
+    from opendox import console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = _state(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    monkeypatch.setattr(serve, "real_notebook_adapter", lambda *a, **k: None)
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    real_rename = os.rename
+    sent: list = []
+
+    def stopped_at_once(self, *args, **kwargs):
+        raise KeyboardInterrupt                       # the first Ctrl-C
+
+    def then_ctrl_c(src, dst, *args, **kwargs):
+        real_rename(src, dst, *args, **kwargs)
+        if not sent and ".removing-" in str(dst):
+            sent.append(dst)
+            _ctrl_c_is_held()
+            os.kill(os.getpid(), signal.SIGINT)       # the second
+            signal.pthread_sigmask(signal.SIG_BLOCK, [])
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", stopped_at_once)
+    monkeypatch.setattr(console_access.os, "rename", then_ctrl_c)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    try:
+        assert serve.main(["--snapshot", str(snapshot), "--checkout-root",
+                           str(repo), "--port", "0"]) == 0
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    monkeypatch.undo()
+    assert sent, "the second Ctrl-C was never staged"
+    assert list((state / console_access.CONSOLE_DIRNAME).iterdir()) == []
