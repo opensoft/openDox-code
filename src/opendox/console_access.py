@@ -1258,10 +1258,32 @@ def guard_private_roots(httpd: Any, state_dir: Path | str) -> None:
     `write_private_copy` asks it, by name and by identity, and refuses the
     start by name, and the copies' directory is marked private
     (`httpd.private_roots`), so the static handler, `/source` and
-    `/snapshot.json` refuse every console's copy here too."""
-    _refuse_a_served_state_dir(state_dir, tuple(getattr(httpd, "served_roots", ())),
-                               port=None)
-    httpd.private_roots = (Path(state_dir).resolve() / CONSOLE_DIRNAME,)
+    `/snapshot.json` refuse every console's copy here too.
+
+    ONE WALK, AS THE WRITER WALKS (Copilot at openDox-code#84,
+    r4179091592). The boundary and the marking each resolved the configured
+    path for themselves, so a link on it re-pointed between the two left the
+    boundary judging the real state directory and the marking naming a
+    decoy. The state directory is walked once (`_walked`), every directory
+    and link on the way judged as the writer judges them, and the boundary
+    and the marking both use the path that walk returned. An operating-system
+    refusal on the way is a refusal by name, as it is for the writer.
+
+    AND THE PLATFORM FIRST (Copilot at openDox-code#84, r4179091624): this
+    plane's handlers judge files by the same POSIX primitives, so a platform
+    without them is refused by name here too (`unsupported_platform`)."""
+    _refuse_an_unsupported_platform()
+    try:
+        state = _walked(state_dir)
+        _refuse_a_served_state_dir(state, tuple(getattr(httpd, "served_roots", ())),
+                                   port=None)
+    except OSError as exc:
+        raise ConsoleAccessRefused(
+            f"{private_copy_path(state_dir, 0).parent} cannot be judged ({exc}), "
+            "so this standalone plane cannot keep the console tokens' private "
+            "copies unserved, and the start is refused. Use a state directory "
+            f"this user can reach ({runtime_config.PREFIX}STATE_DIR)") from None
+    httpd.private_roots = (state / CONSOLE_DIRNAME,)
 
 
 def publish(httpd: Any, *, page_url: str,
@@ -1278,6 +1300,7 @@ def publish(httpd: Any, *, page_url: str,
     it: a console nobody can open is not served as if it could be."""
     if not _standalone(httpd):
         return None
+    _refuse_an_unsupported_platform()       # token or not (r4179091624)
     try:
         state = runtime_config.state_dir(env)
     except runtime_config.ConfigurationError as exc:

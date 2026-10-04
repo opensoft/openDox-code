@@ -3206,3 +3206,148 @@ def test_a_copys_repr_never_carries_its_token(tmp_path) -> None:
         assert str(copy.path) in repr(copy)
     finally:
         console_access.remove_private_copy(copy)
+
+
+# ---------------------------------------------------------------------------
+# 18 — Copilot's review at 0539f8c0: the tokenless plane walks the state
+#      directory once (r4179091592) and refuses an unsupported platform
+#      first (r4179091624)
+# ---------------------------------------------------------------------------
+
+def test_a_tokenless_planes_state_link_retargeted_mid_guard_marks_the_real_directory(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """r4179091592, Copilot's layout. `OPENDOX_STATE_DIR` names a link to the
+    real state directory, and the tokenless plane's `--web-dir` holds an
+    outward link to it, where a sibling plane's copy lies. The link is
+    re-pointed at a decoy between the boundary check and the marking. The
+    guard walks once and marks what that walk reached, so the sibling's copy
+    stays a 404; the marking used to resolve the link again and name the
+    decoy, and the copy was served."""
+    import shutil as _shutil
+
+    from opendox import console_access, serve
+
+    web = tmp_path / "web"
+    _shutil.copytree(WEB, web)
+    real = _state(tmp_path)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir(mode=0o700)
+    alias = tmp_path / "state-link"
+    alias.symlink_to(real)
+    (web / "state-alias").symlink_to(real)
+    outer = fresh_repository(PLAIN, tmp_path / "b")
+    httpd, _repo, worker = _guarded_plane(tmp_path, monkeypatch, repo=outer, web=web)
+    real_boundary = console_access._refuse_a_served_state_dir
+
+    def then_retarget(*args, **kwargs):
+        real_boundary(*args, **kwargs)
+        alias.unlink()
+        alias.symlink_to(decoy)                    # re-pointed between the two
+
+    try:
+        base = httpd.server_address[:2]
+        assert httpd.console_token is None, "the case is vacuous: a token was minted"
+        other = _write(real, port=9)               # a sibling plane's copy
+        token = console_access.read_private_copy(other.path)["console_token"]
+        monkeypatch.setattr(console_access, "_refuse_a_served_state_dir", then_retarget)
+        assert console_access.publish(
+            httpd, page_url=serve.server_url(httpd, "/index.html"),
+            env={"OPENDOX_STATE_DIR": str(alias)}) is None
+        assert alias.resolve() == decoy.resolve(), "the retarget was never staged"
+        (marked,) = httpd.private_roots
+        assert marked.resolve() == (real / console_access.CONSOLE_DIRNAME).resolve()
+        _assert_never_served(base, token, (
+            f"/state-alias/console/{other.path.name}", "/state-alias/console/"))
+        assert _call(base, "GET", "/index.html")[0] == 200
+        console_access.remove_private_copy(other)
+    finally:
+        _stop_plane(httpd, worker)
+
+
+def test_a_tokenless_planes_unsafe_state_path_refuses_its_start(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """r4179091592: the guard judges the state directory's path as the writer
+    does, so a directory on the way that another user could change (here a
+    world-writable, non-sticky one) refuses the tokenless start by name too,
+    and nothing is marked."""
+    from opendox import console_access, serve
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    try:
+        state = _state(shared / "inner")
+        outer = fresh_repository(PLAIN, tmp_path / "b")
+        _clean_git(monkeypatch)
+        snapshot = tmp_path / "snapshot.json"
+        snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+        httpd = serve.build_server(WEB, snapshot, outer, port=0, quiet=True)
+        try:
+            assert httpd.console_token is None, "the case is vacuous: a token was minted"
+            with pytest.raises(console_access.ConsoleAccessRefused,
+                               match="not sticky") as refused:
+                console_access.publish(
+                    httpd, page_url=serve.server_url(httpd, "/index.html"),
+                    env={"OPENDOX_STATE_DIR": str(state)})
+            assert str(shared) in str(refused.value)
+            assert not getattr(httpd, "private_roots", ())
+        finally:
+            httpd.server_close()
+    finally:
+        shared.chmod(0o700)
+
+
+def test_a_tokenless_plane_refuses_a_platform_without_the_primitives(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """r4179091624, in the process: a tokenless standalone plane used to skip
+    the platform check, start, and mark a private root its handlers then
+    judged with the missing `O_NONBLOCK`, dropping every static request. It
+    refuses by name now, before it marks anything."""
+    from opendox import console_access, serve
+
+    _clean_git(monkeypatch)
+    outer = fresh_repository(PLAIN, tmp_path / "b")
+    state = _state(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    httpd = serve.build_server(WEB, snapshot, outer, port=0, quiet=True)
+    try:
+        assert httpd.console_token is None, "the case is vacuous: a token was minted"
+        monkeypatch.delattr(os, "O_NONBLOCK")
+        with pytest.raises(console_access.ConsoleAccessRefused,
+                           match="needs a POSIX platform") as refused:
+            console_access.publish(
+                httpd, page_url=serve.server_url(httpd, "/index.html"),
+                env={"OPENDOX_STATE_DIR": str(state)})
+        assert "os.O_NONBLOCK" in str(refused.value)
+        assert not getattr(httpd, "private_roots", ())
+    finally:
+        monkeypatch.undo()
+        httpd.server_close()
+
+
+def test_a_tokenless_start_without_the_posix_primitives_refuses_by_name(
+        tmp_path) -> None:
+    """r4179091624, as a user starts it: the no-identity variant of the
+    reviewer's B2 child. With `os.getuid`, `O_NOFOLLOW`, `O_DIRECTORY` and
+    `O_NONBLOCK` gone, as on Windows, a checkout with no git identity (so no
+    token) refuses its start by name, and never serves."""
+    import textwrap
+
+    repo = _adv_repo(tmp_path / "r", identity=False)
+    state = _state(tmp_path)
+    code = textwrap.dedent("""
+        import os, sys
+        from opendox import serve
+        for name in ('getuid', 'O_NOFOLLOW', 'O_DIRECTORY', 'O_NONBLOCK'):
+            delattr(os, name)
+    """)
+    proc, out = _adv_serve(tmp_path, repo, state, _free_port(), "w", code=code)
+    if proc.poll() is None:
+        _adv_stop(proc)
+        pytest.fail("the tokenless plane started serving: " + out.read_text())
+    rc = proc.wait(60)
+    text = out.read_text()
+    assert "Traceback" not in text, text
+    assert rc == 1 and "serve refused:" in text, text
+    assert "needs a POSIX platform" in text and "os.O_NONBLOCK" in text, text
