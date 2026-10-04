@@ -387,7 +387,18 @@ def test_the_route_is_read_only():
     body = _source_of(_method("_serve_source"))
     for writer in ("write_bytes", "write_text", "unlink", "mkdir", "rename"):
         assert writer not in body, f"_serve_source calls {writer}"
-    assert "read_bytes()" in body
+    # It READS through `read_unless_private` (plan 034 T104; Copilot at
+    # openDox-code#84, r4178133842), which judges the file it opened and
+    # never sends a console token's private copy. That reader is read-only
+    # too: it opens for reading, and writes nothing.
+    assert "read_unless_private(" in body
+    reader = next((_source_of(node) for node in SERVE_TREE.body
+                   if isinstance(node, ast.FunctionDef)
+                   and node.name == "read_unless_private"), "")
+    assert 'open(path, "rb")' in reader, "read_unless_private reads nothing"
+    for writer in ("write_bytes", "write_text", "unlink", "mkdir", "rename",
+                   '"w', '"a'):
+        assert writer not in reader, f"read_unless_private calls {writer}"
 
 
 # ---------------------------------------------------------------------------

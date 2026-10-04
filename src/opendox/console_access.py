@@ -102,7 +102,8 @@ __all__ = [
     "CONSOLE_DIRNAME", "ConsoleAccessRefused", "ConsoleTerminated",
     "DELIVERY_CAPABILITIES",
     "DELIVERY_OPENED_URL", "FRAGMENT_KEY", "PrivateCopy", "RECORD_ELEMENT_ID",
-    "RECORD_KIND", "deferred_termination", "delivery_for", "needs_copy",
+    "RECORD_KIND", "deferred_termination", "delivery_for", "is_private_file",
+    "needs_copy", "opens_a_private_file",
     "opened_url", "private_copy_path", "publish", "read_private_copy",
     "remove_private_copy", "terminate_as_interrupt", "write_private_copy",
 ]
@@ -151,11 +152,41 @@ class PrivateCopy:
     #: `(st_dev, st_ino)` of the file this process wrote, so a removal at
     #: shutdown removes that file and never one written after it.
     identity: tuple[int, int]
+    #: The open descriptor that RESERVES the copy for its server's life
+    #: (`_Reservation`), or None where no reservation could be taken.
+    reservation: "_Reservation | None" = dataclasses.field(
+        default=None, compare=False, repr=False)
 
     @property
     def file_url(self) -> str:
         """The `file://` URL a browser is given: a path, never the token."""
         return self.path.as_uri()
+
+
+class _Reservation:
+    """The open descriptor that holds a copy's lock while its server runs.
+
+    A COPY IS RESERVED FOR ITS SERVER'S LIFE (Copilot at openDox-code#84,
+    r4178133814). The copy's name is per PORT, and two consoles can share a
+    port number and a state directory, one on 127.0.0.1 and one on ::1. So
+    the writer takes an exclusive `flock` on the file it wrote, on its own
+    descriptor, and keeps it until the copy is removed. A later publication
+    on that port finds the lock held, and refuses rather than replace a
+    RUNNING console's copy. A copy whose server died holds no lock, since the
+    kernel drops it with the process, and is replaced as a stale one.
+    `close` is idempotent, and so is dropping the reservation."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd: int | None = fd
+
+    def close(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    def __del__(self) -> None:
+        self.close()
 
 
 def delivery_for(profile: Any) -> str:
@@ -577,14 +608,15 @@ def write_private_copy(state_dir: Path | str, *, page_url: str, port: int,
             FRAGMENT_KEY: token,
         }
         target = private_copy_path(state, port)
-        identity = _write_the_copy(state, target, record)
+        identity, reservation = _write_the_copy(state, target, record)
     except OSError as exc:
         raise ConsoleAccessRefused(
             f"{target} cannot be written ({exc}), so the console token has no "
             "private copy and the start is refused. Use a state directory this "
             f"user can write ({runtime_config.PREFIX}STATE_DIR)") from None
     copy = PrivateCopy(path=target, page_url=page_url,
-                       opened_url=record["opened_url"], identity=identity)
+                       opened_url=record["opened_url"], identity=identity,
+                       reservation=reservation)
     try:
         read_private_copy(target)   # what was written is what a reader accepts
     except BaseException:
@@ -627,6 +659,8 @@ def _write_the_copy(state: Path, target: Path,
                 f"{target} {reason}: something other than this user's own "
                 "private copy is at that name, so it is refused, never "
                 "followed or replaced")
+        if present is not None:
+            _refuse_a_running_consoles_copy(target, directory, present)
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary, dir_fd=directory)   # an interrupted start's; a link itself, never its target
         handle = os.open(temporary,
@@ -634,26 +668,82 @@ def _write_the_copy(state: Path, target: Path,
                          PRIVATE_MODE, dir_fd=directory)
         # From here a failure (a full disk, an interrupt) removes the
         # temporary file it made, so no partial copy is left beside the name.
+        # The descriptor stays open on success: it is the copy's RESERVATION
+        # (`_Reservation`), locked before the copy takes its name, so no other
+        # publication can find the name unreserved.
+        reservation = _Reservation(handle)
         try:
-            try:
-                os.fchmod(handle, PRIVATE_MODE)
-                data = _opener_html(record).encode("utf-8")
-                view = memoryview(data)
-                while view:
-                    view = view[os.write(handle, view):]
-                os.fsync(handle)
-                written = os.fstat(handle)
-            finally:
-                os.close(handle)
+            os.fchmod(handle, PRIVATE_MODE)
+            data = _opener_html(record).encode("utf-8")
+            view = memoryview(data)
+            while view:
+                view = view[os.write(handle, view):]
+            os.fsync(handle)
+            written = os.fstat(handle)
+            if fcntl is not None:
+                with contextlib.suppress(OSError):   # no locks here: unreserved
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             os.replace(temporary, target.name, src_dir_fd=directory,
                        dst_dir_fd=directory)
         except BaseException:
+            reservation.close()
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary, dir_fd=directory)
             raise
     finally:
         os.close(directory)
-    return (written.st_dev, written.st_ino)
+    return (written.st_dev, written.st_ino), reservation
+
+
+def _refuse_a_running_consoles_copy(target: Path, directory: int,
+                                    present: os.stat_result) -> None:
+    """Refuse when the copy at `target` is RESERVED by a console that is still
+    running (`_Reservation`); return where it is a stale copy, to be replaced.
+
+    The copy is opened without following a link or blocking, checked to be
+    the file judged a moment ago, and its lock asked for WITHOUT waiting: a
+    lock that is held is a running console's, and one that is free is a
+    stale copy's. Where the filesystem keeps no locks, nothing can be told,
+    and the copy is replaced, as before. The console directory's lock
+    (`_lock`) is held throughout, so no publication races this one."""
+    try:
+        held = os.open(target.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                       dir_fd=directory)
+    except FileNotFoundError:
+        return
+    try:
+        info = os.fstat(held)
+        if (info.st_dev, info.st_ino) != (present.st_dev, present.st_ino):
+            raise ConsoleAccessRefused(
+                f"{target} changed while it was judged, so it is refused, "
+                "never replaced")
+        if fcntl is None:
+            return
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ConsoleAccessRefused(
+                f"{target} belongs to a console that is still running"
+                f"{_writer_of(held)}. Two serves on this port number share "
+                f"this state directory (for example one on 127.0.0.1 and one "
+                "on ::1), and a running console's copy is never replaced. "
+                "Stop that console, or serve on another port or with another "
+                f"{runtime_config.PREFIX}STATE_DIR") from None
+        except OSError:
+            return                          # no locks here: replace, as before
+    finally:
+        os.close(held)
+
+
+def _writer_of(handle: int) -> str:
+    """`" (pid N)"` from the copy's own record, or nothing."""
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        found = _RECORD_PATTERN.search(
+            os.pread(handle, _READ_LIMIT, 0).decode("utf-8", "replace"))
+        pid = json.loads(found.group("record")).get("pid")
+        if isinstance(pid, int):
+            return f" (pid {pid})"
+    return ""
 
 
 def read_private_copy(path: Path | str) -> dict:
@@ -775,6 +865,8 @@ def remove_private_copy(copy: PrivateCopy | None) -> None:
         directory = os.open(copy.path.parent,
                             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
+        if copy.reservation is not None:   # nothing left to remove: unreserve
+            copy.reservation.close()
         return
     name = copy.path.name
     taken = f".{name}.removing-{os.getpid()}-{os.urandom(6).hex()}"
@@ -801,6 +893,10 @@ def remove_private_copy(copy: PrivateCopy | None) -> None:
         with contextlib.suppress(OSError):
             os.unlink(taken, dir_fd=directory)
     finally:
+        # Its RESERVATION goes with it, the file gone and the console
+        # directory still locked, so no publication sees it in between.
+        if copy.reservation is not None:
+            copy.reservation.close()
         os.close(directory)
 
 
@@ -898,6 +994,49 @@ def terminate_as_interrupt(enabled: bool):
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
+
+
+def is_private_file(handle: int, private_roots: Iterable[Path | str]) -> bool:
+    """Whether the file open on `handle` lives in a private-copy directory.
+
+    Judged by the FILE'S OWN IDENTITY, `(st_dev, st_ino)`, against every name
+    in each directory `publish` marked private (Copilot at openDox-code#84,
+    r4178133842). A path cannot tell: a served root re-pointed at the state
+    directory after publication, a link swapped after a check, or a hard link
+    made anywhere under a served root all reach the copy by a name that looks
+    like something else. The identity of what was OPENED cannot be swapped
+    afterwards. Every name in the directory counts, every port's copy and a
+    temporary name included. A directory that cannot be listed counts for
+    nothing, as no copy can be published in it either."""
+    info = os.fstat(handle)
+    key = (info.st_dev, info.st_ino)
+    for root in private_roots:
+        try:
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    with contextlib.suppress(OSError):
+                        found = entry.stat(follow_symlinks=False)
+                        if (found.st_dev, found.st_ino) == key:
+                            return True
+        except OSError:
+            continue
+    return False
+
+
+def opens_a_private_file(path: Path | str,
+                         private_roots: Iterable[Path | str]) -> bool:
+    """Whether what opens at `path` is a file in a private-copy directory
+    (`is_private_file`). Opened without blocking, so a FIFO cannot stall the
+    check; a path that does not open is no private file, and is left to the
+    caller to answer as it always has."""
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        return is_private_file(handle, private_roots)
+    finally:
+        os.close(handle)
 
 
 def needs_copy(httpd: Any) -> bool:

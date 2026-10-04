@@ -812,6 +812,25 @@ def host_names_this_loopback_serve(host_lines, port: int,
 
 # --------------------------- source-path containment (pure) ---------------------------
 
+def read_unless_private(path: Path | str, private_roots) -> bytes | None:
+    """The bytes of `path`, or None where the file it OPENS is a console
+    token's private copy (`console_access.is_private_file`, plan 034 T104).
+
+    Every route that reads a file for any caller, with no console check,
+    reads through this (Copilot at openDox-code#84, r4178133842): `/source`
+    and `/snapshot.json`. A root or a snapshot named through a link is
+    resolved again on every request, and could be re-pointed at the state
+    directory after the copy was published; a hard link reaches the copy by
+    another name. The file actually opened is judged, so neither is served.
+    With no private root (a host's plane, or a plane that wrote no copy) it
+    reads as before."""
+    with open(path, "rb") as stream:
+        if private_roots and console_access.is_private_file(
+                stream.fileno(), private_roots):
+            return None
+        return stream.read()
+
+
 def resolve_source_path(checkout_root: Path, url_tail: str) -> Path | None:
     """Resolve a `/source/<tail>` request to an absolute file under
     `checkout_root`, or None to reject. Rejects absolute paths, NUL bytes, any
@@ -1352,7 +1371,16 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         the directory's first index page that exists (`index_pages`:
         `index.html`, then `index.htm`), so the index page it would pick is
         judged as well as the directory, and `web/sub/index.html` linked to a
-        copy is a 404 like the link itself."""
+        copy is a 404 like the link itself.
+
+        AND BY THE IDENTITY OF THE FILE (Copilot at openDox-code#84,
+        r4178133842). A path cannot tell a hard link to the copy from any
+        other file, so the file the handler would serve is opened and judged
+        by `(st_dev, st_ino)` first (`console_access.is_private_file`), and a
+        private copy is a 404. The file the stdlib handler then opens is
+        judged the same way, against a link swapped in between: its headers
+        are already sent by then, so it is closed unread and its bytes are
+        never written."""
         private = getattr(self.server, "private_roots", ())
         if private:
             path = Path(self.translate_path(self.path))
@@ -1364,11 +1392,22 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
                         break
             for candidate in judged:
                 target = candidate.resolve()
-                if any(target == root or root in target.parents
-                       for root in private):
+                if (any(target == root or root in target.parents
+                        for root in private)
+                        or console_access.opens_a_private_file(candidate, private)):
                     self.send_error(404, "File not found")
                     return None
-        return super().send_head()
+        stream = super().send_head()
+        if private and stream is not None:
+            try:
+                handle = stream.fileno()
+            except (AttributeError, OSError, ValueError):
+                handle = None               # a directory listing, in memory
+            if handle is not None and console_access.is_private_file(handle, private):
+                stream.close()
+                self.close_connection = True    # its promised body never comes
+                return None
+        return stream
 
     def do_GET(self):  # noqa: N802
         if not self._route(head_only=False):
@@ -1407,11 +1446,25 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         pass the hosted refusal with one entry and serve another's bytes
         (FR-048)."""
         if entry is not None:
-            return entry.read_bytes()
+            return self._entry_bytes(entry)
         try:
-            return Path(self.snapshot_path).read_bytes()
+            return read_unless_private(
+                self.snapshot_path, getattr(self.server, "private_roots", ()))
         except OSError:
             return None
+
+    def _entry_bytes(self, entry) -> bytes | None:
+        """A registered entry's snapshot bytes, read as `read_unless_private`
+        reads, where this plane marked a private-copy directory and the entry
+        names its file. Otherwise the entry reads itself, as before."""
+        private = getattr(self.server, "private_roots", ())
+        path = getattr(entry, "snapshot_path", None)
+        if private and path is not None:
+            try:
+                return read_unless_private(path, private)
+            except OSError:
+                return None
+        return entry.read_bytes()
 
     def _serve_snapshot(self, head_only: bool) -> None:
         """`/snapshot.json`: the active snapshot, or the registered
@@ -1445,7 +1498,7 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
                 return
             if self._hosted_entry_refused(entry):
                 return
-            self._serve_bytes(entry.read_bytes(), JSON_CTYPE, head_only,
+            self._serve_bytes(self._entry_bytes(entry), JSON_CTYPE, head_only,
                               entry=entry)
             return
         if repository:
@@ -1560,9 +1613,16 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             self.end_headers()
             return
         try:
-            body = target.read_bytes()
+            body = read_unless_private(
+                target, getattr(self.server, "private_roots", ()))
         except OSError:
             self.send_error(404, "unreadable source")
+            return
+        if body is None:                    # a console token's private copy
+            self.send_response(404)
+            self._divergence_headers(entry)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         ctype = "text/markdown; charset=utf-8" if target.suffix == ".md" else "text/plain; charset=utf-8"
         self._serve_bytes(body, ctype, head_only, entry=entry)

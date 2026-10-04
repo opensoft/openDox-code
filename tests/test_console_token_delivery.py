@@ -576,12 +576,14 @@ def test_a_state_directory_below_a_non_sticky_shared_directory_is_refused(tmp_pa
 
 def test_a_later_copy_replaces_this_users_earlier_one_and_removal_is_exact(
         tmp_path) -> None:
-    """A server restarted on the same port replaces its own earlier copy. The
-    first server's removal at shutdown leaves the later copy in place."""
+    """A server restarted on the same port, after the first ended without
+    removing its copy, replaces that copy. The first server's removal, had it
+    still run, leaves the later copy in place."""
     from opendox import console_access
 
     state = _state(tmp_path)
     first = _write(state)
+    _abandon(first)                          # the first serve is gone
     second_token = _token()
     second = _write(state, token=second_token)
     assert first.path == second.path
@@ -1536,8 +1538,9 @@ def test_another_serves_copy_survives_a_removal_where_hard_links_fail(
 
     state = _state(tmp_path)
     first = _write(state)
+    _abandon(first)                          # its reservation lost
     second_token = _token()
-    _write(state, token=second_token)        # another serve's, over the first
+    second = _write(state, token=second_token)   # another serve's, over the first
 
     def no_hard_links(*args, **kwargs):
         raise PermissionError(errno.EPERM, "Operation not permitted")
@@ -1665,6 +1668,7 @@ def test_a_console_directory_with_a_setgid_bit_is_still_0700(tmp_path) -> None:
     if not os.lstat(copy.path.parent).st_mode & stat.S_ISGID:
         pytest.skip("this filesystem keeps no setgid bit on a directory")
     assert console_access.read_private_copy(copy.path)["port"] == 8080
+    _abandon(copy)
     assert _write(state).path == copy.path
 
 
@@ -1852,8 +1856,10 @@ def test_a_copy_published_during_a_rename_back_is_never_overwritten(
 
     state = _state(tmp_path)
     first = _write(state)
+    _abandon(first)                          # its reservation lost
     second_token, third_token = _token(), _token()
-    _write(state, token=second_token)        # another serve's, over the first
+    second = _write(state, token=second_token)   # another serve's, over the first
+    _abandon(second)                         # ...whose serve is gone too
     real_exists = console_access._name_exists
     raced: list = []
 
@@ -2200,3 +2206,272 @@ def test_a_second_ctrl_c_after_the_removal_rename_leaves_nothing(
     monkeypatch.undo()
     assert sent, "the second Ctrl-C was never staged"
     assert list((state / console_access.CONSOLE_DIRNAME).iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# 16 — Copilot's review at fb8a1cc4: a live console's copy is reserved for
+#      its server's life (r4178133814); every unguarded file read refuses a
+#      private copy by the file's own identity (r4178133842)
+# ---------------------------------------------------------------------------
+
+def _abandon(copy) -> None:
+    """The serve that wrote `copy` is gone without removing it (a crash, a
+    SIGKILL): its reservation is released, as the kernel releases it."""
+    reservation = getattr(copy, "reservation", None)
+    if reservation is not None:
+        reservation.close()
+
+
+def test_a_running_consoles_copy_is_never_replaced(tmp_path) -> None:
+    """Two consoles can share a port number (127.0.0.1 and ::1) and a state
+    directory. The first's copy is reserved while it runs: a second
+    publication on that port is refused by name, and the first's copy is left
+    exactly as it was, still opening the first console. Once the first stops
+    and removes its copy, the port's copy can be written again."""
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    first = _write(state)
+    before = (first.path.read_bytes(), _fingerprint(first.path))
+    with pytest.raises(console_access.ConsoleAccessRefused,
+                       match="still running") as refused:
+        _write(state)
+    assert str(first.path) in str(refused.value)
+    assert (first.path.read_bytes(), _fingerprint(first.path)) == before
+    console_access.remove_private_copy(first)
+    assert _write(state).path == first.path
+
+
+def test_a_copy_whose_console_died_is_replaced(tmp_path) -> None:
+    """A copy whose writer died without removing it (here a process that
+    writes one and exits at once) holds no reservation, since the kernel
+    released it with the process. It is a stale copy, and is replaced."""
+    import subprocess
+    import sys
+
+    from opendox import console_access
+
+    state = _state(tmp_path)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "XF_"))}
+    env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), env.get("PYTHONPATH", "")])
+    done = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; from opendox import console_access, serve\n"
+         "console_access.write_private_copy(sys.argv[1], "
+         "page_url='http://127.0.0.1:8080/index.html', port=8080, "
+         "token=serve.mint_console_token(), served_roots=())\n",
+         str(state)], env=env, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    stale = console_access.private_copy_path(state, 8080)
+    old = console_access.read_private_copy(stale)["console_token"]
+    token = _token()
+    assert _write(state, token=token).path == stale
+    assert console_access.read_private_copy(stale)["console_token"] == token != old
+
+
+@pytest.mark.skipif(not socket.has_ipv6, reason="no IPv6 on this platform")
+def test_two_consoles_on_one_port_number_never_share_a_copy(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """Copilot's layout, as two real planes: one bound to 127.0.0.1 and one
+    to ::1, on the same port number and the same state directory. The second
+    is refused by name, and the first's copy still opens the first."""
+    from opendox import console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = _state(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    v4 = serve.build_server(WEB, snapshot, repo, host="127.0.0.1", port=0, quiet=True)
+    port = v4.server_address[1]
+    try:
+        v6 = serve.build_server(WEB, snapshot, repo, host="::1", port=port, quiet=True)
+    except OSError as exc:
+        v4.server_close()
+        pytest.skip(f"no IPv6 loopback here: {exc}")
+    try:
+        env = {"OPENDOX_STATE_DIR": str(state)}
+        first = console_access.publish(
+            v4, page_url=serve.server_url(v4, "/index.html"), env=env)
+        with pytest.raises(console_access.ConsoleAccessRefused, match="still running"):
+            console_access.publish(
+                v6, page_url=serve.server_url(v6, "/index.html"), env=env)
+        record = console_access.read_private_copy(first.path)
+        assert record["console_token"] == v4.console_token
+        assert "127.0.0.1" in record["page_url"]
+        console_access.remove_private_copy(first)
+    finally:
+        v4.server_close()
+        v6.server_close()
+
+
+def _guarded_plane(tmp_path, monkeypatch, **build):
+    from opendox import serve
+
+    _clean_git(monkeypatch)
+    repo = build.pop("repo", None) or _repository(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    web = build.pop("web", WEB)
+    httpd = serve.build_server(web, snapshot, repo, port=0, quiet=True, **build)
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    return httpd, repo, worker
+
+
+def _stop_plane(httpd, worker) -> None:
+    httpd.shutdown()
+    httpd.server_close()
+    worker.join(timeout=10)
+
+
+def _assert_never_served(base, token: str, paths) -> None:
+    for path in paths:
+        for method in ("GET", "HEAD"):
+            status, headers, raw = _call(base, method, path)
+            assert status == 404, (method, path, status)
+            assert token.encode() not in raw, (method, path)
+            assert all(token not in str(v) for v in headers.values()), path
+
+
+def test_a_source_root_retargeted_after_publication_never_serves_the_copy(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """Copilot at openDox-code#84, r4178133842. A declared source root named
+    through a link is judged where the link leads when the copy is
+    published, but `/source` resolves it again on every request. Re-pointed
+    at the state directory afterwards, it used to serve the copy to anyone.
+    Every `/source` read is judged by the identity of the file it opened, so
+    the copy is never served, whatever the root leads to now."""
+    from opendox import console_access, serve
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "note.md").write_text("# a note\n", encoding="utf-8")
+    alias = tmp_path / "root-alias"
+    alias.symlink_to(elsewhere)
+    state = _state(tmp_path)
+    httpd, _repo, worker = _guarded_plane(
+        tmp_path, monkeypatch, repository="other", source_roots={"other": str(alias)})
+    try:
+        base = httpd.server_address[:2]
+        copy = console_access.publish(
+            httpd, page_url=serve.server_url(httpd, "/index.html"),
+            env={"OPENDOX_STATE_DIR": str(state)})
+        assert _call(base, "GET", "/source/note.md")[0] == 200
+        alias.unlink()
+        alias.symlink_to(state)                       # retargeted after the check
+        name = copy.path.name
+        _assert_never_served(base, httpd.console_token,
+                             (f"/source/console/{name}",
+                              f"/source/other@main/console/{name}"))
+    finally:
+        _stop_plane(httpd, worker)
+
+
+def test_a_snapshot_retargeted_after_publication_never_serves_the_copy(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """The same for `/snapshot.json`, which reads a registered entry's file
+    directly: an entry whose snapshot is named through a link re-pointed at
+    the copy after publication is a 404, never the copy."""
+    from opendox import console_access, default_registry, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    real = tmp_path / "other.snapshot.json"
+    real.write_text(json.dumps({"generation": {}}), encoding="utf-8")
+    alias = tmp_path / "snapshot-alias.json"
+    alias.symlink_to(real)
+    source = default_registry.SnapshotSource(
+        baked_snapshot=tmp_path / "snapshot.json", checkout_root=repo)
+    source.registry.register(default_registry.entry_from_snapshot_file(
+        alias, repository="other", ref="main"))
+    state = _state(tmp_path)
+    httpd, _repo, worker = _guarded_plane(tmp_path, monkeypatch, repo=repo,
+                                          snapshot_source=source)
+    try:
+        base = httpd.server_address[:2]
+        copy = console_access.publish(
+            httpd, page_url=serve.server_url(httpd, "/index.html"),
+            env={"OPENDOX_STATE_DIR": str(state)})
+        path = "/snapshot.json?repository=other&ref=main"
+        assert _call(base, "GET", path)[0] == 200
+        alias.unlink()
+        alias.symlink_to(copy.path)                   # retargeted after the check
+        _assert_never_served(base, httpd.console_token, (path,))
+    finally:
+        _stop_plane(httpd, worker)
+
+
+@pytest.mark.parametrize("where", ["the static bundle", "the served checkout"])
+def test_a_hard_link_to_the_copy_is_never_served(
+        tmp_path, monkeypatch, standalone_profile, where) -> None:
+    """A path cannot tell a hard link from the file itself: `web/x.html`, or
+    `checkout/x.md`, hard-linked to the copy, resolves to a name outside the
+    state directory. The file's own identity tells, so the static handler
+    and `/source` answer 404 and never send the copy."""
+    import shutil as _shutil
+
+    from opendox import console_access, serve
+
+    web = tmp_path / "web"
+    _shutil.copytree(WEB, web)
+    state = _state(tmp_path)
+    httpd, repo, worker = _guarded_plane(tmp_path, monkeypatch, web=web)
+    try:
+        base = httpd.server_address[:2]
+        copy = console_access.publish(
+            httpd, page_url=serve.server_url(httpd, "/index.html"),
+            env={"OPENDOX_STATE_DIR": str(state)})
+        if where == "the static bundle":
+            os.link(copy.path, web / "hard.html")
+            paths = ("/hard.html",)
+        else:
+            os.link(copy.path, repo / "hard.md")
+            paths = ("/source/hard.md",)
+        _assert_never_served(base, httpd.console_token, paths)
+        assert _call(base, "GET", "/index.html")[0] == 200
+    finally:
+        _stop_plane(httpd, worker)
+
+
+def _raw_get(base, path: str) -> bytes:
+    """Every byte the server sends for `GET path`, read until it closes:
+    a response cut short is read as far as it went, never raised."""
+    with socket.create_connection(base, timeout=30) as conn:
+        conn.sendall(f"GET {path} HTTP/1.0\r\nHost: {base[0]}:{base[1]}\r\n\r\n"
+                     .encode("ascii"))
+        received = b""
+        while True:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return received
+            received += chunk
+
+
+def test_the_static_backstop_never_sends_a_copy_swapped_in_after_the_check(
+        tmp_path, monkeypatch, standalone_profile) -> None:
+    """The file the stdlib handler opens is judged after it opens, against a
+    link swapped in between the handler's own check and that open. Staged by
+    blinding the first check: the copy's bytes are still never sent."""
+    import shutil as _shutil
+
+    from opendox import console_access, serve
+
+    web = tmp_path / "web"
+    _shutil.copytree(WEB, web)
+    state = _state(tmp_path)
+    httpd, _repo, worker = _guarded_plane(tmp_path, monkeypatch, web=web)
+    try:
+        base = httpd.server_address[:2]
+        copy = console_access.publish(
+            httpd, page_url=serve.server_url(httpd, "/index.html"),
+            env={"OPENDOX_STATE_DIR": str(state)})
+        os.link(copy.path, web / "swapped.html")
+        monkeypatch.setattr(console_access, "opens_a_private_file",
+                            lambda path, roots: False)        # the race, won
+        received = _raw_get(base, "/swapped.html")
+        assert httpd.console_token.encode() not in received, received[:300]
+        assert b"opendox-console" not in received
+        assert b"index" in _raw_get(base, "/index.html").lower()
+    finally:
+        _stop_plane(httpd, worker)
