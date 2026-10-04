@@ -270,15 +270,16 @@ def unsupported_platform() -> str | None:
     """Why this platform cannot keep the per-machine store, or None (Copilot
     at openDox-code#82, r4173876800; #69's `runtime.bundle.
     unsupported_platform` names its own gaps the same way). The store is
-    judged by its owner's uid, opened and made without following a link,
-    made relative to its parent's descriptor, written with `fchmod`, and
-    recorded under a file lock. Where one of those is missing, nothing can be
-    trusted, and the store says so by name rather than fail on the first
-    missing name."""
+    judged by its owner's uid, opened and made without following a link and
+    without waiting on what it opened (a FIFO, r4178064601), made relative
+    to its parent's descriptor, written with `fchmod`, and recorded under a
+    file lock. Where one of those is missing, nothing can be trusted, and
+    the store says so by name rather than fail on the first missing name."""
     missing = [name for name, present in (
         ("os.getuid", hasattr(os, "getuid")),
         ("os.O_DIRECTORY", hasattr(os, "O_DIRECTORY")),
         ("os.O_NOFOLLOW", hasattr(os, "O_NOFOLLOW")),
+        ("os.O_NONBLOCK", hasattr(os, "O_NONBLOCK")),
         ("os.fchmod", hasattr(os, "fchmod")),
         ("mkdir with dir_fd", os.mkdir in getattr(os, "supports_dir_fd", ())),
         ("fcntl.flock", fcntl is not None),
@@ -1022,8 +1023,11 @@ def _store_locked(state: Path):
     nothing is recorded."""
     path = state / TRUST_LOCK_FILENAME
     try:
+        # NONBLOCKING, so a FIFO in the lock file's place is refused by the
+        # descriptor's own type below rather than waited on (r4178064601).
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
-                             | getattr(os, "O_CLOEXEC", 0), 0o600)
+                             | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
+                             0o600)
     except OSError:
         if os.path.lexists(path):
             reason = _unsafe_because(os.lstat(path), uid=os.getuid(),
@@ -1229,7 +1233,14 @@ class MachineTrust:
         _refuse_an_unsafe_tree(state, existing_only=True)
         path = state / TRUST_FILENAME
         try:
+            # NONBLOCKING (Copilot at openDox-code#82, r4178064601): a FIFO
+            # in the store's place would otherwise hold this open until some
+            # writer came, and `list`, the start and every verdict with it.
+            # Opened so, it is refused by the descriptor's own type below,
+            # judged on what was opened and not on a second look at the
+            # path. A regular file reads the same either way.
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW
+                                 | os.O_NONBLOCK
                                  | getattr(os, "O_CLOEXEC", 0))
         except FileNotFoundError:
             return {}

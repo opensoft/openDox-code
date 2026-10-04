@@ -985,7 +985,7 @@ class _OsWithout:
 
 
 @pytest.mark.parametrize("missing", ["getuid", "O_NOFOLLOW", "O_DIRECTORY",
-                                     "fchmod", "fcntl"])
+                                     "O_NONBLOCK", "fchmod", "fcntl"])
 def test_a_platform_without_the_stores_primitives_trusts_nothing(
         served, capsys, monkeypatch, missing):
     """Copilot at openDox-code#82 (r4173876800). Where the platform lacks a
@@ -1099,6 +1099,46 @@ def test_a_store_that_cannot_be_locked_records_nothing(served, monkeypatch):
         served.trust.record(served.declared(), root=served.repo)
     assert "lock" in str(refused.value)
     assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+
+
+@pytest.mark.parametrize("which", ["store", "lock"])
+def test_a_fifo_in_the_stores_place_is_refused_without_waiting(served,
+                                                               which):
+    """Copilot at openDox-code#82 (r4178064601). A FIFO where the store or
+    its lock file belongs is refused by name, as not a regular file, and
+    nothing waits on it: a read-only open of a FIFO otherwise blocks until a
+    writer comes, holding `list`, the start and every verdict with it. Asked
+    on a thread, so a store that waited fails this case rather than hang the
+    suite."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    binding = served.declared()
+    served.state_dir.mkdir(mode=0o700)
+    fifo = served.state_dir / (trust_mod.TRUST_FILENAME if which == "store"
+                               else trust_mod.TRUST_LOCK_FILENAME)
+    os.mkfifo(fifo, 0o600)
+    answers: dict = {}
+
+    def ask():
+        answers["verdict"] = served.trust.verdict(binding, root=served.repo)
+        try:
+            served.trust.record(binding, root=served.repo)
+        except trust_mod.TrustStoreRefused as refusal:
+            answers["record"] = refusal
+
+    worker = threading.Thread(target=ask, daemon=True)
+    worker.start()
+    worker.join(timeout=20)
+    waited = worker.is_alive()
+    if waited:
+        # Release the reader a waiting store left behind, so the case ends.
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+    assert not waited, "the trust store waited on a FIFO"
+    if which == "store":
+        assert not answers["verdict"].trusted
+        assert "is not a regular file" in answers["verdict"].reason
+    assert "is not a regular file" in str(answers["record"])
+    assert stat.S_ISFIFO(fifo.lstat().st_mode)
 
 
 def test_a_restrictive_umask_leaves_the_store_usable(served):
