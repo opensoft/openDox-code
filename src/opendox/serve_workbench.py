@@ -1417,14 +1417,17 @@ class WorkbenchRoutes:
         consumers that register openDox's default (`doxbench_trust.policy`),
         so where nothing is registered no binding has been judged trusted in
         this process, and the result says it is not, rather than read a
-        store no consumer has asked for."""
+        store no consumer has asked for. The registration is read ONCE, and
+        the verdict is that policy's (`registered_verdict_for`), so a host
+        that unregisters meanwhile never has the default installed in its
+        place by this act (Copilot at openDox-code#82, r4177946288)."""
         from opendox import doxbench_intake
         from opendox import doxbench_trust
         if doxbench_trust.unservable_because(binding) is not None:
             return doxbench_trust.APPROVED_UNSERVABLE_NOTICE
-        if (doxbench_trust.is_registered()
-                and doxbench_trust.verdict_for(
-                    binding, root=Path(self.checkout_root)).admits(binding)):
+        verdict = doxbench_trust.registered_verdict_for(
+            binding, root=Path(self.checkout_root))
+        if verdict is not None and verdict.admits(binding):
             return doxbench_intake.APPROVAL_NOTICE
         return doxbench_trust.APPROVED_UNTRUSTED_NOTICE
 

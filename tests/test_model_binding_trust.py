@@ -1101,6 +1101,30 @@ def test_a_store_that_cannot_be_locked_records_nothing(served, monkeypatch):
     assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
 
 
+def test_a_restrictive_umask_leaves_the_store_usable(served):
+    """Copilot at openDox-code#82 (r4177946237). `os.open`'s mode is
+    filtered by the umask: under 0777 the lock file was born 000, the first
+    record went through the descriptor it had open, and every later one was
+    refused ("cannot be opened"). The lock file and the store are each
+    exactly 0600 whatever the umask, and every record after the first
+    succeeds."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    binding = served.declared()
+    second = served.fresh_repository("r2")
+    previous = os.umask(0o777)
+    try:
+        served.trust.record(binding, root=served.repo)
+        served.trust.record(binding, root=second)
+    finally:
+        os.umask(previous)
+    for name in (trust_mod.TRUST_FILENAME, trust_mod.TRUST_LOCK_FILENAME):
+        assert stat.S_IMODE((served.state_dir / name).stat().st_mode) == (
+            0o600), name
+    assert served.trust.verdict(binding, root=served.repo).trusted
+    assert served.trust.verdict(binding, root=second).trusted
+
+
 # --- every command printed for an operator to paste (r4174783197) -----------
 
 #: Repository directory names, each holding what a shell acts on: a command
@@ -2318,6 +2342,32 @@ def test_each_command_a_fixed_sentence_quotes_is_one_the_verb_takes(
             "<repository>", str(served.repo)).replace("<id>", BINDING_ID))
         args = cli_mod.build_parser().parse_args(argv[1:])
         assert Path(args.repo_root) == served.repo
+
+
+def test_an_approval_reads_the_trust_seam_once(served, monkeypatch):
+    """Copilot at openDox-code#82 (r4177946288). The approval's verdict is
+    the policy registered when it reads the seam, read ONCE. A host that
+    unregisters between two reads (here, a registration check that answers
+    yes and tears the host down) must not have openDox's default installed
+    in its place by the approval, nor that store's answer given as the
+    host's: the store trusts the binding, and the host does not."""
+    trust_mod = _trust_mod()
+    _caps, answer = _served_intake(served, host_policy=_AdmitsTheIntake())
+    assert answer.get("error") is None, answer
+    served.trust.record(served.declared(), root=served.repo)
+    host = _Declines()
+    trust_mod.unregister()
+    trust_mod.register(host)
+
+    def registered_then_torn_down():
+        trust_mod.unregister()
+        return True
+
+    monkeypatch.setattr(trust_mod, "is_registered", registered_then_torn_down)
+    approval = _post_an_approval(served, BINDING_ID)
+    assert approval.get("ok") is True, approval
+    assert approval["availability"] == trust_mod.APPROVED_UNTRUSTED_NOTICE
+    assert trust_mod.current() is host
 
 
 @pytest.mark.parametrize("sentence", ["UNTRUSTED_TURN_MESSAGE",

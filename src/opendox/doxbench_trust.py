@@ -154,6 +154,7 @@ __all__ = [
     "refusal_message",
     "register",
     "register_default",
+    "registered_verdict_for",
     "require_admitted",
     "resolved_root",
     "shown",
@@ -688,24 +689,52 @@ def unservable_because(binding) -> str | None:
     return None
 
 
-def verdict_for(binding, *, root: Path | str) -> TrustVerdict:
-    """The registered policy's verdict on `binding` at `root`, held to it.
-
-    What every consumer asks before it uses a binding read from a repository.
-    A binding the catalog refuses is untrusted before any policy is asked
-    (`unservable_because`). A policy that raises trusts nothing, and its
-    words are not repeated (`reason_policy_failed`)."""
+def _judged(policy_of, binding, *, root: Path | str) -> TrustVerdict:
+    """The verdict of the policy `policy_of()` answers, on `binding` at
+    `root`, held to it. A binding the catalog refuses is untrusted before any
+    policy is asked (`unservable_because`). A policy that raises trusts
+    nothing, and its words are not repeated (`reason_policy_failed`)."""
     unservable = unservable_because(binding)
     if unservable is not None:
         return TrustVerdict.untrusted_for(binding, root=root,
                                           basis=BASIS_CATALOG,
                                           reason=unservable)
     try:
-        verdict = policy().verdict(binding, root=root)
+        verdict = policy_of().verdict(binding, root=root)
     except Exception as error:  # noqa: BLE001 - a policy that fails trusts nothing
         return TrustVerdict.untrusted_for(binding, root=root, basis=BASIS_HOST,
                                           reason=reason_policy_failed(error))
     return _held_to(binding, verdict, root=root)
+
+
+def verdict_for(binding, *, root: Path | str) -> TrustVerdict:
+    """The registered policy's verdict on `binding` at `root`, held to it:
+    openDox's strict default registered first where nothing is (`policy`).
+
+    What every consumer asks before it uses a binding read from a repository.
+    A binding the catalog refuses is untrusted before any policy is asked
+    (`unservable_because`). A policy that raises trusts nothing, and its
+    words are not repeated (`reason_policy_failed`)."""
+    return _judged(policy, binding, root=root)
+
+
+def registered_verdict_for(binding, *,
+                           root: Path | str) -> TrustVerdict | None:
+    """The verdict of the policy registered NOW on `binding` at `root`, held
+    to it, or None where nothing is registered. It REGISTERS NOTHING, for an
+    act that is not one of the consumers that register openDox's default
+    (the console's model approval).
+
+    ONE READ OF THE SEAM (Copilot at openDox-code#82, r4177946288). The
+    registration is read once, under the seam's lock, and the verdict is
+    that policy's alone. Asking `is_registered()` and then `verdict_for()`
+    would read the seam twice: a host that unregistered between the two
+    would have the default installed by an act that promised not to, and
+    its answer given in the host's place."""
+    registered = _registered_now()
+    if registered is None:
+        return None
+    return _judged(lambda: registered, binding, root=root)
 
 
 def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
@@ -1007,6 +1036,12 @@ def _store_locked(state: Path):
                                  own=True, directory=False)
         if reason is not None:
             raise _store_refused(path, reason)
+        # EXACTLY 0600, WHATEVER THE UMASK (Copilot at openDox-code#82,
+        # r4177946237). `os.open`'s mode is filtered by the umask, so under
+        # a restrictive one the file is born 000: this open succeeds, and
+        # every later one fails, which would leave the store unusable. Set
+        # through the descriptor already judged, as `_write` sets the store.
+        os.fchmod(descriptor, 0o600)
         try:
             _lock_exclusively(descriptor)
         except OSError as error:
@@ -1459,6 +1494,18 @@ def current() -> Any:
             "registered by the consumers that ask (doxbench_trust.policy()), "
             "never answered here. A host registers its own at process start "
             "with\n\n    " + REGISTRATION_CALL + "\n")
+    return registered
+
+
+def _registered_now() -> Any:
+    """The registered policy, read ONCE under the seam's lock, or None. It
+    registers nothing; reading the default closes its window, as `current`
+    does."""
+    global _default_read
+    with _lock:
+        registered = _registered
+        if registered is not None and _is_default:
+            _default_read = True
     return registered
 
 
