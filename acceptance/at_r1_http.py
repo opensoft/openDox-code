@@ -222,6 +222,9 @@ CONSOLE_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]{16,512}")
 #: (`Verdict.redact`), and the least length of a value it stands for: the
 #: page's own least length, so a short value never blanks out a word.
 REDACTED = "<the console token>"
+#: A run of a token's characters and `%XX` escapes, which `Verdict.redact`
+#: percent-decodes.
+_ENCODABLE_RUN = re.compile(r"(?:[A-Za-z0-9_-]|%[0-9A-Fa-f]{2})+")
 SECRET_MIN_LENGTH = 16
 CONSOLE_LINE = re.compile(r"^[ \t]*console (?P<where>(?:file:|/)\S*)", re.M)
 #: The opener's machine-readable record, "for a harness or a script"
@@ -349,9 +352,22 @@ class Verdict:
             self.secrets.add(value)
 
     def redact(self, text: str) -> str:
+        """`text` with every secret blanked out: as it is, and inside any run
+        of the token's characters and `%XX` escapes whose percent-decodings
+        hold it, partly encoded or encoded twice (Copilot review of
+        openDox-code#75 at ba216f84, r4178913911)."""
         for secret in sorted(self.secrets, key=len, reverse=True):
             text = text.replace(secret, REDACTED)
-        return text
+        if not self.secrets:
+            return text
+
+        def blank(run: re.Match) -> str:
+            if "%" in run.group(0) and any(
+                    secret in form for form in _decodings(run.group(0))
+                    for secret in self.secrets):
+                return REDACTED
+            return run.group(0)
+        return _ENCODABLE_RUN.sub(blank, text)
 
     def note(self, text: str) -> None:
         note(self.redact(text))
@@ -723,6 +739,14 @@ _REGEX_AFTER_WORDS = frozenset({
 _REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
 
 
+#: JavaScript's WhiteSpace and LineTerminator code points (ECMA-262): tab,
+#: VT, FF, U+FEFF, every space separator (Zs), LF, CR, LS and PS. Python's
+#: `\s` is not this set: it lacks U+FEFF, and adds U+001C-U+001F and U+0085
+#: (Copilot review of openDox-code#75 at ba216f84, r4178913887).
+_JS_WHITESPACE = frozenset(
+    "\t\v\f \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u202f\u205f\u3000\ufeff\n\r\u2028\u2029")
+
 #: JavaScript's single-character escapes.
 _JS_SINGLE_ESCAPES = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
                       "v": "\v"}
@@ -778,8 +802,9 @@ class JsStrings:
 
     `scan()` returns `(quote, value, preceding code)` for each literal, where
     the preceding code is the last 40 characters of code before it (other
-    strings blanked), so an import specifier can be told from an ordinary
-    string. A template literal's value is its leading static text, before
+    strings blanked, comments and every run of JavaScript whitespace read
+    as ONE space, so no run is too long for it), so an import specifier can
+    be told from an ordinary string. A template literal's value is its leading static text, before
     any `${`. Each value is read as a browser reads a URL from it
     (`scalar_values`). `malformed` is set where a string holds an escape a
     module refuses (`js_escape`), as an untagged template does too. It is a
@@ -806,18 +831,24 @@ class JsStrings:
         elif self.src.startswith("/*", self.i):
             end = self.src.find("*/", self.i + 2)
             self.i = len(self.src) if end < 0 else end + 2
-            self.code.append(" ")
+            self._space()
         elif c == "/" and self._regex_may_start():
             self._skip_regex()
         elif c in "\"'":
             self._quoted(c)
         elif c == "`":
             self._template()
+        elif c in _JS_WHITESPACE:
+            self._space()
+            self.i += 1
         else:
             self.code.append(c)
-            if not (c.isspace() or c == "\ufeff"):    # U+FEFF is JS whitespace
-                self.last = c
+            self.last = c
             self.i += 1
+
+    def _space(self) -> None:
+        if not (self.code and self.code[-1].endswith(" ")):
+            self.code.append(" ")
 
     def _recent(self) -> str:
         return "".join(self.code[-40:])
@@ -900,8 +931,11 @@ class JsStrings:
         return j
 
 
-_STATIC_IMPORT_CONTEXT = re.compile(r"(?:\bimport\s*|\bfrom\s*)$")
-_DYNAMIC_IMPORT_CONTEXT = re.compile(r"\bimport\s*\(\s*$")
+#: The code before an import's specifier, whitespace already read as one
+#: space (`JsStrings`): `import` or `from`, or `import(`, and never a member
+#: named `import` (`loader.import("x")` is a call, not an import).
+_STATIC_IMPORT_CONTEXT = re.compile(r"(?<![\w$.])(?<!\. )(?:import|from) ?$")
+_DYNAMIC_IMPORT_CONTEXT = re.compile(r"(?<![\w$.])(?<!\. )import ?\( ?$")
 _PATH_LITERAL = re.compile(r"^\.?/[A-Za-z][\w\-./%@~]*(?:\?\S*)?$")
 _MODULE_OR_SHEET = re.compile(r"\.(?:m?js|css)(?:[?#].*)?$")
 
@@ -1118,11 +1152,14 @@ DIVERGENT_PREFIX = "divergent:"
 #: control or space at either end (trimmed). An inner space is encoded, not
 #: dropped, so it is no divergence.
 _DIVERGENT_REFERENCE = re.compile(r"\\|[\t\n\r]|^[\x00-\x20]|[\x00-\x20]$")
-#: A percent-encoded dot in a path, which a browser's URL parser reads as a
-#: `.` or `..` segment and urljoin does not. And a URL with user
-#: information, which a browser refuses to fetch a module or a stylesheet
-#: from, is divergent too (`_resolve`).
-_ENCODED_DOT = re.compile(r"%2e", re.IGNORECASE)
+#: A path SEGMENT a browser's URL parser reads as `.` or `..` and urljoin
+#: does not: `%2e`, `.%2e`, `%2e.` or `%2e%2e`, in any case. A `%2e` inside
+#: a longer segment (`child%2Ejs`) is no dot segment, and a browser
+#: requests it as it is (Copilot review of openDox-code#75 at ba216f84,
+#: r4178913926). And a URL with user information, which a browser refuses
+#: to fetch a module or a stylesheet from, is divergent too (`_resolve`).
+_ENCODED_DOT = re.compile(r"(?:^|/)(?:%2e|\.%2e|%2e\.|%2e%2e)(?=/|$)",
+                          re.IGNORECASE | re.ASCII)
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
@@ -1209,9 +1246,10 @@ def _check_page_resolution(links: "_IndexLinks", origin: str,
                   "empty `src`")
     for base in links.bases[:1]:            # only the first one counts
         verdict.check(f"{label}.bundle.base", _resolve("/", base, origin) == "/",
-                      f"`/` sets its base URL to {base!r:.120}; a browser then "
-                      "resolves the page's links against it, and this "
-                      "harness resolves them against `/`")
+                      "`/` sets a base URL other than its own root (not "
+                      "quoted); a browser then resolves the page's links "
+                      "against it, and this harness resolves them against "
+                      "`/`")
     if links.import_maps:
         verdict.check(f"{label}.bundle.importmap", False,
                       "`/` declares an import map, which this harness does "
@@ -1819,8 +1857,9 @@ def check_pages(server: Server, index: Answer,
     documents = snapshot.get("documents")
     verdict.check(f"{label}.snapshot non-empty",
                   isinstance(documents, list) and bool(documents),
-                  f"the snapshot's documents are not a non-empty list: "
-                  f"{documents!r:.200}")
+                  f"the snapshot's documents are not a non-empty list: they "
+                  f"are {'an empty list' if documents == [] else 'a ' + type(documents).__name__} "
+                  "(not quoted)")
     # EVERY DOCUMENT NAMES ITS PATH, or `requests_for` would skip its source
     # reads and the run would pass on less than it claims (Copilot review of
     # openDox-code#75 at 33841d4a, r4174621535).
@@ -1839,7 +1878,7 @@ def check_pages(server: Server, index: Answer,
     verdict.check(f"{label}.snapshot neutral (F5.3)", not leaks,
                   f"openxFactory's vocabulary leaked into the neutral "
                   f"snapshot: {leaks}")
-    verdict.note(f"snapshot kind={snapshot.get('kind')!r}, "
+    verdict.note(f"the snapshot lists "
                  f"{len(as_list(snapshot.get('documents')))} documents")
     caps, caps_raw = fetch_object(server, "/capabilities", verdict)
     # A token `/capabilities` publishes, under its name at any depth, is
@@ -1933,10 +1972,11 @@ def check_grouping(label: str, snapshot: dict, caps: dict,
     field = grouping_field_of(caps)
     verdict.check(f"{label}.snapshot fills the grouping station",
                   grouping_tile(snapshot, field) is not None,
-                  f"the snapshot's grouping station ({field!r}) holds no "
-                  "tile with an id and a member document, so no grouping "
-                  "tile can open the chat pane (R1Q13 (a) with (c); AT-R1 "
-                  f"fails and does not skip): {snapshot.get(field)!r:.200}")
+                  "the snapshot's grouping station (the field /capabilities "
+                  "names, not quoted, nor its value) holds no tile with an id "
+                  "and a member document, so no grouping tile can open the "
+                  "chat pane (R1Q13 (a) with (c); AT-R1 fails and does not "
+                  "skip)")
 
 
 # ---------------------------------------------------------------------------
@@ -2000,11 +2040,10 @@ def record_disagrees_because(records: list[str], port: int,
     if record.get("kind") != CONSOLE_RECORD_KIND or not (
             is_json_number(version)
             and version == CONSOLE_RECORD_SCHEMA_VERSION):
-        problems.append(f"it is kind={record.get('kind')!r} "
-                        f"schema_version={version!r}, not "
-                        f"{CONSOLE_RECORD_KIND!r} v{CONSOLE_RECORD_SCHEMA_VERSION}")
+        problems.append(f"it is not {CONSOLE_RECORD_KIND!r} "
+                        f"v{CONSOLE_RECORD_SCHEMA_VERSION}")
     if not (is_json_number(record.get("port")) and record.get("port") == port):
-        problems.append(f"its port is {record.get('port')!r}, not {port}")
+        problems.append(f"its port is not {port}")
     if record.get(CONSOLE_FRAGMENT_KEY) != token:
         problems.append(f"its `{CONSOLE_FRAGMENT_KEY}` is not the token the "
                         "forward carries")
@@ -2478,19 +2517,29 @@ def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
     # r4173473346).
     envelope = as_object(payload)
     version = envelope.get("schema_version")
+    # No reason quotes a value the catalog sent: a token in it, percent- or
+    # otherwise encoded, would pass any literal redaction (Copilot review of
+    # openDox-code#75 at ba216f84, r4178913911).
+    version_ok = (is_json_number(version)
+                  and version == CATALOG_SCHEMA_VERSION)
+    kind_ok = envelope.get("kind") == CATALOG_KIND
+    wrong = [part for part, ok in (("schema_version", version_ok),
+                                   ("kind", kind_ok)) if not ok]
     verdict.check(f"{label}.catalog envelope is the one the chat rail adopts",
-                  is_json_number(version) and version == CATALOG_SCHEMA_VERSION
-                  and envelope.get("kind") == CATALOG_KIND,
-                  f"the catalog's envelope is schema_version={version!r}, "
-                  f"kind={envelope.get('kind')!r}; the chat rail adopts only "
-                  f"schema_version={CATALOG_SCHEMA_VERSION}, "
-                  f"kind={CATALOG_KIND!r}")
+                  not wrong,
+                  f"the catalog's {' and '.join(wrong)} is not what the chat "
+                  f"rail adopts (schema_version={CATALOG_SCHEMA_VERSION}, "
+                  f"kind={CATALOG_KIND!r}); the values it sent are not "
+                  "quoted")
     # As the rail reads it: `m.available === true`, and nothing else
     # (`views/doxbench-chat-model.js`).
     available = [as_object(m).get("model_id") for m in as_list(models)
                  if as_object(m).get("available") is True]
     verdict.check(f"{label}.catalog offers no available entry", not available,
-                  f"no model is configured, yet the catalog offers {available}")
+                  f"no model is configured, yet the catalog offers "
+                  f"{len(available)} available entr"
+                  f"{'y' if len(available) == 1 else 'ies'} (the ids are not "
+                  "quoted)")
 
 
 def grouping_tile(snapshot: dict,

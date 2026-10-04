@@ -1497,10 +1497,20 @@ def test_one_serve_learns_the_opener_s_token_before_it_quotes_a_page(
         monkeypatch.setattr(harness, "launch",
                             lambda *_args: (server, _HTML_INDEX))
         monkeypatch.setattr(harness, "stop_and_look", lambda *_a, **_k: None)
+        # The token is a secret BEFORE step 5 begins, whatever step 5 prints
+        # today.
+        known_at_step_5: list[bool] = []
+        check_pages = harness.check_pages
+
+        def watched(server_, index_, verdict_):
+            known_at_step_5.append(TOKEN in verdict_.secrets)
+            return check_pages(server_, index_, verdict_)
+        monkeypatch.setattr(harness, "check_pages", watched)
         verdict = harness.Verdict(keep_going=True)
         harness.serve_one("t", tmp_path / "repo",
                           types.SimpleNamespace(state_dir=state), verdict)
     verdict.report()
+    assert known_at_step_5 == [True]
     failures = _failures(verdict)
     assert "t.snapshot fills the grouping station" in failures
     assert BY_VALUE in failures
@@ -1971,8 +1981,8 @@ def test_an_encoded_dot_in_a_query_is_no_divergence() -> None:
     files = {"/child.js": (JS, "export const x = 1;\n")}
     verdict = harness.Verdict(keep_going=True)
     with served(files) as port:
-        files["/app.js"] = (JS, 'import "./child.js?v=%2e";\n')
-        files["/child.js?v=%2e"] = files["/child.js"]
+        files["/app.js"] = (JS, 'import "./child.js?v=/%2e%2e/";\n')
+        files["/child.js?v=/%2e%2e/"] = files["/child.js"]
         _routes, modules = harness.derive_bundle(
             port, _page("./app.js"), {}, verdict, "t")
     assert _failures(verdict) == []
@@ -2356,3 +2366,188 @@ def test_a_module_script_nothing_closes_the_way_to_is_no_entry(
         harness.derive_bundle(port, f"<html><body>{body}</body></html>", {},
                               verdict, "t")
     assert _failures(verdict) == expected
+
+
+# ---------------------------------------------------------------------------
+# Copilot review of #75 at ba216f84: JavaScript's own whitespace around an
+# import (r4178913887), no server value in a catalog reason, and redaction
+# that sees through percent-encoding (r4178913911), and an encoded dot only
+# as a whole segment (r4178913926).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("source, queued", [
+    ('import﻿"./a.js";\n', [("/views/a.js", True)]),
+    ('export * from﻿"./b.js";\n', [("/views/b.js", True)]),
+    ('import(﻿"./c.js");\n', [("/views/c.js", False)]),
+    ('import﻿("./d.js");\n', [("/views/d.js", False)]),
+    ('import　"./e.js";\n', [("/views/e.js", True)]),
+    ("import" + " \n" * 40 + '"./f.js";\n', [("/views/f.js", True)]),
+    ('import /* ' + "x" * 80 + ' */ "./g.js";\n', [("/views/g.js", True)]),
+    ('import(\n  // ' + "y" * 80 + '\n  "./h.js");\n', [("/views/h.js", False)]),
+    ('loader.import("./i.js");\n', []),
+    ('loader . import("./j.js");\n', []),
+    ('loader?.import("./k.js");\n', []),
+    ('import\x1c"./l.js";\n', []),
+    ('import\x85"./m.js";\n', []),
+], ids=["static-feff", "from-feff", "dynamic-feff", "feff-before-paren",
+        "ideographic-space", "long-whitespace", "long-block-comment",
+        "long-line-comment", "member-call", "spaced-member-call",
+        "optional-member-call", "python-only-space", "next-line"])
+def test_an_import_is_found_through_javascript_s_whitespace(
+        source: str, queued: list) -> None:
+    """U+FEFF and every space separator are JavaScript whitespace, as
+    Python's `\\s` is not; a run of it, or a comment, of any length; and a
+    method named `import` is a call. U+001C and U+0085 are whitespace to
+    Python only, so no import is read through them."""
+    pending: collections.deque = collections.deque()
+    routes: set[str] = set()
+    harness._scan_module("/views/x.js", source.encode("utf-8"), pending, routes)
+    assert [(path, static) for path, static, _importer in pending] == queued
+
+
+@pytest.mark.parametrize("envelope, wrong", [
+    ('"schema_version": 2, "kind": "workbench-model-catalog"', "schema_version"),
+    ('"schema_version": 1, "kind": "SENT-KIND-%s"' % ENCODED, "kind"),
+    ('"schema_version": "SENT-VERSION", "kind": "SENT-KIND"',
+     "schema_version and kind"),
+], ids=["version", "kind-with-an-encoded-token", "both"])
+def test_a_catalog_envelope_reason_quotes_nothing_it_was_sent(
+        capsys, envelope: str, wrong: str) -> None:
+    files = {harness.CATALOG_ROUTE: ("application/json",
+                                     '{%s, "models": []}' % envelope)}
+    verdict = harness.Verdict(keep_going=True)
+    verdict.keep_secret(TOKEN)
+    with served(files) as port:
+        harness.check_catalog(_Server(port), TOKEN, verdict)
+    verdict.report()
+    out = capsys.readouterr().out
+    failed = [f for f in verdict.failures
+              if f.ident == "t.catalog envelope is the one the chat rail adopts"]
+    assert len(failed) == 1 and failed[0].why.startswith(
+        f"the catalog's {wrong} is not what the chat rail adopts")
+    for sent in ("SENT-", ENCODED, TOKEN):
+        assert sent not in out and sent not in failed[0].why
+
+
+def test_an_available_entry_is_counted_and_never_quoted(capsys) -> None:
+    models = [{"model_id": f"SENT-ID-{ENCODED}", "available": True},
+              {"model_id": "SENT-ID-2", "available": True},
+              {"model_id": "SENT-ID-3", "available": False}]
+    files = {harness.CATALOG_ROUTE: (
+        "application/json", json.dumps({"schema_version": 1,
+                                        "kind": harness.CATALOG_KIND,
+                                        "models": models}))}
+    verdict = harness.Verdict(keep_going=True)
+    verdict.keep_secret(TOKEN)
+    with served(files, guarded=frozenset({harness.CATALOG_ROUTE})) as port:
+        harness.check_catalog(_Server(port), TOKEN, verdict)
+    verdict.report()
+    out = capsys.readouterr().out
+    assert _failures(verdict) == ["t.catalog offers no available entry"]
+    assert "offers 2 available entries" in verdict.failures[0].why
+    assert "SENT-ID" not in out and ENCODED not in out
+
+
+@pytest.mark.parametrize("make", [
+    lambda: ENCODED,
+    lambda: ENCODED.replace("%", "%25"),
+    lambda: TOKEN[:10] + ENCODED[30:],
+    lambda: "".join(f"%{ord(c):02x}" for c in TOKEN),
+], ids=["encoded", "encoded-twice", "partly-encoded", "lower-case-hex"])
+def test_an_encoded_token_is_redacted_too(capsys, make) -> None:
+    """Every line the harness prints: a percent-encoded token in a bundle
+    path or a request target, which literal replacement passes."""
+    encoded = make()
+    verdict = harness.Verdict(keep_going=True)
+    verdict.keep_secret(TOKEN)
+    verdict.check(f"t.bundle.bare x-{encoded}", False,
+                  f"/app.js imports 'x-{encoded}'")
+    verdict.note(f"GET /source/{encoded}.md -> HTTP 404")
+    verdict.report()
+    out = capsys.readouterr().out
+    assert encoded not in out and TOKEN not in out
+    assert f"/source/{harness.REDACTED}.md" in out
+
+
+def test_an_encoded_run_without_the_token_is_kept(capsys) -> None:
+    verdict = harness.Verdict(keep_going=True)
+    verdict.keep_secret(TOKEN)
+    verdict.note("GET /source/caf%C3%A9-notes.md -> HTTP 200")
+    assert "/source/caf%C3%A9-notes.md" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("snapshot, caps, reason_holds", [
+    ({"documents": f"SENT-{ENCODED}"}, {}, "they are a str (not quoted)"),
+    ({"documents": []}, {}, "they are an empty list (not quoted)"),
+], ids=["documents-a-string", "documents-empty"])
+def test_a_snapshot_reason_quotes_nothing_it_was_sent(
+        tmp_path: Path, capsys, snapshot: dict, caps: dict,
+        reason_holds: str) -> None:
+    files = {"/snapshot.json": ("application/json", json.dumps(snapshot)),
+             "/capabilities": ("application/json",
+                               json.dumps({"install": {"mode": "local"}}))}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.check_pages(_quiet_server(tmp_path, port), _HTML_INDEX,
+                            verdict)
+    failed = [f for f in verdict.failures if f.ident == "t.snapshot non-empty"]
+    assert len(failed) == 1 and reason_holds in failed[0].why
+    assert "SENT-" not in capsys.readouterr().out
+
+
+def test_a_grouping_reason_quotes_neither_the_field_nor_its_value(
+        capsys) -> None:
+    caps = {"display": {"fields": {"grouping": {"field": "SENT-FIELD"}}}}
+    verdict = harness.Verdict(keep_going=True)
+    harness.check_grouping("t", {"SENT-FIELD": [{"id": "SENT-TILE"}]}, caps,
+                           verdict)
+    assert _failures(verdict) == ["t.snapshot fills the grouping station"]
+    assert "SENT-" not in capsys.readouterr().out
+
+
+def test_a_record_and_base_reason_quote_nothing_they_were_sent(
+        tmp_path: Path, capsys) -> None:
+    page = _opener_page(FORWARD, records=[_record(kind="SENT-KIND",
+                                                  port="SENT-PORT")])
+    state, opener = _opener(tmp_path, page)
+    verdict = harness.Verdict(keep_going=True)
+    harness.check_console_opener("t", PORT, _printed(opener), state,
+                                 tmp_path / "repo", verdict, hosts=SERVED)
+    links = harness._IndexLinks()
+    links.feed(f'<base href="/SENT-BASE/">{_ENTRY}')
+    harness._check_page_resolution(links, harness.plane_origin(PORT), verdict,
+                                   "t")
+    assert _failures(verdict) == [RECORD, "t.bundle.base"]
+    assert "SENT-" not in capsys.readouterr().out
+    assert not any("SENT-" in str(failure) for failure in verdict.failures)
+
+
+@pytest.mark.parametrize("ref, fetched", [
+    ("./child%2Ejs", "/child%2Ejs"),
+    ("./%2e.x/child.js", "/%2e.x/child.js"),
+    ("./x%2e%2e/child.js", "/x%2e%2e/child.js"),
+], ids=["inside-a-file-name", "dot-then-more", "inside-a-directory-name"])
+def test_an_encoded_dot_inside_a_segment_is_no_divergence(
+        ref: str, fetched: str) -> None:
+    """Only a whole `%2e`, `.%2e`, `%2e.` or `%2e%2e` segment is a dot
+    segment to a browser; one inside a name is requested as it is."""
+    files = {fetched: (JS, "export const x = 1;\n"),
+             "/app.js": (JS, f'import "{ref}";\n')}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        _routes, modules = harness.derive_bundle(
+            port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == []
+    assert modules == 2
+
+
+@pytest.mark.parametrize("ref", ["./.%2E/child.js", "./%2E./child.js",
+                                 "./sub/%2e"],
+                         ids=["dot-encoded-dot", "encoded-dot-dot",
+                              "last-segment"])
+def test_every_encoded_dot_segment_is_refused(ref: str) -> None:
+    files = {"/app.js": (JS, f'import "{ref}";\n')}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == [f"t.bundle.divergent {ref!r}"]
