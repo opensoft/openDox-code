@@ -616,20 +616,46 @@ def write_settings_document(path: Path, text: str) -> None:
         raise
 
 
+def cannot_read(path: Path, what: str, error: OSError) -> str:
+    """The refusal of a settings document the system will not read for
+    this user, by the system's own short word for why."""
+    return (f"the {what} at {shown_path(path)} cannot be read "
+            f"({error.strerror or type(error).__name__})")
+
+
+def document_present(path: Path) -> bool:
+    """Whether a settings document is there: a regular file at `path`. Only
+    "no such file", or a file where a directory belongs on the way, is its
+    absence; any other failure to look, such as a directory on the way this
+    user cannot search, raises, so the caller refuses it by name (Copilot at
+    openDox-code#86, r4179241603) on every Python, where `Path.is_file`
+    swallows some of them."""
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def read_settings_document(path: Path, *, what: str, yaml, refused):
     """The YAML document at `path`, parsed, or a refusal BY NAME (`refused`,
     the caller's own refusal class) for one that cannot be read (T100
     follow-on, N2): one the system will not read for this user, not UTF-8,
     nested past what the parser can descend, or not YAML. A console's start
-    reads it, so none of these may surface as a raw error there."""
+    reads it, so none of these may surface as a raw error there. A
+    document that parses but holds a value its constructor rejects (a
+    timestamp such as `2024-13-01`) is not readable YAML either (the
+    holder's ruling, openxFactory#656 comment 5985046107, C3)."""
     shown = shown_path(path)
     try:
         return yaml.safe_load(path.read_text(encoding="utf-8"))
     except OSError as error:
-        raise refused(f"the {what} at {shown} cannot be read "
-                      f"({error.strerror or type(error).__name__})") from None
+        raise refused(cannot_read(path, what, error)) from None
     except UnicodeDecodeError:
+        # before ValueError, of which it is a kind, so it keeps its words
         raise refused(f"the {what} at {shown} is not UTF-8 text") from None
+    except ValueError:
+        raise refused(f"the {what} at {shown} is not readable "
+                      "YAML") from None
     except RecursionError:
         raise refused(f"the {what} at {shown} nests too deeply to "
                       "read") from None
@@ -1146,8 +1172,16 @@ class BindingStore:
                 link=shown_path(link)))
 
     def _load(self) -> list[ModelProviderBinding]:
-        self._refuse_a_link()
-        if not self.path.is_file():
+        try:
+            # The look before the read refuses BY NAME too (Copilot at
+            # openDox-code#86, r4179241603): a directory on the way that
+            # this user cannot search fails `lstat` and `stat` themselves.
+            self._refuse_a_link()
+            present = document_present(self.path)
+        except OSError as error:
+            raise BindingRefused(cannot_read(
+                self.path, "bindings document", error)) from None
+        if not present:
             # THE HOSTED PATH, and the reason the import below is lazy: an
             # install with no bindings document answers here and never needs a
             # YAML parser at all.

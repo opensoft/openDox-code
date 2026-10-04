@@ -112,7 +112,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import stat
 import sys
 import threading
@@ -137,6 +136,7 @@ __all__ = [
     "BASIS_HOST",
     "BASIS_MACHINE_TRUST",
     "BASIS_REPOSITORY",
+    "BROKER_WORKING_DIRECTORY",
     "BindingUntrusted",
     "MachineTrust",
     "TRUST_FILENAME",
@@ -151,6 +151,7 @@ __all__ = [
     "INTAKE_BROKER_REFUSED",
     "INTAKE_NOT_ADMISSIBLE",
     "REASON_INLINE_SCRIPT",
+    "REASON_UNREADABLE_COMMAND",
     "REASON_IN_REPOSITORY",
     "REASON_RECORD_FORM",
     "REMEDY_INLINE_SCRIPT",
@@ -158,6 +159,7 @@ __all__ = [
     "REMEDY_NOT_BY_TRUST",
     "UNTRUSTABLE_TURN_MESSAGE",
     "REASON_UNSERVABLE",
+    "REASON_NO_WITHDRAWAL",
     "REMEDY_UNSERVABLE",
     "binding_digest",
     "command_safe_id",
@@ -310,6 +312,23 @@ REASON_INLINE_SCRIPT = (
     "its broker command gives a shell or an interpreter an inline script, "
     "which is no file a review can pin and can run whatever the repository "
     "holds")
+
+#: Why a binding whose broker command cannot be read to the program it runs
+#: is never trusted (T100 follow-on, A2 and its rulings; Copilot at
+#: openDox-code#86, r4179366319; the holder's ruling, openxFactory#656
+#: comment 5985046107, C1): an option its launcher does not have, or has by
+#: more than one name; an option after which what runs cannot be judged
+#: from its words (`env --argv0`, `sudo --chroot`, `sudo -i`); an `env -S`
+#: string env would not split as a shell does (a backslash, a `$` or a
+#: `#`); or launchers nested past what is unwrapped. What it runs cannot be
+#: judged, so it is refused FAIL-CLOSED, as an inline script is, with the
+#: inline-script remedy.
+REASON_UNREADABLE_COMMAND = (
+    "its broker command cannot be read to the program it runs (a launcher "
+    "option it does not have, or has by more than one name, an option after "
+    "which what runs cannot be judged, an env -S string env would not split "
+    "as a shell does, or launchers nested too deeply), so what it runs "
+    "cannot be judged")
 
 #: What an operator is told to do about such a binding.
 REMEDY_INLINE_SCRIPT = (
@@ -727,7 +746,7 @@ def trust_remedy(binding_id: str, root: str | None,
         return REMEDY_UNSERVABLE
     if reason == REASON_IN_REPOSITORY:
         return REMEDY_IN_REPOSITORY
-    if reason == REASON_INLINE_SCRIPT:
+    if reason in (REASON_INLINE_SCRIPT, REASON_UNREADABLE_COMMAND):
         return REMEDY_INLINE_SCRIPT
     if reason is not None and not trust_can_repair(reason):
         return REMEDY_NOT_BY_TRUST
@@ -882,67 +901,119 @@ def unservable_because(binding) -> str | None:
     return None
 
 
-#: A URL's scheme and authority (`https://`): a value that names no file,
-#: whatever separators it carries.
-_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+#: The working directory every broker starts in (T100 follow-on, A2
+#: extended; RULED by Brett Heap, openxFactory#656 comment 5983805990,
+#: "Refuse inline scripts (Recommended)", item 2): the file system's root,
+#: which lies outside every served repository. `doxbench_provider` starts
+#: every broker here, and the rules below judge a broker command from here,
+#: as it runs (Copilot at openDox-code#86, r4179241532, r4179366288).
+BROKER_WORKING_DIRECTORY = os.path.abspath(os.sep)
 
 
-def _program_path(candidate: str, *, first: bool,
-                  root: Path) -> list[Path]:
-    """The files one argv member could name, resolved, links followed: a
-    path (with a separator) as written, made absolute against this process's
-    working directory, which the broker inherits, and against the served
-    root, since a broker may be run from either, whether or not a file is
-    there yet (a pull could add one); a bare word as the program `PATH`
-    finds, for the command's first member; and any other bare word that
-    names an existing file in either directory. A URL names no file."""
-    found: list[str] = []
-    if _URL.match(candidate):
-        return []
+class _Context(NamedTuple):
+    """Where a broker command runs: its working directory, and the search
+    path its program is found on (None: the platform's default,
+    `os.defpath`), as the child process sees them (Copilot at
+    openDox-code#86, r4179241532, r4179366288). A launcher can change both
+    for the command it starts (`env -C`, `env PATH=...`, `env -i`)."""
+
+    cwd: str
+    path: str | None
+
+
+def _broker_context() -> _Context:
+    """The context every broker command starts in: `BROKER_WORKING_DIRECTORY`,
+    and the search path the broker inherits from this process."""
+    return _Context(BROKER_WORKING_DIRECTORY, os.environ.get("PATH"))
+
+
+def _which(name: str, context: _Context) -> str | None:
+    """`name` as the child finds it on its search path: the first executable
+    file among the path's directories, a relative directory (or an empty
+    entry) taken from the context's working directory, as the child takes
+    it, never from this process's (r4179366288)."""
+    search = context.path if context.path is not None else os.defpath
+    for entry in search.split(os.pathsep):
+        candidate = os.path.join(context.cwd, entry, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _resolved_path(path: str) -> str:
+    """`path` with every link followed and `..` taken as the system takes it,
+    or, where it cannot be resolved (an embedded NUL, which no program can
+    be run with anyway; r4179077018), normalized as written."""
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        return os.path.normpath(path)
+
+
+def _traversed(path: str) -> list[Path]:
+    """Every name the system looks up on the way to the absolute `path`,
+    each in the directory it is looked up in, that directory resolved
+    (links followed, `..` taken as the system takes it), and last `path`
+    itself, resolved (Copilot at openDox-code#86, r4179241566). A link
+    inside the repository is a name the repository controls, which a pull
+    can point elsewhere, whether it points inside or out; a link outside it
+    that points in reaches the repository's file."""
+    names: list[Path] = []
+    real = Path(os.sep)
+    for part in Path(path).parts[1:]:
+        if part == os.pardir:
+            real = real.parent
+            continue
+        names.append(real / part)
+        real = Path(_resolved_path(str(real / part)))
+    names.append(real)
+    return names
+
+
+def _located(candidate: str, *, first: bool, context: _Context) -> list[str]:
+    """The file one argv member could name, as an absolute path, or
+    nothing: a path (with a separator) joined to the context's working
+    directory, whether or not a file is there yet (a pull could add one); a
+    bare word as the program the context's search path finds (`_which`),
+    for the command's program; and any other bare word that names an
+    existing file in the working directory."""
     if candidate in (".", "..") or os.sep in candidate or (
             os.altsep and os.altsep in candidate):
-        if os.path.isabs(candidate):
-            found.append(candidate)
-        else:
-            found += [os.path.join(os.getcwd(), candidate),
-                      os.path.join(str(root), candidate)]
-    elif first:
-        located = shutil.which(candidate)
-        if located is not None:
-            found.append(located)
-    else:
-        found += [here for here in (os.path.join(os.getcwd(), candidate),
-                                    os.path.join(str(root), candidate))
-                  if os.path.lexists(here)]
-    return _resolved(found)
+        return [os.path.join(context.cwd, candidate)]
+    if first:
+        located = _which(candidate, context)
+        return [located] if located is not None else []
+    here = os.path.join(context.cwd, candidate)
+    return [here] if os.path.lexists(here) else []
 
 
-def _module_paths(name: str, *, root: Path) -> list[Path]:
-    """The files a module named after `-m` could be imported from, resolved:
-    its top-level package or module (`a` or `a.py` for `a.b`) in this
-    process's working directory, which an interpreter run with `-m` imports
-    from first and which the broker inherits, and in the served root."""
-    top = name.split(".", 1)[0]
-    if not top:
-        return []
-    return _resolved([here for directory in (os.getcwd(), str(root))
-                      for here in (os.path.join(directory, top),
-                                   os.path.join(directory, top + ".py"))
-                      if os.path.lexists(here)])
+def _candidates(member: str, *, option: bool) -> list[str]:
+    """What one member could name a file by, fail-closed: the member itself
+    or, for an option, its value, after `=` and, for a single-dash option,
+    the rest after its letter (`-I<dir>`, `-a<file>`; the holder's ruling,
+    openxFactory#656 comment 5985046107, C4); and, in either, every absolute
+    path it holds (`-vI/r/lib`, `PERL5OPT=-I/r/lib -Mx`)."""
+    found = [] if option else [member]
+    if option:
+        if "=" in member:
+            found.append(member.split("=", 1)[1])
+        if not member.startswith("--"):
+            found.append(member[2:])
+    found += [member[at:] for at in range(1, len(member))
+              if member[at] in (os.sep, os.altsep)]
+    return [candidate for candidate in found if candidate]
 
 
-def _resolved(found: list[str]) -> list[Path]:
-    """Each path resolved, links followed, or as written, made absolute,
-    where it cannot be resolved: a loop, or an embedded NUL, which no
-    program can be run with anyway (Copilot at openDox-code#86,
-    r4179077018)."""
-    paths: list[Path] = []
-    for path in found:
-        try:
-            paths.append(Path(path).resolve())
-        except (OSError, RuntimeError, ValueError):
-            paths.append(Path(os.path.abspath(path)))
-    return paths
+def _module_paths(name: str, *, context: _Context) -> list[str]:
+    """The files a module named after `-m` could be imported from: its
+    whole dotted name as a path under the context's working directory,
+    which `python -m` imports from first, as a package (`a/b/c`) and as a
+    module (`a/b/c.py`), whether or not a file is there yet (Copilot at
+    openDox-code#86, r4179241555). A namespace package needs no
+    `__init__`, so a dotted name can reach any directory under the working
+    directory; every package on the way is a name `_traversed` judges."""
+    base = os.path.join(context.cwd, *name.split("."))
+    return [base, base + ".py"]
 
 
 def in_repository_program(binding, *, root: Path | str) -> str | None:
@@ -962,11 +1033,11 @@ def in_repository_program(binding, *, root: Path | str) -> str | None:
     member that is an option (`-v`, `--config=VALUE`), only its value is. The
     program itself is never an option, whatever its name, and nothing after
     a `--` member is one (Copilot at openDox-code#86, r4179076944). A
-    member names a file inside
-    the repository where what it resolves to (`_program_path`) is the served
-    root or lies under it, and so does a module named after `-m` that would
-    be imported from there (`_module_paths`). A binding no broker answers
-    has no command."""
+    member names a file inside the repository where, as the broker runs it
+    (`in_repository_argv`), any name on the way to what it names is the
+    served root or lies under it (`_traversed`), and so does a module named
+    after `-m` that could be imported from there (`_module_paths`). A
+    binding no broker answers has no command."""
     if binding.credential_source() != binding_mod.CREDENTIAL_FROM_BROKER:
         return None
     return in_repository_argv(binding.substituted_argv(), root=root)
@@ -977,39 +1048,54 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
     the served repository, or None: `in_repository_program`'s rule, for a
     command no binding carries yet (the console intake's broker).
 
-    Its launchers are unwrapped first (`_unwrapped`; the holder's ruling,
-    openxFactory#656 comment 5984069416): each launcher's own program, and
-    each value of its that could name a file (`env -C DIR`, `env
-    NAME=VALUE`), are judged, and the command it starts is judged as a
-    command of its own, so its program is found as `PATH` finds it."""
+    It is judged as it runs (`_Context`; Copilot at openDox-code#86,
+    r4179241532, r4179366288): from `BROKER_WORKING_DIRECTORY`, on the
+    search path the broker inherits. A member names a file inside the
+    repository where any name on the way to it (`_traversed`) is the
+    served root or lies under it, for every file the member could name
+    (`_candidates`): an option's value, attached or after `=`, and every
+    absolute path it holds (the holder's ruling, openxFactory#656 comment
+    5985046107, C4). Its launchers are unwrapped first (`_unwrapped`; the
+    holder's ruling, openxFactory#656 comment 5984069416): each launcher's
+    own program, and each value and operand of its (`env -C DIR`, `env
+    NAME=VALUE`, `xargs -a FILE`, `time -o FILE`), are judged in the
+    context they are read in, and the command it starts is judged as a
+    command of its own, in the context the launchers left it. A file a
+    launcher writes inside the repository is refused too, an accepted
+    strictness."""
     served = Path(resolved_root(root))
-    unwrapped = _unwrapped(members, root=served)
-    for launcher in unwrapped.launchers:
-        if any(path == served or served in path.parents
-               for path in _program_path(launcher, first=True, root=served)):
+
+    def inside(found: list[str]) -> bool:
+        return any(name == served or served in name.parents
+                   for path in found for name in _traversed(path))
+
+    def named(member: str, *, option: bool, first: bool,
+              context: _Context) -> list[str]:
+        return [path for candidate in _candidates(member, option=option)
+                for path in _located(candidate,
+                                     first=first and candidate == member,
+                                     context=context)]
+
+    unwrapped = _unwrapped(members)
+    for launcher, context in unwrapped.launchers:
+        if inside(_located(launcher, first=True, context=context)):
             return launcher
-    for value in unwrapped.values:
-        if value and any(path == served or served in path.parents
-                         for path in _program_path(value, first=False,
-                                                   root=served)):
+    for value, context in unwrapped.values:
+        if inside(named(value, option=value.startswith("-"), first=False,
+                        context=context)):
             return value
     members = unwrapped.command
+    context = unwrapped.context
     positional = False
     for index, member in enumerate(members):
         if index and member == "--" and not positional:
             positional = True
             continue
-        if index and member.startswith("-") and not positional:
-            candidates = ([member.split("=", 1)[1]] if "=" in member
-                          else [])
-        else:
-            candidates = [member]
-        paths = [path for candidate in candidates if candidate
-                 for path in _program_path(candidate, first=index == 0,
-                                           root=served)]
+        found = named(member, option=bool(index) and member.startswith("-")
+                      and not positional, first=index == 0, context=context)
         if index and members[index - 1] == "-m" and not positional:
-            paths += _module_paths(member, root=served)
-        if any(path == served or served in path.parents for path in paths):
+            found += _module_paths(member, context=context)
+        if inside(found):
             return member
     return None
 
@@ -1018,40 +1104,132 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
 _SHELLS = frozenset({"sh", "bash", "rbash", "zsh", "dash", "ksh", "mksh",
                      "pdksh", "ash", "yash", "posh", "fish", "csh", "tcsh"})
 
-#: Each interpreter, by its file name without a version suffix, and the
-#: letters of a short option cluster that give it an inline script
-#: (`python -c`, `perl -e`, `node -e`/`-p`, `php -r`, `flock FILE -c`,
-#: `su -c`).
-_INLINE_LETTERS: dict[str, str] = {
-    **{shell: "c" for shell in _SHELLS},
-    "python": "c", "pypy": "c", "jython": "c",
-    "perl": "eE", "ruby": "e", "php": "r", "lua": "e", "luajit": "e",
-    "node": "ep", "nodejs": "ep", "bun": "ep", "osascript": "e",
-    "flock": "c", "su": "c", "runuser": "c",
+
+class _Interpreter(NamedTuple):
+    """How a shell or an interpreter reads its own options, as far as the
+    inline-script rule needs (Copilot at openDox-code#86, r4179241583,
+    r4179241614): the short letters that give it an inline script, those
+    that take a value (attached, or the next member), those whose value is
+    only ever attached (the rest of the cluster), and those after which only
+    the program's own operands follow (`python -m`); any other letter, or a
+    digit (`perl -l0e`), is read past; the long options that give an inline script, take
+    a value, or end its options (`pwsh -File`); how many operands it reads
+    before its script (`flock FILE`; None reads every member, as `su` and
+    `pwsh` do); whether `+o` is an option (a shell's); and whether option
+    names are compared without regard to case (PowerShell's)."""
+
+    inline: str = ""
+    takes: str = ""
+    attached: str = ""
+    ends: str = ""
+    longs: frozenset[str] = frozenset()
+    long_values: frozenset[str] = frozenset()
+    long_ends: frozenset[str] = frozenset()
+    operands: int | None = 0
+    plus: bool = False
+    folded: bool = False
+
+
+_SHELL = _Interpreter(inline="c", takes="oO",
+                      long_values=frozenset({"--rcfile", "--init-file"}),
+                      plus=True)
+_NODE = _Interpreter(
+    inline="ep", takes="rC", longs=frozenset({"--eval", "--print"}),
+    long_values=frozenset({
+        "--require", "--import", "--loader", "--experimental-loader",
+        "--conditions", "--input-type", "--env-file", "--title",
+        "--inspect-port", "--redirect-warnings", "--report-dir",
+        "--report-filename", "--stack-trace-limit", "--disable-warning",
+        "--watch-path", "--test-reporter", "--test-reporter-destination",
+        "--openssl-config", "--icu-data-dir", "--dns-result-order",
+        "--unhandled-rejections", "--run"}))
+_PWSH = _Interpreter(
+    longs=frozenset({"-c", "-command", "--command", "-e", "-ec",
+                     "-encodedcommand", "--encodedcommand", "-cwa",
+                     "-commandwithargs"}),
+    long_ends=frozenset({"-f", "-file", "--file"}), operands=None,
+    folded=True)
+_SU = _Interpreter(inline="c", takes="gGswu",
+                   longs=frozenset({"--command", "--session-command"}),
+                   long_values=frozenset({"--shell", "--group", "--supp-group",
+                                          "--whitelist-environment", "--user"}),
+                   operands=None)
+
+#: Each shell and interpreter, by its file name without a version suffix.
+_INTERPRETERS: dict[str, _Interpreter] = {
+    **{shell: _SHELL for shell in _SHELLS},
+    "fish": _Interpreter(
+        inline="cC", longs=frozenset({"--command", "--init-command"}),
+        long_values=frozenset({"--features", "--debug", "--debug-output",
+                               "--profile", "--profile-startup"})),
+    "python": _Interpreter(inline="c", takes="WX", ends="m",
+                           long_values=frozenset(
+                               {"--check-hash-based-pycs"})),
+    "pypy": _Interpreter(inline="c", takes="WX", ends="m"),
+    "jython": _Interpreter(inline="c", takes="WX", ends="m"),
+    "perl": _Interpreter(inline="eE", takes="IMm", attached="ixdDC"),
+    "ruby": _Interpreter(inline="e", takes="IrCE", attached="FKTxW"),
+    "php": _Interpreter(inline="rRBE", takes="cdzt", ends="f"),
+    "lua": _Interpreter(inline="e", takes="l"),
+    "luajit": _Interpreter(inline="e", takes="lj", attached="O", ends="b"),
+    "node": _NODE, "nodejs": _NODE, "bun": _NODE,
+    "osascript": _Interpreter(inline="e", takes="ls"),
+    "flock": _Interpreter(inline="c", takes="wE",
+                          longs=frozenset({"--command"}),
+                          long_values=frozenset({"--timeout", "--wait",
+                                                 "--conflict-exit-code"}),
+                          operands=1),
+    "su": _SU, "runuser": _SU,
+    "pwsh": _PWSH, "powershell": _PWSH,
 }
 
-#: The long options that give an interpreter an inline script, as a member
-#: or as `--option=VALUE`. PowerShell's are matched without regard to case.
-_INLINE_LONG: dict[str, tuple[str, ...]] = {
-    "node": ("--eval", "--print"), "nodejs": ("--eval", "--print"),
-    "bun": ("--eval", "--print"), "fish": ("--command",),
-    "flock": ("--command",), "su": ("--command",), "runuser": ("--command",),
-    "pwsh": ("-c", "-command", "--command", "-e", "-ec", "-encodedcommand",
-             "--encodedcommand", "-cwa", "-commandwithargs"),
-}
-_INLINE_LONG["powershell"] = _INLINE_LONG["pwsh"]
 
-_SHORT_CLUSTER = re.compile(r"-[A-Za-z]+")
+class _Option(NamedTuple):
+    """One option of a launcher: the option it is another name for (its
+    short letter, or its own long name), and what it takes, in getopt's own
+    spelling: "" nothing, ":" a value (attached, or the next member), "::"
+    a value only where attached (after `=` for a long option)."""
+
+    key: str
+    takes: str
 
 
 class _Launcher(NamedTuple):
     """How one launcher reads its own arguments before the command it
-    starts: the short options and the long options that take a value, and
-    how many operands precede the command (`timeout`'s duration)."""
+    starts, as its getopt does (the holder's ruling, openxFactory#656
+    comment 5985046107, C1): its short options and its long options, how
+    many operands precede the command (`timeout`'s duration), and whether a
+    dash and a number is an option (`nice -5`)."""
 
-    short: str = ""
-    long: frozenset[str] = frozenset()
+    short: dict[str, str]
+    long: dict[str, _Option]
     operands: int = 0
+    numeric: bool = False
+
+
+def _launcher(short: str, longs: str = "", *, operands: int = 0,
+              numeric: bool = False) -> _Launcher:
+    """A launcher's grammar from getopt's own spellings: `short` as getopt's
+    option string (`C:` takes a value, `e::` one only attached), and
+    `longs` as its long options, each suffixed as `short` is and followed by
+    `/x` where it is short option x's other name. `--help` and `--version`
+    run no command, so every launcher reads them."""
+    letters: dict[str, str] = {}
+    at = 0
+    while at < len(short):
+        letter = short[at]
+        at += 1
+        takes = ""
+        while at < len(short) and short[at] == ":":
+            takes += ":"
+            at += 1
+        letters[letter] = takes
+    named: dict[str, _Option] = {}
+    for word in ("help version " + longs).split():
+        name, _slash, key = word.partition("/")
+        bare = name.rstrip(":")
+        named[bare] = _Option(key or bare, name[len(bare):])
+    return _Launcher(letters, named, operands, numeric)
 
 
 #: THE COMMON LAUNCHERS (the holder's ruling, openxFactory#656 comment
@@ -1060,116 +1238,237 @@ class _Launcher(NamedTuple):
 #: `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `chrt`, `ionice`,
 #: `taskset`, and wrappers of the same class: `time`, `xargs`, `busybox`
 #: (whose first operand is the applet it runs), `flock`, `sudo`, `doas`.
+#: Each is read by its own getopt grammar, the GNU coreutils, findutils
+#: and util-linux ones where there are several (C1).
 _LAUNCHERS: dict[str, _Launcher] = {
-    "env": _Launcher("uCS", frozenset({"--unset", "--chdir",
-                                        "--split-string"})),
-    "nice": _Launcher("n", frozenset({"--adjustment"})),
-    "nohup": _Launcher(),
-    "timeout": _Launcher("sk", frozenset({"--signal", "--kill-after"}), 1),
-    "stdbuf": _Launcher("ioe", frozenset({"--input", "--output", "--error"})),
-    "setsid": _Launcher(),
-    "chrt": _Launcher("TPD", frozenset({"--sched-runtime", "--sched-period",
-                                        "--sched-deadline"}), 1),
-    "ionice": _Launcher("cnpPu", frozenset({"--class", "--classdata",
-                                            "--pid", "--pgid", "--uid"})),
-    "taskset": _Launcher("", frozenset(), 1),
-    "time": _Launcher("fo", frozenset({"--format", "--output"})),
-    "xargs": _Launcher("adEILnPs", frozenset({
-        "--arg-file", "--delimiter", "--max-lines", "--max-args",
-        "--max-procs", "--max-chars", "--process-slot-var"})),
-    "busybox": _Launcher(),
-    "flock": _Launcher("wE", frozenset({"--timeout", "--wait",
-                                        "--conflict-exit-code"}), 1),
-    "sudo": _Launcher("CDghpRrtTUu", frozenset({
-        "--close-from", "--chdir", "--group", "--host", "--prompt",
-        "--chroot", "--role", "--type", "--command-timeout", "--other-user",
-        "--user"})),
-    "doas": _Launcher("Cu"),
+    "env": _launcher(
+        "a:C:iS:u:v0",
+        "argv0:/a chdir:/C debug/v ignore-environment/i null/0 "
+        "split-string:/S unset:/u block-signal:: default-signal:: "
+        "ignore-signal:: list-signal-handling"),
+    "nice": _launcher("n:", "adjustment:/n", numeric=True),
+    "nohup": _launcher(""),
+    "timeout": _launcher(
+        "fk:ps:v", "foreground/f kill-after:/k preserve-status/p signal:/s "
+        "verbose/v", operands=1),
+    "stdbuf": _launcher("i:o:e:", "input:/i output:/o error:/e"),
+    "setsid": _launcher("cfhVw", "ctty/c fork/f help/h version/V wait/w"),
+    "chrt": _launcher(
+        "abdD:efhimoP:pRrT:vV",
+        "all/a batch/b deadline/d ext/e fifo/f help/h idle/i max/m other/o "
+        "pid/p reset-on-fork/R rr/r sched-deadline:/D sched-period:/P "
+        "sched-runtime:/T verbose/v version/V", operands=1),
+    "ionice": _launcher(
+        "c:hn:p:P:tu:V", "class:/c classdata:/n help/h ignore/t pid:/p "
+        "pgid:/P uid:/u version/V"),
+    "taskset": _launcher("achpV", "all-tasks/a cpu-list/c help/h pid/p "
+                         "version/V", operands=1),
+    "time": _launcher("af:o:pqvV", "append/a format:/f output:/o "
+                      "portability/p quiet/q verbose/v version/V"),
+    "xargs": _launcher(
+        "0a:d:E:e::hI:i::L:l::n:oprs:txP:",
+        "null/0 arg-file:/a delimiter:/d eof::/e replace::/I max-lines::/l "
+        "max-args:/n open-tty/o interactive/p no-run-if-empty/r "
+        "max-chars:/s verbose/t show-limits exit/x max-procs:/P "
+        "process-slot-var: help/h"),
+    "busybox": _launcher(""),
+    "flock": _launcher(
+        "eE:Fhnosuw:xV",
+        "shared/s exclusive/x unlock/u nonblocking/n nb/n timeout:/w "
+        "wait:/w conflict-exit-code:/E close/o no-fork/F verbose help/h "
+        "version/V", operands=1),
+    "sudo": _launcher(
+        "Aa:BbC:c:D:Eeg:Hh::iKklNnPp:R:r:SsT:t:U:u:Vv",
+        "askpass/A auth-type:/a background/b bell/B close-from:/C "
+        "login-class:/c chdir:/D preserve-env:: edit/e group:/g set-home/H "
+        "help/h host: login/i remove-timestamp/K reset-timestamp/k list/l "
+        "non-interactive/n no-update/N preserve-groups/P prompt:/p "
+        "chroot:/R role:/r stdin/S shell/s type:/t command-timeout:/T "
+        "other-user:/U user:/u version/V validate/v"),
+    "doas": _launcher("a:C:Lnsu:"),
 }
+
+#: The options after which what a command names can no longer be judged
+#: from its words (C1, fail-closed): a program told another name to run as
+#: (`env --argv0`), a new root every path is read in (`sudo --chroot`), and
+#: a login shell's working directory, the target user's home (`sudo -i`).
+#: Each makes the command unreadable.
+_UNREADABLE_OPTIONS = frozenset({("env", "a"), ("sudo", "R"), ("sudo", "i")})
+
+#: How deep launchers are unwrapped. A command that still starts with one
+#: past this is refused (`REASON_UNREADABLE_COMMAND`; Copilot at
+#: openDox-code#86, r4179366319).
+_LAUNCHER_DEPTH = 32
 
 #: `env NAME=value`: an assignment, whose value is judged as a path.
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
-class _Unwrapped(NamedTuple):
-    """A broker command with its launchers unwrapped: the launchers'
-    programs, the values of their options and assignments that could name a
-    file (`env -C DIR`, `env NAME=VALUE`), and the command they start.
-    `unreadable` is an `env -S` string that does not split as a shell
-    would, which is judged as an inline script."""
+#: `nice -5`, `nice --5`, `nice -+5`: an adjustment, nice's own option.
+_NUMERIC_OPTION = re.compile(r"-[-+]?[0-9]+")
 
-    launchers: tuple[str, ...]
-    values: tuple[str, ...]
+#: What `env -S` splits only where its string holds none of them (C1): a
+#: backslash escape (`\_` is a space to env and not to a shell's split), a
+#: `${VAR}` env expands, and a `#` that begins env's comment.
+_UNSPLITTABLE = frozenset("\\$#")
+
+
+class _Unwrapped(NamedTuple):
+    """A broker command with its launchers unwrapped: each launcher's
+    program, and each value and operand of theirs (which could name a file:
+    `env -C DIR`, `env NAME=VALUE`, `xargs -a FILE`), with the context each
+    is read in; the command they start, and the context it runs in.
+    `unreadable` is a member that cannot be read to the program it runs: an
+    option its launcher does not have, or has by more than one name, an
+    option after which a name cannot be judged, an `env -S` string env would
+    not split as a shell does, or a launcher still left at
+    `_LAUNCHER_DEPTH`."""
+
+    launchers: tuple[tuple[str, _Context], ...]
+    values: tuple[tuple[str, _Context], ...]
     command: tuple[str, ...]
+    context: _Context
     unreadable: str | None = None
 
 
-def _launcher_name(member: str, *, first: bool, root: Path) -> str | None:
+class _Unreadable(Exception):
+    """A launcher's argument that cannot be read (`_Unwrapped.unreadable`)."""
+
+    def __init__(self, member: str):
+        super().__init__(member)
+        self.member = member
+
+
+def _long_option(grammar: _Launcher, spelled: str) -> _Option | None:
+    """The long option `--spelled` names, as GNU getopt_long reads it: its
+    exact name, or the one option it is an unambiguous beginning of (`--chd`
+    is `--chdir`). None where it names none, or more than one (`--d` may be
+    `--debug` or `--default-signal`)."""
+    exact = grammar.long.get(spelled)
+    if exact is not None:
+        return exact
+    matches = {option for name, option in grammar.long.items()
+               if name.startswith(spelled)}
+    return matches.pop() if len(matches) == 1 else None
+
+
+def _launcher_name(member: str, *, context: _Context) -> str | None:
     """The launcher `member` runs, by the name it is called by or the file
     it resolves to, or None."""
-    for name in _program_names(member, first=first, root=root):
+    for name in _program_names(member, first=True, context=context):
         if name in _LAUNCHERS:
             return name
     return None
 
 
-def _unwrapped(members, *, root: Path) -> _Unwrapped:
-    """`members` with every leading launcher unwrapped (at most 32 deep),
-    each read by its own grammar (`_LAUNCHERS`)."""
+def _launcher_options(name: str, rest: tuple[str, ...], context: _Context,
+                      values: list[tuple[str, _Context]]):
+    """Read launcher `name`'s options from `rest`, as its getopt does:
+    returns how many members they took, the context they leave, and, for
+    `env -S`, the words its string splits into (else None). Each value is
+    added to `values` in the context it is read in. Raises `_Unreadable`."""
+    grammar = _LAUNCHERS[name]
+
+    def given(key: str, value: str | None) -> list[str] | None:
+        nonlocal context
+        if (name, key) in _UNREADABLE_OPTIONS:
+            raise _Unreadable(value if value is not None else key)
+        if name == "env" and key == "i":
+            context = context._replace(path=None)
+        if value is None:
+            return None
+        if name == "env" and key == "S":
+            if _UNSPLITTABLE & set(value):
+                raise _Unreadable(value)
+            try:
+                return shlex.split(value)
+            except ValueError:
+                raise _Unreadable(value) from None
+        values.append((value, context))
+        if (name, key) in (("env", "C"), ("sudo", "D")):
+            # the directory as the system enters it, links followed
+            context = context._replace(cwd=_resolved_path(
+                os.path.join(context.cwd, value)))
+        elif name == "env" and key == "u" and value == "PATH":
+            context = context._replace(path=None)
+        return None
+
+    index = 0
+    while index < len(rest):
+        member = rest[index]
+        if member == "--":
+            return index + 1, context, None
+        if name == "env" and member == "-":         # `env -`: `-i`
+            context = context._replace(path=None)
+            return index + 1, context, None
+        if not member.startswith("-") or member == "-":
+            break
+        index += 1
+        if grammar.numeric and _NUMERIC_OPTION.fullmatch(member):
+            continue
+        if member.startswith("--"):
+            spelled, equals, value = member[2:].partition("=")
+            option = _long_option(grammar, spelled)
+            if option is None or (equals and not option.takes):
+                raise _Unreadable(member)
+            if not equals:
+                value = None
+                if option.takes == ":":
+                    if index == len(rest):
+                        raise _Unreadable(member)
+                    value = rest[index]
+                    index += 1
+            split = given(option.key, value)
+            if split is not None:
+                return index, context, split
+            continue
+        at = 1
+        while at < len(member):
+            letter = member[at]
+            at += 1
+            takes = grammar.short.get(letter)
+            if takes is None:
+                raise _Unreadable(member)
+            if not takes:
+                given(letter, None)
+                continue
+            value = member[at:] or None
+            if value is None and takes == ":":
+                if index == len(rest):
+                    raise _Unreadable(member)
+                value = rest[index]
+                index += 1
+            split = given(letter, value)
+            if split is not None:
+                return index, context, split
+            break
+    return index, context, None
+
+
+def _unwrapped(members) -> _Unwrapped:
+    """`members` with every leading launcher unwrapped (at most
+    `_LAUNCHER_DEPTH` deep), each read by its own grammar (`_LAUNCHERS`),
+    from the context every broker starts in, as each changes it: `env -C`
+    and `sudo -D`/`--chdir` move the working directory, and `env PATH=...`,
+    `env -i` and `env -u PATH` change the search path. Each launcher's
+    operands are judged as its values are."""
     command = tuple(members)
-    launchers: list[str] = []
-    values: list[str] = []
-    for _depth in range(32):
+    context = _broker_context()
+    launchers: list[tuple[str, _Context]] = []
+    values: list[tuple[str, _Context]] = []
+    for _depth in range(_LAUNCHER_DEPTH):
         if not command:
             break
-        name = _launcher_name(command[0], first=True, root=root)
+        name = _launcher_name(command[0], context=context)
         if name is None:
             break
-        grammar = _LAUNCHERS[name]
-        launchers.append(command[0])
+        launchers.append((command[0], context))
         rest = command[1:]
-        split: list[str] | None = None
-        index = 0
-        while index < len(rest):
-            member = rest[index]
-            if member == "--":
-                index += 1
-                break
-            if not member.startswith("-") or member == "-":
-                break
-            value = None
-            if member.startswith("--"):
-                option, equals, given = member.partition("=")
-                if option in grammar.long:
-                    if equals:
-                        value = given
-                    elif index + 1 < len(rest):
-                        index += 1
-                        value = rest[index]
-                    option_name = option
-                else:
-                    option_name = None
-            else:
-                option_name = None
-                for at, letter in enumerate(member[1:], start=1):
-                    if letter in grammar.short:
-                        option_name = "-" + letter
-                        if member[at + 1:]:
-                            value = member[at + 1:]
-                        elif index + 1 < len(rest):
-                            index += 1
-                            value = rest[index]
-                        break
-            index += 1
-            if value is None or option_name is None:
-                continue
-            if name == "env" and option_name in ("-S", "--split-string"):
-                try:
-                    split = shlex.split(value)
-                except ValueError:
-                    return _Unwrapped(tuple(launchers), tuple(values), (),
-                                      unreadable=value)
-            elif name == "env" and option_name in ("-C", "--chdir"):
-                values.append(value)
+        try:
+            index, context, split = _launcher_options(name, rest, context,
+                                                      values)
+        except _Unreadable as unreadable:
+            return _Unwrapped(tuple(launchers), tuple(values), (), context,
+                              unreadable=unreadable.member)
         if split is not None:
             # `env -S STRING`: STRING's words are env's own arguments, read
             # again by env's grammar, before what followed them.
@@ -1178,12 +1477,22 @@ def _unwrapped(members, *, root: Path) -> _Unwrapped:
             continue
         if name == "env":
             while index < len(rest) and _ASSIGNMENT.match(rest[index]):
+                variable, assigned = rest[index].split("=", 1)
                 # A search path's every directory is judged (`PATH=a:b`).
-                values.extend(rest[index].split("=", 1)[1].split(os.pathsep))
+                values.extend((part, context)
+                              for part in assigned.split(os.pathsep))
+                if variable == "PATH":
+                    context = context._replace(path=assigned)
                 index += 1
-        index += grammar.operands
-        command = rest[index:]
-    return _Unwrapped(tuple(launchers), tuple(values), command)
+        operands = rest[index:index + _LAUNCHERS[name].operands]
+        values.extend((operand, context) for operand in operands)
+        command = rest[index + len(operands):]
+    else:
+        if command and _launcher_name(command[0],
+                                      context=context) is not None:
+            return _Unwrapped(tuple(launchers), tuple(values), command,
+                              context, unreadable=command[0])
+    return _Unwrapped(tuple(launchers), tuple(values), command, context)
 
 
 def _unversioned(name: str) -> str:
@@ -1192,38 +1501,73 @@ def _unversioned(name: str) -> str:
     return re.sub(r"[-.\d]+$", "", name) or name
 
 
-def _program_names(member: str, *, first: bool, root: Path) -> set[str]:
+def _program_names(member: str, *, first: bool,
+                   context: _Context) -> set[str]:
     """The names `member` could run as: its own file name and, where it
-    resolves to a file, that file's (`/bin/sh` may be `dash`, and a link
-    named `broker` may be `python3`), each without a version suffix."""
+    names a file (`_located`), that file's, links followed (`/bin/sh` may be
+    `dash`, and a link named `broker` may be `python3`), each without a
+    version suffix."""
     names = {Path(member).name}
-    names.update(path.name for path in _program_path(member, first=first,
-                                                    root=root))
+    names.update(Path(_resolved_path(path)).name for path in _located(
+        member, first=first, context=context))
     return {_unversioned(name) for name in names if name}
 
 
-def _gives_an_inline_script(name: str, rest: tuple[str, ...], *,
-                            first: bool) -> bool:
+def _gives_an_inline_script(name: str, rest: tuple[str, ...]) -> bool:
     """Whether a program named `name`, followed by `rest`, is given an inline
-    script. Only its options are read, up to a `--` member."""
-    options = []
-    for member in rest:
-        if member == "--":
-            break
-        options.append(member)
+    script, read by its own grammar (`_INTERPRETERS`): a short cluster
+    letter by letter, so an attached script (`-cprint(1)`) and a cluster
+    (`-Sc`, `-nle`) are read, and an option's value is skipped; and only
+    until its script's operand, so an option given to the script itself
+    (`python /opt/broker.py -c profile`) is the script's (Copilot at
+    openDox-code#86, r4179241583, r4179241614)."""
     if name == "deno":
         return bool(rest) and rest[0] == "eval"
-    longs = _INLINE_LONG.get(name, ())
-    letters = _INLINE_LETTERS.get(name, "")
-    for member in options:
-        spelled = member.lower() if name in ("pwsh", "powershell") else member
-        if spelled in longs or any(
-                long.startswith("--") and spelled.startswith(long + "=")
-                for long in longs):
-            return True
-        if letters and _SHORT_CLUSTER.fullmatch(member) and any(
-                letter in member[1:] for letter in letters):
-            return True
+    spec = _INTERPRETERS.get(name)
+    if spec is None:
+        return False
+    operands = 0
+    index = 0
+    while index < len(rest):
+        member = rest[index]
+        index += 1
+        if member == "--":
+            return False
+        spelled = member.lower() if spec.folded else member
+        if spelled.startswith("--") or (spec.folded and spelled.startswith(
+                "-") and len(spelled) > 1):
+            option, equals, _given = spelled.partition("=")
+            if option in spec.longs:
+                return True
+            if option in spec.long_ends:
+                return False
+            if option in spec.long_values and not equals:
+                index += 1
+            continue
+        if len(member) > 1 and (member[0] == "-" or (
+                spec.plus and member[0] == "+")):
+            letters = member[1:]
+            at = 0
+            while at < len(letters):
+                letter = letters[at]
+                if letter in spec.inline:
+                    return True
+                if letter in spec.ends:
+                    return False
+                if letter in spec.takes:
+                    if at + 1 == len(letters):
+                        index += 1          # its value is the next member
+                    break
+                if letter in spec.attached:
+                    break
+                at += 1
+            continue
+        if spec.operands is None:
+            continue
+        if operands < spec.operands:
+            operands += 1
+            continue
+        return False                        # the script's own operand
     return False
 
 
@@ -1235,30 +1579,26 @@ def inline_script(members, *, root: Path | str | None = None) -> str | None:
 
     The command is asked with its launchers unwrapped (`_unwrapped`; the
     holder's ruling, openxFactory#656 comment 5984069416), so an `env -S`
-    string is split and read as the command it is, and an `env -S` string
-    that does not split is refused. Every member of the command as written
-    is asked too, not the program alone, so a wrapper of the same class that
-    is not in `_LAUNCHERS` (`busybox sh -c`, `xargs sh -c`, `sudo bash -c`)
-    hides none. A member's name is its own file name and, where it resolves
-    to a file, that file's, each without a version suffix
-    (`_program_names`).
+    string is split and read as the command it is. Every member of the
+    command as written is asked too, not the program alone, so a wrapper of
+    the same class that is not in `_LAUNCHERS` (`busybox sh -c`, `xargs sh
+    -c`, `sudo bash -c`) hides none. A member's name is its own file name
+    and, where it resolves to a file, that file's, each without a version
+    suffix (`_program_names`). `root` is not needed: the rule is the same
+    for every repository.
 
     THE ACCEPTED LIMIT (the same ruling, item 4): a general program that
     runs code from its own arguments, such as `awk 'PROGRAM'`, `sed` or
     `find -exec`, is not judged as an inline script."""
-    where = Path(resolved_root(root)) if root is not None else Path(
-        os.path.abspath(os.sep))
-    unwrapped = _unwrapped(members, root=where)
-    if unwrapped.unreadable is not None:
-        return unwrapped.unreadable
-    for command in (tuple(members), unwrapped.command):
+    unwrapped = _unwrapped(members)
+    for command, context in ((tuple(members), _broker_context()),
+                             (unwrapped.command, unwrapped.context)):
         for index, member in enumerate(command):
             if not member or (index and member.startswith("-")):
                 continue
             for name in _program_names(member, first=index == 0,
-                                       root=where):
-                if _gives_an_inline_script(name, command[index + 1:],
-                                           first=index == 0):
+                                       context=context):
+                if _gives_an_inline_script(name, command[index + 1:]):
                     return member
     return None
 
@@ -1266,11 +1606,14 @@ def inline_script(members, *, root: Path | str | None = None) -> str | None:
 def broker_command_refused(members, *,
                            root: Path | str | None) -> str | None:
     """Why the broker command `members` may never be trusted, or None: it
+    cannot be read to the program it runs (`REASON_UNREADABLE_COMMAND`), it
     gives a shell or an interpreter an inline script
     (`REASON_INLINE_SCRIPT`), or, at a known `root`, it names a file inside
     the served repository (`REASON_IN_REPOSITORY`). Asked where trust is
     recorded and wherever it is judged, and of the console intake's
     broker."""
+    if _unwrapped(members).unreadable is not None:
+        return REASON_UNREADABLE_COMMAND
     if inline_script(members, root=root) is not None:
         return REASON_INLINE_SCRIPT
     if root is not None and in_repository_argv(members,
@@ -1408,19 +1751,35 @@ def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
         "on this machine and nothing was written")
 
 
+#: Why a host's policy cannot take back a trust it recorded: the trust
+#: policy interface records and judges trust, and withdraws none.
+REASON_NO_WITHDRAWAL = (
+    "the trust policy registered here records trust but offers no way to "
+    "withdraw it")
+
+
 def restored_for(binding, *, replacing, root: Path | str) -> None:
-    """After a write that failed, trust `binding` (the form the document
-    still holds) again in place of `replacing` (the form trust was recorded
-    for, for that write), where `binding` was trusted before (T100
-    follow-on, A11). openDox's own store does it only while it still holds
-    `replacing`'s digest, under its lock (`MachineTrust.restore`), so a
-    trust another process recorded meanwhile is never overwritten (Copilot
-    at openDox-code#86, r4179076901). A host's policy is asked to record it
-    again, as `recorded_for` asks. Refused BY NAME where it cannot be done."""
+    """After a write that failed, take back the trust recorded for
+    `replacing` (the form that write would have declared): trust `binding`,
+    the earlier form the document still holds, again in its place where it
+    was trusted before (T100 follow-on, A11), and, where `binding` is None
+    (none was trusted, or the binding is new), withdraw it (the holder's
+    ruling, openxFactory#656 comment 5985046107, C2), so a failed write
+    leaves no trust for a form no document declares.
+
+    openDox's own store does it only while it still holds `replacing`'s
+    digest, under its lock (`MachineTrust.restore`), so a trust another
+    process recorded meanwhile is never overwritten (Copilot at
+    openDox-code#86, r4179076901). A host's policy is asked to record the
+    earlier form again, as `recorded_for` asks; one cannot be asked to
+    withdraw a trust (`REASON_NO_WITHDRAWAL`). Refused BY NAME where it
+    cannot be done."""
     registered = _registered_now()
     if type(registered) is MachineTrust:
         registered.restore(binding, root=root, replacing=replacing)
         return
+    if binding is None:
+        raise TrustNotRecorded(REASON_NO_WITHDRAWAL)
     recorded_for(binding, root=root)
 
 
@@ -1478,15 +1837,22 @@ def intake_verdict_for(binding, *, root: Path | str) -> TrustVerdict:
 # ---------------------------------------------------------------------------
 
 
+#: Why a path of the store's tree is the wrong kind of thing for its place,
+#: where it is no link: what it IS, not what another user could do with it
+#: (the holder's ruling, openxFactory#656 comment 5985046107, C5).
+KIND_NOT_A_DIRECTORY = "is not a directory"
+KIND_NOT_A_REGULAR_FILE = "is not a regular file"
+
+
 def _unsafe_kind(mode: int, *, directory: bool) -> str | None:
     """Why a path is the wrong KIND of thing for its place, or None. A link
     is refused outright."""
     if stat.S_ISLNK(mode):
         return "is a symbolic link"
     if directory and not stat.S_ISDIR(mode):
-        return "is not a directory"
+        return KIND_NOT_A_DIRECTORY
     if not directory and not stat.S_ISREG(mode):
-        return "is not a regular file"
+        return KIND_NOT_A_REGULAR_FILE
     return None
 
 
@@ -1557,7 +1923,13 @@ def _store_failed(state: Path | str, error: OSError, *,
 def _store_refused(path: Path | str, reason: str) -> TrustStoreRefused:
     """A store refused for what ANOTHER USER could do with it: a link, an
     owner or a mode (the tree checks). Only those say so (T100 follow-on,
-    A7); every other refusal names its own cause (`_store_unusable`)."""
+    A7); every other refusal names its own cause (`_store_unusable`). So a
+    path that is the wrong kind of thing for its place and no link (a
+    directory, a FIFO or a socket where the store belongs) names what it is,
+    with the move-aside recovery (the holder's ruling, openxFactory#656
+    comment 5985046107, C5)."""
+    if reason in (KIND_NOT_A_DIRECTORY, KIND_NOT_A_REGULAR_FILE):
+        return _store_unusable(path, reason, RECOVER_MOVE_ASIDE)
     return TrustStoreRefused(
         f"the model-binding trust store refuses {shown(str(path))}: it "
         f"{reason}, so "
@@ -1953,12 +2325,13 @@ class MachineTrust:
                                         basis=BASIS_MACHINE_TRUST)
 
     def restore(self, binding, *, root: Path | str, replacing) -> bool:
-        """Trust `binding` at `root` again IN PLACE OF `replacing`, and only
-        while the store still holds `replacing`'s digest for its id: one
-        read, comparison and write under the store's lock (Copilot at
-        openDox-code#86, r4179076901). A failed edit asks this, so a trust
-        another process recorded meanwhile stands. Returns whether the
-        store was changed."""
+        """Trust `binding` at `root` again IN PLACE OF `replacing`, or, where
+        `binding` is None, withdraw `replacing`'s trust (C2), and only while
+        the store still holds `replacing`'s digest for its id: one read,
+        comparison and write under the store's lock (Copilot at
+        openDox-code#86, r4179076901). A failed add or edit asks this, so a
+        trust another process recorded meanwhile stands. Returns whether
+        the store was changed."""
         key_root = resolved_root(root)
         held_for = (key_root, replacing.id)
         with self._lock:
@@ -1972,7 +2345,9 @@ class MachineTrust:
                     if entries.get(held_for) != binding_digest(replacing):
                         return False
                     del entries[held_for]
-                    entries[(key_root, binding.id)] = binding_digest(binding)
+                    if binding is not None:
+                        entries[(key_root, binding.id)] = binding_digest(
+                            binding)
                     self._write(state, entries)
             except OSError as error:
                 raise _store_failed(state, error, writing=True) from None

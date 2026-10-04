@@ -679,8 +679,15 @@ class DeclarationStore:
                 link=binding_mod.shown_path(link)))
 
     def _load(self) -> tuple[BrokerDeclaration | None, list[ModelDeclaration]]:
-        self._refuse_a_link()
-        if not self.path.is_file():
+        try:
+            # Refused BY NAME before the read too (Copilot at
+            # openDox-code#86, r4179241603).
+            self._refuse_a_link()
+            present = binding_mod.document_present(self.path)
+        except OSError as error:
+            raise IntakeRefused(binding_mod.cannot_read(
+                self.path, "declarations document", error)) from None
+        if not present:
             # THE HOSTED PATH, and the reason the import below is lazy: an
             # install with no declarations answers here and never needs a YAML
             # parser at all.

@@ -88,6 +88,34 @@ def _cannot_write(store: "binding_mod.BindingStore", error: OSError) -> str:
             "nothing in it changed")
 
 
+#: How to recover where a failed write's trust could not be taken back.
+RECOVER_FAILED_UNDOING = (
+    "This machine now trusts a form of the binding that no document "
+    "declares: run the same command again once the document can be written, "
+    "which declares that form")
+
+
+def _undone(refusal: "binding_mod.BindingRefused", *, earlier, written,
+            args: argparse.Namespace) -> "binding_mod.BindingRefused":
+    """`refusal`, for a write that failed after trust was recorded for
+    `written`, once that trust is taken back (the holder's ruling,
+    openxFactory#656 comment 5985046107, C2; T100 follow-on, A11): the
+    earlier form trusted again where it was trusted (`earlier`), and the
+    new form's trust withdrawn where it was not (`earlier` None), so a failed
+    write leaves no trust for a form no document declares. Where that
+    cannot be done, the refusal says so, and how to recover."""
+    try:
+        trust_mod.restored_for(earlier, replacing=written,
+                               root=_repo_root(args))
+    except binding_mod.BindingRefused as undoing:
+        what = ("the trust its earlier form held could not be restored"
+                if earlier is not None else
+                "the trust just recorded for it could not be withdrawn")
+        return binding_mod.BindingRefused(
+            f"{refusal}; and {what}: {undoing}. {RECOVER_FAILED_UNDOING}")
+    return refusal
+
+
 def _trusted_line(binding: "binding_mod.ModelProviderBinding", verdict) -> str:
     return (f"  trusted {trust_mod.shown(binding.id)} on this machine for "
             f"{trust_mod.shown(verdict.root)}")
@@ -257,8 +285,9 @@ def cmd_model_binding_add(args: argparse.Namespace) -> int:
     THE TRUST IS RECORDED FIRST, once the binding is known to be new, so a
     store that refuses (a state directory inside the served repository, a
     link, a writable file) leaves NOTHING written (T007 batch M). A write
-    that fails after it leaves a trust for a binding never declared, which
-    trusts nothing that exists."""
+    that fails after it WITHDRAWS that trust (the holder's ruling,
+    openxFactory#656 comment 5985046107, C2), so no form no document
+    declares stays trusted (`_undone`)."""
     store = _binding_store(args)
     try:
         binding = _declared_binding(args)
@@ -267,9 +296,11 @@ def cmd_model_binding_add(args: argparse.Namespace) -> int:
         verdict = _record_trust(binding, args)
         try:
             store.add(binding)
-        except OSError as error:
-            raise binding_mod.BindingRefused(
-                _cannot_write(store, error)) from None
+        except (binding_mod.BindingRefused, OSError) as error:
+            refusal = (binding_mod.BindingRefused(_cannot_write(store, error))
+                       if isinstance(error, OSError) else error)
+            raise _undone(refusal, earlier=None, written=binding,
+                          args=args) from None
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -288,11 +319,13 @@ def cmd_model_binding_edit(args: argparse.Namespace) -> int:
     A WRITE THAT FAILS AFTER THE TRUST WAS RECORDED UNDOES IT (T100
     follow-on, A11). The store holds one form per binding, so recording the
     new form untrusted the old one; where the old form was trusted, it is
-    trusted again, so a failed edit changes neither the document (its write
-    is atomic) nor what this machine trusts. The undoing never overwrites a
-    trust recorded meanwhile (`doxbench_trust.restored_for`, Copilot at
+    trusted again, and where it was not, the new form's trust is withdrawn
+    (the holder's ruling, openxFactory#656 comment 5985046107, C2), so a
+    failed edit changes neither the document (its write is atomic) nor what
+    this machine trusts (`_undone`). The undoing never overwrites a trust
+    recorded meanwhile (`doxbench_trust.restored_for`, Copilot at
     openDox-code#86, r4179076901). The refusal names the write's cause,
-    never a raw error."""
+    never a raw error, and says so where the undoing failed too."""
     store = _binding_store(args)
     try:
         binding = _declared_binding(args)
@@ -307,15 +340,8 @@ def cmd_model_binding_edit(args: argparse.Namespace) -> int:
         except (binding_mod.BindingRefused, OSError) as error:
             refusal = (binding_mod.BindingRefused(_cannot_write(store, error))
                        if isinstance(error, OSError) else error)
-            if was_trusted:
-                try:
-                    trust_mod.restored_for(existing, replacing=binding,
-                                           root=_repo_root(args))
-                except binding_mod.BindingRefused as restoring:
-                    raise binding_mod.BindingRefused(
-                        f"{refusal}; and the trust its earlier form held "
-                        f"could not be restored: {restoring}") from None
-            raise refusal from None
+            raise _undone(refusal, earlier=existing if was_trusted else None,
+                          written=binding, args=args) from None
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1

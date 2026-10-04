@@ -315,8 +315,10 @@ DIAG_PROVIDER_REDIRECTED = (
 #: interpreter it runs, finds relative to its working directory (a relative
 #: path, `python -m`'s first import) can be a file a pull changes, whatever
 #: directory the console was started from. Defence in depth beneath
-#: `doxbench_trust.broker_refusal`, which refuses such a command outright.
-BROKER_WORKING_DIRECTORY = os.path.abspath(os.sep)
+#: `doxbench_trust.broker_refusal`, which refuses such a command outright,
+#: and judges it from this very directory (one constant, the trust
+#: module's, so the two cannot disagree).
+BROKER_WORKING_DIRECTORY = trust_mod.BROKER_WORKING_DIRECTORY
 
 #: The variables that name a working directory, which a broker's
 #: environment never carries (the holder's ruling, openxFactory#656 comment
