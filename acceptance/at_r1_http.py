@@ -942,6 +942,11 @@ class JsStrings:
             elif src.startswith("${", j):
                 self._close_text(resume, "".join(buf), j + 2)
                 self.interpolations.append((self.depth, tagged))
+                # An EXPRESSION starts here, so a `/` opens a regular
+                # expression, as after any `{` (Copilot review of
+                # openDox-code#75 at 0717f72f, r4179220628).
+                self.code.append("${")
+                self.last = "{"
                 return
             else:
                 buf.append(src[j])
@@ -1142,6 +1147,16 @@ class _IndexLinks(_LivePage):
         self.inline_modules = 0
 
     def live_tag(self, tag, named):
+        # `html.unescape` decodes `&copy=2` in an attribute; a browser keeps
+        # a reference with no `;` before `=` or a letter or digit as text, so
+        # the two read different URLs. Refused by name, as the opener's
+        # refresh is (Copilot review of openDox-code#75 at 0717f72f,
+        # r4179220641).
+        if tag in self.WATCHED and _UNTERMINATED_REFERENCE.search(
+                self.get_starttag_text() or ""):
+            self.unmodeled.append(f"a <{tag}> whose attributes hold a "
+                                  "character reference with no `;`")
+            return
         if tag == "script":
             kind = script_type(named)
             if kind == "importmap":
@@ -1193,8 +1208,10 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 def plane_origin(port: int, host: str = "127.0.0.1") -> str:
     """The origin of the page the harness loads: the loopback host the
     opener's forward names (`127.0.0.1` for `/` itself), on the launched
-    plane's port."""
-    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
+    plane's port. Plain HTTP, as the plane serves on loopback only, and the
+    host is one `token_in_fragment` admitted from `LOOPBACK_HOSTS`."""
+    netloc = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    return urllib.parse.urlunsplit(("http", netloc, "", "", ""))
 
 
 def _origin_of(url: str) -> tuple | None:

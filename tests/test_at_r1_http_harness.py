@@ -2590,8 +2590,11 @@ def test_a_line_comment_ends_where_javascript_ends_it(source: str) -> None:
      [("/views/deep.js", False)], set()),
     ('const t = `${x}`;\nimport "./after.js";\n',
      [("/views/after.js", True)], set()),
+    ('const t = `${/}/.test("}") ? await import("./child.js") : ""}`;\n',
+     [("/views/child.js", False)], set()),
 ], ids=["dynamic-import", "brace-in-a-string-and-an-object",
-        "nested-template", "code-after-the-template"])
+        "nested-template", "code-after-the-template",
+        "regular-expression-first"])
 def test_a_template_s_interpolation_is_read_as_code(
         source: str, queued: list, routes: set) -> None:
     pending: collections.deque = collections.deque()
@@ -2601,10 +2604,17 @@ def test_a_template_s_interpolation_is_read_as_code(
     assert found == routes
 
 
-def test_a_dependency_imported_inside_an_interpolation_is_judged() -> None:
-    """Copilot's example: the child, imported only inside `${…}`, imports a
-    module that is missing, which the browser's import fails on."""
-    files = {"/app.js": (JS, 'const t = `${await import("./child.js")}`;\n'),
+@pytest.mark.parametrize("app", [
+    'const t = `${await import("./child.js")}`;\n',
+    'const t = `${/}/.test("}") ? await import("./child.js") : ""}`;\n',
+], ids=["import", "after-a-regular-expression"])
+def test_a_dependency_imported_inside_an_interpolation_is_judged(
+        app: str) -> None:
+    """Copilot's examples (r4179115282, and r4179220628, where a `/` opens
+    the interpolation as a regular expression holding a `}`): the child,
+    imported only inside `${…}`, imports a module that is missing, which the
+    browser's import fails on."""
+    files = {"/app.js": (JS, app),
              "/child.js": (JS, 'import "./missing.js";\n')}
     verdict = harness.Verdict(keep_going=True)
     with served(files) as port:
@@ -2708,3 +2718,38 @@ def test_a_page_reference_is_resolved_against_the_page() -> None:
                   "</head></html>", {}, verdict, "t", page="/index.html")
     assert _failures(verdict) == []
     assert modules == 1
+
+
+@pytest.mark.parametrize("head, served_as, expected", [
+    (f'{_ENTRY}<script type="module" src="./app.js?v=1&copy=2"></script>',
+     None, ["t.bundle.unmodeled"]),
+    (f'{_ENTRY}<link rel="stylesheet" href="./s.css?v=1&copy=2">',
+     None, ["t.bundle.unmodeled"]),
+    ('<script type="module" src="./app.js?v=1&amp;copy=2"></script>',
+     ("/app.js?v=1&copy=2", (JS, "export const x = 1;\n")), []),
+    (f'<link rel="stylesheet" href="./s.css?v=1&amp;copy=2">{_ENTRY}',
+     ("/s.css?v=1&copy=2", ("text/css", "")), []),
+], ids=["script-unterminated", "sheet-unterminated", "script-escaped",
+        "sheet-escaped"])
+def test_a_page_reference_with_an_unterminated_reference_is_refused(
+        head: str, served_as, expected: list) -> None:
+    """`html.unescape` reads `&copy=2` as `\u00a9=2`; a browser keeps it as
+    text in an attribute, so the two would fetch different URLs (Copilot
+    review of #75 at 0717f72f, r4179220641). `&amp;copy=2` is read alike."""
+    files = {"/app.js": (JS, "export const x = 1;\n")}
+    if served_as is not None:
+        files[served_as[0]] = served_as[1]
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, f"<html><head>{head}</head></html>", {},
+                              verdict, "t")
+    assert _failures(verdict) == expected
+
+
+@pytest.mark.parametrize("host, origin", [
+    ("127.0.0.1", "http://127.0.0.1:8080"),
+    ("localhost", "http://localhost:8080"),
+    ("::1", "http://[::1]:8080"),
+], ids=["ipv4", "localhost", "ipv6"])
+def test_a_page_s_origin_brackets_an_ipv6_host(host: str, origin: str) -> None:
+    assert harness.plane_origin(8080, host) == origin
