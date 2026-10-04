@@ -232,6 +232,10 @@ CONSOLE_RECORD_ID = "opendox-console"
 CONSOLE_RECORD_KIND = "opendox-console-access"
 CONSOLE_RECORD_SCHEMA_VERSION = 1
 OPENER_MODE = 0o600
+#: The most of an opener the harness reads, and it reads it whole: a larger
+#: file is refused by name, never judged by a truncated prefix. T104's is
+#: about one kilobyte.
+OPENER_READ_LIMIT = 64 * 1024
 #: The opener's directory, `console/`, exactly (quickstart.md § 3; T104).
 OPENER_DIRECTORY_MODE = 0o700
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
@@ -559,9 +563,35 @@ def get(port: int, target: str, *, token: str | None = None) -> Answer:
                       {k.lower(): v for k, v in response.getheaders()},
                       body, None)
     except (OSError, http.client.HTTPException) as exc:
-        return Answer(None, {}, b"", f"{type(exc).__name__}: {exc}")
+        return Answer(None, {}, b"", error_name(exc))
     finally:
         conn.close()
+
+
+def error_name(exc: BaseException) -> str:
+    """A failed request, named without the text the peer sent: the error's
+    type, and the operating system's own words where it has them. An
+    `http.client` error's message quotes the server's status line or
+    headers, which may carry the token (Copilot review of openDox-code#75
+    at 82869769, r4177924097, carried to every answer)."""
+    strerror = exc.strerror if isinstance(exc, OSError) else None
+    return f"{type(exc).__name__}: {strerror}" if strerror else type(exc).__name__
+
+
+#: A plain MIME type essence, the only `Content-Type` a reason quotes.
+_PLAIN_MEDIA_TYPE = re.compile(r"[a-z0-9!#$&^_.+-]{1,64}/[a-z0-9!#$&^_.+-]{1,64}")
+
+
+def shown_type(answer: Answer) -> str:
+    """The answer's `Content-Type` for a reason: its essence where it is a
+    plain MIME type, and otherwise not quoted, as it is the server's own
+    bytes (r4177924097)."""
+    if "content-type" not in answer.headers:
+        return "no Content-Type"
+    essence = media_type(answer)
+    if _PLAIN_MEDIA_TYPE.fullmatch(essence):
+        return repr(essence)
+    return "a Content-Type that is no plain MIME type (not quoted)"
 
 
 def listening(host: str, port: int) -> bool:
@@ -727,17 +757,50 @@ class _IndexLinks(html.parser.HTMLParser):
             self.sheets.append(a["href"])
 
 
+#: The origin a reference is resolved against where no server is named (a
+#: route literal, which is a path). `derive_bundle` resolves the module
+#: graph against the RUNNING server's own origin (`plane_origin`).
 _SAME_ORIGIN = "http://loopback"
+#: What a reference this harness cannot parse resolves to: never a path.
+UNPARSEABLE_PREFIX = "unparseable:"
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
-def _resolve(base: str, ref: str) -> str:
+def plane_origin(port: int) -> str:
+    """The origin of the page the harness loads: the loopback address it
+    fetches `/` from, on the launched plane's port."""
+    return f"http://127.0.0.1:{port}"
+
+
+def _origin_of(url: str) -> tuple | None:
+    """`(scheme, host, port)` of `url` as the URL standard compares origins
+    (a default port made explicit), or `None` where it has no host or no
+    readable port, which no same-origin check admits."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port or _DEFAULT_PORTS.get(parts.scheme)
+    except ValueError:
+        return None
+    if not parts.hostname:
+        return None
+    return parts.scheme, parts.hostname, port
+
+
+def _resolve(base: str, ref: str, origin: str = _SAME_ORIGIN) -> str:
     """`ref` resolved against `base` as a browser resolves it on this plane:
     a same-origin path (with its query), or, for anything that leaves the
     plane, the whole absolute URL, which never starts with `/` (Copilot
-    review of openDox-code#75 at 142d1352, previously missed)."""
-    joined = urllib.parse.urljoin(_SAME_ORIGIN + base, ref)
-    parts = urllib.parse.urlsplit(joined)
-    if f"{parts.scheme}://{parts.netloc}" != _SAME_ORIGIN:
+    review of openDox-code#75 at 142d1352, previously missed). Same-origin
+    is the RUNNING server's origin, so an absolute
+    `http://127.0.0.1:<port>/app.js` is a path of this plane, as it is to
+    the browser (Copilot review of openDox-code#75 at 82869769,
+    r4177924129). A reference no parser here can read is never a path."""
+    try:
+        joined = urllib.parse.urljoin(origin + base, ref)
+        parts = urllib.parse.urlsplit(joined)
+    except ValueError:
+        return UNPARSEABLE_PREFIX + ref
+    if _origin_of(joined) != _origin_of(origin):
         return joined
     return parts.path + (f"?{parts.query}" if parts.query else "")
 
@@ -746,15 +809,17 @@ def _external(where: str) -> bool:
     return not where.startswith("/")
 
 
-def _graph_roots(index_html: str, capabilities: dict) -> tuple[list, list]:
+def _graph_roots(index_html: str, capabilities: dict,
+                 origin: str = _SAME_ORIGIN) -> tuple[list, list]:
     links = _IndexLinks()
     links.feed(index_html)
-    roots = [(_resolve("/", m), True, "/") for m in links.modules]
+    roots = [(_resolve("/", m, origin), True, "/") for m in links.modules]
     for view in as_list(as_object(capabilities.get("views")).get("views")):
         module = as_object(view).get("module")
         if isinstance(module, str) and module:
-            roots.append((_resolve("/", module), True, "/capabilities"))
-    return roots, [_resolve("/", sheet) for sheet in links.sheets]
+            roots.append((_resolve("/", module, origin), True,
+                          "/capabilities"))
+    return roots, [_resolve("/", sheet, origin) for sheet in links.sheets]
 
 
 #: The JavaScript MIME type essences the HTML standard lists, as
@@ -805,9 +870,8 @@ def _judge_module(answer: Answer, path: str, static: bool, importer: str,
             f"{label}.bundle.module-type {path}",
             media_type(answer) in JAVASCRIPT_TYPES,
             f"{path}, imported {'statically' if static else 'dynamically'} "
-            f"by {importer}, is served as "
-            f"{answer.headers.get('content-type')!r}, which a browser "
-            "refuses for a module script")
+            f"by {importer}, is served as {shown_type(answer)}, which a "
+            "browser refuses for a module script")
 
 
 #: A bare module specifier (`import "child.js"`), marked so: with no import
@@ -819,24 +883,26 @@ BARE_PREFIX = "bare:"
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
-def _specifier(importer: str, value: str) -> str:
+def _specifier(importer: str, value: str,
+               origin: str = _SAME_ORIGIN) -> str:
     """A module specifier as a browser with no import map resolves it: the
     resolved path or URL, or `bare:<specifier>` where it throws."""
     if value.startswith(("/", "./", "../")) or _URL_SCHEME.match(value):
-        return _resolve(importer, value)
+        return _resolve(importer, value, origin)
     return BARE_PREFIX + value
 
 
 def _scan_module(path: str, body: bytes, pending: collections.deque,
-                 routes: set[str], literals: set[str] | None = None) -> None:
+                 routes: set[str], literals: set[str] | None = None,
+                 origin: str = _SAME_ORIGIN) -> None:
     for _quote, value, before in JsStrings(
             body.decode("utf-8", "replace")).scan():
         if literals is not None:
             literals.add(value)
         if _DYNAMIC_IMPORT_CONTEXT.search(before):
-            pending.append((_specifier(path, value), False, path))
+            pending.append((_specifier(path, value, origin), False, path))
         elif _STATIC_IMPORT_CONTEXT.search(before):
-            pending.append((_specifier(path, value), True, path))
+            pending.append((_specifier(path, value, origin), True, path))
         elif _PATH_LITERAL.match(value) and not _MODULE_OR_SHEET.search(value):
             routes.add(_resolve("/", value))
 
@@ -848,7 +914,8 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
     the server, and return `(routes, modules)`: every same-origin path
     literal the graph names, and how many modules it holds. Every string
     literal of the graph is added to `literals` where one is given."""
-    roots, sheets = _graph_roots(index_html, capabilities)
+    origin = plane_origin(port)
+    roots, sheets = _graph_roots(index_html, capabilities, origin)
     for sheet in sheets:
         if _external(sheet):
             verdict.check(
@@ -866,8 +933,8 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
                 f"{label}.bundle.sheet-type {sheet}",
                 media_type(answer) == STYLESHEET_TYPE,
                 f"the stylesheet `/` links is served as "
-                f"{answer.headers.get('content-type')!r}, which a "
-                "standards-mode page does not apply as CSS")
+                f"{shown_type(answer)}, which a standards-mode page does not "
+                "apply as CSS")
     # Each path is FETCHED and scanned once, but JUDGED once per way it is
     # imported: a module refused as a dynamic import must still answer 200
     # where another module imports it statically (Copilot review of
@@ -905,7 +972,8 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
         answer = answers[path]
         _judge_module(answer, path, static, importer, verdict, label)
         if first and answer.status == 200:
-            _scan_module(path, answer.body, pending, routes, literals)
+            _scan_module(path, answer.body, pending, routes, literals,
+                         origin)
     modules = sum(1 for answer in answers.values() if answer.status == 200)
     return sorted(routes), modules
 
@@ -1275,8 +1343,8 @@ def check_pages(server: Server, index: Answer,
     verdict.check(f"{label}.http / is HTML",
                   "<html" in page.lower()
                   and "text/html" in index.headers.get("content-type", ""),
-                  f"`/` answered {index.headers.get('content-type')!r} "
-                  "without an <html> element")
+                  f"`/` answered {shown_type(index)}, not text/html with an "
+                  "<html> element")
     snapshot, _raw = fetch_object(server, "/snapshot.json", verdict)
     documents = snapshot.get("documents")
     verdict.check(f"{label}.snapshot non-empty",
@@ -1672,25 +1740,32 @@ def opener_unsafe_because(path: Path) -> tuple[Path, str] | None:
     return tree_unsafe_because(path.parent.parent)
 
 
-def _read_without_following(path: Path, limit: int = 64 * 1024) -> str:
+def _read_without_following(path: Path,
+                            limit: int = OPENER_READ_LIMIT) -> str:
     """The file at `path`, opened without following a link and WITHOUT
     BLOCKING, and read only if what opened is a regular file: a FIFO with no
     writer would otherwise hang the harness before its verdict and its
     cleanup (Copilot review of openDox-code#75 at 27479495, previously
-    missed)."""
+    missed). Read WHOLE, or refused: a file past `limit` bytes is an error,
+    never a truncated page whose checks would judge only its first part,
+    while a browser reads it all (Copilot review of openDox-code#75 at
+    82869769, r4177924060)."""
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise OSError(errno.EINVAL, "not a regular file")
         chunks, size = [], 0
-        while size < limit:
-            chunk = os.read(descriptor, limit - size)
+        while size <= limit:
+            chunk = os.read(descriptor, limit + 1 - size)
             if not chunk:
                 break
             chunks.append(chunk)
             size += len(chunk)
     finally:
         os.close(descriptor)
+    if size > limit:
+        raise OSError(errno.EFBIG, f"larger than the {limit} bytes this "
+                      "harness reads whole")
     return b"".join(chunks).decode("utf-8", "replace")
 
 
@@ -1912,9 +1987,13 @@ def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
     catalog = get(server.port, CATALOG_ROUTE, token=token)
     asked = ("with the console token" if token else
              "with no console token to present (step 6 found none)")
+    # No reason here quotes the catalog's body: it answers a request that
+    # carries the token, so it may echo it, escaped in ways no literal
+    # redaction finds (Copilot review of openDox-code#75 at 82869769,
+    # r4177924097).
     verdict.check(f"{label}.catalog answers", catalog.status == 200,
                   f"{CATALOG_ROUTE} {asked} answers "
-                  f"{catalog.describe()}: {catalog.body[:300]!r}")
+                  f"{catalog.describe()} (its body is not quoted)")
     if catalog.status != 200:
         return
     # The payload's SHAPE is a named check, never a harness error: `[]`,
@@ -1922,12 +2001,15 @@ def check_catalog(server: Server, token: str | None, verdict: Verdict) -> None:
     # of openDox-code#75, r4170450491).
     try:
         payload = catalog.json()
+        shape = (f"its `models` is a {type(payload['models']).__name__}"
+                 if isinstance(payload, dict) and "models" in payload else
+                 f"it is JSON, a {type(payload).__name__}")
     except ValueError:
-        payload = None
+        payload, shape = None, "it is not JSON"
     models = as_object(payload).get("models")
     verdict.check(f"{label}.catalog is a catalog", isinstance(models, list),
-                  f"{CATALOG_ROUTE} answered no models[]: "
-                  f"{catalog.body[:300]!r}")
+                  f"{CATALOG_ROUTE} answered no models[]: {shape} (its body "
+                  "is not quoted)")
     # THE ENVELOPE THE RAIL ADOPTS, or it shows "the catalog could not be
     # read" and never its no-model state (Copilot review of
     # openDox-code#75, at f0e0ffe1). JavaScript's `=== 1` admits no `true`

@@ -52,7 +52,13 @@ is installed or started:
     any depth, nor by value (T007 batch N);
   * the chat rail's thread read is never asked with a query, as a standalone
     plane's rail sends none, and the plane must contribute no branch-session
-    column (openDox-code#85, the T102 follow-on).
+    column (openDox-code#85, the T102 follow-on);
+  * the opener is read whole or refused, never judged by a truncated prefix
+    (Copilot review of #75 at 82869769, r4177924060); no reason quotes the
+    server's own bytes: a catalog body, a peer's error text, a `Content-Type`
+    that is no plain MIME type (r4177924097); and the module graph resolves
+    against the running server's origin, so an absolute same-origin URL is a
+    path of this plane (r4177924129).
 """
 
 from __future__ import annotations
@@ -88,10 +94,10 @@ harness = _load_harness()
 
 @contextlib.contextmanager
 def served(files: dict[str, tuple[str, str]], guarded: frozenset = frozenset()):
-    """A loopback server answering `files` (`path -> (content type, body)`),
-    and 404 for anything else. A path in `guarded` answers 403 to a request
-    without the console header, as the product's console check does. Yields
-    its port."""
+    """A loopback server answering `files` (`path -> (content type, body)`,
+    or `(content type, body, status)`), and 404 for anything else. A path in
+    `guarded` answers 403 to a request without the console header, as the
+    product's console check does. Yields its port."""
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
@@ -108,7 +114,7 @@ def served(files: dict[str, tuple[str, str]], guarded: frozenset = frozenset()):
                 self.end_headers()
                 return
             body = entry[1].encode("utf-8")
-            self.send_response(200)
+            self.send_response(entry[2] if len(entry) > 2 else 200)
             if entry[0]:
                 self.send_header("Content-Type", entry[0])
             self.send_header("Content-Length", str(len(body)))
@@ -1281,8 +1287,9 @@ def test_the_harness_refuses_a_tmpdir_others_can_change(
 
 def test_a_catalog_answer_that_echoes_the_token_never_prints_it(
         tmp_path: Path, capsys) -> None:
-    """The catalog is asked with the token, so its answer may echo it; the
-    token the opener carried is kept out of every line from then on."""
+    """The catalog is asked with the token, so its answer may echo it, and
+    no line quotes any of the answer's content (Copilot review of #75 at
+    82869769, r4177924097)."""
     state, opener = _opener(tmp_path)
     echo = json.dumps({"error": f"unknown token {TOKEN}"})
     files = {harness.CATALOG_ROUTE: ("application/json", echo)}
@@ -1293,10 +1300,37 @@ def test_a_catalog_answer_that_echoes_the_token_never_prints_it(
     with served(files, guarded=frozenset({harness.CATALOG_ROUTE})) as port:
         harness.check_catalog(_Server(port), token, verdict)
     verdict.report()
+    out = capsys.readouterr().out
     assert "t.catalog is a catalog" in _failures(verdict)
-    assert any(harness.REDACTED in failure.why for failure in verdict.failures)
-    assert not any(TOKEN in str(failure) for failure in verdict.failures)
-    assert TOKEN not in capsys.readouterr().out
+    assert not any("unknown token" in str(failure)
+                   for failure in verdict.failures)
+    assert "unknown token" not in out and TOKEN not in out
+
+
+#: The token with every character a JSON `\u` escape, which no literal
+#: redaction finds and any reader decodes (r4177924097).
+_ESCAPED_ECHO = '{"error": "unknown token %s"}' % "".join(
+    f"\\u{ord(c):04x}" for c in TOKEN)
+
+
+@pytest.mark.parametrize("status, failure", [
+    (200, "t.catalog is a catalog"),
+    (403, "t.catalog answers"),
+], ids=["malformed-200", "refused-403"])
+def test_a_catalog_answer_s_body_is_never_quoted(capsys, status: int,
+                                                 failure: str) -> None:
+    files = {harness.CATALOG_ROUTE: ("application/json", _ESCAPED_ECHO,
+                                     status)}
+    verdict = harness.Verdict(keep_going=True)
+    verdict.keep_secret(TOKEN)
+    with served(files) as port:
+        harness.check_catalog(_Server(port), TOKEN, verdict)
+    verdict.report()
+    out = capsys.readouterr().out
+    assert failure in _failures(verdict)
+    assert not any("\\u00" in str(failed) or "unknown token" in str(failed)
+                   for failed in verdict.failures)
+    assert "\\u00" not in out and "unknown token" not in out
 
 
 def test_every_token_the_opener_carries_is_kept_secret(tmp_path: Path) -> None:
@@ -1566,3 +1600,121 @@ def test_step_8_asserts_the_rail_reads_no_thread(tmp_path: Path) -> None:
         harness.check_routes(_quiet_server(tmp_path, port), _HTML_INDEX,
                              _SNAPSHOT, caps, None, verdict)
     assert "t.chat rail reads no thread (no branch session)" in _failures(verdict)
+
+
+# ---------------------------------------------------------------------------
+# Copilot review of #75 at 82869769: the opener is read whole or refused
+# (r4177924060); no reason quotes the server's own bytes (r4177924097); the
+# module graph resolves against the running server's origin (r4177924129).
+# ---------------------------------------------------------------------------
+
+def _padded_to(page: str, size: int) -> str:
+    """`page` with an HTML comment before its end, making it `size` bytes."""
+    pad = size - len(page.encode("utf-8")) - len("<!---->")
+    assert pad >= 0
+    return page.replace("</html>", f"<!--{'x' * pad}--></html>")
+
+
+def test_an_opener_past_the_read_limit_is_refused_never_truncated(
+        tmp_path: Path) -> None:
+    """A valid page within the limit, and a second record past it: read
+    whole, the opener holds two records; truncated, it held one."""
+    limit = harness.OPENER_READ_LIMIT
+    page = _opener_page(FORWARD)
+    head = _padded_to(page, limit).replace("</html>\n", "")
+    oversized = head + "</html>\n" + _record_script(_record())
+    assert len(head.encode("utf-8")) < limit < len(oversized.encode("utf-8"))
+    state, opener = _opener(tmp_path, oversized)
+    verdict = harness.Verdict(keep_going=True)
+    _path, token = harness.check_console_opener(
+        "t", PORT, _printed(opener), state, tmp_path / "repo", verdict,
+        hosts=SERVED)
+    assert _failures(verdict) == [FRAGMENT]
+    assert token is None
+    assert f"larger than the {limit} bytes" in verdict.failures[0].why
+
+
+def test_an_opener_of_exactly_the_read_limit_is_read(tmp_path: Path) -> None:
+    page = _padded_to(_opener_page(FORWARD), harness.OPENER_READ_LIMIT)
+    assert len(page.encode("utf-8")) == harness.OPENER_READ_LIMIT
+    state, opener = _opener(tmp_path, page)
+    failures, _path, token = _read(state, _printed(opener))
+    assert failures == []
+    assert token == TOKEN
+
+
+def test_a_failed_request_is_named_without_the_server_s_bytes() -> None:
+    import http.client
+    line = f"HTTP/1.1 999 {TOKEN}"
+    assert harness.error_name(http.client.BadStatusLine(line)) == "BadStatusLine"
+    assert harness.error_name(
+        ConnectionRefusedError(111, "Connection refused")) == (
+        "ConnectionRefusedError: Connection refused")
+    assert harness.error_name(TimeoutError()) == "TimeoutError"
+
+
+@pytest.mark.parametrize("value, shown", [
+    ("text/javascript; charset=utf-8", "'text/javascript'"),
+    ("Text/HTML", "'text/html'"),
+    (None, "no Content-Type"),
+    ('text/x-\\u0041"; x=1', "a Content-Type that is no plain MIME type "
+                            "(not quoted)"),
+    ("text/" + "%41" * 3, "a Content-Type that is no plain MIME type "
+                          "(not quoted)"),
+], ids=["with-charset", "upper-case", "absent", "escaped", "percent"])
+def test_a_content_type_is_quoted_only_as_a_plain_mime_type(value,
+                                                           shown: str) -> None:
+    headers = {} if value is None else {"content-type": value}
+    assert harness.shown_type(harness.Answer(200, headers, b"", None)) == shown
+
+
+@pytest.mark.parametrize("make", [
+    lambda port: f'import "http://127.0.0.1:{port}/child.js";\n',
+    lambda port: f'import("http://127.0.0.1:{port}/child.js");\n',
+    lambda port: f'import "//127.0.0.1:{port}/child.js";\n',
+], ids=["static-absolute", "dynamic-absolute", "protocol-relative"])
+def test_an_absolute_same_origin_import_is_a_path_of_this_plane(make) -> None:
+    files = {"/child.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        files["/app.js"] = (JS, make(port))
+        _routes, modules = harness.derive_bundle(
+            port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == []
+    assert modules == 2
+
+
+def test_an_absolute_same_origin_stylesheet_is_a_path_of_this_plane() -> None:
+    files = {"/app.js": (JS, "export const x = 1;\n"),
+             "/styles.css": ("text/plain", "body { margin: 0; }\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        page = ('<html><head><link rel="stylesheet" '
+                f'href="http://127.0.0.1:{port}/styles.css">'
+                '<script type="module" src="./app.js"></script></head></html>')
+        harness.derive_bundle(port, page, {}, verdict, "t")
+    # fetched and judged as this plane's own sheet, never as external
+    assert _failures(verdict) == ["t.bundle.sheet-type /styles.css"]
+
+
+@pytest.mark.parametrize("make, expected", [
+    (lambda port: f'import "http://localhost:{port}/child.js";\n',
+     lambda port: f"t.bundle.external http://localhost:{port}/child.js"),
+    (lambda port: f'import "http://127.0.0.1:{port + 1}/child.js";\n',
+     lambda port: f"t.bundle.external http://127.0.0.1:{port + 1}/child.js"),
+    (lambda port: f'import "https://127.0.0.1:{port}/child.js";\n',
+     lambda port: f"t.bundle.external https://127.0.0.1:{port}/child.js"),
+    (lambda port: 'import "http://[broken/child.js";\n',
+     lambda port: "t.bundle.external unparseable:http://[broken/child.js"),
+], ids=["another-host", "another-port", "another-scheme", "unparseable"])
+def test_an_import_from_another_origin_is_still_external(make,
+                                                         expected) -> None:
+    files = {"/child.js": (JS, "export const x = 1;\n")}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        files["/app.js"] = (JS, make(port))
+        _routes, modules = harness.derive_bundle(
+            port, _page("./app.js"), {}, verdict, "t")
+        wanted = expected(port)
+    assert _failures(verdict) == [wanted]
+    assert modules == 1
