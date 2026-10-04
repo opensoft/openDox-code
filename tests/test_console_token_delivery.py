@@ -3679,3 +3679,28 @@ def test_a_server_outlives_no_killed_run(tmp_path) -> None:
             middle.kill()
             middle.wait(10)
         middle.stdout.close()
+
+
+def test_a_partly_written_copy_is_refused_by_its_place(tmp_path) -> None:
+    """A file in the copies' directory is refused by its identity even when
+    it holds no whole record: a copy caught part way through its write has
+    the token and not yet the end of its element, so it cannot be known by
+    what it holds, only by where it is. Hard-linked under a served root, it
+    is still never read out."""
+    from opendox import console_access, serve
+
+    state = _state(tmp_path)
+    copy = _write(state)
+    text = copy.path.read_text(encoding="utf-8")
+    token = console_access.read_private_copy(copy.path)["console_token"]
+    partial = copy.path.parent / f".{copy.path.name}.opendox-424242"
+    partial.write_text(text[:text.index(token) + len(token)], encoding="utf-8")
+    partial.chmod(0o600)
+    served = tmp_path / "served"
+    served.mkdir()
+    os.link(partial, served / "partial.md")
+    with open(served / "partial.md", "rb") as stream:
+        assert not console_access._carries_a_console_record(
+            stream.fileno(), os.fstat(stream.fileno())), "the case is vacuous"
+    assert serve.read_unless_private(served / "partial.md", (copy.path.parent,)) is None
+    console_access.remove_private_copy(copy)
