@@ -42,6 +42,7 @@ A CREATED FILE: no carve-manifest row (RULED OQ-C).
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import http.server
 import io
 import json
@@ -2232,7 +2233,9 @@ def _post_an_approval(served, binding_id: str) -> dict:
 
 
 @pytest.mark.parametrize("judged_by", ["strict-default", "strict-default-trusted",
-                                       "host", "nothing-registered"])
+                                       "host", "nothing-registered",
+                                       "unservable-strict-default",
+                                       "unservable-host"])
 def test_an_approval_says_available_only_where_the_binding_is_trusted(
         served, judged_by):
     """The trust-state walk, at the console's approval. Approval is a
@@ -2242,12 +2245,21 @@ def test_an_approval_says_available_only_where_the_binding_is_trusted(
     host whose policy admits the binding (a governed host's approval) and a
     binding this machine trusts read as before. Where nothing is registered,
     the act registers nothing and reads no store: no binding has been judged
-    trusted in that process."""
+    trusted in that process.
+
+    A binding the catalog cannot list (its label past the catalog's bound,
+    written after the intake) is approved and still unusable under ANY
+    policy, and trust cannot repair it, so the result names the remedy and
+    no command that trusts (Copilot at openDox-code#82, r4175203889)."""
     trust_mod = _trust_mod()
     _caps, answer = _served_intake(served, host_policy=_AdmitsTheIntake())
     assert answer.get("error") is None, answer
+    if judged_by.startswith("unservable-"):
+        store = binding_mod.BindingStore(binding_mod.bindings_path(
+            served.repo))
+        store.edit(dataclasses.replace(served.declared(), label="L" * 201))
     trust_mod.unregister()
-    if judged_by == "host":
+    if judged_by.endswith("host"):
         trust_mod.register(_AdmitsTheIntake())
     elif judged_by != "nothing-registered":
         trust_mod.register(served.trust)
@@ -2255,7 +2267,11 @@ def test_an_approval_says_available_only_where_the_binding_is_trusted(
             served.trust.record(served.declared(), root=served.repo)
     approval = _post_an_approval(served, BINDING_ID)
     assert approval.get("ok") is True, approval
-    if judged_by in ("strict-default", "nothing-registered"):
+    if judged_by.startswith("unservable-"):
+        assert "model-binding trust" not in approval["availability"]
+        assert approval["availability"] == (
+            trust_mod.APPROVED_UNSERVABLE_NOTICE)
+    elif judged_by in ("strict-default", "nothing-registered"):
         assert approval["availability"] != intake_mod.APPROVAL_NOTICE
         assert approval["availability"] == (
             trust_mod.APPROVED_UNTRUSTED_NOTICE)
@@ -2264,28 +2280,60 @@ def test_an_approval_says_available_only_where_the_binding_is_trusted(
     assert trust_mod.is_registered() == (judged_by != "nothing-registered")
 
 
-@pytest.mark.parametrize("sentence", ["UNTRUSTED_TURN_MESSAGE",
-                                      "UNTRUSTED_BINDING_REMEDY",
-                                      "APPROVED_UNTRUSTED_NOTICE"])
+#: Each fixed sentence that quotes a `model-binding` command, with the verbs
+#: it quotes in full (with their arguments) and those it only names.
+FIXED_SENTENCES = {
+    "UNTRUSTED_TURN_MESSAGE": (["list", "trust"], []),
+    "UNTRUSTED_BINDING_REMEDY": (["list", "trust"], []),
+    "APPROVED_UNTRUSTED_NOTICE": (["list", "trust"], []),
+    "UNSERVABLE_TURN_MESSAGE": (["list"], ["edit"]),
+    "APPROVED_UNSERVABLE_NOTICE": (["list"], ["edit", "remove"]),
+    "REMEDY_UNSERVABLE": ([], ["edit", "remove"]),
+}
+
+
+@pytest.mark.parametrize("sentence", sorted(FIXED_SENTENCES))
 def test_each_command_a_fixed_sentence_quotes_is_one_the_verb_takes(
         served, sentence):
     """The trust-state walk. A fixed sentence (a refused turn's, the rail's,
     an approval's) names no repository and no binding, so it quotes each
     command with placeholders. Filled in, each is one `opendox` parses:
     `--repo-root` is required by every `model-binding` verb, and a sentence
-    that left it out would send the operator to a usage error."""
+    that left it out would send the operator to a usage error. A sentence for
+    a binding the catalog cannot list quotes no `trust` (r4175203889): it only
+    names the verbs that correct a binding."""
     import re
     import shlex
 
     text = getattr(_trust_mod(), sentence)
+    in_full, named = FIXED_SENTENCES[sentence]
     quoted = re.findall(r'"(opendox [^"]*)"', text)
-    assert sorted(command.split()[2] for command in quoted) == [
-        "list", "trust"]
+    assert sorted(command.split()[2] for command in quoted) == sorted(
+        in_full + named)
     for command in quoted:
+        if command.split()[2] in named:
+            assert command == f"opendox model-binding {command.split()[2]}"
+            continue
         argv = shlex.split(command.replace(
             "<repository>", str(served.repo)).replace("<id>", BINDING_ID))
         args = cli_mod.build_parser().parse_args(argv[1:])
         assert Path(args.repo_root) == served.repo
+
+
+@pytest.mark.parametrize("sentence", ["UNTRUSTED_TURN_MESSAGE",
+                                      "UNSERVABLE_TURN_MESSAGE"])
+def test_each_turn_sentence_fits_the_released_failure_envelope(sentence):
+    """A refused turn's sentence rides the RELEASED failure envelope, whose
+    `message` the schema bounds; one past it would fail the envelope's own
+    validation and lose its cause. Read from the released schema."""
+    import yaml
+
+    schema = yaml.safe_load((REPO_ROOT / "src" / "opendox" / "contracts"
+                             / "schemas"
+                             / "xfactory-workbench-chat-turn.schema.yaml"
+                             ).read_text(encoding="utf-8"))
+    bound = schema["$defs"]["failure_v2"]["properties"]["message"]
+    assert 1 <= len(getattr(_trust_mod(), sentence)) <= bound["maxLength"]
 
 
 # ===========================================================================
@@ -2493,10 +2541,15 @@ class _EveryKind(dict):
         return _Conforms()
 
 
-def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served):
+@pytest.mark.parametrize("binding", ["untrusted", "unservable"])
+def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served,
+                                                                   binding):
     """A served turn naming the untrusted binding is refused
     `model_unavailable` with the fixed sentence that says how to trust it,
-    and nothing is contacted."""
+    and nothing is contacted. Where the catalog cannot list the binding (a
+    label past its bound), trust cannot help, so the sentence names the
+    remedy and no command that trusts (Copilot at openDox-code#82,
+    r4175203889)."""
     import http.client
 
     from opendox import doxbench_hash, serve
@@ -2508,7 +2561,9 @@ def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served):
                             / "plain-documents", served.tmp / "turn")
     git(repo, "config", "user.name", "fixture")
     git(repo, "config", "user.email", "fixture@example.invalid")
-    served.hand_write(served.record("env"), root=repo)
+    served.hand_write(served.record(
+        "env", **({"label": "L" * 201} if binding == "unservable" else {})),
+        root=repo)
     out = served.tmp / "turn-out" / "snapshot.json"
     generated, status = run_module(
         served.tmp, "opendox.cli", "generate", "--repo-root", str(repo),
@@ -2566,5 +2621,11 @@ def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served):
         httpd.server_close()
         worker.join(timeout=10)
     assert body.get("error") == DOXBENCH_ERR_MODEL_UNAVAILABLE, body
-    assert body.get("message") == _trust_mod().UNTRUSTED_TURN_MESSAGE, body
+    if binding == "unservable":
+        assert "model-binding trust" not in body.get("message", ""), body
+        assert body.get("message") == _trust_mod().UNSERVABLE_TURN_MESSAGE, (
+            body)
+    else:
+        assert body.get("message") == _trust_mod().UNTRUSTED_TURN_MESSAGE, (
+            body)
     served.nothing_was_touched()

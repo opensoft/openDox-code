@@ -128,6 +128,7 @@ except ImportError:     # pragma: no cover - exercised through _lock_exclusively
     fcntl = None
 
 __all__ = [
+    "APPROVED_UNSERVABLE_NOTICE",
     "APPROVED_UNTRUSTED_NOTICE",
     "BASIS_CATALOG",
     "BASIS_HOST",
@@ -139,6 +140,7 @@ __all__ = [
     "TrustPolicyNotRegistered",
     "TrustStoreRefused",
     "TrustVerdict",
+    "UNSERVABLE_TURN_MESSAGE",
     "UNTRUSTED_TURN_MESSAGE",
     "UntrustedBindingPort",
     "INTAKE_BROKER_UNTRUSTED",
@@ -157,6 +159,7 @@ __all__ = [
     "shown",
     "trust_command",
     "trust_remedy",
+    "turn_message_for",
     "unregister",
     "unservable_because",
 ]
@@ -250,11 +253,16 @@ REASON_UNSERVABLE = (
     f"to {doxbench_model.LABEL_MAX_LENGTH} characters and not blank, so no "
     "chat turn could use it")
 
-#: What an operator is told to do about such a binding. Trust cannot help, so
-#: no command that trusts it is printed.
+#: What an operator is told to do about such a binding: the ACTUAL remedy.
+#: Trust cannot help (`recorded_for` refuses such a binding), so no command
+#: that trusts it is printed. The binding is corrected instead, by the verbs
+#: that declare one, and each records trust for what it writes (Copilot at
+#: openDox-code#82, r4175203889).
 REMEDY_UNSERVABLE = (
-    "Trusting it cannot make it usable: declare it again with an id and a "
-    "label the model catalog accepts, then trust that binding")
+    "Trusting it cannot make it usable: correct it so the model catalog "
+    "accepts its id and its label, with \"opendox model-binding edit\" "
+    "(the same id) or \"opendox model-binding remove\" and then \"add\" (a "
+    "new id), each of which records trust for what it writes")
 
 
 def unsupported_platform() -> str | None:
@@ -308,6 +316,21 @@ UNTRUSTED_TURN_MESSAGE = (
     "model-binding trust --repo-root <repository> <id>\", and restart this "
     "console")
 
+#: What a refused chat turn says when the binding this install declares is
+#: one the model catalog cannot list (`REASON_UNSERVABLE`), so its port lists
+#: nothing (Copilot at openDox-code#82, r4175203889). Trust cannot repair it,
+#: so this sentence, unlike `UNTRUSTED_TURN_MESSAGE`, names no command that
+#: trusts: it names the remedy. A FIXED sentence, as that one is, and held
+#: within the released failure envelope's `message` bound (500 characters).
+UNSERVABLE_TURN_MESSAGE = (
+    "the model binding this install declares cannot be used, because the "
+    "model catalog cannot list its id or its label, so nothing was sent and "
+    "nothing was contacted. Trusting it cannot help. Run \"opendox "
+    "model-binding list --repo-root <repository>\" to see which binding, "
+    "correct it with \"opendox model-binding edit\" (the same id) or "
+    "\"remove\" and \"add\" (a new id), each of which records trust for "
+    "what it writes, and restart this console")
+
 
 #: What the chat rail says when the catalog lists a declared model and none is
 #: available (#1144 16.3a; RULED openxFactory#656 comment 5962785556, item 2,
@@ -344,6 +367,22 @@ APPROVED_UNTRUSTED_NOTICE = (
     "showing what it would run and where it would connect; then restart this "
     "console. The credential remains in the broker's custody and this act "
     "neither mints nor reads one")
+
+#: What the console's model approval answers when the binding it approved is
+#: one the model catalog cannot list (`REASON_UNSERVABLE`): approved, and
+#: still unusable, and trust cannot repair it, so this names the remedy and
+#: no command that trusts (Copilot at openDox-code#82, r4175203889). Whatever
+#: policy is registered: a host's cannot make it usable either. A FIXED
+#: sentence.
+APPROVED_UNSERVABLE_NOTICE = (
+    "the model is approved for this console, but the model catalog cannot "
+    "list its binding's id or its label, so no chat turn can use it, and "
+    "trusting it cannot help: \"opendox model-binding list --repo-root "
+    "<repository>\" shows which binding and why; correct it with \"opendox "
+    "model-binding edit\" (the same id) or \"opendox model-binding remove\" "
+    "and then \"add\" (a new id), each of which records trust for what it "
+    "writes, then restart this console. The credential remains in the "
+    "broker's custody and this act neither mints nor reads one")
 
 #: What the console intake's hand-off is refused with when the trust policy
 #: does not admit the binding it is declaring (#1144 16.3a, T007 batch M). A
@@ -1316,6 +1355,22 @@ class UntrustedBindingPort:
 
     def __repr__(self) -> str:
         return f"<model binding {shown(self._verdict.binding_id)} not trusted>"
+
+
+def turn_message_for(port: object) -> str | None:
+    """The FIXED sentence a chat turn is refused with where `port` is the
+    refusing port the factory declared, or None for any other port (#1144
+    16.3a). A binding the catalog cannot list gets `UNSERVABLE_TURN_MESSAGE`,
+    which names its remedy, and every other untrusted binding
+    `UNTRUSTED_TURN_MESSAGE`, which names the command that trusts it. Telling
+    the operator to trust a binding `recorded_for` will never record would
+    send them to a command that cannot help (Copilot at openDox-code#82,
+    r4175203889)."""
+    if not isinstance(port, UntrustedBindingPort):
+        return None
+    if port.verdict.reason == REASON_UNSERVABLE:
+        return UNSERVABLE_TURN_MESSAGE
+    return UNTRUSTED_TURN_MESSAGE
 
 
 # ---------------------------------------------------------------------------

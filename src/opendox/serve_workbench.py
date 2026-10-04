@@ -1407,6 +1407,12 @@ class WorkbenchRoutes:
         and openDox's strict default, until the binding is trusted, answers
         `doxbench_trust.APPROVED_UNTRUSTED_NOTICE`.
 
+        A BINDING THE MODEL CATALOG CANNOT LIST is judged first, under any
+        policy, and answers `doxbench_trust.APPROVED_UNSERVABLE_NOTICE`: no
+        policy can make it usable and `trust` refuses it, so the result names
+        the remedy and no command that trusts (Copilot at openDox-code#82,
+        r4175203889). That judgement reads no store.
+
         ASKED OF A REGISTERED POLICY ONLY. This act is not one of the
         consumers that register openDox's default (`doxbench_trust.policy`),
         so where nothing is registered no binding has been judged trusted in
@@ -1414,6 +1420,8 @@ class WorkbenchRoutes:
         store no consumer has asked for."""
         from opendox import doxbench_intake
         from opendox import doxbench_trust
+        if doxbench_trust.unservable_because(binding) is not None:
+            return doxbench_trust.APPROVED_UNSERVABLE_NOTICE
         if (doxbench_trust.is_registered()
                 and doxbench_trust.verdict_for(
                     binding, root=Path(self.checkout_root)).admits(binding)):
@@ -2000,16 +2008,14 @@ class WorkbenchRoutes:
             # A BINDING NOT TRUSTED ON THIS MACHINE SAYS SO (#1144 16.3a): its
             # port is `doxbench_trust.UntrustedBindingPort`, and the refusal
             # carries that module's FIXED sentence, which names no binding and
-            # no path. The catalog's shape is closed, so this is where a turn
-            # reads why.
+            # no path: how to trust it, or, for a binding the catalog cannot
+            # list, how to correct it, since trust cannot (r4175203889). The
+            # catalog's shape is closed, so this is where a turn reads why.
             from opendox import doxbench_trust
             self._refuse_turn(
                 validators, DOXBENCH_ERR_MODEL_UNAVAILABLE, turn_id,
                 failure_kind=failure_kind,
-                message=(doxbench_trust.UNTRUSTED_TURN_MESSAGE
-                         if isinstance(port,
-                                       doxbench_trust.UntrustedBindingPort)
-                         else None))
+                message=doxbench_trust.turn_message_for(port))
             return
 
         effective_input_limit = doxbench_model.effective_limit_bytes(
