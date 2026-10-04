@@ -118,6 +118,7 @@ import sys
 import threading
 from collections.abc import Mapping
 from pathlib import Path
+from typing import NamedTuple
 from typing import Any
 
 from opendox import doxbench_binding as binding_mod
@@ -299,7 +300,12 @@ REMEDY_IN_REPOSITORY = (
 #: (Recommended)"). The script is text, not a file a review can pin, and it
 #: can run whatever the repository holds (`/bin/sh -c "exec
 #: ./tools/broker.py"`), so the program must be a real file outside the
-#: served repository.
+#: served repository. A launcher (`env`, `nice`, `timeout`, ...) is unwrapped
+#: to the program it starts, and that program is judged (the holder's
+#: ruling, openxFactory#656 comment 5984069416). THE ACCEPTED LIMIT (same
+#: ruling, item 4): a general program that runs code from its own arguments
+#: (`awk`, `sed`, `find -exec`, and the like) is not judged as an inline
+#: script.
 REASON_INLINE_SCRIPT = (
     "its broker command gives a shell or an interpreter an inline script, "
     "which is no file a review can pin and can run whatever the repository "
@@ -969,9 +975,25 @@ def in_repository_program(binding, *, root: Path | str) -> str | None:
 def in_repository_argv(members, *, root: Path | str) -> str | None:
     """The member of a broker command `members` that names a file inside
     the served repository, or None: `in_repository_program`'s rule, for a
-    command no binding carries yet (the console intake's broker)."""
+    command no binding carries yet (the console intake's broker).
+
+    Its launchers are unwrapped first (`_unwrapped`; the holder's ruling,
+    openxFactory#656 comment 5984069416): each launcher's own program, and
+    each value of its that could name a file (`env -C DIR`, `env
+    NAME=VALUE`), are judged, and the command it starts is judged as a
+    command of its own, so its program is found as `PATH` finds it."""
     served = Path(resolved_root(root))
-    members = tuple(members)
+    unwrapped = _unwrapped(members, root=served)
+    for launcher in unwrapped.launchers:
+        if any(path == served or served in path.parents
+               for path in _program_path(launcher, first=True, root=served)):
+            return launcher
+    for value in unwrapped.values:
+        if value and any(path == served or served in path.parents
+                         for path in _program_path(value, first=False,
+                                                   root=served)):
+            return value
+    members = unwrapped.command
     positional = False
     for index, member in enumerate(members):
         if index and member == "--" and not positional:
@@ -998,13 +1020,14 @@ _SHELLS = frozenset({"sh", "bash", "rbash", "zsh", "dash", "ksh", "mksh",
 
 #: Each interpreter, by its file name without a version suffix, and the
 #: letters of a short option cluster that give it an inline script
-#: (`python -c`, `perl -e`, `node -e`/`-p`, `php -r`, `env -S`).
+#: (`python -c`, `perl -e`, `node -e`/`-p`, `php -r`, `flock FILE -c`,
+#: `su -c`).
 _INLINE_LETTERS: dict[str, str] = {
     **{shell: "c" for shell in _SHELLS},
     "python": "c", "pypy": "c", "jython": "c",
     "perl": "eE", "ruby": "e", "php": "r", "lua": "e", "luajit": "e",
     "node": "ep", "nodejs": "ep", "bun": "ep", "osascript": "e",
-    "env": "S",
+    "flock": "c", "su": "c", "runuser": "c",
 }
 
 #: The long options that give an interpreter an inline script, as a member
@@ -1012,17 +1035,155 @@ _INLINE_LETTERS: dict[str, str] = {
 _INLINE_LONG: dict[str, tuple[str, ...]] = {
     "node": ("--eval", "--print"), "nodejs": ("--eval", "--print"),
     "bun": ("--eval", "--print"), "fish": ("--command",),
-    "env": ("--split-string",),
+    "flock": ("--command",), "su": ("--command",), "runuser": ("--command",),
     "pwsh": ("-c", "-command", "--command", "-e", "-ec", "-encodedcommand",
              "--encodedcommand", "-cwa", "-commandwithargs"),
 }
 _INLINE_LONG["powershell"] = _INLINE_LONG["pwsh"]
 
-#: Programs whose own first operand IS a script, unless a file is named for
-#: it (`-f FILE`), judged where they are the command's program.
-_SCRIPT_OPERAND = frozenset({"awk", "gawk", "mawk", "nawk", "sed"})
-
 _SHORT_CLUSTER = re.compile(r"-[A-Za-z]+")
+
+
+class _Launcher(NamedTuple):
+    """How one launcher reads its own arguments before the command it
+    starts: the short options and the long options that take a value, and
+    how many operands precede the command (`timeout`'s duration)."""
+
+    short: str = ""
+    long: frozenset[str] = frozenset()
+    operands: int = 0
+
+
+#: THE COMMON LAUNCHERS (the holder's ruling, openxFactory#656 comment
+#: 5984069416, items 1 and 3), each unwrapped to the program it starts so
+#: the rules judge that program: `env` (with `-S` and `NAME=value`),
+#: `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `chrt`, `ionice`,
+#: `taskset`, and wrappers of the same class: `time`, `xargs`, `busybox`
+#: (whose first operand is the applet it runs), `flock`, `sudo`, `doas`.
+_LAUNCHERS: dict[str, _Launcher] = {
+    "env": _Launcher("uCS", frozenset({"--unset", "--chdir",
+                                        "--split-string"})),
+    "nice": _Launcher("n", frozenset({"--adjustment"})),
+    "nohup": _Launcher(),
+    "timeout": _Launcher("sk", frozenset({"--signal", "--kill-after"}), 1),
+    "stdbuf": _Launcher("ioe", frozenset({"--input", "--output", "--error"})),
+    "setsid": _Launcher(),
+    "chrt": _Launcher("TPD", frozenset({"--sched-runtime", "--sched-period",
+                                        "--sched-deadline"}), 1),
+    "ionice": _Launcher("cnpPu", frozenset({"--class", "--classdata",
+                                            "--pid", "--pgid", "--uid"})),
+    "taskset": _Launcher("", frozenset(), 1),
+    "time": _Launcher("fo", frozenset({"--format", "--output"})),
+    "xargs": _Launcher("adEILnPs", frozenset({
+        "--arg-file", "--delimiter", "--max-lines", "--max-args",
+        "--max-procs", "--max-chars", "--process-slot-var"})),
+    "busybox": _Launcher(),
+    "flock": _Launcher("wE", frozenset({"--timeout", "--wait",
+                                        "--conflict-exit-code"}), 1),
+    "sudo": _Launcher("CDghpRrtTUu", frozenset({
+        "--close-from", "--chdir", "--group", "--host", "--prompt",
+        "--chroot", "--role", "--type", "--command-timeout", "--other-user",
+        "--user"})),
+    "doas": _Launcher("Cu"),
+}
+
+#: `env NAME=value`: an assignment, whose value is judged as a path.
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+class _Unwrapped(NamedTuple):
+    """A broker command with its launchers unwrapped: the launchers'
+    programs, the values of their options and assignments that could name a
+    file (`env -C DIR`, `env NAME=VALUE`), and the command they start.
+    `unreadable` is an `env -S` string that does not split as a shell
+    would, which is judged as an inline script."""
+
+    launchers: tuple[str, ...]
+    values: tuple[str, ...]
+    command: tuple[str, ...]
+    unreadable: str | None = None
+
+
+def _launcher_name(member: str, *, first: bool, root: Path) -> str | None:
+    """The launcher `member` runs, by the name it is called by or the file
+    it resolves to, or None."""
+    for name in _program_names(member, first=first, root=root):
+        if name in _LAUNCHERS:
+            return name
+    return None
+
+
+def _unwrapped(members, *, root: Path) -> _Unwrapped:
+    """`members` with every leading launcher unwrapped (at most 32 deep),
+    each read by its own grammar (`_LAUNCHERS`)."""
+    command = tuple(members)
+    launchers: list[str] = []
+    values: list[str] = []
+    for _depth in range(32):
+        if not command:
+            break
+        name = _launcher_name(command[0], first=True, root=root)
+        if name is None:
+            break
+        grammar = _LAUNCHERS[name]
+        launchers.append(command[0])
+        rest = command[1:]
+        split: list[str] | None = None
+        index = 0
+        while index < len(rest):
+            member = rest[index]
+            if member == "--":
+                index += 1
+                break
+            if not member.startswith("-") or member == "-":
+                break
+            value = None
+            if member.startswith("--"):
+                option, equals, given = member.partition("=")
+                if option in grammar.long:
+                    if equals:
+                        value = given
+                    elif index + 1 < len(rest):
+                        index += 1
+                        value = rest[index]
+                    option_name = option
+                else:
+                    option_name = None
+            else:
+                option_name = None
+                for at, letter in enumerate(member[1:], start=1):
+                    if letter in grammar.short:
+                        option_name = "-" + letter
+                        if member[at + 1:]:
+                            value = member[at + 1:]
+                        elif index + 1 < len(rest):
+                            index += 1
+                            value = rest[index]
+                        break
+            index += 1
+            if value is None or option_name is None:
+                continue
+            if name == "env" and option_name in ("-S", "--split-string"):
+                try:
+                    split = shlex.split(value)
+                except ValueError:
+                    return _Unwrapped(tuple(launchers), tuple(values), (),
+                                      unreadable=value)
+            elif name == "env" and option_name in ("-C", "--chdir"):
+                values.append(value)
+        if split is not None:
+            # `env -S STRING`: STRING's words are env's own arguments, read
+            # again by env's grammar, before what followed them.
+            launchers.pop()
+            command = (command[0],) + tuple(split) + rest[index:]
+            continue
+        if name == "env":
+            while index < len(rest) and _ASSIGNMENT.match(rest[index]):
+                # A search path's every directory is judged (`PATH=a:b`).
+                values.extend(rest[index].split("=", 1)[1].split(os.pathsep))
+                index += 1
+        index += grammar.operands
+        command = rest[index:]
+    return _Unwrapped(tuple(launchers), tuple(values), command)
 
 
 def _unversioned(name: str) -> str:
@@ -1050,11 +1211,6 @@ def _gives_an_inline_script(name: str, rest: tuple[str, ...], *,
         if member == "--":
             break
         options.append(member)
-    if name in _SCRIPT_OPERAND:
-        return first and bool(rest) and not any(
-            member in ("-f", "--file") or member.startswith("--file=")
-            or (_SHORT_CLUSTER.fullmatch(member) and "f" in member[1:])
-            for member in rest)
     if name == "deno":
         return bool(rest) and rest[0] == "eval"
     longs = _INLINE_LONG.get(name, ())
@@ -1077,20 +1233,33 @@ def inline_script(members, *, root: Path | str | None = None) -> str | None:
     extended; RULED by Brett Heap, openxFactory#656 comment 5983805990,
     "Refuse inline scripts (Recommended)").
 
-    Every member is asked, not the program alone, so a wrapper (`env sh -c`,
-    `timeout 5 bash -c`, `busybox sh -c`) hides none. A member's name is its
-    own file name and, where it resolves to a file, that file's, each
-    without a version suffix (`_program_names`)."""
-    members = tuple(members)
+    The command is asked with its launchers unwrapped (`_unwrapped`; the
+    holder's ruling, openxFactory#656 comment 5984069416), so an `env -S`
+    string is split and read as the command it is, and an `env -S` string
+    that does not split is refused. Every member of the command as written
+    is asked too, not the program alone, so a wrapper of the same class that
+    is not in `_LAUNCHERS` (`busybox sh -c`, `xargs sh -c`, `sudo bash -c`)
+    hides none. A member's name is its own file name and, where it resolves
+    to a file, that file's, each without a version suffix
+    (`_program_names`).
+
+    THE ACCEPTED LIMIT (the same ruling, item 4): a general program that
+    runs code from its own arguments, such as `awk 'PROGRAM'`, `sed` or
+    `find -exec`, is not judged as an inline script."""
     where = Path(resolved_root(root)) if root is not None else Path(
         os.path.abspath(os.sep))
-    for index, member in enumerate(members):
-        if not member or (index and member.startswith("-")):
-            continue
-        for name in _program_names(member, first=index == 0, root=where):
-            if _gives_an_inline_script(name, members[index + 1:],
-                                       first=index == 0):
-                return member
+    unwrapped = _unwrapped(members, root=where)
+    if unwrapped.unreadable is not None:
+        return unwrapped.unreadable
+    for command in (tuple(members), unwrapped.command):
+        for index, member in enumerate(command):
+            if not member or (index and member.startswith("-")):
+                continue
+            for name in _program_names(member, first=index == 0,
+                                       root=where):
+                if _gives_an_inline_script(name, command[index + 1:],
+                                           first=index == 0):
+                    return member
     return None
 
 

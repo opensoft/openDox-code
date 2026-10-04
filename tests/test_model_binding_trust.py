@@ -4071,8 +4071,13 @@ INLINE = {
     "env-split-string": ["env", "-S", "sh -c x"],
     "timeout-wrapped": ["timeout", "5", "bash", "-c", "x"],
     "busybox-wrapped": ["busybox", "sh", "-c", "x"],
-    "awk-program": ["awk", "NR == 1"],
-    "sed-program": ["sed", "-n", "1p"],
+    "unknown-wrapper": ["/opt/opendox-test/wrap", "sh", "-c", "x"],
+    "xargs-wrapped": ["xargs", "-0", "sh", "-c", "x"],
+    "sudo-wrapped": ["sudo", "-u", "bob", "bash", "-c", "x"],
+    "env-python": ["/usr/bin/env", "python3", "-c", "x"],
+    "env-split-python": ["env", "-S", "python3 -c x"],
+    "env-split-unreadable": ["env", "-S", "a 'b"],
+    "flock-command": ["flock", "/tmp/opendox-lock", "-c", "x"],
     "deno-eval": ["deno", "eval", "x"],
 }
 
@@ -4163,6 +4168,10 @@ INLINE_CONTROLS = {
     "a-file-named-after-double-dash": lambda served: [
         "/bin/sh", "--", str(served.broker)],
     "awk-given-a-file": lambda served: ["awk", "-f", str(served.broker)],
+    "env-split-a-program": lambda served: [
+        "env", "-S", f"{sys.executable} {served.broker}"],
+    "timeout-and-a-program": lambda served: [
+        "timeout", "-s", "KILL", "30", sys.executable, str(served.broker)],
     "an-option-after-the-scripts-double-dash": lambda served: [
         "/bin/sh", str(served.broker), "--", "-c"],
 }
@@ -4220,4 +4229,151 @@ def test_A2_every_broker_starts_outside_the_served_repository(
     assert ran_in == Path(provider_mod.BROKER_WORKING_DIRECTORY)
     assert served.repo.resolve() not in (ran_in.resolve(),
                                          *ran_in.resolve().parents)
+
+
+# ===========================================================================
+# 8. LAUNCHERS (the holder's ruling, openxFactory#656 comment 5984069416,
+#    implementing Brett Heap's 5983805990). Each fails at `46ac0a0f`.
+# ===========================================================================
+
+#: Each launcher, starting `PROG`: a broker program on a `PATH` entry inside
+#: the served repository, which the launched command names by a bare word.
+LAUNCHED = {
+    "env": ["env", "PROG"],
+    "env-ignore-and-assign": ["env", "-i", "OPREF_PROFILE=work", "PROG"],
+    "env-split-string": ["env", "-S", "OPREF_PROFILE=work PROG --flag"],
+    "nice": ["nice", "-n", "5", "PROG"],
+    "nice-adjustment": ["nice", "--adjustment=5", "PROG"],
+    "nohup": ["nohup", "PROG"],
+    "timeout": ["timeout", "-s", "KILL", "5", "PROG"],
+    "timeout-long-option": ["timeout", "--signal", "KILL", "5", "PROG"],
+    "stdbuf": ["stdbuf", "-oL", "PROG"],
+    "setsid": ["setsid", "-w", "PROG"],
+    "chrt": ["chrt", "-o", "0", "PROG"],
+    "ionice": ["ionice", "-c", "3", "PROG"],
+    "taskset": ["taskset", "0x1", "PROG"],
+    "time": ["time", "-f", "%e", "PROG"],
+    "xargs": ["xargs", "-0", "PROG"],
+    "busybox": ["busybox", "env", "PROG"],
+    "flock": ["flock", "-w", "5", "/tmp/opendox-lock", "PROG"],
+    "sudo": ["sudo", "-u", "bob", "PROG"],
+    "doas": ["doas", "-u", "bob", "PROG"],
+    "nested": ["env", "nice", "-n", "1", "timeout", "5", "PROG"],
+}
+
+
+@pytest.mark.parametrize("case", sorted(LAUNCHED))
+def test_A2_a_launcher_is_unwrapped_to_the_program_it_starts(
+        served, capsys, monkeypatch, case):
+    """Item 1 and 3 of the ruling: a launcher is unwrapped, with its own
+    options and operands, to the program it starts, and that program is
+    judged as a command's program is, so it is found as `PATH` finds it,
+    here inside the repository."""
+    trust_mod = _trust_mod()
+    program = served.repo / "bin" / "opref-in-repository"
+    program.parent.mkdir()
+    program.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+    os.chmod(program, 0o755)
+    monkeypatch.setenv("PATH", f"{program.parent}{os.pathsep}"
+                       f"{os.environ.get('PATH', '')}")
+    argv = [member.replace("PROG", program.name) for member in LAUNCHED[case]]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.broker_refusal(binding, root=served.repo) == (
+        trust_mod.REASON_IN_REPOSITORY), argv
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    assert trust_mod.REMEDY_IN_REPOSITORY in capsys.readouterr().err
+    served.nothing_was_touched()
+
+
+def _launcher_values(served):
+    tool = served.repo / "tools" / "broker.py"
+    tool.parent.mkdir(exist_ok=True)
+    shutil.copy(served.broker, tool)
+    launcher = served.repo / "tools" / "env"
+    launcher.write_text("#!/bin/sh\nexec \"$@\"\n", encoding="utf-8")
+    os.chmod(launcher, 0o755)
+    return {
+        "env-assigns-a-module-path": [
+            "env", "PYTHONPATH=tools", sys.executable, "-m", "broker"],
+        "env-assigns-a-search-path": [
+            "env", f"PATH=/usr/bin{os.pathsep}{tool.parent}", "opref-broker"],
+        "env-changes-directory": [
+            "env", "-C", str(served.repo), sys.executable, str(served.broker)],
+        "env-changes-directory-long": [
+            "env", f"--chdir={served.repo}", sys.executable,
+            str(served.broker)],
+        "a-launcher-inside-the-repository": [
+            str(launcher), sys.executable, str(served.broker)],
+    }
+
+
+@pytest.mark.parametrize("case", ["env-assigns-a-module-path",
+                                  "env-assigns-a-search-path",
+                                  "env-changes-directory",
+                                  "env-changes-directory-long",
+                                  "a-launcher-inside-the-repository"])
+def test_A2_what_a_launcher_is_given_is_judged_too(served, case):
+    """A launcher's own program, and each of its values that could name a
+    file (`env NAME=VALUE`, every directory of a search path, `env -C DIR`),
+    are judged, so none of them may lie inside the repository."""
+    trust_mod = _trust_mod()
+    argv = _launcher_values(served)[case]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    assert trust_mod.broker_refusal(served.declared(), root=served.repo) == (
+        trust_mod.REASON_IN_REPOSITORY), argv
+
+
+@pytest.mark.parametrize("argv", [["awk", "NR == 1"],
+                                  ["sed", "-n", "1p"],
+                                  ["find", "/nonexistent", "-exec", "true",
+                                   ";"]],
+                         ids=["awk", "sed", "find-exec"])
+def test_A2_a_general_program_running_its_arguments_is_the_accepted_limit(
+        served, argv):
+    """Item 4 of the ruling: a general program that runs code from its own
+    arguments (`awk`, `sed`, `find -exec`) is the recorded ACCEPTED limit.
+    It is not judged as an inline script, so its binding is trusted as any
+    program outside the repository is. This case records the limit; it
+    asks for nothing more."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("broker", broker_argv=argv))
+    assert trust_mod.broker_refusal(served.declared(),
+                                    root=served.repo) is None
+
+
+def test_A2_a_broker_never_inherits_a_working_directory_variable(
+        served, capsys, monkeypatch):
+    """Item 2 of the ruling: `PWD` and `OLDPWD` never reach a broker, even
+    where the harness's allowlist, which a broker's environment starts from,
+    came to hold them, so nothing that trusts `$PWD` over its real working
+    directory reads the directory the console was started in."""
+    from opendox import doxbench_bridge
+
+    monkeypatch.setattr(doxbench_bridge, "INHERITED_ENVIRONMENT",
+                        (*doxbench_bridge.INHERITED_ENVIRONMENT, "PWD",
+                         "OLDPWD"))
+    # the serving process's environment, as the provider reads it
+    served.environ["PWD"] = str(served.repo)
+    served.environ["OLDPWD"] = str(served.repo)
+    seen = served.tmp / "broker-environment.json"
+    recording = served.tmp / "recording-broker.py"
+    recording.write_text(
+        "import json, os\n"
+        f"open({str(seen)!r}, 'w').write(json.dumps(sorted(os.environ)))\n"
+        + served.broker.read_text(encoding="utf-8"), encoding="utf-8")
+    adding = served.add_argv("broker")
+    adding[-1] = str(recording)
+    assert _cli(*adding) == 0
+    capsys.readouterr()
+    port = served.port()
+    with contextlib.suppress(Exception):
+        port.dispatch(_Envelope())
+    names = json.loads(seen.read_text(encoding="utf-8"))
+    assert "PWD" not in names and "OLDPWD" not in names, names
+    assert "PATH" in names
+    assert provider_mod.broker_environment(
+        {"PATH": "/usr/bin", "PWD": "/x", "OLDPWD": "/y"}) == {
+            "PATH": "/usr/bin"}
 

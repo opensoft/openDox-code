@@ -318,6 +318,23 @@ DIAG_PROVIDER_REDIRECTED = (
 #: `doxbench_trust.broker_refusal`, which refuses such a command outright.
 BROKER_WORKING_DIRECTORY = os.path.abspath(os.sep)
 
+#: The variables that name a working directory, which a broker's
+#: environment never carries (the holder's ruling, openxFactory#656 comment
+#: 5984069416, item 2): a shell, or a program that trusts `$PWD` over its
+#: real working directory, would otherwise read the directory the console
+#: was started from, which may be the served repository.
+WORKING_DIRECTORY_VARIABLES: frozenset[str] = frozenset({"PWD", "OLDPWD"})
+
+
+def broker_environment(base) -> dict:
+    """A broker's whole environment: the harness child's allowlist
+    (`doxbench_bridge.child_environment`), without the variables that name a
+    working directory (`WORKING_DIRECTORY_VARIABLES`), whatever that
+    allowlist comes to hold."""
+    return {name: value
+            for name, value in bridge_mod.child_environment(base).items()
+            if name not in WORKING_DIRECTORY_VARIABLES}
+
 FIXED_DIAGNOSTICS: frozenset[str] = frozenset({
     DIAG_BROKER_UNREACHABLE, DIAG_BROKER_REFUSED, DIAG_BROKER_MALFORMED,
     DIAG_BROKER_TIMEOUT, DIAG_PROVIDER_UNREACHABLE,
@@ -614,7 +631,7 @@ def _run_broker(argv, *, source, timeout: float,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            env=bridge_mod.child_environment(os.environ),
+            env=broker_environment(os.environ),
             # OUTSIDE EVERY SERVED REPOSITORY (BROKER_WORKING_DIRECTORY).
             cwd=BROKER_WORKING_DIRECTORY,
             text=True,
