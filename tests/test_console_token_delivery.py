@@ -1889,19 +1889,33 @@ def test_deferred_termination_holds_a_stop_until_the_block_ends() -> None:
     in hand, and removal, already a stop, lets it go."""
     from opendox import console_access
 
+    # Every interrupt is CAUGHT here and judged, so a stop raised where it
+    # should have been held fails this case instead of ending the session.
+    reached = []
     with console_access.terminate_as_interrupt(True):
         assert signal.getsignal(signal.SIGTERM) not in (signal.SIG_DFL, signal.SIG_IGN)
-        with pytest.raises(KeyboardInterrupt):
+        try:
             with console_access.deferred_termination():
+                try:
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    signal.pthread_sigmask(signal.SIG_BLOCK, [])   # deliver now
+                except KeyboardInterrupt:
+                    pytest.fail("the stop was raised inside the block, not held")
+                reached.append("held")
+        except KeyboardInterrupt:
+            reached.append("raised once the block was done")
+        assert reached == ["held", "raised once the block was done"], reached
+        try:
+            with console_access.deferred_termination(raise_pending=False):
                 os.kill(os.getpid(), signal.SIGTERM)
-                signal.pthread_sigmask(signal.SIG_BLOCK, [])   # deliver now
-                reached = True                                  # not raised here
-        assert reached
-        with console_access.deferred_termination(raise_pending=False):
-            os.kill(os.getpid(), signal.SIGTERM)
-            signal.pthread_sigmask(signal.SIG_BLOCK, [])
-        with console_access.deferred_termination():
-            pass                                                # nothing left over
+                signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        except KeyboardInterrupt:
+            pytest.fail("a stop held during a removal was raised")
+        try:
+            with console_access.deferred_termination():
+                pass                                            # nothing left over
+        except KeyboardInterrupt:
+            pytest.fail("a stop that was let go came back")
 
 
 @pytest.mark.parametrize("entry", ["serve", "generate-and-open"])
@@ -2475,3 +2489,32 @@ def test_the_static_backstop_never_sends_a_copy_swapped_in_after_the_check(
         assert b"index" in _raw_get(base, "/index.html").lower()
     finally:
         _stop_plane(httpd, worker)
+
+
+def test_a_snapshot_named_at_a_copy_not_yet_written_refuses_the_start(
+        tmp_path, monkeypatch, capsys, standalone_profile) -> None:
+    """The configured snapshot is a served root even when its file does not
+    exist yet, and so is registered as no entry: `/snapshot.json` falls back
+    to reading that path. Named at the copy this start is about to write,
+    `<state>/console/<port>.html`, it refuses the start by name, and no copy
+    is written."""
+    from opendox import console_access, serve
+
+    _clean_git(monkeypatch)
+    repo = _repository(tmp_path)
+    state = _state(tmp_path)
+    monkeypatch.setenv("OPENDOX_STATE_DIR", str(state))
+    monkeypatch.setattr(serve, "real_notebook_adapter", lambda *a, **k: None)
+
+    def served(self, *args, **kwargs):
+        raise AssertionError("the server served")
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", served)
+    port = _free_port()
+    future = console_access.private_copy_path(state, port)
+    assert serve.main(["--snapshot", str(future), "--checkout-root", str(repo),
+                       "--port", str(port)]) == 1
+    err = capsys.readouterr().err
+    assert "serve refused:" in err and "OPENDOX_STATE_DIR" in err, err
+    assert not future.exists()
+    assert _port_is_free(port)
