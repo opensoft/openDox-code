@@ -1649,7 +1649,8 @@ def test_a_hosts_own_policy_may_admit_the_console_intake(served):
     does not admit it unless it says so."""
     _caps, answer = _served_intake(served, host_policy=_TrustsEveryBinding())
     assert answer.get("error") == "intake_refused", answer
-    assert answer.get("reason") == _trust_mod().INTAKE_BROKER_UNTRUSTED
+    # the host's own policy refused it, so it says so (5985490378, D3)
+    assert answer.get("reason") == _trust_mod().INTAKE_HOST_NOT_ADMITTED
     assert not served.marker.exists()
     served.marker.unlink(missing_ok=True)
     shutil.rmtree(served.tmp / "out")
@@ -1684,6 +1685,59 @@ def test_trusting_a_lookalike_binding_never_admits_the_console_intake(
 
 
 # --- what a policy answers is held to the binding asked about ---------------
+
+
+@pytest.mark.parametrize("basis", ["default", "host"])
+def test_D3_the_intakes_refusal_names_the_policy_that_refused(served, basis):
+    """The holder's ruling, openxFactory#656 comment 5985490378, D3: where
+    the host's own registered policy refuses the hand-off (here, as for a
+    pending binding), the refusal says so in its own FIXED sentence, not
+    "a host's own trust policy may admit it"; under openDox's own trust the
+    sentence is unchanged. No broker runs either way."""
+    trust_mod = _trust_mod()
+
+    class _DeclinesTheIntake(_Declines):
+        def intake_verdict(self, binding, *, root):
+            return self.verdict(binding, root=root)
+
+    if basis == "default":
+        _caps, answer = _served_intake(served)
+        said = trust_mod.INTAKE_BROKER_UNTRUSTED
+    else:
+        _caps, answer = _served_intake(served,
+                                       host_policy=_DeclinesTheIntake())
+        said = trust_mod.INTAKE_HOST_NOT_ADMITTED
+    assert answer.get("error") == "intake_refused", answer
+    assert answer.get("reason") == said
+    assert not served.marker.exists()
+    assert trust_mod.INTAKE_HOST_NOT_ADMITTED == (
+        "the host's trust policy does not admit this hand-off; "
+        "model-binding list shows why")
+
+
+def test_D3_each_basis_has_its_sentence():
+    trust_mod = _trust_mod()
+    binding = _a_binding()
+    for basis, said in ((trust_mod.BASIS_HOST,
+                         trust_mod.INTAKE_HOST_NOT_ADMITTED),
+                        (trust_mod.BASIS_MACHINE_TRUST,
+                         trust_mod.INTAKE_BROKER_UNTRUSTED),
+                        (trust_mod.BASIS_REPOSITORY,
+                         trust_mod.INTAKE_BROKER_UNTRUSTED)):
+        verdict = trust_mod.TrustVerdict.untrusted_for(
+            binding, root="/srv/opendox-test", basis=basis, reason="no")
+        assert trust_mod.intake_refusal_reason(verdict) == said, basis
+
+
+def test_D2_the_remedy_where_trust_cannot_help_holds_under_every_policy():
+    """The holder's ruling, openxFactory#656 comment 5985490378, D2: the
+    remedy's last sentence is true under a host whose approval trusts the
+    binding, which lists it trusted and prints no command."""
+    remedy = _trust_mod().REMEDY_NOT_BY_TRUST
+    assert remedy.endswith(
+        "Then list its bindings again: it is shown trusted, or with the "
+        "command that trusts it")
+    assert "which prints the command" not in remedy
 
 
 class _Declines:
@@ -1813,7 +1867,7 @@ def test_a_verdict_for_another_root_covers_nothing_here(served, capsys,
     if question == "intake":
         _caps, answer = _served_intake(served,
                                        host_policy=_AnswersForAnotherRoot())
-        assert answer.get("reason") == trust_mod.INTAKE_BROKER_UNTRUSTED
+        assert answer.get("reason") == trust_mod.INTAKE_HOST_NOT_ADMITTED
         assert not served.marker.exists()
         return
     trust_mod.unregister()

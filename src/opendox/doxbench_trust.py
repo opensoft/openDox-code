@@ -148,6 +148,7 @@ __all__ = [
     "UNTRUSTED_TURN_MESSAGE",
     "UntrustedBindingPort",
     "INTAKE_BROKER_UNTRUSTED",
+    "INTAKE_HOST_NOT_ADMITTED",
     "INTAKE_BROKER_REFUSED",
     "INTAKE_NOT_ADMISSIBLE",
     "REASON_INLINE_SCRIPT",
@@ -169,6 +170,7 @@ __all__ = [
     "inline_script",
     "in_repository_program",
     "intake_admissible",
+    "intake_refusal_reason",
     "restored_for",
     "trust_can_repair",
     "current",
@@ -340,11 +342,13 @@ REMEDY_INLINE_SCRIPT = (
 #: What every refusal says, in place of a command, where `trust` itself would
 #: be refused for the same reason (T100 follow-on, A1): the store cannot be
 #: used, the platform cannot keep it, or a host's policy declines. No command
-#: is printed that could not succeed.
+#: is printed that could not succeed. Its last sentence holds under every
+#: policy (the holder's ruling, openxFactory#656 comment 5985490378, D2): a
+#: host whose approval trusts the binding lists it trusted, with no command.
 REMEDY_NOT_BY_TRUST = (
     "Resolve the cause above first: until it is resolved, trusting this "
     "binding would be refused for the same reason. Then list its bindings "
-    "again, which prints the command that trusts it")
+    "again: it is shown trusted, or with the command that trusts it")
 
 #: Why `MachineTrust` never admits the console intake's broker (#1144 16.3a,
 #: T007 batch M; Copilot at openDox-code#82, r4173513782). The intake asks its
@@ -564,6 +568,26 @@ INTAKE_BROKER_UNTRUSTED = (
     "broker is not trusted on this machine, so nothing was run and nothing "
     "was read. No command trusts an intake declaration's broker; a host's own "
     "trust policy (opendox.doxbench_trust.register) may admit it")
+
+#: What the console intake's hand-off is refused with when the HOST's own
+#: trust policy, registered here, is what does not admit it (a pending
+#: binding, say): `INTAKE_BROKER_UNTRUSTED`'s "a host's own trust policy may
+#: admit it" would send the operator to the very policy that refused (the
+#: holder's ruling, openxFactory#656 comment 5985490378, D3). A FIXED
+#: sentence, as that one is.
+INTAKE_HOST_NOT_ADMITTED = (
+    "the host's trust policy does not admit this hand-off; model-binding "
+    "list shows why")
+
+
+def intake_refusal_reason(verdict: TrustVerdict) -> str:
+    """The FIXED sentence the console intake's hand-off is refused with for
+    `verdict`, which does not admit it: the host's own where the host's
+    policy refused (`BASIS_HOST`, D3), and `INTAKE_BROKER_UNTRUSTED`
+    otherwise."""
+    if verdict.basis == BASIS_HOST:
+        return INTAKE_HOST_NOT_ADMITTED
+    return INTAKE_BROKER_UNTRUSTED
 
 
 class BindingUntrusted(binding_mod.BindingRefused):

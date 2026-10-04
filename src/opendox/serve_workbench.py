@@ -1194,7 +1194,9 @@ class WorkbenchRoutes:
         # (Copilot at openDox-code#82, r4173513782). openDox's strict default
         # always refuses it; a host's own policy may admit it. Refused here,
         # before any byte of the body is read, and the body is drained
-        # unread.
+        # unread, in a FIXED sentence: the host's own where the host's policy
+        # refused (`doxbench_trust.intake_refusal_reason`; the holder's
+        # ruling, openxFactory#656 comment 5985490378, D3).
         from opendox import doxbench_trust
         verdict = doxbench_trust.intake_verdict_for(
             binding, root=Path(self.checkout_root))
@@ -1202,7 +1204,7 @@ class WorkbenchRoutes:
             if length > 0:
                 _drain_refused_body(self.rfile, length)
             self._intake_refusal(DOXBENCH_ERR_INTAKE_REFUSED,
-                                 doxbench_trust.INTAKE_BROKER_UNTRUSTED)
+                                 doxbench_trust.intake_refusal_reason(verdict))
             return
         accepts_secret = (
             declared["kind"] == doxbench_binding.AUTH_KIND_API_KEY)
