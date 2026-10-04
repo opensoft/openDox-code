@@ -747,6 +747,11 @@ _JS_WHITESPACE = frozenset(
     "\t\v\f \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
     "\u2007\u2008\u2009\u200a\u202f\u205f\u3000\ufeff\n\r\u2028\u2029")
 
+#: What ends a line comment, as JavaScript's LineTerminator: LF, and CR,
+#: U+2028 and U+2029 as well (Copilot's review of openDox-code#75 at
+#: 9229c659, its overview).
+_JS_LINE_END = re.compile("[\n\r\u2028\u2029]")
+
 #: JavaScript's single-character escapes.
 _JS_SINGLE_ESCAPES = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
                       "v": "\v"}
@@ -825,9 +830,10 @@ class JsStrings:
 
     def _step(self) -> None:
         c = self.src[self.i]
-        if self.src.startswith("//", self.i):
-            end = self.src.find("\n", self.i)
-            self.i = len(self.src) if end < 0 else end
+        if self.src.startswith("//", self.i) or (
+                self.i == 0 and self.src.startswith("#!")):  # or a hashbang
+            end = _JS_LINE_END.search(self.src, self.i)
+            self.i = len(self.src) if end is None else end.start()
         elif self.src.startswith("/*", self.i):
             end = self.src.find("*/", self.i + 2)
             self.i = len(self.src) if end < 0 else end + 2

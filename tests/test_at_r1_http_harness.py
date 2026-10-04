@@ -2551,3 +2551,21 @@ def test_every_encoded_dot_segment_is_refused(ref: str) -> None:
     with served(files) as port:
         harness.derive_bundle(port, _page("./app.js"), {}, verdict, "t")
     assert _failures(verdict) == [f"t.bundle.divergent {ref!r}"]
+
+
+@pytest.mark.parametrize("source", [
+    '// a comment\rimport "./a.js";\n',
+    '// a comment\r\nimport "./a.js";\n',
+    '// a comment\u2028import "./a.js";\n',
+    '// a comment\u2029import "./a.js";\n',
+    '#!/usr/bin/env node /*\nimport "./a.js";\n',
+], ids=["cr", "crlf", "line-separator", "paragraph-separator", "hashbang"])
+def test_a_line_comment_ends_where_javascript_ends_it(source: str) -> None:
+    """At any LineTerminator, never only at LF; and a module's first line
+    is a comment where it starts with `#!` (Copilot's review of #75 at
+    9229c659, its overview)."""
+    pending: collections.deque = collections.deque()
+    routes: set[str] = set()
+    harness._scan_module("/views/x.js", source.encode("utf-8"), pending, routes)
+    assert [(path, static) for path, static, _importer in pending] == [
+        ("/views/a.js", True)]
