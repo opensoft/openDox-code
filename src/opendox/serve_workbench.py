@@ -1165,6 +1165,26 @@ class WorkbenchRoutes:
             self._intake_refusal(DOXBENCH_ERR_INVALID_INTAKE_REQUEST,
                                  str(error))
             return
+        # THE BROKER IS THE SERVED REPOSITORY'S, SO IT RUNS ONLY IF ADMITTED
+        # (#1144 16.3a, T007 batch M; RULED openxFactory#656 comment
+        # 5962785556, item 2). The broker above comes from the repository's
+        # declarations document, which NO BINDING'S TRUST admits: the
+        # registered policy is asked the intake's OWN question
+        # (`intake_verdict_for`), so a repository that declares a binding
+        # with these very fields and has it trusted gains nothing here
+        # (Copilot at openDox-code#82, r4173513782). openDox's strict default
+        # always refuses it; a host's own policy may admit it. Refused here,
+        # before any byte of the body is read, and the body is drained
+        # unread.
+        from opendox import doxbench_trust
+        verdict = doxbench_trust.intake_verdict_for(
+            binding, root=Path(self.checkout_root))
+        if not verdict.admits(binding):
+            if length > 0:
+                _drain_refused_body(self.rfile, length)
+            self._intake_refusal(DOXBENCH_ERR_INTAKE_REFUSED,
+                                 doxbench_trust.INTAKE_BROKER_UNTRUSTED)
+            return
         accepts_secret = (
             declared["kind"] == doxbench_binding.AUTH_KIND_API_KEY)
         source = (_CredentialStream(self.rfile, length)
@@ -1179,7 +1199,10 @@ class WorkbenchRoutes:
             # a credential for no reason at all.
             _drain_refused_body(self.rfile, length)
         try:
-            reference = doxbench_provider.hand_off_credential(binding, source)
+            # Under the verdict the policy gave above. What the intake writes
+            # is NOT trusted by it (#1144 16.3a).
+            reference = doxbench_provider.hand_off_credential(
+                binding, source, trust=verdict)
         except doxbench_provider.BrokerRefused as error:
             # THE BROKER'S OWN WORDS NEVER REACH HERE: `BrokerRefused` carries
             # one of `doxbench_provider.FIXED_DIAGNOSTICS` and nothing else, and
@@ -1372,8 +1395,41 @@ class WorkbenchRoutes:
             "ok": True,
             "kind": "workbench-model-approval-result",
             "declaration": approved.as_read_back(),
-            "availability": doxbench_intake.APPROVAL_NOTICE,
+            "availability": self._approved_availability(binding),
         })
+
+    def _approved_availability(self, binding) -> str:
+        """What an approval says of the binding it approved (#1144 16.3a;
+        the trust-state walk). Approval is a governance record, and trust is
+        this machine's, so the result says the binding is available only
+        where the registered trust policy admits it: a governed host's, which
+        trusts what its gate approved, answers `APPROVAL_NOTICE` as before,
+        and openDox's strict default, until the binding is trusted, answers
+        `doxbench_trust.APPROVED_UNTRUSTED_NOTICE`.
+
+        A BINDING THE MODEL CATALOG CANNOT LIST is judged first, under any
+        policy, and answers `doxbench_trust.APPROVED_UNSERVABLE_NOTICE`: no
+        policy can make it usable and `trust` refuses it, so the result names
+        the remedy and no command that trusts (Copilot at openDox-code#82,
+        r4175203889). That judgement reads no store.
+
+        ASKED OF A REGISTERED POLICY ONLY. This act is not one of the
+        consumers that register openDox's default (`doxbench_trust.policy`),
+        so where nothing is registered no binding has been judged trusted in
+        this process, and the result says it is not, rather than read a
+        store no consumer has asked for. The registration is read ONCE, and
+        the verdict is that policy's (`registered_verdict_for`), so a host
+        that unregisters meanwhile never has the default installed in its
+        place by this act (Copilot at openDox-code#82, r4177946288)."""
+        from opendox import doxbench_intake
+        from opendox import doxbench_trust
+        if doxbench_trust.unservable_because(binding) is not None:
+            return doxbench_trust.APPROVED_UNSERVABLE_NOTICE
+        verdict = doxbench_trust.registered_verdict_for(
+            binding, root=Path(self.checkout_root))
+        if verdict is not None and verdict.admits(binding):
+            return doxbench_intake.APPROVAL_NOTICE
+        return doxbench_trust.APPROVED_UNTRUSTED_NOTICE
 
     def _approval_binding(self, binding_id: str):
         """The binding a pending declaration names, or None. Read through the
@@ -1952,8 +2008,17 @@ class WorkbenchRoutes:
             return
         model_entry = catalog.selectable_entry_for(model_id)
         if model_entry is None:
-            self._refuse_turn(validators, DOXBENCH_ERR_MODEL_UNAVAILABLE,
-                              turn_id, failure_kind=failure_kind)
+            # A BINDING NOT TRUSTED ON THIS MACHINE SAYS SO (#1144 16.3a): its
+            # port is `doxbench_trust.UntrustedBindingPort`, and the refusal
+            # carries that module's FIXED sentence, which names no binding and
+            # no path: how to trust it, or, for a binding the catalog cannot
+            # list, how to correct it, since trust cannot (r4175203889). The
+            # catalog's shape is closed, so this is where a turn reads why.
+            from opendox import doxbench_trust
+            self._refuse_turn(
+                validators, DOXBENCH_ERR_MODEL_UNAVAILABLE, turn_id,
+                failure_kind=failure_kind,
+                message=doxbench_trust.turn_message_for(port))
             return
 
         effective_input_limit = doxbench_model.effective_limit_bytes(

@@ -110,6 +110,44 @@ FORBIDDEN_PORT_MEMBERS = frozenset({
 })
 
 
+@pytest.fixture(autouse=True)
+def _a_private_trust_store(tmp_path_factory):
+    """THE TRUST SEAM, OVER A STORE OF EACH CASE'S OWN (#1144 16.3a; plan 034
+    T100). `opendox model-binding add` and `edit` now record trust, and the
+    entry points' factory asks for it, so every case here runs with openDox's
+    own `MachineTrust` over a private state directory, never the operator's
+    real one. Outside `tmp_path`, so a case that sweeps its own tree for a
+    secret sweeps nothing this put there."""
+    from opendox import doxbench_trust
+
+    doxbench_trust.unregister()
+    doxbench_trust.register(doxbench_trust.MachineTrust(
+        state_dir=tmp_path_factory.mktemp("trust") / "st"))
+    try:
+        yield
+    finally:
+        doxbench_trust.unregister()
+
+
+def _trusted(binding):
+    """A verdict trusting exactly `binding` (#1144 16.3a): what the entry
+    points' factory hands the provider for a binding the policy trusts. The
+    provider refuses any act on a binding no verdict covers, which
+    `tests/test_model_binding_trust.py` holds."""
+    from opendox import doxbench_trust
+
+    return doxbench_trust.TrustVerdict.trusted_for(binding, root=None,
+                                                   basis="test")
+
+
+def _trust_in_place(binding, checkout) -> None:
+    """Trust `binding` at `checkout` in the case's private store, as `opendox
+    model-binding trust` does, for a case that writes its bindings by hand."""
+    from opendox import doxbench_trust
+
+    doxbench_trust.policy().record(binding, root=checkout)
+
+
 def _binding(**overrides):
     fields = dict(id="openprofiler-demo", label="Demo brokered provider",
                   provider="demo-provider", credential_ref=FAKE_REFERENCE,
@@ -670,7 +708,7 @@ def test_the_credential_is_the_whole_of_the_brokers_standard_input(tmp_path):
     script = _write_broker(tmp_path)
     binding = _broker_binding(script)
     reference = provider_mod.hand_off_credential(
-        binding, io.StringIO(SENTINEL_CREDENTIAL))
+        binding, io.StringIO(SENTINEL_CREDENTIAL), trust=_trusted(binding))
     assert reference == FAKE_REFERENCE
 
     seen = _seen(script)
@@ -692,7 +730,7 @@ def test_a_mint_reads_no_standard_input(tmp_path):
     """The declaration: `mint` does not read standard input and the caller may
     close it. So the adapter closes it, and the broker sees nothing."""
     script = _write_broker(tmp_path)
-    provider_mod.mint(_broker_binding(script))
+    provider_mod.mint(_broker_binding(script), trust=_trusted(_broker_binding(script)))
     assert _seen(script)["stdin"] is None
 
 
@@ -705,6 +743,9 @@ def test_the_credential_survives_nowhere_in_the_checkout_or_the_surface(
     (checkout / "ideation" / "dashboard").mkdir(parents=True)
     store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
     store.add(_broker_binding(script, credential_ref="opref-" + "0" * 24))
+    # set-credential runs the binding's broker, so it is gated on trust
+    # (#1144 16.3a): a binding written by hand is trusted first.
+    _trust_in_place(store.get("openprofiler-demo"), checkout)
 
     args = cli_mod.build_parser().parse_args([
         "model-binding", "set-credential", "--repo-root", str(checkout),
@@ -732,7 +773,10 @@ def test_the_hand_off_takes_a_handle_and_never_a_value():
     VALUE, so no caller can be holding one."""
     import inspect
     signature = inspect.signature(provider_mod.hand_off_credential)
-    assert list(signature.parameters) == ["binding", "source", "runner"]
+    # `trust` (#1144 16.3a) is the verdict covering the binding: a fact about
+    # the binding, never a value the credential could ride.
+    assert list(signature.parameters) == ["binding", "source", "trust",
+                                          "runner"]
 
 
 # ===========================================================================
@@ -754,7 +798,7 @@ class _Envelope:
 def test_a_mint_executes_the_declared_invocation_and_returns_a_token(tmp_path):
     script = _write_broker(tmp_path)
     binding = _broker_binding(script)
-    minted = provider_mod.mint(binding)
+    minted = provider_mod.mint(binding, trust=_trusted(binding))
     assert minted.token == SENTINEL_TOKEN
     assert minted.audit_ref.startswith("opaud-")
     # 0.2 FINDING 3: the ROUTE is the binding's, because the declaration's mint
@@ -782,7 +826,7 @@ def test_a_mint_answer_that_named_a_route_would_still_not_supply_one(tmp_path):
         "'enforcement':{},'endpoint':'https://elsewhere.invalid'}))\n",
         encoding="utf-8")
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.mint(_broker_binding(script))
+        provider_mod.mint(_broker_binding(script), trust=_trusted(_broker_binding(script)))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
 
 
@@ -801,7 +845,7 @@ def test_an_answer_carrying_an_undeclared_key_is_malformed(tmp_path):
         encoding="utf-8")
     with pytest.raises(provider_mod.BrokerRefused) as caught:
         provider_mod.hand_off_credential(_broker_binding(script),
-                                         io.StringIO("x"))
+                                         io.StringIO("x"), trust=_trusted(_broker_binding(script)))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
 
 
@@ -814,7 +858,7 @@ def test_an_answer_missing_a_declared_key_is_malformed(tmp_path):
         encoding="utf-8")
     with pytest.raises(provider_mod.BrokerRefused) as caught:
         provider_mod.hand_off_credential(_broker_binding(script),
-                                         io.StringIO("x"))
+                                         io.StringIO("x"), trust=_trusted(_broker_binding(script)))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
 
 
@@ -843,16 +887,16 @@ def test_the_declared_answer_field_lists_match_the_declaration():
 def test_revoke_and_list_speak_the_declared_surface(tmp_path):
     script = _write_broker(tmp_path)
     binding = _broker_binding(script)
-    assert provider_mod.revoke(binding) == "opaud-77b0c4e91d3a5628ff0e1a42"
+    assert provider_mod.revoke(binding, trust=_trusted(binding)) == "opaud-77b0c4e91d3a5628ff0e1a42"
     assert _seen(script)["argv"] == ["revoke", "--reference", FAKE_REFERENCE]
-    assert provider_mod.list_references(binding) == []
+    assert provider_mod.list_references(binding, trust=_trusted(binding)) == []
     assert _seen(script)["argv"] == ["list"]
     assert _seen(script)["stdin"] is None
 
 
 def test_the_minted_token_redacts_itself_in_every_rendering(tmp_path):
     script = _write_broker(tmp_path)
-    minted = provider_mod.mint(_broker_binding(script))
+    minted = provider_mod.mint(_broker_binding(script), trust=_trusted(_broker_binding(script)))
     for rendering in (repr(minted), str(minted), f"{minted}", "%s" % (minted,)):
         assert SENTINEL_TOKEN not in rendering
         assert "<redacted>" in rendering
@@ -910,7 +954,7 @@ def _port(tmp_path, *outcomes, expires=None, notice=None, clock=time.time,
     port = provider_mod.BrokeredProviderPort(
         binding, install_mod.brokered_catalog(binding),
         runner=runner, opener=opener, clock=clock,
-        notice=notice if notice is not None else (lambda _text: None))
+        notice=notice if notice is not None else (lambda _text: None), trust=_trusted(binding))
     return port, opener
 
 
@@ -1089,7 +1133,7 @@ def test_a_broker_that_exits_non_zero_is_a_fixed_refusal(tmp_path):
     script.write_text("import sys\nsys.stderr.write('broker internals')\n"
                       "sys.exit(3)\n", encoding="utf-8")
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.mint(_broker_binding(script))
+        provider_mod.mint(_broker_binding(script), trust=_trusted(_broker_binding(script)))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_REFUSED
     assert "broker internals" not in str(caught.value)
 
@@ -1117,7 +1161,7 @@ def test_a_broker_that_refuses_before_reading_stdin_reads_as_a_refusal(
     binding = _broker_binding(script, auth_kind="oauth")
     big = io.StringIO("x" * 4_000_000)
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.hand_off_credential(binding, big)
+        provider_mod.hand_off_credential(binding, big, trust=_trusted(binding))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_REFUSED, \
         "the exit code is the answer, not the write error"
     assert caught.value.diagnostic != provider_mod.DIAG_BROKER_UNREACHABLE
@@ -1128,7 +1172,7 @@ def test_a_broker_that_cannot_be_started_is_still_unreachable(tmp_path):
     does not exist is NOT a refusal, and keeps its own sentence."""
     binding = _binding(broker_argv=(str(tmp_path / "no-such-broker"),))
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.mint(binding)
+        provider_mod.mint(binding, trust=_trusted(binding))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_UNREACHABLE
 
 
@@ -1136,7 +1180,7 @@ def test_a_broker_that_answers_garbage_is_a_fixed_refusal(tmp_path):
     script = tmp_path / "garbled-broker.py"
     script.write_text("import sys\nprint('not json')\n", encoding="utf-8")
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.mint(_broker_binding(script))
+        provider_mod.mint(_broker_binding(script), trust=_trusted(_broker_binding(script)))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
 
 
@@ -1188,6 +1232,7 @@ def test_a_broker_that_has_refused_marks_the_catalog_unavailable(tmp_path):
     measured. A failure is never reported as an empty result."""
     port, _opener = _port(tmp_path)
     port._binding = _binding(broker_argv=(str(tmp_path / "absent"),))
+    port._trust = _trusted(port._binding)
     with pytest.raises(provider_mod.BrokerRefused):
         port.dispatch(_Envelope())
     catalog = port.catalog()
@@ -1230,6 +1275,9 @@ def test_a_declared_binding_resolves_the_brokered_port_instead(tmp_path):
     script = _write_broker(tmp_path)
     binding_mod.BindingStore(binding_mod.bindings_path(checkout)).add(
         _broker_binding(script))
+    # Trusted on this machine (#1144 16.3a): a binding written by hand is
+    # refused until it is, which tests/test_model_binding_trust.py holds.
+    _trust_in_place(_broker_binding(script), checkout)
     resolve = install_mod.declared_model_port_factory(
         tmp_path / "sessions", checkout_root=checkout)
     port = resolve()
@@ -1308,7 +1356,7 @@ def test_the_transport_really_speaks_to_an_endpoint_over_a_socket(tmp_path):
         binding = _broker_binding(script, endpoint=endpoint)
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
-            notice=lambda _text: None)
+            notice=lambda _text: None, trust=_trusted(binding))
         assert port.dispatch(_Envelope()) == {
             "assistant_prose": "answered over a socket", "proposals": []}
     finally:
@@ -1339,7 +1387,7 @@ def test_the_broker_child_inherits_no_credential_shaped_environment(tmp_path,
         "'expires_in_seconds':300,'scope':[],'issued_by':'i',"
         "'approved_by':'a','audit_ref':'opaud-x','retry_of':None,"
         "'enforcement':{}}))\n", encoding="utf-8")
-    provider_mod.mint(_broker_binding(script))
+    provider_mod.mint(_broker_binding(script), trust=_trusted(_broker_binding(script)))
     inherited = json.loads(
         Path(str(script) + ".env.json").read_text(encoding="utf-8"))
     assert "SENTINEL_PROVIDER_API_KEY" not in inherited
@@ -1383,7 +1431,7 @@ def test_the_broker_answer_is_bounded(tmp_path):
         script.write_text(f"import sys\nsys.stdout.write('x' * {size})\n",
                           encoding="utf-8")
         with pytest.raises(provider_mod.BrokerRefused) as caught:
-            provider_mod.mint(_broker_binding(script))
+            provider_mod.mint(_broker_binding(script), trust=_trusted(_broker_binding(script)))
         assert caught.value.diagnostic == expected
 
 
@@ -1603,7 +1651,7 @@ def test_a_chat_turn_reaches_a_stand_in_chat_completions_server(tmp_path):
                                   dialect=OPENAI_CHAT)
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
-            notice=lambda _text: None)
+            notice=lambda _text: None, trust=_trusted(binding))
         assert port.dispatch(_Envelope()) == {
             "assistant_prose": "answered in the chat grammar",
             "proposals": []}
@@ -1793,7 +1841,9 @@ def test_the_cli_sets_the_model_on_add_and_edit(tmp_path, capsys):
     capsys.readouterr()
     assert store.get("local-chat").model == DECLARED_MODEL
     assert run("model-binding", "list", *root) == 0
-    assert f"model            {DECLARED_MODEL}" in capsys.readouterr().out
+    # `list` prints each value in its JSON spelling (T100: escaped)
+    assert f"model            {json.dumps(DECLARED_MODEL)}" in \
+        capsys.readouterr().out
 
     assert run("model-binding", "edit", *root, *declaration,
                "--model", "another-model", "--", "openprofiler-broker") == 0
@@ -1824,7 +1874,7 @@ def test_a_stand_in_chat_server_receives_the_declared_model(tmp_path):
             dialect=OPENAI_CHAT, model=DECLARED_MODEL)
         provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
-            notice=lambda _text: None).dispatch(_Envelope())
+            notice=lambda _text: None, trust=_trusted(binding)).dispatch(_Envelope())
     assert _ChatCompletionsHandler.seen["body"] == {
         "model": DECLARED_MODEL,
         "messages": [{"role": "user", "content": "assembled prompt"}]}
@@ -2413,7 +2463,7 @@ def test_a_binding_no_broker_answers_has_no_broker_operation():
                 provider_mod.broker_operation_argv(binding, operation)
         stdin = io.StringIO("x")
         with pytest.raises(AssertionError):
-            provider_mod.hand_off_credential(binding, stdin)
+            provider_mod.hand_off_credential(binding, stdin, trust=_trusted(binding))
 
 
 # --- a built-in credential travels by a private route --------------------
@@ -2539,14 +2589,14 @@ def test_the_resolver_reads_nothing_for_a_route_that_is_not_private(
 
 
 def test_the_resolver_reads_a_key_for_a_private_route():
-    """The control for the case above: the same shape on IPv6 loopback is
-    read."""
-    shaped = types.SimpleNamespace(id="undeclared",
-                                   credential_ref=f"env:{ENV_NAME}",
-                                   endpoint="http://[::1]:8080/v1")
+    """The control for the case above: the same reference on IPv6 loopback
+    is read. A declared binding since #1144 16.3a, because the resolver now
+    also reads only for a binding a trust verdict covers, and a verdict
+    covers a declared binding alone."""
+    shaped = _built_in_binding(endpoint="http://[::1]:8080/v1")
     environ = _RecordingEnviron({ENV_NAME: KEY_SENTINEL})
     assert provider_mod.resolve_credential_reference(
-        shaped, environ=environ) == KEY_SENTINEL
+        shaped, environ=environ, trust=_trusted(shaped)) == KEY_SENTINEL
     assert environ.read == [ENV_NAME]
 
 
@@ -2571,7 +2621,7 @@ def test_a_broker_reference_in_a_built_in_form_is_malformed(tmp_path):
         binding = _broker_binding(script)
         stdin = io.StringIO("x")
         with pytest.raises(provider_mod.BrokerRefused) as caught:
-            provider_mod.hand_off_credential(binding, stdin)
+            provider_mod.hand_off_credential(binding, stdin, trust=_trusted(binding))
         assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
 
 @pytest.mark.parametrize("which", ["raw-key-shape", "past-the-url-bound"])
@@ -2596,7 +2646,8 @@ def test_a_broker_reference_the_record_would_refuse_is_malformed(tmp_path,
     binding = _broker_binding(script)
     source = io.StringIO("x")
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.hand_off_credential(binding, source)
+        provider_mod.hand_off_credential(binding, source,
+                                         trust=_trusted(binding))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
     assert reference not in str(caught.value)
 
@@ -2641,7 +2692,7 @@ def _unbrokered_port(binding, *outcomes, environ=None, keyring_backend=None,
         binding, install_mod.brokered_catalog(binding),
         runner=_refusing_runner, opener=opener,
         notice=notice if notice is not None else (lambda _text: None),
-        environ=environ, keyring_backend=keyring_backend)
+        environ=environ, keyring_backend=keyring_backend, trust=_trusted(binding))
     return port, opener
 
 
@@ -2709,7 +2760,7 @@ def test_a_value_outside_latin_1_is_refused_before_any_header_is_built(
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
             runner=_refusing_runner, notice=lambda _text: None,
-            environ={ENV_NAME: f"{KEY_SENTINEL}\u20ac"})
+            environ={ENV_NAME: f"{KEY_SENTINEL}\u20ac"}, trust=_trusted(binding))
         envelope = _Envelope()
         with pytest.raises(provider_mod.BrokerRefused) as caught:
             port.dispatch(envelope)
@@ -2911,7 +2962,7 @@ def test_a_stand_in_server_sees_the_resolved_bearer_or_no_header(which,
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
             runner=_refusing_runner, notice=lambda _text: None,
-            environ={ENV_NAME: KEY_SENTINEL})
+            environ={ENV_NAME: KEY_SENTINEL}, trust=_trusted(binding))
         assert port.dispatch(_Envelope())["assistant_prose"] == \
             "answered in the chat grammar"
     assert _ChatCompletionsHandler.seen["authorization"] == expected
@@ -3002,7 +3053,7 @@ def test_a_built_in_credential_follows_no_redirect(monkeypatch, code):
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
             runner=_refusing_runner, notice=lambda _text: None,
-            environ={ENV_NAME: KEY_SENTINEL})
+            environ={ENV_NAME: KEY_SENTINEL}, trust=_trusted(binding))
         envelope = _Envelope()
         with pytest.raises(provider_mod.BrokerRefused) as caught:
             port.dispatch(envelope)
@@ -3024,7 +3075,7 @@ def test_a_built_in_credential_over_http_to_this_host_uses_no_proxy(
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
             runner=_refusing_runner, notice=lambda _text: None,
-            environ={ENV_NAME: KEY_SENTINEL})
+            environ={ENV_NAME: KEY_SENTINEL}, trust=_trusted(binding))
         answer = port.dispatch(_Envelope())
     assert answer["assistant_prose"] == "answered in the chat grammar"
     assert _ChatCompletionsHandler.seen["authorization"] == (
@@ -3090,7 +3141,7 @@ def test_a_refused_connection_keeps_no_frame_that_holds_the_key(monkeypatch):
             endpoint=f"http://127.0.0.1:{closed}/v1/chat/completions")
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
-            runner=_refusing_runner, notice=lambda _text: None)
+            runner=_refusing_runner, notice=lambda _text: None, trust=_trusted(binding))
         envelope = _Envelope()
         with pytest.raises(provider_mod.BrokerRefused) as caught:
             port.dispatch(envelope)
@@ -3179,7 +3230,7 @@ def test_an_answer_http_client_cannot_read_is_unreachable_and_keeps_no_key(
         port = provider_mod.BrokeredProviderPort(
             binding, install_mod.brokered_catalog(binding),
             runner=runner, notice=lambda _text: None,
-            environ={ENV_NAME: KEY_SENTINEL})
+            environ={ENV_NAME: KEY_SENTINEL}, trust=_trusted(binding))
         envelope = _Envelope()
         with pytest.raises(provider_mod.BrokerRefused) as caught:
             port.dispatch(envelope)
@@ -3306,7 +3357,7 @@ def test_the_cli_declares_a_binding_for_each_resolver(tmp_path, capsys):
     from opendox import cli_model_binding as cmb
     assert f"credential ref   {cmb.NOT_DECLARED}" in listed
     assert f"broker argv      {cmb.NOT_DECLARED}" in listed
-    assert f"credential ref   env:{ENV_NAME}" in listed
+    assert f"credential ref   {json.dumps(f'env:{ENV_NAME}')}" in listed
 
     assert run("model-binding", "remove", *root, "--id", "env-bound") == 0
     assert binding_mod.BUILT_IN_REMOVAL_NOTICE in capsys.readouterr().out
@@ -3421,7 +3472,7 @@ def test_mint_asks_no_broker_for_a_token_on_a_route_that_is_not_private(
     binding = _broker_binding(script)
     object.__setattr__(binding, "endpoint", "http://api.example.invalid/v1")
     with pytest.raises(AssertionError) as caught:
-        provider_mod.mint(binding)
+        provider_mod.mint(binding, trust=_trusted(binding))
     assert "nothing was minted" in str(caught.value)
     assert _seen_all(script) == [], "the broker was never asked"
 
@@ -3452,7 +3503,7 @@ def _minting_port(tmp_path, endpoint, *, token=SENTINEL_TOKEN):
                               endpoint=endpoint, dialect=OPENAI_CHAT)
     return provider_mod.BrokeredProviderPort(
         binding, install_mod.brokered_catalog(binding),
-        notice=lambda _text: None)
+        notice=lambda _text: None, trust=_trusted(binding))
 
 
 def _refused_turn(port) -> provider_mod.BrokerRefused:
@@ -3651,7 +3702,7 @@ def _broker_answering(tmp_path, text: str) -> Path:
 def test_the_declared_mint_answer_mints(tmp_path):
     """The control for the case below: this answer, unchanged, mints."""
     script = _broker_answering(tmp_path, json.dumps(_mint_answer()))
-    assert provider_mod.mint(_broker_binding(script)).token == SENTINEL_TOKEN
+    assert provider_mod.mint(_broker_binding(script), trust=_trusted(_broker_binding(script))).token == SENTINEL_TOKEN
 
 
 #: A mint answer nested past the interpreter's recursion limit, and still well
@@ -3690,7 +3741,7 @@ def test_a_malformed_mint_answer_keeps_no_frame_that_holds_its_token(
         "a case for the answer's parser, not for the runner's bound"
     binding = _broker_binding(_broker_answering(tmp_path, text))
     with pytest.raises(provider_mod.BrokerRefused) as caught:
-        provider_mod.mint(binding)
+        provider_mod.mint(binding, trust=_trusted(binding))
     assert caught.value.diagnostic == provider_mod.DIAG_BROKER_MALFORMED
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
@@ -3851,13 +3902,13 @@ _OPERATIONS_ASKED = {
     provider_mod.OPERATION_INTAKE: lambda binding, runner: (
         provider_mod.hand_off_credential(
             binding, io.StringIO("sk-stand-in-intake-NOT-A-KEY"),
-            runner=runner)),
+            runner=runner, trust=_trusted(binding))),
     provider_mod.OPERATION_MINT: lambda binding, runner: (
-        provider_mod.mint(binding, runner=runner)),
+        provider_mod.mint(binding, runner=runner, trust=_trusted(binding))),
     provider_mod.OPERATION_REVOKE: lambda binding, runner: (
-        provider_mod.revoke(binding, runner=runner)),
+        provider_mod.revoke(binding, runner=runner, trust=_trusted(binding))),
     provider_mod.OPERATION_LIST: lambda binding, runner: (
-        provider_mod.list_references(binding, runner=runner)),
+        provider_mod.list_references(binding, runner=runner, trust=_trusted(binding))),
 }
 
 
@@ -3986,7 +4037,9 @@ def test_a_credential_source_that_fails_leaves_no_broker_running(tmp_path):
         "            return self.parts.pop()\n"
         "        raise UnicodeDecodeError('utf-8', b'x', 0, 1, 'stand-in')\n"
         f"binding = b.ModelProviderBinding(**{fields!r})\n"
-        "p.hand_off_credential(binding, Failing())\n")
+        "from opendox import doxbench_trust as t\n"
+        "p.hand_off_credential(binding, Failing(), "
+        "trust=t.TrustVerdict.trusted_for(binding, root=None, basis='test'))\n")
     run = subprocess.run([sys.executable, "-c", program], cwd=tmp_path,
                          capture_output=True, text=True, timeout=60,
                          check=False)
@@ -4308,7 +4361,7 @@ def test_a_broker_that_never_reads_the_credential_is_refused_in_time(
     def run():
         try:
             provider_mod.hand_off_credential(
-                binding, io.StringIO("k" * 1_000_000), runner=runner)
+                binding, io.StringIO("k" * 1_000_000), runner=runner, trust=_trusted(binding))
         except provider_mod.BrokerRefused as refusal:
             caught.append(refusal)
 
@@ -4356,7 +4409,7 @@ def test_a_failing_credential_source_escapes_with_no_broker_output(tmp_path):
     source = _SourceFailingOnceMarked(Path(str(script) + ".wrote"))
     binding = _broker_binding(script)
     with pytest.raises(UnicodeDecodeError) as caught:
-        provider_mod.hand_off_credential(binding, source)
+        provider_mod.hand_off_credential(binding, source, trust=_trusted(binding))
     assert _wrote(script), "the broker wrote before the source failed"
     assert _kept_anywhere(caught.value, SENTINEL_TOKEN) == []
     pid = int(Path(str(script) + ".pid").read_text(encoding="utf-8"))
@@ -4408,6 +4461,7 @@ def test_the_operator_door_names_the_operation_and_withholds_the_answer(
     (checkout / "ideation" / "dashboard").mkdir(parents=True)
     store = binding_mod.BindingStore(binding_mod.bindings_path(checkout))
     store.add(_broker_binding(script, credential_ref="opref-" + "0" * 24))
+    _trust_in_place(store.get("openprofiler-demo"), checkout)
     args = cli_mod.build_parser().parse_args([
         "model-binding", "set-credential", "--repo-root", str(checkout),
         "--id", "openprofiler-demo"])
