@@ -36,13 +36,17 @@ name: release
 # workflow's file name and the environment, never the ref. So every gate in
 # this file binds only where the dispatched ref carries the reviewed file.
 # The one server-side control over the ref is each environment's deployment
-# limit, and both environments MUST carry one: Brett set each to the tag
-# pattern `v*` alone, so a dispatch on `main` or any branch builds and
-# verifies but cannot deploy. The build job refuses when either environment
-# has no such limit, and each publish job checks it again at use time. The
-# limit that remains, accepted: while sessions act as brettheap, the approval
-# click is the last line of defense, and a ruleset over `v*` tags is
-# recommended, not required.
+# limit, and both environments MUST carry one. The build job refuses when
+# either environment has NO CUSTOM DEPLOYMENT LIMIT, and each publish job
+# checks that again at use time. The limit's pattern is the tag `v*` alone,
+# as the lane configured both environments on 2026-10-05 and verified through
+# the API, so a dispatch on `main` or any branch builds and verifies but
+# cannot deploy. The workflow does not re-read the pattern: changing it is an
+# admin act, as is changing the reviewer rule, and an admin can edit this
+# file too (accepted, RULED openxFactory#656 comment 5993462741). The limit
+# that remains, accepted: while sessions act as brettheap, the approval click
+# is the last line of defense, and a ruleset over `v*` tags is recommended,
+# not required.
 #
 # FOUR JOBS, EACH GATED ON THE ONE BEFORE IT:
 #   build            builds the sdist and the wheel in a clean job, runs
@@ -235,10 +239,12 @@ jobs:
       # dispatch runs the dispatched ref's own copy of this file, so an
       # environment that any ref may deploy to would publish whatever a branch
       # carries. Each environment must name a required reviewer, and its
-      # `deployment_branch_policy` must be set, with `custom_branch_policies`
-      # (the tag pattern `v*`, as Brett configured them). This step refuses
-      # either gap, before anything is built. The environments are public
-      # metadata of a public repository.
+      # `deployment_branch_policy` must be set, with `custom_branch_policies`:
+      # a custom deployment limit. Its pattern, the tag `v*`, is configured
+      # and was verified through the API, but this step does not re-read it
+      # (changing it is an admin act). This step refuses either gap, before
+      # anything is built. The environments are public metadata of a public
+      # repository.
       - name: both environments ask a reviewer and limit the refs that deploy
         env:
           GH_TOKEN: ${{ github.token }}
