@@ -345,3 +345,40 @@ jobs:
           [ "$FAILURES" = "0" ] || { echo "::error::failures $FAILURES, clause (d) requires zero"; rc=1; }
           [ "$ERRORS" = "0" ] || { echo "::error::errors $ERRORS, clause (d) requires zero"; rc=1; }
           exit $rc
+
+  # ---------------------------------------------------------------------------
+  # AT-R1, THE HTTP HALF — plan 034 T095 (FR-011's HTTP half; openxFactory
+  # `specs/034-opendox-standalone-operation/spec.md` § "AT-R1"). Release 1's
+  # acceptance: on a clean machine with only openDox installed, a plain git
+  # repository opens, and the wheel, the radar lens and the chat pane are
+  # served, with chat's "no model configured" state.
+  #
+  # ITS OWN JOB, AND WITH NO DATABASE SERVICE, because the harness ASSERTS a
+  # clean machine: nothing answers on PostgreSQL's port or socket, and no DSN
+  # is set. The `validate` job's PostgreSQL service (T036) would break that
+  # precondition, so the two cannot share a job.
+  #
+  # NOT A PYTEST RUN. `acceptance/at_r1_http.py` sits outside `tests/` and
+  # `tests_runtime/`, so `testpaths` never collects it and #1144's F9.1 is
+  # unchanged. It installs `opendox[local]` into a fresh venv of its own,
+  # from this checkout and through the dependency lock, runs the documented
+  # `opendox generate-and-open --local …` over two plain repositories, checks
+  # what the server answers, stops it, and asserts that no bundled PostgreSQL
+  # process is left. It exits non-zero on the first failed assertion, naming
+  # it. So this job installs nothing itself, and the one `pip install` step
+  # in this file stays the `validate` job's.
+  #
+  # NOT A REQUIRED CHECK. Making it one is a ruleset change for the
+  # repository's owner (`docs/branch-protection.md`); this file cannot.
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: AT-R1, the HTTP half
+        run: python3 acceptance/at_r1_http.py
