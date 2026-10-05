@@ -790,9 +790,9 @@ class DeclarationStore:
             raise _not_a_regular_file(self.path, mode)
         try:
             descriptor = os.open(self.path, _OPEN_FLAGS)
-        except (FileNotFoundError, NotADirectoryError):
-            return None             # removed since the look: nothing there
         except OSError as error:
+            # Removed since the look included: the look saw a document,
+            # and one that cannot then be opened is not read as none.
             raise self._cannot_read(error) from None
         try:
             mode = os.fstat(descriptor).st_mode

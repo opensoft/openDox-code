@@ -450,6 +450,35 @@ def test_F1_no_document_is_still_no_document(repo, governed):
     assert beneath.read_back()["declarations"] == []
 
 
+def test_F1_a_look_that_fails_is_never_absence(tmp_path):
+    """Green at main too. Only "no such file" (or a file where a directory
+    belongs on the way) is absence: a look the system refuses for any other
+    reason, here a link that loops in a directory on the way to a document
+    named outside a checkout's default path, is a document that cannot be
+    read."""
+    looping = tmp_path / "loop"
+    looping.symlink_to(looping)
+    with pytest.raises(intake_mod.IntakeRefused) as refused:
+        intake_mod.DeclarationStore(
+            looping / "declarations.yaml").pending_binding_ids()
+    assert "cannot be read" in str(refused.value)
+
+
+def test_F1_a_document_removed_after_the_look_is_not_read_as_none(
+        repo, monkeypatch, governed):
+    """RED AT MAIN, where the store took no look of its own to race (it read
+    the regular file). A regular document removed between the store's look
+    and its open is refused as unreadable, never read as no document, as
+    main refused a document removed between its look and its read."""
+    document = _pending_document(repo)
+    monkeypatch.setattr(intake_mod, "os",
+                        _OsThatSwaps(document, lambda path: path.unlink()),
+                        raising=False)
+    with pytest.raises(intake_mod.IntakeRefused) as refused:
+        intake_mod.DeclarationStore(document).pending_binding_ids()
+    assert "cannot be read" in str(refused.value)
+
+
 def test_F1_a_regular_document_still_reads(repo, governed):
     """Green at main too. A regular document is read as before: its pending
     binding is refused by the governed host, another is trusted."""
