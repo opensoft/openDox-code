@@ -4656,6 +4656,9 @@ INLINE = {
                                          "-e", "x", "--"],
     "node-flag-then-e": ["node", "--no-warnings", "-e", "x"],
     "pwsh-flag-then-command": ["pwsh", "-NoProfile", "-Command", "x"],
+    # pwsh reads every member before its command (`operands=None`),
+    # fail-closed: a word before `-Command` hides none
+    "pwsh-a-word-then-command": ["pwsh", "x", "-Command", "y"],
     "node-flag-a-file-then-e": ["node", "--no-warnings", "/opt/x.js", "-e",
                                 "x"],
     "pwsh-encoded": ["powershell", "-EncodedCommand", "eAA="],
