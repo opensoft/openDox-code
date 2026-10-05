@@ -2974,10 +2974,13 @@ def test_a_slash_where_an_expression_starts_opens_a_regular_expression(
     'for (const x of xs) of / 2; import "./a.js";\n',
     'const q = 1. / 2; import "./a.js";\n',
     'const q = f(await (x)) / 2; import "./a.js";\n',
+    'const q = await (x) / 2; import "./a.js";\n',
 ], ids=["of-as-a-name", "of-as-a-name-then-postfix",
         "of-in-a-call-in-a-for-head", "of-after-a-for-head",
-        "after-a-decimal-point", "after-a-call-after-await"])
+        "after-a-decimal-point", "after-a-call-after-await",
+        "after-an-awaited-group"])
 def test_a_slash_after_an_operand_divides(source: str) -> None:
-    """`of` outside a `for` head is a name, and a lone `.` ends a number,
-    not a spread; each `/` divides."""
+    """`of` outside a `for` head is a name, a lone `.` ends a number, not
+    a spread, and only `for await (` opens a `for` head, never another
+    `await (`; each `/` divides."""
     assert _queued(source) == ["/views/a.js"]
