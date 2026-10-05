@@ -264,20 +264,25 @@ def brokered_catalog(binding) -> ModelCatalog:
     ])
 
 
-def brokered_model_port_factory(binding, *, runner=None, opener=None,
-                                clock=None, notice=None):
+def brokered_model_port_factory(binding, *, trust=None, runner=None,
+                                opener=None, clock=None, notice=None):
     """The ZERO-ARGUMENT factory for a BROKER-BACKED port, memoized per process.
 
     Same shape and same reason as `model_port_factory` above: the accessor is
     called per REQUEST, and a port built per call would mint a fresh token for
     every turn and discard a live one. The seams (`runner`, `opener`, `clock`,
     `notice`) pass through so a test can exercise a turn without a broker and
-    without a provider; production declares none of them."""
+    without a provider; production declares none of them.
+
+    `trust` is the verdict that covers this exact binding (#1144 16.3a;
+    `doxbench_trust`). The port asks it again before every act, so a port
+    built without one spawns, reads and contacts nothing."""
     from opendox import doxbench_provider as provider_mod
 
     seams = {name: value for name, value in (
         ("runner", runner), ("opener", opener), ("clock", clock),
         ("notice", notice)) if value is not None}
+    seams["trust"] = trust
     catalog = brokered_catalog(binding)
     lock = threading.Lock()
     holder: dict[str, object] = {}
@@ -293,6 +298,79 @@ def brokered_model_port_factory(binding, *, runner=None, opener=None,
                     binding, catalog, **seams)
                 holder["port"] = port
             return port
+
+    return resolve
+
+
+def unavailable_catalog(binding) -> ModelCatalog:
+    """The catalog a binding discloses when it may not be used: its one entry,
+    exactly as `brokered_catalog` declares it, with `available: false`. The
+    catalog's wire shape is closed, so no reason rides it (#1144 16.3a)."""
+    import dataclasses
+
+    return ModelCatalog.from_entries([
+        dataclasses.replace(entry, available=False)
+        for entry in brokered_catalog(binding).entries])
+
+
+def trust_gated_model_port_factory(binding, *, checkout_root: Path | str,
+                                   bindings_path: Path | str | None = None):
+    """The factory for the first approved binding, ONCE THE TRUST POLICY HAS
+    JUDGED IT (#1144 16.3a; plan 034 T100; RULED openxFactory#656 comment
+    5962785556, item 2).
+
+    THE ONE PLACE A BINDING BECOMES USABLE. The binding was read from the
+    served repository, so it is used only if the registered trust policy
+    (`doxbench_trust.policy()`: a host's, or openDox's strict per-machine
+    store where no host registered one) trusts that exact binding at
+    `checkout_root`. Trusted, it resolves the brokered port, handed the
+    verdict. Untrusted, it resolves `doxbench_trust.UntrustedBindingPort`:
+    the catalog lists the binding `available: false`, a turn is refused by
+    name, and nothing is spawned, read or contacted. The refusal is said on
+    stderr, naming the binding and the command that trusts it.
+
+    The verdict is HELD TO THIS BINDING (`doxbench_trust.verdict_for`): a
+    policy that raises trusts nothing, and its words are not repeated; one
+    that answers for another binding, trusted or not, covers nothing, and the
+    refusal names THIS binding and its command.
+
+    A BINDING THE CATALOG REFUSES IS NEVER TRUSTED, whatever the policy or
+    the store says (Copilot at openDox-code#82, r4174783280): its id or its
+    label is not one `brokered_catalog` can list, so the verdict refuses it
+    before any policy is asked (`doxbench_trust.unservable_because`), and
+    this declares the refusing port over an empty catalog rather than fail
+    on what a repository wrote. So `brokered_catalog` below is only ever
+    built for a binding it accepts. The console's start never hands one
+    here: `declared_model_port_factory` passes it over (T100 follow-on, A3),
+    and this refusal is the defence beneath that, for any other caller.
+
+    `bindings_path` is the document the binding was read from, where a
+    caller named one, so the command the refusal prints reads that document
+    too."""
+    from opendox import doxbench_trust as trust_mod
+    from opendox.doxbench_model import EMPTY_CATALOG, ModelCatalogError
+
+    verdict = trust_mod.verdict_for(binding, root=checkout_root)
+    if verdict.admits(binding):
+        return brokered_model_port_factory(binding, trust=verdict)
+    bindings = (None if bindings_path is None
+                else str(Path(bindings_path).resolve()))
+    sys.stderr.write("[model-provider] " + trust_mod.refusal_message(
+        verdict.binding_id, verdict.root,
+        verdict.reason or trust_mod.REASON_NEVER_TRUSTED,
+        bindings=bindings) + "\n")
+    try:
+        catalog = unavailable_catalog(binding)
+    except ModelCatalogError:
+        # An id or a label the catalog's schema refuses (a newline, a
+        # terminal escape, an id past its bound) is a binding no turn could
+        # name. It is refused by name above, and the catalog lists nothing
+        # rather than the start failing on what a repository wrote.
+        catalog = EMPTY_CATALOG
+    port = trust_mod.UntrustedBindingPort(catalog, verdict, bindings=bindings)
+
+    def resolve():
+        return port
 
     return resolve
 
@@ -329,6 +407,13 @@ def declared_model_port_factory(session_root: Path | str, *,
     at a time. Choosing among several declared bindings needs a selection rule
     this change does not have and must not invent — see tasks.md 2.5.
 
+    A BINDING THE MODEL CATALOG CANNOT LIST IS PASSED OVER as a pending one
+    is (T100 follow-on, A3). It is no model at all: no turn could name it,
+    and declaring it would leave the console with an empty catalog whose
+    rail line ("No model configured") offers two remedies, a harness on PATH
+    or another binding, neither of which could then take effect. Passed
+    over, both do. It is said on stderr, by name, with its remedy.
+
     A PENDING DECLARATION IS SKIPPED (add-doxchat-model-intake task 3.1). A
     binding the intake flow wrote is DECLARED and not yet APPROVED, and "not yet
     approved" has to mean something at the one seam where availability is
@@ -337,7 +422,14 @@ def declared_model_port_factory(session_root: Path | str, *,
     not declared. A binding the DECLARATIONS DOCUMENT SAYS NOTHING ABOUT is
     unaffected, byte for byte — it was declared by hand in the settings file by
     the operator, and the operator is who approval is a record of (see
-    `doxbench_intake`'s module docstring for why the rule is not inverted)."""
+    `doxbench_intake`'s module docstring for why the rule is not inverted).
+
+    A DECLARED BINDING IS USED ONLY ONCE IT IS TRUSTED (#1144 16.3a; plan 034
+    T100; RULED openxFactory#656 comment 5962785556, item 2). The binding was
+    read from the repository this install serves, so the registered trust
+    policy judges the first approved one (`trust_gated_model_port_factory`).
+    A checkout declaring none never asks the policy, so it never touches
+    openDox's state directory."""
     from opendox import doxbench_binding as binding_mod
     from opendox import doxbench_intake as intake_mod
 
@@ -351,21 +443,35 @@ def declared_model_port_factory(session_root: Path | str, *,
             f"[model-provider] the bindings document could not be read "
             f"({error}); reading it as declaring no binding\n")
         declared = ()
+    from opendox import doxbench_trust as trust_mod
+
     pending = intake_mod.pending_binding_ids(checkout_root)
+    unservable = tuple(binding for binding in declared
+                       if binding.id not in pending
+                       and trust_mod.unservable_because(binding) is not None)
+    for binding in unservable:
+        sys.stderr.write(
+            f"[model-provider] model binding {trust_mod.shown(binding.id)} "
+            f"is passed over: {trust_mod.REASON_UNSERVABLE}. "
+            f"{trust_mod.REMEDY_UNSERVABLE}\n")
     approved = tuple(binding for binding in declared
-                     if binding.id not in pending)
-    if len(approved) != len(declared):
+                     if binding.id not in pending
+                     and binding not in unservable)
+    if len(approved) + len(unservable) != len(declared):
         # SAID OUT LOUD, on the same stderr channel the unreadable-document
         # fallback uses: an operator who declared a model through the wizard and
         # then wondered why the selector still has nothing in it deserves to
         # read the reason in their own console rather than infer it.
         sys.stderr.write(
             "[model-provider] "
-            f"{len(declared) - len(approved)} declared binding(s) are pending "
+            f"{len(declared) - len(approved) - len(unservable)} declared "
+            "binding(s) are pending "
             "human approval and contribute no available model; approve them "
             "from the console's model intake flow\n")
     if not approved:
         if (harness_present or harness_installed)():
             return model_port_factory(Path(session_root), spawn=spawn)
         return no_model_port_factory
-    return brokered_model_port_factory(approved[0])
+    return trust_gated_model_port_factory(approved[0],
+                                          checkout_root=checkout_root,
+                                          bindings_path=bindings_path)

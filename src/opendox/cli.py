@@ -104,6 +104,10 @@ from opendox.runtime import config as runtime_config  # noqa: E402
 # the driver is imported when the server is started, never here.
 from opendox.runtime import bundle as bundle_mod  # noqa: E402
 from opendox.runtime import migrations as migrations_mod  # noqa: E402
+# THE CONSOLE TOKEN'S PRIVATE COPY (plan 034 T104): on a standalone plane the
+# token is not on `/capabilities`, and `generate-and-open` opens the page
+# through a 0600 copy in the state directory instead. Stdlib-only.
+from opendox import console_access  # noqa: E402
 from opendox.boundary import (  # noqa: E402
     BoundaryViolation, HumanGate, OutputBoundary,
 )
@@ -893,34 +897,86 @@ def _generate_and_serve(args: argparse.Namespace, run_dir: Path, *,
                                    # bundled server it started as its child.
                                    install_report=_install_report(args))
     url = serve_mod.server_url(httpd, "/index.html")
-    print(f"  serving {url}")
-    print(f"  snapshot {serve_mod.server_url(httpd, '/snapshot.json')}")
-    # The URL is ALWAYS printed on its own line, AND FLUSHED (plan 034 T056).
-    # Where standard output is a pipe or a file, Python buffers it by block,
-    # and the process is about to block in `serve_forever()`. So without the
-    # flush, a wrapper reading this line never sees it while the server runs,
-    # and it cannot learn an ephemeral port or tell that the server started.
-    # Measured at openDox-code#59 e3ef506a: zero lines in 20 s on a pipe.
-    print(url, flush=True)
-
-    if not args.no_open:
+    # THE CONSOLE TOKEN, ON A STANDALONE PLANE (plan 034 T104; RULED
+    # openxFactory#656 `5963851934`). `/capabilities` no longer carries it, so
+    # this entry point writes it into a 0600 private copy in the install's
+    # state directory, an HTML page that forwards to `url` with the token in
+    # the FRAGMENT. The browser is handed the copy's PATH, because a URL given
+    # to `webbrowser.open` sits on a command line every user can read
+    # (`/proc/<pid>/cmdline`). The path is printed with or without
+    # `--no-open`, and the token never is: opening that file again re-opens
+    # the page. `None` on a host's plane, where no token was minted (a
+    # standalone plane still keeps every console's copy unserved then,
+    # `console_access.guard_private_roots`), and under `--no-serve`. A copy
+    # that cannot be written safely refuses the run before it serves.
+    #
+    # A plain `kill`, or a closed terminal, stops a standalone console the way
+    # Ctrl-C does (`terminate_as_interrupt`), from BEFORE the copy is written
+    # to after it is removed (Copilot at openDox-code#84, r4175213864), and a
+    # stop that arrives while the copy is being written or removed is held
+    # until that is done (`deferred_termination`), so no copy is ever left
+    # half handled. A plane that writes no copy keeps the signals' defaults.
+    #
+    # `--no-serve` SERVES NOTHING, SO IT PUBLISHES NOTHING (adversarial review
+    # of openDox-code#84, B8). It closes the server as soon as it has printed
+    # the URL, so a copy written for it opened a console page nothing
+    # answered, and was deleted as the run returned. No copy is written, none
+    # is opened, and no console line is printed.
+    console = None
+    serving = not args.no_serve
+    with console_access.terminate_as_interrupt(
+            serving and console_access.needs_copy(httpd)):
         try:
-            opener(url)
-        except Exception as exc:  # a headless box has no browser — never fatal
-            print(f"  (could not open a browser: {exc}; open the URL above manually)")
+            try:
+                with console_access.deferred_termination():
+                    if serving:
+                        console = console_access.publish(httpd, page_url=url)
+                print(f"  serving {url}")
+                print(f"  snapshot {serve_mod.server_url(httpd, '/snapshot.json')}")
+                if console is not None:
+                    print(f"  console {console.file_url} (this user's private "
+                          "copy, mode 0600: open it to open the console page "
+                          "again)")
+                    # A browser that cannot open it is told the way past it,
+                    # in one line with no token (RULED, B3).
+                    print(f"  {console_access.UNOPENABLE_HINT}")
+                # The URL is ALWAYS printed on its own line, AND FLUSHED (plan
+                # 034 T056). Where standard output is a pipe or a file, Python
+                # buffers it by block, and the process is about to block in
+                # `serve_forever()`. So without the flush, a wrapper reading
+                # this line never sees it while the server runs, and it cannot
+                # learn an ephemeral port or tell that the server started.
+                # Measured at openDox-code#59 e3ef506a: zero lines in 20 s on
+                # a pipe. It carries no token.
+                print(url, flush=True)
 
-    if args.no_serve:
-        httpd.server_close()
-        return 0
+                if not args.no_open:
+                    try:
+                        opener(console.file_url if console is not None else url)
+                    except Exception as exc:  # a headless box has no browser — never fatal
+                        print(f"  (could not open a browser: {exc}; open the "
+                              f"{'console file' if console is not None else 'URL'} "
+                              "above manually)")
 
-    print("  serving until interrupted (Ctrl-C to stop)", flush=True)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        httpd.server_close()
-    return 0
+                if args.no_serve:
+                    return 0
+
+                print("  serving until interrupted (Ctrl-C to stop)", flush=True)
+                httpd.serve_forever()
+            except console_access.ConsoleAccessRefused as exc:
+                print(f"generate-and-open refused: {exc}", file=sys.stderr)
+                return 1
+            except KeyboardInterrupt:
+                pass
+            return 0
+        finally:
+            # The copy goes with the server: its token is this serve's, and
+            # dies with it. It goes FIRST, while this process still holds the
+            # port, so no later serve can bind it and write its own copy in
+            # between. A stop that arrives meanwhile lets it finish.
+            with console_access.deferred_termination(raise_pending=False):
+                console_access.remove_private_copy(console)
+                httpd.server_close()
 
 
 # ---- gate console (US9): human-only executable gate actions ----------------

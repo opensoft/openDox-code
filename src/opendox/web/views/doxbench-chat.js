@@ -353,6 +353,36 @@ export function noModelConfiguredRemedy(stateValue) {
   return NO_MODEL_CONFIGURED_REMEDY;
 }
 
+// A DECLARED MODEL, NONE OF IT AVAILABLE, SAYS HOW TO TRUST IT (#1144 16.3a;
+// plan 034 T100; RULED openxFactory#656 comment 5962785556, item 2: "make the
+// rail say how to trust"). A binding read from the served repository is used
+// only once this machine trusts it, and until then the catalog keeps it,
+// `available: false`. The catalog's shape is closed, so the rail cannot say
+// WHICH binding or why; this line sends the operator to `model-binding list`,
+// which shows whether each binding is trusted, names the verb that trusts
+// one, and says where the reason is for a binding already trusted, which a
+// provider's refusal also leaves unavailable (Copilot at openDox-code#82,
+// r4173876849). Its OWN visible line, beside 16.4's:
+// that one is for an EMPTY catalog, and an operator with a binding declared
+// has a model configured. It shows only when the catalog has ANSWERED, is
+// NOT EMPTY, offers nothing available, no catalog failure is recorded (each
+// has its own remedy), and no intake affordance is rendered (where a host
+// offers intake it supplies its own remedy, as for 16.4's line). The Python
+// twin is `doxbench_trust.UNTRUSTED_BINDING_REMEDY`, which
+// tests/test_model_binding_trust.py holds to this spelling.
+export const UNTRUSTED_BINDING_REMEDY =
+  "No declared model is available. \"opendox model-binding list --repo-root <repository>\" shows whether each binding is trusted on this machine and, where trusting it can help, \"opendox model-binding trust --repo-root <repository> <id>\" trusts one after showing what it would run and where it would connect; then restart this console. A binding already trusted is unavailable for the reason this console printed when its provider refused.";
+
+export function untrustedBindingRemedy(stateValue) {
+  if (stateValue.catalogFailure) return null;
+  if (stateValue.models === null) return null;
+  const models = stateValue.models || [];
+  if (models.length === 0) return null;
+  if (models.some((entry) => entry.available === true)) return null;
+  if (stateValue.intakeOffered === true) return null;
+  return UNTRUSTED_BINDING_REMEDY;
+}
+
 // T104 F10-2/4: the over-bound paste, refused VISIBLY. The pure model
 // refuses by returning the IDENTICAL state (refused, never truncated) and
 // render()'s unconditional value reassignment reverts the DOM — correct, but
@@ -1147,6 +1177,9 @@ export function mountDoxBenchChatRail(host, options = {}) {
   // text through `announce` below, once per change.
   const noModelNote = el("div", "doxchat-no-model");
   noModelNote.hidden = true;
+  // 16.3a's visible line (`untrustedBindingRemedy`), announced as 16.4's is.
+  const untrustedNote = el("div", "doxchat-untrusted");
+  untrustedNote.hidden = true;
   const transcriptList = el("ul", "doxchat-transcript");
   transcriptList.setAttribute("aria-label", "chat transcript");
   const failureNote = el("div", "doxchat-failure");
@@ -1203,7 +1236,8 @@ export function mountDoxBenchChatRail(host, options = {}) {
   sendBtn.setAttribute("aria-describedby", unavailableNote.id);
   host.append(loadedSelect, loadedNote, loadedEmpty,
               loadedFull, subjectInput,
-              unavailableNote, noModelNote, transcriptList, contextNote,
+              unavailableNote, noModelNote, untrustedNote, transcriptList,
+              contextNote,
               retryNote, cardsHost, announce, failureNote, composer,
               disclosure, sendrow);
 
@@ -1528,6 +1562,12 @@ export function mountDoxBenchChatRail(host, options = {}) {
       noModelNote.hidden = !remedyText;
       noModelNote.textContent = remedyText;
       if (remedyText) announce.textContent = remedyText;
+    }
+    const trustText = untrustedBindingRemedy(state) || "";
+    if (untrustedNote.textContent !== trustText) {
+      untrustedNote.hidden = !trustText;
+      untrustedNote.textContent = trustText;
+      if (trustText) announce.textContent = trustText;
     }
     selector.value = defaultSelectorValue(state);
     transcriptList.textContent = "";

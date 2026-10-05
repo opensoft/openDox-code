@@ -450,7 +450,10 @@ def test_the_three_crash_sites_answer_a_standalone_server(
     repo = _repository(tmp_path, identity=True)
     child, base, caps = _standalone(tmp_path, repo)
     try:
-        token = caps.get("console_token")
+        # THE TOKEN IS NOT ON `/capabilities` (plan 034 T104): a standalone
+        # plane delivers it in the opened URL, through its private copy.
+        assert "console_token" not in caps, caps
+        token = child.console_token(base[1])
         assert caps["actions"]["session"] is True and token, caps
         abstract = _call(base, "POST", "/actions/workbench/document-abstract",
                          body=_json(_ABSTRACT), token=token)
@@ -493,7 +496,10 @@ def test_the_rails_thread_read_answers_a_standalone_server(
     repo = _repository(tmp_path, identity=True)
     child, base, caps = _standalone(tmp_path, repo)
     try:
-        token = caps.get("console_token")
+        # THE TOKEN IS NOT ON `/capabilities` (plan 034 T104): a standalone
+        # plane delivers it in the opened URL, through its private copy.
+        assert "console_token" not in caps, caps
+        token = child.console_token(base[1])
         assert caps["actions"]["session"] is True and token, caps
         status, body, raw = _call(
             base, "GET",
@@ -523,7 +529,8 @@ def test_an_unknown_tile_kind_on_the_thread_read_is_refused_not_dropped(
             base, "GET",
             "/workbench/thread?repository=fixture&ref=main&tile_kind=bogus"
             "&tile_id=barrel-rain&document=notes-rain-barrel-leak.md",
-            token=caps["console_token"])
+            # a standalone plane's token, from its private copy (T104)
+            token=child.console_token(base[1]))
         assert body.get("error") == DOXBENCH_ERR_INVALID_TURN_REQUEST, (status, raw)
         assert child.interrupt() == 0, child.stderr_text()
     finally:
@@ -585,7 +592,10 @@ def test_a_chat_turn_with_a_binding_configured_is_answered_standalone(
     assert status == 0, added.stderr_text()
     child, base, caps = _standalone(tmp_path, repo)
     try:
-        token = caps.get("console_token")
+        # THE TOKEN IS NOT ON `/capabilities` (plan 034 T104): a standalone
+        # plane delivers it in the opened URL, through its private copy.
+        assert "console_token" not in caps, caps
+        token = child.console_token(base[1])
         assert caps["actions"]["session"] is True and token, caps
         answer = _call(base, "POST", "/actions/workbench/chat-turn",
                        body=_json(_chat_turn()), token=token)
@@ -748,7 +758,10 @@ def test_a_standalone_server_does_not_offer_an_intake_it_could_not_approve(
     before = document.read_bytes()
     child, base, caps = _standalone(tmp_path, repo)
     try:
-        token = caps.get("console_token")
+        # THE TOKEN IS NOT ON `/capabilities` (plan 034 T104): a standalone
+        # plane delivers it in the opened URL, through its private copy.
+        assert "console_token" not in caps, caps
+        token = child.console_token(base[1])
         assert caps["actions"]["session"] is True and token, caps
         status, surface, raw = _call(base, "GET", "/workbench/model-intake",
                                      token=token)
@@ -817,11 +830,34 @@ def host_gate():
         column_seams.gate.unregister()
 
 
+class _HostTrust:
+    """A HOST's trust policy that admits the console intake's hand-off, as a
+    host offering the intake registers one (T100 follow-on, A5): openDox's
+    own per-machine trust admits no intake, so under it the surface is not
+    offered. It trusts no binding."""
+
+    def verdict(self, binding, *, root):
+        from opendox import doxbench_trust
+        return doxbench_trust.TrustVerdict.untrusted_for(
+            binding, root=root, basis=doxbench_trust.BASIS_HOST,
+            reason="this stand-in host trusts no binding")
+
+    def record(self, binding, *, root):
+        return self.verdict(binding, root=root)
+
+    def intake_verdict(self, binding, *, root):
+        from opendox import doxbench_trust
+        return doxbench_trust.TrustVerdict.trusted_for(
+            binding, root=root, basis=doxbench_trust.BASIS_HOST)
+
+
 def test_a_host_that_registers_its_gate_is_offered_intake_and_approves(
         tmp_path, host_gate) -> None:
     import yaml
-    from opendox import doxbench_intake, serve
+    from opendox import doxbench_intake, doxbench_trust, serve
 
+    doxbench_trust.unregister()
+    doxbench_trust.register(_HostTrust())
     repo = _repository(tmp_path, identity=True)
     document = _declare(tmp_path, repo)
     out = _snapshot(tmp_path, repo)
