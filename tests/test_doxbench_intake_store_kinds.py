@@ -38,6 +38,7 @@ import json
 import os
 import socket
 import stat
+import sys
 import threading
 import time
 from pathlib import Path
@@ -538,3 +539,58 @@ def test_F1_the_declarations_parse_refuses_in_the_bindings_stores_words(
         f"bindings document at {json.dumps(str(bindings))}",
         f"declarations document at {json.dumps(str(declarations))}")
     assert str(said_of_declarations.value) == expected
+
+
+# ===========================================================================
+# 6. a platform without the open's guards opens no document (Copilot
+#    r4187659916 on openDox-code#87)
+# ===========================================================================
+
+
+class _OsThatRecordsOpens:
+    """`os` as the declarations store sees it, recording every path it
+    opens. Everything else is the real `os`."""
+
+    def __init__(self) -> None:
+        self.opened: list[Path] = []
+
+    def open(self, path, *args, **kwargs):
+        self.opened.append(Path(path))
+        return os.open(path, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
+@pytest.mark.parametrize("missing", [
+    ("os.O_NOFOLLOW",), ("os.O_NONBLOCK",), ("os.O_NOFOLLOW", "os.O_NONBLOCK")],
+    ids=["no-nofollow", "no-nonblock", "neither"])
+def test_F1_a_platform_without_the_opens_guards_opens_no_document(
+        repo, monkeypatch, governed, missing):
+    """RED AT MAIN (the document was read by its name). Without
+    `O_NOFOLLOW` a link put in the document's place after the look would be
+    followed, and without `O_NONBLOCK` a FIFO put there would hold the open.
+    So where the platform lacks either, a document that is there is refused
+    by name, as an unreadable one, and is never opened; the governed host
+    admits nothing; and nothing there is still nothing."""
+    document = _pending_document(repo, "another")
+    recorder = _OsThatRecordsOpens()
+    monkeypatch.setattr(intake_mod, "_MISSING_OPEN_GUARDS", missing,
+                        raising=False)
+    monkeypatch.setattr(intake_mod, "os", recorder, raising=False)
+    refusal = (
+        f"the declarations document at {json.dumps(str(document))} cannot "
+        f"be read (this platform ({sys.platform}) lacks "
+        f"{' and '.join(missing)}, so the document cannot be opened without "
+        "following a link or waiting on what it opened)")
+    with pytest.raises(intake_mod.IntakeRefused) as refused:
+        intake_mod.DeclarationStore(document).pending_binding_ids()
+    assert str(refused.value) == refusal
+    verdict = trust_mod.verdict_for(_binding(), root=repo)
+    assert not verdict.trusted
+    assert verdict.reason == (
+        f"its declarations document cannot be read ({refusal})")
+    assert document not in recorder.opened
+    document.unlink()
+    assert intake_mod.DeclarationStore(document).pending_binding_ids() == \
+        frozenset()

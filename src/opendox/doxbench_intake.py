@@ -59,6 +59,7 @@ import errno
 import io
 import os
 import stat
+import sys
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -573,11 +574,28 @@ def _yaml_or_refused():
 #: FIFO put in the document's place after the look cannot hold the read
 #: until some writer comes; never through a link at its own name; and not
 #: inherited by a program this process starts. A regular file reads the
-#: same either way. A flag a platform lacks is left out, and there the look
-#: before the open and the descriptor's own type still refuse anything but
-#: a regular file (`DeclarationStore._open`).
+#: same either way. Spelled so this module imports everywhere; where a guard
+#: is missing, nothing is opened with it (`_MISSING_OPEN_GUARDS`).
 _OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
                | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+
+#: The guards that open needs and this platform lacks (Copilot r4187659916
+#: on openDox-code#87). They are the guard itself, not an optimization:
+#: without `O_NOFOLLOW` a link put in the document's place after the look is
+#: followed, and without `O_NONBLOCK` a FIFO put there holds the open
+#: itself. So a platform lacking either opens no declarations document: one
+#: that is there is refused by name, as an unreadable one, and none is read
+#: unguarded, as `runtime.local_git_adapter.NO_FOLLOW_WALK_IS_AVAILABLE`
+#: refuses its own walk. Every CI runner and deployment is Linux, which has
+#: both.
+_MISSING_OPEN_GUARDS = tuple(f"os.{name}" for name in ("O_NOFOLLOW",
+                                                        "O_NONBLOCK")
+                             if not hasattr(os, name))
+
+#: Why a document that is there is not read where a guard is missing.
+NO_GUARDED_OPEN = (
+    "this platform ({platform}) lacks {missing}, so the document cannot be "
+    "opened without following a link or waiting on what it opened")
 
 #: What a path in the declarations document's place IS, where it is no
 #: regular file, as a refusal names it.
@@ -773,7 +791,9 @@ class DeclarationStore:
         hold it either, and the descriptor's own type decides (`os.fstat`):
         whatever replaced the file after the look is refused for what it is.
         The caller reads through this descriptor, never through a second look
-        at the path, and closes it."""
+        at the path, and closes it. Where the platform lacks a guard the open
+        needs, a document that is there is refused by name rather than opened
+        without it (`_MISSING_OPEN_GUARDS`, Copilot r4187659916)."""
         try:
             # Refused BY NAME before the read too (Copilot at
             # openDox-code#86, r4179241603).
@@ -788,6 +808,11 @@ class DeclarationStore:
             raise self._cannot_read(error) from None
         if not stat.S_ISREG(mode):
             raise _not_a_regular_file(self.path, mode)
+        if _MISSING_OPEN_GUARDS:
+            raise self._cannot_read(OSError(
+                errno.ENOTSUP, NO_GUARDED_OPEN.format(
+                    platform=sys.platform,
+                    missing=" and ".join(_MISSING_OPEN_GUARDS))))
         try:
             descriptor = os.open(self.path, _OPEN_FLAGS)
         except OSError as error:
