@@ -71,9 +71,9 @@ def test_D5_a_broker_at_the_ceiling_is_read():
 def test_D5_a_broker_past_the_ceiling_is_refused_by_name():
     """RED AT MAIN. One member past the ceiling is refused by name, naming
     how many there are and the ceiling."""
+    record = {"kind": intake_mod.BROKER_KIND, "argv": _argv(CEILING + 1)}
     with pytest.raises(intake_mod.IntakeRefused) as refused:
-        intake_mod.BrokerDeclaration.from_record(
-            {"kind": intake_mod.BROKER_KIND, "argv": _argv(CEILING + 1)})
+        intake_mod.BrokerDeclaration.from_record(record)
     assert str(refused.value) == _past_the_ceiling(CEILING + 1)
 
 
@@ -83,8 +83,9 @@ def test_D5_the_ceiling_is_imported_never_restated(monkeypatch):
     three members are read and four refused."""
     monkeypatch.setattr(binding_mod, "MAX_JUDGED_MEMBERS", 3)
     assert len(intake_mod.BrokerDeclaration(argv=_argv(3)).argv) == 3
+    argv = _argv(4)
     with pytest.raises(intake_mod.IntakeRefused) as refused:
-        intake_mod.BrokerDeclaration(argv=_argv(4))
+        intake_mod.BrokerDeclaration(argv=argv)
     assert str(refused.value) == _past_the_ceiling(4, 3)
 
 
@@ -114,15 +115,16 @@ def test_D5_a_document_whose_broker_passes_the_ceiling_is_refused(
 
 
 def test_D5_no_write_crosses_the_ceiling(tmp_path):
-    """RED AT MAIN (the broker was declared and written). A broker past the
-    ceiling cannot be built to be declared, so no document is written that
-    every read would then refuse; the document is as it was."""
+    """RED AT MAIN (the broker was built, and `declare_broker` would have
+    written it). A broker past the ceiling cannot be built to be declared,
+    so no document is written that every read would then refuse: the
+    document is as it was, and a broker at the ceiling is declared."""
     document = _write_declarations(tmp_path, _argv(1))
     before = document.read_bytes()
     store = intake_mod.DeclarationStore(document)
+    argv = _argv(CEILING + 1)
     with pytest.raises(intake_mod.IntakeRefused) as refused:
-        store.declare_broker(intake_mod.BrokerDeclaration(
-            argv=_argv(CEILING + 1)))
+        intake_mod.BrokerDeclaration(argv=argv)
     assert str(refused.value) == _past_the_ceiling(CEILING + 1)
     assert document.read_bytes() == before
     store.declare_broker(intake_mod.BrokerDeclaration(argv=_argv(CEILING)))

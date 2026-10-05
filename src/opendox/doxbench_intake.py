@@ -569,6 +569,9 @@ def _yaml_or_refused():
     return yaml
 
 
+#: What every refusal of the declarations document calls it.
+_DOCUMENT = "declarations document"
+
 #: How the declarations document is opened (Copilot r4184739661 on
 #: openxFactory#1236): read-only; WITHOUT WAITING on what was opened, so a
 #: FIFO put in the document's place after the look cannot hold the read
@@ -626,7 +629,7 @@ def _not_a_regular_file(path: Path, mode: int) -> IntakeRefused:
     kind = next((name for test, name in _KINDS if test(mode)),
                 "an unknown kind of file")
     return IntakeRefused(binding_mod.cannot_read(
-        path, "declarations document",
+        path, _DOCUMENT,
         OSError(errno.EINVAL, NOT_A_REGULAR_FILE.format(kind=kind))))
 
 
@@ -762,13 +765,13 @@ class DeclarationStore:
                                             DEFAULT_DECLARATIONS_RELPATH)
         if link is not None:
             raise IntakeRefused(binding_mod.LINKED_DOCUMENT.format(
-                what="declarations document",
+                what=_DOCUMENT,
                 path=binding_mod.shown_path(self.path),
                 link=binding_mod.shown_path(link)))
 
     def _cannot_read(self, error: OSError) -> IntakeRefused:
         return IntakeRefused(binding_mod.cannot_read(
-            self.path, "declarations document", error))
+            self.path, _DOCUMENT, error))
 
     def _open(self) -> int | None:
         """A descriptor open on the declarations document, or None where

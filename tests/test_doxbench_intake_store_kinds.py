@@ -343,8 +343,9 @@ def test_F1_a_link_that_appears_after_the_link_rule_looked_is_never_read(
         return found
 
     monkeypatch.setattr(binding_mod, "linked_component", look_then_link)
+    store = intake_mod.DeclarationStore(document)
     with pytest.raises(intake_mod.IntakeRefused) as refused:
-        intake_mod.DeclarationStore(document).pending_binding_ids()
+        store.pending_binding_ids()
     assert str(refused.value) == _refusal(document, "a symbolic link")
     document.unlink()               # the same race, asked by the host
     verdict = trust_mod.verdict_for(_binding("another"), root=repo)
@@ -426,8 +427,9 @@ def test_F1_a_file_replaced_by_a_link_after_the_look_is_never_read_through(
 
     monkeypatch.setattr(intake_mod, "os", _OsThatSwaps(document, into_link),
                         raising=False)
+    store = intake_mod.DeclarationStore(document)
     with pytest.raises(intake_mod.IntakeRefused) as refused:
-        intake_mod.DeclarationStore(document).pending_binding_ids()
+        store.pending_binding_ids()
     assert "cannot be read" in str(refused.value)
 
 
@@ -459,9 +461,9 @@ def test_F1_a_look_that_fails_is_never_absence(tmp_path):
     read."""
     looping = tmp_path / "loop"
     looping.symlink_to(looping)
+    store = intake_mod.DeclarationStore(looping / "declarations.yaml")
     with pytest.raises(intake_mod.IntakeRefused) as refused:
-        intake_mod.DeclarationStore(
-            looping / "declarations.yaml").pending_binding_ids()
+        store.pending_binding_ids()
     assert "cannot be read" in str(refused.value)
 
 
@@ -475,8 +477,9 @@ def test_F1_a_document_removed_after_the_look_is_not_read_as_none(
     monkeypatch.setattr(intake_mod, "os",
                         _OsThatSwaps(document, lambda path: path.unlink()),
                         raising=False)
+    store = intake_mod.DeclarationStore(document)
     with pytest.raises(intake_mod.IntakeRefused) as refused:
-        intake_mod.DeclarationStore(document).pending_binding_ids()
+        store.pending_binding_ids()
     assert "cannot be read" in str(refused.value)
 
 
@@ -531,10 +534,12 @@ def test_F1_the_declarations_parse_refuses_in_the_bindings_stores_words(
     bindings.write_bytes(raw)
     declarations = intake_mod.declarations_path(repo)
     declarations.write_bytes(raw)
+    bindings_store = binding_mod.BindingStore(bindings)
+    declarations_store = intake_mod.DeclarationStore(declarations)
     with pytest.raises(binding_mod.BindingRefused) as said_of_bindings:
-        binding_mod.BindingStore(bindings).list()
+        bindings_store.list()
     with pytest.raises(intake_mod.IntakeRefused) as said_of_declarations:
-        intake_mod.DeclarationStore(declarations).list()
+        declarations_store.list()
     expected = str(said_of_bindings.value).replace(
         f"bindings document at {json.dumps(str(bindings))}",
         f"declarations document at {json.dumps(str(declarations))}")
@@ -583,8 +588,9 @@ def test_F1_a_platform_without_the_opens_guards_opens_no_document(
         f"be read (this platform ({sys.platform}) lacks "
         f"{' and '.join(missing)}, so the document cannot be opened without "
         "following a link or waiting on what it opened)")
+    store = intake_mod.DeclarationStore(document)
     with pytest.raises(intake_mod.IntakeRefused) as refused:
-        intake_mod.DeclarationStore(document).pending_binding_ids()
+        store.pending_binding_ids()
     assert str(refused.value) == refusal
     verdict = trust_mod.verdict_for(_binding(), root=repo)
     assert not verdict.trusted
