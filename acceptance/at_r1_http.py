@@ -748,8 +748,16 @@ _REGEX_AFTER_WORDS = frozenset({
 #: comes before a binding, never before the separator.
 _OF = frozenset({"of"})
 _DECLARATIONS = frozenset({"const", "let", "var"})
-#: ... and so does a `/` after one of these characters, or at the start.
-_REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
+#: What a line break ends, by automatic semicolon insertion, where a `/`
+#: could not go on as a division, so that one on the next line opens a
+#: regular expression: a `break` or `continue` to a label, and a
+#: declaration's one binding with no initializer. (A static import's
+#: specifier is another, which the lexer marks as it reads it.)
+_ENDED_BY_A_LINE_BREAK = re.compile(
+    r"(?<![\w$.])(?:break|continue|let|var|const) [\w$]+$")
+#: ... and so does a `/` after one of these characters, or at the start: an
+#: operator's, a division's own `/` among them (`a / /re/.lastIndex`).
+_REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*/%<>~^")
 #: The keywords whose `(…)` is a condition, after which a statement, and so
 #: a regular expression, may start.
 _CONDITION_WORDS = frozenset({"if", "while", "for", "with"})
@@ -907,6 +915,11 @@ class JsStrings:
         self.closed_condition = False
         # Whether a `/` stood right after a `}`, which this lexer cannot read.
         self.ambiguous = False
+        # The number of code entries read before each line break (or each
+        # comment holding one), and where the last static import's specifier
+        # ended, for the statements a line break ends.
+        self.breaks: set[int] = set()
+        self.specifier_end = -1
 
     def scan(self) -> list[tuple[str, str, str]]:
         while self.i < len(self.src):
@@ -920,9 +933,10 @@ class JsStrings:
             end = _JS_LINE_END.search(self.src, self.i)
             self.i = len(self.src) if end is None else end.start()
         elif self.src.startswith("/*", self.i):
-            end = self.src.find("*/", self.i + 2)
+            start, end = self.i, self.src.find("*/", self.i + 2)
             self.i = len(self.src) if end < 0 else end + 2
-            self._space()
+            broken = _JS_LINE_END.search(self.src, start, self.i) is not None
+            self._space(broken)
         elif c == "/" and self.last == "}":
             # A `}` that closes a BLOCK is followed by a statement, so a `/`
             # opens a regular expression; one that closes an EXPRESSION (an
@@ -940,7 +954,7 @@ class JsStrings:
         elif c == "`":
             self._template()
         elif c in _JS_WHITESPACE:
-            self._space()
+            self._space(c in _JS_LINE_TERMINATORS)
             self.i += 1
         elif (c == "}" and self.interpolations
                 and self.interpolations[-1][0] == self.depth):
@@ -958,18 +972,23 @@ class JsStrings:
             self.last = c
             self.i += 1
 
-    def _space(self) -> None:
+    def _space(self, line_break: bool = False) -> None:
         if not (self.code and self.code[-1].endswith(" ")):
             self.code.append(" ")
+        if line_break:
+            self.breaks.add(len(self.code))
 
     def _recent(self) -> str:
         return "".join(self.code[-40:])
 
     def _emit(self, quote: str, value: str, end: int) -> None:
-        self.found.append((quote, scalar_values(value), self._recent()))
+        before = self._recent()
+        self.found.append((quote, scalar_values(value), before))
         self.code.append(" s ")
         self.last = "s"
         self.i = end
+        if quote != "`" and _STATIC_IMPORT_CONTEXT.search(before):
+            self.specifier_end = len(self.code)
 
     def _regex_may_start(self) -> bool:
         """Whether a `/` here opens a regular expression, not a division:
@@ -979,17 +998,35 @@ class JsStrings:
         (Copilot review of openDox-code#75 at b7b9b843, r4179348386: `n++ /
         2` divides). After a spread's `...`, or a keyword an expression may
         follow, it opens one (the pass after Copilot's review overview at
-        ea4f7838); `of` is that keyword only as a `for` head's separator."""
+        ea4f7838); `of` is that keyword only as a `for` head's separator.
+        After a line break that ends a statement, it opens one as well: a
+        `++` or `--` after a line break is a prefix, and a labelled `break`
+        or `continue`, a declaration's lone binding and a static import's
+        specifier each end their statement there."""
         if self.last == ")":
             return self.closed_condition
         code = self._recent().rstrip(" ")
         if code.endswith(("++", "--")):
-            return not self._ends_an_operand(code[:-2].rstrip(" "))
+            return (self._break_before_operator()
+                    or not self._ends_an_operand(code[:-2].rstrip(" ")))
         if code.endswith("..."):        # a spread, before an expression
             return True
         if self.last == "" or self.last in _REGEX_AFTER_PUNCTUATION:
             return True
+        if len(self.code) in self.breaks and (
+                _ENDED_BY_A_LINE_BREAK.search(code) is not None
+                or (self.last == "s" and self.specifier_end == len(self.code))):
+            return True
         return self._ends_with_a_keyword(self._recent())
+
+    def _break_before_operator(self) -> bool:
+        """Whether a line break stands right before the `++` or `--` that
+        ends the code read, which makes it a prefix (`a` [line break] `++x`
+        is `a; ++x`)."""
+        j = len(self.code)
+        while j and self.code[j - 1] == " ":
+            j -= 1
+        return j - 2 in self.breaks
 
     def _ends_with_a_keyword(self, code: str) -> bool:
         """Whether `code` ends with a keyword an expression may follow:

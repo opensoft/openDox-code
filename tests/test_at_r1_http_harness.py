@@ -2955,11 +2955,13 @@ def test_a_longer_or_private_name_is_no_keyword(source: str) -> None:
     'for (;;) { break\n/"/.test(s) } import "./a.js";\n',
     'for (;;) { continue\n/"/.test(s) } import "./a.js";\n',
     'debugger\n/"/.test(s); import "./a.js";\n',
+    'const q = a / /"/.lastIndex; import "./a.js";\n',
 ], ids=["of-in-a-for-head", "of-in-a-for-await-head",
         "after-a-for-await-condition", "prefix-after-of-in-a-for-head",
         "after-a-spread", "after-a-spaced-spread", "after-export-default",
         "after-extends", "after-break-and-a-line-break",
-        "after-continue-and-a-line-break", "after-debugger-and-a-line-break"])
+        "after-continue-and-a-line-break", "after-debugger-and-a-line-break",
+        "after-a-division"])
 def test_a_slash_where_an_expression_starts_opens_a_regular_expression(
         source: str) -> None:
     """Each `/` opens a regular expression, whose `"` hides nothing after
@@ -3018,3 +3020,38 @@ def test_of_is_a_keyword_only_as_a_for_head_s_separator(source: str) -> None:
     it is the separator, and the `"` of the regular expression after it
     hides nothing."""
     assert _queued(source) == ["/views/a.js"]
+
+
+# ---------------------------------------------------------------------------
+# A differential check of the lexer against node's own module parser, run in
+# the pass after r4180899047, found the statements a line break ends
+# (automatic semicolon insertion) read as going on: a `/` on the next line
+# opens a regular expression there.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("source, queued", [
+    ('let a = 1; a\n++/"/.lastIndex; import "./a.js";\n', ["/views/a.js"]),
+    ('let a = 1; a /* c\n*/ ++/"/.lastIndex; import "./a.js";\n',
+     ["/views/a.js"]),
+    ('outer: for (;;) { break outer\n/"/.lastIndex } import "./a.js";\n',
+     ["/views/a.js"]),
+    ('outer: for (;;) { continue outer\n/"/.lastIndex } import "./a.js";\n',
+     ["/views/a.js"]),
+    ('let x\n/"/.lastIndex; import "./a.js";\n', ["/views/a.js"]),
+    ('import "./b.js"\n/"/.lastIndex; import "./a.js";\n',
+     ["/views/b.js", "/views/a.js"]),
+    ('import b from "./b.js"\n/"/.lastIndex; import "./a.js";\n',
+     ["/views/b.js", "/views/a.js"]),
+    # a line break that ends nothing: each `/` divides
+    ('let a = 1; a++\n/ 2; import "./a.js";\n', ["/views/a.js"]),
+    ('const s = "./b.js"\n/ 2; import "./a.js";\n', ["/views/a.js"]),
+    ('let x = y\n/ 2; import "./a.js";\n', ["/views/a.js"]),
+    ('const q = a\n/ 2; import "./a.js";\n', ["/views/a.js"]),
+], ids=["prefix-after-a-line-break", "prefix-after-a-comment-holding-one",
+        "after-a-labelled-break", "after-a-labelled-continue",
+        "after-a-lone-binding", "after-an-import", "after-an-import-from",
+        "postfix-then-a-line-break", "a-string-then-a-line-break",
+        "a-binding-with-an-initializer", "a-name-then-a-line-break"])
+def test_a_line_break_that_ends_a_statement_opens_a_regular_expression(
+        source: str, queued: list) -> None:
+    assert _queued(source) == queued
