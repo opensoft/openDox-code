@@ -37,8 +37,12 @@ What is held:
   * before that, the preflight: the index holds no file of this version but a
     verified one at its verified digest, so skip-existing can never make a
     mixed release;
-  * the environment step: both environments with a reviewer pass, and either
-    one without a reviewer, or unreadable, refuses;
+  * the environment step: both environments with a reviewer and a deployment
+    limit pass, and either one without a reviewer, without a limit (or with
+    protected branches in place of one), or unreadable, refuses;
+  * `main` is `refs/heads/main`, in the root's fetch and in the compare: a
+    stand-in root whose tag `main`, at a commit off the branch, pins another
+    commit cannot name the release commit, in any of the three jobs;
   * the version gate, case by case, a pre-release and a development release
     among the refusals;
   * the artifact checks, over a small built-by-hand wheel and sdist in a git
@@ -180,7 +184,7 @@ case "$*" in
     printf '%s\\n' "$FAKE_APPROVALS" ;;
   *environments/*)
     args="$*"; environment="${args##*environments/}"; environment="${environment%% *}"
-    variable="FAKE_REVIEWERS_${environment}"
+    variable="FAKE_ENVIRONMENT_${environment}"
     [ -z "${!variable:-}" ] && { echo "HTTP 404" >&2; exit 1; }
     printf '%s\\n' "${!variable}" ;;
   *) echo "the stand-in gh has no answer for: $*" >&2; exit 2 ;;
@@ -194,6 +198,23 @@ def _fake_gh(where: Path) -> Path:
     gh.write_text(FAKE_GH, encoding="utf-8")
     gh.chmod(0o755)
     return _shim(where)
+
+
+LIMITED = {"custom_branch_policies": True, "protected_branches": False}
+
+
+def _environment(reviewers: int, policy: dict | None = LIMITED) -> str:
+    """An environment as `GET /repos/{owner}/{repo}/environments/{name}`
+    answers it (the shape read from opensoft/openDox-code's own environments
+    on 2026-10-05): `reviewers` required reviewers, and `policy` as its
+    `deployment_branch_policy`, which is null when any ref may deploy."""
+    rules = [{"id": 1, "type": "required_reviewers", "prevent_self_review": False,
+              "reviewers": [{"type": "User", "reviewer": {"login": f"reviewer{n}"}}
+                            for n in range(reviewers)]}]
+    if policy is not None:
+        rules.append({"id": 2, "type": "branch_policy"})
+    return json.dumps({"id": 1, "name": "an-environment", "protection_rules": rules,
+                       "deployment_branch_policy": policy})
 
 
 def _pin(commit: str, source: str = REPOSITORY) -> str:
@@ -295,11 +316,52 @@ def test_the_root_pin_is_read_over_git_with_no_credential() -> None:
     script = step["run"]
     assert "contents/contracts/code-pin.yaml" not in script
     assert re.search(r'GIT_TERMINAL_PROMPT=0 git -C "\$root" -c credential\.helper= \\\n'
-                     r'\s+fetch -q --depth 1 --no-tags ' + re.escape(ROOT_URL) + r' main', script), script
+                     r'\s+fetch -q --depth 1 --no-tags ' + re.escape(ROOT_URL) + r' refs/heads/main \\\n',
+                     script), script
     assert not re.search(r"\bgh\b", script) and "env" not in step, step
     ref = _step("build", REF_STEP)["run"]
     calls = [line.strip() for line in ref.splitlines() if re.search(r"\bgh\b", line)]
     assert len(calls) == 1 and "/compare/" in calls[0], calls
+    # `main` is the branch, never a bare name that a tag `main` would win.
+    assert '/compare/$GITHUB_SHA...refs/heads/main"' in calls[0], calls
+
+
+def _root_with_a_tag_named_main(where: Path, tagged: str) -> Path:
+    """A stand-in root whose branch `main` pins PINNED, and whose TAG `main`
+    is a commit off that branch pinning `tagged` (lane 3's review D8, F1: git
+    resolves a bare `main` on the remote as the tag, before the branch)."""
+    root = _root(where, _pin(PINNED))
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(where),
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_AUTHOR_NAME": "root", "GIT_AUTHOR_EMAIL": "root@example.invalid",
+           "GIT_COMMITTER_NAME": "root", "GIT_COMMITTER_EMAIL": "root@example.invalid"}
+    for args in (("checkout", "-q", "-b", "side"),):
+        subprocess.run(("git", "-C", str(root), *args), check=True, env=env)
+    (root / "contracts" / "code-pin.yaml").write_text(_pin(tagged), encoding="utf-8")
+    for args in (("commit", "-q", "-am", "an unreviewed pin, reachable only from the tag"),
+                 ("tag", "main"), ("checkout", "-q", "main"), ("branch", "-q", "-D", "side")):
+        subprocess.run(("git", "-C", str(root), *args), check=True, env=env)
+    return root
+
+
+@needs_a_shell
+@pytest.mark.parametrize("job", ["build", "testpypi", "pypi"])
+@pytest.mark.parametrize("sha", ["the branch's pin", "the tag's pin"])
+def test_a_tag_named_main_in_the_root_cannot_name_the_release_commit(
+        job: str, sha: str, tmp_path: Path) -> None:
+    other = "2" * 40
+    root = _root_with_a_tag_named_main(tmp_path / "root", other)
+    (tmp_path / "rt").mkdir()
+    env = {"GITHUB_REPOSITORY": REPOSITORY, "RUNNER_TEMP": str(tmp_path / "rt"),
+           "GITHUB_SHA": PINNED if sha == "the branch's pin" else other, **_redirect(root)}
+    result = _run(_step(job, PIN_STEP)["run"], tmp_path, env)
+    if sha == "the branch's pin":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "is the commit opensoft/openDox main pins" in result.stdout
+    else:
+        assert result.returncode != 0, result.stdout
+        assert f"the openDox root pins {PINNED}" in result.stdout + result.stderr, \
+            result.stdout + result.stderr
 
 
 def test_each_upload_rechecks_the_pin_right_before_it() -> None:
@@ -335,10 +397,20 @@ def test_a_pin_that_moved_stops_the_upload(job: str, moved: bool, tmp_path: Path
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+ENVIRONMENT_STEP = "both environments ask a reviewer and limit the refs that deploy"
+
 ENVIRONMENT_CASES = {
-    "both name a reviewer": (dict(testpypi="1", pypi="1"), None),
-    "pypi names none": (dict(testpypi="1", pypi="0"), "the pypi environment names no required reviewer"),
-    "testpypi does not exist": (dict(pypi="1"), "the testpypi environment cannot be read"),
+    "both name a reviewer and limit their refs": (
+        dict(testpypi=_environment(1), pypi=_environment(1)), None),
+    "pypi names none": (dict(testpypi=_environment(1), pypi=_environment(0)),
+                        "the pypi environment names no required reviewer"),
+    "testpypi does not exist": (dict(pypi=_environment(1)), "the testpypi environment cannot be read"),
+    "pypi limits no refs": (dict(testpypi=_environment(1), pypi=_environment(1, None)),
+                            "the pypi environment does not limit the refs"),
+    "testpypi allows its protected branches, not named refs": (
+        dict(testpypi=_environment(1, {"custom_branch_policies": False, "protected_branches": True}),
+             pypi=_environment(1)),
+        "the testpypi environment does not limit the refs"),
 }
 
 
@@ -346,9 +418,9 @@ ENVIRONMENT_CASES = {
 @pytest.mark.parametrize("case", sorted(ENVIRONMENT_CASES))
 def test_the_environment_step(case: str, tmp_path: Path) -> None:
     reviewers, refusal = ENVIRONMENT_CASES[case]
-    step = _step("build", "both environments ask a reviewer before they deploy")
+    step = _step("build", ENVIRONMENT_STEP)
     env = {"GITHUB_REPOSITORY": REPOSITORY, "GH_TOKEN": "unused",
-           **{f"FAKE_REVIEWERS_{name}": count for name, count in reviewers.items()}}
+           **{f"FAKE_ENVIRONMENT_{name}": document for name, document in reviewers.items()}}
     result = _run(step["run"], tmp_path, env, (_fake_gh(tmp_path / "bin"),))
     if refusal is None:
         assert result.returncode == 0, result.stdout + result.stderr
@@ -931,7 +1003,8 @@ def test_the_install_verdict(case: str, tmp_path: Path) -> None:
 # job's reviewer check goes stale while the run waits, so each publish job
 # re-reads its environment's rule and this run's review history.
 
-APPROVAL_STEP = "this environment still asks a reviewer, and this run's deployment to it was approved"
+APPROVAL_STEP = ("this environment still asks a reviewer and limits its refs, "
+                 "and this run's deployment to it was approved")
 
 
 def test_each_publish_job_rechecks_its_approval_before_the_preflight() -> None:
@@ -956,19 +1029,25 @@ def _approval(state: str, *environments: str) -> dict:
 
 
 APPROVAL_CASES = {
-    "a reviewer named, and this deployment approved": (
-        dict(reviewers="1", approvals=[_approval("approved", "{env}")]), None),
+    "a reviewer named, the refs limited, and this deployment approved": (
+        dict(environment=_environment(1), approvals=[_approval("approved", "{env}")]), None),
     "the reviewer rule removed meanwhile": (
-        dict(reviewers="0", approvals=[_approval("approved", "{env}")]), "names no required reviewer now"),
+        dict(environment=_environment(0), approvals=[_approval("approved", "{env}")]),
+        "names no required reviewer now"),
+    "the deployment limit removed meanwhile": (
+        dict(environment=_environment(1, None), approvals=[_approval("approved", "{env}")]),
+        "no longer limits the refs"),
     "the environment unreadable": (
-        dict(reviewers=None, approvals=[_approval("approved", "{env}")]), "cannot be read"),
-    "no approval at all": (dict(reviewers="1", approvals=[]), "holds no approval"),
+        dict(environment=None, approvals=[_approval("approved", "{env}")]), "cannot be read"),
+    "no approval at all": (dict(environment=_environment(1), approvals=[]), "holds no approval"),
     "only the other environment approved": (
-        dict(reviewers="1", approvals=[_approval("approved", "{other}")]), "holds no approval"),
+        dict(environment=_environment(1), approvals=[_approval("approved", "{other}")]),
+        "holds no approval"),
     "this deployment rejected": (
-        dict(reviewers="1", approvals=[_approval("rejected", "{env}")]), "holds no approval"),
+        dict(environment=_environment(1), approvals=[_approval("rejected", "{env}")]),
+        "holds no approval"),
     "the review history unreadable": (
-        dict(reviewers="1", approvals=None), "review history cannot be read"),
+        dict(environment=_environment(1), approvals=None), "review history cannot be read"),
 }
 
 
@@ -982,8 +1061,8 @@ def test_the_approval_check(job: str, case: str, tmp_path: Path) -> None:
     approvals = given["approvals"]
     env = {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_RUN_ID": "1", "GH_TOKEN": "unused",
            "ENVIRONMENT": step["env"]["ENVIRONMENT"]}
-    if given["reviewers"] is not None:
-        env[f"FAKE_REVIEWERS_{env_name}"] = given["reviewers"]
+    if given["environment"] is not None:
+        env[f"FAKE_ENVIRONMENT_{env_name}"] = given["environment"]
     if approvals is None:
         env["FAKE_APPROVALS_FAILS"] = "1"
     else:

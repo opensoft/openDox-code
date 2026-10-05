@@ -23,11 +23,26 @@ name: release
 # dispatched at the cut. `main`'s head may have moved past the pinned commit by
 # then (T095 lands later), so the head is never required: the run's commit
 # must equal the root's pin and be on `main`. A dispatch runs at the head of
-# the ref it names, so it names the tag `v<version>`, created at the pinned
-# commit, or `main` only while `main`'s head is still that commit. No other
-# tag is accepted. The pin is checked in the build job and AGAIN right before
-# each upload, so a pin that moves while the run waits (on an approval, or on
-# TestPyPI) stops the upload.
+# the ref it names, so the release is dispatched on the tag `v<version>`,
+# created at the commit T087 pinned. No other tag is accepted. The pin is
+# checked in the build job and AGAIN right before each upload, so a pin that
+# moves while the run waits (on an approval, or on TestPyPI) stops the
+# upload. `main` here is always `refs/heads/main`, in the root's fetch and in
+# this repository's compare: a bare `main` would resolve to a TAG named
+# `main` before the branch, and a tag needs no review.
+#
+# ONLY A `v*` TAG CAN DEPLOY. A dispatch runs the dispatched ref's OWN copy
+# of this file, and PyPI's trusted publisher matches the repository, the
+# workflow's file name and the environment, never the ref. So every gate in
+# this file binds only where the dispatched ref carries the reviewed file.
+# The one server-side control over the ref is each environment's deployment
+# limit, and both environments MUST carry one: Brett set each to the tag
+# pattern `v*` alone, so a dispatch on `main` or any branch builds and
+# verifies but cannot deploy. The build job refuses when either environment
+# has no such limit, and each publish job checks it again at use time. The
+# limit that remains, accepted: while sessions act as brettheap, the approval
+# click is the last line of defense, and a ruleset over `v*` tags is
+# recommended, not required.
 #
 # FOUR JOBS, EACH GATED ON THE ONE BEFORE IT:
 #   build            builds the sdist and the wheel in a clean job, runs
@@ -43,6 +58,18 @@ name: release
 #   pypi             re-checks the root's pin, publishes the same bytes to
 #                    PyPI, in the `pypi` environment, then requires PyPI to
 #                    serve exactly those two files, by digest, neither yanked.
+#
+# AFTER THE TestPyPI UPLOAD, RE-RUN ONLY THE FAILED JOBS. Use "Re-run failed
+# jobs", never "Re-run all jobs", and never a second dispatch of the same
+# version. The wheel is byte-reproducible, but the sdist is not (its archive
+# carries file times and a gzip header the build does not normalize), so a
+# rebuild records new digests, the index keeps the first files under the same
+# names for good, and every later preflight refuses, correctly: the version
+# could then never complete through this workflow without a version bump and a
+# new T087 pin. A failed job re-run from the same run reuses the build's
+# artifact and its recorded digests. An accepted limit (RULED openxFactory#656
+# comment 5992918154, on lane 3's review D8, F4); the follow-on is a
+# reproducible sdist, with normalized member times and gzip header.
 #
 # NO PyPI TOKEN AND NO STORED SECRET, ANYWHERE. Both uploads use PyPI's
 # trusted publishing (OIDC): the job asks GitHub for a short-lived identity
@@ -60,6 +87,16 @@ name: release
 # EVERY ACTION IS PINNED BY FULL COMMIT SHA, with its release tag beside it.
 # (`validate.yml` pins by tag. A tag can be moved after review, and a commit
 # cannot, which matters most in the one workflow whose output is published.)
+# ONE LIMIT, ACCEPTED (RULED openxFactory#656 comment 5992918154, on lane 3's
+# review D8, F3): the SHA pins the publish action's own files, not all the
+# code it runs. pypa/gh-action-pypi-publish is a container action, and called
+# from any repository but its own it runs the image
+# `ghcr.io/pypa/gh-action-pypi-publish:<that sha>`, pulled by registry TAG
+# (its `create-docker-action.py`), and a registry tag can be pushed again. So
+# the step that holds the OIDC token runs an image that a tag names, and the
+# JSON check after an upload could catch other bytes only once they are
+# published. The follow-on: a hash-locked `twine upload` (twine is already in
+# the release tools' lock) with the documented manual OIDC token exchange.
 # ---------------------------------------------------------------------------
 
 on:
@@ -119,7 +156,9 @@ jobs:
       # steps come first. This one: a dispatch on a tag must name
       # `v<version>`, and the run's commit must be on this repository's
       # `main`, as `main` or an ancestor of it (`main`'s head need not be that
-      # commit). The compare reads this repository, through the API.
+      # commit). The compare reads this repository, through the API, against
+      # `refs/heads/main`: the bare name would resolve to a tag named `main`
+      # first.
       - name: the dispatched commit is on main, dispatched on v<version> or a branch
         env:
           GH_TOKEN: ${{ github.token }}
@@ -132,7 +171,7 @@ jobs:
               fi
               ;;
           esac
-          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq .status)"
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...refs/heads/main" --jq .status)"
           case "$status" in
             identical|ahead) echo "$GITHUB_SHA is on main ($status), dispatched on $GITHUB_REF" ;;
             *)
@@ -150,7 +189,10 @@ jobs:
       # public, and a job's GITHUB_TOKEN is an installation token scoped to
       # this repository, so the read of another repository uses no token: a
       # fetch of `main`, depth 1, with every credential helper cleared and no
-      # prompt, in a repository of its own under `$RUNNER_TEMP`.
+      # prompt, in a repository of its own under `$RUNNER_TEMP`. The fetch
+      # names `refs/heads/main`: git resolves a bare `main` on the remote as a
+      # tag before a branch, and a tag `main` at an unreviewed commit would
+      # then name the release commit.
       - name: the dispatched commit is the one the openDox root pins
         timeout-minutes: 3
         run: |
@@ -158,7 +200,7 @@ jobs:
           rm -rf "$root"
           git init -q -b main "$root"
           if ! GIT_TERMINAL_PROMPT=0 git -C "$root" -c credential.helper= \
-              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git main \
+              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git refs/heads/main \
               || ! pin="$(git -C "$root" show FETCH_HEAD:contracts/code-pin.yaml)"; then
             echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
             exit 1
@@ -186,29 +228,50 @@ jobs:
           print(f"{this} is the commit opensoft/openDox main pins for {here}")
           PY
 
-      # BOTH ENVIRONMENTS MUST ASK A REVIEWER. GitHub creates an environment a
-      # job names if it does not exist yet, and creates it with no protection
-      # rule, so a dispatch made before Brett configured `pypi` would publish
-      # with nobody approving it. This step refuses that case, before anything
-      # is built. The environments are public metadata of a public repository.
-      - name: both environments ask a reviewer before they deploy
+      # BOTH ENVIRONMENTS MUST ASK A REVIEWER, AND LIMIT THE REFS THAT DEPLOY.
+      # GitHub creates an environment a job names if it does not exist yet,
+      # and creates it with no protection rule, so a dispatch made before
+      # Brett configured `pypi` would publish with nobody approving it. And a
+      # dispatch runs the dispatched ref's own copy of this file, so an
+      # environment that any ref may deploy to would publish whatever a branch
+      # carries. Each environment must name a required reviewer, and its
+      # `deployment_branch_policy` must be set, with `custom_branch_policies`
+      # (the tag pattern `v*`, as Brett configured them). This step refuses
+      # either gap, before anything is built. The environments are public
+      # metadata of a public repository.
+      - name: both environments ask a reviewer and limit the refs that deploy
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           rc=0
           for environment in testpypi pypi; do
-            if ! reviewers=$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment" \
-                --jq '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[]] | length'); then
-              echo "::error::the $environment environment cannot be read (it does not exist yet, or this job cannot see it); create it with a required reviewer first"
+            if ! settings=$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment"); then
+              echo "::error::the $environment environment cannot be read (it does not exist yet, or this job cannot see it); create it with a required reviewer and a deployment limit to the tags v* first"
               rc=1
               continue
             fi
-            if [ "$reviewers" -lt 1 ]; then
-              echo "::error::the $environment environment names no required reviewer, so a deployment to it would not wait for an approval"
-              rc=1
-            else
-              echo "$environment: $reviewers required reviewer(s)"
-            fi
+            ENVIRONMENT="$environment" SETTINGS="$settings" python3 - <<'PY' || rc=1
+          import json, os, sys
+
+          environment, settings = os.environ["ENVIRONMENT"], json.loads(os.environ["SETTINGS"])
+          reviewers = sum(len(rule.get("reviewers") or []) for rule in settings.get("protection_rules") or []
+                          if rule.get("type") == "required_reviewers")
+          policy = settings.get("deployment_branch_policy")
+          problems = []
+          if reviewers < 1:
+              problems.append(f"the {environment} environment names no required reviewer, "
+                              "so a deployment to it would not wait for an approval")
+          if not policy or policy.get("custom_branch_policies") is not True:
+              problems.append(f"the {environment} environment does not limit the refs that may "
+                              f"deploy to it (deployment_branch_policy {policy!r}): a dispatch on any "
+                              "branch runs that branch's own release.yml, so limit it to the tags v*")
+          for problem in problems:
+              print(f"::error::{problem}")
+          if problems:
+              sys.exit(1)
+          print(f"{environment}: {reviewers} required reviewer(s), and only the refs its "
+                "deployment limit names can deploy")
+          PY
           done
           exit $rc
 
@@ -644,44 +707,50 @@ jobs:
           printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
             | sha256sum --strict -c -
 
-      # THE APPROVAL, AT USE TIME. The build job's check that both
-      # environments ask a reviewer goes stale while the run waits: a rule
-      # removed meanwhile would let this job start with nobody approving it.
-      # So, right before the preflight, the pin check and the upload, this
-      # step requires that this job's environment still names a required
-      # reviewer AND that this run's review history holds an approval of a
-      # deployment to it. Either missing refuses, and nothing is uploaded.
-      - name: this environment still asks a reviewer, and this run's deployment to it was approved
+      # THE APPROVAL, AT USE TIME. The build job's check of both environments
+      # goes stale while the run waits: a rule removed meanwhile would let
+      # this job start with nobody approving it, and a deployment limit
+      # removed meanwhile would let any ref deploy. So, right before the
+      # preflight, the pin check and the upload, this step requires that this
+      # job's environment still names a required reviewer AND still limits
+      # the refs that deploy to it (`custom_branch_policies`), AND that this
+      # run's review history holds an approval of a deployment to it. Any one
+      # missing refuses, and nothing is uploaded.
+      - name: this environment still asks a reviewer and limits its refs, and this run's deployment to it was approved
         timeout-minutes: 2
         env:
           GH_TOKEN: ${{ github.token }}
           ENVIRONMENT: testpypi
         run: |
-          if ! reviewers=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT" \
-              --jq '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[]] | length'); then
+          if ! settings=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT"); then
             echo "::error::the $ENVIRONMENT environment cannot be read, so its reviewer rule is unknown"
-            exit 1
-          fi
-          if [ "$reviewers" -lt 1 ]; then
-            echo "::error::the $ENVIRONMENT environment names no required reviewer now, so this deployment did not wait for an approval"
             exit 1
           fi
           if ! approvals=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals"); then
             echo "::error::this run's review history cannot be read"
             exit 1
           fi
-          APPROVALS="$approvals" python3 - <<'PY'
+          SETTINGS="$settings" APPROVALS="$approvals" python3 - <<'PY'
           import json, os, sys
 
-          environment = os.environ["ENVIRONMENT"]
+          environment, settings = os.environ["ENVIRONMENT"], json.loads(os.environ["SETTINGS"])
+          reviewers = sum(len(rule.get("reviewers") or []) for rule in settings.get("protection_rules") or []
+                          if rule.get("type") == "required_reviewers")
+          if reviewers < 1:
+              sys.exit(f"::error::the {environment} environment names no required reviewer now, "
+                       "so this deployment did not wait for an approval")
+          policy = settings.get("deployment_branch_policy")
+          if not policy or policy.get("custom_branch_policies") is not True:
+              sys.exit(f"::error::the {environment} environment no longer limits the refs that may "
+                       f"deploy to it (deployment_branch_policy {policy!r}), so nothing is uploaded")
           approved = [review["user"]["login"] for review in json.loads(os.environ["APPROVALS"])
                       if review.get("state") == "approved"
                       and any(e.get("name") == environment for e in review.get("environments", []))]
           if not approved:
               sys.exit(f"::error::this run's review history holds no approval of a deployment "
                        f"to {environment}, so nothing is uploaded")
-          print(f"{environment}: a required reviewer is named, and this run's deployment "
-                f"was approved by {', '.join(approved)}")
+          print(f"{environment}: a required reviewer is named, the refs that deploy are limited, "
+                f"and this run's deployment was approved by {', '.join(approved)}")
           PY
 
       # BEFORE THE UPLOAD, NOTHING ELSE HELD. skip-existing skips a file name
@@ -746,7 +815,7 @@ jobs:
           rm -rf "$root"
           git init -q -b main "$root"
           if ! GIT_TERMINAL_PROMPT=0 git -C "$root" -c credential.helper= \
-              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git main \
+              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git refs/heads/main \
               || ! pin="$(git -C "$root" show FETCH_HEAD:contracts/code-pin.yaml)"; then
             echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
             exit 1
@@ -1003,44 +1072,50 @@ jobs:
           printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
             | sha256sum --strict -c -
 
-      # THE APPROVAL, AT USE TIME. The build job's check that both
-      # environments ask a reviewer goes stale while the run waits: a rule
-      # removed meanwhile would let this job start with nobody approving it.
-      # So, right before the preflight, the pin check and the upload, this
-      # step requires that this job's environment still names a required
-      # reviewer AND that this run's review history holds an approval of a
-      # deployment to it. Either missing refuses, and nothing is uploaded.
-      - name: this environment still asks a reviewer, and this run's deployment to it was approved
+      # THE APPROVAL, AT USE TIME. The build job's check of both environments
+      # goes stale while the run waits: a rule removed meanwhile would let
+      # this job start with nobody approving it, and a deployment limit
+      # removed meanwhile would let any ref deploy. So, right before the
+      # preflight, the pin check and the upload, this step requires that this
+      # job's environment still names a required reviewer AND still limits
+      # the refs that deploy to it (`custom_branch_policies`), AND that this
+      # run's review history holds an approval of a deployment to it. Any one
+      # missing refuses, and nothing is uploaded.
+      - name: this environment still asks a reviewer and limits its refs, and this run's deployment to it was approved
         timeout-minutes: 2
         env:
           GH_TOKEN: ${{ github.token }}
           ENVIRONMENT: pypi
         run: |
-          if ! reviewers=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT" \
-              --jq '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[]] | length'); then
+          if ! settings=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT"); then
             echo "::error::the $ENVIRONMENT environment cannot be read, so its reviewer rule is unknown"
-            exit 1
-          fi
-          if [ "$reviewers" -lt 1 ]; then
-            echo "::error::the $ENVIRONMENT environment names no required reviewer now, so this deployment did not wait for an approval"
             exit 1
           fi
           if ! approvals=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals"); then
             echo "::error::this run's review history cannot be read"
             exit 1
           fi
-          APPROVALS="$approvals" python3 - <<'PY'
+          SETTINGS="$settings" APPROVALS="$approvals" python3 - <<'PY'
           import json, os, sys
 
-          environment = os.environ["ENVIRONMENT"]
+          environment, settings = os.environ["ENVIRONMENT"], json.loads(os.environ["SETTINGS"])
+          reviewers = sum(len(rule.get("reviewers") or []) for rule in settings.get("protection_rules") or []
+                          if rule.get("type") == "required_reviewers")
+          if reviewers < 1:
+              sys.exit(f"::error::the {environment} environment names no required reviewer now, "
+                       "so this deployment did not wait for an approval")
+          policy = settings.get("deployment_branch_policy")
+          if not policy or policy.get("custom_branch_policies") is not True:
+              sys.exit(f"::error::the {environment} environment no longer limits the refs that may "
+                       f"deploy to it (deployment_branch_policy {policy!r}), so nothing is uploaded")
           approved = [review["user"]["login"] for review in json.loads(os.environ["APPROVALS"])
                       if review.get("state") == "approved"
                       and any(e.get("name") == environment for e in review.get("environments", []))]
           if not approved:
               sys.exit(f"::error::this run's review history holds no approval of a deployment "
                        f"to {environment}, so nothing is uploaded")
-          print(f"{environment}: a required reviewer is named, and this run's deployment "
-                f"was approved by {', '.join(approved)}")
+          print(f"{environment}: a required reviewer is named, the refs that deploy are limited, "
+                f"and this run's deployment was approved by {', '.join(approved)}")
           PY
 
       # BEFORE THE UPLOAD, NOTHING ELSE HELD. skip-existing skips a file name
@@ -1105,7 +1180,7 @@ jobs:
           rm -rf "$root"
           git init -q -b main "$root"
           if ! GIT_TERMINAL_PROMPT=0 git -C "$root" -c credential.helper= \
-              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git main \
+              fetch -q --depth 1 --no-tags https://github.com/opensoft/openDox.git refs/heads/main \
               || ! pin="$(git -C "$root" show FETCH_HEAD:contracts/code-pin.yaml)"; then
             echo "::error::opensoft/openDox main's contracts/code-pin.yaml cannot be read, so the release commit is unknown"
             exit 1
