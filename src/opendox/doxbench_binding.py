@@ -89,7 +89,11 @@ parser at all, so an install with no bindings never needs the dependency.
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
+import secrets
+import stat
+import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import NamedTuple
@@ -527,6 +531,155 @@ class BindingRefused(ValueError):
     """A binding, a store document, or an argv substitution is not
     well-formed. ONE exception class for every refusal this module raises, so a
     caller declaring a binding has exactly one thing to catch."""
+
+
+def linked_component(path: Path | str, relpath: str) -> Path | None:
+    """The symbolic link on the way to a settings document, or None (T100
+    follow-on, N1): the document itself and, where its path ends with
+    `relpath` (a checkout's own default for it), every directory of `relpath`
+    above it. A clone carries a link as readily as a file, so a document
+    reached through one could be read from, or written to, anywhere the link
+    points: a write through it would create or overwrite a file outside the
+    repository. Directories above `relpath`, the checkout's own path, are
+    the operator's. A path that IS `relpath`, relative to the working
+    directory, is judged the same way (Copilot at openDox-code#86,
+    r4179076919)."""
+    path = Path(path)
+    candidates = [path]
+    parts = Path(relpath).parts
+    if len(path.parts) >= len(parts) and path.parts[-len(parts):] == parts:
+        candidates += list(path.parents)[:len(parts) - 1]
+    for candidate in candidates:
+        if candidate.is_symlink():
+            return candidate
+    return None
+
+
+#: What a store says of a settings document reached through a link. Both
+#: paths are filled in `shown_path`'s form.
+LINKED_DOCUMENT = (
+    "the {what} at {path} is reached through a symbolic link ({link}), which "
+    "a clone can carry to point anywhere, so it is neither read nor written; "
+    "replace the link with the file or directory itself")
+
+
+def shown_path(path: Path | str) -> str:
+    """A path as a refusal prints it: in a JSON string's form, as
+    `doxbench_trust.shown` prints every value a repository wrote, so a
+    newline or a terminal control sequence in a checkout's path is escaped
+    and cannot forge or hide output (Copilot at openDox-code#86,
+    r4179076973, r4179076986)."""
+    return json.dumps(str(path), ensure_ascii=True)
+
+
+def _write_all(handle, text: str) -> None:
+    """Write `text` to the open file `handle`. A seam of its own, so a case
+    can fail a write part way, as a full disk does."""
+    handle.write(text)
+
+
+def write_settings_document(path: Path, text: str) -> None:
+    """Replace the settings document at `path` with `text`, ATOMICALLY
+    (Copilot at openDox-code#86, r4179076956): written whole to a new file
+    beside it, created exclusively and never through a link, then renamed
+    over it, keeping the document's mode. A write that fails part way (a
+    full disk, an I/O error) leaves the document as it was, and the new
+    file is removed, so a refusal can say nothing in it changed. A document
+    this user cannot write is refused as it always was, by the system's own
+    error, rather than replaced.
+
+    A DOCUMENT THAT DOES NOT EXIST YET is written whole to a new file beside
+    it, created exclusively (so with the mode a new file takes here), and
+    then published with a hard link (`os.link`), which never replaces a
+    document made in the meantime (Copilot at openDox-code#86, r4180041167;
+    the holder's ruling, openxFactory#656 comment 5986391296). So no reader
+    sees part of one, a write that fails leaves none, and one made meanwhile
+    refuses this write (`FileExistsError`) rather than being overwritten."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        staged = path.parent / (f".{path.name}.{secrets.token_hex(8)}"
+                                ".opendox-new")
+        try:
+            with staged.open("x", encoding="utf-8") as handle:
+                _write_all(handle, text)
+            path.hardlink_to(staged)
+        finally:
+            staged.unlink(missing_ok=True)
+        return
+    with path.open("a", encoding="utf-8"):
+        pass                    # this user may write it, or PermissionError
+    mode = stat.S_IMODE(path.stat().st_mode)
+    handle = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+        suffix=".opendox-new", delete=False)
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            _write_all(handle, text)
+        temporary.chmod(mode)
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def cannot_read(path: Path, what: str, error: OSError) -> str:
+    """The refusal of a settings document the system will not read for
+    this user, by the system's own short word for why."""
+    return (f"the {what} at {shown_path(path)} cannot be read "
+            f"({error.strerror or type(error).__name__})")
+
+
+def document_present(path: Path) -> bool:
+    """Whether a settings document is there: a regular file at `path`. Only
+    "no such file", or a file where a directory belongs on the way, is its
+    absence; any other failure to look, such as a directory on the way this
+    user cannot search, raises, so the caller refuses it by name (Copilot at
+    openDox-code#86, r4179241603) on every Python, where `Path.is_file`
+    swallows some of them."""
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+#: The most broker command members one bindings document may declare
+#: across its bindings, every one of which is judged where trust is asked
+#: (`doxbench_trust.broker_command_refused`). Past it the document is
+#: refused by name, FAIL-CLOSED: it lives in the served repository, so a
+#: pull must not be able to hang verdict computation, and each command's
+#: judgment is bounded (`doxbench_trust._WORK_BUDGET`) while their number
+#: is bounded here (Copilot at openDox-code#86, r4182002696; the holder's
+#: ruling, openxFactory#656 comment 5990845570).
+MAX_JUDGED_MEMBERS = 256
+
+
+def read_settings_document(path: Path, *, what: str, yaml, refused):
+    """The YAML document at `path`, parsed, or a refusal BY NAME (`refused`,
+    the caller's own refusal class) for one that cannot be read (T100
+    follow-on, N2): one the system will not read for this user, not UTF-8,
+    nested past what the parser can descend, or not YAML. A console's start
+    reads it, so none of these may surface as a raw error there. A
+    document that parses but holds a value its constructor rejects (a
+    timestamp such as `2024-13-01`) is not readable YAML either (the
+    holder's ruling, openxFactory#656 comment 5985046107, C3)."""
+    shown = shown_path(path)
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise refused(cannot_read(path, what, error)) from None
+    except UnicodeDecodeError:
+        # before ValueError, of which it is a kind, so it keeps its words
+        raise refused(f"the {what} at {shown} is not UTF-8 text") from None
+    except ValueError:
+        raise refused(f"the {what} at {shown} is not readable "
+                      "YAML") from None
+    except RecursionError:
+        raise refused(f"the {what} at {shown} nests too deeply to "
+                      "read") from None
+    except yaml.YAMLError as error:
+        raise refused(f"the {what} at {shown} is not readable "
+                      "YAML") from error
 
 
 def _require_non_blank_str(field: str, value: object) -> str:
@@ -1027,19 +1180,34 @@ class BindingStore:
 
     # -- the document ------------------------------------------------------
 
+    def _refuse_a_link(self) -> None:
+        """No link on the way to the document, which a clone could carry
+        (T100 follow-on, N1; `linked_component`)."""
+        link = linked_component(self.path, DEFAULT_BINDINGS_RELPATH)
+        if link is not None:
+            raise BindingRefused(LINKED_DOCUMENT.format(
+                what="bindings document", path=shown_path(self.path),
+                link=shown_path(link)))
+
     def _load(self) -> list[ModelProviderBinding]:
-        if not self.path.is_file():
+        try:
+            # The look before the read refuses BY NAME too (Copilot at
+            # openDox-code#86, r4179241603): a directory on the way that
+            # this user cannot search fails `lstat` and `stat` themselves.
+            self._refuse_a_link()
+            present = document_present(self.path)
+        except OSError as error:
+            raise BindingRefused(cannot_read(
+                self.path, "bindings document", error)) from None
+        if not present:
             # THE HOSTED PATH, and the reason the import below is lazy: an
             # install with no bindings document answers here and never needs a
             # YAML parser at all.
             return []
         yaml = _yaml_or_refused()
-        try:
-            document = yaml.safe_load(self.path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as error:
-            raise BindingRefused(
-                f"the bindings document at {self.path} is not readable YAML"
-            ) from error
+        document = read_settings_document(
+            self.path, what="bindings document", yaml=yaml,
+            refused=BindingRefused)
         if document is None:
             return []
         if not isinstance(document, Mapping):
@@ -1068,19 +1236,24 @@ class BindingStore:
                     f"the bindings document at {self.path} declares the id "
                     f"{binding.id!r} twice")
             seen.add(binding.id)
+        judged = sum(len(binding.broker_argv) for binding in bindings)
+        if judged > MAX_JUDGED_MEMBERS:
+            raise BindingRefused(
+                f"the bindings document at {self.path} declares {judged} "
+                "broker command members across its bindings, more than the "
+                f"{MAX_JUDGED_MEMBERS} judged in one document")
         return bindings
 
     def _save(self, bindings: Iterable[ModelProviderBinding]) -> None:
+        self._refuse_a_link()
         yaml = _yaml_or_refused()
         document = {
             "schema_version": SCHEMA_VERSION,
             "kind": BINDINGS_KIND,
             "bindings": [binding.as_record() for binding in bindings],
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
-            encoding="utf-8")
+        write_settings_document(self.path, yaml.safe_dump(
+            document, sort_keys=False, allow_unicode=True))
 
 
 #: What a removal does and does not do, stated once so no surface invents its

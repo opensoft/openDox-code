@@ -44,6 +44,8 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import http.server
+import importlib.machinery
+import importlib.util
 import io
 import json
 import os
@@ -290,9 +292,21 @@ class _Served:
         return binding_mod.BindingStore(
             binding_mod.bindings_path(root or self.repo)).list()[0]
 
-    def port(self, root: Path | None = None):
+    def port(self, root: Path | None = None, *, harness: bool = False):
+        """The port the console's start declares. Whether the local harness
+        is installed is ANSWERED (`harness`, no by default), so what a case
+        sees never depends on what this machine has on its `PATH`."""
         return install_mod.declared_model_port_factory(
-            self.tmp / "sessions", checkout_root=root or self.repo)()
+            self.tmp / "sessions", checkout_root=root or self.repo,
+            harness_present=lambda: harness)()
+
+    def gated_port(self, root: Path | None = None):
+        """The port the trust gate resolves for the declared binding itself,
+        as a host that hands it one binding resolves it. The start passes
+        over a binding the catalog cannot list (T100 follow-on, A3); this
+        port is the defence beneath it, and still refuses such a binding."""
+        return install_mod.trust_gated_model_port_factory(
+            self.declared(root), checkout_root=root or self.repo)()
 
     def nothing_was_touched(self) -> None:
         """No broker ran, the variable was never read, the keyring was never
@@ -636,11 +650,16 @@ def test_a_binding_carrying_control_characters_is_shown_escaped(served,
     by `list` and in the refusal, and no raw control byte reaches the
     output. The catalog refuses such an id, so `trust` shows it and then
     refuses it (Copilot at openDox-code#82, r4174783280)."""
+    from opendox import doxbench_model
+
     hostile = "evil\n\x1b[2J"
     served.hand_write(served.record(
         "broker", id=hostile, label=f"Label{hostile}",
         broker_argv=[sys.executable, str(served.broker), f"--x{hostile}"]))
-    port = served.port()
+    # the start passes it over, saying so (T100 follow-on, A3) ...
+    assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+    # ... and the gate beneath still refuses it
+    port = served.gated_port()
     with pytest.raises(_trust_mod().BindingUntrusted) as refused:
         port.dispatch(_Envelope())
     assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
@@ -705,6 +724,11 @@ def _plant_link_to_the_file(served):
 
 
 def _plant_link_to_the_directory(served):
+    """The state directory replaced by a link of this user's own, to a
+    private directory of this user's own holding a private store: F16.1's
+    ratified text refuses even this one (T100 follow-on, A8; the holder's
+    ruling on openxFactory#656 comment 5982436447). Before A8 the case
+    passed only because the target was made writable by every user."""
     real = served.tmp / "real-state"
     real.mkdir(mode=0o700)
     (real / _trust_mod().TRUST_FILENAME).write_text(_planted(served),
@@ -712,11 +736,7 @@ def _plant_link_to_the_directory(served):
     os.chmod(real / _trust_mod().TRUST_FILENAME, 0o600)
     os.chmod(served.tmp, 0o700)
     served.state_dir.symlink_to(real, target_is_directory=True)
-    # A link of this user's own, to a directory of this user's own, is a
-    # path #69's tree check accepts, so the directory is made writable by
-    # every user too: the check judges what the link reaches.
-    os.chmod(real, 0o777)
-    return "is writable by every user"
+    return "the directory that holds the store is a symbolic link"
 
 
 def _plant_a_writable_file(served, mode=0o666):
@@ -1303,10 +1323,15 @@ def test_an_id_the_catalog_refuses_prints_no_command_and_is_never_trusted(
     refused turn, `list`), each says why instead, and `trust` refuses it with
     nothing recorded. The catalog lists nothing, and the start does not
     fail."""
+    from opendox import doxbench_model
+
     trust_mod = _trust_mod()
     binding_id = HOSTILE_IDS[name]
     served.hand_write(served.record("env", id=binding_id))
-    port = served.port()
+    # The start passes it over, saying why (T100 follow-on, A3), and the
+    # gate beneath refuses it.
+    assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+    port = served.gated_port()
     notice = capsys.readouterr().err
     with pytest.raises(trust_mod.BindingUntrusted) as refused:
         port.dispatch(_Envelope())
@@ -1356,10 +1381,14 @@ def test_a_binding_the_catalog_refuses_is_never_trusted_nor_fails_the_start(
     document = served.hand_write(record)
     # recorded straight into the store, as a store written before this check
     served.trust.record(served.declared(), root=served.repo)
+    from opendox import doxbench_model
+
     for policy in (served.trust, _TrustsEveryBinding()):
         trust_mod.unregister()
         trust_mod.register(policy)
-        port = served.port()
+        # passed over at the start (T100 follow-on, A3); refused beneath it
+        assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+        port = served.gated_port()
         assert list(port.catalog().entries) == []
         with pytest.raises(trust_mod.BindingUntrusted) as refused:
             port.dispatch(_Envelope())
@@ -1451,8 +1480,12 @@ def test_a_link_to_nothing_on_the_way_to_the_store_is_refused_by_name(
     trust_mod.register(policy)
     with pytest.raises(trust_mod.TrustStoreRefused) as refused:
         policy.record(served.declared(), root=served.repo)
-    assert (f"refuses {json.dumps(str(link))}: it is a symbolic link to "
-            "nothing") in str(refused.value)
+    # The state directory itself is never a link, whatever it reaches (T100
+    # follow-on, A8), so that is its refusal; above it, a link to nothing.
+    said = ("the directory that holds the store is a symbolic link"
+            if where == "state-directory" else
+            "it is a symbolic link to nothing")
+    assert f"refuses {json.dumps(str(link))}: {said}" in str(refused.value)
     verdict = policy.verdict(served.declared(), root=served.repo)
     assert not verdict.trusted and verdict.reason == str(refused.value)
     assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
@@ -1618,7 +1651,8 @@ def test_a_hosts_own_policy_may_admit_the_console_intake(served):
     does not admit it unless it says so."""
     _caps, answer = _served_intake(served, host_policy=_TrustsEveryBinding())
     assert answer.get("error") == "intake_refused", answer
-    assert answer.get("reason") == _trust_mod().INTAKE_BROKER_UNTRUSTED
+    # the host's own policy refused it, so it says so (5985490378, D3)
+    assert answer.get("reason") == _trust_mod().INTAKE_HOST_NOT_ADMITTED
     assert not served.marker.exists()
     served.marker.unlink(missing_ok=True)
     shutil.rmtree(served.tmp / "out")
@@ -1653,6 +1687,59 @@ def test_trusting_a_lookalike_binding_never_admits_the_console_intake(
 
 
 # --- what a policy answers is held to the binding asked about ---------------
+
+
+@pytest.mark.parametrize("basis", ["default", "host"])
+def test_D3_the_intakes_refusal_names_the_policy_that_refused(served, basis):
+    """The holder's ruling, openxFactory#656 comment 5985490378, D3: where
+    the host's own registered policy refuses the hand-off (here, as for a
+    pending binding), the refusal says so in its own FIXED sentence, not
+    "a host's own trust policy may admit it"; under openDox's own trust the
+    sentence is unchanged. No broker runs either way."""
+    trust_mod = _trust_mod()
+
+    class _DeclinesTheIntake(_Declines):
+        def intake_verdict(self, binding, *, root):
+            return self.verdict(binding, root=root)
+
+    if basis == "default":
+        _caps, answer = _served_intake(served)
+        said = trust_mod.INTAKE_BROKER_UNTRUSTED
+    else:
+        _caps, answer = _served_intake(served,
+                                       host_policy=_DeclinesTheIntake())
+        said = trust_mod.INTAKE_HOST_NOT_ADMITTED
+    assert answer.get("error") == "intake_refused", answer
+    assert answer.get("reason") == said
+    assert not served.marker.exists()
+    assert trust_mod.INTAKE_HOST_NOT_ADMITTED == (
+        "the host's trust policy does not admit this hand-off; "
+        "model-binding list shows why")
+
+
+def test_D3_each_basis_has_its_sentence():
+    trust_mod = _trust_mod()
+    binding = _a_binding()
+    for basis, said in ((trust_mod.BASIS_HOST,
+                         trust_mod.INTAKE_HOST_NOT_ADMITTED),
+                        (trust_mod.BASIS_MACHINE_TRUST,
+                         trust_mod.INTAKE_BROKER_UNTRUSTED),
+                        (trust_mod.BASIS_REPOSITORY,
+                         trust_mod.INTAKE_BROKER_UNTRUSTED)):
+        verdict = trust_mod.TrustVerdict.untrusted_for(
+            binding, root="/srv/opendox-test", basis=basis, reason="no")
+        assert trust_mod.intake_refusal_reason(verdict) == said, basis
+
+
+def test_D2_the_remedy_where_trust_cannot_help_holds_under_every_policy():
+    """The holder's ruling, openxFactory#656 comment 5985490378, D2: the
+    remedy's last sentence is true under a host whose approval trusts the
+    binding, which lists it trusted and prints no command."""
+    remedy = _trust_mod().REMEDY_NOT_BY_TRUST
+    assert remedy.endswith(
+        "Then list its bindings again: it is shown trusted, or with the "
+        "command that trusts it")
+    assert "which prints the command" not in remedy
 
 
 class _Declines:
@@ -1782,7 +1869,7 @@ def test_a_verdict_for_another_root_covers_nothing_here(served, capsys,
     if question == "intake":
         _caps, answer = _served_intake(served,
                                        host_policy=_AnswersForAnotherRoot())
-        assert answer.get("reason") == trust_mod.INTAKE_BROKER_UNTRUSTED
+        assert answer.get("reason") == trust_mod.INTAKE_HOST_NOT_ADMITTED
         assert not served.marker.exists()
         return
     trust_mod.unregister()
@@ -1791,8 +1878,12 @@ def test_a_verdict_for_another_root_covers_nothing_here(served, capsys,
     port = served.port()
     notice = capsys.readouterr().err
     assert isinstance(port, trust_mod.UntrustedBindingPort)
-    assert _command(served.repo) in notice
+    # an invalid answer, which the same policy gives when asked to record,
+    # so no command that trusts is printed (Copilot at openDox-code#86,
+    # r4179077004)
+    _no_trust_command_in(notice)
     assert trust_mod.REASON_NOT_COVERED in notice
+    assert trust_mod.REMEDY_NOT_BY_TRUST in notice
     served.nothing_was_touched()
 
 
@@ -1802,7 +1893,9 @@ def test_a_verdict_for_another_binding_is_refused_naming_this_one(
     """Copilot at openDox-code#82 (r4173513795). A policy that answers a
     verdict for ANOTHER binding, untrusted or trusted, covers nothing here,
     and the refusal, the notice and `list` name the binding that was asked
-    about and the command that trusts it, never the other one."""
+    about, never the other one. The answer is the policy's own invalid one,
+    which it gives when asked to record too, so none of them prints a
+    command that trusts (Copilot at openDox-code#86, r4179077004)."""
     trust_mod = _trust_mod()
 
     class _AnswersAnother(_Declines):
@@ -1826,8 +1919,10 @@ def test_a_verdict_for_another_binding_is_refused_naming_this_one(
     assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
     listed = capsys.readouterr().out
     for text in (notice, str(refused.value), listed):
-        assert _command(served.repo) in text
+        assert BINDING_ID in text
         assert "other-binding" not in text
+        _no_trust_command_in(text)
+        assert trust_mod.REMEDY_NOT_BY_TRUST in text
     assert trust_mod.REASON_NOT_COVERED in notice
     served.nothing_was_touched()
 
@@ -2353,6 +2448,11 @@ FIXED_SENTENCES = {
     "UNSERVABLE_TURN_MESSAGE": (["list"], ["edit"]),
     "APPROVED_UNSERVABLE_NOTICE": (["list"], ["edit", "remove"]),
     "REMEDY_UNSERVABLE": ([], ["edit", "remove"]),
+    # T100 follow-on, A1 and A2: where trusting cannot help, none quotes it
+    "UNTRUSTABLE_TURN_MESSAGE": (["list"], []),
+    "APPROVED_UNTRUSTABLE_NOTICE": (["list"], []),
+    "REMEDY_NOT_BY_TRUST": ([], []),
+    "REMEDY_IN_REPOSITORY": ([], ["edit"]),
 }
 
 
@@ -2390,7 +2490,10 @@ def test_an_approval_reads_the_trust_seam_once(served, monkeypatch):
     unregisters between two reads (here, a registration check that answers
     yes and tears the host down) must not have openDox's default installed
     in its place by the approval, nor that store's answer given as the
-    host's: the store trusts the binding, and the host does not."""
+    host's: the store trusts the binding, and the host does not.
+
+    The host declines for a reason of its own, which `trust` cannot repair,
+    so the approval names no command that trusts (T100 follow-on, A1)."""
     trust_mod = _trust_mod()
     _caps, answer = _served_intake(served, host_policy=_AdmitsTheIntake())
     assert answer.get("error") is None, answer
@@ -2406,12 +2509,13 @@ def test_an_approval_reads_the_trust_seam_once(served, monkeypatch):
     monkeypatch.setattr(trust_mod, "is_registered", registered_then_torn_down)
     approval = _post_an_approval(served, BINDING_ID)
     assert approval.get("ok") is True, approval
-    assert approval["availability"] == trust_mod.APPROVED_UNTRUSTED_NOTICE
+    assert approval["availability"] == trust_mod.APPROVED_UNTRUSTABLE_NOTICE
     assert trust_mod.current() is host
 
 
 @pytest.mark.parametrize("sentence", ["UNTRUSTED_TURN_MESSAGE",
-                                      "UNSERVABLE_TURN_MESSAGE"])
+                                      "UNSERVABLE_TURN_MESSAGE",
+                                      "UNTRUSTABLE_TURN_MESSAGE"])
 def test_each_turn_sentence_fits_the_released_failure_envelope(sentence):
     """A refused turn's sentence rides the RELEASED failure envelope, whose
     `message` the schema bounds; one past it would fail the envelope's own
@@ -2639,11 +2743,18 @@ def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served,
     and nothing is contacted. Where the catalog cannot list the binding (a
     label past its bound), trust cannot help, so the sentence names the
     remedy and no command that trusts (Copilot at openDox-code#82,
-    r4175203889)."""
+    r4175203889).
+
+    SINCE THE T100 FOLLOW-ON (A3) the start passes such a binding over, as
+    it does a pending one, so the console serves no model: the turn is
+    refused as a plane with no model capability refuses it, and the start
+    said why on stderr. Whether the local harness is installed is answered
+    (no), so the case never depends on this machine's `PATH`."""
     import http.client
 
     from opendox import doxbench_hash, serve
     from opendox.serve_wire import (DOXBENCH_CHAT_TURN_V2_KIND,
+                                    DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE,
                                     DOXBENCH_ERR_MODEL_UNAVAILABLE)
     from standalone_child import fresh_repository, git, run_module
 
@@ -2663,7 +2774,8 @@ def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served,
         REPO_ROOT / "src" / "opendox" / "web", out, repo, port=0,
         actor="brett", schema_validator_factory=_EveryKind,
         model_port_factory=install_mod.declared_model_port_factory(
-            install_mod.session_root_beside(out), checkout_root=repo))
+            install_mod.session_root_beside(out), checkout_root=repo,
+            harness_present=lambda: False))
     worker = threading.Thread(target=httpd.serve_forever, daemon=True)
     worker.start()
     try:
@@ -2710,12 +2822,3600 @@ def test_a_served_turn_on_an_untrusted_binding_says_how_to_trust_it(served,
         httpd.shutdown()
         httpd.server_close()
         worker.join(timeout=10)
-    assert body.get("error") == DOXBENCH_ERR_MODEL_UNAVAILABLE, body
     if binding == "unservable":
+        assert body.get("error") == (
+            DOXBENCH_ERR_MODEL_CAPABILITY_UNAVAILABLE), body
         assert "model-binding trust" not in body.get("message", ""), body
-        assert body.get("message") == _trust_mod().UNSERVABLE_TURN_MESSAGE, (
-            body)
     else:
+        assert body.get("error") == DOXBENCH_ERR_MODEL_UNAVAILABLE, body
         assert body.get("message") == _trust_mod().UNTRUSTED_TURN_MESSAGE, (
             body)
+    served.nothing_was_touched()
+
+
+# ===========================================================================
+# 6. THE T100 FOLLOW-ON: the holder's adversarial review of openDox-code#82
+#    (findings A1 to A19, N1 and N2; rulings on openxFactory#656 comment
+#    5982436447: A2 and A14 Brett Heap's, A8 the holder's). Each case fails at
+#    openDox-code `38d3350e`, where #82 landed, for its finding's reason.
+#    A14 is RULED "Served repo only, limit": no case, no change.
+# ===========================================================================
+
+
+class _OsWith:
+    """`os`, as the trust module sees it, with some names replaced (a spy, or
+    a system that answers otherwise). Everything else is the real `os`."""
+
+    def __init__(self, **replaced) -> None:
+        self._replaced = replaced
+
+    def __getattr__(self, name):
+        if name in self._replaced:
+            return self._replaced[name]
+        return getattr(os, name)
+
+
+def _no_trust_command_in(*texts: str) -> None:
+    for text in texts:
+        assert _printed_commands(text) == [], text
+        assert "opendox model-binding trust" not in text, text
+
+
+def _store_holding(served, document) -> Path:
+    served.state_dir.mkdir(mode=0o700, exist_ok=True)
+    store = served.state_dir / _trust_mod().TRUST_FILENAME
+    store.write_text(document if isinstance(document, str)
+                     else json.dumps(document), encoding="utf-8")
+    os.chmod(store, 0o600)
+    return store
+
+
+# --- A1: no `trust` command where `trust` cannot repair the refusal --------
+
+
+def test_A1_an_unsupported_platform_is_told_no_trust_command(
+        served, capsys, monkeypatch):
+    """On a platform that cannot keep the store, `trust` is refused too, so
+    no command that trusts is printed: not by `list`, the start's notice, a
+    refused turn, nor the turn's fixed sentence (`UNTRUSTABLE_TURN_MESSAGE`).
+    Each names the cause and says to resolve it first."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    monkeypatch.setattr(trust_mod, "fcntl", None)         # as on Windows
+    port = served.port()
+    assert isinstance(port, trust_mod.UntrustedBindingPort)
+    with pytest.raises(trust_mod.BindingUntrusted) as refused:
+        port.dispatch(_Envelope())
+    assert trust_mod.turn_message_for(port) == (
+        trust_mod.UNTRUSTABLE_TURN_MESSAGE)
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    captured = capsys.readouterr()
+    _no_trust_command_in(captured.out, captured.err, str(refused.value))
+    for text in (captured.out, captured.err, str(refused.value)):
+        assert "POSIX" in text, text
+        assert trust_mod.REMEDY_NOT_BY_TRUST in text, text
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    served.nothing_was_touched()
+
+
+def test_A1_a_policys_answer_for_another_binding_is_told_no_trust_command(
+        served, capsys):
+    """Copilot at openDox-code#86 (r4179077004). A host whose `verdict` and
+    `record` both answer with a verdict that does not cover the binding (a
+    subclass, as in A12) is refused `REASON_NOT_COVERED`; `trust` would ask
+    the same host and be refused, so no command is printed."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+
+    class Lax(trust_mod.TrustVerdict):
+        def admits(self, binding):
+            return True
+
+    class Host:
+        def verdict(self, binding, *, root):
+            exact = trust_mod.TrustVerdict.trusted_for(
+                binding, root=root, basis=trust_mod.BASIS_HOST)
+            return Lax(**{field.name: getattr(exact, field.name)
+                          for field in dataclasses.fields(exact)})
+
+        record = verdict
+
+    trust_mod.unregister()
+    trust_mod.register(Host())
+    assert not trust_mod.trust_can_repair(trust_mod.REASON_NOT_COVERED)
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    listed = capsys.readouterr().out
+    assert trust_mod.REASON_NOT_COVERED in listed
+    _no_trust_command_in(listed)
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+
+
+def test_A1_a_hosts_own_refusal_is_told_no_trust_command(served, capsys):
+    """A host's policy that declines (a governed host, for a pending
+    declaration) declines `trust` too, so `list` prints the host's reason
+    and no command, and the approval names none either."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    _propose(served.repo, BINDING_ID)
+    trust_mod.unregister()
+    trust_mod.register(_GovernedHostPolicy())
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    listed = capsys.readouterr().out
+    _no_trust_command_in(listed)
+    assert "its declaration is not approved" in listed
+    assert trust_mod.REMEDY_NOT_BY_TRUST in listed
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    class _Fails:
+        def verdict(self, binding, *, root):
+            raise RuntimeError(SECRET)
+
+        record = verdict
+
+    # the turn's sentence, for a host's refusal and for a host that fails
+    for policy in (_GovernedHostPolicy(), _Fails()):
+        trust_mod.unregister()
+        trust_mod.register(policy)
+        port = served.gated_port()
+        assert isinstance(port, trust_mod.UntrustedBindingPort)
+        assert trust_mod.turn_message_for(port) == (
+            trust_mod.UNTRUSTABLE_TURN_MESSAGE)
+    assert SECRET not in capsys.readouterr().err
+
+
+def test_A1_an_unusable_store_is_told_no_trust_command(served, capsys):
+    """A torn store refuses `trust` as it refuses the verdict, so the
+    start's notice prints its cause and recovery, and no command."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    _store_holding(served, "{")                      # a torn copy
+    served.port()
+    notice = capsys.readouterr().err
+    _no_trust_command_in(notice)
+    assert "does not read as JSON" in notice
+    assert trust_mod.RECOVER_MOVE_ASIDE in notice
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+
+
+@pytest.mark.parametrize("reason", ["never", "changed", "record-form",
+                                    "no-verdict"])
+def test_A1_each_reason_trust_repairs_prints_the_command_that_repairs_it(
+        served, capsys, reason):
+    """The other side of A1: where `trust` CAN repair the refusal, the
+    command is printed, and, run as printed, it trusts the binding."""
+    import shlex
+
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    words = {"never": trust_mod.REASON_NEVER_TRUSTED,
+             "changed": trust_mod.REASON_CHANGED,
+             "record-form": trust_mod.REASON_RECORD_FORM,
+             "no-verdict": trust_mod.REASON_NO_VERDICT}[reason]
+    assert trust_mod.trust_can_repair(words)
+    remedy = trust_mod.trust_remedy(BINDING_ID, str(served.repo), words)
+    [command] = _printed_commands(remedy)
+    assert _cli(*shlex.split(command)[1:]) == 0
+    capsys.readouterr()
+    assert trust_mod.verdict_for(served.declared(), root=served.repo).trusted
+
+
+# --- A2: a broker program inside the served repository is never trusted ----
+
+
+def _in_repository_argv(served, where, monkeypatch):
+    """A broker command naming a file inside the served repository, `where`
+    each way a command can name one, as the broker runs it: from
+    `BROKER_WORKING_DIRECTORY`, whatever directory the console was started
+    in (here, an empty one outside the repository), unless a launcher moves
+    it. The repository holds a copy of the marker broker at
+    `tools/broker.py`."""
+    tool = served.repo / "tools" / "broker.py"
+    tool.parent.mkdir(exist_ok=True)
+    shutil.copy(served.broker, tool)
+    console = served.tmp / "console"
+    console.mkdir()
+    monkeypatch.chdir(console)
+    broker_cwd = provider_mod.BROKER_WORKING_DIRECTORY
+    beside = served.repo.parent              # the repository's own parent
+    if where == "absolute":
+        return [sys.executable, str(tool)]
+    if where == "relative-to-the-broker-directory":
+        return [sys.executable, os.path.relpath(tool, broker_cwd)]
+    if where == "relative-climbing-from-the-broker-directory":
+        # Copilot at openDox-code#86, r4179241532: `..` from the file
+        # system's root is the root, so this names the repository's file
+        # there, and from neither the console's directory nor the root's.
+        return [sys.executable,
+                os.path.join(os.pardir, os.path.relpath(tool, broker_cwd))]
+    if where == "relative-after-env-changes-directory":
+        # r4179366288: `env -C` moves the directory the rest is read from.
+        deeper = beside / "a" / "b"
+        deeper.mkdir(parents=True)
+        return ["env", "-C", str(deeper), sys.executable,
+                f"../../{served.repo.name}/tools/broker.py"]
+    if where == "relative-after-env-chdir-abbreviated":
+        # C1: `--chd` is `--chdir` to GNU getopt_long
+        deeper = beside / "a" / "b"
+        deeper.mkdir(parents=True)
+        return ["env", f"--chd={deeper}", sys.executable,
+                f"../../{served.repo.name}/tools/broker.py"]
+    if where == "relative-after-env-chdir-in-a-cluster":
+        # C1: `-vC/dir` is `-v -C /dir`
+        deeper = beside / "a" / "b"
+        deeper.mkdir(parents=True)
+        return ["env", f"-vC{deeper}", sys.executable,
+                f"../../{served.repo.name}/tools/broker.py"]
+    if where == "relative-after-sudo-changes-directory":
+        deeper = beside / "a" / "b"
+        deeper.mkdir(parents=True)
+        return ["sudo", "-D", str(deeper), sys.executable,
+                f"../../{served.repo.name}/tools/broker.py"]
+    if where == "bare-word-after-env-changes-directory":
+        elsewhere = served.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "broker.py").symlink_to(tool)
+        return ["env", "-C", str(elsewhere), sys.executable, "broker.py"]
+    if where == "dotted-module-after-env-changes-directory":
+        # r4179241555: a dotted name reaches the repository through
+        # namespace packages from the directory `-m` imports from first.
+        return ["env", "-C", str(beside), sys.executable, "-m",
+                f"{served.repo.name}.tools.broker"]
+    if where == "dotted-module-through-a-package-link":
+        # r4179241555: the top-level package lies outside, and the module
+        # the whole name reaches lies inside.
+        package = served.tmp / "pkg"
+        package.mkdir()
+        (package / "inner").symlink_to(tool.parent)
+        return ["env", "-C", str(served.tmp), sys.executable, "-m",
+                "pkg.inner.broker"]
+    if where == "dotted-module-linked-at-its-last-name":
+        # r4179241555: every package on the way lies outside, and the file
+        # the whole dotted name reaches is a link into the repository.
+        elsewhere = served.tmp / "elsewhere"
+        (elsewhere / "pkg").mkdir(parents=True)
+        (elsewhere / "pkg" / "broker.py").symlink_to(tool)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m",
+                "pkg.broker"]
+    if where == "a-link-inside-in-the-middle-of-a-chain":
+        # r4180041184: outside -> repository -> outside, as the script
+        return [sys.executable, str(_chain(served, tool, relative=False))]
+    if where == "a-relative-chain-through-the-repository":
+        return [sys.executable, str(_chain(served, tool, relative=True))]
+    if where == "a-chain-through-the-repository-as-the-program":
+        return [str(_chain(served, tool, relative=False, program=True))]
+    if where == "sourceless-bytecode-module":
+        # r4180041203: `-m` imports a sourceless `.pyc`
+        compiled = tool.parent / "bytecode.pyc"
+        compiled.write_bytes(b"")
+        elsewhere = served.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "bytecode.pyc").symlink_to(compiled)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m",
+                "bytecode"]
+    if where == "extension-module":
+        suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
+        extension = tool.parent / f"native{suffix}"
+        extension.write_bytes(b"")
+        elsewhere = served.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / f"native{suffix}").symlink_to(extension)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m", "native"]
+    if where == "package-main-linked-into-the-repository":
+        # r4180717725: `-m pkg` runs `pkg/__main__.py`
+        elsewhere = served.tmp / "elsewhere"
+        (elsewhere / "pkg").mkdir(parents=True)
+        (elsewhere / "pkg" / "__main__.py").symlink_to(tool)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m", "pkg"]
+    if where == "package-init-linked-into-the-repository":
+        # r4180717725: `-m pkg.mod` runs `pkg/__init__.py` first
+        elsewhere = served.tmp / "elsewhere"
+        (elsewhere / "pkg").mkdir(parents=True)
+        (elsewhere / "pkg" / "__init__.py").symlink_to(tool)
+        (elsewhere / "pkg" / "mod.py").write_text("", encoding="utf-8")
+        return ["env", "-C", str(elsewhere), sys.executable, "-m",
+                "pkg.mod"]
+    if where == "module-on-an-assigned-pythonpath":
+        # r4180717772: the module is found through `PYTHONPATH`
+        library = served.tmp / "library"
+        library.mkdir()
+        (library / "broker.py").symlink_to(tool)
+        return ["env", f"PYTHONPATH={library}", sys.executable, "-m",
+                "broker"]
+    if where == "module-on-a-relative-pythonpath-entry":
+        library = beside / "library"
+        library.mkdir()
+        (library / "broker.py").symlink_to(tool)
+        return ["env", "-C", str(beside), "PYTHONPATH=library",
+                sys.executable, "-m", "broker"]
+    if where == "module-on-the-inherited-pythonpath":
+        library = served.tmp / "library"
+        library.mkdir()
+        (library / "broker.py").symlink_to(tool)
+        from opendox import doxbench_bridge
+
+        monkeypatch.setattr(doxbench_bridge, "INHERITED_ENVIRONMENT",
+                            (*doxbench_bridge.INHERITED_ENVIRONMENT,
+                             "PYTHONPATH"))
+        monkeypatch.setenv("PYTHONPATH", str(library))
+        return [sys.executable, "-m", "broker"]
+    if where == "module-attached-to-its-option":
+        # r4180041213: `-mX`
+        return ["env", "-C", str(beside), sys.executable,
+                f"-m{served.repo.name}.tools.broker"]
+    if where == "module-in-an-option-cluster":
+        # r4180041213: `-BmX`
+        return ["env", "-C", str(beside), sys.executable,
+                f"-Bm{served.repo.name}.tools.broker"]
+    if where == "symlink-in-the-repository-to-outside":
+        # r4179241566: the repository owns the link, and a pull can point it
+        # at another program without changing the binding.
+        link = served.repo / "tools" / "outside-broker.py"
+        link.symlink_to(served.broker)
+        return [sys.executable, str(link)]
+    if where == "climbing-out-of-a-link":
+        # `..` is taken as the system takes it: from where the link leads.
+        (served.tmp / "up").symlink_to(tool.parent)
+        return [sys.executable,
+                str(served.tmp / "up" / os.pardir / "tools" / "broker.py")]
+    if where == "first-word-past-a-file-that-cannot-run":
+        # a search path's file that cannot be run is passed over, as the
+        # system passes it over
+        program = served.repo / "bin" / "opref-runnable"
+        program.parent.mkdir()
+        program.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+        os.chmod(program, 0o755)
+        inert = served.tmp / "inert"
+        inert.mkdir()
+        (inert / program.name).write_text("", encoding="utf-8")
+        monkeypatch.setenv("PATH", f"{inert}{os.pathsep}{program.parent}"
+                           f"{os.pathsep}{os.environ.get('PATH', '')}")
+        return [program.name]
+    if where == "relative-search-path-entry":
+        # r4179366288: a relative `PATH` entry is read from the broker's
+        # directory, not the console's.
+        program = served.repo / "bin" / "opref-relative"
+        program.parent.mkdir()
+        program.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+        os.chmod(program, 0o755)
+        monkeypatch.setenv("PATH", os.path.relpath(program.parent, broker_cwd)
+                           + os.pathsep + os.environ.get("PATH", ""))
+        return [program.name]
+    if where == "relative-launcher-in-the-repository-re-read-after-its-split":
+        # r4182002510; the holder's ruling, #656 5990845570: `-C` before `-S`
+        # moves the directory the split string is read in, not the one the
+        # launcher itself was found from
+        launcher = served.repo / "env"
+        launcher.symlink_to(shutil.which("env"))
+        return [os.path.relpath(launcher, broker_cwd), "-C", str(served.tmp),
+                "-S", f"{sys.executable} {served.broker}"]
+    if where.endswith("bytecode-cache-linked-into-the-repository"):
+        # r4181465499; the holder's ruling, #656 5989835334: Python imports
+        # a source's bytecode cache from `__pycache__` in its place
+        compiled = tool.parent / "broker.pyc"
+        compiled.write_bytes(b"")
+        elsewhere = served.tmp / "elsewhere"
+        package = elsewhere / "pkg"
+        package.mkdir(parents=True)
+        source, module = {
+            "module-bytecode-cache-linked-into-the-repository": (
+                elsewhere / "broker.py", "broker"),
+            "initializer-bytecode-cache-linked-into-the-repository": (
+                package / "__init__.py", "pkg.mod"),
+            "main-bytecode-cache-linked-into-the-repository": (
+                package / "__main__.py", "pkg"),
+            "another-interpreters-bytecode-cache-linked-into-the-repository": (
+                elsewhere / "broker.py", "broker"),
+            "prefixed-process-bytecode-cache-linked-into-the-repository": (
+                elsewhere / "broker.py", "broker"),
+        }[where]
+        source.write_text("", encoding="utf-8")
+        (package / "mod.py").write_text("", encoding="utf-8")
+        name = Path(importlib.util.cache_from_source(str(source))).name
+        if where.startswith("another-interpreters"):
+            name = f"{source.stem}.cpython-399.pyc"
+        if where.startswith("prefixed-process"):
+            # a cache prefix this process has is not where a broker's own
+            # interpreter reads the cache from
+            monkeypatch.setattr(sys, "pycache_prefix",
+                                str(served.tmp / "prefix"))
+        cache = source.parent / "__pycache__" / name
+        cache.parent.mkdir()
+        cache.symlink_to(compiled)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m", module]
+    if where.startswith("bytecode-cache-directory-linked"):
+        # no cache is there yet, and the directory it would be read from is
+        # a link into the repository; under a cache prefix this process has
+        # as well, which is not where a broker's interpreter reads it from
+        if where.endswith("under-a-process-cache-prefix"):
+            monkeypatch.setattr(sys, "pycache_prefix",
+                                str(served.tmp / "prefix"))
+        caches = tool.parent / "caches"
+        caches.mkdir()
+        elsewhere = served.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "broker.py").write_text("", encoding="utf-8")
+        (elsewhere / "__pycache__").symlink_to(caches)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m", "broker"]
+    if where == "parent-module-on-an-assigned-pythonpath":
+        # r4181006328: `-m parent.child` runs `parent.py` before it finds
+        # `parent` is no package
+        library = served.tmp / "library"
+        library.mkdir()
+        (library / "parent.py").symlink_to(tool)
+        return ["env", f"PYTHONPATH={library}", sys.executable, "-m",
+                "parent.child"]
+    if where == "parent-module-in-the-start-directory":
+        elsewhere = served.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "parent.py").symlink_to(tool)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m",
+                "parent.child"]
+    if where == "dotted-package-main-linked-into-the-repository":
+        # `-m pkg.sub` runs `pkg/sub/__main__.py`, under packages outside
+        elsewhere = served.tmp / "elsewhere"
+        (elsewhere / "pkg" / "sub").mkdir(parents=True)
+        (elsewhere / "pkg" / "sub" / "__main__.py").symlink_to(tool)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m",
+                "pkg.sub"]
+    if where == "program-past-an-assignment-whose-name-is-no-identifier":
+        # r4181006390: GNU env reads `A-B=x` as an assignment, so the
+        # program is the next member, found on the assigned `PATH`
+        os.chmod(tool, 0o755)
+        links = served.tmp / "links"
+        links.mkdir()
+        (links / "broker").symlink_to(tool)
+        return ["env", f"PATH={links}", "A-B=x", "broker"]
+    if where == "value-of-an-assignment-whose-name-is-no-identifier":
+        return ["env", f"A-B={tool}", sys.executable, str(served.broker)]
+    if where == "member-an-unknown-option-may-take":
+        # 5988818366: a member read as an unknown option's value is still
+        # judged as a path
+        return ["node", "--frobnicate", str(tool)]
+    if where == "search-path-assigned-through-a-link":
+        # r4179366288: `env PATH=...` is the path the program is found on.
+        program = served.repo / "bin" / "opref-linked"
+        program.parent.mkdir()
+        program.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+        os.chmod(program, 0o755)
+        links = served.tmp / "links"
+        links.mkdir()
+        (links / program.name).symlink_to(program)
+        return ["env", f"PATH={links}", program.name]
+    if where == "flag-value":
+        return [sys.executable, str(served.broker), f"--config={tool}"]
+    if where == "relative-flag-value-after-env-changes-directory":
+        return ["env", "-C", str(beside), sys.executable, str(served.broker),
+                f"--config={served.repo.name}/tools/broker.py"]
+    if where == "link-from-outside":
+        link = served.tmp / "outside-link.py"
+        link.symlink_to(tool)
+        return [sys.executable, str(link)]
+    if where == "dash-named-program-on-path":
+        program = served.repo / "bin" / "-broker"
+        program.parent.mkdir()
+        program.write_text(f"#!{sys.executable}\n"
+                           + tool.read_text(encoding="utf-8"),
+                           encoding="utf-8")
+        os.chmod(program, 0o755)
+        monkeypatch.setenv("PATH", f"{program.parent}{os.pathsep}"
+                           f"{os.environ.get('PATH', '')}")
+        return ["-broker"]
+    if where == "positional-after-double-dash":
+        elsewhere = served.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "-broker.py").symlink_to(tool)
+        return ["env", "-C", str(elsewhere), sys.executable, "--",
+                "-broker.py"]
+    if where == "first-word-on-path":
+        program = served.repo / "bin" / "opref-broker"
+        program.parent.mkdir()
+        program.write_text(f"#!{sys.executable}\n"
+                           + tool.read_text(encoding="utf-8"),
+                           encoding="utf-8")
+        os.chmod(program, 0o755)
+        monkeypatch.setenv("PATH", f"{program.parent}{os.pathsep}"
+                           f"{os.environ.get('PATH', '')}")
+        return ["opref-broker"]
+    raise AssertionError(where)
+
+
+def _chain(served, tool: Path, *, relative: bool,
+           program: bool = False) -> Path:
+    """`outside/entry -> <repo>/tools/selected -> outside/real`: a link
+    outside the repository whose target is a link inside it, whose own
+    target is a real file outside it (Copilot at openDox-code#86,
+    r4180041184). Each target is relative to its link's directory where
+    `relative`."""
+    outside = served.tmp / "chain"
+    outside.mkdir(exist_ok=True)
+    real = outside / ("real-program" if program else "real.py")
+    real.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+    os.chmod(real, 0o755)
+    selected = tool.parent / ("selected" if program else "selected.py")
+    entry = outside / ("entry" if program else "entry.py")
+    if relative:
+        selected.symlink_to(os.path.relpath(real, selected.parent))
+        entry.symlink_to(os.path.relpath(selected, entry.parent))
+    else:
+        selected.symlink_to(real)
+        entry.symlink_to(selected)
+    return entry
+
+
+IN_REPOSITORY = ("absolute", "relative-to-the-broker-directory",
+                 "relative-climbing-from-the-broker-directory",
+                 "relative-after-env-changes-directory",
+                 "relative-after-sudo-changes-directory",
+                 "relative-after-env-chdir-abbreviated",
+                 "relative-after-env-chdir-in-a-cluster",
+                 "bare-word-after-env-changes-directory",
+                 "dotted-module-after-env-changes-directory",
+                 "dotted-module-through-a-package-link",
+                 "dotted-module-linked-at-its-last-name",
+                 "a-link-inside-in-the-middle-of-a-chain",
+                 "a-relative-chain-through-the-repository",
+                 "a-chain-through-the-repository-as-the-program",
+                 "sourceless-bytecode-module", "extension-module",
+                 "module-attached-to-its-option",
+                 "module-in-an-option-cluster",
+                 "package-main-linked-into-the-repository",
+                 "package-init-linked-into-the-repository",
+                 "module-on-an-assigned-pythonpath",
+                 "module-on-a-relative-pythonpath-entry",
+                 "module-on-the-inherited-pythonpath",
+                 "parent-module-on-an-assigned-pythonpath",
+                 "parent-module-in-the-start-directory",
+                 "dotted-package-main-linked-into-the-repository",
+                 "program-past-an-assignment-whose-name-is-no-identifier",
+                 "value-of-an-assignment-whose-name-is-no-identifier",
+                 "member-an-unknown-option-may-take",
+                 "relative-launcher-in-the-repository-re-read-after-its-split",
+                 "module-bytecode-cache-linked-into-the-repository",
+                 "initializer-bytecode-cache-linked-into-the-repository",
+                 "main-bytecode-cache-linked-into-the-repository",
+                 "another-interpreters-bytecode-cache-linked-into-the-repository",
+                 "prefixed-process-bytecode-cache-linked-into-the-repository",
+                 "bytecode-cache-directory-linked-into-the-repository",
+                 "bytecode-cache-directory-linked-under-a-process-cache-prefix",
+                 "symlink-in-the-repository-to-outside",
+                 "relative-search-path-entry",
+                 "climbing-out-of-a-link",
+                 "first-word-past-a-file-that-cannot-run",
+                 "search-path-assigned-through-a-link",
+                 "flag-value",
+                 "relative-flag-value-after-env-changes-directory",
+                 "link-from-outside", "first-word-on-path",
+                 "dash-named-program-on-path", "positional-after-double-dash")
+
+
+@pytest.mark.parametrize("where", IN_REPOSITORY)
+def test_A2_a_broker_inside_the_repository_is_refused_by_name(
+        served, capsys, monkeypatch, where):
+    """RULED by Brett Heap, openxFactory#656 comment 5982436447, item 2,
+    "Refuse in-repo programs". Trust is of the binding's record, and a pull
+    can change a program inside the repository after the record was
+    trusted, so a binding whose broker command names one is refused BY NAME
+    where trust is recorded (`trust`, `add`) and where it is checked (the
+    verdict, under any policy, a host's that trusts everything included),
+    with the remedy "install the broker outside the repository"."""
+    trust_mod = _trust_mod()
+    argv = _in_repository_argv(served, where, monkeypatch)
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.in_repository_program(binding, root=served.repo)
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    err = capsys.readouterr().err
+    assert trust_mod.REASON_IN_REPOSITORY in err
+    assert "install the broker outside the repository" in err
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+    for policy in (served.trust, _TrustsEveryBinding()):
+        trust_mod.unregister()
+        trust_mod.register(policy)
+        verdict = trust_mod.verdict_for(binding, root=served.repo)
+        assert not verdict.trusted
+        assert verdict.reason == trust_mod.REASON_IN_REPOSITORY
+    served.nothing_was_touched()
+
+
+def test_N2_deno_whose_leading_option_cannot_be_read_is_named(served):
+    """Lane openXfactory-3 D7 early findings N2, holder ruled fix now: a
+    leading option deno's global grammar does not hold is refused as
+    unreadable, fail-closed, and `inline_script` names it rather than pass
+    it; a known one is read past, to the subcommand."""
+    trust_mod = _trust_mod()
+    unknown = ["deno", "--frobnicate", "eval", "x"]
+    assert trust_mod.inline_script(unknown) == "--frobnicate"
+    assert trust_mod.broker_command_refused(unknown, root=served.repo) == (
+        trust_mod.REASON_UNREADABLE_COMMAND)
+    for argv in (["deno", "--quiet", "eval", "x"],
+                 ["deno", "-q", "eval", "x"],
+                 ["deno", "--log-level=info", "eval", "x"],
+                 ["deno", "-Linfo", "eval", "x"],
+                 ["deno", "--unstable-kv", "eval", "x"]):
+        assert trust_mod.inline_script(argv) == "deno", argv
+    assert trust_mod.inline_script(
+        ["deno", "--quiet", "run", str(served.broker)]) is None
+
+
+def test_R4_one_working_directory_per_launcher_is_judged(served):
+    """The other side of r4180717752: one `-C` per launcher keeps its
+    judgment, nested launchers each with their own included, and one given
+    only inside an `env -S` string."""
+    trust_mod = _trust_mod()
+    program = [sys.executable, str(served.broker)]
+    for argv in (["env", "-C", "/tmp", *program],
+                 ["env", "-C", "/tmp", "env", "-C", "usr", *program],
+                 ["env", "-S", f"-C /tmp {sys.executable} {served.broker}"],
+                 ["sudo", "-D", "/tmp", *program]):
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) is None, argv
+
+
+@pytest.mark.parametrize("optimization", ["", 1, 2])
+def test_R6_a_cache_is_judged_by_name_where_its_directory_cannot_be_listed(
+        served, optimization):
+    """r4181465499; the holder's ruling, #656 5989835334: this
+    interpreter's cache name, at every optimization level, is judged
+    whether or not the directory it is in can be listed."""
+    trust_mod = _trust_mod()
+    compiled = served.repo / "broker.pyc"
+    compiled.write_bytes(b"")
+    elsewhere = served.tmp / "elsewhere"
+    elsewhere.mkdir()
+    source = elsewhere / "broker.py"
+    source.write_text("", encoding="utf-8")
+    name = Path(importlib.util.cache_from_source(
+        str(source), optimization=optimization)).name
+    pycache = elsewhere / "__pycache__"
+    pycache.mkdir()
+    (pycache / name).symlink_to(compiled)
+    os.chmod(pycache, 0o300)                # searchable, not listable
+    try:
+        with pytest.raises(OSError):
+            os.listdir(pycache)
+        assert trust_mod.broker_command_refused(
+            ["env", "-C", str(elsewhere), sys.executable, "-m", "broker"],
+            root=served.repo) == trust_mod.REASON_IN_REPOSITORY
+    finally:
+        os.chmod(pycache, 0o700)
+
+
+def test_R6_a_member_past_the_bounds_is_refused_as_unreadable(served):
+    """The summary of review 5411026353; the holder's ruling, #656
+    5989835334: a member longer than PATH_MAX (4096), or holding more than
+    32 absolute paths, is refused as unreadable before it is judged, and
+    `in_repository_argv` returns it unjudged, FAIL-CLOSED, so an
+    environment value past the bounds is no value a broker gets; a member
+    at each bound is judged."""
+    trust_mod = _trust_mod()
+    outside = "/opt/opendox-test/broker"
+    for member in ("a" * 4097, "/a" * 33):
+        for argv in ([outside, member], [member]):
+            assert trust_mod.broker_command_refused(
+                argv, root=served.repo) == (
+                    trust_mod.REASON_UNREADABLE_COMMAND), len(member)
+        assert trust_mod.in_repository_argv(
+            [outside, member], root=served.repo) == member
+        assert trust_mod.names_a_path_inside(member, root=served.repo)
+    for member in ("a" * 4096, "/a" * 32):
+        assert trust_mod.broker_command_refused(
+            [outside, member], root=served.repo) is None, len(member)
+        assert not trust_mod.names_a_path_inside(member, root=served.repo)
+
+
+def test_R6_the_old_worst_cases_are_judged_in_under_a_second(served):
+    """The summary of review 5411026353 ("quadratic memory allocation
+    before trust approval"); the holder's ruling, #656 5989835334: a pull
+    that delivers a bindings document must not hang the judgment. One
+    member of 400 absolute paths took 29 s at fe56c0c4, and 4000 options
+    node does not know took seconds, growing with their square; each is
+    judged now in under a second (4000 such options now pass the work
+    budget, ruling 5990845570, so 1500 are judged here)."""
+    trust_mod = _trust_mod()
+    for argv, reason in (
+            (["/opt/opendox-test/broker", "/x" * 400],
+             trust_mod.REASON_UNREADABLE_COMMAND),
+            (["/opt/opendox-test/broker", "/x" * 2048],
+             trust_mod.REASON_UNREADABLE_COMMAND),
+            (["node", *(["--a"] * 1500)], None),
+            (["node", *(["--a"] * 4000), "-e", "x"],
+             trust_mod.REASON_INLINE_SCRIPT)):
+        started = time.monotonic()
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) == reason, argv[:2]
+        assert time.monotonic() - started < 1, argv[:2]
+
+
+def test_R7_an_alias_a_wrapper_runs_is_judged_on_the_brokers_search_path(
+        served, monkeypatch, capsys):
+    """r4182002637; the holder's ruling, #656 5990845570: a bare word after
+    the program, which a wrapper not in the launcher table may run, is
+    looked for on the broker's FILTERED search path as well, so an alias
+    that resolves to an interpreter given its inline flag is an inline
+    script; an alias of a program that is no interpreter is not, and one
+    only an entry inside the repository holds is no program the broker
+    finds."""
+    trust_mod = _trust_mod()
+    aliases = served.tmp / "aliases"
+    aliases.mkdir()
+    (aliases / "opref-alias").symlink_to(sys.executable)
+    (aliases / "opref-tool").symlink_to(shutil.which("true"))
+    hidden = served.repo / "bin"
+    hidden.mkdir()
+    (hidden / "opref-hidden").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        [str(aliases), str(hidden), os.environ.get("PATH", "")]))
+    for wrapper in (["prlimit", "--"], ["setpriv", "--"]):
+        assert trust_mod.broker_command_refused(
+            [*wrapper, "opref-alias", "-c", "x"], root=served.repo) == (
+                trust_mod.REASON_INLINE_SCRIPT), wrapper
+        for word in ("opref-tool", "opref-hidden"):
+            assert trust_mod.broker_command_refused(
+                [*wrapper, word, "-c", "x"], root=served.repo) is None, word
+    served.hand_write(served.record(
+        "broker", broker_argv=["prlimit", "--", "opref-alias", "-c", "x"]))
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    assert trust_mod.REASON_INLINE_SCRIPT in capsys.readouterr().err
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+
+
+#: Each residual form of the judgment's cost the writer measured at
+#: 5324ca4c, with what it answers now (the holder's ruling, #656
+#: 5990845570): every one past its work budget is refused as unreadable.
+RESIDUAL_FORMS = {
+    "a-module-of-100-dotted-parts": (
+        lambda py: [py, "-m", ".".join(["a"] * 100)], "unreadable"),
+    "a-module-of-2000-dotted-parts-under-two-roots": (
+        lambda py: ["env", "PYTHONPATH=x", py, "-m",
+                    ".".join(["a"] * 2000)], "unreadable"),
+    "2000-repeated-pythonpath-entries": (
+        lambda py: ["env", "PYTHONPATH=" + ":".join(["a"] * 2000), py, "-m",
+                    "a"], None),
+    "700-distinct-pythonpath-entries": (
+        lambda py: ["env", "PYTHONPATH=" + ":".join(
+            f"e{i}" for i in range(700)), py, "-m", "a"], "unreadable"),
+    "6000-members-of-32-separators": (
+        lambda py: ["/opt/opendox-test/broker", *(["/a" * 32] * 6000)],
+        "unreadable"),
+    "4000-short-members": (
+        lambda py: ["/opt/opendox-test/broker", *(["w"] * 4000)],
+        "unreadable"),
+    "3000-su-members": (
+        lambda py: ["/opt/opendox-test/broker", *(["su"] * 3000)],
+        "unreadable"),
+    "1000-words-on-a-search-path-of-700-entries": (
+        lambda py: ["env", "PATH=" + ":".join(f"p{i}" for i in range(700)),
+                    "prlimit", "--", *(["w"] * 1000)], "unreadable"),
+    "2000-interpreter-option-clusters-of-4095-letters": (
+        lambda py: [py, *(["-" + "B" * 4095] * 2000)], "unreadable"),
+    "2000-option-clusters-of-4095-letters": (
+        lambda py: ["/opt/opendox-test/broker",
+                    *(["-" + "B" * 4095] * 2000)], "unreadable"),
+    "4000-options-node-does-not-know": (
+        lambda py: ["node", *(["--a"] * 4000)], "unreadable"),
+}
+
+
+@pytest.mark.parametrize("form", sorted(RESIDUAL_FORMS))
+def test_R7_each_residual_form_is_judged_in_under_a_second(served, form):
+    """r4182002696 and the writer's residual measurements; the holder's
+    ruling, #656 5990845570: import roots are judged once each, and one
+    work budget per command counts the names traversed, the module
+    candidates before they are built, the directories searched, and every
+    member and option letter a scan reads; past it the command is refused
+    as unreadable, FAIL-CLOSED, so a pull cannot hang verdict computation.
+    Each form the writer measured (100 dotted parts took 7 s, and 2000 su
+    members, 1 s) is judged in under a second."""
+    trust_mod = _trust_mod()
+    build, answer = RESIDUAL_FORMS[form]
+    argv = build(sys.executable)
+    started = time.monotonic()
+    refused = trust_mod.broker_command_refused(argv, root=served.repo)
+    assert time.monotonic() - started < 1
+    assert refused == (trust_mod.REASON_UNREADABLE_COMMAND
+                       if answer == "unreadable" else None)
+
+
+def test_R7_a_commands_budget_grows_with_its_members(served, monkeypatch):
+    """The work budget is `_WORK_PER_MEMBER` steps for each member, at most
+    `_WORK_BUDGET`, so the bindings document's ceiling on members bounds a
+    whole document's work: the same module of 30 dotted parts is past the
+    budget of a command of 2 members and within that of 10. An ordinary
+    command spends little of its budget, and the operator's own search
+    path, filtered of the served root, is no command's work."""
+    trust_mod = _trust_mod()
+    module = "-m" + ".".join(["a"] * 30)
+    assert trust_mod.broker_command_refused(
+        [sys.executable, module], root=served.repo) == (
+            trust_mod.REASON_UNREADABLE_COMMAND)
+    assert trust_mod.broker_command_refused(
+        [sys.executable, module, *(["-q"] * 8)], root=served.repo) is None
+    entries = []
+    for index in range(300):
+        entry = served.tmp / "path" / f"d{index}"
+        entry.mkdir(parents=True)
+        entries.append(str(entry))
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        [*entries, os.environ.get("PATH", "")]))
+    assert trust_mod.broker_command_refused(
+        ["/opt/opendox-test/broker", "show"], root=served.repo) is None
+
+
+def test_R7_a_bindings_document_past_its_ceiling_is_refused_by_name(
+        served, capsys):
+    """The holder's ruling, #656 5990845570: a bindings document declaring
+    more broker command members across its bindings than
+    `MAX_JUDGED_MEMBERS` is refused by name, FAIL-CLOSED, before any of
+    them is judged; one at the ceiling is read."""
+    trust_mod = _trust_mod()
+    ceiling = binding_mod.MAX_JUDGED_MEMBERS
+    assert ceiling == 256
+
+    def document(members: int) -> Path:
+        # bindings of 64 members each, the last taking the rest
+        sizes = [64] * (members // 64)
+        sizes[-1] += members % 64
+        return served.hand_write(*(served.record(
+            "broker", id=f"{BINDING_ID}-{number}",
+            broker_argv=[sys.executable, str(served.broker),
+                         *(["--flag"] * (size - 2))])
+            for number, size in enumerate(sizes)))
+
+    path = document(ceiling)
+    assert len(binding_mod.BindingStore(path).list()) == 4
+    path = document(ceiling + 1)
+    with pytest.raises(binding_mod.BindingRefused) as refused:
+        binding_mod.BindingStore(path).list()
+    assert f"{ceiling + 1} broker command members" in str(refused.value)
+    assert f"more than the {ceiling} judged" in str(refused.value)
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                f"{BINDING_ID}-0") == 1
+    assert f"more than the {ceiling} judged" in capsys.readouterr().err
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+
+
+def test_R5_xargs_is_refused_after_the_other_two_judgments(served):
+    """r4181006365; the holder's ruling, #656 5988818366: every xargs is
+    refused as unreadable, but only after the in-repository and
+    inline-script judgments, so each keeps its name (F16.1 as T007 batch P
+    amends it); an xargs a launcher starts, or an `env -S` string names, is
+    one too, and so is one judged with no root."""
+    trust_mod = _trust_mod()
+    arguments = served.repo / "args"
+    arguments.write_text("x\n", encoding="utf-8")
+    outside = "/opt/opendox-test/broker"
+    for argv, reason in (
+            (["xargs", "-a", str(arguments), outside],
+             trust_mod.REASON_IN_REPOSITORY),
+            (["xargs", "-n", "1", "python3", "-c", "x"],
+             trust_mod.REASON_INLINE_SCRIPT),
+            (["xargs", outside], trust_mod.REASON_UNREADABLE_COMMAND),
+            (["nice", "xargs", outside],
+             trust_mod.REASON_UNREADABLE_COMMAND),
+            (["env", "-S", f"xargs {outside}"],
+             trust_mod.REASON_UNREADABLE_COMMAND)):
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) == reason, argv
+    assert trust_mod.broker_command_refused(["xargs", outside], root=None) == (
+        trust_mod.REASON_UNREADABLE_COMMAND)
+    assert trust_mod.broker_command_refused(["nice", outside],
+                                            root=served.repo) is None
+
+
+def test_R4_the_effective_pythonpath_is_what_the_broker_has(
+        served, monkeypatch):
+    """r4180717772; the holder's ruling, #656 5988088910: an inherited
+    `PYTHONPATH` entry inside the repository, which the broker's environment
+    drops, is no root a module is judged under; `env -i` and `env -u
+    PYTHONPATH` clear the inherited entries, as they clear the broker's."""
+    from opendox import doxbench_bridge
+
+    trust_mod = _trust_mod()
+    tools = served.repo / "tools"
+    tools.mkdir()
+    library = served.tmp / "library"
+    library.mkdir()
+    (library / "broker.py").symlink_to(tools / "broker.py")
+    monkeypatch.setattr(doxbench_bridge, "INHERITED_ENVIRONMENT",
+                        (*doxbench_bridge.INHERITED_ENVIRONMENT,
+                         "PYTHONPATH"))
+    monkeypatch.setenv("PYTHONPATH", str(tools))       # dropped: inside
+    assert trust_mod.broker_command_refused(
+        [sys.executable, "-m", "json.tool"], root=served.repo) is None
+    monkeypatch.setenv("PYTHONPATH", str(library))     # reaches inside
+    assert trust_mod.broker_command_refused(
+        [sys.executable, "-m", "broker"], root=served.repo) == (
+            trust_mod.REASON_IN_REPOSITORY)
+    for cleared in (["env", "-i"], ["env", "-"], ["env", "-u", "PYTHONPATH"],
+                    ["env", "--ignore-environment"]):
+        argv = [*cleared, sys.executable, "-m", "broker"]
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) is None, argv
+
+
+def test_R3_a_value_python_reads_is_no_module(served):
+    """The other side of reading `-m` by Python's grammar (r4180041213): a
+    letter that takes a value ends the cluster, so `-Wm...` is a warning
+    filter, and an option of another letter is no module."""
+    trust_mod = _trust_mod()
+    (served.repo / "tools").mkdir()
+    beside = served.repo.parent
+    for argv in (["env", "-C", str(beside), sys.executable,
+                  f"-Wm{served.repo.name}.tools.broker", str(served.broker)],
+                 ["env", "-C", str(beside), sys.executable,
+                  f"-Xm{served.repo.name}.tools.broker", str(served.broker)],
+                 ["env", "-C", str(beside), sys.executable, "-B",
+                  str(served.broker)]):
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) is None, argv
+
+
+def test_A2_a_broker_outside_the_repository_is_trusted_as_before(
+        served, capsys):
+    """The rule names files, so what names none is not refused: an option's
+    absolute value outside the repository, a URL, a bare word that names no
+    file, and options with no value. A member holding a NUL, which no path
+    can, is judged without failing (Copilot at openDox-code#86,
+    r4179077018). `trust` records it, and the start declares it."""
+    trust_mod = _trust_mod()
+    argv = [sys.executable, str(served.broker), "--config=/etc/opref.conf",
+            "--issuer=https://auth.example/v1", "-v", "--quiet", "plain-word",
+            "--profile=/etc/opref\x00.conf", "/etc/opref\x00.conf"]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.in_repository_program(binding, root=served.repo) is None
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 0
+    capsys.readouterr()
+    assert trust_mod.verdict_for(binding, root=served.repo).trusted
+    assert isinstance(served.port(), provider_mod.BrokeredProviderPort)
+
+
+def test_A2_a_trusted_broker_edited_in_the_repository_never_runs(
+        served, capsys, monkeypatch):
+    """The review's case: the binding trusted (here, straight into the
+    store, as a store written before the rule), then a pull edits the
+    program it runs. Nothing runs: the start refuses it, the gate beneath
+    refuses even a verdict that admits it, and so does the console intake's
+    own question."""
+    trust_mod = _trust_mod()
+    argv = _in_repository_argv(served, "absolute", monkeypatch)
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    served.trust.record(binding, root=served.repo)
+    canary = served.tmp / "CANARY"
+    tool = Path(argv[1])
+    tool.write_text(f"open({str(canary)!r}, 'w').close()\n"
+                    + tool.read_text(encoding="utf-8"), encoding="utf-8")
+    port = served.port()
+    assert isinstance(port, trust_mod.UntrustedBindingPort)
+    with pytest.raises(trust_mod.BindingUntrusted) as refused:
+        port.dispatch(_Envelope())
+    assert "install the broker outside the repository" in str(refused.value)
+    _no_trust_command_in(str(refused.value), capsys.readouterr().err)
+    admitted = trust_mod.TrustVerdict.trusted_for(
+        binding, root=served.repo, basis=trust_mod.BASIS_HOST)
+    with pytest.raises(trust_mod.BindingUntrusted) as beneath:
+        trust_mod.require_admitted(binding, admitted)
+    assert trust_mod.REASON_IN_REPOSITORY in str(beneath.value)
+    with pytest.raises(binding_mod.BindingRefused):
+        provider_mod.mint(binding, trust=admitted)
+    trust_mod.unregister()
+    trust_mod.register(_AdmitsTheIntake())
+    intake = trust_mod.intake_verdict_for(binding, root=served.repo)
+    assert not intake.trusted
+    assert intake.reason == trust_mod.REASON_IN_REPOSITORY
+    assert not canary.exists()
+    served.nothing_was_touched()
+
+
+def test_A2_add_refuses_a_broker_inside_the_repository_and_writes_nothing(
+        served, capsys, monkeypatch):
+    trust_mod = _trust_mod()
+    argv = _in_repository_argv(served, "absolute", monkeypatch)
+    adding = served.add_argv("broker")
+    adding = adding[:adding.index("--") + 1] + argv
+    assert _cli(*adding) == 1
+    assert trust_mod.REMEDY_IN_REPOSITORY in capsys.readouterr().err
+    assert not binding_mod.bindings_path(served.repo).exists()
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+
+
+# --- A3: an unservable binding is passed over, so 16.4's remedies work -----
+
+
+def test_A3_the_start_passes_over_a_binding_the_catalog_cannot_list(
+        served, capsys):
+    """The rail's "No model configured" line offers two remedies, the local
+    harness on PATH and another binding. With a binding the catalog cannot
+    list declared first, the start declared a refusing port for it and
+    neither remedy could take effect. It is passed over, as a pending one
+    is, and the start says so by name."""
+    from opendox import doxbench_model
+
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env", label="L" * 201))
+    assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+    notice = capsys.readouterr().err
+    assert (f"[model-provider] model binding {trust_mod.shown(BINDING_ID)} "
+            f"is passed over: {trust_mod.REASON_UNSERVABLE}. "
+            f"{trust_mod.REMEDY_UNSERVABLE}") in notice
+    # remedy (1): the local harness, installed, is what the start declares
+    harness = served.port(harness=True)
+    assert not isinstance(harness, trust_mod.UntrustedBindingPort)
+    assert [entry.model_id for entry in harness.catalog().entries] == [
+        "omp-local"]
+    # remedy (2): another binding, added, is what the start declares
+    second = served.add_argv("env")
+    second[second.index("--id") + 1] = "second-model"
+    assert _cli(*second) == 0
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    listed = capsys.readouterr().out
+    assert "passes over it: the model catalog cannot list" in listed
+    port = served.port()
+    assert isinstance(port, provider_mod.BrokeredProviderPort)
+    assert [entry.model_id for entry in port.catalog().entries] == [
+        "second-model"]
+
+
+# --- A4: a trusted binding's refusal is printed where the rail says --------
+
+
+@pytest.mark.parametrize("kind", ["env", "broker"])
+def test_A4_a_trusted_bindings_refusal_is_printed_once_by_name(
+        served, capsys, kind):
+    """`UNTRUSTED_BINDING_REMEDY` says a trusted binding is unavailable "for
+    the reason this console printed when its provider refused". The broker's
+    stderr is not read and the turn's refusal is not printed, so the port
+    prints it: one fixed line naming the binding and its fixed diagnostic,
+    as it turns unavailable, and not again while it stays so. Here the
+    `env:` reference resolves to nothing, or the broker exits without an
+    answer."""
+    from opendox import doxbench_model
+
+    adding = served.add_argv(kind)
+    if kind == "env":
+        served.environ.pop(SECRET_NAME)   # the reference resolves to nothing
+    else:
+        failing = served.tmp / "failing-broker.py"
+        failing.write_text("import sys\nsys.exit(3)\n", encoding="utf-8")
+        adding[-1] = str(failing)
+    assert _cli(*adding) == 0
+    capsys.readouterr()
+    port = served.port()
+    entry = port.catalog().entries[0]
+    for _ in range(2):
+        outcome = doxbench_model.dispatch_turn(port, _Envelope(), entry=entry,
+                                               clock=time.monotonic)
+        assert isinstance(outcome, doxbench_model.TurnDispatchFailure)
+    printed = capsys.readouterr().err.splitlines()
+    lead = (f"[model-provider] model binding "
+            f"{_trust_mod().shown(BINDING_ID)} is unavailable: ")
+    said = [line for line in printed if line.startswith(lead)]
+    assert len(said) == 1, printed
+    assert said[0][len(lead):] in provider_mod.FIXED_DIAGNOSTICS
+    assert all(not e.available for e in port.catalog().entries)
+    assert SECRET not in "\n".join(printed)
+
+
+# --- A5: the intake is not offered where no policy could admit it ----------
+
+
+def _intake_surface(served) -> dict:
+    import http.client
+
+    from opendox import serve
+
+    snapshot = served.tmp / "out" / "snapshot.json"
+    httpd = serve.build_server(
+        REPO_ROOT / "src" / "opendox" / "web", snapshot, served.repo,
+        port=0, actor="brett", model_port_factory=lambda: None)
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    try:
+        base = httpd.server_address[:2]
+        connection = http.client.HTTPConnection(*base, timeout=30)
+        connection.request("GET", "/capabilities")
+        own = json.loads(connection.getresponse().read())
+        connection.close()
+        connection = http.client.HTTPConnection(*base, timeout=30)
+        connection.request("GET", "/workbench/model-intake", headers={
+            serve.CONSOLE_TOKEN_HEADER: own.get("console_token", "")})
+        surface = json.loads(connection.getresponse().read())
+        connection.close()
+        return surface
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join(timeout=10)
+
+
+@pytest.mark.parametrize("policy", ["none-registered", "strict-default",
+                                    "no-intake-verdict", "admits"])
+def test_A5_the_intake_is_offered_only_where_a_policy_could_admit_it(
+        served, policy):
+    """A host registers a gate (#77) and a broker is declared. Under
+    openDox's own trust (registered or not), or a host policy with no
+    `intake_verdict`, every hand-off is refused, so the surface is NOT
+    offered and says why; a host policy that answers `intake_verdict` is
+    offered it. Asking registers nothing."""
+    from opendox import column_seams
+
+    trust_mod = _trust_mod()
+    intake_mod.DeclarationStore(intake_mod.declarations_path(
+        served.repo)).declare_broker(intake_mod.BrokerDeclaration(
+            argv=(sys.executable, str(served.broker))))
+    snapshot = served.tmp / "out" / "snapshot.json"
+    snapshot.parent.mkdir()
+    snapshot.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    trust_mod.unregister()
+    if policy == "strict-default":
+        trust_mod.register(served.trust)
+    elif policy == "no-intake-verdict":
+        trust_mod.register(_TrustsEveryBinding())
+    elif policy == "admits":
+        trust_mod.register(_AdmitsTheIntake())
+    column_seams.gate.unregister()
+    column_seams.gate.register(_HostGate())
+    try:
+        surface = _intake_surface(served)
+    finally:
+        column_seams.gate.unregister()
+    if policy == "admits":
+        assert surface.get("offered") is True and "reason" not in surface, (
+            surface)
+    else:
+        assert surface.get("offered") is False, surface
+        assert surface.get("reason") == trust_mod.INTAKE_NOT_ADMISSIBLE
+    assert trust_mod.is_registered() == (policy != "none-registered")
+    assert not served.marker.exists()
+
+
+# --- A6: set-credential's refusal names the document it read --------------
+
+
+def test_A6_set_credential_prints_the_command_for_the_document_it_read(
+        served, capsys):
+    import shlex
+
+    trust_mod = _trust_mod()
+    record = served.record("broker")
+    elsewhere = served.tmp / "elsewhere.yaml"
+    elsewhere.write_text(json.dumps({
+        "schema_version": 1, "kind": "model-provider-bindings",
+        "bindings": [record]}), encoding="utf-8")
+    served.hand_write({**record, "label": "Another form"})
+    assert _cli("model-binding", "set-credential", "--repo-root",
+                str(served.repo), "--bindings", str(elsewhere),
+                "--id", BINDING_ID) == 1
+    [command] = _printed_commands(capsys.readouterr().err)
+    assert "--bindings" in command, command
+    assert _cli(*shlex.split(command)[1:]) == 0
+    capsys.readouterr()
+    refused_for = binding_mod.BindingStore(elsewhere).list()[0]
+    assert trust_mod.verdict_for(refused_for, root=served.repo).trusted
+    assert not trust_mod.verdict_for(served.declared(),
+                                     root=served.repo).trusted
+
+
+# --- A7: a store refusal names its actual cause ----------------------------
+
+
+@pytest.mark.parametrize("case", ["torn-json", "newer-schema", "older-schema",
+                                  "another-kind", "state-dir-0500",
+                                  "state-dir-0500-once-locked"])
+def test_A7_a_store_refusal_names_its_cause_and_recovery(served, case):
+    """Only a link, an owner or a mode is blamed on another user. A torn
+    copy, a newer store, another kind of document and a directory this user
+    cannot write each name their own cause, and how to recover. Each is
+    refused, by `record` and by the verdict (A9: the kind and the version
+    are both checked)."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    planted = json.loads(_planted(served))
+    if case == "torn-json":
+        _store_holding(served, '{"schema_version": 1, "kind"')
+        cause, recovery = "does not read as JSON", trust_mod.RECOVER_MOVE_ASIDE
+    elif case == "newer-schema":
+        _store_holding(served, {**planted, "schema_version": 2})
+        cause, recovery = "schema_version 2", trust_mod.RECOVER_NEWER
+    elif case == "older-schema":
+        _store_holding(served, {**planted, "schema_version": 0})
+        cause = "is not a trust store this install writes"
+        recovery = trust_mod.RECOVER_MOVE_ASIDE
+    elif case == "another-kind":
+        _store_holding(served, {**planted, "kind": "something-else"})
+        cause = "is not a trust store this install writes"
+        recovery = trust_mod.RECOVER_MOVE_ASIDE
+    elif case == "state-dir-0500":
+        served.state_dir.mkdir(mode=0o700)
+        os.chmod(served.state_dir, 0o500)
+        cause, recovery = "cannot be opened", trust_mod.RECOVER_PERMISSIONS
+    else:
+        # the lock file exists, so it opens; the store's new copy cannot be
+        # created beside it
+        served.trust.record(_a_binding(id="another-model"), root=served.repo)
+        os.chmod(served.state_dir, 0o500)
+        cause = "could not be created"
+        recovery = trust_mod.RECOVER_PERMISSIONS
+    try:
+        with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+            served.trust.record(served.declared(), root=served.repo)
+        verdict = served.trust.verdict(served.declared(), root=served.repo)
+    finally:
+        os.chmod(served.state_dir, 0o700)
+    words = str(refused.value)
+    assert "another user could change" not in words, words
+    assert cause in words and recovery in words, words
+    if not case.startswith("state-dir-0500"):
+        assert not verdict.trusted and cause in verdict.reason, verdict
+
+
+# --- A8: a state directory that is a link trusts nothing -------------------
+
+
+def test_A8_a_state_directory_that_is_a_link_trusts_nothing(served):
+    """F16.1's ratified text (the holder's ruling, openxFactory#656 comment
+    5982436447): "With the trust file, or a directory that holds it,
+    replaced by a symbolic link ... every binding reads untrusted". Here
+    the link is this user's own and reaches a private directory of this
+    user's own holding a store that would trust the binding."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    real = served.tmp / "real-state"
+    real.mkdir(mode=0o700)
+    planted = real / trust_mod.TRUST_FILENAME
+    planted.write_text(_planted(served), encoding="utf-8")
+    os.chmod(planted, 0o600)
+    served.state_dir.symlink_to(real, target_is_directory=True)
+    verdict = served.trust.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted
+    assert "the directory that holds the store is a symbolic link" in (
+        verdict.reason)
+    held = planted.read_bytes()
+    with pytest.raises(trust_mod.TrustStoreRefused):
+        served.trust.record(served.declared(), root=served.repo)
+    assert planted.read_bytes() == held
+
+
+# --- A9: the store rules the suite did not pin ------------------------------
+
+
+def test_A9_an_ancestor_others_could_write_trusts_nothing_unless_sticky(
+        served):
+    """G1. A directory above the store that another user could write, and
+    that is not sticky, could have the store's directory renamed away and
+    replaced; with the sticky bit set, it could not."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    shared = served.tmp / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o777)
+    (shared / "st").mkdir(mode=0o700)
+    store = shared / "st" / trust_mod.TRUST_FILENAME
+    store.write_text(_planted(served), encoding="utf-8")
+    os.chmod(store, 0o600)
+    policy = trust_mod.MachineTrust(state_dir=shared / "st")
+    verdict = policy.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted and "is not sticky" in verdict.reason, verdict
+    os.chmod(shared, 0o1777)
+    assert policy.verdict(served.declared(), root=served.repo).trusted
+
+
+def test_A9_a_link_above_the_store_in_a_directory_others_could_write(served):
+    """G2. The directories judged include those the state directory is
+    SPELLED under, not only those it resolves under: a link above it, in a
+    directory another user could write, could be repointed."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    real = served.tmp / "real"
+    (real / "st").mkdir(mode=0o700, parents=True)
+    os.chmod(real, 0o700)
+    store = real / "st" / trust_mod.TRUST_FILENAME
+    store.write_text(_planted(served), encoding="utf-8")
+    os.chmod(store, 0o600)
+    shared = served.tmp / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o777)
+    (shared / "link").symlink_to(real, target_is_directory=True)
+    policy = trust_mod.MachineTrust(state_dir=shared / "link" / "st")
+    verdict = policy.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted and "is not sticky" in verdict.reason, verdict
+    os.chmod(shared, 0o755)
+    assert policy.verdict(served.declared(), root=served.repo).trusted
+
+
+def test_A9_a_link_above_the_store_owned_by_another_user_trusts_nothing(
+        served, monkeypatch):
+    """A link above the state directory that another user owns could be
+    pointed elsewhere by them. The other owner is the system's answer, so
+    `lstat` answers it here."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    real = served.tmp / "real"
+    (real / "st").mkdir(mode=0o700, parents=True)
+    store = real / "st" / trust_mod.TRUST_FILENAME
+    store.write_text(_planted(served), encoding="utf-8")
+    os.chmod(store, 0o600)
+    link = served.tmp / "link"
+    link.symlink_to(real, target_is_directory=True)
+    policy = trust_mod.MachineTrust(state_dir=link / "st")
+    assert policy.verdict(served.declared(), root=served.repo).trusted
+
+    def lstat(path, *args, **kwargs):
+        info = os.lstat(path, *args, **kwargs)
+        if os.fspath(path) != str(link):
+            return info
+        fields = list(info[:10])
+        fields[4] = os.getuid() + 4242
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(trust_mod, "os", _OsWith(lstat=lstat))
+    verdict = policy.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted, verdict
+    assert f"owned by uid {os.getuid() + 4242}" in verdict.reason
+
+
+def test_A9_the_lock_and_the_store_are_opened_without_waiting(
+        served, monkeypatch):
+    """Round 8 (r4178064601): both are opened non-blocking, so a FIFO in
+    either's place is refused by its type rather than waited on. Opening a
+    FIFO for reading and writing never waits on Linux, so the flag itself is
+    what is held."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    opened: dict[str, int] = {}
+
+    def spy(path, flags, *args, **kwargs):
+        opened[os.path.basename(os.fspath(path))] = flags
+        return os.open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(trust_mod, "os", _OsWith(open=spy))
+    served.trust.record(served.declared(), root=served.repo)
+    assert served.trust.verdict(served.declared(), root=served.repo).trusted
+    for name in (trust_mod.TRUST_LOCK_FILENAME, trust_mod.TRUST_FILENAME):
+        assert opened[name] & os.O_NONBLOCK, (name, opened)
+
+
+def test_A9_a_refused_intake_body_is_drained_unread(served, monkeypatch):
+    """The console intake refused at its hand-off drains the body it was
+    sent, unread, so the connection answers rather than stalls."""
+    from opendox import serve_workbench
+
+    drained = []
+    real = serve_workbench._drain_refused_body
+
+    def spy(rfile, length):
+        drained.append(length)
+        return real(rfile, length)
+
+    monkeypatch.setattr(serve_workbench, "_drain_refused_body", spy)
+    _caps, answer = _served_intake(served)
+    assert answer.get("reason") == _trust_mod().INTAKE_BROKER_UNTRUSTED
+    assert drained == [len(b"sk-stand-in-NOT-A-KEY")]
+    assert not served.marker.exists()
+
+
+def test_A9_a_directory_made_for_the_store_is_judged_once_made(
+        served, monkeypatch):
+    """`_make_private_directories` judges each directory it makes by its
+    own descriptor once made. A system that leaves one writable by others
+    (here, a chmod between the make and the open) has it refused."""
+    trust_mod = _trust_mod()
+
+    def mkdir(name, mode=0o777, *, dir_fd=None):
+        os.mkdir(name, mode, dir_fd=dir_fd)
+        os.chmod(name, 0o770, dir_fd=dir_fd)
+
+    monkeypatch.setattr(trust_mod, "os", _OsWith(mkdir=mkdir))
+    with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+        trust_mod._make_private_directories(served.tmp / "made" / "st")
+    assert "is writable by its group" in str(refused.value)
+
+
+def test_A9_and_A17_the_store_and_its_directory_are_synced(
+        served, monkeypatch):
+    """The store's bytes are synced before the replace (A9), and the state
+    directory after it (A17), so a crash after `record` returns can neither
+    lose the new store's bytes nor bring back the store it replaced."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    served.trust.record(_a_binding(id="another-model"), root=served.repo)
+    events: list[tuple] = []
+
+    def fsync(descriptor):
+        info = os.fstat(descriptor)
+        events.append(("fsync", stat.S_ISDIR(info.st_mode), info.st_ino))
+        return os.fsync(descriptor)
+
+    def replace(source, target, *args, **kwargs):
+        events.append(("replace", os.path.basename(os.fspath(target))))
+        return os.replace(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(trust_mod, "os", _OsWith(fsync=fsync,
+                                                 replace=replace))
+    served.trust.record(served.declared(), root=served.repo)
+    at = events.index(("replace", trust_mod.TRUST_FILENAME))
+    assert any(event[0] == "fsync" and not event[1]
+               for event in events[:at]), events
+    directory = os.stat(served.state_dir).st_ino
+    assert ("fsync", True, directory) in events[at + 1:], events
+
+
+# --- A10: no raw path reaches the terminal ---------------------------------
+
+
+def test_A10_a_repositorys_path_is_printed_escaped(served, capsys):
+    root = served.fresh_repository("r\x1b[8m\n  forged line")
+    served.hand_write(served.record("env"), root=root)
+    assert _cli("model-binding", "list", "--repo-root", str(root)) == 0
+    assert _cli("model-binding", "trust", "--repo-root", str(root),
+                "no-such-binding") == 1
+    adding = served.add_argv("env")
+    adding[adding.index("--repo-root") + 1] = str(root)
+    adding[adding.index("--id") + 1] = "second-model"
+    assert _cli(*adding) == 0
+    captured = capsys.readouterr()
+    for text in (captured.out, captured.err):
+        assert "\x1b" not in text and "\n  forged line" not in text, (
+            repr(text[:300]))
+        assert "\\u001b[8m" in text
+
+
+# --- A11: a failed edit leaves the trusted form trusted ---------------------
+
+
+def test_A11_an_edit_whose_write_fails_keeps_the_trusted_form_trusted(
+        served, capsys):
+    trust_mod = _trust_mod()
+    assert _cli(*served.add_argv("env")) == 0
+    capsys.readouterr()
+    before = served.declared()
+    document = binding_mod.bindings_path(served.repo)
+    editing = served.add_argv("env")
+    editing[1] = "edit"
+    editing[editing.index("--label") + 1] = "Renamed"
+    os.chmod(document, 0o444)
+    os.chmod(document.parent, 0o555)
+    try:
+        rc = _cli(*editing)
+    finally:
+        os.chmod(document.parent, 0o755)
+        os.chmod(document, 0o644)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "could not be written" in err and "nothing in it changed" in err
+    assert served.declared() == before
+    assert trust_mod.verdict_for(before, root=served.repo).trusted
+
+
+# --- A12: a verdict subclass admits nothing --------------------------------
+
+
+def test_A12_a_verdict_subclass_cannot_admit_another_binding(served):
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+
+    class Lax(trust_mod.TrustVerdict):
+        def admits(self, binding):
+            return True
+
+    lax = Lax(binding_id="some-other-binding", digest="sha256:0",
+              root=trust_mod.resolved_root(served.repo), trusted=True,
+              basis=trust_mod.BASIS_HOST)
+
+    class Host:
+        def verdict(self, binding, *, root):
+            return lax
+
+        def record(self, binding, *, root):
+            return lax
+
+    trust_mod.unregister()
+    trust_mod.register(Host())
+    port = served.port()
+    assert isinstance(port, trust_mod.UntrustedBindingPort), port
+    with pytest.raises(trust_mod.BindingUntrusted):
+        trust_mod.require_admitted(served.declared(), lax)
+    # beneath both: the provider's port lists nothing available for one,
+    # even a subclass that names this very binding
+    exact = trust_mod.TrustVerdict.trusted_for(
+        served.declared(), root=served.repo, basis=trust_mod.BASIS_HOST)
+    lookalike = Lax(**{field.name: getattr(exact, field.name)
+                       for field in dataclasses.fields(exact)})
+    brokered = provider_mod.BrokeredProviderPort(
+        served.declared(), install_mod.brokered_catalog(served.declared()),
+        trust=lookalike)
+    assert not any(entry.available for entry in brokered.catalog().entries)
+    served.nothing_was_touched()
+
+
+# --- A13: the seam is read once, inside the refusal net ---------------------
+
+
+def test_A13_a_host_torn_down_while_the_default_registers_records_anyway(
+        served, monkeypatch):
+    """`policy()` registered the default, then read the seam: a host that
+    unregistered between the two left the read nothing, and `recorded_for`
+    raised a `RuntimeError` no verb catches. It is one operation now."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    real = trust_mod.register_default
+
+    def then_torn_down():
+        held = real()
+        trust_mod.unregister()
+        return held
+
+    monkeypatch.setattr(trust_mod, "register_default", then_torn_down)
+    trust_mod.unregister()
+    verdict = trust_mod.recorded_for(served.declared(), root=served.repo)
+    assert verdict.admits(served.declared())
+
+
+def test_A13_a_seam_that_fails_is_refused_by_name(served, monkeypatch):
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+
+    def fails():
+        raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(trust_mod, "policy", fails)
+    with pytest.raises(trust_mod.TrustNotRecorded) as refused:
+        trust_mod.recorded_for(served.declared(), root=served.repo)
+    assert SECRET not in str(refused.value)
+
+
+# --- A15: no case reads this machine's own trust ----------------------------
+
+
+_A15_SEEN: list[str] = []
+
+
+@pytest.fixture(scope="module")
+def _a15_module_setting():
+    """`OPENDOX_STATE_DIR` as a module-scoped fixture sees it: set up before
+    any case's own fixtures, so it is the session's."""
+    return os.environ.get("OPENDOX_STATE_DIR")
+
+
+def test_A15_a_case_has_a_scratch_state_directory_of_its_own(
+        tmp_path_factory, _a15_module_setting):
+    """The root conftest gives the session, and every case, a scratch
+    `OPENDOX_STATE_DIR` under this run's own temporary directory, so no
+    case and no wider fixture reads or writes the operator's trust. This
+    case also leaves a policy registered, which the next one proves was
+    dropped."""
+    trust_mod = _trust_mod()
+    trust_mod.unregister()
+    trust_mod.register(_TrustsEveryBinding())
+    setting = os.environ.get("OPENDOX_STATE_DIR")
+    assert setting, "no scratch state directory: the operator's is read"
+    assert _a15_module_setting, "a module fixture reads the operator's"
+    base = tmp_path_factory.getbasetemp().resolve()
+    for each in (setting, _a15_module_setting):
+        assert base in Path(each).resolve().parents, each
+    assert setting != _a15_module_setting
+    assert trust_mod.MachineTrust().state_dir() == Path(setting)
+    _A15_SEEN.append(setting)
+
+
+def test_A15_the_seam_is_emptied_after_every_case():
+    """Runs after the case above, which left a policy registered, and has a
+    state directory of its own."""
+    assert not _trust_mod().is_registered()
+    assert os.environ.get("OPENDOX_STATE_DIR") not in _A15_SEEN
+
+
+# --- A16: a digest of another scheme is not a "changed" binding -------------
+
+
+def test_A16_a_digest_of_another_scheme_reads_as_another_record_form(
+        served, capsys):
+    import shlex
+
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    planted = json.loads(_planted(served))
+    digest = planted["entries"][0]["digest"]
+    assert digest.startswith(trust_mod.DIGEST_PREFIX)
+    planted["entries"][0]["digest"] = "sha256/2:" + digest.split(":", 1)[1]
+    _store_holding(served, planted)
+    verdict = served.trust.verdict(served.declared(), root=served.repo)
+    assert not verdict.trusted
+    assert verdict.reason == trust_mod.REASON_RECORD_FORM
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 0
+    [command] = _printed_commands(capsys.readouterr().out)
+    assert _cli(*shlex.split(command)[1:]) == 0
+    assert served.trust.verdict(served.declared(), root=served.repo).trusted
+
+
+def test_A16_the_digest_scheme_names_every_field_of_the_record():
+    """Adding a field to the binding record changes every digest, so it
+    must change the digest's scheme too: the scheme's field list is pinned to
+    the record's."""
+    trust_mod = _trust_mod()
+    assert trust_mod.DIGEST_SCHEME_FIELDS == binding_mod.BINDING_FIELDS
+    assert set(_a_binding().as_record()) == {
+        "kind", *trust_mod.DIGEST_SCHEME_FIELDS}
+
+
+# --- A18: the directory the store's tree is made from is judged ------------
+
+
+def test_A18_the_directory_the_store_is_made_in_is_judged_first(served):
+    trust_mod = _trust_mod()
+    shared = served.tmp / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o777)
+    with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+        trust_mod._make_private_directories(shared / "st")
+    assert "is not sticky" in str(refused.value)
+    assert not (shared / "st").exists()
+
+
+# --- A19: an approval never calls a trusted binding untrusted --------------
+
+
+def test_A19_an_approval_reads_this_machines_store_where_nothing_registered(
+        served):
+    """Nothing registered in the serving process yet (its console started
+    with only the pending binding, so the factory never asked), and this
+    machine's store trusts the approved binding: the approval says it is
+    available, and registers nothing."""
+    trust_mod = _trust_mod()
+    _caps, answer = _served_intake(served, host_policy=_AdmitsTheIntake())
+    assert answer.get("error") is None, answer
+    served.trust.record(served.declared(), root=served.repo)
+    trust_mod.unregister()
+    approval = _post_an_approval(served, BINDING_ID)
+    assert approval.get("ok") is True, approval
+    assert approval["availability"] == intake_mod.APPROVAL_NOTICE
+    assert not trust_mod.is_registered()
+
+
+# --- N1: a settings document reached through a link is refused -------------
+
+
+@pytest.mark.parametrize("link", ["document", "its-directory"])
+def test_N1_add_never_writes_through_a_link_a_clone_carries(
+        served, capsys, link):
+    """A clone carries a link as readily as a file. One at the bindings
+    document's path, or at a directory of its default path, would have
+    `add` create or overwrite a file wherever it points."""
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    document = binding_mod.bindings_path(served.repo)
+    if link == "document":
+        document.parent.mkdir(parents=True)
+        document.symlink_to(outside / "created-by-add")
+        named = document
+    else:
+        document.parent.parent.mkdir(parents=True)
+        document.parent.symlink_to(outside, target_is_directory=True)
+        named = document.parent
+    assert _cli(*served.add_argv("env")) == 1
+    err = capsys.readouterr().err
+    assert "symbolic link" in err and str(named) in err, err
+    assert list(outside.iterdir()) == []
+    assert _cli("model-binding", "list", "--repo-root", str(served.repo)) == 1
+    assert "symbolic link" in capsys.readouterr().err
+
+
+def test_N1_each_stores_write_refuses_a_link_by_itself(served):
+    """The read refuses a link first, so the write's own refusal is asked
+    directly: a link planted after a read is never written through."""
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    for path, store, refused, write in (
+            (binding_mod.bindings_path(served.repo), binding_mod.BindingStore,
+             binding_mod.BindingRefused,
+             lambda store: store._save([_a_binding()])),
+            (intake_mod.declarations_path(served.repo),
+             intake_mod.DeclarationStore, intake_mod.IntakeRefused,
+             lambda store: store._save(None, []))):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(outside / path.name)
+        with pytest.raises(refused) as said:
+            write(store(path))
+        assert "symbolic link" in str(said.value)
+    assert list(outside.iterdir()) == []
+
+
+def test_N1_the_declarations_document_is_never_written_through_a_link(
+        served):
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    document = intake_mod.declarations_path(served.repo)
+    document.parent.mkdir(parents=True)
+    document.symlink_to(outside / "created-by-intake")
+    with pytest.raises(intake_mod.IntakeRefused) as refused:
+        _propose(served.repo, BINDING_ID)
+    assert "symbolic link" in str(refused.value)
+    assert list(outside.iterdir()) == []
+
+
+# --- N2: an unreadable settings document is refused by name ---------------
+
+
+UNREADABLE = {"not-utf-8": (b"\xff\xfe\x00schema_version: 1\n", "not UTF-8"),
+              "nested": (b"[" * 1000 + b"]" * 1000, "nests too deeply"),
+              "no-permission": (b"schema_version: 1\n", "cannot be read"),
+              # the holder's ruling, openxFactory#656 comment 5985046107, C3:
+              # valid YAML whose timestamp cannot be constructed
+              "unconstructable": (
+                  b"schema_version: 1\nkind: model-provider-bindings\n"
+                  b"bindings: []\nnote: 2024-13-01\n",
+                  "is not readable YAML")}
+
+
+@contextlib.contextmanager
+def _unreadable(document: Path, case: str):
+    """`document` holding `case`'s bytes, and, for "no-permission", a mode
+    this user cannot read, restored afterwards."""
+    raw, _said = UNREADABLE[case]
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_bytes(raw)
+    if case == "no-permission":
+        os.chmod(document, 0)
+    try:
+        yield
+    finally:
+        os.chmod(document, 0o644)
+
+
+@pytest.mark.parametrize("case", sorted(UNREADABLE))
+def test_N2_an_unreadable_bindings_document_is_refused_by_name(
+        served, capsys, case):
+    """Not UTF-8, or nested past what the parser can descend: refused BY
+    NAME, never a raw error, and the console's start reads it as declaring
+    no binding and says why."""
+    from opendox import doxbench_model
+
+    _raw, said = UNREADABLE[case]
+    document = binding_mod.bindings_path(served.repo)
+    with _unreadable(document, case):
+        with pytest.raises(binding_mod.BindingRefused) as refused:
+            binding_mod.BindingStore(document).list()
+        assert said in str(refused.value)
+        assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+        assert said in capsys.readouterr().err
+        assert _cli("model-binding", "list", "--repo-root",
+                    str(served.repo)) == 1
+        assert said in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("case", sorted(UNREADABLE))
+def test_N2_an_unreadable_declarations_document_is_refused_by_name(
+        served, case):
+    _raw, said = UNREADABLE[case]
+    document = intake_mod.declarations_path(served.repo)
+    with _unreadable(document, case):
+        with pytest.raises(intake_mod.IntakeRefused) as refused:
+            intake_mod.DeclarationStore(document).get(BINDING_ID)
+        assert said in str(refused.value)
+        # the console's start reads it as declaring nothing pending
+        assert not intake_mod.pending_binding_ids(served.repo)
+
+
+@contextlib.contextmanager
+def _unsearchable(directory: Path):
+    """`directory` with a mode this user cannot search, restored after."""
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0)
+    try:
+        yield
+    finally:
+        os.chmod(directory, 0o755)
+
+
+def test_N2_a_bindings_document_behind_an_unsearchable_directory_is_refused(
+        served, capsys):
+    """The look before the read refuses BY NAME too (Copilot at
+    openDox-code#86, r4179241603): a directory on the way to the bindings
+    document that this user cannot search fails the link check and the
+    presence check themselves, and the console's start still reads it as
+    declaring no binding and says why."""
+    from opendox import doxbench_model
+
+    document = binding_mod.bindings_path(served.repo)
+    with _unsearchable(document.parent):
+        # The presence check raises rather than read it as absent, so a
+        # Python whose `Path.is_symlink` swallows the error refuses it too.
+        with pytest.raises(PermissionError):
+            binding_mod.document_present(document)
+        with pytest.raises(binding_mod.BindingRefused) as refused:
+            binding_mod.BindingStore(document).list()
+        assert "cannot be read" in str(refused.value)
+        assert served.port() is doxbench_model.NO_MODEL_CONFIGURED
+        assert "cannot be read" in capsys.readouterr().err
+        assert _cli("model-binding", "list", "--repo-root",
+                    str(served.repo)) == 1
+        assert "cannot be read" in capsys.readouterr().err
+
+
+def test_N2_a_declarations_document_behind_an_unsearchable_directory_is_refused(
+        served):
+    document = intake_mod.declarations_path(served.repo)
+    with _unsearchable(document.parent):
+        with pytest.raises(intake_mod.IntakeRefused) as refused:
+            intake_mod.DeclarationStore(document).get(BINDING_ID)
+        assert "cannot be read" in str(refused.value)
+        # the console's start reads it as declaring nothing pending
+        assert not intake_mod.pending_binding_ids(served.repo)
+
+
+def test_N2_a_missing_settings_document_still_declares_nothing(served):
+    """The hosted path is kept: a document that is not there, or a file
+    where a directory belongs on the way to it, is absent, not refused."""
+    for document in (binding_mod.bindings_path(served.repo),
+                     intake_mod.declarations_path(served.repo)):
+        assert not binding_mod.document_present(document)
+    blocker = served.tmp / "a-file"
+    blocker.write_text("", encoding="utf-8")
+    assert not binding_mod.document_present(blocker / "bindings.yaml")
+    assert not binding_mod.BindingStore(blocker / "bindings.yaml").list()
+
+
+# ===========================================================================
+# 7. Copilot's first review of openDox-code#86 (review 5407887563), and A2
+#    EXTENDED (RULED by Brett Heap, openxFactory#656 comment 5983805990,
+#    "Refuse inline scripts (Recommended)"). Each fails at `3e4958ab`.
+# ===========================================================================
+
+
+def test_A11_a_failed_edit_never_overwrites_a_trust_recorded_meanwhile(
+        served, capsys, monkeypatch):
+    """r4179076901. Edit A records its form, edit B records and writes
+    another, and A's write then fails: A's undoing must not trust its stale
+    form over B's. It is undone only while the store still holds A's
+    form, under the store's lock."""
+    assert _cli(*served.add_argv("env")) == 0
+    capsys.readouterr()
+    before = served.declared()
+    meanwhile = dataclasses.replace(before, label="Recorded meanwhile")
+
+    def edit(store, binding):
+        served.trust.record(meanwhile, root=served.repo)  # edit B, recorded
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(binding_mod.BindingStore, "edit", edit)
+    editing = served.add_argv("env")
+    editing[1] = "edit"
+    editing[editing.index("--label") + 1] = "Renamed"
+    assert _cli(*editing) == 1
+    assert "could not be written" in capsys.readouterr().err
+    assert served.trust.verdict(meanwhile, root=served.repo).trusted
+    assert not served.trust.verdict(before, root=served.repo).trusted
+
+
+def test_A11_a_write_that_fails_part_way_leaves_the_document_as_it_was(
+        served, capsys, monkeypatch):
+    """r4179076956. A full disk part way through the write: the document
+    is replaced atomically, so it reads as it did, no partial copy is left
+    beside it, and the refusal's "nothing in it changed" is true. Both
+    stores write so."""
+    trust_mod = _trust_mod()
+    assert _cli(*served.add_argv("env")) == 0
+    capsys.readouterr()
+    _propose(served.repo, "first-model")
+    document = binding_mod.bindings_path(served.repo)
+    declarations = intake_mod.declarations_path(served.repo)
+    held, kept = document.read_bytes(), declarations.read_bytes()
+    before = served.declared()
+
+    def half_then_full(handle, text):
+        handle.write(text[:len(text) // 2])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(binding_mod, "_write_all", half_then_full)
+    editing = served.add_argv("env")
+    editing[1] = "edit"
+    editing[editing.index("--label") + 1] = "Renamed"
+    assert _cli(*editing) == 1
+    err = capsys.readouterr().err
+    assert "could not be written" in err and "nothing in it changed" in err
+    assert document.read_bytes() == held
+    assert trust_mod.verdict_for(before, root=served.repo).trusted
+    with pytest.raises(OSError):
+        _propose(served.repo, "second-model")
+    assert declarations.read_bytes() == kept
+    assert sorted(path.name for path in document.parent.iterdir()) == sorted(
+        [declarations.name, document.name])
+
+
+def _umask_mode() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return 0o666 & ~mask
+
+
+@pytest.mark.parametrize("document", ["bindings", "declarations"])
+def test_R3_a_new_document_is_never_seen_in_part(served, capsys, monkeypatch,
+                                                 document):
+    """Copilot at openDox-code#86, r4180041167; the holder's ruling,
+    openxFactory#656 comment 5986391296: a document that does not exist yet
+    is written whole beside its place and published with a hard link, so
+    while it is written its place holds nothing, and after it holds all of
+    it, with the mode a new file takes here and nothing left beside it. The
+    first `add`, and the first intake write."""
+    path = (binding_mod.bindings_path(served.repo) if document == "bindings"
+            else intake_mod.declarations_path(served.repo))
+    seen = []
+    real = binding_mod._write_all
+
+    def watching(handle, text):
+        seen.append(path.exists())
+        real(handle, text)
+
+    monkeypatch.setattr(binding_mod, "_write_all", watching)
+    if document == "bindings":
+        assert _cli(*served.add_argv("env")) == 0
+        capsys.readouterr()
+        assert served.declared().id == BINDING_ID
+    else:
+        _propose(served.repo, "first-model")
+        assert intake_mod.pending_binding_ids(served.repo) == {"first-model"}
+    assert seen == [False]
+    assert stat.S_IMODE(path.stat().st_mode) == _umask_mode()
+    assert path.stat().st_nlink == 1
+    assert sorted(p.name for p in path.parent.iterdir()) == [path.name]
+
+
+@pytest.mark.parametrize("document", ["bindings", "declarations"])
+def test_R3_a_document_made_meanwhile_is_never_overwritten(
+        served, capsys, monkeypatch, document):
+    """A document another process makes while this one writes its first is
+    never overwritten: the hard link refuses (`File exists`), this write is
+    refused by name, the other document stands as it was written, and
+    nothing is left beside it. An `add` refused so withdraws the trust it
+    recorded (C2)."""
+    path = (binding_mod.bindings_path(served.repo) if document == "bindings"
+            else intake_mod.declarations_path(served.repo))
+    theirs = b"# another process's document\n"
+    real = binding_mod._write_all
+
+    def meanwhile(handle, text):
+        real(handle, text)
+        path.write_bytes(theirs)
+
+    monkeypatch.setattr(binding_mod, "_write_all", meanwhile)
+    if document == "bindings":
+        assert _cli(*served.add_argv("env")) == 1
+        err = capsys.readouterr().err
+        assert "could not be written (File exists)" in err, err
+        assert not _held_entries(served)
+    else:
+        with pytest.raises(FileExistsError):
+            _propose(served.repo, "first-model")
+    assert path.read_bytes() == theirs
+    assert sorted(p.name for p in path.parent.iterdir()) == [path.name]
+
+
+def test_N1_a_relative_path_that_is_the_default_is_judged_whole(
+        served, monkeypatch):
+    """r4179076919. Run from the repository's root, the default path is
+    exactly as long as the default relative path, and a link at a directory
+    of it is refused all the same, by both stores."""
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    (served.repo / "ideation").mkdir()
+    (served.repo / "ideation" / "dashboard").symlink_to(
+        outside, target_is_directory=True)
+    monkeypatch.chdir(served.repo)
+    with pytest.raises(binding_mod.BindingRefused) as refused:
+        binding_mod.BindingStore(binding_mod.bindings_path(".")).add(
+            _a_binding())
+    assert "symbolic link" in str(refused.value)
+    with pytest.raises(intake_mod.IntakeRefused):
+        _propose(Path("."), BINDING_ID)
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("link", ["document", "its-directory"])
+def test_N1_bindings_named_on_the_command_line_are_never_written_through_a_link(
+        served, capsys, link):
+    """r4179076934. `--bindings` was resolved before the store saw it, which
+    erased the link. It is made absolute instead, so the store refuses it."""
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    document = binding_mod.bindings_path(served.tmp / "named")
+    document.parent.parent.mkdir(parents=True)
+    if link == "document":
+        document.parent.mkdir()
+        document.symlink_to(outside / "created-by-add")
+    else:
+        document.parent.symlink_to(outside, target_is_directory=True)
+    adding = served.add_argv("env")
+    adding[adding.index("--repo-root") + 2:adding.index("--repo-root") + 2] = [
+        "--bindings", str(document)]
+    assert _cli(*adding) == 1
+    assert "symbolic link" in capsys.readouterr().err
+    assert list(outside.iterdir()) == []
+
+
+def test_N2_every_refusal_of_a_document_prints_its_path_escaped(
+        served, capsys):
+    """r4179076973, r4179076986. A checkout whose path holds a terminal
+    control and a newline: a linked document, and an unreadable one, are
+    each refused with the path escaped, by the start and by `list`."""
+    root = served.fresh_repository("r\x1b[8m\n  forged line")
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    document = binding_mod.bindings_path(root)
+    document.parent.mkdir(parents=True)
+    for plant in ("link", "not-utf-8"):
+        if plant == "link":
+            document.symlink_to(outside / "x.yaml")
+        else:
+            document.unlink()
+            document.write_bytes(b"\xff\xfe")
+        served.port(root)
+        assert _cli("model-binding", "list", "--repo-root", str(root)) == 1
+        captured = capsys.readouterr()
+        for text in (captured.out, captured.err):
+            assert "\x1b" not in text and "\n  forged line" not in text, (
+                repr(text[:300]))
+        assert "\\u001b[8m" in captured.err
+
+
+def test_A5_an_intake_broker_the_rules_refuse_is_not_offered(served):
+    """r4179077029. A host that admits the intake, and a declarations
+    document naming a broker inside the served repository, or an inline
+    script: every hand-off is refused before the host is asked, so the
+    surface is not offered, and says why."""
+    from opendox import column_seams
+
+    trust_mod = _trust_mod()
+    tool = served.repo / "tools" / "broker.py"
+    tool.parent.mkdir()
+    shutil.copy(served.broker, tool)
+    store = intake_mod.DeclarationStore(intake_mod.declarations_path(
+        served.repo))
+    snapshot = served.tmp / "out" / "snapshot.json"
+    snapshot.parent.mkdir()
+    snapshot.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    trust_mod.unregister()
+    trust_mod.register(_AdmitsTheIntake())
+    column_seams.gate.unregister()
+    column_seams.gate.register(_HostGate())
+    try:
+        for argv in ((sys.executable, str(tool)),
+                     ("/bin/sh", "-c", "exec ./tools/broker.py")):
+            store.declare_broker(intake_mod.BrokerDeclaration(argv=argv))
+            surface = _intake_surface(served)
+            assert surface.get("offered") is False, surface
+            assert surface.get("reason") == trust_mod.INTAKE_BROKER_REFUSED
+        store.declare_broker(intake_mod.BrokerDeclaration(
+            argv=(sys.executable, str(served.broker))))
+        assert _intake_surface(served).get("offered") is True
+    finally:
+        column_seams.gate.unregister()
+
+
+INLINE = {
+    "sh-c": ["/bin/sh", "-c", "exec ./tools/broker.py"],
+    "bash-lc": ["bash", "-lc", "exec ./tools/broker.py"],
+    "sh-ec": ["sh", "-ec", "exec ./tools/broker.py"],
+    "zsh-c": ["zsh", "-c", "x"],
+    "dash-c": ["dash", "-c", "x"],
+    "python-c": [sys.executable, "-c", "import runpy"],
+    "python3-Sc": ["python3", "-Sc", "x"],
+    "node-e": ["node", "-e", "x"],
+    "node-eval": ["node", "--eval=x"],
+    "node-p": ["node", "-p", "x"],
+    "perl-e": ["perl", "-e", "x"],
+    "perl-ne": ["perl", "-ne", "x"],
+    "ruby-e": ["ruby", "-e", "x"],
+    "php-r": ["php", "-r", "x"],
+    "pwsh-command": ["pwsh", "-Command", "x"],
+    "env-wrapped": ["/usr/bin/env", "sh", "-c", "x"],
+    "env-split-string": ["env", "-S", "sh -c x"],
+    "timeout-wrapped": ["timeout", "5", "bash", "-c", "x"],
+    "busybox-wrapped": ["busybox", "sh", "-c", "x"],
+    "unknown-wrapper": ["/opt/opendox-test/wrap", "sh", "-c", "x"],
+    "xargs-wrapped": ["xargs", "-0", "sh", "-c", "x"],
+    "sudo-wrapped": ["sudo", "-u", "bob", "/bin/bash", "-c", "x"],
+    "env-python": ["/usr/bin/env", "python3", "-c", "x"],
+    "env-split-python": ["env", "-S", "python3 -c x"],
+    # Copilot at openDox-code#86, r4179241583: an attached script, and an
+    # inline option after options that take values, read by grammar.
+    "python-attached": [sys.executable, "-cprint(1)"],
+    "python-cluster-attached": ["python3", "-Bcprint(1)"],
+    "python-value-then-c": ["python3", "-W", "ignore", "-c", "x"],
+    "ruby-attached": ["ruby", "-eputs(1)"],
+    "perl-digits-then-e": ["perl", "-l0e", "x"],
+    "php-B": ["php", "-B", "x"],
+    "lua-e": ["lua", "-e", "x"],
+    "osascript-e": ["osascript", "-e", "x"],
+    "node-require-then-e": ["node", "--require", "mod", "-e", "x"],
+    "su-c": ["su", "bob", "-c", "x"],
+    "runuser-command": ["runuser", "-u", "bob", "--command=x"],
+    "pwsh-policy-then-command": ["pwsh", "-ExecutionPolicy", "Bypass",
+                                 "-Command", "x"],
+    # r4181006345; the holder's ruling, #656 5988818366: a long option the
+    # table does not know is read as a flag and as taking the next member
+    "node-unknown-value-option-then-e": ["node", "--v8-pool-size", "1",
+                                         "-e", "x", "--"],
+    "node-flag-then-e": ["node", "--no-warnings", "-e", "x"],
+    "pwsh-flag-then-command": ["pwsh", "-NoProfile", "-Command", "x"],
+    # pwsh reads every member before its command (`operands=None`),
+    # fail-closed: a word before `-Command` hides none
+    "pwsh-a-word-then-command": ["pwsh", "x", "-Command", "y"],
+    "node-flag-a-file-then-e": ["node", "--no-warnings", "/opt/x.js", "-e",
+                                "x"],
+    "pwsh-encoded": ["powershell", "-EncodedCommand", "eAA="],
+    "fish-C": ["fish", "-C", "x"],
+    "bash-plus-o-then-c": ["bash", "+o", "posix", "-c", "x"],
+    # Lane openXfactory-3 D7 early findings N1 and N2, holder ruled fix now
+    "julia-e": ["julia", "-e", "x"],
+    "julia-eval": ["julia", "--eval=x"],
+    "julia-E": ["julia", "--threads", "2", "-E", "x"],
+    "Rscript-e": ["Rscript", "-e", "x"],
+    "R-e": ["R", "--no-echo", "-e", "x"],
+    "R-file-then-e": ["R", "-f", "/opt/opendox-test/x.R", "-e", "x"],
+    # Lane openXfactory-3 D7 F1, holder ruled fix now (#656 5988369111)
+    "raku-e": ["raku", "-e", "x"],
+    "deno-quiet-eval": ["deno", "--quiet", "eval", "x"],
+    "deno-q-eval": ["deno", "-q", "eval", "x"],
+    "deno-log-level-eval": ["deno", "--log-level", "info", "eval", "x"],
+    # The holder's ruling, openxFactory#656 comment 5985046107, C1: env's
+    # long options by any unambiguous beginning, and its clusters.
+    "env-split-string-abbreviated": ["env", "--split=sh -c x"],
+    "env-split-string-abbreviated-next": ["env", "--spl", "sh -c x"],
+    "env-split-string-bundled": ["env", "-iS", "sh -c x"],
+    "env-split-string-bundled-attached": ["env", "-iSsh -c x"],
+    "env-unset-bundled": ["env", "-0u", "NAME", "sh", "-c", "x"],
+    # A string env would not split as a shell does is refused as an inline
+    # script (F16.1 as T007 batch P amends it; 5985046107, C1): a backslash
+    # (env reads `\\_` as a space), a `$`, a `#`, or a quote left open.
+    "split-string-escape": ["env", "-S", "sh\\_-c\\_id"],
+    "split-string-variable": ["env", "-S", "$BROKER"],
+    "split-string-comment": ["env", "-S", "sh #", "-c", "x"],
+    "split-string-that-does-not-split": ["env", "-S", "a 'b"],
+    "flock-command": ["flock", "/tmp/opendox-lock", "-c", "x"],
+    "deno-eval": ["deno", "eval", "x"],
+}
+
+
+@pytest.mark.parametrize("case", sorted(INLINE))
+def test_A2_a_shell_or_interpreter_given_an_inline_script_is_refused(
+        served, capsys, case):
+    """RULED by Brett Heap, openxFactory#656 comment 5983805990, "Refuse
+    inline scripts (Recommended)". The script is text, not a file a review
+    can pin, and it can run whatever the repository holds, so it is refused
+    BY NAME where trust is recorded (`trust`, `add`) and where it is
+    checked (the verdict under any policy, and the gate beneath), with the
+    remedy: the program itself, or a script kept outside the repository."""
+    trust_mod = _trust_mod()
+    argv = INLINE[case]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.broker_refusal(binding, root=served.repo) == (
+        trust_mod.REASON_INLINE_SCRIPT)
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    err = capsys.readouterr().err
+    assert trust_mod.REASON_INLINE_SCRIPT in err
+    assert trust_mod.REMEDY_INLINE_SCRIPT in err
+    _no_trust_command_in(err)
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+    for policy in (served.trust, _TrustsEveryBinding()):
+        trust_mod.unregister()
+        trust_mod.register(policy)
+        verdict = trust_mod.verdict_for(binding, root=served.repo)
+        assert not verdict.trusted
+        assert verdict.reason == trust_mod.REASON_INLINE_SCRIPT
+    admitted = trust_mod.TrustVerdict.trusted_for(
+        binding, root=served.repo, basis=trust_mod.BASIS_HOST)
+    with pytest.raises(trust_mod.BindingUntrusted) as beneath:
+        trust_mod.require_admitted(binding, admitted)
+    assert trust_mod.REASON_INLINE_SCRIPT in str(beneath.value)
+    document = binding_mod.bindings_path(served.repo)
+    document.unlink()
+    adding = served.add_argv("broker")
+    adding = adding[:adding.index("--") + 1] + argv
+    assert _cli(*adding) == 1
+    assert trust_mod.REMEDY_INLINE_SCRIPT in capsys.readouterr().err
+    assert not document.exists()
+    served.nothing_was_touched()
+
+
+def test_A2_an_inline_script_trusted_before_the_rule_never_runs(
+        served, capsys, monkeypatch):
+    """The ruling's own case, `["/bin/sh", "-c", "exec ./tools/broker.py"]`,
+    from a console started in the repository, with its trust recorded
+    straight into the store, as a store written before the rule: the start
+    refuses it, the gate refuses even a verdict that admits it, and the
+    repository's script never runs."""
+    trust_mod = _trust_mod()
+    tool = served.repo / "tools" / "broker.py"
+    tool.parent.mkdir()
+    canary = served.tmp / "CANARY"
+    tool.write_text(f"#!{sys.executable}\nopen({str(canary)!r}, 'w')"
+                    ".close()\n", encoding="utf-8")
+    os.chmod(tool, 0o755)
+    monkeypatch.chdir(served.repo)
+    argv = ["/bin/sh", "-c", "exec ./tools/broker.py"]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    served.trust.record(binding, root=served.repo)
+    port = served.port()
+    assert isinstance(port, trust_mod.UntrustedBindingPort)
+    with pytest.raises(trust_mod.BindingUntrusted) as refused:
+        port.dispatch(_Envelope())
+    assert trust_mod.REMEDY_INLINE_SCRIPT in str(refused.value)
+    _no_trust_command_in(str(refused.value), capsys.readouterr().err)
+    admitted = trust_mod.TrustVerdict.trusted_for(
+        binding, root=served.repo, basis=trust_mod.BASIS_HOST)
+    with pytest.raises(binding_mod.BindingRefused):
+        provider_mod.mint(binding, trust=admitted)
+    assert not canary.exists()
+    served.nothing_was_touched()
+
+
+INLINE_CONTROLS = {
+    "a-shell-script-file": lambda served: ["/bin/sh", str(served.broker)],
+    "the-program-itself": lambda served: ["pass", "show", "key"],
+    "an-interpreter-and-a-file": lambda served: [
+        sys.executable, "-B", str(served.broker)],
+    "env-and-a-file": lambda served: ["env", "OPREF_PROFILE=work",
+                                      sys.executable, str(served.broker)],
+    "a-file-named-after-double-dash": lambda served: [
+        "/bin/sh", "--", str(served.broker)],
+    "awk-given-a-file": lambda served: ["awk", "-f", str(served.broker)],
+    "env-split-a-program": lambda served: [
+        "env", "-S", f"{sys.executable} {served.broker}"],
+    "timeout-and-a-program": lambda served: [
+        "timeout", "-s", "KILL", "30", sys.executable, str(served.broker)],
+    "an-option-after-the-scripts-double-dash": lambda served: [
+        "/bin/sh", str(served.broker), "--", "-c"],
+    # Copilot at openDox-code#86, r4179241614: an interpreter's options end
+    # at its script or module, so what follows is the script's own.
+    "an-option-given-to-the-script": lambda served: [
+        sys.executable, str(served.broker), "-c", "profile"],
+    "a-value-then-the-script": lambda served: [
+        sys.executable, "-W", "ignore", str(served.broker), "-c", "x"],
+    "a-module-then-its-own-option": lambda served: [
+        sys.executable, "-m", "json.tool", "-c", "x"],
+    "a-shell-given-a-file-then-c": lambda served: [
+        "/bin/sh", str(served.broker), "-c", "x"],
+    "perl-include-then-the-script": lambda served: [
+        "perl", "-I", "/opt/opendox-test/lib", str(served.broker), "-e",
+        "x"],
+    "pwsh-file-then-command": lambda served: [
+        "pwsh", "-File", str(served.broker), "-Command", "x"],
+    "flock-given-a-program": lambda served: [
+        "flock", "/tmp/opendox-lock", sys.executable, str(served.broker),
+        "-c", "x"],
+    "su-given-a-shell-file": lambda served: [
+        "su", "bob", "-s", str(served.broker)],
+    "julia-given-a-file": lambda served: [
+        "julia", "-t", "2", str(served.broker), "-e", "x"],
+    "julia-attached-target-then-a-file": lambda served: [
+        "julia", "-Ccore-avx2", str(served.broker)],
+    "raku-given-a-file": lambda served: ["raku", "/opt/x.raku"],
+    "node-flag-then-a-file": lambda served: [
+        "node", "--no-warnings", str(served.broker)],
+    "node-flag-a-file-and-its-own-options": lambda served: [
+        "node", "--no-warnings", str(served.broker), "--flag", "x"],
+    "flock-unknown-option-then-a-program": lambda served: [
+        "flock", "/tmp/opendox-lock", "--verbose", sys.executable,
+        str(served.broker), "-c", "x"],
+    "R-given-a-file": lambda served: [
+        "R", "-f", str(served.broker), "--args", "-e", "x"],
+    "deno-quiet-run": lambda served: [
+        "deno", "--quiet", "run", str(served.broker)],
+    "a-module-attached-then-its-own-option": lambda served: [
+        sys.executable, "-mjson.tool", "-c", "x"],
+    "an-option-like-file-after-double-dash": lambda served: [
+        "/bin/sh", "--", "-c"],
+    "perl-module-attached": lambda served: [
+        "perl", "-MExporter", str(served.broker)],
+    "perl-in-place-extension": lambda served: [
+        "perl", "-ie", str(served.broker)],
+    "perl-unicode-features-attached": lambda served: [
+        "perl", "-CE", str(served.broker)],
+}
+
+
+@pytest.mark.parametrize("case", sorted(INLINE_CONTROLS))
+def test_A2_a_program_given_a_file_is_not_an_inline_script(served, case):
+    """The other side of the ruling: a shell or an interpreter given a FILE
+    outside the repository, the program itself, and a wrapper of one, are
+    not refused."""
+    trust_mod = _trust_mod()
+    argv = INLINE_CONTROLS[case](served)
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.broker_refusal(binding, root=served.repo) is None
+    trust_mod.recorded_for(binding, root=served.repo)
+    assert trust_mod.verdict_for(binding, root=served.repo).trusted
+
+
+def test_A2_an_interpreter_behind_a_name_of_its_own_is_refused(served):
+    """A program is judged by the file it resolves to as well as by the name
+    it is called by, so a link named like a broker that reaches an
+    interpreter is an interpreter given an inline script."""
+    trust_mod = _trust_mod()
+    disguise = served.tmp / "bin" / "opref-broker"
+    disguise.parent.mkdir()
+    disguise.symlink_to(Path(sys.executable).resolve())
+    served.hand_write(served.record(
+        "broker", broker_argv=[str(disguise), "-c", "import runpy"]))
+    verdict = trust_mod.verdict_for(served.declared(), root=served.repo)
+    assert verdict.reason == trust_mod.REASON_INLINE_SCRIPT
+
+
+def test_A2_every_broker_starts_outside_the_served_repository(
+        served, capsys, monkeypatch):
+    """RULED, openxFactory#656 comment 5983805990, item 2: defence in depth.
+    A console started inside the served repository starts its broker in a
+    working directory outside it (`BROKER_WORKING_DIRECTORY`), so nothing
+    the broker finds relative to it is a file a pull changes."""
+    where = served.tmp / "broker-cwd"
+    recording = served.tmp / "recording-broker.py"
+    recording.write_text(
+        f"import os\nopen({str(where)!r}, 'w').write(os.getcwd())\n"
+        + served.broker.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.chdir(served.repo)
+    adding = served.add_argv("broker")
+    adding[-1] = str(recording)
+    assert _cli(*adding) == 0
+    capsys.readouterr()
+    port = served.port()
+    assert isinstance(port, provider_mod.BrokeredProviderPort)
+    with contextlib.suppress(Exception):
+        port.dispatch(_Envelope())
+    ran_in = Path(where.read_text(encoding="utf-8"))
+    # the file system's root, which lies outside every served repository,
+    # and the one directory the rules judge a command from
+    assert provider_mod.BROKER_WORKING_DIRECTORY == os.path.abspath(os.sep)
+    assert provider_mod.BROKER_WORKING_DIRECTORY is (
+        _trust_mod().BROKER_WORKING_DIRECTORY)
+    assert ran_in == Path(provider_mod.BROKER_WORKING_DIRECTORY)
+    assert served.repo.resolve() not in (ran_in.resolve(),
+                                         *ran_in.resolve().parents)
+
+
+# ===========================================================================
+# 8. LAUNCHERS (the holder's ruling, openxFactory#656 comment 5984069416,
+#    implementing Brett Heap's 5983805990). Each fails at `46ac0a0f`.
+# ===========================================================================
+
+#: Each launcher, starting `PROG`: a broker program on a `PATH` entry inside
+#: the served repository, which the launched command names by a bare word.
+LAUNCHED = {
+    "env": ["env", "PROG"],
+    "env-ignore-and-assign": ["env", "-i", "OPREF_PROFILE=work",
+                              "PATH=BIN", "PROG"],
+    "env-split-string": ["env", "-S", "OPREF_PROFILE=work PROG --flag"],
+    "nice": ["nice", "-n", "5", "PROG"],
+    "nice-adjustment": ["nice", "--adjustment=5", "PROG"],
+    "nohup": ["nohup", "PROG"],
+    "timeout": ["timeout", "-s", "KILL", "5", "PROG"],
+    "timeout-long-option": ["timeout", "--signal", "KILL", "5", "PROG"],
+    "timeout-abbreviated": ["timeout", "--sig", "KILL", "5", "PROG"],
+    "stdbuf-abbreviated": ["stdbuf", "--out", "L", "PROG"],
+    "stdbuf": ["stdbuf", "-oL", "PROG"],
+    "setsid": ["setsid", "-w", "PROG"],
+    "chrt": ["chrt", "-o", "0", "PROG"],
+    "ionice": ["ionice", "-c", "3", "PROG"],
+    "taskset": ["taskset", "0x1", "PROG"],
+    "time": ["time", "-f", "%e", "PROG"],
+    "xargs": ["xargs", "-0", "PROG"],
+    "busybox": ["busybox", "env", "PROG"],
+    "flock": ["flock", "-w", "5", "/tmp/opendox-lock", "PROG"],
+    # r4182002567; #656 5990845570: an absolute path after sudo or doas
+    "sudo": ["sudo", "-u", "bob", "BIN/PROG"],
+    "doas": ["doas", "-u", "bob", "BIN/PROG"],
+    "nested": ["env", "nice", "-n", "1", "timeout", "5", "PROG"],
+}
+
+
+@pytest.mark.parametrize("case", sorted(LAUNCHED))
+def test_A2_a_launcher_is_unwrapped_to_the_program_it_starts(
+        served, capsys, monkeypatch, case):
+    """Item 1 and 3 of the ruling: a launcher is unwrapped, with its own
+    options and operands, to the program it starts, and that program is
+    judged as a command's program is, so it is found as `PATH` finds it,
+    here inside the repository."""
+    trust_mod = _trust_mod()
+    program = served.repo / "bin" / "opref-in-repository"
+    program.parent.mkdir()
+    program.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+    os.chmod(program, 0o755)
+    monkeypatch.setenv("PATH", f"{program.parent}{os.pathsep}"
+                       f"{os.environ.get('PATH', '')}")
+    argv = [member.replace("BIN", str(program.parent)).replace(
+        "PROG", program.name) for member in LAUNCHED[case]]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.broker_refusal(binding, root=served.repo) == (
+        trust_mod.REASON_IN_REPOSITORY), argv
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    assert trust_mod.REMEDY_IN_REPOSITORY in capsys.readouterr().err
+    served.nothing_was_touched()
+
+
+def _launcher_values(served):
+    tool = served.repo / "tools" / "broker.py"
+    tool.parent.mkdir(exist_ok=True)
+    shutil.copy(served.broker, tool)
+    launcher = served.repo / "tools" / "env"
+    launcher.write_text("#!/bin/sh\nexec \"$@\"\n", encoding="utf-8")
+    os.chmod(launcher, 0o755)
+    return {
+        "env-assigns-a-module-path": [
+            "env", f"PYTHONPATH={tool.parent}", sys.executable, "-m",
+            "broker"],
+        "env-assigns-a-relative-module-path": [
+            "env", "PYTHONPATH=" + os.path.relpath(
+                tool.parent, provider_mod.BROKER_WORKING_DIRECTORY),
+            sys.executable, "-m", "broker"],
+        "env-assigns-a-search-path": [
+            "env", f"PATH=/usr/bin{os.pathsep}{tool.parent}", "opref-broker"],
+        "env-assigns-a-relative-search-path-entry": [
+            "env", "-C", str(served.repo.parent),
+            f"PATH=/usr/bin{os.pathsep}{served.repo.name}/tools",
+            "opref-broker"],
+        "env-changes-directory": [
+            "env", "-C", str(served.repo), sys.executable, str(served.broker)],
+        "env-changes-directory-long": [
+            "env", f"--chdir={served.repo}", sys.executable,
+            str(served.broker)],
+        "a-launcher-inside-the-repository": [
+            str(launcher), sys.executable, str(served.broker)],
+    }
+
+
+@pytest.mark.parametrize("case", ["env-assigns-a-module-path",
+                                  "env-assigns-a-relative-module-path",
+                                  "env-assigns-a-search-path",
+                                  "env-assigns-a-relative-search-path-entry",
+                                  "env-changes-directory",
+                                  "env-changes-directory-long",
+                                  "a-launcher-inside-the-repository"])
+def test_A2_what_a_launcher_is_given_is_judged_too(served, case):
+    """A launcher's own program, and each of its values that could name a
+    file (`env NAME=VALUE`, every directory of a search path, `env -C DIR`),
+    are judged, so none of them may lie inside the repository."""
+    trust_mod = _trust_mod()
+    argv = _launcher_values(served)[case]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    assert trust_mod.broker_refusal(served.declared(), root=served.repo) == (
+        trust_mod.REASON_IN_REPOSITORY), argv
+
+
+def test_A2_a_cleared_search_path_is_the_default_one(served, monkeypatch):
+    """`env -i`, `env -`, `env --ignore-environment` and `env -u PATH` leave
+    the program they start to be found on the platform's default search
+    path, as the launched child finds it (Copilot at openDox-code#86,
+    r4179366288), not on the console's: a program only the console's `PATH`
+    reaches is not the one that runs. Where `PATH` is assigned again, that
+    is the path."""
+    trust_mod = _trust_mod()
+    program = served.repo / "bin" / "opref-console-only"
+    program.parent.mkdir()
+    program.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+    os.chmod(program, 0o755)
+    monkeypatch.setenv("PATH", f"{program.parent}{os.pathsep}"
+                       f"{os.environ.get('PATH', '')}")
+    for launcher in (["env", "-i"], ["env", "-"],
+                     ["env", "--ignore-environment"], ["env", "-u", "PATH"],
+                     ["env", "--unset=PATH"], ["env", "-iv"]):
+        argv = [*launcher, program.name]
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) is None, argv
+    links = served.tmp / "links"
+    links.mkdir()
+    (links / program.name).symlink_to(program)
+    argv = ["env", "-i", f"PATH={links}", program.name]
+    assert trust_mod.broker_command_refused(argv, root=served.repo) == (
+        trust_mod.REASON_IN_REPOSITORY)
+    # and a console whose `PATH` reaches it, with no launcher, still is
+    assert trust_mod.broker_command_refused(
+        [program.name], root=served.repo) == trust_mod.REASON_IN_REPOSITORY
+
+
+def _unreadable_command(served, monkeypatch, case):
+    program = served.repo / "bin" / "opref-broker"
+    program.parent.mkdir()
+    program.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+    os.chmod(program, 0o755)
+    monkeypatch.setenv("PATH", f"{program.parent}{os.pathsep}"
+                       f"{os.environ.get('PATH', '')}")
+    if case == "launchers-nested-past-the-depth":
+        return ["env"] * 33 + [program.name]
+    return UNREADABLE_COMMANDS[case]
+
+
+#: The holder's ruling, openxFactory#656 comment 5985046107, C1: what a
+#: launcher's getopt would read otherwise than its words say is refused
+#: FAIL-CLOSED: an ambiguous or an unknown option, a flag given a value, a
+#: value that is missing, and an option after which what runs cannot be
+#: judged.
+UNREADABLE_COMMANDS = {
+    "ambiguous-d": ["env", "--d", "sh"],
+    "ambiguous-i": ["env", "--i", "sh"],
+    "unknown-long-option": ["env", "--frobnicate", "sh"],
+    "unknown-short-option": ["nice", "-z", "/bin/true"],
+    "a-flag-given-a-value": ["env", "--debug=1", "/bin/true"],
+    "a-value-missing": ["env", "-C"],
+    "a-long-value-missing": ["env", "--chdir"],
+    "env-argv0": ["env", "--argv0=sh", "/opt/opendox-test/multi-call",
+                  "-c", "x"],
+    "sudo-chroot": ["sudo", "--chroot=/srv", "/bin/true"],
+    "sudo-login": ["sudo", "-i", "/bin/true"],
+    # N2: a leading option deno's global grammar does not hold
+    "deno-unknown-leading-option": ["deno", "--frobnicate", "eval", "x"],
+    # r4180717752; the holder's ruling, #656 5988088910: a second working
+    # directory for one launcher, counting one an `env -S` string gives
+    "env-chdir-twice": ["env", "-C", "/tmp", "-C", "usr", "/bin/true"],
+    "env-chdir-twice-long": ["env", "--chdir=/tmp", "--chd", "usr",
+                             "/bin/true"],
+    "env-chdir-again-in-a-split-string": ["env", "-C", "/tmp", "-S",
+                                          "-C usr /bin/true"],
+    "sudo-chdir-twice": ["sudo", "-D", "/tmp", "--chdir=/usr", "/bin/true"],
+    # r4181006365; the holder's ruling, #656 5988818366: what xargs runs is
+    # built from its input, so every xargs is unreadable, after the
+    # in-repository and inline-script judgments
+    "xargs-building-its-command": ["xargs", "-a", "/opt/opendox-test/args",
+                                   "-I", "SCRIPT", "python3", "SCRIPT"],
+    "xargs-and-a-program-outside": ["xargs", "/opt/opendox-test/broker"],
+    "xargs-abbreviated-option": ["xargs", "--max-a", "1",
+                                 "/opt/opendox-test/broker"],
+    # the writer's sibling, 5988818366: any assignment given to sudo
+    "sudo-assignment": ["sudo", "A=b", "/bin/true"],
+    "sudo-path-assignment": ["sudo", "PATH=/opt/opendox-test/bin", "true"],
+    "sudo-option-then-assignment": ["sudo", "-u", "bob", "A=b",
+                                    "/bin/true"],
+    # the summary of review 5411026353; the holder's ruling, #656
+    # 5989835334: a member past the bounds of what is judged
+    "member-past-the-length-bound": ["/opt/opendox-test/broker",
+                                     "a" * 4097],
+    "member-past-the-path-bound": ["/opt/opendox-test/broker", "/a" * 33],
+    # r4182002567; the holder's ruling, #656 5990845570: a bare program
+    # name after sudo or doas is found on a search path their policy picks
+    "sudo-bare-program": ["sudo", "true"],
+    "sudo-option-then-bare-program": ["sudo", "-u", "bob", "true"],
+    "sudo-bare-launcher": ["sudo", "env", "/bin/true"],
+    "doas-bare-program": ["doas", "true"],
+    "doas-option-then-bare-program": ["doas", "-u", "bob", "true"],
+}
+
+
+@pytest.mark.parametrize("case", ["launchers-nested-past-the-depth",
+                                  *sorted(UNREADABLE_COMMANDS)])
+def test_A2_a_command_that_cannot_be_read_is_refused_by_name(
+        served, capsys, monkeypatch, case):
+    """A broker command that cannot be read to the program it runs (Copilot
+    at openDox-code#86, r4179366319): launchers nested past what is
+    unwrapped, where the program the last one starts was never judged, or
+    a launcher option its getopt would read otherwise (C1). What it runs
+    cannot be judged, so it is refused BY NAME where trust is recorded and
+    where it is checked, with the inline-script remedy."""
+    trust_mod = _trust_mod()
+    argv = _unreadable_command(served, monkeypatch, case)
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    refused = trust_mod.broker_refusal(binding, root=served.repo)
+    assert refused is not None and refused != (
+        trust_mod.REASON_INLINE_SCRIPT), refused
+    assert refused == trust_mod.REASON_UNREADABLE_COMMAND
+    assert not trust_mod.trust_can_repair(refused)
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 1
+    err = capsys.readouterr().err
+    assert trust_mod.REASON_UNREADABLE_COMMAND in err
+    assert trust_mod.REMEDY_INLINE_SCRIPT in err
+    _no_trust_command_in(err)
+    for policy in (served.trust, _TrustsEveryBinding()):
+        trust_mod.unregister()
+        trust_mod.register(policy)
+        verdict = trust_mod.verdict_for(binding, root=served.repo)
+        assert verdict.reason == trust_mod.REASON_UNREADABLE_COMMAND
+    admitted = trust_mod.TrustVerdict.trusted_for(
+        binding, root=served.repo, basis=trust_mod.BASIS_HOST)
+    with pytest.raises(trust_mod.BindingUntrusted) as beneath:
+        trust_mod.require_admitted(binding, admitted)
+    assert trust_mod.REASON_UNREADABLE_COMMAND in str(beneath.value)
+    served.nothing_was_touched()
+
+
+@pytest.mark.parametrize("case", ["past-the-bound", "a-loop"])
+def test_R3_links_past_the_bound_are_unreadable(served, case):
+    """The holder's ruling, openxFactory#656 comment 5986391296: a path
+    whose symbolic links pass the kernel's own bound (40), or loop, is
+    refused BY NAME as unreadable, wherever it is judged; a chain within
+    the bound is followed to its end."""
+    trust_mod = _trust_mod()
+    links = served.tmp / "links"
+    links.mkdir()
+    real = links / "real.py"
+    real.write_text("", encoding="utf-8")
+    if case == "past-the-bound":
+        target = real
+        for hop in range(41):
+            link = links / f"hop-{hop}"
+            link.symlink_to(target)
+            target = link
+        named = target
+    else:
+        (links / "a").symlink_to(links / "b")
+        (links / "b").symlink_to(links / "a")
+        named = links / "a"
+    argv = [sys.executable, str(named)]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.broker_refusal(binding, root=served.repo) == (
+        trust_mod.REASON_UNREADABLE_COMMAND)
+    assert trust_mod.in_repository_argv(argv, root=served.repo) == str(
+        named)
+    assert trust_mod.names_a_path_inside(str(named), root=served.repo)
+    trust_mod.unregister()
+    trust_mod.register(_TrustsEveryBinding())
+    assert trust_mod.verdict_for(binding, root=served.repo).reason == (
+        trust_mod.REASON_UNREADABLE_COMMAND)
+
+
+def test_R3_a_path_that_leaves_the_root_by_dot_dot_is_outside(served):
+    """The walk ends where the path does: `<root>/..` passes through the
+    served root and names its parent, which lies outside it."""
+    trust_mod = _trust_mod()
+    leaving = os.path.join(str(served.repo), os.pardir)
+    for argv in (["env", "-C", leaving, sys.executable, str(served.broker)],
+                 [sys.executable, str(served.broker), f"--cache={leaving}"]):
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) is None, argv
+
+
+def test_R3_a_chain_within_the_bound_is_followed_to_its_end(served):
+    trust_mod = _trust_mod()
+    links = served.tmp / "links"
+    links.mkdir()
+    target = served.broker
+    for hop in range(40):
+        link = links / f"hop-{hop}"
+        link.symlink_to(target)
+        target = link
+    assert trust_mod.broker_command_refused(
+        [sys.executable, str(target)], root=served.repo) is None
+
+
+def test_A2_launchers_within_the_depth_are_unwrapped_whole(served):
+    """The control: launchers nested within the depth are unwrapped to the
+    program they start, which is judged, and admitted where it is a file
+    outside the repository."""
+    trust_mod = _trust_mod()
+    argv = ["env"] * 31 + [sys.executable, str(served.broker)]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.broker_refusal(binding, root=served.repo) is None
+    trust_mod.recorded_for(binding, root=served.repo)
+    assert trust_mod.verdict_for(binding, root=served.repo).trusted
+
+
+def test_C1_a_split_string_env_would_expand_is_refused():
+    """`${VAR}`, which env -S expands and a shell's split does not: refused
+    as an inline script. A binding cannot declare it at all (a placeholder
+    outside its vocabulary), so the console intake's broker is where it is
+    asked."""
+    trust_mod = _trust_mod()
+    assert trust_mod.broker_command_refused(
+        ["env", "-S", "sh -c ${OPREF_SCRIPT}"], root=None) == (
+            trust_mod.REASON_INLINE_SCRIPT)
+
+
+def test_C1_a_launchers_own_options_are_read_as_its_getopt_reads_them(
+        served):
+    """The controls: an unambiguous beginning of a long option, a cluster,
+    nice's own `-5`, `--help`, and an option taking its value after `=`,
+    each unwrapped to the program it starts, here a file outside the
+    repository, so nothing is refused."""
+    trust_mod = _trust_mod()
+    program = [sys.executable, str(served.broker)]
+    for argv in (["env", "--ignore-env", *program],
+                 ["env", "-iv", *program],
+                 ["env", f"--chd={served.tmp}", *program],
+                 ["env", "-0u", "OPREF_PROFILE", *program],
+                 ["nice", "-5", *program],
+                 ["nice", "--adj=5", *program],
+                 ["timeout", "--sig=KILL", "5", *program],
+                 ["stdbuf", "--out", "L", *program],
+                 ["env", "A-B=x", *program],
+                 ["env", "1A=x", "A.B=y", *program],
+                 ["sudo", "--user=bob", *program],
+                 ["doas", "-u", "bob", *program],
+                 ["env", "--default-signal", *program],
+                 ["env", "--help"]):
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) is None, argv
+
+
+# --- C4: every file a launcher or an option could name ---------------------
+
+
+def _launcher_files(served):
+    arguments = served.repo / "ideation" / "arguments"
+    arguments.parent.mkdir(parents=True, exist_ok=True)
+    arguments.write_text("x\n", encoding="utf-8")
+    library = served.repo / "lib"
+    library.mkdir()
+    script = "/opt/opendox-test/broker.pl"
+    return {
+        "xargs-arg-file": ["xargs", "-a", str(arguments), "printf"],
+        "xargs-arg-file-attached": ["xargs", f"-a{arguments}", "printf"],
+        "xargs-arg-file-long": ["xargs", f"--arg-file={arguments}",
+                                "printf"],
+        "xargs-arg-file-abbreviated": ["xargs", "--arg", str(arguments),
+                                       "printf"],
+        "xargs-arg-file-in-a-cluster": ["xargs", f"-0a{arguments}",
+                                        "printf"],
+        "an-option-with-an-attached-path": ["perl", f"-I{library}", script],
+        "an-attached-path-in-a-cluster": ["perl", f"-wI{library}", script],
+        "a-relative-path-attached-to-an-option": [
+            "env", "-C", str(served.repo.parent), "perl",
+            f"-I{served.repo.name}/lib", script],
+        "an-option-in-an-assignment": ["env", f"PERL5OPT=-I{library}",
+                                       "perl", script],
+        "a-path-inside-an-assignment": [
+            "env", f"PERL5OPT=-Mstrict -I{library}", "perl", script],
+        "an-output-file": ["time", "-o", str(served.repo / "timing"),
+                           "/bin/true"],
+        "a-launchers-operand": ["flock", str(served.repo / ".lock"),
+                                "/bin/true"],
+    }
+
+
+@pytest.mark.parametrize("case", ["xargs-arg-file", "xargs-arg-file-attached",
+                                  "xargs-arg-file-long",
+                                  "xargs-arg-file-abbreviated",
+                                  "xargs-arg-file-in-a-cluster",
+                                  "an-option-with-an-attached-path",
+                                  "an-attached-path-in-a-cluster",
+                                  "a-relative-path-attached-to-an-option",
+                                  "an-option-in-an-assignment",
+                                  "a-path-inside-an-assignment",
+                                  "an-output-file", "a-launchers-operand"])
+def test_C4_every_file_a_launcher_or_an_option_names_is_judged(served, case):
+    """The holder's ruling, openxFactory#656 comment 5985046107, C4: xargs's
+    argument file in every spelling, a path attached to a single-dash
+    option, a path inside an assignment's value, and a launcher's operands,
+    each judged where the broker reads it. Inside the repository is refused,
+    fail-closed, and so is a file a launcher writes there (`time -o`), an
+    accepted strictness."""
+    trust_mod = _trust_mod()
+    argv = _launcher_files(served)[case]
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert trust_mod.broker_refusal(binding, root=served.repo) == (
+        trust_mod.REASON_IN_REPOSITORY), argv
+    trust_mod.unregister()
+    trust_mod.register(_TrustsEveryBinding())
+    assert trust_mod.verdict_for(binding, root=served.repo).reason == (
+        trust_mod.REASON_IN_REPOSITORY)
+
+
+# --- C5: a wrong kind in the store's place names what it is ----------------
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo", "socket"])
+def test_C5_a_wrong_kind_in_the_stores_place_names_what_it_is(
+        served, monkeypatch, kind):
+    """The holder's ruling, openxFactory#656 comment 5985046107, C5: a
+    directory, a FIFO or a socket where the store belongs is no link, owner
+    or mode, so it is not blamed on another user (A7): it is refused for
+    what it is, with the move-aside recovery, by the verdict and by
+    `record`."""
+    import socket
+
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    served.state_dir.mkdir(mode=0o700)
+    store = served.state_dir / trust_mod.TRUST_FILENAME
+    listening = None
+    if kind == "directory":
+        store.mkdir(mode=0o700)
+    elif kind == "fifo":
+        os.mkfifo(store, 0o600)
+    else:
+        monkeypatch.chdir(served.state_dir)  # a socket's path is short
+        listening = socket.socket(socket.AF_UNIX)
+        listening.bind(store.name)
+    try:
+        verdict = served.trust.verdict(served.declared(), root=served.repo)
+        with pytest.raises(trust_mod.TrustStoreRefused) as refused:
+            served.trust.record(served.declared(), root=served.repo)
+    finally:
+        if listening is not None:
+            listening.close()
+    assert not verdict.trusted
+    for words in (verdict.reason, str(refused.value)):
+        assert "is not a regular file" in words, words
+        assert "another user could change" not in words, words
+        assert trust_mod.RECOVER_MOVE_ASIDE in words, words
+
+
+# --- C2: a failed write takes back the trust it recorded -------------------
+
+
+def _held_entries(served) -> list:
+    """The trust store's entries for the binding, as the store holds them."""
+    store = served.state_dir / _trust_mod().TRUST_FILENAME
+    if not store.exists():
+        return []
+    return [entry for entry in json.loads(store.read_text(
+        encoding="utf-8"))["entries"] if entry["binding_id"] == BINDING_ID]
+
+
+def _failing(monkeypatch, verb, error=None):
+    def fails(store, binding):
+        raise error or OSError(28, "No space left on device")
+
+    monkeypatch.setattr(binding_mod.BindingStore, verb, fails)
+
+
+@pytest.mark.parametrize("failure", ["the-system", "the-store"])
+def test_C2_an_add_whose_write_fails_withdraws_the_trust_it_recorded(
+        served, capsys, monkeypatch, failure):
+    """The holder's ruling, openxFactory#656 comment 5985046107, C2: the
+    trust `add` records first is withdrawn when the document's write fails,
+    by the system (a full disk) or by the store's own refusal, so this
+    machine trusts no form no document declares, and "nothing in it
+    changed" is true of both."""
+    if failure == "the-system":
+        _failing(monkeypatch, "add")
+        said = "nothing in it changed"
+    else:
+        said = "the store refused the write"
+        _failing(monkeypatch, "add", binding_mod.BindingRefused(said))
+    assert _cli(*served.add_argv("env")) == 1
+    err = capsys.readouterr().err
+    assert said in err
+    assert "could not be withdrawn" not in err
+    assert not binding_mod.bindings_path(served.repo).exists()
+    assert not _held_entries(served), "a trust stayed for no declared form"
+
+
+def test_C2_an_edit_of_an_untrusted_binding_whose_write_fails_trusts_nothing(
+        served, capsys, monkeypatch):
+    """The review's case: an edit of a binding never trusted records trust
+    for its new form, the write fails, and that trust is withdrawn, so the
+    earlier form still reads "never trusted", not "changed"."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    before = served.declared()
+    assert not served.trust.verdict(before, root=served.repo).trusted
+    _failing(monkeypatch, "edit")
+    editing = served.add_argv("env")
+    editing[1] = "edit"
+    editing[editing.index("--label") + 1] = "Renamed"
+    assert _cli(*editing) == 1
+    err = capsys.readouterr().err
+    assert "could not be written" in err and "nothing in it changed" in err
+    assert served.declared() == before
+    assert served.trust.verdict(before, root=served.repo).reason == (
+        trust_mod.REASON_NEVER_TRUSTED)
+    assert not _held_entries(served), "a trust stayed for no declared form"
+
+
+@pytest.mark.parametrize("trusted", [False, True],
+                         ids=["untrusted", "trusted"])
+def test_C2_an_undoing_that_fails_says_so_and_how_to_recover(
+        served, capsys, monkeypatch, trusted):
+    """Where the trust cannot be taken back (the store refuses), the refusal
+    says so, after the write's own cause, and how to recover: run the same
+    command again once the document can be written."""
+    from opendox import cli_model_binding
+
+    trust_mod = _trust_mod()
+    if trusted:
+        assert _cli(*served.add_argv("env")) == 0
+        capsys.readouterr()
+    else:
+        served.hand_write(served.record("env"))
+
+    def refuses(self, binding, *, root, replacing):
+        raise trust_mod.TrustStoreRefused("the store refused the undoing")
+
+    monkeypatch.setattr(trust_mod.MachineTrust, "restore", refuses)
+    _failing(monkeypatch, "edit")
+    editing = served.add_argv("env")
+    editing[1] = "edit"
+    editing[editing.index("--label") + 1] = "Renamed"
+    assert _cli(*editing) == 1
+    err = capsys.readouterr().err
+    assert "could not be written" in err
+    said = ("the trust its earlier form held could not be restored"
+            if trusted else
+            "the trust just recorded for it could not be withdrawn")
+    assert said in err and "the store refused the undoing" in err, err
+    assert cli_model_binding.RECOVER_FAILED_UNDOING in err
+
+
+def test_R3_an_add_racing_one_of_the_same_form_keeps_its_trust(
+        served, capsys, monkeypatch):
+    """Copilot at openDox-code#86, r4180041219; the holder's ruling,
+    openxFactory#656 comment 5986391296, (a): two `add`s of the same form
+    both record its trust, the other writes the document first, and this
+    one's write is refused for the repeated id. Its undoing is skipped,
+    because the document now declares exactly the form recorded, so the
+    declared binding stays trusted."""
+    from opendox import cli_model_binding
+
+    trust_mod = _trust_mod()
+    real = cli_model_binding._record_trust
+    document = binding_mod.bindings_path(served.repo)
+
+    def and_the_other_add_lands(binding, args):
+        recording = real(binding, args)
+        binding_mod.BindingStore(document).add(binding)
+        return recording
+
+    monkeypatch.setattr(cli_model_binding, "_record_trust",
+                        and_the_other_add_lands)
+    assert _cli(*served.add_argv("env")) == 1
+    capsys.readouterr()
+    assert trust_mod.verdict_for(served.declared(), root=served.repo).trusted
+
+
+def test_R3_an_edit_racing_one_of_the_same_form_keeps_its_trust(
+        served, capsys, monkeypatch):
+    """The same for `edit`: the other edit writes the same form, and this
+    one's write fails; the document declares exactly the form recorded, so
+    its trust stands."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("env"))
+    document = binding_mod.bindings_path(served.repo)
+    real = binding_mod.BindingStore.edit
+
+    def the_other_lands_then_this_fails(store, binding):
+        real(binding_mod.BindingStore(document), binding)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(binding_mod.BindingStore, "edit",
+                        the_other_lands_then_this_fails)
+    editing = served.add_argv("env")
+    editing[1] = "edit"
+    editing[editing.index("--label") + 1] = "Renamed"
+    assert _cli(*editing) == 1
+    capsys.readouterr()
+    assert served.declared().label == "Renamed"
+    assert trust_mod.verdict_for(served.declared(), root=served.repo).trusted
+
+
+class _RecordsNothing(_TrustsEveryBinding):
+    """A host policy whose `record()` writes nothing and answers nothing,
+    as openxFactory's governed policy does (T094): its `verdict` decides."""
+
+    def record(self, binding, *, root):
+        return None
+
+
+class _RecordsNothingAndDeclines(_RecordsNothing):
+    def verdict(self, binding, *, root):
+        return _trust_mod().TrustVerdict.untrusted_for(
+            binding, root=root, basis=_trust_mod().BASIS_HOST,
+            reason="its declaration is pending")
+
+
+@pytest.mark.parametrize("verb", ["add", "edit"])
+def test_R3_a_host_that_recorded_nothing_has_nothing_withdrawn(
+        served, capsys, monkeypatch, verb):
+    """The holder's ruling, openxFactory#656 comment 5986391296: openDox
+    withdraws only what a policy recorded. A host policy whose `record()`
+    answers something falsy recorded nothing; its `verdict` admits the
+    binding, so the act writes, and where the write fails the refusal says
+    truthfully that nothing changed, and nothing is withdrawn."""
+    from opendox import cli_model_binding
+
+    trust_mod = _trust_mod()
+    if verb == "edit":
+        served.hand_write(served.record("env"))
+    trust_mod.unregister()
+    trust_mod.register(_RecordsNothing())
+    _failing(monkeypatch, verb)
+    argv = served.add_argv("env")
+    if verb == "edit":
+        argv[1] = "edit"
+        argv[argv.index("--label") + 1] = "Renamed"
+    assert _cli(*argv) == 1
+    err = capsys.readouterr().err
+    assert "could not be written" in err and "nothing in it changed" in err
+    assert "could not be withdrawn" not in err
+    assert "could not be restored" not in err
+    assert trust_mod.REASON_NO_WITHDRAWAL not in err
+    assert cli_model_binding.RECOVER_FAILED_UNDOING not in err
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+
+
+def test_R3_a_host_that_records_nothing_is_asked_its_verdict(served, capsys):
+    """Recording under such a host asks its `verdict`: one that admits the
+    binding lets `add` write it, with nothing written to this machine's
+    store, and one that declines refuses `add` by name before it writes."""
+    trust_mod = _trust_mod()
+    trust_mod.unregister()
+    trust_mod.register(_RecordsNothing())
+    recording = trust_mod.recording_for(
+        binding_mod.ModelProviderBinding.from_record(served.record("env")),
+        root=served.repo)
+    assert recording.verdict.trusted and recording.recorded is False
+    assert _cli(*served.add_argv("env")) == 0
+    capsys.readouterr()
+    assert served.declared().id == BINDING_ID
+    assert not (served.state_dir / trust_mod.TRUST_FILENAME).exists()
+    binding_mod.bindings_path(served.repo).unlink()
+    trust_mod.unregister()
+    trust_mod.register(_RecordsNothingAndDeclines())
+    assert _cli(*served.add_argv("env")) == 1
+    assert "its declaration is pending" in capsys.readouterr().err
+    assert not binding_mod.bindings_path(served.repo).exists()
+    trust_mod.unregister()
+    trust_mod.register(_TrustsEveryBinding())
+    recording = trust_mod.recording_for(
+        binding_mod.ModelProviderBinding.from_record(served.record("env")),
+        root=served.repo)
+    assert recording.verdict.trusted and recording.recorded is True
+
+
+def test_C2_a_host_policy_cannot_be_asked_to_withdraw_and_says_so(
+        served, capsys, monkeypatch):
+    """A host's policy records and judges trust and withdraws none, so a
+    failed add under one whose `record()` answered a record (truthy) says
+    the trust could not be withdrawn, and why (the holder's ruling,
+    openxFactory#656 comment 5986391296)."""
+    from opendox import cli_model_binding
+
+    trust_mod = _trust_mod()
+    trust_mod.unregister()
+    trust_mod.register(_TrustsEveryBinding())
+    _failing(monkeypatch, "add")
+    assert _cli(*served.add_argv("env")) == 1
+    err = capsys.readouterr().err
+    assert "the trust just recorded for it could not be withdrawn" in err
+    assert trust_mod.REASON_NO_WITHDRAWAL in err
+    assert cli_model_binding.RECOVER_FAILED_UNDOING in err
+
+
+@pytest.mark.parametrize("argv", [["awk", "NR == 1"],
+                                  ["sed", "-n", "1p"],
+                                  ["find", "/nonexistent", "-exec", "true",
+                                   ";"]],
+                         ids=["awk", "sed", "find-exec"])
+def test_A2_a_general_program_running_its_arguments_is_the_accepted_limit(
+        served, argv):
+    """Item 4 of the ruling: a general program that runs code from its own
+    arguments (`awk`, `sed`, `find -exec`) is the recorded ACCEPTED limit.
+    It is not judged as an inline script, so its binding is trusted as any
+    program outside the repository is. This case records the limit; it
+    asks for nothing more."""
+    trust_mod = _trust_mod()
+    served.hand_write(served.record("broker", broker_argv=argv))
+    assert trust_mod.broker_refusal(served.declared(),
+                                    root=served.repo) is None
+
+
+def test_A2_a_broker_never_inherits_a_working_directory_variable(
+        served, capsys, monkeypatch):
+    """Item 2 of the ruling: `PWD` and `OLDPWD` never reach a broker, even
+    where the harness's allowlist, which a broker's environment starts from,
+    came to hold them, so nothing that trusts `$PWD` over its real working
+    directory reads the directory the console was started in."""
+    from opendox import doxbench_bridge
+
+    monkeypatch.setattr(doxbench_bridge, "INHERITED_ENVIRONMENT",
+                        (*doxbench_bridge.INHERITED_ENVIRONMENT, "PWD",
+                         "OLDPWD"))
+    # the serving process's environment, as the provider reads it
+    served.environ["PWD"] = str(served.repo)
+    served.environ["OLDPWD"] = str(served.repo)
+    seen = served.tmp / "broker-environment.json"
+    recording = served.tmp / "recording-broker.py"
+    recording.write_text(
+        "import json, os\n"
+        f"open({str(seen)!r}, 'w').write(json.dumps(sorted(os.environ)))\n"
+        + served.broker.read_text(encoding="utf-8"), encoding="utf-8")
+    adding = served.add_argv("broker")
+    adding[-1] = str(recording)
+    assert _cli(*adding) == 0
+    capsys.readouterr()
+    port = served.port()
+    with contextlib.suppress(Exception):
+        port.dispatch(_Envelope())
+    names = json.loads(seen.read_text(encoding="utf-8"))
+    assert "PWD" not in names and "OLDPWD" not in names, names
+    assert "PATH" in names
+    assert provider_mod.broker_environment(
+        {"PATH": "/usr/bin", "PWD": "/x", "OLDPWD": "/y"}) == {
+            "PATH": "/usr/bin"}
+
+
+
+# ===========================================================================
+# 9. F16.1 AS T007 BATCH P AMENDS IT (openxFactory#1230; the holder's
+#    rulings on openxFactory#656, comments 5982436447 item 2, 5983805990,
+#    5984069416, 5985046107 and 5985553609). One case per command: each is
+#    refused BY NAME by `add`, `edit`, `trust` and `set-credential`, and
+#    before any spawn, with no marker file written.
+# ===========================================================================
+
+_MARKING_PYTHON = "import sys\nopen({marker!r}, 'a').write('ran\\n')\n"
+
+
+def _batch_p_world(served, monkeypatch) -> dict:
+    """The served repository's own programs and links, and the case's own
+    scratch directory outside it (`outside`), each of which writes the
+    marker file when it runs."""
+    root = served.repo
+    marking = _MARKING_PYTHON.format(marker=str(served.marker))
+    tools = root / "tools"
+    tools.mkdir()
+    for name in ("broker.py", "sitecustomize.py"):
+        (tools / name).write_text(f"#!{sys.executable}\n" + marking,
+                                  encoding="utf-8")
+    (tools / "broker.sh").write_text(
+        f"#!/bin/sh\necho ran >> {shlex_quote(str(served.marker))}\n",
+        encoding="utf-8")
+    for name in ("broker.py", "broker.sh"):
+        os.chmod(tools / name, 0o755)
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    broker = outside / "broker"
+    broker.write_text(f"#!{sys.executable}\n" + marking, encoding="utf-8")
+    os.chmod(broker, 0o755)
+    (outside / "broker.py").write_text(marking, encoding="utf-8")
+    (outside / "broker.pl").write_text(
+        f"open(my $m, '>>', {json.dumps(str(served.marker))}); "
+        "print $m \"ran\\n\";\n", encoding="utf-8")
+    (outside / "alias").symlink_to(tools, target_is_directory=True)
+    (outside / "link").symlink_to(tools / "broker.py")
+    (outside / "link.py").symlink_to(tools / "broker.py")
+    real_out = served.tmp / "real-out"
+    real_out.mkdir()
+    (tools / "out").symlink_to(real_out, target_is_directory=True)
+    (tools / "out-broker").symlink_to(broker)
+    (tools / "out-broker.py").symlink_to(outside / "broker.py")
+    bin_ = root / "bin"
+    bin_.mkdir()
+    (bin_ / "opref-broker").write_text(f"#!{sys.executable}\n" + marking,
+                                       encoding="utf-8")
+    os.chmod(bin_ / "opref-broker", 0o755)
+    monkeypatch.setenv("PATH", f"{bin_}{os.pathsep}"
+                       f"{os.environ.get('PATH', '')}")
+    monkeypatch.chdir(root)     # opendox started at the served root
+    return {"root": str(root), "outside": str(outside)}
+
+
+def shlex_quote(text: str) -> str:
+    import shlex
+
+    return shlex.quote(text)
+
+
+P_IN_REPO, P_INLINE, P_UNREADABLE = "in-repo", "inline", "unreadable"
+
+#: Each case of the amended F16.1, as `(argv, reason)`; `{root}` is the
+#: served root and `{outside}` the case's scratch directory outside it.
+BATCH_P = {
+    # an in-repository program or script, absolute and relative to the root
+    "program-absolute": (["{root}/tools/broker.py"], P_IN_REPO),
+    "program-relative": (["tools/broker.py"], P_IN_REPO),
+    "python-script-absolute": (["python3", "{root}/tools/broker.py"],
+                               P_IN_REPO),
+    "python-script-relative": (["python3", "tools/broker.py"], P_IN_REPO),
+    "sh-script-absolute": (["sh", "{root}/tools/broker.sh"], P_IN_REPO),
+    "sh-script-relative": (["sh", "tools/broker.sh"], P_IN_REPO),
+    # an inline script, and one reached through each launcher
+    "sh-c": (["sh", "-c", "exec ./tools/broker.py"], P_INLINE),
+    "python-c": (["python3", "-c", "import runpy"], P_INLINE),
+    "env-i": (["env", "-i", "python3", "-c", "import runpy"], P_INLINE),
+    "nice": (["nice", "-n", "5", "python3", "-c", "import runpy"],
+             P_INLINE),
+    "nohup": (["nohup", "python3", "-c", "import runpy"], P_INLINE),
+    "timeout": (["timeout", "-s", "KILL", "5", "python3", "-c",
+                 "import runpy"], P_INLINE),
+    "stdbuf": (["stdbuf", "-oL", "python3", "-c", "import runpy"],
+               P_INLINE),
+    "setsid": (["setsid", "-w", "python3", "-c", "import runpy"],
+               P_INLINE),
+    "xargs": (["xargs", "-n", "1", "python3", "-c", "import runpy"],
+              P_INLINE),
+    "nested": (["env", "nice", "-n", "5", "timeout", "5", "python3", "-c",
+                "import runpy"], P_INLINE),
+    "env-split-string": (["env", "-S", "python3 -c 'import runpy'"],
+                         P_INLINE),
+    # an alias, judged as named and as it resolves
+    "link-outside-to-inside": (["{outside}/link"], P_IN_REPO),
+    "link-outside-to-inside-as-script": (["python3", "{outside}/link.py"],
+                                         P_IN_REPO),
+    "bare-name-on-a-path-entry-under-the-root": (["opref-broker"], P_IN_REPO),
+    "link-inside-to-outside": (["{root}/tools/out-broker"], P_IN_REPO),
+    "link-inside-to-outside-as-script": (
+        ["python3", "{root}/tools/out-broker.py"], P_IN_REPO),
+    # a launcher's own assignment, and its working-directory option
+    "env-module-path-relative": (
+        ["env", "PYTHONPATH=tools", "python3", "{outside}/broker.py"],
+        P_IN_REPO),
+    "env-module-path-through-an-outside-alias": (
+        ["env", "PYTHONPATH={outside}/alias", "python3",
+         "{outside}/broker.py"], P_IN_REPO),
+    "env-scalar-through-an-outside-alias": (
+        ["env", "OPENDOX_TEST_HOME={outside}/alias", "python3",
+         "{outside}/broker.py"], P_IN_REPO),
+    "env-module-path-through-an-inside-link": (
+        ["env", "PYTHONPATH=tools/out", "python3", "{outside}/broker.py"],
+        P_IN_REPO),
+    "env-scalar-through-an-inside-link": (
+        ["env", "OPENDOX_TEST_HOME=tools/out", "python3",
+         "{outside}/broker.py"], P_IN_REPO),
+    "env-chdir-root": (["env", "--chdir={root}", "python3",
+                        "{outside}/broker.py"], P_IN_REPO),
+    "env-C-root": (["env", "-C", "{root}", "python3", "{outside}/broker.py"],
+                   P_IN_REPO),
+    "env-chdir-outside-alias": (["env", "--chdir={outside}/alias", "python3",
+                                 "{outside}/broker.py"], P_IN_REPO),
+    "env-chdir-inside-link": (["env", "--chdir=tools/out", "python3",
+                               "{outside}/broker.py"], P_IN_REPO),
+    # 5985046107, C1 and C4: a path an option carries, an unreadable split
+    # string, and a launcher option that cannot be read
+    "perl-attached-library": (["perl", "-I{root}/lib", "{outside}/broker.pl"],
+                              P_IN_REPO),
+    "xargs-argument-file": (["xargs", "-a", "{root}/args",
+                             "{outside}/broker"], P_IN_REPO),
+    "env-chdir-abbreviated": (["env", "--chd={root}", "{outside}/broker"],
+                              P_IN_REPO),
+    "env-split-string-escape": (["env", "-S", "sh\\_-c\\_id"], P_INLINE),
+    "option-value": (["{outside}/broker", "--config={root}/conf"], P_IN_REPO),
+    "output-path": (["{outside}/broker", "-o{root}/out"], P_IN_REPO),
+    "env-ambiguous-i": (["env", "--i", "{outside}/broker"], P_UNREADABLE),
+    "env-unknown-option": (["env", "--no-such-option", "{outside}/broker"],
+                           P_UNREADABLE),
+    "env-ambiguous-d": (["env", "--d", "{outside}/broker"], P_UNREADABLE),
+    "env-bundled-split-string": (["env", "-iS", "python3 -c 'import runpy'"],
+                                 P_INLINE),
+    "timeout-abbreviated": (["timeout", "--sig", "KILL", "5", "python3",
+                             "-c", "import runpy"], P_INLINE),
+    "stdbuf-abbreviated": (["stdbuf", "--out=L", "python3", "-c",
+                            "import runpy"], P_INLINE),
+    "env-split-string-variable": (["env", "-S", "$BROKER"], P_INLINE),
+}
+
+
+@pytest.mark.parametrize("case", sorted(BATCH_P))
+def test_F16_1_batch_p_each_command_is_refused_by_name_everywhere(
+        served, capsys, monkeypatch, case):
+    """F16.1 as T007 batch P amends it: each command is refused BY NAME by
+    `add` (nothing written), `edit` (the document as it was), `trust`
+    (nothing recorded) and `set-credential` (no credential read), each
+    naming its remedy; with a trust recorded for it before the rule, it
+    reads untrusted, the catalog lists it `available: false`, a turn naming
+    it is refused by name before any process is spawned, and so is a
+    verdict that admits it, at the gate beneath; no marker file exists."""
+    trust_mod = _trust_mod()
+    where = _batch_p_world(served, monkeypatch)
+    template, kind = BATCH_P[case]
+    argv = [member.replace("{root}", where["root"]).replace(
+        "{outside}", where["outside"]) for member in template]
+    reason, remedy = {
+        P_IN_REPO: (trust_mod.REASON_IN_REPOSITORY,
+                  trust_mod.REMEDY_IN_REPOSITORY),
+        P_INLINE: (trust_mod.REASON_INLINE_SCRIPT,
+                        trust_mod.REMEDY_INLINE_SCRIPT),
+        P_UNREADABLE: (trust_mod.REASON_UNREADABLE_COMMAND,
+                     trust_mod.REMEDY_INLINE_SCRIPT)}[kind]
+    document = binding_mod.bindings_path(served.repo)
+
+    def refused_by_name(rc: int) -> None:
+        assert rc == 1, argv
+        err = capsys.readouterr().err
+        assert reason in err and remedy in err, err
+        _no_trust_command_in(err)
+
+    # add: refused, and nothing is written
+    adding = served.add_argv("broker")
+    adding = adding[:adding.index("--") + 1] + argv
+    refused_by_name(_cli(*adding))
+    assert not document.exists()
+    # edit: a binding declared outside the repository, edited to this
+    # command, is refused, and the document is as it was
+    served.hand_write(served.record("broker"))
+    held = document.read_bytes()
+    editing = list(adding)
+    editing[1] = "edit"
+    refused_by_name(_cli(*editing))
+    assert document.read_bytes() == held
+    # trust: declared by hand, as a clone delivers it; nothing is recorded
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    refused_by_name(_cli("model-binding", "trust", "--repo-root",
+                         str(served.repo), BINDING_ID))
+    assert not _held_entries(served)
+
+    # set-credential: refused, and the credential is never read
+    class _MustNotBeRead:
+        def read(self, *_args):
+            raise AssertionError("set-credential read a credential for a "
+                                 "binding it may not hand one to")
+
+    args = cli_mod.build_parser().parse_args([
+        "model-binding", "set-credential", "--repo-root", str(served.repo),
+        "--id", BINDING_ID])
+    rc = cli_mod.cmd_model_binding_set_credential(args,
+                                                  source=_MustNotBeRead())
+    assert rc == 1
+    assert reason in capsys.readouterr().err
+    # a trust recorded before the rule admits nothing: no process spawns
+    served.trust.record(binding, root=served.repo)
+    verdict = trust_mod.verdict_for(binding, root=served.repo)
+    assert not verdict.trusted and verdict.reason == reason, verdict
+    port = served.port()
+    assert isinstance(port, trust_mod.UntrustedBindingPort), port
+    assert [entry.available for entry in port.catalog().entries] == [False]
+    with pytest.raises(trust_mod.BindingUntrusted) as turned:
+        port.dispatch(_Envelope())
+    assert remedy in str(turned.value)
+    admitted = trust_mod.TrustVerdict.trusted_for(
+        binding, root=served.repo, basis=trust_mod.BASIS_HOST)
+    with pytest.raises(binding_mod.BindingRefused):
+        provider_mod.mint(binding, trust=admitted)
+    served.nothing_was_touched()
+
+
+def _names_a_place_inside(value: str, root: Path) -> bool:
+    """Whether any entry of `value` names a place inside `root`, read from
+    the file system's root and from the served root, as written and with
+    its links followed: the test's own reading, not the rule's. A bare word
+    (`C.UTF-8`) is a path only where a file of that name is there."""
+    served_root = root.resolve()
+    for part in value.split(os.pathsep):
+        if not part:
+            continue
+        for base in (os.sep, str(root)):
+            if os.sep not in part and not os.path.lexists(
+                    os.path.join(base, part)):
+                continue
+            path = os.path.join(base, part)
+            for spelled in (Path(os.path.normpath(path)),
+                            Path(os.path.realpath(path))):
+                if spelled == served_root or served_root in spelled.parents:
+                    return True
+                if spelled == root or root in spelled.parents:
+                    return True
+    return False
+
+
+def test_F16_1_batch_p_an_outside_broker_runs_with_nothing_inside_the_root(
+        served, capsys, monkeypatch):
+    """F16.1 as T007 batch P amends it: a broker outside the served root,
+    once trusted, runs, and does so in a working directory outside the root
+    (opendox itself started AT the root), with neither `PWD` nor `OLDPWD`,
+    no variable whose value is a path inside the root, and no entry inside
+    the root in a path list: `PATH`, `PYTHONPATH` and `NODE_PATH` each
+    carry an entry inside it, a scalar variable names a directory inside
+    it, and each is tried again through an alias outside the root that
+    leads in, and through a link inside the root that leads out."""
+    trust_mod = _trust_mod()
+    root = served.repo
+    tools = root / "tools"
+    tools.mkdir()
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    (outside / "alias").symlink_to(tools, target_is_directory=True)
+    real_out = served.tmp / "real-out"
+    real_out.mkdir()
+    (tools / "out").symlink_to(real_out, target_is_directory=True)
+    seen = served.tmp / "broker-saw.json"
+    recording = served.tmp / "recording-broker.py"
+    recording.write_text(
+        "import json, os\n"
+        f"open({str(seen)!r}, 'w').write(json.dumps("
+        "{'cwd': os.getcwd(), 'env': dict(os.environ)}))\n"
+        + served.broker.read_text(encoding="utf-8"), encoding="utf-8")
+    from opendox import doxbench_bridge
+
+    # every variable below reaches the broker unless the rule drops it
+    monkeypatch.setattr(doxbench_bridge, "INHERITED_ENVIRONMENT",
+                        (*doxbench_bridge.INHERITED_ENVIRONMENT, "PWD",
+                         "OLDPWD", "PYTHONPATH", "NODE_PATH",
+                         "OPENDOX_TEST_HOME", "OPENDOX_TEST_ALIAS",
+                         "OPENDOX_TEST_OUT"))
+    inside_entries = [str(tools), str(outside / "alias"), str(tools / "out"),
+                      "tools"]
+    served.environ["PATH"] = os.pathsep.join(
+        [*inside_entries, served.environ.get("PATH", "")])
+    served.environ["PYTHONPATH"] = os.pathsep.join(inside_entries)
+    served.environ["NODE_PATH"] = os.pathsep.join(inside_entries)
+    served.environ["OPENDOX_TEST_HOME"] = str(tools)
+    served.environ["OPENDOX_TEST_ALIAS"] = str(outside / "alias")
+    served.environ["OPENDOX_TEST_OUT"] = str(tools / "out")
+    served.environ["PWD"] = str(root)
+    served.environ["OLDPWD"] = str(root)
+    monkeypatch.chdir(root)
+    adding = served.add_argv("broker")
+    adding[-1] = str(recording)
+    assert _cli(*adding) == 0
+    capsys.readouterr()
+    port = served.port()
+    assert isinstance(port, provider_mod.BrokeredProviderPort)
+    with contextlib.suppress(Exception):
+        port.dispatch(_Envelope())
+    saw = json.loads(seen.read_text(encoding="utf-8"))
+    assert Path(saw["cwd"]) == Path(provider_mod.BROKER_WORKING_DIRECTORY)
+    assert root.resolve() not in Path(saw["cwd"]).resolve().parents
+    environment = saw["env"]
+    assert "PWD" not in environment and "OLDPWD" not in environment
+    for name, value in environment.items():
+        assert not _names_a_place_inside(value, root), (name, value)
+    for name in ("PYTHONPATH", "NODE_PATH", "OPENDOX_TEST_HOME",
+                 "OPENDOX_TEST_ALIAS", "OPENDOX_TEST_OUT"):
+        assert name not in environment, (name, environment.get(name))
+    # what the console's PATH held outside the root is kept
+    assert environment["PATH"].split(os.pathsep)[-1:] == (
+        served.environ["PATH"].split(os.pathsep)[-1:])
+    assert trust_mod.verdict_for(served.declared(), root=root).trusted
+
+
+def test_F16_1_batch_p_a_programs_bare_name_is_found_where_it_runs(
+        served, monkeypatch):
+    """The other side of judging a relative path from the served root as
+    well: the PROGRAM's bare name is found on the search path, as the child
+    finds it, so a file of that name at the root does not make a program
+    found outside the repository one inside it. A bare ARGUMENT that names
+    a file at the root is judged, fail-closed."""
+    trust_mod = _trust_mod()
+    tool = served.tmp / "bin" / "opref-tool"
+    tool.parent.mkdir()
+    tool.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+    os.chmod(tool, 0o755)
+    (served.repo / "opref-tool").write_text("", encoding="utf-8")
+    (served.repo / "opref-config").write_text("", encoding="utf-8")
+    monkeypatch.setenv("PATH", f"{tool.parent}{os.pathsep}"
+                       f"{os.environ.get('PATH', '')}")
+    assert trust_mod.broker_command_refused(
+        ["opref-tool", "show"], root=served.repo) is None
+    assert trust_mod.broker_command_refused(
+        ["opref-tool", "opref-config"], root=served.repo) == (
+            trust_mod.REASON_IN_REPOSITORY)
+
+
+def test_F16_1_batch_p_a_relative_word_is_judged_from_the_root_where_it_names_a_place_there(
+        served):
+    """Judging a relative path from the served root as well reads it as the
+    repository's author wrote it: where its first name is one the root
+    holds, or `..`, it is judged there, and refused where it reaches inside
+    (`../r/tools/broker.py` from the root is the repository's own file).
+    A word whose first name the root does not hold is judged where the
+    broker runs alone: the rest of an option cluster, a format, a URL, a
+    sibling of the root."""
+    trust_mod = _trust_mod()
+    (served.repo / "tools").mkdir()
+    for argv in (["perl", "-wI/usr/lib/perl5", "/opt/opendox-test/x.pl"],
+                 ["date", "--format=%Y/%m"],
+                 ["python3", "../sibling/broker.py"],
+                 ["python3", "conf/broker.yaml"],
+                 ["opref-tool", "-o/tmp/opendox-test-out"],
+                 ["opref-tool", "--issuer=https://auth.example/v1"]):
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) is None, argv
+    for argv in (["python3", "tools/broker.py"],
+                 ["python3", f"../{served.repo.name}/tools/broker.py"],
+                 ["python3", "./tools/broker.py"]):
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) == trust_mod.REASON_IN_REPOSITORY, argv
+
+
+def test_R3_a_variable_off_the_path_list_is_kept_whole_or_dropped_whole(
+        served, monkeypatch):
+    """The holder's ruling, openxFactory#656 comment 5986391296, on Copilot
+    at openDox-code#86, r4180041233: only the CLOSED list of path-list
+    variables loses its entries inside the served repository; any other
+    variable is never edited, and is dropped WHOLE where any part of it
+    names a path inside, so a `HOME` or a `TMPDIR` is never emptied or
+    cut."""
+    from opendox import doxbench_bridge
+
+    monkeypatch.setattr(doxbench_bridge, "INHERITED_ENVIRONMENT",
+                        (*doxbench_bridge.INHERITED_ENVIRONMENT,
+                         *sorted(provider_mod.PATH_LIST_VARIABLES),
+                         "OPENDOX_TEST_LIST"))
+    inside = served.repo / "tools"
+    inside.mkdir()
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    colon = served.tmp / "a:scratch"
+    colon.mkdir()
+    sep = os.pathsep
+    base = {"HOME": str(colon), "TMPDIR": f"{outside}{sep}{inside}",
+            "LANG": "C.UTF-8", "OPENDOX_TEST_LIST": f"{outside}{sep}{inside}"}
+    for name in provider_mod.PATH_LIST_VARIABLES:
+        base[name] = f"{inside}{sep}{outside}{sep}tools"
+    environment = provider_mod.broker_environment(base, root=served.repo)
+    assert environment["HOME"] == str(colon)        # never cut at its `:`
+    assert "TMPDIR" not in environment              # dropped whole
+    assert "OPENDOX_TEST_LIST" not in environment   # off the list: whole
+    assert environment["LANG"] == "C.UTF-8"
+    for name in provider_mod.PATH_LIST_VARIABLES:
+        assert environment[name] == str(outside), name
+    assert provider_mod.PATH_LIST_VARIABLES == frozenset({
+        "PATH", "PYTHONPATH", "NODE_PATH", "LD_LIBRARY_PATH", "PERL5LIB",
+        "PERLLIB", "RUBYLIB", "CLASSPATH", "GEM_PATH", "MANPATH"})
+
+
+def test_F16_1_batch_p_an_environment_value_is_judged_entry_by_entry(served):
+    """`names_a_path_inside` reads a value as a path list, so an entry
+    inside the served root is found wherever it stands in the list."""
+    trust_mod = _trust_mod()
+    (served.repo / "tools").mkdir()
+    inside = str(served.repo / "tools")
+    for value in (inside, f"/usr/bin{os.pathsep}{inside}",
+                  f"/usr/bin{os.pathsep}/bin{os.pathsep}tools"):
+        assert trust_mod.names_a_path_inside(value, root=served.repo), value
+    for value in ("/usr/bin", f"/usr/bin{os.pathsep}/bin", "C.UTF-8", ""):
+        assert not trust_mod.names_a_path_inside(value,
+                                                 root=served.repo), value
+
+
+@pytest.mark.parametrize("alias", ["program-link", "script-link",
+                                   "path-entry"])
+def test_F16_1_batch_p_a_trust_recorded_outside_admits_nothing_once_it_leads_in(
+        served, capsys, monkeypatch, alias):
+    """F16.1 as T007 batch P amends it: a trust recorded, by `trust`, while
+    the binding's paths resolved outside the served root does not admit it
+    once a link, or the `PATH` entry, leads inside: it reads untrusted, the
+    catalog lists it `available: false`, a turn is refused by name before
+    any spawn, and no marker file exists."""
+    trust_mod = _trust_mod()
+    marking = _MARKING_PYTHON.format(marker=str(served.marker))
+    outside = served.tmp / "outside"
+    outside.mkdir()
+    real = outside / "broker"
+    real.write_text(f"#!{sys.executable}\n" + marking, encoding="utf-8")
+    os.chmod(real, 0o755)
+    tools = served.repo / "tools"
+    tools.mkdir()
+    inside = tools / "broker"
+    inside.write_text(f"#!{sys.executable}\n" + marking, encoding="utf-8")
+    os.chmod(inside, 0o755)
+    link = outside / "link"
+    if alias == "path-entry":
+        first = served.tmp / "first"
+        first.mkdir()
+        (first / "opref-broker").symlink_to(real)
+        monkeypatch.setenv("PATH", f"{first}{os.pathsep}"
+                           f"{os.environ.get('PATH', '')}")
+        argv = ["opref-broker"]
+    else:
+        link.symlink_to(real)
+        argv = ([str(link)] if alias == "program-link"
+                else ["python3", str(link)])
+    served.hand_write(served.record("broker", broker_argv=argv))
+    binding = served.declared()
+    assert _cli("model-binding", "trust", "--repo-root", str(served.repo),
+                BINDING_ID) == 0
+    capsys.readouterr()
+    assert trust_mod.verdict_for(binding, root=served.repo).trusted
+    # it now leads inside: the link retargeted, or a PATH entry under the
+    # root put first
+    if alias == "path-entry":
+        (tools / "opref-broker").symlink_to(inside)
+        monkeypatch.setenv("PATH", f"{tools}{os.pathsep}"
+                           f"{os.environ['PATH']}")
+    else:
+        link.unlink()
+        link.symlink_to(inside)
+    verdict = trust_mod.verdict_for(binding, root=served.repo)
+    assert not verdict.trusted
+    assert verdict.reason == trust_mod.REASON_IN_REPOSITORY
+    port = served.port()
+    assert isinstance(port, trust_mod.UntrustedBindingPort), port
+    assert [entry.available for entry in port.catalog().entries] == [False]
+    with pytest.raises(trust_mod.BindingUntrusted):
+        port.dispatch(_Envelope())
     served.nothing_was_touched()

@@ -308,6 +308,63 @@ DIAG_PROVIDER_REDIRECTED = (
 #: grammar can no longer reach a mint. Keeping a sentence here that no path can
 #: raise would be a refusal nobody can trigger, asserted by a test that proves
 #: nothing.
+#: The working directory every broker starts in (T100 follow-on, A2
+#: extended; RULED by Brett Heap, openxFactory#656 comment 5983805990,
+#: "Refuse inline scripts (Recommended)", item 2): the file system's root,
+#: which lies outside every served repository. So nothing a broker, or an
+#: interpreter it runs, finds relative to its working directory (a relative
+#: path, `python -m`'s first import) can be a file a pull changes, whatever
+#: directory the console was started from. Defence in depth beneath
+#: `doxbench_trust.broker_refusal`, which refuses such a command outright,
+#: and judges it from this very directory (one constant, the trust
+#: module's, so the two cannot disagree).
+BROKER_WORKING_DIRECTORY = trust_mod.BROKER_WORKING_DIRECTORY
+
+#: The variables that name a working directory, which a broker's
+#: environment never carries (the holder's ruling, openxFactory#656 comment
+#: 5984069416, item 2): a shell, or a program that trusts `$PWD` over its
+#: real working directory, would otherwise read the directory the console
+#: was started from, which may be the served repository.
+WORKING_DIRECTORY_VARIABLES: frozenset[str] = frozenset({"PWD", "OLDPWD"})
+
+
+#: The CLOSED list of variables a broker's environment reads as path lists
+#: (the holder's ruling, openxFactory#656 comment 5986391296, on Copilot at
+#: openDox-code#86, r4180041233): each loses every entry inside the served
+#: repository, and keeps the rest.
+PATH_LIST_VARIABLES: frozenset[str] = frozenset({
+    "PATH", "PYTHONPATH", "NODE_PATH", "LD_LIBRARY_PATH", "PERL5LIB",
+    "PERLLIB", "RUBYLIB", "CLASSPATH", "GEM_PATH", "MANPATH"})
+
+
+def broker_environment(base, *, root=None) -> dict:
+    """A broker's whole environment: the harness child's allowlist
+    (`doxbench_bridge.child_environment`), without the variables that name a
+    working directory (`WORKING_DIRECTORY_VARIABLES`), whatever that
+    allowlist comes to hold. Given the served `root`, it carries no path
+    inside it either (F16.1 as T007 batch P amends it; ruling 5986391296):
+    a path-list variable (`PATH_LIST_VARIABLES`) loses each entry that names
+    one, and is dropped where none is left; any other variable is never
+    edited, and is dropped WHOLE where any `os.pathsep`-separated part of it
+    names one (`doxbench_trust.names_a_path_inside`), so a `HOME` or a
+    `TMPDIR` is kept as it is or not at all, never emptied or cut."""
+    environment: dict = {}
+    for name, value in bridge_mod.child_environment(base).items():
+        if name in WORKING_DIRECTORY_VARIABLES:
+            continue
+        if root is not None and name in PATH_LIST_VARIABLES:
+            kept = [part for part in value.split(os.pathsep)
+                    if not (part and trust_mod.names_a_path_inside(
+                        part, root=root))]
+            if not any(kept) and value:
+                continue
+            value = os.pathsep.join(kept)
+        elif root is not None and trust_mod.names_a_path_inside(value,
+                                                                root=root):
+            continue
+        environment[name] = value
+    return environment
+
 FIXED_DIAGNOSTICS: frozenset[str] = frozenset({
     DIAG_BROKER_UNREACHABLE, DIAG_BROKER_REFUSED, DIAG_BROKER_MALFORMED,
     DIAG_BROKER_TIMEOUT, DIAG_PROVIDER_UNREACHABLE,
@@ -571,8 +628,8 @@ def _close_quietly(stream) -> None:
         pass
 
 
-def _run_broker(argv, *, source, timeout: float,
-                read=None) -> tuple[object | None, str | None]:
+def _run_broker(argv, *, source, timeout: float, read=None,
+                root=None) -> tuple[object | None, str | None]:
     """The work of `subprocess_broker_runner`: `(answer, None)`, or
     `(None, sentence)` for a refusal. It raises no refusal itself, so no
     refusal keeps its frame, which holds the child and what the child
@@ -604,7 +661,9 @@ def _run_broker(argv, *, source, timeout: float,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            env=bridge_mod.child_environment(os.environ),
+            env=broker_environment(os.environ, root=root),
+            # OUTSIDE EVERY SERVED REPOSITORY (BROKER_WORKING_DIRECTORY).
+            cwd=BROKER_WORKING_DIRECTORY,
             text=True,
             # Its own process group, so a refusal can kill its descendants
             # too (`_kill_the_group`). The session, and so the terminal, is
@@ -902,7 +961,7 @@ def _broker_operation(binding, operation: str, read, *, runner, trust,
     if runner is subprocess_broker_runner:
         result, failure = _run_broker(argv, source=source,
                                       timeout=BROKER_TIMEOUT_SECONDS,
-                                      read=read)
+                                      read=read, root=trust.root)
         if failure is None:
             return result
         raise BrokerRefused(failure, operation=operation)
@@ -1617,7 +1676,7 @@ class BrokeredProviderPort:
 
         A BINDING THE TRUST VERDICT DOES NOT COVER IS NEVER AVAILABLE (#1144
         16.3a), so no turn can select it."""
-        if self._available and isinstance(self._trust, trust_mod.TrustVerdict) \
+        if self._available and type(self._trust) is trust_mod.TrustVerdict \
                 and self._trust.admits(self._binding):
             return self._declared_catalog
         return model_mod.ModelCatalog.from_entries([
@@ -1730,9 +1789,8 @@ class BrokeredProviderPort:
                 credential = _PresentedCredential(resolve_credential_reference(
                     self._binding, trust=self._trust, environ=self._environ,
                     keyring_backend=self._keyring_backend))
-            except BrokerRefused:
-                with self._lock:
-                    self._available = False
+            except BrokerRefused as refusal:
+                self._now_unavailable(refusal.diagnostic)
                 raise
             with self._lock:
                 self._available = True
@@ -1811,13 +1869,36 @@ class BrokeredProviderPort:
             try:
                 minted = mint(self._binding, trust=self._trust,
                               retry_of=retry_of, runner=self._runner)
-            except BrokerRefused:
-                self._available = False
+            except BrokerRefused as refusal:
+                self._now_unavailable(refusal.diagnostic, locked=True)
                 raise
             self._available = True
             self._token = minted
         self._record(reason, audit_ref=minted.audit_ref)
         return minted
+
+    def _now_unavailable(self, diagnostic: str, *,
+                         locked: bool = False) -> None:
+        """Mark the catalog unavailable, and SAY SO, once, as the port turns
+        unavailable (T100 follow-on, A4). The chat rail tells an operator
+        whose binding is trusted, and still unavailable, to read "the reason
+        this console printed when its provider refused": this is that line.
+        ONE fixed `[model-provider]` line, through the port's notice seam,
+        naming the binding's id and the refusal's FIXED diagnostic, which is
+        one of `FIXED_DIAGNOSTICS` and carries nothing a broker, a reference
+        or a provider wrote. A refusal while already unavailable says
+        nothing more; a later success makes the next refusal say it again.
+        `locked` says the caller already holds the port's lock."""
+        if locked:
+            was_available, self._available = self._available, False
+        else:
+            with self._lock:
+                was_available, self._available = self._available, False
+        if was_available:
+            self._notice(
+                f"[model-provider] model binding "
+                f"{trust_mod.shown(self._binding.id)} is unavailable: "
+                f"{diagnostic}\n")
 
     def _forget_token(self) -> None:
         with self._lock:

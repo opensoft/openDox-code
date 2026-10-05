@@ -666,19 +666,36 @@ class DeclarationStore:
 
     # -- the document -------------------------------------------------------
 
+    def _refuse_a_link(self) -> None:
+        """No link on the way to the document, which a clone could carry, so
+        an approval never writes outside the repository (T100 follow-on, N1;
+        `doxbench_binding.linked_component`)."""
+        link = binding_mod.linked_component(self.path,
+                                            DEFAULT_DECLARATIONS_RELPATH)
+        if link is not None:
+            raise IntakeRefused(binding_mod.LINKED_DOCUMENT.format(
+                what="declarations document",
+                path=binding_mod.shown_path(self.path),
+                link=binding_mod.shown_path(link)))
+
     def _load(self) -> tuple[BrokerDeclaration | None, list[ModelDeclaration]]:
-        if not self.path.is_file():
+        try:
+            # Refused BY NAME before the read too (Copilot at
+            # openDox-code#86, r4179241603).
+            self._refuse_a_link()
+            present = binding_mod.document_present(self.path)
+        except OSError as error:
+            raise IntakeRefused(binding_mod.cannot_read(
+                self.path, "declarations document", error)) from None
+        if not present:
             # THE HOSTED PATH, and the reason the import below is lazy: an
             # install with no declarations answers here and never needs a YAML
             # parser at all.
             return None, []
         yaml = _yaml_or_refused()
-        try:
-            document = yaml.safe_load(self.path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as error:
-            raise IntakeRefused(
-                f"the declarations document at {self.path} is not readable "
-                "YAML") from error
+        document = binding_mod.read_settings_document(
+            self.path, what="declarations document", yaml=yaml,
+            refused=IntakeRefused)
         if document is None:
             return None, []
         if not isinstance(document, Mapping):
@@ -714,6 +731,7 @@ class DeclarationStore:
 
     def _save(self, broker: BrokerDeclaration | None,
               declarations: Iterable[ModelDeclaration]) -> None:
+        self._refuse_a_link()
         yaml = _yaml_or_refused()
         document = {
             "schema_version": SCHEMA_VERSION,
@@ -721,10 +739,8 @@ class DeclarationStore:
             "broker": broker.as_record() if broker is not None else None,
             "declarations": [d.as_record() for d in declarations],
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
-            encoding="utf-8")
+        binding_mod.write_settings_document(self.path, yaml.safe_dump(
+            document, sort_keys=False, allow_unicode=True))
 
 
 def declarations_path(checkout_root: Path | str) -> Path:

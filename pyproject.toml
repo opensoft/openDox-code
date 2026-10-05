@@ -15,9 +15,21 @@
 
 [project]
 name = "opendox"
-version = "0.0.0"
+# RELEASE 1's VERSION (plan 034 T099's release step; RULED openxFactory#656
+# comment 5963162921, "0.1.0 (Recommended)"): the first public release, with
+# the API still pre-1.0. This change is the LAST phase-3 openDox-code landing.
+# The openDox root then pins this commit (T087), and `.github/workflows/
+# release.yml` publishes only the commit that root pins, at the cut (T099).
+version = "0.1.0"
 description = "The openDox code leg — the `opendox` package, carved from openxFactory."
 requires-python = ">=3.12"
+# THE PROJECT PAGE ON PyPI (plan 034 T099; RULED openxFactory#656 comment
+# 5962754358, item 1, "Publish to PyPI at the cut"). Without it the metadata
+# carries no long description, `twine check --strict` refuses both files, and
+# the published page is blank. `.github/workflows/release.yml` runs that check
+# before any upload. The `.md` suffix makes setuptools declare `text/markdown`,
+# and README.md's links are absolute, so they resolve from the PyPI page too.
+readme = "README.md"
 
 # THE RUNTIME DEPENDENCY SET, round 2 of the levelling pass — RULED Q-L2
 # (openxFactory#656, Brett Heap, 2026-09-10: "rule Q-L1 approve, Q-L2 approve,

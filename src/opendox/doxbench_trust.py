@@ -104,10 +104,14 @@ openxFactory and never what a destination assembles (RULED OQ-C).
 
 from __future__ import annotations
 
+import collections
 import contextlib
+import contextvars
 import dataclasses
 import errno
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
@@ -117,6 +121,7 @@ import sys
 import threading
 from collections.abc import Mapping
 from pathlib import Path
+from typing import NamedTuple
 from typing import Any
 
 from opendox import doxbench_binding as binding_mod
@@ -128,26 +133,53 @@ except ImportError:     # pragma: no cover - exercised through _lock_exclusively
     fcntl = None
 
 __all__ = [
+    "APPROVED_UNTRUSTABLE_NOTICE",
     "APPROVED_UNSERVABLE_NOTICE",
     "APPROVED_UNTRUSTED_NOTICE",
     "BASIS_CATALOG",
     "BASIS_HOST",
     "BASIS_MACHINE_TRUST",
+    "BASIS_REPOSITORY",
+    "BROKER_WORKING_DIRECTORY",
     "BindingUntrusted",
     "MachineTrust",
     "TRUST_FILENAME",
     "TrustPolicyAlreadyRegistered",
     "TrustPolicyNotRegistered",
     "TrustStoreRefused",
+    "TrustRecording",
     "TrustVerdict",
     "UNSERVABLE_TURN_MESSAGE",
     "UNTRUSTED_TURN_MESSAGE",
     "UntrustedBindingPort",
     "INTAKE_BROKER_UNTRUSTED",
+    "INTAKE_HOST_NOT_ADMITTED",
+    "INTAKE_BROKER_REFUSED",
+    "INTAKE_NOT_ADMISSIBLE",
+    "REASON_INLINE_SCRIPT",
+    "REASON_UNREADABLE_COMMAND",
+    "REASON_IN_REPOSITORY",
+    "REASON_RECORD_FORM",
+    "REMEDY_INLINE_SCRIPT",
+    "REMEDY_IN_REPOSITORY",
+    "REMEDY_NOT_BY_TRUST",
+    "UNTRUSTABLE_TURN_MESSAGE",
     "REASON_UNSERVABLE",
+    "REASON_NO_WITHDRAWAL",
     "REMEDY_UNSERVABLE",
     "binding_digest",
     "command_safe_id",
+    "broker_command_refused",
+    "broker_refusal",
+    "in_repository_argv",
+    "inline_script",
+    "in_repository_program",
+    "names_a_path_inside",
+    "intake_admissible",
+    "intake_refusal_reason",
+    "recording_for",
+    "restored_for",
+    "trust_can_repair",
     "current",
     "is_registered",
     "policy",
@@ -190,9 +222,22 @@ TRUST_LOCK_FILENAME = "model-binding-trust.lock"
 #: this process's memory.
 MAX_TRUST_STORE_BYTES = 1_048_576
 
-#: The digest's algorithm, spelled on every digest so a stored one says how it
-#: was computed.
+#: The digest's SCHEME, spelled on every digest so a stored one says how it
+#: was computed: the algorithm, and the form of the canonical record it was
+#: computed over (T100 follow-on, A16). Scheme 1 is `sha256:` over
+#: `as_record()` with exactly `DIGEST_SCHEME_FIELDS`. A change to the record's
+#: fields changes every digest, so it MUST change this prefix too (for
+#: instance to `sha256/2:`): a digest stored under another prefix is then read
+#: as trusted under another form of the record (`REASON_RECORD_FORM`), and
+#: never as a binding that "has changed", which it has not.
 DIGEST_PREFIX = "sha256:"
+
+#: The binding fields scheme 1's canonical record holds. Pinned equal to
+#: `doxbench_binding.BINDING_FIELDS` by a test, so adding a field cannot go
+#: unnoticed by the digest's scheme.
+DIGEST_SCHEME_FIELDS: tuple[str, ...] = (
+    "id", "label", "provider", "credential_ref", "auth_kind", "approved_by",
+    "endpoint", "dialect", "model", "broker_argv")
 
 # ---------------------------------------------------------------------------
 # what a verdict rests on
@@ -207,6 +252,11 @@ BASIS_HOST = "host"
 #: The verdict on a binding the model catalog refuses, given before any
 #: policy is asked (`unservable_because`).
 BASIS_CATALOG = "catalog"
+
+#: The verdict on a binding whose broker command names a file inside the
+#: served repository, given before any policy is asked
+#: (`in_repository_program`).
+BASIS_REPOSITORY = "repository"
 
 #: The setting that names openDox's state directory (openDox-code#69).
 STATE_DIR_SETTING = "OPENDOX_STATE_DIR"
@@ -230,6 +280,102 @@ REASON_NO_VERDICT = "no trust verdict was given for it"
 REASON_NOT_COVERED = (
     "the trust verdict given for it covers another binding, or another form "
     "of it")
+
+#: Why a binding the store trusted under another digest SCHEME is untrusted
+#: (T100 follow-on, A16): another openDox computed that digest over another
+#: form of the binding record, so it says nothing about whether this binding
+#: changed. It is reviewed and trusted again, as a changed one is.
+REASON_RECORD_FORM = (
+    "it was trusted under another form of the binding record, by another "
+    "openDox version, so it is reviewed and trusted again")
+
+#: Why a binding whose broker command names a file inside the served
+#: repository is never trusted (T100 follow-on, A2; RULED by Brett Heap,
+#: openxFactory#656 comment 5982436447, item 2, "Refuse in-repo programs").
+#: Trust is of the binding's record, and a pull can change such a program
+#: after the record was trusted, so the broker must live outside the
+#: repository.
+REASON_IN_REPOSITORY = (
+    "its broker command names a file inside the served repository, which a "
+    "pull could change after the binding was trusted")
+
+#: What an operator is told to do about such a binding.
+REMEDY_IN_REPOSITORY = (
+    "Trusting it cannot make it usable: install the broker outside the "
+    "repository, then declare the binding with that command with \"opendox "
+    "model-binding edit\", which records trust for what it writes")
+
+#: Why a binding whose broker command gives a shell or an interpreter an
+#: INLINE script is never trusted (T100 follow-on, A2 extended; RULED by
+#: Brett Heap, openxFactory#656 comment 5983805990, "Refuse inline scripts
+#: (Recommended)"). The script is text, not a file a review can pin, and it
+#: can run whatever the repository holds (`/bin/sh -c "exec
+#: ./tools/broker.py"`), so the program must be a real file outside the
+#: served repository. A launcher (`env`, `nice`, `timeout`, ...) is unwrapped
+#: to the program it starts, and that program is judged (the holder's
+#: ruling, openxFactory#656 comment 5984069416). THE ACCEPTED LIMIT (same
+#: ruling, item 4): a general program that runs code from its own arguments
+#: (`awk`, `sed`, `find -exec`, and the like) is not judged as an inline
+#: script; nor is an interpreter `_INTERPRETERS` does not hold, such as
+#: `guile -c` or `-e`, `elixir -e`, `erl -eval`, `escript`, `groovy -e`,
+#: `scala -e`, `clojure -e`, `gjs -c` and `swipl -g` (lane openXfactory-3
+#: D7 F1; the holder's ruling, openxFactory#656 comment 5988369111). An
+#: `env -S` string env would not split as a shell does (one
+#: holding a backslash, a `$` or a `#`, or quotes that do not close) is
+#: refused as one too: what it runs cannot be read (F16.1 as T007 batch P
+#: amends it; the holder's ruling, openxFactory#656 comment 5985046107, C1).
+REASON_INLINE_SCRIPT = (
+    "its broker command gives a shell or an interpreter an inline script, "
+    "which is no file a review can pin and can run whatever the repository "
+    "holds")
+
+#: Why a binding whose broker command cannot be read to the program it runs
+#: is never trusted (T100 follow-on, A2 and its rulings; Copilot at
+#: openDox-code#86, r4179366319; the holder's ruling, openxFactory#656
+#: comment 5985046107, C1): an option its launcher does not have, or has by
+#: more than one name; an option after which what runs cannot be judged
+#: from its words (`env --argv0`, `sudo --chroot`, `sudo -i`); a launcher
+#: given a second working directory (`env -C`, counting an `env -S`
+#: string's, or `sudo -D`; ruling 5988088910); an assignment given to sudo
+#: (`sudo A=b`, `PATH=` included), which sudo's policy honours or not; an
+#: xargs, which builds what it runs from its input (ruling 5988818366);
+#: launchers nested past what is unwrapped; a path whose symbolic links
+#: pass the kernel's own bound, or loop (`_LINK_HOPS`; ruling 5986391296);
+#: a member past the bounds of what is judged (`_unbounded_member`;
+#: ruling 5989835334); a bare program name after sudo or doas, found on a
+#: search path their policy picks; or a command whose judgment would pass
+#: its work budget (`_WORK_BUDGET`; ruling 5990845570). What it runs cannot be judged, so it is
+#: refused FAIL-CLOSED, with the inline-script remedy. (An `env -S` string
+#: env would not split as a shell does is an inline script:
+#: `REASON_INLINE_SCRIPT`.)
+REASON_UNREADABLE_COMMAND = (
+    "its broker command cannot be read to the program it runs (a launcher "
+    "option it does not have, or has by more than one name, an option after "
+    "which what runs cannot be judged, a launcher given two working "
+    "directories, an assignment given to sudo, xargs, which builds what it "
+    "runs from its input, launchers nested too deeply, a path whose links "
+    "go deeper than the system follows, a member longer than the "
+    "system's path limit or holding more than 32 paths, a bare program "
+    "name after sudo or doas, or more than its judgment may take), so what "
+    "it runs cannot be judged")
+
+#: What an operator is told to do about such a binding.
+REMEDY_INLINE_SCRIPT = (
+    "Trusting it cannot make it usable: name the broker program itself, for "
+    "example [\"pass\", \"show\", \"key\"], or a script kept outside the "
+    "repository, then declare the binding with that command with \"opendox "
+    "model-binding edit\", which records trust for what it writes")
+
+#: What every refusal says, in place of a command, where `trust` itself would
+#: be refused for the same reason (T100 follow-on, A1): the store cannot be
+#: used, the platform cannot keep it, or a host's policy declines. No command
+#: is printed that could not succeed. Its last sentence holds under every
+#: policy (the holder's ruling, openxFactory#656 comment 5985490378, D2): a
+#: host whose approval trusts the binding lists it trusted, with no command.
+REMEDY_NOT_BY_TRUST = (
+    "Resolve the cause above first: until it is resolved, trusting this "
+    "binding would be refused for the same reason. Then list its bindings "
+    "again: it is shown trusted, or with the command that trusts it")
 
 #: Why `MachineTrust` never admits the console intake's broker (#1144 16.3a,
 #: T007 batch M; Copilot at openDox-code#82, r4173513782). The intake asks its
@@ -333,6 +479,20 @@ UNSERVABLE_TURN_MESSAGE = (
     "\"remove\" and \"add\" (a new id), each of which records trust for "
     "what it writes, and restart this console")
 
+#: What a refused chat turn says when the binding is untrusted for a reason
+#: `trust` cannot repair (T100 follow-on, A1): the trust store cannot be
+#: used, the platform cannot keep it, a host's policy declines, or its broker
+#: lies inside the repository. Like `UNSERVABLE_TURN_MESSAGE`, it names no
+#: command that trusts. A FIXED sentence, within the released failure
+#: envelope's `message` bound.
+UNTRUSTABLE_TURN_MESSAGE = (
+    "the model binding this install declares is not usable on this machine, "
+    "and trusting it cannot help yet: the trust store, the platform or the "
+    "host's trust policy refuses it, or its broker command runs a program "
+    "inside the repository or an inline script. Nothing was sent and "
+    "nothing was contacted. Run \"opendox model-binding list --repo-root "
+    "<repository>\" to see why and what to do, and restart this console")
+
 
 #: What the chat rail says when the catalog lists a declared model and none is
 #: available (#1144 16.3a; RULED openxFactory#656 comment 5962785556, item 2,
@@ -348,11 +508,11 @@ UNSERVABLE_TURN_MESSAGE = (
 UNTRUSTED_BINDING_REMEDY = (
     "No declared model is available. \"opendox model-binding list "
     "--repo-root <repository>\" shows whether each binding is trusted on "
-    "this machine, and \"opendox model-binding trust --repo-root <repository> "
-    "<id>\" trusts one after showing what it would run and where it would "
-    "connect; then restart this console. A binding already trusted is "
-    "unavailable for the reason this console printed when its provider "
-    "refused.")
+    "this machine and, where trusting it can help, \"opendox model-binding "
+    "trust --repo-root <repository> <id>\" trusts one after showing what it "
+    "would run and where it would connect; then restart this console. A "
+    "binding already trusted is unavailable for the reason this console "
+    "printed when its provider refused.")
 
 #: What the console's model approval answers, as its `availability`, when
 #: the trust policy does not admit the binding it approved (#1144 16.3a; the
@@ -386,6 +546,44 @@ APPROVED_UNSERVABLE_NOTICE = (
     "writes, then restart this console. The credential remains in the "
     "broker's custody and this act neither mints nor reads one")
 
+#: What the console's model approval answers when the binding it approved is
+#: untrusted for a reason `trust` cannot repair (T100 follow-on, A1): the
+#: trust store cannot be used, the platform cannot keep it, the host's
+#: policy declines, or its broker lies inside the repository. A FIXED
+#: sentence, which names no command that trusts.
+APPROVED_UNTRUSTABLE_NOTICE = (
+    "the model is approved for this console, but its binding is not usable "
+    "on this machine, and trusting it cannot help yet: the trust store, the "
+    "platform or the host's trust policy refuses it, or its broker command "
+    "runs a program inside the repository or an inline script. \"opendox "
+    "model-binding list --repo-root "
+    "<repository>\" shows why and what to do; then restart this console. The "
+    "credential remains in the broker's custody and this act neither mints "
+    "nor reads one")
+
+#: Why the console intake is not offered where the broker command the
+#: served repository's declarations document names runs a program inside
+#: the repository, or an inline script (T100 follow-on, A2 and its
+#: extension; Copilot at openDox-code#86, r4179077029): every hand-off to it
+#: is refused before any policy is asked. A FIXED sentence.
+INTAKE_BROKER_REFUSED = (
+    "the console intake is not offered: the broker command the served "
+    "repository's declarations document names runs a program inside the "
+    "repository, or an inline script, which no review can pin, so no "
+    "hand-off to it is ever admitted. Name a broker program installed "
+    "outside the repository")
+
+#: Why the console intake is not offered where the trust policy registered
+#: now could not admit its hand-off (T100 follow-on, A5). openDox's own
+#: per-machine store admits no intake, so an intake offered under it would
+#: open a surface every submission of which is refused. A FIXED sentence.
+INTAKE_NOT_ADMISSIBLE = (
+    "the console intake is not offered: its hand-off runs the broker the "
+    "served repository's declarations document names, and no registered "
+    "trust policy admits such a broker. openDox's own per-machine trust "
+    "admits none; a host's own trust policy (opendox.doxbench_trust."
+    "register) may, by answering intake_verdict")
+
 #: What the console intake's hand-off is refused with when the trust policy
 #: does not admit the binding it is declaring (#1144 16.3a, T007 batch M). A
 #: FIXED sentence: an intake refusal's reason never carries what the request
@@ -397,6 +595,26 @@ INTAKE_BROKER_UNTRUSTED = (
     "broker is not trusted on this machine, so nothing was run and nothing "
     "was read. No command trusts an intake declaration's broker; a host's own "
     "trust policy (opendox.doxbench_trust.register) may admit it")
+
+#: What the console intake's hand-off is refused with when the HOST's own
+#: trust policy, registered here, is what does not admit it (a pending
+#: binding, say): `INTAKE_BROKER_UNTRUSTED`'s "a host's own trust policy may
+#: admit it" would send the operator to the very policy that refused (the
+#: holder's ruling, openxFactory#656 comment 5985490378, D3). A FIXED
+#: sentence, as that one is.
+INTAKE_HOST_NOT_ADMITTED = (
+    "the host's trust policy does not admit this hand-off; model-binding "
+    "list shows why")
+
+
+def intake_refusal_reason(verdict: TrustVerdict) -> str:
+    """The FIXED sentence the console intake's hand-off is refused with for
+    `verdict`, which does not admit it: the host's own where the host's
+    policy refused (`BASIS_HOST`, D3), and `INTAKE_BROKER_UNTRUSTED`
+    otherwise."""
+    if verdict.basis == BASIS_HOST:
+        return INTAKE_HOST_NOT_ADMITTED
+    return INTAKE_BROKER_UNTRUSTED
 
 
 class BindingUntrusted(binding_mod.BindingRefused):
@@ -538,6 +756,25 @@ def _command_from_the_root(binding_id: str, root: str | None,
                          bindings=os.path.join(".", str(relative)))
 
 
+#: The reasons `trust` repairs (T100 follow-on, A1): openDox's own "never
+#: trusted here", "changed since", "trusted under another form of the
+#: record", and no verdict at all. Every other reason is one `trust` would
+#: be refused for as well. A verdict that covers another binding
+#: (`REASON_NOT_COVERED`) is a policy's invalid answer, which the same
+#: policy gives when asked to record, so it is not one (Copilot at
+#: openDox-code#86, r4179077004).
+TRUST_REPAIRS: frozenset[str] = frozenset({
+    REASON_NEVER_TRUSTED, REASON_CHANGED, REASON_RECORD_FORM,
+    REASON_NO_VERDICT})
+
+
+def trust_can_repair(reason: str | None) -> bool:
+    """Whether `opendox model-binding trust` can repair a binding untrusted
+    for `reason` (T100 follow-on, A1). No reason is the store's plain "never
+    trusted"."""
+    return reason is None or reason in TRUST_REPAIRS
+
+
 def trust_remedy(binding_id: str, root: str | None,
                  reason: str | None = None, *,
                  bindings: str | None = None) -> str:
@@ -546,12 +783,24 @@ def trust_remedy(binding_id: str, root: str | None,
     it, where a command can be printed safely (`trust_command`).
 
     A binding the catalog refuses gets no command, since trust cannot make it
-    usable (`REMEDY_UNSERVABLE`). Where the root is unknown, or a path cannot
-    be printed, the command names the repository `.` and says to run it from
-    that repository's root. Where even that cannot be printed, the sentence
-    says what to give the verb instead."""
+    usable (`REMEDY_UNSERVABLE`), and neither does one whose broker lies
+    inside the repository (`REMEDY_IN_REPOSITORY`). NOR DOES ANY BINDING
+    UNTRUSTED FOR A REASON `trust` WOULD REFUSE TOO (T100 follow-on, A1): a
+    store that cannot be used, a platform that cannot keep one, a host
+    policy's own refusal. That remedy is `REMEDY_NOT_BY_TRUST`, and a
+    command is printed only where `trust_can_repair` says trust repairs the
+    reason. Where the root is unknown, or a path cannot be printed, the
+    command names the repository `.` and says to run it from that
+    repository's root. Where even that cannot be printed, the sentence says
+    what to give the verb instead."""
     if reason == REASON_UNSERVABLE or not command_safe_id(binding_id):
         return REMEDY_UNSERVABLE
+    if reason == REASON_IN_REPOSITORY:
+        return REMEDY_IN_REPOSITORY
+    if reason in (REASON_INLINE_SCRIPT, REASON_UNREADABLE_COMMAND):
+        return REMEDY_INLINE_SCRIPT
+    if reason is not None and not trust_can_repair(reason):
+        return REMEDY_NOT_BY_TRUST
     command = trust_command(binding_id, root, bindings=bindings)
     if command is not None:
         return f"Review it, then trust it with: {command}"
@@ -634,11 +883,22 @@ def require_admitted(binding, trust: TrustVerdict | None) -> None:
 
     Asked by every act on a binding before it spawns, reads or contacts
     anything (`doxbench_provider`). `None` is no verdict, and no verdict is no
-    trust."""
-    if isinstance(trust, TrustVerdict) and trust.admits(binding):
+    trust. A verdict is a `TrustVerdict` EXACTLY: a subclass could answer
+    `admits` as it liked (T100 follow-on, A12).
+
+    A BROKER COMMAND THE RULES REFUSE IS REFUSED HERE TOO (a program inside
+    the repository, by the verdict's own root, or an inline script), so the
+    defence beneath the factory holds even for a verdict a policy gave
+    before the rule existed (T100 follow-on, A2 and its extension;
+    `broker_refusal`)."""
+    if type(trust) is TrustVerdict and trust.admits(binding):
+        refused = broker_refusal(binding, root=trust.root)
+        if refused is not None:
+            raise BindingUntrusted(refusal_message(
+                trust.binding_id, trust.root, refused))
         return
     binding_id = getattr(binding, "id", "<not a binding>")
-    if not isinstance(trust, TrustVerdict):
+    if type(trust) is not TrustVerdict:
         raise BindingUntrusted(refusal_message(
             str(binding_id), None, REASON_NO_VERDICT))
     if (trust.trusted or trust.binding_id != binding_id
@@ -659,8 +919,9 @@ def _held_to(binding, verdict: Any, *, root: Path | str) -> TrustVerdict:
     a verdict for another binding, or another form of this one, trusted or
     not (Copilot at openDox-code#82, r4173513795); one minted for another
     repository root, which would defeat the per-repository key (r4174310794);
-    and something that is not a verdict."""
-    if isinstance(verdict, TrustVerdict) and verdict.root == resolved_root(
+    and something that is not a verdict, a subclass of one included, whose
+    `admits` could answer anything (T100 follow-on, A12)."""
+    if type(verdict) is TrustVerdict and verdict.root == resolved_root(
             root):
         if verdict.admits(binding):
             return verdict
@@ -679,8 +940,9 @@ def unservable_because(binding) -> str | None:
     (`doxbench_install.brokered_catalog`), so the two cannot disagree. Asked
     BEFORE any policy is: no policy, a host's included, trusts a binding that
     could never be served, `add`, `edit` and `trust` record nothing for one
-    and write nothing, and the factory declares a refusing port for one
-    rather than fail at start on what a repository wrote."""
+    and write nothing, the console's start passes over one (T100 follow-on,
+    A3), and the trust gate beneath it declares a refusing port for one
+    rather than fail on what a repository wrote."""
     from opendox import doxbench_install
 
     try:
@@ -690,16 +952,1409 @@ def unservable_because(binding) -> str | None:
     return None
 
 
+#: The working directory every broker starts in (T100 follow-on, A2
+#: extended; RULED by Brett Heap, openxFactory#656 comment 5983805990,
+#: "Refuse inline scripts (Recommended)", item 2): the file system's root,
+#: which lies outside every served repository. `doxbench_provider` starts
+#: every broker here, and the rules below judge a broker command from here,
+#: as it runs (Copilot at openDox-code#86, r4179241532, r4179366288).
+BROKER_WORKING_DIRECTORY = os.path.abspath(os.sep)
+
+
+class _Context(NamedTuple):
+    """Where a broker command runs: its working directory, the search path
+    its program is found on (None: the platform's default, `os.defpath`),
+    and its Python import path, `PYTHONPATH`'s entries (None: the ones the
+    broker inherits, `_inherited_pythonpath`), as the child process sees
+    them (Copilot at openDox-code#86, r4179241532, r4179366288,
+    r4180717772). A launcher can change each for the command it starts
+    (`env -C`, `env PATH=...`, `env PYTHONPATH=...`, `env -i`)."""
+
+    cwd: str
+    path: str | None
+    pythonpath: tuple[str, ...] | None = None
+
+
+def _broker_context() -> _Context:
+    """The context every broker command starts in: `BROKER_WORKING_DIRECTORY`,
+    and the search path the broker inherits from this process."""
+    return _Context(BROKER_WORKING_DIRECTORY, os.environ.get("PATH"))
+
+
+def _inherited_pythonpath(*, root: Path | str) -> list[str]:
+    """The `PYTHONPATH` entries a broker inherits: those of this process's
+    environment that the broker's environment carries, after its filter
+    drops every entry inside the served repository
+    (`doxbench_provider.broker_environment`, `PATH_LIST_VARIABLES`)."""
+    from opendox import doxbench_bridge
+
+    inherited = doxbench_bridge.child_environment(os.environ).get(
+        "PYTHONPATH")
+    if not inherited:
+        return []
+    return _outside_the_budget(lambda: [
+        entry for entry in inherited.split(os.pathsep)
+        if not (entry and names_a_path_inside(entry, root=root))])
+
+
+def _python_roots(context: _Context, *, root: Path | str) -> list[str]:
+    """Every directory `python -m` imports a module from, as the broker runs
+    it: its start directory, and each entry of its effective `PYTHONPATH`,
+    the inherited entries after the filter or whatever a launcher assigned
+    or cleared, a relative entry (or an empty one) read from the start
+    directory (Copilot at openDox-code#86, r4180717772; the holder's ruling,
+    openxFactory#656 comment 5988088910). Not the interpreter's own default
+    import path (its site-packages, a `.pth` file, an editable install):
+    the accepted limit `in_repository_argv` records (r4181006277; ruling
+    5988818366)."""
+    entries = (context.pythonpath if context.pythonpath is not None
+               else _inherited_pythonpath(root=root))
+    # each once: a repeated entry is no other directory (r4182002696)
+    return list(dict.fromkeys([context.cwd, *(
+        os.path.join(context.cwd, entry) for entry in entries)]))
+
+
+def _which(name: str, context: _Context) -> str | None:
+    """`name` as the child finds it on its search path: the first executable
+    file among the path's directories, a relative directory (or an empty
+    entry) taken from the context's working directory, as the child takes
+    it, never from this process's (r4179366288)."""
+    search = context.path if context.path is not None else os.defpath
+    for entry in search.split(os.pathsep):
+        _spend()
+        candidate = os.path.join(context.cwd, entry, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _resolved_path(path: str) -> str:
+    """`path` with every link followed and `..` taken as the system takes it,
+    or, where it cannot be resolved (an embedded NUL, which no program can
+    be run with anyway; r4179077018), normalized as written."""
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        return os.path.normpath(path)
+
+
+#: How many symbolic links one path may pass through before it is refused as
+#: unreadable: the kernel's own bound on a path's resolution (Linux's
+#: MAXSYMLINKS), past which it would not be run either (the holder's ruling,
+#: openxFactory#656 comment 5986391296).
+_LINK_HOPS = 40
+
+
+class _TooManyLinks(Exception):
+    """A path whose links pass `_LINK_HOPS`, or loop: what it names cannot
+    be judged, so the command is refused as unreadable."""
+
+    def __init__(self, member: str):
+        super().__init__(member)
+        self.member = member
+
+
+def _traversed(path: str) -> list[Path]:
+    """Every name the system looks up on the way to the absolute `path`,
+    each in the directory it is looked up in, and last what `path` comes to
+    (Copilot at openDox-code#86, r4179241566). A link is expanded ONE PATH
+    COMPONENT AT A TIME, as the kernel expands it, its target's own names
+    looked up in turn, relative to the link's directory or from the root,
+    and `..` taken from where the walk stands (r4179241184; the holder's
+    ruling, openxFactory#656 comment 5986391296): so every name a chain of
+    links passes through is judged, a link inside the repository anywhere
+    in it included (`/outside/entry -> /repo/selected -> /outside/a`). A
+    link inside the repository is a name the repository controls, which a
+    pull can point elsewhere, whether it points inside or out; a link
+    outside it that points in reaches the repository's file. A path whose
+    links pass `_LINK_HOPS` raises `_TooManyLinks`."""
+    names: list[Path] = []
+    real = Path(os.sep)
+    pending = collections.deque(Path(path).parts[1:])
+    hops = 0
+    while pending:
+        _spend()
+        part = pending.popleft()
+        if part == os.curdir:
+            continue
+        if part == os.pardir:
+            real = real.parent
+            continue
+        name = real / part
+        names.append(name)
+        try:
+            target = os.readlink(name)
+        except (OSError, ValueError):
+            real = name             # no link: looked up as it is named
+            continue
+        hops += 1
+        if hops > _LINK_HOPS:
+            raise _TooManyLinks(path)
+        parts = list(Path(target).parts)
+        if os.path.isabs(target):
+            real = Path(os.sep)
+            parts = parts[1:]
+        pending.extendleft(reversed(parts))
+    names.append(real)
+    return names
+
+
+#: The bounds on one member of a broker command, past which it is refused
+#: as unreadable, FAIL-CLOSED, before anything is judged: a member longer
+#: than the system's own path limit (PATH_MAX), and one holding more
+#: absolute paths than `_MAX_ABSOLUTE_PATHS` (every separator begins one,
+#: `_candidates`). The bindings document lives in the served repository,
+#: so a pull must not be able to hang the judgment (Copilot at
+#: openDox-code#86, review 5411026353; the holder's ruling,
+#: openxFactory#656 comment 5989835334).
+_MAX_MEMBER_LENGTH = 4096
+_MAX_ABSOLUTE_PATHS = 32
+
+#: The separators a path is written with on this system.
+_SEPARATORS = tuple(sep for sep in (os.sep, os.altsep) if sep)
+
+
+#: The work judging one broker command may take, in steps: each name
+#: looked up on the way to a path (`_traversed`), each candidate path a
+#: `-m` name could be imported from, before it is built (`_module_paths`),
+#: each directory a program is looked for in (`_which`), each entry of a
+#: bytecode cache directory, and each member and option letter a scan reads.
+#: Past it the command is refused as unreadable, FAIL-CLOSED: the bindings
+#: document lives in the served repository, so a pull must not be able to
+#: hang verdict computation (Copilot at openDox-code#86, r4182002696; the
+#: holder's ruling, openxFactory#656 comment 5990845570). A command's
+#: budget is `_WORK_PER_MEMBER` steps for each of its members, at most
+#: `_WORK_BUDGET`, so the ceiling on the members one bindings document
+#: declares (`doxbench_binding.MAX_JUDGED_MEMBERS`) bounds the work of the
+#: whole document too. An ordinary command takes a few hundred steps; at
+#: their slowest, deep paths, steps take some 15 microseconds each.
+_WORK_PER_MEMBER = 2_000
+_WORK_BUDGET = 20_000
+
+#: The steps left in the judgment being made, or None outside one.
+_STEPS_LEFT: contextvars.ContextVar[list[int] | None] = (
+    contextvars.ContextVar("opendox_trust_steps_left", default=None))
+
+
+class _OverBudget(Exception):
+    """A judgment that would pass `_WORK_BUDGET`."""
+
+
+def _spend(steps: int = 1) -> None:
+    """Spend `steps` of the judgment's budget. Raises `_OverBudget` past
+    it."""
+    left = _STEPS_LEFT.get()
+    if left is None:
+        return
+    left[0] -= steps
+    if left[0] < 0:
+        raise _OverBudget()
+
+
+def _within_budget(work, *, over, members=None):
+    """`work()` within one command's work budget: the one already being
+    spent, whose owner answers for it, or a new one for the command
+    `members` (`_WORK_PER_MEMBER` for each, at most `_WORK_BUDGET`; the
+    cap for none), where a judgment past it answers `over()` instead."""
+    if _STEPS_LEFT.get() is not None:
+        return work()
+    steps = _WORK_BUDGET if members is None else min(
+        _WORK_BUDGET, _WORK_PER_MEMBER * max(1, len(members)))
+    token = _STEPS_LEFT.set([steps])
+    try:
+        return work()
+    except _OverBudget:
+        return over()
+    finally:
+        _STEPS_LEFT.reset(token)
+
+
+def _outside_the_budget(work):
+    """`work()` as no command's work: what the operator's own environment
+    holds (the search path and the module path a broker inherits, filtered
+    of the served root), which no pull chooses. Each judgment in it has a
+    budget of its own."""
+    token = _STEPS_LEFT.set(None)
+    try:
+        return work()
+    finally:
+        _STEPS_LEFT.reset(token)
+
+
+def _unbounded_member(members) -> str | None:
+    """The first member of a broker command `members` past the bounds of
+    what is judged (`_MAX_MEMBER_LENGTH`, `_MAX_ABSOLUTE_PATHS`), or
+    None."""
+    for member in members:
+        if len(member) > _MAX_MEMBER_LENGTH:
+            return member
+        if sum(member.count(sep) for sep in _SEPARATORS) > (
+                _MAX_ABSOLUTE_PATHS):
+            return member
+    return None
+
+
+def _has_a_separator(candidate: str) -> bool:
+    """Whether `candidate` is a path rather than a bare word."""
+    return candidate in (".", "..") or os.sep in candidate or bool(
+        os.altsep and os.altsep in candidate)
+
+
+def _located(candidate: str, *, first: bool, context: _Context) -> list[str]:
+    """The file one argv member could name, as an absolute path, or
+    nothing: a path (with a separator) joined to the context's working
+    directory, whether or not a file is there yet (a pull could add one); a
+    bare word as the program the context's search path finds (`_which`),
+    for the command's program; and any other bare word that names an
+    existing file in the working directory."""
+    if _has_a_separator(candidate):
+        return [os.path.join(context.cwd, candidate)]
+    if first:
+        located = _which(candidate, context)
+        return [located] if located is not None else []
+    here = os.path.join(context.cwd, candidate)
+    return [here] if os.path.lexists(here) else []
+
+
+def _candidates(member: str, *, option: bool) -> list[str]:
+    """What one member could name a file by, fail-closed: the member itself
+    or, for an option, its value, after `=` and, for a single-dash option,
+    the rest after its letter (`-I<dir>`, `-a<file>`; the holder's ruling,
+    openxFactory#656 comment 5985046107, C4); and, in either, every absolute
+    path it holds (`-vI/r/lib`, `PERL5OPT=-I/r/lib -Mx`)."""
+    found = [] if option else [member]
+    if option:
+        if "=" in member:
+            found.append(member.split("=", 1)[1])
+        if not member.startswith("--"):
+            found.append(member[2:])
+    found += [member[at:] for at in range(1, len(member))
+              if member[at] in (os.sep, os.altsep)]
+    return [candidate for candidate in found if candidate]
+
+
+#: Every suffix a module is imported from: sources, bytecode (a sourceless
+#: `.pyc`) and extension modules (Copilot at openDox-code#86, r4180041203;
+#: the holder's ruling, openxFactory#656 comment 5986391296).
+_MODULE_SUFFIXES: tuple[str, ...] = tuple(importlib.machinery.all_suffixes())
+
+#: The suffixes a module's source is read from (`.py`), whose bytecode
+#: cache Python imports in its place (`_bytecode_caches`).
+_SOURCE_SUFFIXES: tuple[str, ...] = tuple(
+    importlib.machinery.SOURCE_SUFFIXES)
+
+#: The optimization levels a bytecode cache is written at: none, `-O` and
+#: `-OO` (`importlib.util.cache_from_source`).
+_OPTIMIZATIONS = ("", 1, 2)
+
+
+def _bytecode_caches(source: str) -> list[str]:
+    """The bytecode caches Python could import the module whose source is
+    `source` from, in its place (Copilot at openDox-code#86, r4181465499;
+    the holder's ruling, openxFactory#656 comment 5989835334): this
+    interpreter's own cache name at every optimization level
+    (`importlib.util.cache_from_source`), whether or not a file is there
+    yet, in the `__pycache__` beside the source, where a broker's
+    interpreter writes and reads it whatever cache prefix this process
+    has; and every cache already there under another interpreter's tag
+    (`__pycache__/<stem>.*.pyc`). Each is judged as resolved, links
+    followed."""
+    directory, name = os.path.split(source)
+    pycache = os.path.join(directory, "__pycache__")
+    caches: list[str] = []
+    for optimization in _OPTIMIZATIONS:
+        try:
+            cached = importlib.util.cache_from_source(
+                source, optimization=optimization)
+        except NotImplementedError:         # no cache tag: none written
+            break
+        caches.append(os.path.join(pycache, os.path.basename(cached)))
+    stem = name.rpartition(".")[0]
+    try:
+        present = sorted(os.listdir(pycache))
+    except (OSError, ValueError):
+        present = []
+    _spend(1 + len(present))
+    caches += [os.path.join(pycache, entry) for entry in present
+               if entry.startswith(stem + ".") and entry.endswith(".pyc")]
+    return caches
+
+
+
+def _module_paths(name: str, *, roots: list[str]) -> list[str]:
+    """The files a module named after `-m` could be imported from, under
+    each of `roots` (`_python_roots`: the start directory, which `python -m`
+    imports from first, and the effective `PYTHONPATH`; r4180717772),
+    whether or not a file is there yet: its whole dotted name as a package
+    directory (`a/b/c`) and as a module with every import suffix
+    (`a/b/c.py`, `a/b/c.pyc`, `a/b/c.<abi>.so`; `_MODULE_SUFFIXES`;
+    r4179241555, r4180041203); every prefix of the dotted name as a module
+    file with every suffix (`a.py`, `a/b.py`, ...), since a parent that is
+    a plain module runs before the import finds it is no package (r4181006328;
+    the holder's ruling, openxFactory#656 comment 5988818366); every
+    package's initializer on the way
+    (`a/__init__.py`, `a/b/__init__.py`, ...), which runs first; and the
+    final package's `__main__`, which `-m` runs for a package
+    (r4180717725; the holder's ruling, openxFactory#656 comment
+    5988088910), each with every suffix; and each source's bytecode cache
+    (`_bytecode_caches`; r4181465499; the holder's ruling,
+    openxFactory#656 comment 5989835334). A namespace package needs no
+    `__init__`, so a dotted name can reach any directory under a root;
+    every name on the way is one `_traversed` judges, links followed."""
+    parts = name.split(".")
+    found: list[str] = []
+    for root in roots:
+        base = os.path.join(root, *parts)
+        found.append(base)
+        for count in range(1, len(parts) + 1):
+            # each prefix, the whole name last, as a module file and as a
+            # package's initializer, with every suffix, paid for before it
+            # is built
+            _spend(count)
+            package = os.path.join(root, *parts[:count])
+            found += [package + suffix for suffix in _MODULE_SUFFIXES]
+            found += [os.path.join(package, "__init__" + suffix)
+                      for suffix in _MODULE_SUFFIXES]
+            for source in _SOURCE_SUFFIXES:
+                # each source's bytecode cache, read in its place
+                found += _bytecode_caches(package + source)
+                found += _bytecode_caches(
+                    os.path.join(package, "__init__" + source))
+        found += [os.path.join(base, "__main__" + suffix)
+                  for suffix in _MODULE_SUFFIXES]
+        found += [cache for source in _SOURCE_SUFFIXES
+                  for cache in _bytecode_caches(
+                      os.path.join(base, "__main__" + source))]
+    return found
+
+
+#: Python's own short options that take a value (`-W arg`, `-X opt`), and
+#: the one that ends its options with an inline script (`-c`).
+_PYTHON_VALUE_LETTERS = "WXc"
+
+
+def _module_operands(members) -> dict[int, str]:
+    """Each module a command names after `-m`, by the index of the member
+    that names it, read by Python's own option rules (Copilot at
+    openDox-code#86, r4180041213; the holder's ruling, openxFactory#656
+    comment 5986391296): `-m X`, `-mX` and a cluster `-BmX`, read letter by
+    letter up to `m`, whose module is the rest of the cluster or else the
+    next member; a letter that takes a value (`-W`, `-X`) or `-c` ends the
+    cluster. Asked of every option member before `--`, whatever the
+    program, FAIL-CLOSED."""
+    modules: dict[int, str] = {}
+    for index, member in enumerate(members):
+        if not index:
+            continue
+        if member == "--":
+            break
+        if not member.startswith("-") or member.startswith("--"):
+            continue
+        for at in range(1, len(member)):
+            _spend()
+            letter = member[at]
+            if letter == "m":
+                if member[at + 1:]:
+                    modules[index] = member[at + 1:]
+                elif index + 1 < len(members):
+                    modules[index + 1] = members[index + 1]
+                break
+            if letter in _PYTHON_VALUE_LETTERS:
+                break
+    return modules
+
+
+def in_repository_program(binding, *, root: Path | str) -> str | None:
+    """The member of `binding`'s broker command that names a file inside the
+    served repository, or None (T100 follow-on, A2; RULED by Brett Heap,
+    openxFactory#656 comment 5982436447, item 2, "Refuse in-repo programs").
+
+    Trust is of the binding's RECORD (`binding_digest`). A program inside the
+    repository is not in that record, and a pull can change it after the
+    record was trusted, so a binding whose command names one is never
+    trusted: it is refused by name where trust is recorded (`recorded_for`)
+    and wherever it is judged (`verdict_for`, `intake_verdict_for`,
+    `require_admitted`), with the remedy "install the broker outside the
+    repository" (`REMEDY_IN_REPOSITORY`).
+
+    Every member of the base invocation is asked, placeholders filled; of a
+    member that is an option (`-v`, `--config=VALUE`), only its value is. The
+    program itself is never an option, whatever its name, and nothing after
+    a `--` member is one (Copilot at openDox-code#86, r4179076944). A
+    member names a file inside the repository where, as the broker runs it
+    (`in_repository_argv`), any name on the way to what it names is the
+    served root or lies under it (`_traversed`), and so does a module named
+    after `-m` that could be imported from there (`_module_paths`). A
+    binding no broker answers has no command."""
+    if binding.credential_source() != binding_mod.CREDENTIAL_FROM_BROKER:
+        return None
+    return in_repository_argv(binding.substituted_argv(), root=root)
+
+
+def _from_the_root(candidate: str, *, program: bool, served: Path) -> bool:
+    """Whether a relative `candidate` is judged from the served root as
+    well: where it reads as a path the repository's author wrote, its first
+    name being one the root holds (`tools/broker.py`, `tools`) or `.` or
+    `..`. Not an absolute path, which names one place; not the program's
+    own bare name, which the search path finds; and not a word whose first
+    name the root does not hold: a URL (`https:`), or the rest of an option
+    cluster (`I/usr/lib` of `-wI/usr/lib`)."""
+    if os.path.isabs(candidate):
+        return False
+    if program and not _has_a_separator(candidate):
+        return False
+    head = candidate.replace(os.altsep or os.sep, os.sep).split(os.sep)[0]
+    return head in (os.curdir, os.pardir) or os.path.lexists(
+        os.path.join(served, head))
+
+
+def in_repository_argv(members, *, root: Path | str) -> str | None:
+    """The member of a broker command `members` that names a file inside
+    the served repository, or None: `in_repository_program`'s rule, for a
+    command no binding carries yet (the console intake's broker). A member
+    whose links cannot be followed to an end (`_LINK_HOPS`) is returned as
+    well, FAIL-CLOSED; `broker_command_refused` refuses it as unreadable.
+
+    It is judged as it runs (`_Context`; Copilot at openDox-code#86,
+    r4179241532, r4179366288): from `BROKER_WORKING_DIRECTORY`, on the
+    search path the broker inherits. A relative path whose first name the
+    served root holds is judged from the root as well, FAIL-CLOSED, as the
+    repository's author would have written it (F16.1 as T007 batch P amends
+    it; `_from_the_root`), and so is a bare word, other than the program's
+    own, that names a file there. A member names a file inside the
+    repository where any name on the way to it (`_traversed`) is the
+    served root or lies under it, for every file the member could name
+    (`_candidates`): an option's value, attached or after `=`, and every
+    absolute path it holds (the holder's ruling, openxFactory#656 comment
+    5985046107, C4). Its launchers are unwrapped first (`_unwrapped`; the
+    holder's ruling, openxFactory#656 comment 5984069416): each launcher's
+    own program, and each value and operand of its (`env -C DIR`, `env
+    NAME=VALUE`, `xargs -a FILE`, `time -o FILE`), are judged in the
+    context they are read in, and the command it starts is judged as a
+    command of its own, in the context the launchers left it. A file a
+    launcher writes inside the repository is refused too, an accepted
+    strictness. A member past the bounds of what is judged
+    (`_unbounded_member`) is returned unjudged, FAIL-CLOSED (the holder's
+    ruling, openxFactory#656 comment 5989835334).
+
+    THE ACCEPTED LIMIT (the holder's rulings, openxFactory#656 comments
+    5988088910 and 5988818366): code imported BY NAME from a directory
+    outside the repository that holds links into it is not judged, which
+    only an operator can set up: a script outside the repository importing
+    from such a directory (Copilot at openDox-code#86, r4180717772), and a
+    module `-m` finds on the interpreter's own default import path, its
+    site-packages, a `.pth` file or an editable install (r4181006277). A
+    `-m` module is judged under its start directory and its effective
+    `PYTHONPATH` (`_python_roots`), and so is every package and every
+    parent module on the way (`_module_paths`)."""
+    unbounded = _unbounded_member(members)
+    if unbounded is not None:
+        return unbounded
+    return _within_budget(lambda: _named_inside(members, root=root),
+                          over=lambda: _first_member(members),
+                          members=members)
+
+
+def _named_inside(members, *, root: Path | str) -> str | None:
+    """`in_repository_argv` for members within the bounds: the member that
+    names a file inside the served repository, or whose links pass
+    `_LINK_HOPS`, or None."""
+    try:
+        return _in_repository_member(members, root=root)
+    except _TooManyLinks as deep:
+        return deep.member
+
+
+def _in_repository_member(members, *, root: Path | str) -> str | None:
+    """`in_repository_argv`'s work. Raises `_TooManyLinks`, naming the
+    member, for a member whose links pass `_LINK_HOPS`."""
+    served = Path(resolved_root(root))
+
+    under = str(served).rstrip(os.sep) + os.sep
+
+    def lies_under(name: Path) -> bool:
+        # strictly under the served root: a prefix of the name's text, which
+        # `_traversed` builds with no `.` or `..` in it, linear in its depth
+        return str(name).startswith(under)
+
+    def inside(found: list[str]) -> bool:
+        # A name on the way counts where it lies INSIDE the root (a link the
+        # repository holds); the root itself is passed through by every path
+        # joined to it, so only the end may be the root itself.
+        for path in found:
+            *on_the_way, end = _traversed(path)
+            if end == served or lies_under(end):
+                return True
+            if any(lies_under(name) for name in on_the_way):
+                return True
+        return False
+
+    from_the_root = _Context(str(served), None)
+
+    def named(member: str, *, option: bool, first: bool,
+              context: _Context) -> list[str]:
+        found: list[str] = []
+        for candidate in _candidates(member, option=option):
+            program = first and candidate == member
+            found += _located(candidate, first=program, context=context)
+            if _from_the_root(candidate, program=program, served=served):
+                # FAIL-CLOSED: also as the repository's author wrote it,
+                # from the served root (F16.1 as T007 batch P amends it:
+                # `["python3", "tools/broker.py"]` is refused)
+                found += _located(candidate, first=False,
+                                  context=from_the_root)
+        return found
+
+    def judged(member: str, found: list[str]) -> bool:
+        _spend(len(found))
+        try:
+            return inside(found)
+        except _TooManyLinks:
+            raise _TooManyLinks(member) from None
+
+    unwrapped = _unwrapped(members)
+    for launcher, context in unwrapped.launchers:
+        if judged(launcher, _located(launcher, first=True, context=context)):
+            return launcher
+    for value, context in unwrapped.values:
+        if judged(value, named(value, option=value.startswith("-"),
+                               first=False, context=context)):
+            return value
+    members = unwrapped.command
+    context = unwrapped.context
+    modules = _module_operands(members)
+    positional = False
+    for index, member in enumerate(members):
+        if index and member == "--" and not positional:
+            positional = True
+            continue
+        found = named(member, option=bool(index) and member.startswith("-")
+                      and not positional, first=index == 0, context=context)
+        if index in modules and not positional:
+            found += _module_paths(modules[index], roots=_python_roots(
+                context, root=served))
+        if judged(member, found):
+            return member
+    return None
+
+
+def names_a_path_inside(value: str, *, root: Path | str) -> bool:
+    """Whether `value`, or any `os.pathsep`-separated part of it, names a
+    path inside the served repository at `root`, by `in_repository_argv`'s
+    rule for an option's value: from `BROKER_WORKING_DIRECTORY` and from the
+    served root, every name on the way, links followed. A broker's
+    environment carries no such value (F16.1 as T007 batch P amends it;
+    `doxbench_provider.broker_environment`), and no part past the bounds of
+    what is judged either (`_unbounded_member`, FAIL-CLOSED; the holder's
+    ruling, openxFactory#656 comment 5989835334)."""
+    return _within_budget(lambda: any(part and (
+        _unbounded_member([part]) is not None or _named_inside(
+            ["opendox-environment", f"--value={part}"], root=root) is not None)
+        for part in value.split(os.pathsep)), over=lambda: True)
+
+
+#: Shells: an option cluster holding `c` gives one an inline script.
+_SHELLS = frozenset({"sh", "bash", "rbash", "zsh", "dash", "ksh", "mksh",
+                     "pdksh", "ash", "yash", "posh", "fish", "csh", "tcsh"})
+
+
+class _Interpreter(NamedTuple):
+    """How a shell or an interpreter reads its own options, as far as the
+    inline-script rule needs (Copilot at openDox-code#86, r4179241583,
+    r4179241614): the short letters that give it an inline script, those
+    that take a value (attached, or the next member), those whose value is
+    only ever attached (the rest of the cluster), and those after which only
+    the program's own operands follow (`python -m`); any other letter, or a
+    digit (`perl -l0e`), is read past; the long options that give an inline script, take
+    a value, or end its options (`pwsh -File`); how many operands it reads
+    before its script (`flock FILE`; None reads every member, as `su` and
+    `pwsh` do); whether `+o` is an option (a shell's); and whether option
+    names are compared without regard to case (PowerShell's)."""
+
+    inline: str = ""
+    takes: str = ""
+    attached: str = ""
+    ends: str = ""
+    longs: frozenset[str] = frozenset()
+    long_values: frozenset[str] = frozenset()
+    long_ends: frozenset[str] = frozenset()
+    operands: int | None = 0
+    plus: bool = False
+    folded: bool = False
+
+
+_SHELL = _Interpreter(inline="c", takes="oO",
+                      long_values=frozenset({"--rcfile", "--init-file"}),
+                      plus=True)
+_NODE = _Interpreter(
+    inline="ep", takes="rC", longs=frozenset({"--eval", "--print"}),
+    long_values=frozenset({
+        "--require", "--import", "--loader", "--experimental-loader",
+        "--conditions", "--input-type", "--env-file", "--title",
+        "--inspect-port", "--redirect-warnings", "--report-dir",
+        "--report-filename", "--stack-trace-limit", "--disable-warning",
+        "--watch-path", "--test-reporter", "--test-reporter-destination",
+        "--openssl-config", "--icu-data-dir", "--dns-result-order",
+        "--unhandled-rejections", "--run"}))
+_PWSH = _Interpreter(
+    longs=frozenset({"-c", "-command", "--command", "-e", "-ec",
+                     "-encodedcommand", "--encodedcommand", "-cwa",
+                     "-commandwithargs"}),
+    long_ends=frozenset({"-f", "-file", "--file"}), operands=None,
+    folded=True)
+_SU = _Interpreter(inline="c", takes="gGswu",
+                   longs=frozenset({"--command", "--session-command"}),
+                   long_values=frozenset({"--shell", "--group", "--supp-group",
+                                          "--whitelist-environment", "--user"}),
+                   operands=None)
+
+#: Each shell and interpreter, by its file name without a version suffix.
+_INTERPRETERS: dict[str, _Interpreter] = {
+    **{shell: _SHELL for shell in _SHELLS},
+    "fish": _Interpreter(
+        inline="cC", longs=frozenset({"--command", "--init-command"}),
+        long_values=frozenset({"--features", "--debug", "--debug-output",
+                               "--profile", "--profile-startup"})),
+    "python": _Interpreter(inline="c", takes="WX", ends="m",
+                           long_values=frozenset(
+                               {"--check-hash-based-pycs"})),
+    "pypy": _Interpreter(inline="c", takes="WX", ends="m"),
+    "jython": _Interpreter(inline="c", takes="WX", ends="m"),
+    "perl": _Interpreter(inline="eE", takes="IMm", attached="ixdDC"),
+    # Lane openXfactory-3 D7 F1, holder ruled fix now (openxFactory#656
+    # comment 5988369111): raku, perl6's current name, is read as perl is
+    # (perl6 is perl by its version suffix, `_unversioned`).
+    "raku": _Interpreter(inline="eE", takes="IMm", attached="ixdDC"),
+    "ruby": _Interpreter(inline="e", takes="IrCE", attached="FKTxW"),
+    "php": _Interpreter(inline="rRBE", takes="cdzt", ends="f"),
+    "lua": _Interpreter(inline="e", takes="l"),
+    "luajit": _Interpreter(inline="e", takes="lj", attached="O", ends="b"),
+    "node": _NODE, "nodejs": _NODE, "bun": _NODE,
+    "osascript": _Interpreter(inline="e", takes="ls"),
+    # Lane openXfactory-3 D7 early findings N1, holder ruled fix now: julia
+    # (-e/--eval, -E/--print), Rscript (-e) and R (-e).
+    "julia": _Interpreter(
+        inline="eE", takes="JHLtpC", attached="Og",
+        longs=frozenset({"--eval", "--print"}),
+        long_values=frozenset({"--sysimage", "--home", "--load",
+                               "--threads", "--procs", "--cpu-target",
+                               "--machine-file"})),
+    "Rscript": _Interpreter(inline="e"),
+    # R's -f/--file names its script, and R's own options are still read
+    # after it (fail-closed); --args passes the rest to the script.
+    "R": _Interpreter(inline="e", takes="dgf",
+                      long_values=frozenset({"--debugger", "--gui",
+                                             "--file"}),
+                      long_ends=frozenset({"--args"})),
+    "flock": _Interpreter(inline="c", takes="wE",
+                          longs=frozenset({"--command"}),
+                          long_values=frozenset({"--timeout", "--wait",
+                                                 "--conflict-exit-code"}),
+                          operands=1),
+    "su": _SU, "runuser": _SU,
+    "pwsh": _PWSH, "powershell": _PWSH,
+}
+
+
+class _Option(NamedTuple):
+    """One option of a launcher: the option it is another name for (its
+    short letter, or its own long name), and what it takes, in getopt's own
+    spelling: "" nothing, ":" a value (attached, or the next member), "::"
+    a value only where attached (after `=` for a long option)."""
+
+    key: str
+    takes: str
+
+
+class _Launcher(NamedTuple):
+    """How one launcher reads its own arguments before the command it
+    starts, as its getopt does (the holder's ruling, openxFactory#656
+    comment 5985046107, C1): its short options and its long options, how
+    many operands precede the command (`timeout`'s duration), and whether a
+    dash and a number is an option (`nice -5`)."""
+
+    short: dict[str, str]
+    long: dict[str, _Option]
+    operands: int = 0
+    numeric: bool = False
+
+
+def _launcher(short: str, longs: str = "", *, operands: int = 0,
+              numeric: bool = False) -> _Launcher:
+    """A launcher's grammar from getopt's own spellings: `short` as getopt's
+    option string (`C:` takes a value, `e::` one only attached), and
+    `longs` as its long options, each suffixed as `short` is and followed by
+    `/x` where it is short option x's other name. `--help` and `--version`
+    run no command, so every launcher reads them."""
+    letters: dict[str, str] = {}
+    at = 0
+    while at < len(short):
+        letter = short[at]
+        at += 1
+        takes = ""
+        while at < len(short) and short[at] == ":":
+            takes += ":"
+            at += 1
+        letters[letter] = takes
+    named: dict[str, _Option] = {}
+    for word in ("help version " + longs).split():
+        name, _slash, key = word.partition("/")
+        bare = name.rstrip(":")
+        named[bare] = _Option(key or bare, name[len(bare):])
+    return _Launcher(letters, named, operands, numeric)
+
+
+#: THE COMMON LAUNCHERS (the holder's ruling, openxFactory#656 comment
+#: 5984069416, items 1 and 3), each unwrapped to the program it starts so
+#: the rules judge that program: `env` (with `-S` and `NAME=value`),
+#: `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `chrt`, `ionice`,
+#: `taskset`, and wrappers of the same class: `time`, `xargs`, `busybox`
+#: (whose first operand is the applet it runs), `flock`, `sudo`, `doas`.
+#: Each is read by its own getopt grammar, the GNU coreutils, findutils
+#: and util-linux ones where there are several (C1). An xargs is unwrapped
+#: so what it names is judged, and is then refused as unreadable whatever
+#: it starts (`_builds_its_command`; ruling 5988818366).
+_LAUNCHERS: dict[str, _Launcher] = {
+    "env": _launcher(
+        "a:C:iS:u:v0",
+        "argv0:/a chdir:/C debug/v ignore-environment/i null/0 "
+        "split-string:/S unset:/u block-signal:: default-signal:: "
+        "ignore-signal:: list-signal-handling"),
+    "nice": _launcher("n:", "adjustment:/n", numeric=True),
+    "nohup": _launcher(""),
+    "timeout": _launcher(
+        "fk:ps:v", "foreground/f kill-after:/k preserve-status/p signal:/s "
+        "verbose/v", operands=1),
+    "stdbuf": _launcher("i:o:e:", "input:/i output:/o error:/e"),
+    "setsid": _launcher("cfhVw", "ctty/c fork/f help/h version/V wait/w"),
+    "chrt": _launcher(
+        "abdD:efhimoP:pRrT:vV",
+        "all/a batch/b deadline/d ext/e fifo/f help/h idle/i max/m other/o "
+        "pid/p reset-on-fork/R rr/r sched-deadline:/D sched-period:/P "
+        "sched-runtime:/T verbose/v version/V", operands=1),
+    "ionice": _launcher(
+        "c:hn:p:P:tu:V", "class:/c classdata:/n help/h ignore/t pid:/p "
+        "pgid:/P uid:/u version/V"),
+    "taskset": _launcher("achpV", "all-tasks/a cpu-list/c help/h pid/p "
+                         "version/V", operands=1),
+    "time": _launcher("af:o:pqvV", "append/a format:/f output:/o "
+                      "portability/p quiet/q verbose/v version/V"),
+    "xargs": _launcher(
+        "0a:d:E:e::hI:i::L:l::n:oprs:txP:",
+        "null/0 arg-file:/a delimiter:/d eof::/e replace::/I max-lines::/l "
+        "max-args:/n open-tty/o interactive/p no-run-if-empty/r "
+        "max-chars:/s verbose/t show-limits exit/x max-procs:/P "
+        "process-slot-var: help/h"),
+    "busybox": _launcher(""),
+    "flock": _launcher(
+        "eE:Fhnosuw:xV",
+        "shared/s exclusive/x unlock/u nonblocking/n nb/n timeout:/w "
+        "wait:/w conflict-exit-code:/E close/o no-fork/F verbose help/h "
+        "version/V", operands=1),
+    "sudo": _launcher(
+        "Aa:BbC:c:D:Eeg:Hh::iKklNnPp:R:r:SsT:t:U:u:Vv",
+        "askpass/A auth-type:/a background/b bell/B close-from:/C "
+        "login-class:/c chdir:/D preserve-env:: edit/e group:/g set-home/H "
+        "help/h host: login/i remove-timestamp/K reset-timestamp/k list/l "
+        "non-interactive/n no-update/N preserve-groups/P prompt:/p "
+        "chroot:/R role:/r stdin/S shell/s type:/t command-timeout:/T "
+        "other-user:/U user:/u version/V validate/v"),
+    "doas": _launcher("a:C:Lnsu:"),
+}
+
+#: The options after which what a command names can no longer be judged
+#: from its words (C1, fail-closed): a program told another name to run as
+#: (`env --argv0`), a new root every path is read in (`sudo --chroot`), and
+#: a login shell's working directory, the target user's home (`sudo -i`).
+#: Each makes the command unreadable.
+_UNREADABLE_OPTIONS = frozenset({("env", "a"), ("sudo", "R"), ("sudo", "i")})
+
+#: How deep launchers are unwrapped. A command that still starts with one
+#: past this is refused (`REASON_UNREADABLE_COMMAND`; Copilot at
+#: openDox-code#86, r4179366319).
+_LAUNCHER_DEPTH = 32
+
+def _is_assignment(member: str) -> bool:
+    """Whether `member`, after env's options and before the command, is an
+    assignment, as GNU env reads one: any member holding a `=`, whatever
+    its name (`A-B=x`, `1A=x`; Copilot at openDox-code#86, r4181006390; the
+    holder's ruling, openxFactory#656 comment 5988818366). Its value is
+    judged as a path."""
+    return "=" in member
+
+
+#: `nice -5`, `nice --5`, `nice -+5`: an adjustment, nice's own option.
+_NUMERIC_OPTION = re.compile(r"-[-+]?[0-9]+")
+
+#: What `env -S` splits only where its string holds none of them (C1): a
+#: backslash escape (`\_` is a space to env and not to a shell's split), a
+#: `${VAR}` env expands, and a `#` that begins env's comment.
+_UNSPLITTABLE = frozenset("\\$#")
+
+
+class _Unwrapped(NamedTuple):
+    """A broker command with its launchers unwrapped: each launcher's
+    program, and each value and operand of theirs (which could name a file:
+    `env -C DIR`, `env NAME=VALUE`, `xargs -a FILE`), with the context each
+    is read in; the command they start, and the context it runs in.
+    `unreadable` is a member that cannot be read to the program it runs: an
+    option its launcher does not have, or has by more than one name, an
+    option after which a name cannot be judged, an `env -S` string env would
+    not split as a shell does, an assignment given to sudo, or a launcher
+    still left at `_LAUNCHER_DEPTH`."""
+
+    launchers: tuple[tuple[str, _Context], ...]
+    values: tuple[tuple[str, _Context], ...]
+    command: tuple[str, ...]
+    context: _Context
+    unreadable: str | None = None
+    unreadable_because: str = ""
+
+
+class _Unreadable(Exception):
+    """A launcher's argument that cannot be read (`_Unwrapped.unreadable`),
+    and the reason it is refused for: `REASON_UNREADABLE_COMMAND`, or, for
+    an `env -S` string env would not split as a shell does,
+    `REASON_INLINE_SCRIPT` (F16.1 as T007 batch P amends it, for the
+    holder's ruling, openxFactory#656 comment 5985046107, C1)."""
+
+    def __init__(self, member: str, reason: str | None = None):
+        super().__init__(member)
+        self.member = member
+        self.reason = reason or REASON_UNREADABLE_COMMAND
+
+
+def _long_option(grammar: _Launcher, spelled: str) -> _Option | None:
+    """The long option `--spelled` names, as GNU getopt_long reads it: its
+    exact name, or the one option it is an unambiguous beginning of (`--chd`
+    is `--chdir`). None where it names none, or more than one (`--d` may be
+    `--debug` or `--default-signal`)."""
+    exact = grammar.long.get(spelled)
+    if exact is not None:
+        return exact
+    matches = {option for name, option in grammar.long.items()
+               if name.startswith(spelled)}
+    return matches.pop() if len(matches) == 1 else None
+
+
+def _launcher_name(member: str, *, context: _Context) -> str | None:
+    """The launcher `member` runs, by the name it is called by or the file
+    it resolves to, or None."""
+    for name in _program_names(member, first=True, context=context):
+        if name in _LAUNCHERS:
+            return name
+    return None
+
+
+def _launcher_options(name: str, rest: tuple[str, ...], context: _Context,
+                      values: list[tuple[str, _Context]],
+                      chdirs: list[int]):
+    """Read launcher `name`'s options from `rest`, as its getopt does:
+    returns how many members they took, the context they leave, and, for
+    `env -S`, the words its string splits into (else None). Each value is
+    added to `values` in the context it is read in. `chdirs` counts the
+    working directories this launcher was given, across an `env -S`
+    string's re-reading. Raises `_Unreadable`."""
+    grammar = _LAUNCHERS[name]
+
+    def given(key: str, value: str | None) -> list[str] | None:
+        nonlocal context
+        if (name, key) in _UNREADABLE_OPTIONS:
+            raise _Unreadable(value if value is not None else key)
+        if name == "env" and key == "i":
+            context = context._replace(path=None, pythonpath=())
+        if value is None:
+            return None
+        if name == "env" and key == "S":
+            if _UNSPLITTABLE & set(value):
+                raise _Unreadable(value, REASON_INLINE_SCRIPT)
+            try:
+                return shlex.split(value)
+            except ValueError:
+                raise _Unreadable(value, REASON_INLINE_SCRIPT) from None
+        values.append((value, context))
+        if (name, key) in (("env", "C"), ("sudo", "D")):
+            # ONE working directory per launcher, counting one an `env -S`
+            # string gives: GNU env applies only the last, from the
+            # directory it started in, which is not modelled; a second is
+            # refused as unreadable (Copilot at openDox-code#86,
+            # r4180717752; the holder's ruling, #656 5988088910)
+            chdirs[0] += 1
+            if chdirs[0] > 1:
+                raise _Unreadable(value)
+            # the directory as the system enters it, links followed
+            context = context._replace(cwd=_resolved_path(
+                os.path.join(context.cwd, value)))
+        elif name == "env" and key == "u" and value == "PATH":
+            context = context._replace(path=None)
+        elif name == "env" and key == "u" and value == "PYTHONPATH":
+            context = context._replace(pythonpath=())
+        return None
+
+    index = 0
+    while index < len(rest):
+        _spend()
+        member = rest[index]
+        if member == "--":
+            return index + 1, context, None
+        if name == "env" and member == "-":         # `env -`: `-i`
+            context = context._replace(path=None, pythonpath=())
+            return index + 1, context, None
+        if not member.startswith("-") or member == "-":
+            break
+        index += 1
+        if grammar.numeric and _NUMERIC_OPTION.fullmatch(member):
+            continue
+        if member.startswith("--"):
+            spelled, equals, value = member[2:].partition("=")
+            option = _long_option(grammar, spelled)
+            if option is None or (equals and not option.takes):
+                raise _Unreadable(member)
+            if not equals:
+                value = None
+                if option.takes == ":":
+                    if index == len(rest):
+                        raise _Unreadable(member)
+                    value = rest[index]
+                    index += 1
+            split = given(option.key, value)
+            if split is not None:
+                return index, context, split
+            continue
+        at = 1
+        while at < len(member):
+            letter = member[at]
+            at += 1
+            takes = grammar.short.get(letter)
+            if takes is None:
+                raise _Unreadable(member)
+            if not takes:
+                given(letter, None)
+                continue
+            value = member[at:] or None
+            if value is None and takes == ":":
+                if index == len(rest):
+                    raise _Unreadable(member)
+                value = rest[index]
+                index += 1
+            split = given(letter, value)
+            if split is not None:
+                return index, context, split
+            break
+    return index, context, None
+
+
+def _unwrapped(members) -> _Unwrapped:
+    """`members` with every leading launcher unwrapped (at most
+    `_LAUNCHER_DEPTH` deep), each read by its own grammar (`_LAUNCHERS`),
+    from the context every broker starts in, as each changes it: `env -C`
+    and `sudo -D`/`--chdir` move the working directory, and `env PATH=...`,
+    `env -i` and `env -u PATH` change the search path. Each launcher's
+    operands are judged as its values are, and so is every value env
+    assigns (`_is_assignment`)."""
+    command = tuple(members)
+    context = _broker_context()
+    launchers: list[tuple[str, _Context]] = []
+    values: list[tuple[str, _Context]] = []
+    chdirs = [0]
+    reread: str | None = None
+    for _depth in range(_LAUNCHER_DEPTH):
+        if not command:
+            break
+        if reread is not None:
+            # `env -S`: the same launcher reads its split string, judged
+            # once, as the member it is and in the context it was judged
+            # in, however the string moves the working directory (Copilot
+            # at openDox-code#86, r4182002510; the holder's ruling,
+            # openxFactory#656 comment 5990845570)
+            name, reread = reread, None
+        else:
+            name = _launcher_name(command[0], context=context)
+            if name is None:
+                break
+            launchers.append((command[0], context))
+        rest = command[1:]
+        try:
+            index, context, split = _launcher_options(name, rest, context,
+                                                      values, chdirs)
+        except _Unreadable as unreadable:
+            return _Unwrapped(tuple(launchers), tuple(values), (), context,
+                              unreadable=unreadable.member,
+                              unreadable_because=unreadable.reason)
+        if split is not None:
+            # `env -S STRING`: STRING's words are env's own arguments, read
+            # again by env's grammar, before what followed them.
+            reread = name
+            command = (command[0],) + tuple(split) + rest[index:]
+            continue
+        chdirs = [0]                # the next launcher is another program
+        if name == "sudo" and index < len(rest) and _is_assignment(
+                rest[index]):
+            # sudo's `VAR=value`: whether sudo honours it is its policy's
+            # (`env_reset`, `secure_path`), not the command's words, so it
+            # is refused as unreadable, `PATH=` included (FAIL-CLOSED; the
+            # writer's sibling of r4181006390; the holder's ruling,
+            # openxFactory#656 comment 5988818366)
+            return _Unwrapped(tuple(launchers), tuple(values), (), context,
+                              unreadable=rest[index],
+                              unreadable_because=REASON_UNREADABLE_COMMAND)
+        if name in ("sudo", "doas") and index < len(rest) and not (
+                _has_a_separator(rest[index])):
+            # the search path sudo's or doas's policy picks (`secure_path`)
+            # is not judged, so a bare program name is refused as
+            # unreadable and an absolute path is required (FAIL-CLOSED;
+            # Copilot at openDox-code#86, r4182002567; the holder's ruling,
+            # openxFactory#656 comment 5990845570)
+            return _Unwrapped(tuple(launchers), tuple(values), (), context,
+                              unreadable=rest[index],
+                              unreadable_because=REASON_UNREADABLE_COMMAND)
+        if name == "env":
+            while index < len(rest) and _is_assignment(rest[index]):
+                variable, assigned = rest[index].split("=", 1)
+                # A search path's every directory is judged (`PATH=a:b`).
+                values.extend((part, context)
+                              for part in assigned.split(os.pathsep))
+                if variable == "PATH":
+                    context = context._replace(path=assigned)
+                elif variable == "PYTHONPATH":
+                    context = context._replace(
+                        pythonpath=tuple(assigned.split(os.pathsep)))
+                index += 1
+        operands = rest[index:index + _LAUNCHERS[name].operands]
+        values.extend((operand, context) for operand in operands)
+        command = rest[index + len(operands):]
+    else:
+        if command and _launcher_name(command[0],
+                                      context=context) is not None:
+            return _Unwrapped(tuple(launchers), tuple(values), command,
+                              context, unreadable=command[0],
+                              unreadable_because=REASON_UNREADABLE_COMMAND)
+    return _Unwrapped(tuple(launchers), tuple(values), command, context)
+
+
+def _unversioned(name: str) -> str:
+    """A program's file name without a version suffix: `python3.12` and
+    `python3` are `python`, `perl5.36` is `perl`."""
+    return re.sub(r"[-.\d]+$", "", name) or name
+
+
+def _program_names(member: str, *, first: bool, context: _Context,
+                   search: _Context | None = None) -> set[str]:
+    """The names `member` could run as: its own file name and, where it
+    names a file (`_located`), that file's, links followed (`/bin/sh` may be
+    `dash`, and a link named `broker` may be `python3`), each without a
+    version suffix. Given `search`, a bare word is also looked for on its
+    search path (`_which`), as a wrapper that runs it would find it."""
+    names = {Path(member).name}
+    found = _located(member, first=first, context=context)
+    if search is not None and not _has_a_separator(member):
+        located = _which(member, search)
+        if located is not None:
+            found.append(located)
+    _spend(len(found) + sum(path.count(os.sep) for path in found))
+    names.update(Path(_resolved_path(path)).name for path in found)
+    return {_unversioned(name) for name in names if name}
+
+
+def _search_context(context: _Context, *, root: Path | str | None) -> _Context:
+    """`context` with the search path a broker is given: the one it
+    inherits, filtered as `doxbench_provider.broker_environment` filters
+    it, with no entry inside the served root; or the one a launcher
+    assigned (Copilot at openDox-code#86, r4182002637; the holder's ruling,
+    openxFactory#656 comment 5990845570)."""
+    if root is None or context.path != os.environ.get("PATH"):
+        return context
+    from opendox import doxbench_provider
+
+    return context._replace(path=_outside_the_budget(
+        lambda: doxbench_provider.broker_environment(
+            os.environ, root=root).get("PATH")))
+
+
+#: deno's global options, which may stand before its subcommand (lane
+#: openXfactory-3 D7 early findings N2, holder ruled fix now): flags, and
+#: those that take a value (attached after `=`, or the next member). Any
+#: `--unstable...` is a flag. A leading option that is none of these is
+#: refused as unreadable, fail-closed, as a launcher's is.
+_DENO_FLAGS = frozenset({"-q", "--quiet", "-h", "--help", "-V", "--version",
+                         "--unstable"})
+_DENO_VALUES = frozenset({"-L", "--log-level"})
+
+
+def _deno_subcommand(rest: tuple[str, ...]) -> str | None:
+    """deno's subcommand: the first member after its leading global options
+    (`deno --quiet eval ...`), or None where there is none. Raises
+    `_Unreadable` for a leading option deno's global grammar does not
+    hold."""
+    index = 0
+    while index < len(rest):
+        member = rest[index]
+        if not member.startswith("-") or member == "-":
+            return member
+        index += 1
+        option = member.partition("=")[0]
+        if option in _DENO_FLAGS or option.startswith("--unstable"):
+            continue
+        if option in _DENO_VALUES:
+            if "=" not in member:
+                index += 1
+            continue
+        if member[:2] in _DENO_VALUES:          # `-Linfo`
+            continue
+        raise _Unreadable(member)
+    return None
+
+
+def _gives_an_inline_script(name: str, rest: tuple[str, ...]) -> bool:
+    """Whether a program named `name`, followed by `rest`, is given an inline
+    script, read by its own grammar (`_INTERPRETERS`): a short cluster
+    letter by letter, so an attached script (`-cprint(1)`) and a cluster
+    (`-Sc`, `-nle`) are read, and an option's value is skipped; and only
+    until its script's operand, so an option given to the script itself
+    (`python /opt/broker.py -c profile`) is the script's (Copilot at
+    openDox-code#86, r4179241583, r4179241614).
+
+    A long option the table does not know, given without `=`, is read both
+    ways, FAIL-CLOSED: as a flag, and as taking the next member as its
+    value, the scan going on past it (`node --v8-pool-size 1 -e ...`;
+    Copilot at openDox-code#86, r4181006345; the holder's ruling,
+    openxFactory#656 comment 5988818366). Either reading that reaches an
+    inline script gives one, an accepted strictness (`node --no-warnings
+    /opt/x.js -e ...` is refused). A member read as a value is still judged
+    as a path (`in_repository_argv` judges every member). Each state, a
+    member and the operands read before it, is read at most once across
+    every reading, so the scan is linear (the holder's ruling,
+    openxFactory#656 comment 5989835334)."""
+    if name == "deno":
+        return _deno_subcommand(rest) == "eval"
+    spec = _INTERPRETERS.get(name)
+    if spec is None:
+        return False
+    pending = [(0, 0)]
+    read: set[tuple[int, int]] = set()
+    while pending:
+        if _reads_an_inline_script(spec, rest, *pending.pop(),
+                                   pending=pending, read=read):
+            return True
+    return False
+
+
+def _reads_an_inline_script(spec: _Interpreter, rest: tuple[str, ...],
+                            index: int, operands: int, *,
+                            pending: list[tuple[int, int]],
+                            read: set[tuple[int, int]]) -> bool:
+    """One reading for `_gives_an_inline_script`, from member `index` of
+    `rest` with `operands` of the program's own operands read: whether it
+    reaches an inline script. Each other reading it finds, an unknown long
+    option's value, is added to `pending`, as where to read from next. A
+    state in `read` was read already, by this reading or another, which
+    read on from it as this one would, so this one stops there."""
+    while index < len(rest):
+        _spend()
+        if (index, operands) in read:
+            return False
+        read.add((index, operands))
+        member = rest[index]
+        index += 1
+        if member == "--":
+            return False
+        spelled = member.lower() if spec.folded else member
+        if spelled.startswith("--") or (spec.folded and spelled.startswith(
+                "-") and len(spelled) > 1):
+            option, equals, _given = spelled.partition("=")
+            if option in spec.longs:
+                return True
+            if option in spec.long_ends:
+                return False
+            if option in spec.long_values and not equals:
+                index += 1
+            elif not equals:
+                # an option the table does not know may take the next
+                # member as its value: read that way as well (r4181006345)
+                pending.append((index + 1, operands))
+            continue
+        if len(member) > 1 and (member[0] == "-" or (
+                spec.plus and member[0] == "+")):
+            letters = member[1:]
+            at = 0
+            while at < len(letters):
+                _spend()
+                letter = letters[at]
+                if letter in spec.inline:
+                    return True
+                if letter in spec.ends:
+                    return False
+                if letter in spec.takes:
+                    if at + 1 == len(letters):
+                        index += 1          # its value is the next member
+                    break
+                if letter in spec.attached:
+                    break
+                at += 1
+            continue
+        if spec.operands is None:
+            continue
+        if operands < spec.operands:
+            operands += 1
+            continue
+        return False                        # the script's own operand
+    return False
+
+
+def inline_script(members, *, root: Path | str | None = None) -> str | None:
+    """The member of a broker command `members` that is a shell or an
+    interpreter given an INLINE script, or None (T100 follow-on, A2
+    extended; RULED by Brett Heap, openxFactory#656 comment 5983805990,
+    "Refuse inline scripts (Recommended)").
+
+    The command is asked with its launchers unwrapped (`_unwrapped`; the
+    holder's ruling, openxFactory#656 comment 5984069416), so an `env -S`
+    string is split and read as the command it is. Every member of the
+    command as written is asked too, not the program alone, so a wrapper of
+    the same class that is not in `_LAUNCHERS` (`busybox sh -c`, `xargs sh
+    -c`, `sudo bash -c`) hides none. A member's name is its own file name
+    and, where it resolves to a file, that file's, each without a version
+    suffix (`_program_names`); a bare word after the first is looked for on
+    the broker's search path as well, filtered of every entry inside `root`
+    where it is given (`_search_context`; r4182002637).
+
+    THE ACCEPTED LIMIT (the same ruling, item 4): a general program that
+    runs code from its own arguments, such as `awk 'PROGRAM'`, `sed` or
+    `find -exec`, is not judged as an inline script, nor is an interpreter
+    `_INTERPRETERS` does not hold, such as `guile -c` or `-e`, `elixir -e`,
+    `erl -eval`, `escript`, `groovy -e`, `scala -e`, `clojure -e`, `gjs -c`
+    and `swipl -g` (lane openXfactory-3 D7 F1; the holder's ruling,
+    openxFactory#656 comment 5988369111). A member whose own
+    options cannot be read (an unknown leading option of deno's) is
+    returned as well, FAIL-CLOSED; `broker_command_refused` refuses it as
+    unreadable."""
+    def work() -> str | None:
+        try:
+            return _inline_member(members, root=root)
+        except _Unreadable as unreadable:
+            return unreadable.member
+
+    return _within_budget(work, over=lambda: _first_member(members),
+                          members=members)
+
+
+def _first_member(members) -> str | None:
+    """The command's first member, which a judgment past its work budget
+    names, FAIL-CLOSED, or None for an empty command."""
+    return next(iter(members), None)
+
+
+def _inline_member(members, *, root: Path | str | None = None) -> str | None:
+    """`inline_script`'s work. Raises `_Unreadable` for a member whose own
+    options cannot be read. A member after the first, a bare word, is
+    looked for on the broker's filtered search path as well as in its start
+    directory (`_search_context`; r4182002637), so an alias a wrapper not
+    in `_LAUNCHERS` runs is judged by what it resolves to."""
+    unwrapped = _unwrapped(members)
+    for command, context in ((tuple(members), _broker_context()),
+                             (unwrapped.command, unwrapped.context)):
+        search: _Context | None = None
+        for index, member in enumerate(command):
+            _spend()
+            if not member or (index and member.startswith("-")):
+                continue
+            if index and search is None:
+                search = _search_context(context, root=root)
+            for name in _program_names(member, first=index == 0,
+                                       context=context,
+                                       search=search if index else None):
+                if _gives_an_inline_script(name, command[index + 1:]):
+                    return member
+    return None
+
+
+def _builds_its_command(unwrapped: _Unwrapped) -> bool:
+    """Whether a launcher `unwrapped` holds is xargs, which builds the
+    command it runs from its input: openDox's request on its standard
+    input, or an argument file's contents, neither of which can be judged
+    (Copilot at openDox-code#86, r4181006365, `xargs -a FILE -I S python3
+    S`; the holder's ruling, openxFactory#656 comment 5988818366)."""
+    return any(_launcher_name(launcher, context=context) == "xargs"
+               for launcher, context in unwrapped.launchers)
+
+
+def broker_command_refused(members, *,
+                           root: Path | str | None) -> str | None:
+    """Why the broker command `members` may never be trusted, or None: it
+    cannot be read to the program it runs (`REASON_UNREADABLE_COMMAND`; an
+    `env -S` string env would not split as a shell does is
+    `REASON_INLINE_SCRIPT`), it gives a shell or an interpreter an inline
+    script (`REASON_INLINE_SCRIPT`), or, at a known `root`, it names a file inside
+    the served repository (`REASON_IN_REPOSITORY`); or, after those, it runs
+    an xargs, whose command is built from input that cannot be judged
+    (`REASON_UNREADABLE_COMMAND`; `_builds_its_command`). A member past the
+    bounds of what is judged is refused as unreadable before anything else
+    is asked (`_unbounded_member`; the holder's ruling, openxFactory#656
+    comment 5989835334), and so is one whose judgment would pass its work
+    budget (`_WORK_BUDGET`; the holder's ruling, openxFactory#656 comment
+    5990845570). Asked where trust is recorded and wherever it is judged,
+    and of the console intake's broker."""
+    if _unbounded_member(members) is not None:
+        return REASON_UNREADABLE_COMMAND
+    return _within_budget(lambda: _command_refused(members, root=root),
+                          over=lambda: REASON_UNREADABLE_COMMAND,
+                          members=members)
+
+
+def _command_refused(members, *, root: Path | str | None) -> str | None:
+    """`broker_command_refused`'s work, within the command's work budget
+    (`_WORK_BUDGET`). Raises `_OverBudget` past it."""
+    unwrapped = _unwrapped(members)
+    if unwrapped.unreadable is not None:
+        return unwrapped.unreadable_because
+    try:
+        if _inline_member(members, root=root) is not None:
+            return REASON_INLINE_SCRIPT
+    except _Unreadable:
+        return REASON_UNREADABLE_COMMAND
+    if root is not None:
+        try:
+            named = _in_repository_member(members, root=root)
+        except _TooManyLinks:
+            # links past the kernel's own bound, or a loop: what it names
+            # cannot be judged (the holder's ruling, #656 5986391296)
+            return REASON_UNREADABLE_COMMAND
+        if named is not None:
+            return REASON_IN_REPOSITORY
+    if _builds_its_command(unwrapped):
+        # FAIL-CLOSED, and AFTER the inline-script and in-repository
+        # judgments, so each keeps its name: `xargs -a <root>/args ...` is
+        # in the repository and `xargs -n 1 python3 -c ...` an inline
+        # script (F16.1 as T007 batch P amends it; ruling 5988818366)
+        return REASON_UNREADABLE_COMMAND
+    return None
+
+
+def broker_refusal(binding, *, root: Path | str | None) -> str | None:
+    """`broker_command_refused` for `binding`'s broker command, placeholders
+    filled, or None for a binding no broker answers."""
+    if binding.credential_source() != binding_mod.CREDENTIAL_FROM_BROKER:
+        return None
+    return broker_command_refused(binding.substituted_argv(), root=root)
+
+
 def _judged(policy_of, binding, *, root: Path | str) -> TrustVerdict:
     """The verdict of the policy `policy_of()` answers, on `binding` at
-    `root`, held to it. A binding the catalog refuses is untrusted before any
-    policy is asked (`unservable_because`). A policy that raises trusts
-    nothing, and its words are not repeated (`reason_policy_failed`)."""
+    `root`, held to it. A binding the catalog refuses, and one whose broker
+    lies inside the repository, are untrusted before any policy is asked
+    (`unservable_because`, `in_repository_program`). A policy that raises
+    trusts nothing, and its words are not repeated
+    (`reason_policy_failed`)."""
     unservable = unservable_because(binding)
     if unservable is not None:
         return TrustVerdict.untrusted_for(binding, root=root,
                                           basis=BASIS_CATALOG,
                                           reason=unservable)
+    refused = broker_refusal(binding, root=root)
+    if refused is not None:
+        return TrustVerdict.untrusted_for(binding, root=root,
+                                          basis=BASIS_REPOSITORY,
+                                          reason=refused)
     try:
         verdict = policy_of().verdict(binding, root=root)
     except Exception as error:  # noqa: BLE001 - a policy that fails trusts nothing
@@ -719,12 +2374,19 @@ def verdict_for(binding, *, root: Path | str) -> TrustVerdict:
     return _judged(policy, binding, root=root)
 
 
-def registered_verdict_for(binding, *,
-                           root: Path | str) -> TrustVerdict | None:
-    """The verdict of the policy registered NOW on `binding` at `root`, held
-    to it, or None where nothing is registered. It REGISTERS NOTHING, for an
-    act that is not one of the consumers that register openDox's default
-    (the console's model approval).
+def registered_verdict_for(binding, *, root: Path | str) -> TrustVerdict:
+    """The verdict on `binding` at `root`, held to it, of the policy
+    registered NOW, or, where nothing is registered, of openDox's own
+    default (`MachineTrust()`), asked WITHOUT REGISTERING it. For an act that
+    is not one of the consumers that register the default (the console's
+    model approval).
+
+    WHERE NOTHING IS REGISTERED, THE DEFAULT'S ANSWER IS THE TRUE ONE (T100
+    follow-on, A19). A host registers its policy at process start, before
+    any consumer asks, so a process that has registered nothing is one whose
+    next start reads this machine's store: saying the binding is untrusted
+    there, when the store trusts it, would be false. The store is read, and
+    nothing is registered, so a host's registration after this still wins.
 
     ONE READ OF THE SEAM (Copilot at openDox-code#82, r4177946288). The
     registration is read once, under the seam's lock, and the verdict is
@@ -734,13 +2396,34 @@ def registered_verdict_for(binding, *,
     its answer given in the host's place."""
     registered = _registered_now()
     if registered is None:
-        return None
+        registered = MachineTrust()
     return _judged(lambda: registered, binding, root=root)
 
 
+class TrustRecording(NamedTuple):
+    """What recording trust came to: the verdict, which admits exactly the
+    binding, and whether the policy RECORDED anything (the holder's ruling,
+    openxFactory#656 comment 5986391296): a policy's `record()` that answers
+    something falsy recorded nothing, and its verdict is asked instead, so
+    there is nothing to withdraw after a write that fails."""
+
+    verdict: TrustVerdict
+    recorded: bool
+
+
 def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
+    """`recording_for`'s verdict: the trust recorded for `binding` at
+    `root`, which admits exactly `binding`."""
+    return recording_for(binding, root=root).verdict
+
+
+def recording_for(binding, *, root: Path | str) -> TrustRecording:
     """Ask the registered policy to RECORD trust for `binding` at `root`, and
-    return the verdict, which admits exactly `binding`.
+    return the verdict, which admits exactly `binding`, and whether the
+    policy recorded anything. `record()` reports that by what it answers: a
+    verdict is a record, and something falsy (None, as openxFactory's
+    governed policy answers) is none, in which case the policy's `verdict`
+    is asked for the verdict (ruling 5986391296).
 
     A policy may decline, as a governed host's does for a binding whose
     declaration is pending. So an answer that does not admit exactly this
@@ -759,9 +2442,23 @@ def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
             f"model binding {shown(binding.id)} is not trusted on this "
             f"machine, and no trust was recorded for it: {unservable}. "
             f"{REMEDY_UNSERVABLE}")
-    registered = policy()
+    refused = broker_refusal(binding, root=root)
+    if refused is not None:
+        raise TrustNotRecorded(
+            f"model binding {shown(binding.id)} is not trusted on this "
+            f"machine, and no trust was recorded for it: {refused}. "
+            f"{trust_remedy(binding.id, str(root), refused)}")
+    registered = None
+    recorded = True
     try:
+        # INSIDE the refusal net (T100 follow-on, A13): whatever the seam
+        # answers, a refusal by name follows, never a raw error.
+        registered = policy()
         verdict = registered.record(binding, root=root)
+        if not verdict:
+            # NOTHING RECORDED: the policy's own verdict decides
+            recorded = False
+            verdict = registered.verdict(binding, root=root)
     except TrustStoreRefused:
         # openDox's own store's refusal is actionable and composed from
         # nothing a policy chose: it is raised as it is. Any other policy's
@@ -780,12 +2477,64 @@ def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
             reason=reason_policy_failed(error))
     verdict = _held_to(binding, verdict, root=root)
     if verdict.admits(binding):
-        return verdict
+        return TrustRecording(verdict, recorded)
     raise TrustNotRecorded(
         f"the trust policy did not record trust for model binding "
         f"{shown(binding.id)} in the repository at {shown(verdict.root)} "
         f"({verdict.reason or REASON_NEVER_TRUSTED}), so it is not trusted "
         "on this machine and nothing was written")
+
+
+#: Why a host's policy cannot take back a trust it recorded: the trust
+#: policy interface records and judges trust, and withdraws none.
+REASON_NO_WITHDRAWAL = (
+    "the trust policy registered here records trust but offers no way to "
+    "withdraw it")
+
+
+def restored_for(binding, *, replacing, root: Path | str) -> None:
+    """After a write that failed, take back the trust recorded for
+    `replacing` (the form that write would have declared): trust `binding`,
+    the earlier form the document still holds, again in its place where it
+    was trusted before (T100 follow-on, A11), and, where `binding` is None
+    (none was trusted, or the binding is new), withdraw it (the holder's
+    ruling, openxFactory#656 comment 5985046107, C2), so a failed write
+    leaves no trust for a form no document declares.
+
+    openDox's own store does it only while it still holds `replacing`'s
+    digest, under its lock (`MachineTrust.restore`), so a trust another
+    process recorded meanwhile is never overwritten (Copilot at
+    openDox-code#86, r4179076901). A host's policy is asked to record the
+    earlier form again, as `recorded_for` asks; one cannot be asked to
+    withdraw a trust (`REASON_NO_WITHDRAWAL`). Refused BY NAME where it
+    cannot be done. Asked only where the policy recorded something
+    (`TrustRecording.recorded`): openDox withdraws only what a policy
+    recorded (ruling 5986391296)."""
+    registered = _registered_now()
+    if type(registered) is MachineTrust:
+        registered.restore(binding, root=root, replacing=replacing)
+        return
+    if binding is None:
+        raise TrustNotRecorded(REASON_NO_WITHDRAWAL)
+    recorded_for(binding, root=root)
+
+
+def intake_admissible() -> bool:
+    """Whether the policy registered NOW could admit a console intake at all
+    (T100 follow-on, A5): one that answers `intake_verdict` with something
+    other than openDox's own per-machine "no". Read ONCE, under the seam's
+    lock, and nothing is registered: where nothing is registered, the
+    default a hand-off would register admits no intake, so the answer is no.
+
+    The console intake surface offers enrolment only where this is so, so an
+    install never opens a form every submission of which is refused."""
+    registered = _registered_now()
+    if registered is None:
+        return False
+    ask = getattr(registered, "intake_verdict", None)
+    if not callable(ask):
+        return False
+    return getattr(ask, "__func__", None) is not MachineTrust.intake_verdict
 
 
 def intake_verdict_for(binding, *, root: Path | str) -> TrustVerdict:
@@ -798,7 +2547,14 @@ def intake_verdict_for(binding, *, root: Path | str) -> TrustVerdict:
     that declares a binding with the intake's very fields, and has it
     trusted, admits nothing here. A policy answers it only through its own
     `intake_verdict`. `MachineTrust` always answers no; a policy without one
-    admits no intake; one that raises admits nothing."""
+    admits no intake; one that raises admits nothing. A broker inside the
+    repository, or an inline script, is refused before any policy is asked
+    (T100 follow-on, A2 and its extension)."""
+    refused = broker_refusal(binding, root=root)
+    if refused is not None:
+        return TrustVerdict.untrusted_for(binding, root=root,
+                                          basis=BASIS_REPOSITORY,
+                                          reason=refused)
     try:
         ask = getattr(policy(), "intake_verdict", None)
         if not callable(ask):
@@ -817,15 +2573,22 @@ def intake_verdict_for(binding, *, root: Path | str) -> TrustVerdict:
 # ---------------------------------------------------------------------------
 
 
+#: Why a path of the store's tree is the wrong kind of thing for its place,
+#: where it is no link: what it IS, not what another user could do with it
+#: (the holder's ruling, openxFactory#656 comment 5985046107, C5).
+KIND_NOT_A_DIRECTORY = "is not a directory"
+KIND_NOT_A_REGULAR_FILE = "is not a regular file"
+
+
 def _unsafe_kind(mode: int, *, directory: bool) -> str | None:
     """Why a path is the wrong KIND of thing for its place, or None. A link
     is refused outright."""
     if stat.S_ISLNK(mode):
         return "is a symbolic link"
     if directory and not stat.S_ISDIR(mode):
-        return "is not a directory"
+        return KIND_NOT_A_DIRECTORY
     if not directory and not stat.S_ISREG(mode):
-        return "is not a regular file"
+        return KIND_NOT_A_REGULAR_FILE
     return None
 
 
@@ -894,12 +2657,69 @@ def _store_failed(state: Path | str, error: OSError, *,
 
 
 def _store_refused(path: Path | str, reason: str) -> TrustStoreRefused:
+    """A store refused for what ANOTHER USER could do with it: a link, an
+    owner or a mode (the tree checks). Only those say so (T100 follow-on,
+    A7); every other refusal names its own cause (`_store_unusable`). So a
+    path that is the wrong kind of thing for its place and no link (a
+    directory, a FIFO or a socket where the store belongs) names what it is,
+    with the move-aside recovery (the holder's ruling, openxFactory#656
+    comment 5985046107, C5)."""
+    if reason in (KIND_NOT_A_DIRECTORY, KIND_NOT_A_REGULAR_FILE):
+        return _store_unusable(path, reason, RECOVER_MOVE_ASIDE)
     return TrustStoreRefused(
         f"the model-binding trust store refuses {shown(str(path))}: it "
         f"{reason}, so "
         "another user could change what this machine trusts. Keep openDox's "
         "state directory (OPENDOX_STATE_DIR) where only this user can change "
         "it")
+
+
+#: The recovery for a store this install cannot read as one of its own: a
+#: torn copy, another kind of document, an entry it does not write, a size it
+#: never writes.
+RECOVER_MOVE_ASIDE = (
+    "Move it aside, then trust each binding again: listing a repository's "
+    "bindings prints the command for each")
+
+#: The recovery for a store a newer openDox wrote.
+RECOVER_NEWER = (
+    "Use the openDox that wrote it, or move it aside and trust each binding "
+    "again: listing a repository's bindings prints the command for each")
+
+#: The recovery for a store, or its directory, that this user cannot open or
+#: write.
+RECOVER_PERMISSIONS = (
+    f"Make openDox's state directory ({STATE_DIR_SETTING}) and what it holds "
+    "readable and writable by this user")
+
+
+def _store_unusable(path: Path | str, cause: str,
+                    recovery: str) -> TrustStoreRefused:
+    """A store refused for what it IS, not for what another user could do
+    with it (T100 follow-on, A7): its own cause, and how to recover."""
+    return TrustStoreRefused(
+        f"the model-binding trust store refuses {shown(str(path))}: it "
+        f"{cause}, so nothing is trusted through it. {recovery}")
+
+
+def _store_cannot_open(path: Path | str, error: OSError) -> TrustStoreRefused:
+    """A store, or its lock file, the system will not open for this user,
+    named by the system's own short word for why."""
+    word = error.strerror or type(error).__name__
+    return _store_unusable(path, f"cannot be opened ({word})",
+                           RECOVER_PERMISSIONS)
+
+
+def _store_refused_state_link(path: Path | str) -> TrustStoreRefused:
+    """A state directory that is itself a symbolic link (T100 follow-on, A8;
+    F16.1's ratified text, the holder's ruling on openxFactory#656 comment
+    5982436447)."""
+    return TrustStoreRefused(
+        f"the model-binding trust store refuses {shown(str(path))}: the "
+        "directory that holds the store is a symbolic link, and the store is "
+        "never reached through one, so nothing is trusted through it. Set "
+        f"openDox's state directory ({STATE_DIR_SETTING}) to the directory "
+        "itself")
 
 
 def _store_refused_dangling(path: Path | str) -> TrustStoreRefused:
@@ -917,13 +2737,21 @@ def _refuse_foreign_links(state: Path, *, existing_only: bool,
     root, who alone could point it elsewhere. And none, whoever owns it,
     points at nothing (Copilot at openDox-code#82, r4174783301): a link to
     nothing resolves to a path the tree check never judged, and the store
-    would be made or read through it."""
+    would be made or read through it.
+
+    THE STATE DIRECTORY ITSELF IS NEVER A LINK, whoever owns it (T100
+    follow-on, A8). F16.1's ratified text: "With the trust file, or a
+    directory that holds it, replaced by a symbolic link ... every binding
+    reads untrusted". A directory ABOVE it may be one, as `/var` is on some
+    systems, under the owner rule above."""
     for component in (state, *state.parents):
         if existing_only and not os.path.lexists(component):
             continue
         info = os.lstat(component)
         if not stat.S_ISLNK(info.st_mode):
             continue
+        if component == state:
+            raise _store_refused_state_link(component)
         if info.st_uid not in (uid, 0):
             raise _store_refused(
                 component, f"is a symbolic link owned by uid {info.st_uid}, "
@@ -968,7 +2796,14 @@ def _make_private_directories(leaf: Path) -> None:
     each made relative to its parent's descriptor and opened without
     following a link before anything is made beneath it (#69's
     `_make_private_directories`). A directory that exists is left as it is,
-    and the tree check judges it."""
+    and the tree check judges it.
+
+    THE DIRECTORY IT STARTS FROM IS JUDGED BY ITS DESCRIPTOR before the
+    first `mkdir` (T100 follow-on, A18; #69's `runtime.bundle`, which asks
+    the same): an ancestor of the store, so this user's or root's, with any
+    write by others only behind the sticky bit. The path-wise check before
+    it asks the same question; this one asks it of the very directory that
+    is written into."""
     uid = os.getuid()
     missing: list[str] = []
     base = leaf
@@ -978,6 +2813,10 @@ def _make_private_directories(leaf: Path) -> None:
     if not missing:
         return
     descriptor = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    reason = _unsafe_because(os.fstat(descriptor), uid=uid, own=False)
+    if reason is not None:
+        os.close(descriptor)
+        raise _store_refused(base, reason)
     path = base
     previous = os.umask(0o077)
     try:
@@ -1028,13 +2867,13 @@ def _store_locked(state: Path):
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
                              | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
                              0o600)
-    except OSError:
+    except OSError as error:
         if os.path.lexists(path):
             reason = _unsafe_because(os.lstat(path), uid=os.getuid(),
                                      own=True, directory=False)
             if reason is not None:
                 raise _store_refused(path, reason) from None
-        raise _store_refused(path, "cannot be opened") from None
+        raise _store_cannot_open(path, error) from None
     try:
         reason = _unsafe_because(os.fstat(descriptor), uid=os.getuid(),
                                  own=True, directory=False)
@@ -1188,9 +3027,13 @@ class MachineTrust:
                 binding, root=key_root, basis=BASIS_MACHINE_TRUST,
                 reason=REASON_NEVER_TRUSTED)
         if held != binding_digest(binding):
+            # A digest of ANOTHER SCHEME says nothing of whether this binding
+            # changed: another openDox computed it over another form of the
+            # record (T100 follow-on, A16).
             return TrustVerdict.untrusted_for(
                 binding, root=key_root, basis=BASIS_MACHINE_TRUST,
-                reason=REASON_CHANGED)
+                reason=(REASON_CHANGED if held.startswith(DIGEST_PREFIX)
+                        else REASON_RECORD_FORM))
         return TrustVerdict.trusted_for(binding, root=key_root,
                                         basis=BASIS_MACHINE_TRUST)
 
@@ -1216,6 +3059,35 @@ class MachineTrust:
                 raise _store_failed(state, error, writing=True) from None
         return TrustVerdict.trusted_for(binding, root=key_root,
                                         basis=BASIS_MACHINE_TRUST)
+
+    def restore(self, binding, *, root: Path | str, replacing) -> bool:
+        """Trust `binding` at `root` again IN PLACE OF `replacing`, or, where
+        `binding` is None, withdraw `replacing`'s trust (C2), and only while
+        the store still holds `replacing`'s digest for its id: one read,
+        comparison and write under the store's lock (Copilot at
+        openDox-code#86, r4179076901). A failed add or edit asks this, so a
+        trust another process recorded meanwhile stands. Returns whether
+        the store was changed."""
+        key_root = resolved_root(root)
+        held_for = (key_root, replacing.id)
+        with self._lock:
+            state = self._state_dir_outside(key_root)
+            try:
+                _refuse_an_unsafe_tree(state, existing_only=True)
+                _make_private_directories(state)
+                _refuse_an_unsafe_tree(state, existing_only=False)
+                with _store_locked(state):
+                    entries = self._read(state)
+                    if entries.get(held_for) != binding_digest(replacing):
+                        return False
+                    del entries[held_for]
+                    if binding is not None:
+                        entries[(key_root, binding.id)] = binding_digest(
+                            binding)
+                    self._write(state, entries)
+            except OSError as error:
+                raise _store_failed(state, error, writing=True) from None
+        return True
 
     def intake_verdict(self, binding, *, root: Path | str) -> TrustVerdict:
         """The console intake's own question, which this policy always
@@ -1244,14 +3116,14 @@ class MachineTrust:
                                  | getattr(os, "O_CLOEXEC", 0))
         except FileNotFoundError:
             return {}
-        except OSError:
+        except OSError as error:
             if os.path.lexists(path):
                 info = os.lstat(path)
                 reason = _unsafe_because(info, uid=os.getuid(), own=True,
                                          directory=False)
                 if reason is not None:
                     raise _store_refused(path, reason) from None
-            raise _store_refused(path, "cannot be opened") from None
+            raise _store_cannot_open(path, error) from None
         try:
             reason = _unsafe_because(os.fstat(descriptor), uid=os.getuid(),
                                      own=True, directory=False)
@@ -1268,8 +3140,8 @@ class MachineTrust:
         finally:
             os.close(descriptor)
         if size > MAX_TRUST_STORE_BYTES:
-            raise _store_refused(path, "is larger than any store this "
-                                 "install writes")
+            raise _store_unusable(path, "is larger than any store this "
+                                  "install writes", RECOVER_MOVE_ASIDE)
         return self._entries(path, b"".join(chunks))
 
     @staticmethod
@@ -1277,22 +3149,34 @@ class MachineTrust:
         try:
             document = json.loads(raw.decode("utf-8"))
         except (ValueError, RecursionError):
-            raise _store_refused(path, "does not read as JSON") from None
+            raise _store_unusable(path, "does not read as JSON (a torn or "
+                                  "hand-edited copy)",
+                                  RECOVER_MOVE_ASIDE) from None
         entries = (document.get("entries")
                    if isinstance(document, dict) else None)
+        version = (document.get("schema_version")
+                   if isinstance(document, dict) else None)
+        if (isinstance(document, dict)
+                and document.get("kind") == TRUST_KIND
+                and isinstance(version, int) and not isinstance(version, bool)
+                and version > SCHEMA_VERSION):
+            raise _store_unusable(
+                path, f"is a trust store of schema_version {version}, which "
+                f"a newer openDox writes and this one ({SCHEMA_VERSION}) does "
+                "not read", RECOVER_NEWER)
         if (not isinstance(document, dict)
-                or document.get("schema_version") != SCHEMA_VERSION
+                or version != SCHEMA_VERSION
                 or document.get("kind") != TRUST_KIND
                 or not isinstance(entries, list)):
-            raise _store_refused(path, "is not a trust store this install "
-                                 "writes")
+            raise _store_unusable(path, "is not a trust store this install "
+                                  "writes", RECOVER_MOVE_ASIDE)
         held: dict[tuple[str, str], str] = {}
         for entry in entries:
             if (not isinstance(entry, dict)
                     or set(entry) != {"root", "binding_id", "digest"}
                     or not all(isinstance(entry[k], str) for k in entry)):
-                raise _store_refused(path, "holds an entry this install does "
-                                     "not write")
+                raise _store_unusable(path, "holds an entry this install "
+                                      "does not write", RECOVER_MOVE_ASIDE)
             held[(entry["root"], entry["binding_id"])] = entry["digest"]
         return held
 
@@ -1327,12 +3211,19 @@ class MachineTrust:
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT
                                  | os.O_EXCL | os.O_NOFOLLOW
                                  | getattr(os, "O_CLOEXEC", 0), 0o600)
-        except OSError:
-            # Something took the name between the unlink and this open: a
-            # link, or a file, someone else put there. It is never followed
-            # or written through, and nothing is trusted.
-            raise _store_refused(temporary, "could not be created by this "
-                                 "process alone") from None
+        except OSError as error:
+            if error.errno in (errno.EEXIST, errno.ELOOP):
+                # Something took the name between the unlink and this open:
+                # a link, or a file, someone else put there. It is never
+                # followed or written through, and nothing is trusted.
+                raise _store_refused(temporary, "could not be created by this "
+                                     "process alone") from None
+            # A directory this user cannot write, a full disk: named by the
+            # system's own word (T100 follow-on, A7).
+            raise _store_unusable(
+                temporary, "could not be created "
+                f"({error.strerror or type(error).__name__})",
+                RECOVER_PERMISSIONS) from None
         try:
             os.fchmod(descriptor, 0o600)
             view = memoryview(payload)
@@ -1348,6 +3239,26 @@ class MachineTrust:
             raise
         os.close(descriptor)
         os.replace(temporary, target)
+        _sync_directory(state)
+
+
+def _sync_directory(state: Path) -> None:
+    """Flush the state directory's entry for the replaced store (T100
+    follow-on, A17), so a crash after `record` returns cannot bring back the
+    store it replaced. The replace has happened by now, so a file system that
+    cannot sync a directory (`EINVAL`), or any failure here, leaves the trust
+    recorded, as it is: it is never reported as unrecorded."""
+    try:
+        descriptor = os.open(state, os.O_RDONLY | os.O_DIRECTORY
+                             | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 # ---------------------------------------------------------------------------
@@ -1407,15 +3318,20 @@ def turn_message_for(port: object) -> str | None:
     """The FIXED sentence a chat turn is refused with where `port` is the
     refusing port the factory declared, or None for any other port (#1144
     16.3a). A binding the catalog cannot list gets `UNSERVABLE_TURN_MESSAGE`,
-    which names its remedy, and every other untrusted binding
-    `UNTRUSTED_TURN_MESSAGE`, which names the command that trusts it. Telling
-    the operator to trust a binding `recorded_for` will never record would
-    send them to a command that cannot help (Copilot at openDox-code#82,
-    r4175203889)."""
+    which names its remedy; one untrusted for a reason `trust` cannot repair
+    (the store, the platform, the host's policy, a broker inside the
+    repository) gets `UNTRUSTABLE_TURN_MESSAGE` (T100 follow-on, A1); and
+    every other untrusted binding `UNTRUSTED_TURN_MESSAGE`, which names the
+    command that trusts it. Telling the operator to trust a binding
+    `recorded_for` will never record would send them to a command that
+    cannot help (Copilot at openDox-code#82, r4175203889)."""
     if not isinstance(port, UntrustedBindingPort):
         return None
     if port.verdict.reason == REASON_UNSERVABLE:
         return UNSERVABLE_TURN_MESSAGE
+    if not trust_can_repair(port.verdict.reason):
+        # A reason `trust` would be refused for too (T100 follow-on, A1).
+        return UNTRUSTABLE_TURN_MESSAGE
     return UNTRUSTED_TURN_MESSAGE
 
 
@@ -1522,9 +3438,20 @@ def _registered_now() -> Any:
 
 def policy() -> Any:
     """What a consumer asks: openDox's strict default registered where no
-    host has registered one, then the registered policy."""
-    register_default()
-    return current()
+    host has registered one, then the registered policy.
+
+    ONE OPERATION UNDER THE SEAM'S LOCK (T100 follow-on, A13). Registering
+    the default and then reading the seam in two steps would let a host that
+    unregisters between them leave the second step nothing, and a consumer
+    would fail on `TrustPolicyNotRegistered`."""
+    global _registered, _is_default, _default_read
+    with _lock:
+        if _registered is None:
+            _registered, _is_default, _default_read = (MachineTrust(), True,
+                                                       False)
+        if _is_default:
+            _default_read = True
+        return _registered
 
 
 def unregister() -> None:
