@@ -742,6 +742,19 @@ _REGEX_AFTER_WORDS = frozenset({
 #: The keywords whose `(…)` is a condition, after which a statement, and so
 #: a regular expression, may start.
 _CONDITION_WORDS = frozenset({"if", "while", "for", "with"})
+#: The last name of some code, and the `.` (or `?.`) that makes it a
+#: member's, whitespace already read as one space.
+_LAST_NAME = re.compile(r"([A-Za-z_$0-9][\w$]*) ?$")
+_MEMBER_DOT = re.compile(r"\. ?$")
+
+
+def _ends_with_keyword(code: str, words: frozenset) -> bool:
+    """Whether `code` ends with one of `words` as a KEYWORD: never as a
+    member's name (`obj.return`, `obj . if`, `obj?.of`), which is an operand
+    (Copilot review of openDox-code#75 at ff04e015, r4180554323)."""
+    word = _LAST_NAME.search(code)
+    return (word is not None and word.group(1) in words
+            and not _MEMBER_DOT.search(code[:word.start()]))
 #: ... and so does a `/` after one of these characters, or at the start.
 _REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
 
@@ -887,9 +900,8 @@ class JsStrings:
             elif c == "}":
                 self.depth -= 1
             elif c == "(":
-                word = re.search(r"([A-Za-z_$][\w$]*) ?$", self._recent())
-                self.parens.append(word is not None and word.group(1)
-                                   in _CONDITION_WORDS)
+                self.parens.append(_ends_with_keyword(self._recent(),
+                                                      _CONDITION_WORDS))
             elif c == ")":
                 self.closed_condition = bool(self.parens and self.parens.pop())
             self.code.append(c)
@@ -923,17 +935,17 @@ class JsStrings:
             return not self._ends_an_operand(code[:-2].rstrip(" "))
         if self.last == "" or self.last in _REGEX_AFTER_PUNCTUATION:
             return True
-        word = re.search(r"([A-Za-z_$][\w$]*)\s*$", self._recent())
-        return word is not None and word.group(1) in _REGEX_AFTER_WORDS
+        return _ends_with_keyword(self._recent(), _REGEX_AFTER_WORDS)
 
     @staticmethod
     def _ends_an_operand(code: str) -> bool:
         """Whether `code` ends with an operand: a name or a literal that is
-        no keyword before an expression, a `)`, a `]`, or a string."""
+        no keyword before an expression (a member's name, `obj.of`, is
+        none), a `)`, a `]`, or a string."""
         if code.endswith((")", "]")):
             return True
-        word = re.search(r"([A-Za-z_$0-9][\w$]*)$", code)
-        return word is not None and word.group(1) not in _REGEX_AFTER_WORDS
+        return (_LAST_NAME.search(code) is not None
+                and not _ends_with_keyword(code, _REGEX_AFTER_WORDS))
 
     def _skip_regex(self) -> None:
         src, j, in_class = self.src, self.i + 1, False

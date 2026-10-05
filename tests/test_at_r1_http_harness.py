@@ -2858,3 +2858,25 @@ def test_a_brace_with_no_slash_after_it_is_read_as_before(source: str) -> None:
     pending: collections.deque = collections.deque()
     harness._scan_module("/views/x.js", source.encode("utf-8"), pending, set())
     assert [path for path, _static, _importer in pending] == ["/views/a.js"]
+
+
+@pytest.mark.parametrize("app", [
+    'const q = obj.return / 2; import "./missing.js";\n',
+    'const q = obj . return / 2; import "./missing.js";\n',
+    'const q = obj?.return / 2; import "./missing.js";\n',
+    'const q = obj.if(1) / 2; import "./missing.js";\n',
+    'const q = obj . while (1) / 2; import "./missing.js";\n',
+    'const q = obj.of++ / 2; import "./missing.js";\n',
+    'const q = obj . in-- / 2; import "./missing.js";\n',
+], ids=["member", "spaced-member", "optional-member", "method-call",
+        "spaced-method-call", "postfix-after-a-member",
+        "postfix-after-a-spaced-member"])
+def test_a_member_named_as_a_keyword_is_an_operand(app: str) -> None:
+    """Copilot's examples (review of #75 at ff04e015, r4180554323): a
+    member's name is never a keyword, so the `/` after it divides, and the
+    missing static dependency after it is judged."""
+    files = {"/app.js": (JS, app)}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, _page("./app.js"), {}, verdict, "t")
+    assert _failures(verdict) == ["t.bundle.module /missing.js"]
