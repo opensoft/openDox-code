@@ -173,6 +173,11 @@ _RECORD_PATTERN = re.compile(
     r'<script type="application/json" id="' + RECORD_ELEMENT_ID
     + r'">(?P<record>[^<]*)</script>')
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+#: The one shape a console page's AUTHORITY may have: a loopback host,
+#: spelled as `server_url` spells it, and an optional port. No user
+#: information, and nothing a browser reads as the authority's end (`\\`).
+_LOOPBACK_AUTHORITY = re.compile(
+    r"(?:127\.0\.0\.1|localhost|\[::1\])(?::(?P<port>[0-9]{1,5}))?")
 #: The names a publication may sweep when their servers are gone
 #: (`_sweep_stale_copies`): a copy, a writer's temporary file, and a remover's
 #: taken name. Each holds a token, and nothing else is ever touched.
@@ -289,8 +294,25 @@ def delivery_for(profile: Any) -> str:
 
 
 def _refuse_page_url(page_url: str) -> None:
+    """The console page must be this machine's own plane, as a BROWSER reads
+    the URL, not only as `urlsplit` does (Copilot at openDox-code#84,
+    r4180089809). A browser takes `\\` for `/`, so in
+    `http://evil.example\\@127.0.0.1:8080/` it sees the host `evil.example`
+    where `urlsplit` sees user information and `127.0.0.1`, and the token's
+    fragment would be handed to the remote page. So the authority must be a
+    loopback host and an optional port, exactly (`_LOOPBACK_AUTHORITY`), and
+    a backslash or a control character anywhere, which a browser rewrites or
+    strips, is refused."""
+    if "\\" in page_url or any(ord(c) < 0x20 or ord(c) == 0x7F for c in page_url):
+        raise ConsoleAccessRefused(
+            f"the console page {page_url!r} holds a backslash or a control "
+            "character, which a browser reads differently, so it is not "
+            "certainly this machine's own plane")
     parts = urllib.parse.urlsplit(page_url)
-    if parts.scheme != "http" or parts.hostname not in _LOOPBACK_HOSTS:
+    authority = _LOOPBACK_AUTHORITY.fullmatch(parts.netloc)
+    if (parts.scheme != "http" or parts.hostname not in _LOOPBACK_HOSTS
+            or authority is None
+            or int(authority.group("port") or 80) > 65535):
         raise ConsoleAccessRefused(
             f"the console page {page_url!r} is not a loopback http URL, and a "
             "console token is only ever opened on this machine's own plane")

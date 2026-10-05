@@ -3927,3 +3927,53 @@ def test_a_file_that_grows_after_its_read_check_never_returns_a_token(
     monkeypatch.undo()
     assert serve.read_unless_private(growing, (own.path.parent,)) is None
     console_access.remove_private_copy(own)
+
+
+# ---------------------------------------------------------------------------
+# 22 — Copilot's review at a2e36652 (r4180089809): the page URL is judged
+#      as a browser reads it
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad", [
+    "http://evil.example\\@127.0.0.1:8080/index.html",
+    "http://127.0.0.1:8080\\@evil.example/index.html",
+    "http://evil.example@127.0.0.1:8080/index.html",
+    "http://user:pass@127.0.0.1:8080/index.html",
+    "http://127.0.0.1:8080/\\\\evil.example/index.html",
+    "http://127.0.0.1:8080/\tindex.html",
+    "http://127.0.0.1:99999/index.html",
+    "http://127.0.0.1:8080:9/index.html",
+], ids=["backslash-userinfo", "backslash-after-port", "userinfo", "user-and-password",
+        "backslash-in-path", "control-character", "port-out-of-range", "two-ports"])
+def test_a_page_url_a_browser_reads_as_another_host_is_refused(
+        tmp_path, bad) -> None:
+    """r4180089809, Copilot's case first: `urlsplit` reads
+    `http://evil.example\\@127.0.0.1:8080/` as user information at
+    `127.0.0.1`, and a browser, taking the backslash for a slash, navigates
+    to `evil.example`, whose page could read the token's fragment. The
+    authority must be a loopback host and an optional port, exactly, and a
+    backslash or a control character anywhere is refused. Nothing is
+    written."""
+    from opendox import console_access
+
+    token = _token()
+    with pytest.raises(console_access.ConsoleAccessRefused):
+        console_access.opened_url(bad, token)
+    state = _state(tmp_path)
+    with pytest.raises(console_access.ConsoleAccessRefused) as refused:
+        console_access.write_private_copy(
+            state, page_url=bad, port=8080, token=token, served_roots=())
+    assert token not in str(refused.value)
+    assert not (state / console_access.CONSOLE_DIRNAME).exists()
+
+
+@pytest.mark.parametrize("good", [
+    "http://127.0.0.1:8080/index.html", "http://[::1]:8080/index.html",
+    "http://localhost:8080/index.html", "http://127.0.0.1/index.html"])
+def test_every_loopback_page_url_a_plane_announces_is_accepted(good) -> None:
+    """The spellings `serve.server_url` announces a plane at, with and
+    without a port, are still accepted."""
+    from opendox import console_access
+
+    token = _token()
+    assert console_access.opened_url(good, token).startswith(good + "#")
