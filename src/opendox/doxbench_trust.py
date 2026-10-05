@@ -1362,6 +1362,21 @@ _INTERPRETERS: dict[str, _Interpreter] = {
     "luajit": _Interpreter(inline="e", takes="lj", attached="O", ends="b"),
     "node": _NODE, "nodejs": _NODE, "bun": _NODE,
     "osascript": _Interpreter(inline="e", takes="ls"),
+    # Lane openXfactory-3 D7 early findings N1, holder ruled fix now: julia
+    # (-e/--eval, -E/--print), Rscript (-e) and R (-e).
+    "julia": _Interpreter(
+        inline="eE", takes="JHLtpC", attached="Og",
+        longs=frozenset({"--eval", "--print"}),
+        long_values=frozenset({"--sysimage", "--home", "--load",
+                               "--threads", "--procs", "--cpu-target",
+                               "--machine-file"})),
+    "Rscript": _Interpreter(inline="e"),
+    # R's -f/--file names its script, and R's own options are still read
+    # after it (fail-closed); --args passes the rest to the script.
+    "R": _Interpreter(inline="e", takes="dgf",
+                      long_values=frozenset({"--debugger", "--gui",
+                                             "--file"}),
+                      long_ends=frozenset({"--args"})),
     "flock": _Interpreter(inline="c", takes="wE",
                           longs=frozenset({"--command"}),
                           long_values=frozenset({"--timeout", "--wait",
@@ -1709,6 +1724,40 @@ def _program_names(member: str, *, first: bool,
     return {_unversioned(name) for name in names if name}
 
 
+#: deno's global options, which may stand before its subcommand (lane
+#: openXfactory-3 D7 early findings N2, holder ruled fix now): flags, and
+#: those that take a value (attached after `=`, or the next member). Any
+#: `--unstable...` is a flag. A leading option that is none of these is
+#: refused as unreadable, fail-closed, as a launcher's is.
+_DENO_FLAGS = frozenset({"-q", "--quiet", "-h", "--help", "-V", "--version",
+                         "--unstable"})
+_DENO_VALUES = frozenset({"-L", "--log-level"})
+
+
+def _deno_subcommand(rest: tuple[str, ...]) -> str | None:
+    """deno's subcommand: the first member after its leading global options
+    (`deno --quiet eval ...`), or None where there is none. Raises
+    `_Unreadable` for a leading option deno's global grammar does not
+    hold."""
+    index = 0
+    while index < len(rest):
+        member = rest[index]
+        if not member.startswith("-") or member == "-":
+            return member
+        index += 1
+        option = member.partition("=")[0]
+        if option in _DENO_FLAGS or option.startswith("--unstable"):
+            continue
+        if option in _DENO_VALUES:
+            if "=" not in member:
+                index += 1
+            continue
+        if member[:2] in _DENO_VALUES:          # `-Linfo`
+            continue
+        raise _Unreadable(member)
+    return None
+
+
 def _gives_an_inline_script(name: str, rest: tuple[str, ...]) -> bool:
     """Whether a program named `name`, followed by `rest`, is given an inline
     script, read by its own grammar (`_INTERPRETERS`): a short cluster
@@ -1718,7 +1767,7 @@ def _gives_an_inline_script(name: str, rest: tuple[str, ...]) -> bool:
     (`python /opt/broker.py -c profile`) is the script's (Copilot at
     openDox-code#86, r4179241583, r4179241614)."""
     if name == "deno":
-        return bool(rest) and rest[0] == "eval"
+        return _deno_subcommand(rest) == "eval"
     spec = _INTERPRETERS.get(name)
     if spec is None:
         return False
@@ -1785,7 +1834,19 @@ def inline_script(members, *, root: Path | str | None = None) -> str | None:
 
     THE ACCEPTED LIMIT (the same ruling, item 4): a general program that
     runs code from its own arguments, such as `awk 'PROGRAM'`, `sed` or
-    `find -exec`, is not judged as an inline script."""
+    `find -exec`, is not judged as an inline script. A member whose own
+    options cannot be read (an unknown leading option of deno's) is
+    returned as well, FAIL-CLOSED; `broker_command_refused` refuses it as
+    unreadable."""
+    try:
+        return _inline_member(members)
+    except _Unreadable as unreadable:
+        return unreadable.member
+
+
+def _inline_member(members) -> str | None:
+    """`inline_script`'s work. Raises `_Unreadable` for a member whose own
+    options cannot be read."""
     unwrapped = _unwrapped(members)
     for command, context in ((tuple(members), _broker_context()),
                              (unwrapped.command, unwrapped.context)):
@@ -1812,8 +1873,11 @@ def broker_command_refused(members, *,
     unwrapped = _unwrapped(members)
     if unwrapped.unreadable is not None:
         return unwrapped.unreadable_because
-    if inline_script(members, root=root) is not None:
-        return REASON_INLINE_SCRIPT
+    try:
+        if _inline_member(members) is not None:
+            return REASON_INLINE_SCRIPT
+    except _Unreadable:
+        return REASON_UNREADABLE_COMMAND
     if root is not None:
         try:
             named = _in_repository_member(members, root=root)

@@ -3264,6 +3264,26 @@ def test_A2_a_broker_inside_the_repository_is_refused_by_name(
     served.nothing_was_touched()
 
 
+def test_N2_deno_whose_leading_option_cannot_be_read_is_named(served):
+    """Lane openXfactory-3 D7 early findings N2, holder ruled fix now: a
+    leading option deno's global grammar does not hold is refused as
+    unreadable, fail-closed, and `inline_script` names it rather than pass
+    it; a known one is read past, to the subcommand."""
+    trust_mod = _trust_mod()
+    unknown = ["deno", "--frobnicate", "eval", "x"]
+    assert trust_mod.inline_script(unknown) == "--frobnicate"
+    assert trust_mod.broker_command_refused(unknown, root=served.repo) == (
+        trust_mod.REASON_UNREADABLE_COMMAND)
+    for argv in (["deno", "--quiet", "eval", "x"],
+                 ["deno", "-q", "eval", "x"],
+                 ["deno", "--log-level=info", "eval", "x"],
+                 ["deno", "-Linfo", "eval", "x"],
+                 ["deno", "--unstable-kv", "eval", "x"]):
+        assert trust_mod.inline_script(argv) == "deno", argv
+    assert trust_mod.inline_script(
+        ["deno", "--quiet", "run", str(served.broker)]) is None
+
+
 def test_R3_a_value_python_reads_is_no_module(served):
     """The other side of reading `-m` by Python's grammar (r4180041213): a
     letter that takes a value ends the cluster, so `-Wm...` is a warning
@@ -4467,6 +4487,16 @@ INLINE = {
     "pwsh-encoded": ["powershell", "-EncodedCommand", "eAA="],
     "fish-C": ["fish", "-C", "x"],
     "bash-plus-o-then-c": ["bash", "+o", "posix", "-c", "x"],
+    # Lane openXfactory-3 D7 early findings N1 and N2, holder ruled fix now
+    "julia-e": ["julia", "-e", "x"],
+    "julia-eval": ["julia", "--eval=x"],
+    "julia-E": ["julia", "--threads", "2", "-E", "x"],
+    "Rscript-e": ["Rscript", "-e", "x"],
+    "R-e": ["R", "--no-echo", "-e", "x"],
+    "R-file-then-e": ["R", "-f", "/opt/opendox-test/x.R", "-e", "x"],
+    "deno-quiet-eval": ["deno", "--quiet", "eval", "x"],
+    "deno-q-eval": ["deno", "-q", "eval", "x"],
+    "deno-log-level-eval": ["deno", "--log-level", "info", "eval", "x"],
     # The holder's ruling, openxFactory#656 comment 5985046107, C1: env's
     # long options by any unambiguous beginning, and its clusters.
     "env-split-string-abbreviated": ["env", "--split=sh -c x"],
@@ -4598,6 +4628,14 @@ INLINE_CONTROLS = {
         "-c", "x"],
     "su-given-a-shell-file": lambda served: [
         "su", "bob", "-s", str(served.broker)],
+    "julia-given-a-file": lambda served: [
+        "julia", "-t", "2", str(served.broker), "-e", "x"],
+    "julia-attached-target-then-a-file": lambda served: [
+        "julia", "-Ccore-avx2", str(served.broker)],
+    "R-given-a-file": lambda served: [
+        "R", "-f", str(served.broker), "--args", "-e", "x"],
+    "deno-quiet-run": lambda served: [
+        "deno", "--quiet", "run", str(served.broker)],
     "a-module-attached-then-its-own-option": lambda served: [
         sys.executable, "-mjson.tool", "-c", "x"],
     "an-option-like-file-after-double-dash": lambda served: [
@@ -4839,6 +4877,8 @@ UNREADABLE_COMMANDS = {
                   "-c", "x"],
     "sudo-chroot": ["sudo", "--chroot=/srv", "/bin/true"],
     "sudo-login": ["sudo", "-i", "/bin/true"],
+    # N2: a leading option deno's global grammar does not hold
+    "deno-unknown-leading-option": ["deno", "--frobnicate", "eval", "x"],
 }
 
 
