@@ -143,9 +143,30 @@ def _undone(refusal: "binding_mod.BindingRefused", *, earlier, written,
     return refusal
 
 
-def _trusted_line(binding: "binding_mod.ModelProviderBinding", verdict) -> str:
-    return (f"  trusted {trust_mod.shown(binding.id)} on this machine for "
-            f"{trust_mod.shown(verdict.root)}")
+#: What trusts a binding whose policy recorded nothing, as `add`, `edit`,
+#: `set-credential` and `trust` print it (the pre-review of
+#: openxFactory#1236; the holder's slice B, openxFactory#656 comment
+#: 6000630835): the host's trust policy, whose own verdict admitted it.
+TRUSTED_BY_THE_HOSTS_POLICY = "by the host's trust policy"
+
+
+def _trusted_line(binding: "binding_mod.ModelProviderBinding",
+                  recording: "trust_mod.TrustRecording") -> str:
+    """The line an act that trusted `binding` ends with: what trusts it, and
+    for which repository.
+
+    "ON THIS MACHINE" ONLY WHERE A RECORD WAS WRITTEN. openDox's own store
+    (`doxbench_trust.MachineTrust`) records the trust here, and the line
+    says so, byte for byte as it always has. A host's policy whose
+    `record()` answers nothing recorded nothing, here or anywhere openDox
+    can see, and its own verdict admitted the binding (the holder's ruling,
+    openxFactory#656 comment 5986391296), as openxFactory's governed policy
+    does: there the line names that policy, because "on this machine" would
+    claim a record nobody wrote."""
+    where = ("on this machine" if recording.recorded
+             else TRUSTED_BY_THE_HOSTS_POLICY)
+    return (f"  trusted {trust_mod.shown(binding.id)} {where} for "
+            f"{trust_mod.shown(recording.verdict.root)}")
 
 
 def _declared_binding(args: argparse.Namespace) -> "binding_mod.ModelProviderBinding":
@@ -321,7 +342,6 @@ def cmd_model_binding_add(args: argparse.Namespace) -> int:
         if store.get(binding.id) is not None:
             store.add(binding)      # refuses the repeated id, in its own words
         recording = _record_trust(binding, args)
-        verdict = recording.verdict
         try:
             store.add(binding)
         except (binding_mod.BindingRefused, OSError) as error:
@@ -336,7 +356,7 @@ def cmd_model_binding_add(args: argparse.Namespace) -> int:
     print(f"  declared {trust_mod.shown(binding.id)} in "
           f"{trust_mod.shown(str(store.path))}")
     print(f"  {binding.custody_notice()}")
-    print(_trusted_line(binding, verdict))
+    print(_trusted_line(binding, recording))
     return 0
 
 
@@ -364,7 +384,6 @@ def cmd_model_binding_edit(args: argparse.Namespace) -> int:
         was_trusted = trust_mod.verdict_for(
             existing, root=_repo_root(args)).admits(existing)
         recording = _record_trust(binding, args)
-        verdict = recording.verdict
         try:
             store.edit(binding)
         except (binding_mod.BindingRefused, OSError) as error:
@@ -378,7 +397,7 @@ def cmd_model_binding_edit(args: argparse.Namespace) -> int:
         return 1
     print(f"  updated {trust_mod.shown(binding.id)} in "
           f"{trust_mod.shown(str(store.path))}")
-    print(_trusted_line(binding, verdict))
+    print(_trusted_line(binding, recording))
     return 0
 
 
@@ -458,12 +477,12 @@ def cmd_model_binding_set_credential(args: argparse.Namespace, *,
     # broker's, so a store that refuses now leaves the binding written and
     # untrusted, which refuses it at use, and says so.
     try:
-        verdict = _record_trust(rewritten, args).verdict
+        recording = _record_trust(rewritten, args)
     except binding_mod.BindingRefused as exc:
         print(f"{trust_mod.shown(rewritten.id)} holds the new reference, but "
               f"it is NOT trusted on this machine: {exc}", file=sys.stderr)
         return 1
-    print(_trusted_line(rewritten, verdict))
+    print(_trusted_line(rewritten, recording))
     return 0
 
 
@@ -546,11 +565,11 @@ def cmd_model_binding_trust(args: argparse.Namespace) -> int:
     for line in _trust_disclosure(binding, store, root):
         print(line)
     try:
-        verdict = _record_trust(binding, args).verdict
+        recording = _record_trust(binding, args)
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(_trusted_line(binding, verdict))
+    print(_trusted_line(binding, recording))
     return 0
 
 
