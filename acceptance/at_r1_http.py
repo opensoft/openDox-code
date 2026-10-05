@@ -735,10 +735,16 @@ def free_port() -> int:
 # The served bundle, read as JavaScript well enough to find its strings.
 # ---------------------------------------------------------------------------
 
-#: A `/` after one of these words starts a regular expression, not a division.
+#: A `/` after one of these words starts a regular expression, not a division:
+#: the reserved words an expression may follow, and those a line break ends
+#: (`break`, `continue`, `debugger`), after which a statement starts.
 _REGEX_AFTER_WORDS = frozenset({
-    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
-    "throw", "case", "do", "else", "yield", "await"})
+    "return", "typeof", "instanceof", "in", "new", "delete", "void",
+    "throw", "case", "default", "do", "else", "extends", "yield", "await",
+    "break", "continue", "debugger"})
+#: ... and `of`, which is a keyword only in a `for` head, and a name elsewhere
+#: (`const of = 4; of / 2` divides).
+_FOR_HEAD_WORDS = _REGEX_AFTER_WORDS | {"of"}
 #: ... and so does a `/` after one of these characters, or at the start.
 _REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
 #: The keywords whose `(…)` is a condition, after which a statement, and so
@@ -752,6 +758,18 @@ _LAST_NAME = re.compile(r"(#?[\w$]+) ?$")
 #: (`1. in`, but neither `1 .`, `1..`, `1.5.` nor `1e5.`).
 _MEMBER_DOT = re.compile(r"\. ?$")
 _NO_MEMBER_DOT = re.compile(r"(?:\.\.|(?<![\w$.])\d[\d_]*)\. ?$")
+
+
+def _condition_opened(code: str) -> str:
+    """The keyword whose condition a `(` after `code` opens: `if`, `while`,
+    `for` or `with`, and `for` after `for await`; or "" for none."""
+    word = _LAST_NAME.search(code)
+    if word is None:
+        return ""
+    if word.group(1) == "await" and _ends_with_keyword(code[:word.start()],
+                                                       frozenset({"for"})):
+        return "for"
+    return word.group(1) if _ends_with_keyword(code, _CONDITION_WORDS) else ""
 
 
 def _ends_with_keyword(code: str, words: frozenset) -> bool:
@@ -860,9 +878,10 @@ class JsStrings:
         # closes at and whether its template is tagged.
         self.depth = 0
         self.interpolations: list[tuple[int, bool]] = []
-        # For each `(` open in code, whether it opens the condition of an
-        # `if`, `while`, `for` or `with`; and whether the last `)` closed one.
-        self.parens: list[bool] = []
+        # For each `(` open in code, the keyword whose condition it opens
+        # (`if`, `while`, `for` or `with`), or "" for none; and whether the
+        # last `)` closed one.
+        self.parens: list[str] = []
         self.closed_condition = False
         # Whether a `/` stood right after a `}`, which this lexer cannot read.
         self.ambiguous = False
@@ -910,8 +929,7 @@ class JsStrings:
             elif c == "}":
                 self.depth -= 1
             elif c == "(":
-                self.parens.append(_ends_with_keyword(self._recent(),
-                                                      _CONDITION_WORDS))
+                self.parens.append(_condition_opened(self._recent()))
             elif c == ")":
                 self.closed_condition = bool(self.parens and self.parens.pop())
             self.code.append(c)
@@ -937,25 +955,35 @@ class JsStrings:
         the condition of an `if`, `while`, `for` or `with`; after `++` or
         `--`, only where the operator is a prefix, with no operand before it
         (Copilot review of openDox-code#75 at b7b9b843, r4179348386: `n++ /
-        2` divides)."""
+        2` divides). After a spread's `...`, or a keyword an expression may
+        follow, it opens one; `of` is that keyword only in a `for` head (the
+        pass after Copilot's review overview at ea4f7838)."""
         if self.last == ")":
             return self.closed_condition
         code = self._recent().rstrip(" ")
         if code.endswith(("++", "--")):
             return not self._ends_an_operand(code[:-2].rstrip(" "))
+        if code.endswith("..."):        # a spread, before an expression
+            return True
         if self.last == "" or self.last in _REGEX_AFTER_PUNCTUATION:
             return True
-        return _ends_with_keyword(self._recent(), _REGEX_AFTER_WORDS)
+        return _ends_with_keyword(self._recent(), self._keywords())
 
-    @staticmethod
-    def _ends_an_operand(code: str) -> bool:
+    def _keywords(self) -> frozenset:
+        """The words after which an expression starts here: `of` among them
+        only in a `for` head, where it is the keyword."""
+        if self.parens and self.parens[-1] == "for":
+            return _FOR_HEAD_WORDS
+        return _REGEX_AFTER_WORDS
+
+    def _ends_an_operand(self, code: str) -> bool:
         """Whether `code` ends with an operand: a name or a literal that is
         no keyword before an expression (a member's name, `obj.of`, is
         none), a `)`, a `]`, or a string."""
         if code.endswith((")", "]")):
             return True
         return (_LAST_NAME.search(code) is not None
-                and not _ends_with_keyword(code, _REGEX_AFTER_WORDS))
+                and not _ends_with_keyword(code, self._keywords()))
 
     def _skip_regex(self) -> None:
         src, j, in_class = self.src, self.i + 1, False

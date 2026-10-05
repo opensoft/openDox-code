@@ -2933,3 +2933,51 @@ def test_a_longer_or_private_name_is_no_keyword(source: str) -> None:
     member's, as after any other: only a decimal point (`1. in`) leaves the
     keyword one. Each `/` divides."""
     assert _queued(source) == ["/views/a.js"]
+
+
+# ---------------------------------------------------------------------------
+# Copilot's review overview at ea4f7838 named "a verified lexer error" with no
+# finding. The pass that followed read every keyword by where it stands: `of`
+# is one only in a `for` head, `for await (` opens a condition, and a spread,
+# `default`, `extends`, `break`, `continue` and `debugger` come before an
+# expression or a statement.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("source", [
+    'for (const x of /"/.exec(s)) f(x); import "./a.js";\n',
+    'for await (const x of /"/.exec(s)) f(x); import "./a.js";\n',
+    'for await (const x of xs) /"/.test(x); import "./a.js";\n',
+    'for (const x of ++/"/.lastIndex) f(x); import "./a.js";\n',
+    'f(.../"/.exec(s)); import "./a.js";\n',
+    'f(... /"/.exec(s)); import "./a.js";\n',
+    'export default /"/; import "./a.js";\n',
+    'class C extends /"/.constructor {} import "./a.js";\n',
+    'for (;;) { break\n/"/.test(s) } import "./a.js";\n',
+    'for (;;) { continue\n/"/.test(s) } import "./a.js";\n',
+    'debugger\n/"/.test(s); import "./a.js";\n',
+], ids=["of-in-a-for-head", "of-in-a-for-await-head",
+        "after-a-for-await-condition", "prefix-after-of-in-a-for-head",
+        "after-a-spread", "after-a-spaced-spread", "after-export-default",
+        "after-extends", "after-break-and-a-line-break",
+        "after-continue-and-a-line-break", "after-debugger-and-a-line-break"])
+def test_a_slash_where_an_expression_starts_opens_a_regular_expression(
+        source: str) -> None:
+    """Each `/` opens a regular expression, whose `"` hides nothing after
+    it."""
+    assert _queued(source) == ["/views/a.js"]
+
+
+@pytest.mark.parametrize("source", [
+    'const of = 4; const q = of / 2; import "./a.js";\n',
+    'let of = 4; of++ / 2; import "./a.js";\n',
+    'for (const x of f(of / 2)) g(x); import "./a.js";\n',
+    'for (const x of xs) of / 2; import "./a.js";\n',
+    'const q = 1. / 2; import "./a.js";\n',
+    'const q = f(await (x)) / 2; import "./a.js";\n',
+], ids=["of-as-a-name", "of-as-a-name-then-postfix",
+        "of-in-a-call-in-a-for-head", "of-after-a-for-head",
+        "after-a-decimal-point", "after-a-call-after-await"])
+def test_a_slash_after_an_operand_divides(source: str) -> None:
+    """`of` outside a `for` head is a name, and a lone `.` ends a number,
+    not a spread; each `/` divides."""
+    assert _queued(source) == ["/views/a.js"]
