@@ -1153,8 +1153,10 @@ def _module_paths(name: str, *, roots: list[str]) -> list[str]:
     found: list[str] = []
     for root in roots:
         base = os.path.join(root, *parts)
-        found += [base, *(base + suffix for suffix in _MODULE_SUFFIXES)]
+        found.append(base)
         for count in range(1, len(parts) + 1):
+            # each prefix, the whole name last, as a module file and as a
+            # package's initializer, with every suffix
             package = os.path.join(root, *parts[:count])
             found += [package + suffix for suffix in _MODULE_SUFFIXES]
             found += [os.path.join(package, "__init__" + suffix)
