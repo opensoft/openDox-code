@@ -2817,3 +2817,44 @@ def test_an_empty_base_is_the_page_itself_and_refused() -> None:
                                     "</head></html>", {}, verdict, "t",
                               page="/index.html")
     assert _failures(verdict) == ["t.bundle.base"]
+
+
+# ---------------------------------------------------------------------------
+# Copilot review of #75 at d50e8cef: a `/` right after a `}` divides or opens
+# a regular expression by what the `}` closed, which a lexer cannot tell, so
+# it is refused by name (r4180454790).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("app", [
+    'const q = {} / 2; import "./missing.js";\n',
+    'const f = function () {} / 2; import "./missing.js";\n',
+    'const o = { m() { return 1; } } / 2; import "./missing.js";\n',
+    'const C = class {} / 2; import "./missing.js";\n',
+    'if (x) { y(); } /"/.test(z); import "./missing.js";\n',
+], ids=["object-literal", "function-expression", "object-with-a-method",
+        "class-expression", "block-then-regular-expression"])
+def test_a_slash_after_a_brace_is_refused_by_name(app: str) -> None:
+    """Copilot's examples, each with a missing static dependency after the
+    `/`: the run fails by name, and never passes past an import it may have
+    read as part of a regular expression."""
+    files = {"/app.js": (JS, app)}
+    verdict = harness.Verdict(keep_going=True)
+    with served(files) as port:
+        harness.derive_bundle(port, _page("./app.js"), {}, verdict, "t")
+    assert "t.bundle.ambiguous-slash /app.js" in _failures(verdict)
+
+
+@pytest.mark.parametrize("source", [
+    'function f() {} // a comment\nimport "./a.js";\n',
+    'function f() {} /* a comment */ import "./a.js";\n',
+    'const o = {}; const q = o / 2; import "./a.js";\n',
+    'const t = `${ {a: 1}.a / 2 }`; import "./a.js";\n',
+], ids=["line-comment", "block-comment", "after-a-semicolon",
+        "member-then-division"])
+def test_a_brace_with_no_slash_after_it_is_read_as_before(source: str) -> None:
+    strings = harness.JsStrings(source)
+    strings.scan()
+    assert strings.ambiguous is False
+    pending: collections.deque = collections.deque()
+    harness._scan_module("/views/x.js", source.encode("utf-8"), pending, set())
+    assert [path for path, _static, _importer in pending] == ["/views/a.js"]

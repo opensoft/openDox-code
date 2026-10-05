@@ -822,8 +822,9 @@ class JsStrings:
     review of openDox-code#75 at 3392f93a, r4179115282), and a `}` in its
     strings closes nothing. Each value is read as a browser reads a URL from it
     (`scalar_values`). `malformed` is set where a string holds an escape a
-    module refuses (`js_escape`), as an untagged template does too. It is a
-    lexer for this bundle's own idioms, not a parser."""
+    module refuses (`js_escape`), as an untagged template does too, and
+    `ambiguous` where a `/` stands right after a `}`, which a lexer cannot
+    read. It is a lexer for this bundle's own idioms, not a parser."""
 
     def __init__(self, source: str) -> None:
         self.src = source
@@ -840,6 +841,8 @@ class JsStrings:
         # `if`, `while`, `for` or `with`; and whether the last `)` closed one.
         self.parens: list[bool] = []
         self.closed_condition = False
+        # Whether a `/` stood right after a `}`, which this lexer cannot read.
+        self.ambiguous = False
 
     def scan(self) -> list[tuple[str, str, str]]:
         while self.i < len(self.src):
@@ -856,6 +859,16 @@ class JsStrings:
             end = self.src.find("*/", self.i + 2)
             self.i = len(self.src) if end < 0 else end + 2
             self._space()
+        elif c == "/" and self.last == "}":
+            # A `}` that closes a BLOCK is followed by a statement, so a `/`
+            # opens a regular expression; one that closes an EXPRESSION (an
+            # object literal, a function or class expression) is followed by
+            # a division. Telling them apart takes a parser, so the module is
+            # refused by name, never read by a guess (Copilot review of
+            # openDox-code#75 at d50e8cef, r4180454790). It is read on as a
+            # regular expression.
+            self.ambiguous = True
+            self._skip_regex()
         elif c == "/" and self._regex_may_start():
             self._skip_regex()
         elif c in "\"'":
@@ -1452,11 +1465,12 @@ def _specifier(importer: str, value: str,
 
 def _scan_module(path: str, body: bytes, pending: collections.deque,
                  routes: set[str], literals: set[str] | None = None,
-                 origin: str = _SAME_ORIGIN) -> bool:
+                 origin: str = _SAME_ORIGIN) -> tuple[bool, bool]:
     """Queue the module's imports and collect its routes. It is decoded as a
     browser decodes a module script, as UTF-8 with a leading BOM dropped.
     Returns whether it holds a string escape a module refuses
-    (`JsStrings.malformed`)."""
+    (`JsStrings.malformed`), and whether a `/` in it stands right after a
+    `}` (`JsStrings.ambiguous`)."""
     strings = JsStrings(body.decode("utf-8-sig", "replace"))
     for _quote, value, before in strings.scan():
         if literals is not None:
@@ -1467,7 +1481,7 @@ def _scan_module(path: str, body: bytes, pending: collections.deque,
             pending.append((_specifier(path, value, origin), True, path))
         elif _PATH_LITERAL.match(value) and not _MODULE_OR_SHEET.search(value):
             routes.add(_resolve("/", value))
-    return strings.malformed
+    return strings.malformed, strings.ambiguous
 
 
 def _judge_divergent(where: str, importer: str, how: str, verdict: Verdict,
@@ -1560,9 +1574,19 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
             answers[path] = get(port, path, host=host)
         answer = answers[path]
         _judge_module(answer, path, static, importer, verdict, label)
-        if (first and answer.status == 200
-                and _scan_module(path, answer.body, pending, routes, literals,
-                                 origin)):
+        if not (first and answer.status == 200):
+            continue
+        malformed, ambiguous = _scan_module(path, answer.body, pending,
+                                            routes, literals, origin)
+        if ambiguous:
+            verdict.check(
+                f"{label}.bundle.ambiguous-slash {path}", False,
+                f"{path} has a `/` right after a `}}`, which divides where the "
+                "`}` ends an expression (an object literal, a function or "
+                "class expression) and opens a regular expression where it "
+                "ends a block; this harness does not tell the two apart, so "
+                "it cannot be sure which imports and routes follow")
+        if malformed:
             verdict.check(
                 f"{label}.bundle.syntax {path}", False,
                 f"{path} holds a string escape a module refuses (a legacy "
