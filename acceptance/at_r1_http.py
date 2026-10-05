@@ -742,9 +742,12 @@ _REGEX_AFTER_WORDS = frozenset({
     "return", "typeof", "instanceof", "in", "new", "delete", "void",
     "throw", "case", "default", "do", "else", "extends", "yield", "await",
     "break", "continue", "debugger"})
-#: ... and `of`, which is a keyword only in a `for` head, and a name elsewhere
-#: (`const of = 4; of / 2` divides).
-_FOR_HEAD_WORDS = _REGEX_AFTER_WORDS | {"of"}
+#: ... and `of`, which is a keyword only as a `for` head's separator, after
+#: its binding or target, and a name elsewhere, its initializer, condition and
+#: update included (`for (; of / 2; )` divides). A declaration's keyword
+#: comes before a binding, never before the separator.
+_OF = frozenset({"of"})
+_DECLARATIONS = frozenset({"const", "let", "var"})
 #: ... and so does a `/` after one of these characters, or at the start.
 _REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
 #: The keywords whose `(…)` is a condition, after which a statement, and so
@@ -770,6 +773,25 @@ def _condition_opened(code: str) -> str:
                                                        frozenset({"for"})):
         return "for"
     return word.group(1) if _ends_with_keyword(code, _CONDITION_WORDS) else ""
+
+
+def _of_separates(code: str) -> bool:
+    """Whether the `of` that ends `code`, standing in a `for` head, is the
+    head's separator: after a binding or a target, so after a name, a `)`,
+    a `]` or a `}`, and never after a declaration's keyword, an operator, a
+    `;` or a keyword (Copilot review of openDox-code#75 at 234229d7,
+    r4180899047). After another bare `of`, it is the separator only where
+    that one is not (`for (const of of xs)`, but `for (x of of / 2)`)."""
+    before = code[:_LAST_NAME.search(code).start()].rstrip(" ")
+    if before.endswith((")", "]", "}")):
+        return True
+    word = _LAST_NAME.search(before)
+    if word is None or _ends_with_keyword(before,
+                                          _REGEX_AFTER_WORDS | _DECLARATIONS):
+        return False
+    if word.group(1) == "of":
+        return not _of_separates(before)
+    return True
 
 
 def _ends_with_keyword(code: str, words: frozenset) -> bool:
@@ -956,8 +978,8 @@ class JsStrings:
         `--`, only where the operator is a prefix, with no operand before it
         (Copilot review of openDox-code#75 at b7b9b843, r4179348386: `n++ /
         2` divides). After a spread's `...`, or a keyword an expression may
-        follow, it opens one; `of` is that keyword only in a `for` head (the
-        pass after Copilot's review overview at ea4f7838)."""
+        follow, it opens one (the pass after Copilot's review overview at
+        ea4f7838); `of` is that keyword only as a `for` head's separator."""
         if self.last == ")":
             return self.closed_condition
         code = self._recent().rstrip(" ")
@@ -967,14 +989,15 @@ class JsStrings:
             return True
         if self.last == "" or self.last in _REGEX_AFTER_PUNCTUATION:
             return True
-        return _ends_with_keyword(self._recent(), self._keywords())
+        return self._ends_with_a_keyword(self._recent())
 
-    def _keywords(self) -> frozenset:
-        """The words after which an expression starts here: `of` among them
-        only in a `for` head, where it is the keyword."""
-        if self.parens and self.parens[-1] == "for":
-            return _FOR_HEAD_WORDS
-        return _REGEX_AFTER_WORDS
+    def _ends_with_a_keyword(self, code: str) -> bool:
+        """Whether `code` ends with a keyword an expression may follow:
+        `of` only as the separator of the `for` head it stands in."""
+        if _ends_with_keyword(code, _REGEX_AFTER_WORDS):
+            return True
+        return (bool(self.parens) and self.parens[-1] == "for"
+                and _ends_with_keyword(code, _OF) and _of_separates(code))
 
     def _ends_an_operand(self, code: str) -> bool:
         """Whether `code` ends with an operand: a name or a literal that is
@@ -983,7 +1006,7 @@ class JsStrings:
         if code.endswith((")", "]")):
             return True
         return (_LAST_NAME.search(code) is not None
-                and not _ends_with_keyword(code, self._keywords()))
+                and not self._ends_with_a_keyword(code))
 
     def _skip_regex(self) -> None:
         src, j, in_class = self.src, self.i + 1, False

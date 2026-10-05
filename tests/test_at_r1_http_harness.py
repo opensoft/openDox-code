@@ -2984,3 +2984,37 @@ def test_a_slash_after_an_operand_divides(source: str) -> None:
     a spread, and only `for await (` opens a `for` head, never another
     `await (`; each `/` divides."""
     assert _queued(source) == ["/views/a.js"]
+
+
+# ---------------------------------------------------------------------------
+# Copilot review of #75 at 234229d7: `of` is a keyword only as a `for` head's
+# separator, never in a classic loop's initializer, condition or update
+# (r4180899047).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("source", [
+    # a name, so each `/` divides
+    'let of = 4; for (; of / 2; ) break; import "./a.js";\n',
+    'for (let i = of / 2; i < 1; i++) break; import "./a.js";\n',
+    'for (;; of / 2) break; import "./a.js";\n',
+    'for (let of = 0; of < 2; of++ / 2) f(); import "./a.js";\n',
+    'for (const k in of / 2) f(k); import "./a.js";\n',
+    'for (const x of of / 2) f(x); import "./a.js";\n',
+    # the separator, so each `/` opens a regular expression
+    'for (const [a, b] of /"/.exec(s)) f(a); import "./a.js";\n',
+    'for (const {a} of /"/.exec(s)) f(a); import "./a.js";\n',
+    'for (o.x of /"/.exec(s)) f(); import "./a.js";\n',
+    'for (o.of of /"/.exec(s)) f(); import "./a.js";\n',
+    'for ((x) of /"/.exec(s)) f(); import "./a.js";\n',
+    'for (const of of /"/.exec(s)) f(of); import "./a.js";\n',
+], ids=["name-in-a-condition", "name-in-an-initializer", "name-in-an-update",
+        "name-then-postfix-in-an-update", "name-after-in", "name-as-the-iterable",
+        "after-an-array-pattern", "after-an-object-pattern",
+        "after-a-member-target", "after-a-member-named-of",
+        "after-a-parenthesized-target", "after-a-binding-named-of"])
+def test_of_is_a_keyword_only_as_a_for_head_s_separator(source: str) -> None:
+    """Copilot's example first: in a classic `for` head, `of` is a name, and
+    the import after its division is judged. After a binding or a target,
+    it is the separator, and the `"` of the regular expression after it
+    hides nothing."""
+    assert _queued(source) == ["/views/a.js"]
