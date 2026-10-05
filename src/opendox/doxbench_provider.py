@@ -328,26 +328,40 @@ BROKER_WORKING_DIRECTORY = trust_mod.BROKER_WORKING_DIRECTORY
 WORKING_DIRECTORY_VARIABLES: frozenset[str] = frozenset({"PWD", "OLDPWD"})
 
 
+#: The CLOSED list of variables a broker's environment reads as path lists
+#: (the holder's ruling, openxFactory#656 comment 5986391296, on Copilot at
+#: openDox-code#86, r4180041233): each loses every entry inside the served
+#: repository, and keeps the rest.
+PATH_LIST_VARIABLES: frozenset[str] = frozenset({
+    "PATH", "PYTHONPATH", "NODE_PATH", "LD_LIBRARY_PATH", "PERL5LIB",
+    "PERLLIB", "RUBYLIB", "CLASSPATH", "GEM_PATH", "MANPATH"})
+
+
 def broker_environment(base, *, root=None) -> dict:
     """A broker's whole environment: the harness child's allowlist
     (`doxbench_bridge.child_environment`), without the variables that name a
     working directory (`WORKING_DIRECTORY_VARIABLES`), whatever that
     allowlist comes to hold. Given the served `root`, it carries no path
-    inside it either (F16.1 as T007 batch P amends it): an entry of a path
-    list (`PATH`) that names one is dropped, and so is a variable whose
-    whole value does (`doxbench_trust.names_a_path_inside`), so nothing the
-    broker finds through its environment is a file a pull changes."""
+    inside it either (F16.1 as T007 batch P amends it; ruling 5986391296):
+    a path-list variable (`PATH_LIST_VARIABLES`) loses each entry that names
+    one, and is dropped where none is left; any other variable is never
+    edited, and is dropped WHOLE where any `os.pathsep`-separated part of it
+    names one (`doxbench_trust.names_a_path_inside`), so a `HOME` or a
+    `TMPDIR` is kept as it is or not at all, never emptied or cut."""
     environment: dict = {}
     for name, value in bridge_mod.child_environment(base).items():
         if name in WORKING_DIRECTORY_VARIABLES:
             continue
-        if root is not None:
+        if root is not None and name in PATH_LIST_VARIABLES:
             kept = [part for part in value.split(os.pathsep)
                     if not (part and trust_mod.names_a_path_inside(
                         part, root=root))]
             if not any(kept) and value:
                 continue
             value = os.pathsep.join(kept)
+        elif root is not None and trust_mod.names_a_path_inside(value,
+                                                                root=root):
+            continue
         environment[name] = value
     return environment
 

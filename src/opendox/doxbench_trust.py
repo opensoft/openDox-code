@@ -108,6 +108,7 @@ import contextlib
 import dataclasses
 import errno
 import hashlib
+import importlib.machinery
 import json
 import os
 import re
@@ -143,6 +144,7 @@ __all__ = [
     "TrustPolicyAlreadyRegistered",
     "TrustPolicyNotRegistered",
     "TrustStoreRefused",
+    "TrustRecording",
     "TrustVerdict",
     "UNSERVABLE_TURN_MESSAGE",
     "UNTRUSTED_TURN_MESSAGE",
@@ -172,6 +174,7 @@ __all__ = [
     "names_a_path_inside",
     "intake_admissible",
     "intake_refusal_reason",
+    "recording_for",
     "restored_for",
     "trust_can_repair",
     "current",
@@ -324,16 +327,18 @@ REASON_INLINE_SCRIPT = (
 #: openDox-code#86, r4179366319; the holder's ruling, openxFactory#656
 #: comment 5985046107, C1): an option its launcher does not have, or has by
 #: more than one name; an option after which what runs cannot be judged
-#: from its words (`env --argv0`, `sudo --chroot`, `sudo -i`); or launchers
-#: nested past what is unwrapped. What it runs cannot be judged, so it is
+#: from its words (`env --argv0`, `sudo --chroot`, `sudo -i`); launchers
+#: nested past what is unwrapped; or a path whose symbolic links pass the
+#: kernel's own bound, or loop (`_LINK_HOPS`; ruling 5986391296). What it runs cannot be judged, so it is
 #: refused FAIL-CLOSED, with the inline-script remedy. (An `env -S` string
 #: env would not split as a shell does is an inline script:
 #: `REASON_INLINE_SCRIPT`.)
 REASON_UNREADABLE_COMMAND = (
     "its broker command cannot be read to the program it runs (a launcher "
     "option it does not have, or has by more than one name, an option after "
-    "which what runs cannot be judged, or launchers nested too deeply), so "
-    "what it runs cannot be judged")
+    "which what runs cannot be judged, launchers nested too deeply, or a "
+    "path whose links go deeper than the system follows), so what it runs "
+    "cannot be judged")
 
 #: What an operator is told to do about such a binding.
 REMEDY_INLINE_SCRIPT = (
@@ -977,22 +982,62 @@ def _resolved_path(path: str) -> str:
         return os.path.normpath(path)
 
 
+#: How many symbolic links one path may pass through before it is refused as
+#: unreadable: the kernel's own bound on a path's resolution (Linux's
+#: MAXSYMLINKS), past which it would not be run either (the holder's ruling,
+#: openxFactory#656 comment 5986391296).
+_LINK_HOPS = 40
+
+
+class _TooManyLinks(Exception):
+    """A path whose links pass `_LINK_HOPS`, or loop: what it names cannot
+    be judged, so the command is refused as unreadable."""
+
+    def __init__(self, member: str):
+        super().__init__(member)
+        self.member = member
+
+
 def _traversed(path: str) -> list[Path]:
     """Every name the system looks up on the way to the absolute `path`,
-    each in the directory it is looked up in, that directory resolved
-    (links followed, `..` taken as the system takes it), and last `path`
-    itself, resolved (Copilot at openDox-code#86, r4179241566). A link
-    inside the repository is a name the repository controls, which a pull
-    can point elsewhere, whether it points inside or out; a link outside it
-    that points in reaches the repository's file."""
+    each in the directory it is looked up in, and last what `path` comes to
+    (Copilot at openDox-code#86, r4179241566). A link is expanded ONE PATH
+    COMPONENT AT A TIME, as the kernel expands it, its target's own names
+    looked up in turn, relative to the link's directory or from the root,
+    and `..` taken from where the walk stands (r4179241184; the holder's
+    ruling, openxFactory#656 comment 5986391296): so every name a chain of
+    links passes through is judged, a link inside the repository anywhere
+    in it included (`/outside/entry -> /repo/selected -> /outside/a`). A
+    link inside the repository is a name the repository controls, which a
+    pull can point elsewhere, whether it points inside or out; a link
+    outside it that points in reaches the repository's file. A path whose
+    links pass `_LINK_HOPS` raises `_TooManyLinks`."""
     names: list[Path] = []
     real = Path(os.sep)
-    for part in Path(path).parts[1:]:
+    pending = list(Path(path).parts[1:])
+    hops = 0
+    while pending:
+        part = pending.pop(0)
+        if part == os.curdir:
+            continue
         if part == os.pardir:
             real = real.parent
             continue
-        names.append(real / part)
-        real = Path(_resolved_path(str(real / part)))
+        name = real / part
+        names.append(name)
+        try:
+            target = os.readlink(name)
+        except (OSError, ValueError):
+            real = name             # no link: looked up as it is named
+            continue
+        hops += 1
+        if hops > _LINK_HOPS:
+            raise _TooManyLinks(path)
+        parts = list(Path(target).parts)
+        if os.path.isabs(target):
+            real = Path(os.sep)
+            parts = parts[1:]
+        pending[:0] = parts
     names.append(real)
     return names
 
@@ -1036,16 +1081,59 @@ def _candidates(member: str, *, option: bool) -> list[str]:
     return [candidate for candidate in found if candidate]
 
 
+#: Every suffix a module is imported from: sources, bytecode (a sourceless
+#: `.pyc`) and extension modules (Copilot at openDox-code#86, r4180041203;
+#: the holder's ruling, openxFactory#656 comment 5986391296).
+_MODULE_SUFFIXES: tuple[str, ...] = tuple(importlib.machinery.all_suffixes())
+
+
 def _module_paths(name: str, *, context: _Context) -> list[str]:
     """The files a module named after `-m` could be imported from: its
     whole dotted name as a path under the context's working directory,
-    which `python -m` imports from first, as a package (`a/b/c`) and as a
-    module (`a/b/c.py`), whether or not a file is there yet (Copilot at
-    openDox-code#86, r4179241555). A namespace package needs no
-    `__init__`, so a dotted name can reach any directory under the working
-    directory; every package on the way is a name `_traversed` judges."""
+    which `python -m` imports from first, as a package directory (`a/b/c`)
+    and as a module with every import suffix (`a/b/c.py`, `a/b/c.pyc`,
+    `a/b/c.<abi>.so`; `_MODULE_SUFFIXES`), whether or not a file is there
+    yet (Copilot at openDox-code#86, r4179241555, r4180041203). A namespace
+    package needs no `__init__`, so a dotted name can reach any directory
+    under the working directory; every package on the way is a name
+    `_traversed` judges."""
     base = os.path.join(context.cwd, *name.split("."))
-    return [base, base + ".py"]
+    return [base, *(base + suffix for suffix in _MODULE_SUFFIXES)]
+
+
+#: Python's own short options that take a value (`-W arg`, `-X opt`), and
+#: the one that ends its options with an inline script (`-c`).
+_PYTHON_VALUE_LETTERS = "WXc"
+
+
+def _module_operands(members) -> dict[int, str]:
+    """Each module a command names after `-m`, by the index of the member
+    that names it, read by Python's own option rules (Copilot at
+    openDox-code#86, r4180041213; the holder's ruling, openxFactory#656
+    comment 5986391296): `-m X`, `-mX` and a cluster `-BmX`, read letter by
+    letter up to `m`, whose module is the rest of the cluster or else the
+    next member; a letter that takes a value (`-W`, `-X`) or `-c` ends the
+    cluster. Asked of every option member before `--`, whatever the
+    program, FAIL-CLOSED."""
+    modules: dict[int, str] = {}
+    for index, member in enumerate(members):
+        if not index:
+            continue
+        if member == "--":
+            break
+        if not member.startswith("-") or member.startswith("--"):
+            continue
+        for at in range(1, len(member)):
+            letter = member[at]
+            if letter == "m":
+                if member[at + 1:]:
+                    modules[index] = member[at + 1:]
+                elif index + 1 < len(members):
+                    modules[index + 1] = members[index + 1]
+                break
+            if letter in _PYTHON_VALUE_LETTERS:
+                break
+    return modules
 
 
 def in_repository_program(binding, *, root: Path | str) -> str | None:
@@ -1095,7 +1183,9 @@ def _from_the_root(candidate: str, *, program: bool, served: Path) -> bool:
 def in_repository_argv(members, *, root: Path | str) -> str | None:
     """The member of a broker command `members` that names a file inside
     the served repository, or None: `in_repository_program`'s rule, for a
-    command no binding carries yet (the console intake's broker).
+    command no binding carries yet (the console intake's broker). A member
+    whose links cannot be followed to an end (`_LINK_HOPS`) is returned as
+    well, FAIL-CLOSED; `broker_command_refused` refuses it as unreadable.
 
     It is judged as it runs (`_Context`; Copilot at openDox-code#86,
     r4179241532, r4179366288): from `BROKER_WORKING_DIRECTORY`, on the
@@ -1116,6 +1206,15 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
     command of its own, in the context the launchers left it. A file a
     launcher writes inside the repository is refused too, an accepted
     strictness."""
+    try:
+        return _in_repository_member(members, root=root)
+    except _TooManyLinks as deep:
+        return deep.member
+
+
+def _in_repository_member(members, *, root: Path | str) -> str | None:
+    """`in_repository_argv`'s work. Raises `_TooManyLinks`, naming the
+    member, for a member whose links pass `_LINK_HOPS`."""
     served = Path(resolved_root(root))
 
     def inside(found: list[str]) -> bool:
@@ -1146,16 +1245,23 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
                                   context=from_the_root)
         return found
 
+    def judged(member: str, found: list[str]) -> bool:
+        try:
+            return inside(found)
+        except _TooManyLinks:
+            raise _TooManyLinks(member) from None
+
     unwrapped = _unwrapped(members)
     for launcher, context in unwrapped.launchers:
-        if inside(_located(launcher, first=True, context=context)):
+        if judged(launcher, _located(launcher, first=True, context=context)):
             return launcher
     for value, context in unwrapped.values:
-        if inside(named(value, option=value.startswith("-"), first=False,
-                        context=context)):
+        if judged(value, named(value, option=value.startswith("-"),
+                               first=False, context=context)):
             return value
     members = unwrapped.command
     context = unwrapped.context
+    modules = _module_operands(members)
     positional = False
     for index, member in enumerate(members):
         if index and member == "--" and not positional:
@@ -1163,19 +1269,20 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
             continue
         found = named(member, option=bool(index) and member.startswith("-")
                       and not positional, first=index == 0, context=context)
-        if index and members[index - 1] == "-m" and not positional:
-            found += _module_paths(member, context=context)
-        if inside(found):
+        if index in modules and not positional:
+            found += _module_paths(modules[index], context=context)
+        if judged(member, found):
             return member
     return None
 
 
 def names_a_path_inside(value: str, *, root: Path | str) -> bool:
-    """Whether `value`, or any entry of it as a path list, names a path
-    inside the served repository at `root`, by `in_repository_argv`'s rule
-    for an option's value: from `BROKER_WORKING_DIRECTORY` and from the
+    """Whether `value`, or any `os.pathsep`-separated part of it, names a
+    path inside the served repository at `root`, by `in_repository_argv`'s
+    rule for an option's value: from `BROKER_WORKING_DIRECTORY` and from the
     served root, every name on the way, links followed. A broker's
-    environment carries no such value (F16.1 as T007 batch P amends it)."""
+    environment carries no such value (F16.1 as T007 batch P amends it;
+    `doxbench_provider.broker_environment`)."""
     return any(part and in_repository_argv(
         ["opendox-environment", f"--value={part}"], root=root) is not None
         for part in value.split(os.pathsep))
@@ -1707,9 +1814,15 @@ def broker_command_refused(members, *,
         return unwrapped.unreadable_because
     if inline_script(members, root=root) is not None:
         return REASON_INLINE_SCRIPT
-    if root is not None and in_repository_argv(members,
-                                               root=root) is not None:
-        return REASON_IN_REPOSITORY
+    if root is not None:
+        try:
+            named = _in_repository_member(members, root=root)
+        except _TooManyLinks:
+            # links past the kernel's own bound, or a loop: what it names
+            # cannot be judged (the holder's ruling, #656 5986391296)
+            return REASON_UNREADABLE_COMMAND
+        if named is not None:
+            return REASON_IN_REPOSITORY
     return None
 
 
@@ -1783,9 +1896,30 @@ def registered_verdict_for(binding, *, root: Path | str) -> TrustVerdict:
     return _judged(lambda: registered, binding, root=root)
 
 
+class TrustRecording(NamedTuple):
+    """What recording trust came to: the verdict, which admits exactly the
+    binding, and whether the policy RECORDED anything (the holder's ruling,
+    openxFactory#656 comment 5986391296): a policy's `record()` that answers
+    something falsy recorded nothing, and its verdict is asked instead, so
+    there is nothing to withdraw after a write that fails."""
+
+    verdict: TrustVerdict
+    recorded: bool
+
+
 def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
+    """`recording_for`'s verdict: the trust recorded for `binding` at
+    `root`, which admits exactly `binding`."""
+    return recording_for(binding, root=root).verdict
+
+
+def recording_for(binding, *, root: Path | str) -> TrustRecording:
     """Ask the registered policy to RECORD trust for `binding` at `root`, and
-    return the verdict, which admits exactly `binding`.
+    return the verdict, which admits exactly `binding`, and whether the
+    policy recorded anything. `record()` reports that by what it answers: a
+    verdict is a record, and something falsy (None, as openxFactory's
+    governed policy answers) is none, in which case the policy's `verdict`
+    is asked for the verdict (ruling 5986391296).
 
     A policy may decline, as a governed host's does for a binding whose
     declaration is pending. So an answer that does not admit exactly this
@@ -1811,11 +1945,16 @@ def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
             f"machine, and no trust was recorded for it: {refused}. "
             f"{trust_remedy(binding.id, str(root), refused)}")
     registered = None
+    recorded = True
     try:
         # INSIDE the refusal net (T100 follow-on, A13): whatever the seam
         # answers, a refusal by name follows, never a raw error.
         registered = policy()
         verdict = registered.record(binding, root=root)
+        if not verdict:
+            # NOTHING RECORDED: the policy's own verdict decides
+            recorded = False
+            verdict = registered.verdict(binding, root=root)
     except TrustStoreRefused:
         # openDox's own store's refusal is actionable and composed from
         # nothing a policy chose: it is raised as it is. Any other policy's
@@ -1834,7 +1973,7 @@ def recorded_for(binding, *, root: Path | str) -> TrustVerdict:
             reason=reason_policy_failed(error))
     verdict = _held_to(binding, verdict, root=root)
     if verdict.admits(binding):
-        return verdict
+        return TrustRecording(verdict, recorded)
     raise TrustNotRecorded(
         f"the trust policy did not record trust for model binding "
         f"{shown(binding.id)} in the repository at {shown(verdict.root)} "
@@ -1864,7 +2003,9 @@ def restored_for(binding, *, replacing, root: Path | str) -> None:
     openDox-code#86, r4179076901). A host's policy is asked to record the
     earlier form again, as `recorded_for` asks; one cannot be asked to
     withdraw a trust (`REASON_NO_WITHDRAWAL`). Refused BY NAME where it
-    cannot be done."""
+    cannot be done. Asked only where the policy recorded something
+    (`TrustRecording.recorded`): openDox withdraws only what a policy
+    recorded (ruling 5986391296)."""
     registered = _registered_now()
     if type(registered) is MachineTrust:
         registered.restore(binding, root=root, replacing=replacing)

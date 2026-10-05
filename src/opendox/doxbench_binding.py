@@ -91,6 +91,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+import secrets
 import stat
 import tempfile
 from collections.abc import Iterable, Mapping
@@ -585,20 +586,26 @@ def write_settings_document(path: Path, text: str) -> None:
     full disk, an I/O error) leaves the document as it was, and the new
     file is removed, so a refusal can say nothing in it changed. A document
     this user cannot write is refused as it always was, by the system's own
-    error, rather than replaced. A document that does not exist yet is
-    written in place, and removed again if that write fails."""
+    error, rather than replaced.
+
+    A DOCUMENT THAT DOES NOT EXIST YET is written whole to a new file beside
+    it, created exclusively (so with the mode a new file takes here), and
+    then published with a hard link (`os.link`), which never replaces a
+    document made in the meantime (Copilot at openDox-code#86, r4180041167;
+    the holder's ruling, openxFactory#656 comment 5986391296). So no reader
+    sees part of one, a write that fails leaves none, and one made meanwhile
+    refuses this write (`FileExistsError`) rather than being overwritten."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
+        staged = path.parent / (f".{path.name}.{secrets.token_hex(8)}"
+                                ".opendox-new")
         try:
-            with path.open("x", encoding="utf-8") as handle:
+            with staged.open("x", encoding="utf-8") as handle:
                 _write_all(handle, text)
-        except FileExistsError:
-            pass                # made meanwhile: replaced below instead
-        except BaseException:
-            path.unlink(missing_ok=True)
-            raise
-        else:
-            return
+            path.hardlink_to(staged)
+        finally:
+            staged.unlink(missing_ok=True)
+        return
     with path.open("a", encoding="utf-8"):
         pass                    # this user may write it, or PermissionError
     mode = stat.S_IMODE(path.stat().st_mode)

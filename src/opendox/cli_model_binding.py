@@ -58,17 +58,18 @@ def _repo_root(args: argparse.Namespace) -> Path:
 
 
 def _record_trust(binding: "binding_mod.ModelProviderBinding",
-                  args: argparse.Namespace):
+                  args: argparse.Namespace) -> "trust_mod.TrustRecording":
     """Record trust for the binding this act writes (#1144 16.3a; RULED
     openxFactory#656 comment 5962785556, item 2): the operator declares it
     here, so the operator trusts it. Returns the verdict, which admits
     exactly this binding. A store that cannot record, a policy that DECLINES
     (as a governed host's does for a pending declaration) or answers for
     another binding, and a policy that raises, are each refused by name, as
-    a `BindingRefused` (`doxbench_trust.recorded_for`). `add`, `edit` and
+    a `BindingRefused` (`doxbench_trust.recording_for`). `add`, `edit` and
     `trust` ask BEFORE they write anything, so a refusal leaves nothing
-    written (T007 batch M)."""
-    return trust_mod.recorded_for(binding, root=_repo_root(args))
+    written (T007 batch M). Returns the verdict, and whether the policy
+    recorded anything (ruling 5986391296)."""
+    return trust_mod.recording_for(binding, root=_repo_root(args))
 
 
 def _named_document(store: "binding_mod.BindingStore",
@@ -95,7 +96,21 @@ RECOVER_FAILED_UNDOING = (
     "which declares that form")
 
 
+def _declares(store: "binding_mod.BindingStore", binding) -> bool:
+    """Whether the document `store` reads now declares exactly `binding`'s
+    form, by its digest. A document that cannot be read declares nothing
+    this act can rely on."""
+    try:
+        declared = store.get(binding.id)
+    except (binding_mod.BindingRefused, OSError):
+        return False
+    return declared is not None and trust_mod.binding_digest(
+        declared) == trust_mod.binding_digest(binding)
+
+
 def _undone(refusal: "binding_mod.BindingRefused", *, earlier, written,
+            recording: "trust_mod.TrustRecording",
+            store: "binding_mod.BindingStore",
             args: argparse.Namespace) -> "binding_mod.BindingRefused":
     """`refusal`, for a write that failed after trust was recorded for
     `written`, once that trust is taken back (the holder's ruling,
@@ -103,7 +118,19 @@ def _undone(refusal: "binding_mod.BindingRefused", *, earlier, written,
     earlier form trusted again where it was trusted (`earlier`), and the
     new form's trust withdrawn where it was not (`earlier` None), so a failed
     write leaves no trust for a form no document declares. Where that
-    cannot be done, the refusal says so, and how to recover."""
+    cannot be done, the refusal says so, and how to recover.
+
+    Nothing is taken back where the policy recorded nothing
+    (`TrustRecording.recorded`), so the refusal's "nothing changed" is true
+    of trust too; nor where the document now declares exactly the form
+    recorded, as another `add` or `edit` of the same form wrote it (the
+    holder's ruling, openxFactory#656 comment 5986391296, (a); Copilot at
+    openDox-code#86, r4180041219). THE ACCEPTED LIMIT: two acts of the
+    same form can still interleave so that one's undoing runs before the
+    other's write lands; it fails closed, the declared binding reading
+    untrusted until it is trusted again."""
+    if not recording.recorded or _declares(store, written):
+        return refusal
     try:
         trust_mod.restored_for(earlier, replacing=written,
                                root=_repo_root(args))
@@ -293,13 +320,15 @@ def cmd_model_binding_add(args: argparse.Namespace) -> int:
         binding = _declared_binding(args)
         if store.get(binding.id) is not None:
             store.add(binding)      # refuses the repeated id, in its own words
-        verdict = _record_trust(binding, args)
+        recording = _record_trust(binding, args)
+        verdict = recording.verdict
         try:
             store.add(binding)
         except (binding_mod.BindingRefused, OSError) as error:
             refusal = (binding_mod.BindingRefused(_cannot_write(store, error))
                        if isinstance(error, OSError) else error)
             raise _undone(refusal, earlier=None, written=binding,
+                          recording=recording, store=store,
                           args=args) from None
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
@@ -334,14 +363,16 @@ def cmd_model_binding_edit(args: argparse.Namespace) -> int:
             store.edit(binding)     # refuses the unknown id, in its own words
         was_trusted = trust_mod.verdict_for(
             existing, root=_repo_root(args)).admits(existing)
-        verdict = _record_trust(binding, args)
+        recording = _record_trust(binding, args)
+        verdict = recording.verdict
         try:
             store.edit(binding)
         except (binding_mod.BindingRefused, OSError) as error:
             refusal = (binding_mod.BindingRefused(_cannot_write(store, error))
                        if isinstance(error, OSError) else error)
             raise _undone(refusal, earlier=existing if was_trusted else None,
-                          written=binding, args=args) from None
+                          written=binding, recording=recording, store=store,
+                          args=args) from None
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -427,7 +458,7 @@ def cmd_model_binding_set_credential(args: argparse.Namespace, *,
     # broker's, so a store that refuses now leaves the binding written and
     # untrusted, which refuses it at use, and says so.
     try:
-        verdict = _record_trust(rewritten, args)
+        verdict = _record_trust(rewritten, args).verdict
     except binding_mod.BindingRefused as exc:
         print(f"{trust_mod.shown(rewritten.id)} holds the new reference, but "
               f"it is NOT trusted on this machine: {exc}", file=sys.stderr)
@@ -515,7 +546,7 @@ def cmd_model_binding_trust(args: argparse.Namespace) -> int:
     for line in _trust_disclosure(binding, store, root):
         print(line)
     try:
-        verdict = _record_trust(binding, args)
+        verdict = _record_trust(binding, args).verdict
     except binding_mod.BindingRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
