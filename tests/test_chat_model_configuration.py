@@ -197,10 +197,29 @@ def _binding(**overrides) -> binding_mod.ModelProviderBinding:
 
 def _declare(checkout: Path, binding=None) -> binding_mod.ModelProviderBinding:
     """A binding declared in the checkout's bindings document, as
-    `opendox model-binding add` declares one."""
+    `opendox model-binding add` declares one: written, and trusted on this
+    machine (#1144 16.3a; plan 034 T100), in the private store
+    `_a_private_trust_store` registers."""
+    from opendox import doxbench_trust
+
     binding = binding or _binding()
+    doxbench_trust.policy().record(binding, root=checkout)
     binding_mod.BindingStore(binding_mod.bindings_path(checkout)).add(binding)
     return binding
+
+
+@pytest.fixture(autouse=True)
+def _a_private_trust_store(tmp_path_factory):
+    """No case reads or writes this machine's own model-binding trust
+    (#1144 16.3a; plan 034 T100): each registers the strict store over a
+    state directory of its own."""
+    from opendox import doxbench_trust
+
+    doxbench_trust.unregister()
+    doxbench_trust.register(doxbench_trust.MachineTrust(
+        state_dir=tmp_path_factory.mktemp("trust") / "st"))
+    yield
+    doxbench_trust.unregister()
 
 
 def _resolve(tmp_path: Path, checkout: Path, *, harness: bool, spawn=None):
@@ -419,7 +438,10 @@ def standalone(tmp_path, monkeypatch):
         base = (match.group(2), int(match.group(3)))
         status, capabilities = _request(base, "GET", "/capabilities")
         assert status == 200 and capabilities["actions"]["session"] is True
-        yield base, capabilities["console_token"], child
+        # a standalone plane delivers its token through the private copy, and
+        # never on `/capabilities` (plan 034 T104)
+        assert "console_token" not in capabilities, sorted(capabilities)
+        yield base, child.console_token(base[1]), child
         assert child.interrupt() == 0, child.stderr_text()
         assert child.refused() == [], child.refused()
         assert "Traceback" not in child.stderr_text(), child.stderr_text()
@@ -1023,7 +1045,7 @@ def postures(tmp_path_factory):
                 status, capabilities = _request(base, "GET", "/capabilities")
                 assert status == 200 and capabilities["actions"]["session"] is True
                 started[name].base = base
-                started[name].token = capabilities["console_token"]
+                started[name].token = child.console_token(base[1])
         yield started
         for posture in started.values():
             assert posture.child.interrupt() == 0, posture.child.stderr_text()

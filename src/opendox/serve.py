@@ -105,6 +105,7 @@ import argparse
 import functools
 import http.server
 import json
+import os
 import secrets
 import socket
 import subprocess
@@ -175,6 +176,9 @@ from opendox import display_profile  # noqa: E402
 # `opendox.runtime.config` and `opendox.corpus_adapter` besides the stdlib.
 from opendox import corpus_adapter  # noqa: E402
 from opendox.runtime import local_git_adapter  # noqa: E402
+# THE CONSOLE TOKEN'S DELIVERY on a standalone plane (plan 034 T104): which
+# delivery a plane uses, and the private copy an entry point writes.
+from opendox import console_access  # noqa: E402
 # THE GENERATOR SEAM'S DEFAULT (5.4; plan 034 T052): openDox's own snapshot
 # generator, which `build_server()` and `main()` register where no host has.
 # Both modules are stdlib-only and name no sibling, so this adds no reach.
@@ -681,10 +685,15 @@ def hosted_ref_refused(loopback: bool, ref: str | None) -> bool:
 # The realization is a HUMAN CONSOLE test, applied to the session verbs before the
 # body is parsed, exactly where the other two clauses live:
 #
-#   1. a per-serve TOKEN, minted at start-up and published ONLY on
-#      `/capabilities`. The served page reads it same-origin; a cross-origin page
-#      cannot read a same-origin JSON response at all, so the drive-by class is
-#      structurally out.
+#   1. a per-serve TOKEN, minted at start-up. On a HOST's plane it is published
+#      ONLY on `/capabilities`: the served page reads it same-origin, and a
+#      cross-origin page cannot read a same-origin JSON response at all, so the
+#      drive-by class is structurally out. On a STANDALONE plane it is not on
+#      `/capabilities` at all (plan 034 T104; RULED openxFactory#656
+#      `5963851934`, adversarial review 2's M5): the page is opened with it in
+#      the URL's FRAGMENT, through a 0600 private copy in the state directory
+#      (`console_access`), so another OS user of the machine cannot simply ask
+#      this loopback server for it.
 #   2. a same-origin `Origin`/`Referer` when the caller sends one, so a browser
 #      that CAN reach the plane cannot borrow the human's session from another
 #      site.
@@ -692,7 +701,8 @@ def hosted_ref_refused(loopback: bool, ref: str | None) -> bool:
 #
 # What this HONESTLY does not do, stated so no reader over-reads it: a process
 # already running as the engineer, on the engineer's own machine, can `GET
-# /capabilities` and present the token. Hardening THAT is the xForge host's
+# /capabilities` on a host's plane, or read the private copy on a standalone
+# one, and present the token. Hardening THAT is the xForge host's
 # concern (the pre-existing ruling recorded at `cli.py`'s `_human_gate` and D22),
 # not this local console's. What the check removes is every caller that cannot
 # demonstrate it came from the console this serve started — which is the whole of
@@ -802,6 +812,33 @@ def host_names_this_loopback_serve(host_lines, port: int,
 
 
 # --------------------------- source-path containment (pure) ---------------------------
+
+def read_unless_private(path: Path | str, private_roots) -> bytes | None:
+    """The bytes of `path`, or None where the file it OPENS is a console
+    token's private copy (`console_access.is_private_file`, plan 034 T104).
+
+    Every route that reads a file for any caller, with no console check,
+    reads through this (Copilot at openDox-code#84, r4178133842): `/source`
+    and `/snapshot.json`. A root or a snapshot named through a link is
+    resolved again on every request, and could be re-pointed at the state
+    directory after the copy was published; a hard link reaches the copy by
+    another name. The file actually opened is judged, so neither is served.
+    With no private root (a host's plane) it reads as before.
+
+    THE BYTES READ ARE JUDGED, NOT ONLY THE FILE (Copilot at
+    openDox-code#84, r4179793524). A copy being written in another state
+    directory grows: judged before the read, it could hold no token yet, and
+    hold one by the time it was read. So the file is read first, and what
+    was read is judged by its own bytes (`console_access.is_copy_bytes`) as
+    well as the file by its identity."""
+    with open(path, "rb") as stream:
+        data = stream.read()
+        if private_roots and (
+                console_access.is_copy_bytes(data)
+                or console_access.is_private_file(stream.fileno(), private_roots)):
+            return None
+        return data
+
 
 def resolve_source_path(checkout_root: Path, url_tail: str) -> Path | None:
     """Resolve a `/source/<tail>` request to an absolute file under
@@ -1324,6 +1361,115 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             return True
         return False
 
+    def send_head(self):
+        """The static bundle's file, as `SimpleHTTPRequestHandler` serves it,
+        except a target inside a console token's private-copy directory.
+
+        The stdlib handler follows links inside `--web-dir`, and a governed
+        host's composed web root is MADE of links out of it, so links are not
+        refused wholesale. But a link into the state directory must never
+        serve the token's copy (plan 034 T104; Copilot at openDox-code#84,
+        r4173889294): a target whose RESOLVED path is a directory the entry
+        point marked private (`console_access.publish` sets
+        `private_roots` on the server, on every standalone plane, whether it
+        wrote a copy or not), or lies inside one, is a 404, for GET and HEAD,
+        files and listings alike. A host's plane marks nothing, and serves
+        exactly as before.
+
+        BY NAME AND BY IDENTITY (adversarial review of openDox-code#84, B4):
+        a case-insensitive filesystem spells the copies' directory more than
+        one way, so where the resolved target, or a directory above it, is a
+        private root by `(st_dev, st_ino)`, it is that root
+        (`console_access.within_private_roots`).
+
+        A DIRECTORY REQUEST IS JUDGED BY WHAT IT SERVES (Copilot at
+        openDox-code#84, r4174674625). For `/sub/` the stdlib handler serves
+        the directory's first index page that exists (`index_pages`:
+        `index.html`, then `index.htm`), so the index page it would pick is
+        judged as well as the directory, and `web/sub/index.html` linked to a
+        copy is a 404 like the link itself.
+
+        AND BY THE IDENTITY OF THE FILE (Copilot at openDox-code#84,
+        r4178133842). A path cannot tell a hard link to the copy from any
+        other file, so the file the handler would serve is opened and judged
+        by `(st_dev, st_ino)` first (`console_access.is_private_file`), and a
+        private copy is a 404. The file the stdlib handler then opens is
+        judged the same way, against a link swapped in between: its headers
+        are already sent by then, so it is closed unread and its bytes are
+        never written."""
+        private = getattr(self.server, "private_roots", ())
+        # Judged afresh for every request: a length judged for an earlier one
+        # never bounds this one's body, should a handler ever serve several.
+        self._judged_length = None
+        if private:
+            path = Path(self.translate_path(self.path))
+            judged = [path]
+            if path.is_dir():
+                for name in getattr(self, "index_pages", ("index.html", "index.htm")):
+                    if (path / name).is_file():
+                        judged.append(path / name)
+                        break
+            for candidate in judged:
+                if (console_access.within_private_roots(candidate, private)
+                        or console_access.opens_a_private_file(candidate, private)):
+                    self.send_error(404, "File not found")
+                    return None
+        stream = super().send_head()
+        if private and stream is not None:
+            try:
+                handle = stream.fileno()
+            except (AttributeError, OSError, ValueError):
+                handle = None               # a directory listing, in memory
+            if handle is not None and console_access.is_private_file(handle, private):
+                stream.close()
+                self.close_connection = True    # its promised body never comes
+                return None
+            if handle is not None:
+                # What `copyfile` may send: the file as long as it was when
+                # judged, and its own first bytes judged again as they are
+                # sent (`copyfile`).
+                self._judged_length = os.fstat(handle).st_size
+        return stream
+
+    def copyfile(self, source, outputfile):
+        """The static body, as `SimpleHTTPRequestHandler` copies it, except
+        on a plane that marked a private-copy directory.
+
+        A FILE CAN GROW AFTER IT WAS JUDGED (Copilot at openDox-code#84,
+        r4179793524). A copy being written in another state directory holds
+        no token in its first bytes, and the stdlib copies to the end of the
+        file as it is when it reads, not as it was when `send_head` judged it.
+        So no more than the judged length is sent, and the body's first bytes,
+        read before anything is sent, are judged by what they are: a copy's
+        (`console_access.is_copy_bytes`) are never sent, and the connection
+        is closed, as the backstop closes it. Bytes shorter than a copy's
+        marker hold no token, and only they are sent."""
+        limit = getattr(self, "_judged_length", None)
+        self._judged_length = None
+        if limit is None:
+            return super().copyfile(source, outputfile)
+        need = min(limit, len(console_access.COPY_MARKER))
+        head = b""
+        while len(head) < need:
+            chunk = source.read(need - len(head))
+            if not chunk:
+                break
+            head += chunk
+        if console_access.is_copy_bytes(head):
+            self.close_connection = True
+            return None
+        outputfile.write(head)
+        remaining = limit - len(head)
+        if len(head) < need:
+            return None
+        while remaining > 0:
+            chunk = source.read(min(64 * 1024, remaining))
+            if not chunk:
+                break
+            outputfile.write(chunk)
+            remaining -= len(chunk)
+        return None
+
     def do_GET(self):  # noqa: N802
         if not self._route(head_only=False):
             super().do_GET()
@@ -1361,11 +1507,32 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
         pass the hosted refusal with one entry and serve another's bytes
         (FR-048)."""
         if entry is not None:
-            return entry.read_bytes()
+            return self._entry_bytes(entry)
         try:
-            return Path(self.snapshot_path).read_bytes()
+            return read_unless_private(
+                self.snapshot_path, getattr(self.server, "private_roots", ()))
         except OSError:
             return None
+
+    def _entry_bytes(self, entry) -> bytes | None:
+        """A registered entry's snapshot bytes, read as `read_unless_private`
+        reads, where this plane marked a private-copy directory and the entry
+        names its file. Otherwise the entry reads itself, as before.
+
+        THE IN-MEMORY PAYLOAD STILL COMES FIRST (Copilot at openDox-code#84,
+        at af2a2efb): `SnapshotEntry.read_bytes` serves an entry's payload
+        before its file, and only the FILE is guarded, so an entry with both
+        serves its payload whether or not the file exists."""
+        private = getattr(self.server, "private_roots", ())
+        path = getattr(entry, "snapshot_path", None)
+        if getattr(entry, "payload", None) is not None:
+            return entry.read_bytes()
+        if private and path is not None:
+            try:
+                return read_unless_private(path, private)
+            except OSError:
+                return None
+        return entry.read_bytes()
 
     def _serve_snapshot(self, head_only: bool) -> None:
         """`/snapshot.json`: the active snapshot, or the registered
@@ -1399,7 +1566,7 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
                 return
             if self._hosted_entry_refused(entry):
                 return
-            self._serve_bytes(entry.read_bytes(), JSON_CTYPE, head_only,
+            self._serve_bytes(self._entry_bytes(entry), JSON_CTYPE, head_only,
                               entry=entry)
             return
         if repository:
@@ -1514,9 +1681,16 @@ class DashboardHandler(serve_workbench.WorkbenchRoutes,
             self.end_headers()
             return
         try:
-            body = target.read_bytes()
+            body = read_unless_private(
+                target, getattr(self.server, "private_roots", ()))
         except OSError:
             self.send_error(404, "unreadable source")
+            return
+        if body is None:                    # a console token's private copy
+            self.send_response(404)
+            self._divergence_headers(entry)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         ctype = "text/markdown; charset=utf-8" if target.suffix == ".md" else "text/plain; charset=utf-8"
         self._serve_bytes(body, ctype, head_only, entry=entry)
@@ -2235,12 +2409,27 @@ def build_server(
         route_bindings=route_bindings,
     )
     # The human console's per-serve token (FR-019's third clause, review finding
-    # 2). Minted only where session verbs exist at all, and published on
-    # `/capabilities` — the one route the served page reads same-origin and no
-    # cross-origin page can read.
+    # 2). Minted only where session verbs exist at all.
+    #
+    # WHERE IT IS DELIVERED depends on whose plane this is (plan 034 T104;
+    # RULED openxFactory#656 `5963851934`). On a HOST's plane it is published on
+    # `/capabilities`, the one route the served page reads same-origin and no
+    # cross-origin page can read, as it always was. On a STANDALONE plane,
+    # built from openDox's own default profile, it is NOT: any loopback caller
+    # can read `/capabilities`, other OS users of the machine included. The
+    # entry point writes it into a 0600 private copy instead and opens the page
+    # with it in the URL's fragment (`console_access.publish`). The routes that
+    # require it require it exactly as before; only the delivery differs.
+    #
+    # THE DELIVERY IS THE PLANE'S, TOKEN OR NOT (adversarial review of
+    # openDox-code#84, B1): a standalone plane that minted none still keeps
+    # the state directory's boundary and never serves another plane's copy
+    # (`console_access.guard_private_roots`), so it is named a standalone
+    # plane's whether or not a token was minted.
     console_token = (mint_console_token()
                      if capabilities["actions"]["session"] else None)
-    if console_token:
+    console_delivery = console_access.delivery_for(domain_profile.current())
+    if console_token and console_delivery == console_access.DELIVERY_CAPABILITIES:
         capabilities[CONSOLE_TOKEN_FIELD] = console_token
     # THE ONE REPOSITORY THIS SERVE CAN WRITE TO. A plane reaching several
     # repositories serves them all for READING through per-entry source roots,
@@ -2420,7 +2609,38 @@ def build_server(
     # trace on the first live connection.
     route_extension.resolve_handlers(route_bindings, bound)
     factory = functools.partial(bound, directory=str(web_dir))
-    return _server_class_for(host)((host, port), factory)
+    httpd = _server_class_for(host)((host, port), factory)
+    # FOR THE ENTRY POINT, which delivers the token where `/capabilities` does
+    # not (`console_access.publish`): the token (`None` where none was
+    # minted), and which delivery this plane uses, whether or not it was.
+    httpd.console_token = console_token
+    httpd.console_token_delivery = console_delivery
+    # ...and EVERY root this plane serves files from, which the token's copy
+    # may not sit in (Copilot at openDox-code#84, r4173806506): the checkout,
+    # the static bundle's directory, each declared source root, the root of
+    # each entry the registry holds now (the bootstrapped session worktrees
+    # among them), and, on a loopback plane, the sessions container every
+    # later session worktree is made in (`branch_session.sessions_root`).
+    #
+    # AND THE SNAPSHOT FILES `/snapshot.json` READS DIRECTLY (Copilot at
+    # openDox-code#84, r4175213798), not through the static handler: the
+    # configured snapshot, each registered entry's, and, on a loopback plane,
+    # the container every session's snapshot is written in. A snapshot named
+    # at an earlier copy would otherwise be replaced by the new one and served.
+    served = [checkout_root, web_dir, snapshot_path,
+              *(Path(path).resolve() for path in (source_roots or {}).values())]
+    if loopback:
+        from opendox import branch_session as session_mod
+        served.append(session_mod.sessions_root(checkout_root))
+        served.append(session_mod.snapshots_root(checkout_root))
+    entries = getattr(source.registry, "entries", None)
+    for entry in (entries() if callable(entries) else ()):
+        for root in (getattr(entry, "source_root", None),
+                     getattr(entry, "snapshot_path", None)):
+            if root:
+                served.append(Path(root).resolve())
+    httpd.served_roots = tuple(dict.fromkeys(served))
+    return httpd
 
 
 class _IPv6ThreadingHTTPServer(http.server.ThreadingHTTPServer):
@@ -2527,18 +2747,45 @@ def serve(
             checkout_root=checkout_root))
     httpd = build_server(web_dir, snapshot_path, checkout_root, host=host,
                          port=port, quiet=quiet, actor=actor, **build_kwargs)
-    # FLUSHED before the process blocks (plan 034 T056): where standard
-    # output is a pipe or a file it is block-buffered, so an unflushed line
-    # never reaches a wrapper while the server runs, and the wrapper cannot
-    # learn an ephemeral port or tell that the server started.
-    print(f"serving ideation dashboard at {server_url(httpd, '/index.html')}",
-          flush=True)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        httpd.server_close()
+    page = server_url(httpd, "/index.html")
+    # THE CONSOLE TOKEN'S PRIVATE COPY on a standalone plane (plan 034 T104),
+    # as `cli.cmd_generate_and_open` writes it: its PATH is printed, never the
+    # token, and it goes when the server does. A copy that cannot be written
+    # safely refuses the start (`console_access.ConsoleAccessRefused`).
+    #
+    # A plain `kill`, or a closed terminal, stops a standalone console the way
+    # Ctrl-C does, from BEFORE the copy is written to after it is removed, and
+    # a stop that arrives while the copy is written or removed is held until
+    # that is done (Copilot at openDox-code#84, r4175213864). A plane that
+    # writes no copy keeps the signals' defaults.
+    console = None
+    with console_access.terminate_as_interrupt(console_access.needs_copy(httpd)):
+        try:
+            try:
+                with console_access.deferred_termination():
+                    console = console_access.publish(httpd, page_url=page)
+                if console is not None:
+                    print(f"console {console.file_url} (this user's private "
+                          "copy, mode 0600: open it to open the console page)")
+                    # A browser that cannot open it is told the way past it,
+                    # in one line with no token (RULED, B3).
+                    print(console_access.UNOPENABLE_HINT)
+                # FLUSHED before the process blocks (plan 034 T056): where
+                # standard output is a pipe or a file it is block-buffered, so
+                # an unflushed line never reaches a wrapper while the server
+                # runs, and the wrapper cannot learn an ephemeral port or tell
+                # that the server started.
+                print(f"serving ideation dashboard at {page}", flush=True)
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                pass
+        finally:
+            # The copy FIRST, while this process still holds the port, then
+            # the socket (`console_access.remove_private_copy`). A stop that
+            # arrives meanwhile lets both finish.
+            with console_access.deferred_termination(raise_pending=False):
+                console_access.remove_private_copy(console)
+                httpd.server_close()
 
 
 def _source_roots_from_args(values) -> dict:
@@ -2764,6 +3011,11 @@ def main(argv: list[str] | None = None) -> int:
         # local index rather than ignoring it, since only a host's registry
         # reads one. Reported on stderr with a non-zero status, as the
         # `--checkout-root` refusal above is.
+        print(f"serve refused: {exc}", file=sys.stderr)
+        return 1
+    except console_access.ConsoleAccessRefused as exc:
+        # NO SAFE PRIVATE COPY, NO SERVE (plan 034 T104): a standalone console
+        # whose token nobody can be handed is refused, before it serves.
         print(f"serve refused: {exc}", file=sys.stderr)
         return 1
     return 0
