@@ -3095,6 +3095,44 @@ def _in_repository_argv(served, where, monkeypatch):
         elsewhere.mkdir()
         (elsewhere / f"native{suffix}").symlink_to(extension)
         return ["env", "-C", str(elsewhere), sys.executable, "-m", "native"]
+    if where == "package-main-linked-into-the-repository":
+        # r4180717725: `-m pkg` runs `pkg/__main__.py`
+        elsewhere = served.tmp / "elsewhere"
+        (elsewhere / "pkg").mkdir(parents=True)
+        (elsewhere / "pkg" / "__main__.py").symlink_to(tool)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m", "pkg"]
+    if where == "package-init-linked-into-the-repository":
+        # r4180717725: `-m pkg.mod` runs `pkg/__init__.py` first
+        elsewhere = served.tmp / "elsewhere"
+        (elsewhere / "pkg").mkdir(parents=True)
+        (elsewhere / "pkg" / "__init__.py").symlink_to(tool)
+        (elsewhere / "pkg" / "mod.py").write_text("", encoding="utf-8")
+        return ["env", "-C", str(elsewhere), sys.executable, "-m",
+                "pkg.mod"]
+    if where == "module-on-an-assigned-pythonpath":
+        # r4180717772: the module is found through `PYTHONPATH`
+        library = served.tmp / "library"
+        library.mkdir()
+        (library / "broker.py").symlink_to(tool)
+        return ["env", f"PYTHONPATH={library}", sys.executable, "-m",
+                "broker"]
+    if where == "module-on-a-relative-pythonpath-entry":
+        library = beside / "library"
+        library.mkdir()
+        (library / "broker.py").symlink_to(tool)
+        return ["env", "-C", str(beside), "PYTHONPATH=library",
+                sys.executable, "-m", "broker"]
+    if where == "module-on-the-inherited-pythonpath":
+        library = served.tmp / "library"
+        library.mkdir()
+        (library / "broker.py").symlink_to(tool)
+        from opendox import doxbench_bridge
+
+        monkeypatch.setattr(doxbench_bridge, "INHERITED_ENVIRONMENT",
+                            (*doxbench_bridge.INHERITED_ENVIRONMENT,
+                             "PYTHONPATH"))
+        monkeypatch.setenv("PYTHONPATH", str(library))
+        return [sys.executable, "-m", "broker"]
     if where == "module-attached-to-its-option":
         # r4180041213: `-mX`
         return ["env", "-C", str(beside), sys.executable,
@@ -3223,6 +3261,11 @@ IN_REPOSITORY = ("absolute", "relative-to-the-broker-directory",
                  "sourceless-bytecode-module", "extension-module",
                  "module-attached-to-its-option",
                  "module-in-an-option-cluster",
+                 "package-main-linked-into-the-repository",
+                 "package-init-linked-into-the-repository",
+                 "module-on-an-assigned-pythonpath",
+                 "module-on-a-relative-pythonpath-entry",
+                 "module-on-the-inherited-pythonpath",
                  "symlink-in-the-repository-to-outside",
                  "relative-search-path-entry",
                  "climbing-out-of-a-link",
@@ -3282,6 +3325,51 @@ def test_N2_deno_whose_leading_option_cannot_be_read_is_named(served):
         assert trust_mod.inline_script(argv) == "deno", argv
     assert trust_mod.inline_script(
         ["deno", "--quiet", "run", str(served.broker)]) is None
+
+
+def test_R4_one_working_directory_per_launcher_is_judged(served):
+    """The other side of r4180717752: one `-C` per launcher keeps its
+    judgment, nested launchers each with their own included, and one given
+    only inside an `env -S` string."""
+    trust_mod = _trust_mod()
+    program = [sys.executable, str(served.broker)]
+    for argv in (["env", "-C", "/tmp", *program],
+                 ["env", "-C", "/tmp", "env", "-C", "usr", *program],
+                 ["env", "-S", f"-C /tmp {sys.executable} {served.broker}"],
+                 ["sudo", "-D", "/tmp", *program]):
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) is None, argv
+
+
+def test_R4_the_effective_pythonpath_is_what_the_broker_has(
+        served, monkeypatch):
+    """r4180717772; the holder's ruling, #656 5988088910: an inherited
+    `PYTHONPATH` entry inside the repository, which the broker's environment
+    drops, is no root a module is judged under; `env -i` and `env -u
+    PYTHONPATH` clear the inherited entries, as they clear the broker's."""
+    from opendox import doxbench_bridge
+
+    trust_mod = _trust_mod()
+    tools = served.repo / "tools"
+    tools.mkdir()
+    library = served.tmp / "library"
+    library.mkdir()
+    (library / "broker.py").symlink_to(tools / "broker.py")
+    monkeypatch.setattr(doxbench_bridge, "INHERITED_ENVIRONMENT",
+                        (*doxbench_bridge.INHERITED_ENVIRONMENT,
+                         "PYTHONPATH"))
+    monkeypatch.setenv("PYTHONPATH", str(tools))       # dropped: inside
+    assert trust_mod.broker_command_refused(
+        [sys.executable, "-m", "json.tool"], root=served.repo) is None
+    monkeypatch.setenv("PYTHONPATH", str(library))     # reaches inside
+    assert trust_mod.broker_command_refused(
+        [sys.executable, "-m", "broker"], root=served.repo) == (
+            trust_mod.REASON_IN_REPOSITORY)
+    for cleared in (["env", "-i"], ["env", "-"], ["env", "-u", "PYTHONPATH"],
+                    ["env", "--ignore-environment"]):
+        argv = [*cleared, sys.executable, "-m", "broker"]
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) is None, argv
 
 
 def test_R3_a_value_python_reads_is_no_module(served):
@@ -4879,6 +4967,14 @@ UNREADABLE_COMMANDS = {
     "sudo-login": ["sudo", "-i", "/bin/true"],
     # N2: a leading option deno's global grammar does not hold
     "deno-unknown-leading-option": ["deno", "--frobnicate", "eval", "x"],
+    # r4180717752; the holder's ruling, #656 5988088910: a second working
+    # directory for one launcher, counting one an `env -S` string gives
+    "env-chdir-twice": ["env", "-C", "/tmp", "-C", "usr", "/bin/true"],
+    "env-chdir-twice-long": ["env", "--chdir=/tmp", "--chd", "usr",
+                             "/bin/true"],
+    "env-chdir-again-in-a-split-string": ["env", "-C", "/tmp", "-S",
+                                          "-C usr /bin/true"],
+    "sudo-chdir-twice": ["sudo", "-D", "/tmp", "--chdir=/usr", "/bin/true"],
 }
 
 

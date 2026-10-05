@@ -327,18 +327,20 @@ REASON_INLINE_SCRIPT = (
 #: openDox-code#86, r4179366319; the holder's ruling, openxFactory#656
 #: comment 5985046107, C1): an option its launcher does not have, or has by
 #: more than one name; an option after which what runs cannot be judged
-#: from its words (`env --argv0`, `sudo --chroot`, `sudo -i`); launchers
-#: nested past what is unwrapped; or a path whose symbolic links pass the
-#: kernel's own bound, or loop (`_LINK_HOPS`; ruling 5986391296). What it runs cannot be judged, so it is
+#: from its words (`env --argv0`, `sudo --chroot`, `sudo -i`); a launcher
+#: given a second working directory (`env -C`, counting an `env -S`
+#: string's, or `sudo -D`; ruling 5988088910); launchers nested past what
+#: is unwrapped; or a path whose symbolic links pass the kernel's own bound,
+#: or loop (`_LINK_HOPS`; ruling 5986391296). What it runs cannot be judged, so it is
 #: refused FAIL-CLOSED, with the inline-script remedy. (An `env -S` string
 #: env would not split as a shell does is an inline script:
 #: `REASON_INLINE_SCRIPT`.)
 REASON_UNREADABLE_COMMAND = (
     "its broker command cannot be read to the program it runs (a launcher "
     "option it does not have, or has by more than one name, an option after "
-    "which what runs cannot be judged, launchers nested too deeply, or a "
-    "path whose links go deeper than the system follows), so what it runs "
-    "cannot be judged")
+    "which what runs cannot be judged, a launcher given two working "
+    "directories, launchers nested too deeply, or a path whose links go "
+    "deeper than the system follows), so what it runs cannot be judged")
 
 #: What an operator is told to do about such a binding.
 REMEDY_INLINE_SCRIPT = (
@@ -943,20 +945,51 @@ BROKER_WORKING_DIRECTORY = os.path.abspath(os.sep)
 
 
 class _Context(NamedTuple):
-    """Where a broker command runs: its working directory, and the search
-    path its program is found on (None: the platform's default,
-    `os.defpath`), as the child process sees them (Copilot at
-    openDox-code#86, r4179241532, r4179366288). A launcher can change both
-    for the command it starts (`env -C`, `env PATH=...`, `env -i`)."""
+    """Where a broker command runs: its working directory, the search path
+    its program is found on (None: the platform's default, `os.defpath`),
+    and its Python import path, `PYTHONPATH`'s entries (None: the ones the
+    broker inherits, `_inherited_pythonpath`), as the child process sees
+    them (Copilot at openDox-code#86, r4179241532, r4179366288,
+    r4180717772). A launcher can change each for the command it starts
+    (`env -C`, `env PATH=...`, `env PYTHONPATH=...`, `env -i`)."""
 
     cwd: str
     path: str | None
+    pythonpath: tuple[str, ...] | None = None
 
 
 def _broker_context() -> _Context:
     """The context every broker command starts in: `BROKER_WORKING_DIRECTORY`,
     and the search path the broker inherits from this process."""
     return _Context(BROKER_WORKING_DIRECTORY, os.environ.get("PATH"))
+
+
+def _inherited_pythonpath(*, root: Path | str) -> list[str]:
+    """The `PYTHONPATH` entries a broker inherits: those of this process's
+    environment that the broker's environment carries, after its filter
+    drops every entry inside the served repository
+    (`doxbench_provider.broker_environment`, `PATH_LIST_VARIABLES`)."""
+    from opendox import doxbench_bridge
+
+    inherited = doxbench_bridge.child_environment(os.environ).get(
+        "PYTHONPATH")
+    if not inherited:
+        return []
+    return [entry for entry in inherited.split(os.pathsep)
+            if not (entry and names_a_path_inside(entry, root=root))]
+
+
+def _python_roots(context: _Context, *, root: Path | str) -> list[str]:
+    """Every directory `python -m` imports a module from, as the broker runs
+    it: its start directory, and each entry of its effective `PYTHONPATH`,
+    the inherited entries after the filter or whatever a launcher assigned
+    or cleared, a relative entry (or an empty one) read from the start
+    directory (Copilot at openDox-code#86, r4180717772; the holder's ruling,
+    openxFactory#656 comment 5988088910)."""
+    entries = (context.pythonpath if context.pythonpath is not None
+               else _inherited_pythonpath(root=root))
+    return [context.cwd, *(os.path.join(context.cwd, entry)
+                           for entry in entries)]
 
 
 def _which(name: str, context: _Context) -> str | None:
@@ -1087,18 +1120,32 @@ def _candidates(member: str, *, option: bool) -> list[str]:
 _MODULE_SUFFIXES: tuple[str, ...] = tuple(importlib.machinery.all_suffixes())
 
 
-def _module_paths(name: str, *, context: _Context) -> list[str]:
-    """The files a module named after `-m` could be imported from: its
-    whole dotted name as a path under the context's working directory,
-    which `python -m` imports from first, as a package directory (`a/b/c`)
-    and as a module with every import suffix (`a/b/c.py`, `a/b/c.pyc`,
-    `a/b/c.<abi>.so`; `_MODULE_SUFFIXES`), whether or not a file is there
-    yet (Copilot at openDox-code#86, r4179241555, r4180041203). A namespace
-    package needs no `__init__`, so a dotted name can reach any directory
-    under the working directory; every package on the way is a name
-    `_traversed` judges."""
-    base = os.path.join(context.cwd, *name.split("."))
-    return [base, *(base + suffix for suffix in _MODULE_SUFFIXES)]
+def _module_paths(name: str, *, roots: list[str]) -> list[str]:
+    """The files a module named after `-m` could be imported from, under
+    each of `roots` (`_python_roots`: the start directory, which `python -m`
+    imports from first, and the effective `PYTHONPATH`; r4180717772),
+    whether or not a file is there yet: its whole dotted name as a package
+    directory (`a/b/c`) and as a module with every import suffix
+    (`a/b/c.py`, `a/b/c.pyc`, `a/b/c.<abi>.so`; `_MODULE_SUFFIXES`;
+    r4179241555, r4180041203); every package's initializer on the way
+    (`a/__init__.py`, `a/b/__init__.py`, ...), which runs first; and the
+    final package's `__main__`, which `-m` runs for a package
+    (r4180717725; the holder's ruling, openxFactory#656 comment
+    5988088910), each with every suffix. A namespace package needs no
+    `__init__`, so a dotted name can reach any directory under a root;
+    every name on the way is one `_traversed` judges, links followed."""
+    parts = name.split(".")
+    found: list[str] = []
+    for root in roots:
+        base = os.path.join(root, *parts)
+        found += [base, *(base + suffix for suffix in _MODULE_SUFFIXES)]
+        for count in range(1, len(parts) + 1):
+            package = os.path.join(root, *parts[:count])
+            found += [os.path.join(package, "__init__" + suffix)
+                      for suffix in _MODULE_SUFFIXES]
+        found += [os.path.join(base, "__main__" + suffix)
+                  for suffix in _MODULE_SUFFIXES]
+    return found
 
 
 #: Python's own short options that take a value (`-W arg`, `-X opt`), and
@@ -1270,7 +1317,8 @@ def _in_repository_member(members, *, root: Path | str) -> str | None:
         found = named(member, option=bool(index) and member.startswith("-")
                       and not positional, first=index == 0, context=context)
         if index in modules and not positional:
-            found += _module_paths(modules[index], context=context)
+            found += _module_paths(modules[index], roots=_python_roots(
+                context, root=served))
         if judged(member, found):
             return member
     return None
@@ -1570,11 +1618,14 @@ def _launcher_name(member: str, *, context: _Context) -> str | None:
 
 
 def _launcher_options(name: str, rest: tuple[str, ...], context: _Context,
-                      values: list[tuple[str, _Context]]):
+                      values: list[tuple[str, _Context]],
+                      chdirs: list[int]):
     """Read launcher `name`'s options from `rest`, as its getopt does:
     returns how many members they took, the context they leave, and, for
     `env -S`, the words its string splits into (else None). Each value is
-    added to `values` in the context it is read in. Raises `_Unreadable`."""
+    added to `values` in the context it is read in. `chdirs` counts the
+    working directories this launcher was given, across an `env -S`
+    string's re-reading. Raises `_Unreadable`."""
     grammar = _LAUNCHERS[name]
 
     def given(key: str, value: str | None) -> list[str] | None:
@@ -1582,7 +1633,7 @@ def _launcher_options(name: str, rest: tuple[str, ...], context: _Context,
         if (name, key) in _UNREADABLE_OPTIONS:
             raise _Unreadable(value if value is not None else key)
         if name == "env" and key == "i":
-            context = context._replace(path=None)
+            context = context._replace(path=None, pythonpath=())
         if value is None:
             return None
         if name == "env" and key == "S":
@@ -1594,11 +1645,21 @@ def _launcher_options(name: str, rest: tuple[str, ...], context: _Context,
                 raise _Unreadable(value, REASON_INLINE_SCRIPT) from None
         values.append((value, context))
         if (name, key) in (("env", "C"), ("sudo", "D")):
+            # ONE working directory per launcher, counting one an `env -S`
+            # string gives: GNU env applies only the last, from the
+            # directory it started in, which is not modelled; a second is
+            # refused as unreadable (Copilot at openDox-code#86,
+            # r4180717752; the holder's ruling, #656 5988088910)
+            chdirs[0] += 1
+            if chdirs[0] > 1:
+                raise _Unreadable(value)
             # the directory as the system enters it, links followed
             context = context._replace(cwd=_resolved_path(
                 os.path.join(context.cwd, value)))
         elif name == "env" and key == "u" and value == "PATH":
             context = context._replace(path=None)
+        elif name == "env" and key == "u" and value == "PYTHONPATH":
+            context = context._replace(pythonpath=())
         return None
 
     index = 0
@@ -1607,7 +1668,7 @@ def _launcher_options(name: str, rest: tuple[str, ...], context: _Context,
         if member == "--":
             return index + 1, context, None
         if name == "env" and member == "-":         # `env -`: `-i`
-            context = context._replace(path=None)
+            context = context._replace(path=None, pythonpath=())
             return index + 1, context, None
         if not member.startswith("-") or member == "-":
             break
@@ -1664,6 +1725,7 @@ def _unwrapped(members) -> _Unwrapped:
     context = _broker_context()
     launchers: list[tuple[str, _Context]] = []
     values: list[tuple[str, _Context]] = []
+    chdirs = [0]
     for _depth in range(_LAUNCHER_DEPTH):
         if not command:
             break
@@ -1674,7 +1736,7 @@ def _unwrapped(members) -> _Unwrapped:
         rest = command[1:]
         try:
             index, context, split = _launcher_options(name, rest, context,
-                                                      values)
+                                                      values, chdirs)
         except _Unreadable as unreadable:
             return _Unwrapped(tuple(launchers), tuple(values), (), context,
                               unreadable=unreadable.member,
@@ -1685,6 +1747,7 @@ def _unwrapped(members) -> _Unwrapped:
             launchers.pop()
             command = (command[0],) + tuple(split) + rest[index:]
             continue
+        chdirs = [0]                # the next launcher is another program
         if name == "env":
             while index < len(rest) and _ASSIGNMENT.match(rest[index]):
                 variable, assigned = rest[index].split("=", 1)
@@ -1693,6 +1756,9 @@ def _unwrapped(members) -> _Unwrapped:
                               for part in assigned.split(os.pathsep))
                 if variable == "PATH":
                     context = context._replace(path=assigned)
+                elif variable == "PYTHONPATH":
+                    context = context._replace(
+                        pythonpath=tuple(assigned.split(os.pathsep)))
                 index += 1
         operands = rest[index:index + _LAUNCHERS[name].operands]
         values.extend((operand, context) for operand in operands)
