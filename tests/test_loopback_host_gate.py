@@ -492,7 +492,16 @@ def test_every_route_class_refuses_a_foreign_host_on_a_real_local_serve(
                                                     "/capabilities", good)
         assert status == 200, payload[:200]
         caps = json.loads(payload)
-        assert ("console_token" in caps) is identity, sorted(caps)
+        # A STANDALONE plane never publishes its token on `/capabilities`
+        # (plan 034 T104): with an identity one is minted and delivered
+        # through the private copy the entry point wrote, and with none
+        # there is no token and no copy.
+        assert "console_token" not in caps, sorted(caps)
+        from opendox import console_access
+        copy = console_access.private_copy_path(child.state_dir, base[1])
+        assert copy.exists() is identity, copy
+        if identity:
+            assert child.console_token(base[1])
         # L2's block, served to its own Host and to no other
         assert caps["install"]["mode"] == "local", caps.get("install")
         violations = table_violations(base, route_classes(contributed=False))
