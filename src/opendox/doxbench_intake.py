@@ -55,6 +55,10 @@ at startup. A store with no document reads as empty without touching the parser.
 from __future__ import annotations
 
 import dataclasses
+import errno
+import io
+import os
+import stat
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -300,7 +304,18 @@ class BrokerDeclaration:
 
     argv, NEVER a shell string, for the same reason `broker_argv` is on a
     binding: no operator's label and no credential reference may ever be read as
-    shell syntax."""
+    shell syntax.
+
+    AT MOST `doxbench_binding.MAX_JUDGED_MEMBERS` MEMBERS (#86's deferred
+    r4182645796; the holder's slice B, openxFactory#656 comment
+    6000630835). The declarations document lives in the served repository,
+    and the broker it declares is judged where the console intake asks
+    (`doxbench_trust.broker_command_refused`), whose bounds scan reads every
+    member before the work budget starts. So the declared broker is held to
+    the ceiling a bindings document is held to, imported from there and
+    never restated, and past it is refused by name: when a document is read
+    (`from_record`), and when one is constructed to be written
+    (`DeclarationStore.declare_broker`), so no write can cross it."""
 
     argv: tuple[str, ...]
 
@@ -321,6 +336,12 @@ class BrokerDeclaration:
             raise IntakeRefused(
                 "the broker declaration must name the broker command; an empty "
                 "invocation is a broker that can never take custody")
+        if len(argv) > binding_mod.MAX_JUDGED_MEMBERS:
+            raise IntakeRefused(
+                f"a broker declaration declares {len(argv)} broker command "
+                f"members, more than the {binding_mod.MAX_JUDGED_MEMBERS} "
+                "judged in one document; name the broker program and its "
+                "fixed leading arguments only")
         for member in argv:
             _require_non_blank_str("broker argv member", member)
 
@@ -547,6 +568,50 @@ def _yaml_or_refused():
     return yaml
 
 
+#: How the declarations document is opened (Copilot r4184739661 on
+#: openxFactory#1236): read-only; WITHOUT WAITING on what was opened, so a
+#: FIFO put in the document's place after the look cannot hold the read
+#: until some writer comes; never through a link at its own name; and not
+#: inherited by a program this process starts. A regular file reads the
+#: same either way. A flag a platform lacks is left out, and there the look
+#: before the open and the descriptor's own type still refuse anything but
+#: a regular file (`DeclarationStore._open`).
+_OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+               | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+
+#: What a path in the declarations document's place IS, where it is no
+#: regular file, as a refusal names it.
+_KINDS = ((stat.S_ISDIR, "a directory"), (stat.S_ISFIFO, "a FIFO"),
+          (stat.S_ISSOCK, "a socket"), (stat.S_ISLNK, "a symbolic link"),
+          (stat.S_ISCHR, "a character device"),
+          (stat.S_ISBLK, "a block device"))
+
+#: Why such a path cannot be read as the declarations document: the
+#: reason `doxbench_binding.cannot_read` prints in the system's place.
+NOT_A_REGULAR_FILE = "{kind}, not a regular file"
+
+
+def _not_a_regular_file(path: Path, mode: int) -> IntakeRefused:
+    """The refusal of a path in the declarations document's place that is no
+    regular file (Copilot r4184739661 on openxFactory#1236, rated High; the
+    holder's slice B, openxFactory#656 comment 6000630835).
+
+    UNREADABLE, NOT ABSENT. Read as absent, a directory, a FIFO or a socket
+    there declared nothing pending, so a host's policy keyed on the pending
+    set (openxFactory's governed one) trusted every binding. So it gets the
+    refusal a document that cannot be read gets
+    (`doxbench_binding.cannot_read`), naming what the path IS, and a policy
+    that refuses on an unreadable document refuses on it too. The system
+    gives no word of its own for most of these kinds (a FIFO is not refused
+    by `read`; it waits), so the reason is this module's, under `EINVAL`,
+    which `read` itself answers for an object unsuitable for reading."""
+    kind = next((name for test, name in _KINDS if test(mode)),
+                "an unknown kind of file")
+    return IntakeRefused(binding_mod.cannot_read(
+        path, "declarations document",
+        OSError(errno.EINVAL, NOT_A_REGULAR_FILE.format(kind=kind))))
+
+
 class DeclarationStore:
     """What this checkout has declared and what a human has approved.
 
@@ -555,6 +620,11 @@ class DeclarationStore:
     divergent in-memory copies. There is no cache to go stale, and a store nobody
     has written yet reads as an empty list rather than as an error — an install
     that has declared nothing is a posture, not a fault.
+
+    ONLY NOTHING IS ABSENT (Copilot r4184739661 on openxFactory#1236). A path
+    in the document's place that is no regular file (a directory, a FIFO, a
+    socket, a device, or a link, dangling or not) is not "no document": it is
+    a document that cannot be read, refused by name (`_open`).
     """
 
     def __init__(self, path: Path | str) -> None:
@@ -678,24 +748,113 @@ class DeclarationStore:
                 path=binding_mod.shown_path(self.path),
                 link=binding_mod.shown_path(link)))
 
-    def _load(self) -> tuple[BrokerDeclaration | None, list[ModelDeclaration]]:
+    def _cannot_read(self, error: OSError) -> IntakeRefused:
+        return IntakeRefused(binding_mod.cannot_read(
+            self.path, "declarations document", error))
+
+    def _open(self) -> int | None:
+        """A descriptor open on the declarations document, or None where
+        nothing is in its place.
+
+        A REGULAR FILE OR NOTHING (Copilot r4184739661 on openxFactory#1236).
+        Only "no such file", or a file where a directory belongs on the way
+        to it, is the document's absence, as `doxbench_binding.
+        document_present` reads absence. Anything else in its place is
+        refused by name (`_not_a_regular_file`). A link is judged as itself,
+        never by what it names, so a dangling one is not absent: a link is
+        refused before anything is read (`_refuse_a_link`, N1), and one that
+        appears after that look fails the open (`O_NOFOLLOW`).
+
+        JUDGED ON WHAT WAS OPENED, as `doxbench_trust.MachineTrust` reads its
+        own store (Copilot at openDox-code#82, r4178064601). The look before
+        the open (`os.lstat`) refuses what is no regular file without opening
+        it, so a FIFO in the document's place is never opened. The open waits
+        on nothing (`O_NONBLOCK`), so a FIFO put there after the look cannot
+        hold it either, and the descriptor's own type decides (`os.fstat`):
+        whatever replaced the file after the look is refused for what it is.
+        The caller reads through this descriptor, never through a second look
+        at the path, and closes it."""
         try:
             # Refused BY NAME before the read too (Copilot at
             # openDox-code#86, r4179241603).
             self._refuse_a_link()
-            present = binding_mod.document_present(self.path)
         except OSError as error:
-            raise IntakeRefused(binding_mod.cannot_read(
-                self.path, "declarations document", error)) from None
-        if not present:
+            raise self._cannot_read(error) from None
+        try:
+            mode = os.lstat(self.path).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as error:
+            raise self._cannot_read(error) from None
+        if not stat.S_ISREG(mode):
+            raise _not_a_regular_file(self.path, mode)
+        try:
+            descriptor = os.open(self.path, _OPEN_FLAGS)
+        except (FileNotFoundError, NotADirectoryError):
+            return None             # removed since the look: nothing there
+        except OSError as error:
+            raise self._cannot_read(error) from None
+        try:
+            mode = os.fstat(descriptor).st_mode
+        except OSError as error:
+            os.close(descriptor)
+            raise self._cannot_read(error) from None
+        if not stat.S_ISREG(mode):
+            os.close(descriptor)
+            raise _not_a_regular_file(self.path, mode)
+        return descriptor
+
+    def _read(self, descriptor: int) -> bytes:
+        """Every byte of the document `descriptor` is open on, or a refusal
+        by name where the system will not read it."""
+        chunks: list[bytes] = []
+        try:
+            while chunk := os.read(descriptor, 1 << 16):
+                chunks.append(chunk)
+        except OSError as error:
+            raise self._cannot_read(error) from None
+        return b"".join(chunks)
+
+    def _parsed(self, raw: bytes, yaml):
+        """The document's bytes as YAML, decoded as `Path.read_text` decodes
+        them (UTF-8, universal newlines), or a refusal BY NAME in the words
+        `doxbench_binding.read_settings_document` gives each failure (T100
+        follow-on, N2; the holder's ruling, openxFactory#656 comment
+        5985046107, C3). Not a call to it: it reads by path, and this store
+        reads only through the descriptor `_open` judged.
+        `tests/test_doxbench_intake_store_kinds.py` holds the two stores'
+        refusals to the same words."""
+        shown = binding_mod.shown_path(self.path)
+        try:
+            text = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8").read()
+            return yaml.safe_load(text)
+        except UnicodeDecodeError:
+            # before ValueError, of which it is a kind, so it keeps its words
+            raise IntakeRefused(f"the declarations document at {shown} is "
+                                "not UTF-8 text") from None
+        except ValueError:
+            raise IntakeRefused(f"the declarations document at {shown} is "
+                                "not readable YAML") from None
+        except RecursionError:
+            raise IntakeRefused(f"the declarations document at {shown} "
+                                "nests too deeply to read") from None
+        except yaml.YAMLError as error:
+            raise IntakeRefused(f"the declarations document at {shown} is "
+                                "not readable YAML") from error
+
+    def _load(self) -> tuple[BrokerDeclaration | None, list[ModelDeclaration]]:
+        descriptor = self._open()
+        if descriptor is None:
             # THE HOSTED PATH, and the reason the import below is lazy: an
             # install with no declarations answers here and never needs a YAML
             # parser at all.
             return None, []
-        yaml = _yaml_or_refused()
-        document = binding_mod.read_settings_document(
-            self.path, what="declarations document", yaml=yaml,
-            refused=IntakeRefused)
+        try:
+            yaml = _yaml_or_refused()
+            raw = self._read(descriptor)
+        finally:
+            os.close(descriptor)
+        document = self._parsed(raw, yaml)
         if document is None:
             return None, []
         if not isinstance(document, Mapping):
