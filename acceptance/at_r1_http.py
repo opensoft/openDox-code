@@ -739,24 +739,34 @@ def free_port() -> int:
 _REGEX_AFTER_WORDS = frozenset({
     "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
     "throw", "case", "do", "else", "yield", "await"})
+#: ... and so does a `/` after one of these characters, or at the start.
+_REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
 #: The keywords whose `(…)` is a condition, after which a statement, and so
 #: a regular expression, may start.
 _CONDITION_WORDS = frozenset({"if", "while", "for", "with"})
-#: The last name of some code, and the `.` (or `?.`) that makes it a
-#: member's, whitespace already read as one space.
-_LAST_NAME = re.compile(r"([A-Za-z_$0-9][\w$]*) ?$")
+#: The last name of some code, whitespace already read as one space: a whole
+#: name, so `ñreturn` is no `return`, and a private one with its `#`.
+_LAST_NAME = re.compile(r"(#?[\w$]+) ?$")
+#: The `.` (or `?.`) before a member's name; and a `.` that is no member
+#: access, the last of a spread's `...` or a decimal literal's own point
+#: (`1. in`, but neither `1 .`, `1..`, `1.5.` nor `1e5.`).
 _MEMBER_DOT = re.compile(r"\. ?$")
+_NO_MEMBER_DOT = re.compile(r"(?:\.\.|(?<![\w$.])\d[\d_]*)\. ?$")
 
 
 def _ends_with_keyword(code: str, words: frozenset) -> bool:
     """Whether `code` ends with one of `words` as a KEYWORD: never as a
     member's name (`obj.return`, `obj . if`, `obj?.of`), which is an operand
-    (Copilot review of openDox-code#75 at ff04e015, r4180554323)."""
+    (Copilot review of openDox-code#75 at ff04e015, r4180554323), nor as
+    part of a longer or private name (`ñreturn`, `this.#of`). After a
+    spread's `...` or a decimal point (`[...typeof x]`, `1. in x`), it is
+    still the keyword."""
     word = _LAST_NAME.search(code)
-    return (word is not None and word.group(1) in words
-            and not _MEMBER_DOT.search(code[:word.start()]))
-#: ... and so does a `/` after one of these characters, or at the start.
-_REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*%<>~^")
+    if word is None or word.group(1) not in words:
+        return False
+    before = code[:word.start()]
+    return (not _MEMBER_DOT.search(before)
+            or _NO_MEMBER_DOT.search(before) is not None)
 
 
 #: JavaScript's WhiteSpace and LineTerminator code points (ECMA-262): tab,

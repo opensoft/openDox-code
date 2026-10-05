@@ -2860,6 +2860,12 @@ def test_a_brace_with_no_slash_after_it_is_read_as_before(source: str) -> None:
     assert [path for path, _static, _importer in pending] == ["/views/a.js"]
 
 
+# ---------------------------------------------------------------------------
+# Copilot review of #75 at ff04e015: a member's name is never a keyword
+# (r4180554323); and, in the self-pass after it, neither is a longer or a
+# private name, while a keyword after a spread or a decimal point still is.
+# ---------------------------------------------------------------------------
+
 @pytest.mark.parametrize("app", [
     'const q = obj.return / 2; import "./missing.js";\n',
     'const q = obj . return / 2; import "./missing.js";\n',
@@ -2880,3 +2886,50 @@ def test_a_member_named_as_a_keyword_is_an_operand(app: str) -> None:
     with served(files) as port:
         harness.derive_bundle(port, _page("./app.js"), {}, verdict, "t")
     assert _failures(verdict) == ["t.bundle.module /missing.js"]
+
+
+def _queued(source: str) -> list:
+    pending: collections.deque = collections.deque()
+    harness._scan_module("/views/x.js", source.encode("utf-8"), pending, set())
+    return [path for path, _static, _importer in pending]
+
+
+@pytest.mark.parametrize("source", [
+    'const a = [...typeof /"/]; import "./a.js";\n',
+    'const a = [...await /"/]; import "./a.js";\n',
+    'f(... void /"/); import "./a.js";\n',
+    'const b = 1. in /"/; import "./a.js";\n',
+    'const b = 1_0.\ninstanceof /"/; import "./a.js";\n',
+], ids=["spread-typeof", "spread-await", "spaced-spread-void",
+        "decimal-point-in", "decimal-point-then-a-line-break"])
+def test_a_keyword_after_a_spread_or_a_decimal_point_is_still_one(
+        source: str) -> None:
+    """The `.` of a spread's `...` or of a decimal literal (`1.`) is no
+    member access, so the keyword after it is one, and the `/` after that
+    opens a regular expression, whose `"` hides nothing after it."""
+    assert _queued(source) == ["/views/a.js"]
+
+
+@pytest.mark.parametrize("source", [
+    'const q = \u00f1return / 2; import "./a.js";\n',
+    'const q = \u00f1of++ / 2; import "./a.js";\n',
+    'class C { #return = 1; m() { return this.#return / 2; } }\n'
+    'import "./a.js";\n',
+    'class C { #if() { return 1; } m() { return this.#if() / 2; } }\n'
+    'import "./a.js";\n',
+    'const q = 1..return / 2; import "./a.js";\n',
+    'const q = 1 .return / 2; import "./a.js";\n',
+    'const q = 1.5.return / 2; import "./a.js";\n',
+    'const q = 1e5.of++ / 2; import "./a.js";\n',
+    'const q = a1.return / 2; import "./a.js";\n',
+], ids=["longer-name", "longer-name-then-postfix", "private-name",
+        "private-method-call", "member-of-a-decimal-literal",
+        "member-of-a-spaced-number", "member-of-a-fraction",
+        "member-of-an-exponent", "member-of-a-name-ending-in-a-digit"])
+def test_a_longer_or_private_name_is_no_keyword(source: str) -> None:
+    """A keyword's letters at the end of a longer name (`\u00f1return`), or
+    of a private one (`this.#return`), are no keyword. And a name after the
+    `.` that follows a number (`1..return`, `1 .return`, `1.5.return`) is a
+    member's, as after any other: only a decimal point (`1. in`) leaves the
+    keyword one. Each `/` divides."""
+    assert _queued(source) == ["/views/a.js"]
