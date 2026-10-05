@@ -3217,9 +3217,13 @@ def _in_repository_argv(served, where, monkeypatch):
         cache.parent.mkdir()
         cache.symlink_to(compiled)
         return ["env", "-C", str(elsewhere), sys.executable, "-m", module]
-    if where == "bytecode-cache-directory-linked-into-the-repository":
+    if where.startswith("bytecode-cache-directory-linked"):
         # no cache is there yet, and the directory it would be read from is
-        # a link into the repository
+        # a link into the repository; under a cache prefix this process has
+        # as well, which is not where a broker's interpreter reads it from
+        if where.endswith("under-a-process-cache-prefix"):
+            monkeypatch.setattr(sys, "pycache_prefix",
+                                str(served.tmp / "prefix"))
         caches = tool.parent / "caches"
         caches.mkdir()
         elsewhere = served.tmp / "elsewhere"
@@ -3366,6 +3370,7 @@ IN_REPOSITORY = ("absolute", "relative-to-the-broker-directory",
                  "another-interpreters-bytecode-cache-linked-into-the-repository",
                  "prefixed-process-bytecode-cache-linked-into-the-repository",
                  "bytecode-cache-directory-linked-into-the-repository",
+                 "bytecode-cache-directory-linked-under-a-process-cache-prefix",
                  "symlink-in-the-repository-to-outside",
                  "relative-search-path-entry",
                  "climbing-out-of-a-link",
