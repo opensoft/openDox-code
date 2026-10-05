@@ -762,8 +762,12 @@ _REGEX_AFTER_PUNCTUATION = frozenset("(,=:[!&|?{};+-*/%<>~^")
 #: a regular expression, may start.
 _CONDITION_WORDS = frozenset({"if", "while", "for", "with"})
 #: The last name of some code, whitespace already read as one space: a whole
-#: name, so `ñreturn` is no `return`, and a private one with its `#`.
-_LAST_NAME = re.compile(r"(#?[\w$]+) ?$")
+#: name, so `ñreturn` is no `return`, and a private one with its `#`. Every
+#: character past ASCII that stands in code is a name's, since the lexer has
+#: read JavaScript's whitespace as a space already, and so is a ZWNJ, a ZWJ, a
+#: combining mark or `℘`, which `\w` lacks (Copilot's review overview at
+#: e4f81d48).
+_LAST_NAME = re.compile(r"(#?(?:[\w$]|[^\x00-\x7f])+) ?$")
 #: The `.` (or `?.`) before a member's name; and a `.` that is no member
 #: access, the last of a spread's `...` or a decimal literal's own point
 #: (`1. in`, but neither `1 .`, `1..`, `1.5.` nor `1e5.`).
@@ -890,12 +894,28 @@ class JsStrings:
     be told from an ordinary string. A template literal's value is its
     leading static text, before any `${`; each `${…}` in it is CODE, and is
     read as code is, so an import or a route inside one is found (Copilot
-    review of openDox-code#75 at 3392f93a, r4179115282), and a `}` in its
+    review of openDox-code#75 at 3392f934, r4179115282), and a `}` in its
     strings closes nothing. Each value is read as a browser reads a URL from it
     (`scalar_values`). `malformed` is set where a string holds an escape a
     module refuses (`js_escape`), as an untagged template does too, and
     `ambiguous` where a `/` stands right after a `}`, which a lexer cannot
-    read. It is a lexer for this bundle's own idioms, not a parser."""
+    read. It is a lexer for this bundle's own idioms, not a parser.
+
+    ITS ACCEPTED LIMITS (the holder's convergence ruling on openDox-code#75):
+    where only a parser can tell a division from a regular expression, the
+    lexer either refuses the module by name or reads one form wrongly:
+    - a `/` right after a `}`, which divides after an expression's `}` and
+      opens a regular expression after a block's, is refused by name;
+    - after a declaration list's last binding with no initializer, then a
+      line break (`let x, y` [line break] `/re/`), automatic semicolon
+      insertion ends the declaration and the `/` opens a regular
+      expression. The lexer reads a division there, so an import after it
+      on that line can be missed. Telling that comma from an expression's
+      takes knowing that it lies in a declaration.
+    No web module openDox ships holds either. When T095 checked all 39,
+    this lexer and acorn's token stream agreed on every `/` (205), and no
+    regular expression in them followed a name, a literal, a `)`, a `]`
+    or a `}`."""
 
     def __init__(self, source: str) -> None:
         self.src = source
@@ -1394,7 +1414,22 @@ def _resolve(base: str, ref: str, origin: str = _SAME_ORIGIN) -> str:
     the browser (Copilot review of openDox-code#75 at 82869769,
     r4177924129). A reference no parser here can read is never a path. A
     lone surrogate is read first as the browser reads it (`scalar_values`;
-    Copilot review of openDox-code#75 at 4bdb41fb, r4178395690)."""
+    Copilot review of openDox-code#75 at 4bdb41fb, r4178395690).
+
+    ITS ACCEPTED LIMITS (the holder's convergence ruling on openDox-code#75):
+    `urllib.parse` reads a few references differently from the URL
+    standard, and these are not refused:
+    - `///a.js` and `http:///127.0.0.1:<port>/a.js`;
+    - an empty path segment (`.//a.js`);
+    - a dot segment in an absolute same-origin URL
+      (`http://127.0.0.1:<port>/./a.js`);
+    - an empty path (`http://127.0.0.1:<port>`);
+    - an unencoded `^`;
+    - a loopback host the URL standard rewrites (`127.1`, `0x7f.0.0.1`,
+      `2130706433`, `127.0.0.1.`), which is judged an external host.
+    No module openDox ships holds any of them. When T095 checked its 84
+    import specifiers, static and dynamic, against node's WHATWG `URL`,
+    every one resolved alike."""
     ref = scalar_values(ref)
     if (_DIVERGENT_REFERENCE.search(ref)
             or _ENCODED_DOT.search(re.split(r"[?#]", ref, maxsplit=1)[0])):
@@ -1616,7 +1651,7 @@ def derive_bundle(port: int, index_html: str, capabilities: dict,
     literal of the graph is added to `literals` where one is given."""
     # The page's own origin and path: the browser resolves and asks every
     # module, sheet and route there (Copilot review of openDox-code#75 at
-    # 3392f93a, r4179115311).
+    # 3392f934, r4179115311).
     origin = plane_origin(port, host)
     roots, sheets = _graph_roots(index_html, capabilities, origin, verdict,
                                  label, page)
@@ -2718,7 +2753,7 @@ def check_console_page(server: Server, target: str,
     browser asks it, of the forward's own host with its path and query.
     It must answer 200 as HTML, and be UTF-8; its module graph and the
     routes are then read from it, at its origin, never from `/` in its
-    place (Copilot review of openDox-code#75 at 3392f93a, r4179115311).
+    place (Copilot review of openDox-code#75 at 3392f934, r4179115311).
     Returns `(answer, host, page)`. The query is not quoted: it is the
     product's output."""
     label = server.label

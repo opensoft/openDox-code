@@ -2578,7 +2578,7 @@ def test_a_line_comment_ends_where_javascript_ends_it(source: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Copilot review of #75 at 3392f93a: a template's `${…}` is code
+# Copilot review of #75 at 3392f934: a template's `${…}` is code
 # (r4179115282), and the page walked is the one the opener opens, at its
 # own origin (r4179115311).
 # ---------------------------------------------------------------------------
@@ -3055,3 +3055,21 @@ def test_of_is_a_keyword_only_as_a_for_head_s_separator(source: str) -> None:
 def test_a_line_break_that_ends_a_statement_opens_a_regular_expression(
         source: str, queued: list) -> None:
     assert _queued(source) == queued
+
+
+# ---------------------------------------------------------------------------
+# Copilot's review overview at e4f81d48 named identifier-parsing errors with
+# no finding: a name's character that Python's `\w` lacks split the name, so
+# a keyword at its end was read as the keyword.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [
+    "x\u200creturn", "x\u200dreturn", "e\u0301return", "x\u203freturn",
+    "\u2118return", "x\u00b7return",
+], ids=["zwnj", "zwj", "combining-mark", "connector", "other-id-start",
+        "other-id-continue"])
+def test_every_character_of_a_name_is_read_as_the_name_s(name: str) -> None:
+    """Each name ends with `return`, which is no keyword there, so the `/`
+    after it divides and the import after that is judged."""
+    source = f'let {name} = 4; const q = {name} / 2; import "./a.js";\n'
+    assert _queued(source) == ["/views/a.js"]
