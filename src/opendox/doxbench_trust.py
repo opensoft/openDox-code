@@ -109,6 +109,7 @@ import dataclasses
 import errno
 import hashlib
 import importlib.machinery
+import importlib.util
 import json
 import os
 import re
@@ -336,8 +337,10 @@ REASON_INLINE_SCRIPT = (
 #: string's, or `sudo -D`; ruling 5988088910); an assignment given to sudo
 #: (`sudo A=b`, `PATH=` included), which sudo's policy honours or not; an
 #: xargs, which builds what it runs from its input (ruling 5988818366);
-#: launchers nested past what is unwrapped; or a path whose symbolic links
-#: pass the kernel's own bound, or loop (`_LINK_HOPS`; ruling 5986391296). What it runs cannot be judged, so it is
+#: launchers nested past what is unwrapped; a path whose symbolic links
+#: pass the kernel's own bound, or loop (`_LINK_HOPS`; ruling 5986391296);
+#: or a member past the bounds of what is judged (`_unbounded_member`;
+#: ruling 5989835334). What it runs cannot be judged, so it is
 #: refused FAIL-CLOSED, with the inline-script remedy. (An `env -S` string
 #: env would not split as a shell does is an inline script:
 #: `REASON_INLINE_SCRIPT`.)
@@ -346,9 +349,10 @@ REASON_UNREADABLE_COMMAND = (
     "option it does not have, or has by more than one name, an option after "
     "which what runs cannot be judged, a launcher given two working "
     "directories, an assignment given to sudo, xargs, which builds what it "
-    "runs from its input, launchers nested too deeply, or a path whose "
-    "links go deeper than the system follows), so what it runs cannot be "
-    "judged")
+    "runs from its input, launchers nested too deeply, a path whose links "
+    "go deeper than the system follows, or a member longer than "
+    "the system's path limit or holding more than 32 paths), so what it "
+    "runs cannot be judged")
 
 #: What an operator is told to do about such a binding.
 REMEDY_INLINE_SCRIPT = (
@@ -1086,6 +1090,34 @@ def _traversed(path: str) -> list[Path]:
     return names
 
 
+#: The bounds on one member of a broker command, past which it is refused
+#: as unreadable, FAIL-CLOSED, before anything is judged: a member longer
+#: than the system's own path limit (PATH_MAX), and one holding more
+#: absolute paths than `_MAX_ABSOLUTE_PATHS` (every separator begins one,
+#: `_candidates`). The bindings document lives in the served repository,
+#: so a pull must not be able to hang the judgment (Copilot at
+#: openDox-code#86, review 5411026353; the holder's ruling,
+#: openxFactory#656 comment 5989835334).
+_MAX_MEMBER_LENGTH = 4096
+_MAX_ABSOLUTE_PATHS = 32
+
+#: The separators a path is written with on this system.
+_SEPARATORS = tuple(sep for sep in (os.sep, os.altsep) if sep)
+
+
+def _unbounded_member(members) -> str | None:
+    """The first member of a broker command `members` past the bounds of
+    what is judged (`_MAX_MEMBER_LENGTH`, `_MAX_ABSOLUTE_PATHS`), or
+    None."""
+    for member in members:
+        if len(member) > _MAX_MEMBER_LENGTH:
+            return member
+        if sum(member.count(sep) for sep in _SEPARATORS) > (
+                _MAX_ABSOLUTE_PATHS):
+            return member
+    return None
+
+
 def _has_a_separator(candidate: str) -> bool:
     """Whether `candidate` is a path rather than a bare word."""
     return candidate in (".", "..") or os.sep in candidate or bool(
@@ -1130,6 +1162,47 @@ def _candidates(member: str, *, option: bool) -> list[str]:
 #: the holder's ruling, openxFactory#656 comment 5986391296).
 _MODULE_SUFFIXES: tuple[str, ...] = tuple(importlib.machinery.all_suffixes())
 
+#: The suffixes a module's source is read from (`.py`), whose bytecode
+#: cache Python imports in its place (`_bytecode_caches`).
+_SOURCE_SUFFIXES: tuple[str, ...] = tuple(
+    importlib.machinery.SOURCE_SUFFIXES)
+
+#: The optimization levels a bytecode cache is written at: none, `-O` and
+#: `-OO` (`importlib.util.cache_from_source`).
+_OPTIMIZATIONS = ("", 1, 2)
+
+
+def _bytecode_caches(source: str) -> list[str]:
+    """The bytecode caches Python could import the module whose source is
+    `source` from, in its place (Copilot at openDox-code#86, r4181465499;
+    the holder's ruling, openxFactory#656 comment 5989835334): this
+    interpreter's own cache name at every optimization level
+    (`importlib.util.cache_from_source`), whether or not a file is there
+    yet, in the `__pycache__` beside the source, where a broker's
+    interpreter writes and reads it whatever cache prefix this process
+    has; and every cache already there under another interpreter's tag
+    (`__pycache__/<stem>.*.pyc`). Each is judged as resolved, links
+    followed."""
+    directory, name = os.path.split(source)
+    pycache = os.path.join(directory, "__pycache__")
+    caches: list[str] = []
+    for optimization in _OPTIMIZATIONS:
+        try:
+            cached = importlib.util.cache_from_source(
+                source, optimization=optimization)
+        except NotImplementedError:         # no cache tag: none written
+            break
+        caches.append(os.path.join(pycache, os.path.basename(cached)))
+    stem = name.rpartition(".")[0]
+    try:
+        present = sorted(os.listdir(pycache))
+    except (OSError, ValueError):
+        present = []
+    caches += [os.path.join(pycache, entry) for entry in present
+               if entry.startswith(stem + ".") and entry.endswith(".pyc")]
+    return caches
+
+
 
 def _module_paths(name: str, *, roots: list[str]) -> list[str]:
     """The files a module named after `-m` could be imported from, under
@@ -1146,7 +1219,9 @@ def _module_paths(name: str, *, roots: list[str]) -> list[str]:
     (`a/__init__.py`, `a/b/__init__.py`, ...), which runs first; and the
     final package's `__main__`, which `-m` runs for a package
     (r4180717725; the holder's ruling, openxFactory#656 comment
-    5988088910), each with every suffix. A namespace package needs no
+    5988088910), each with every suffix; and each source's bytecode cache
+    (`_bytecode_caches`; r4181465499; the holder's ruling,
+    openxFactory#656 comment 5989835334). A namespace package needs no
     `__init__`, so a dotted name can reach any directory under a root;
     every name on the way is one `_traversed` judges, links followed."""
     parts = name.split(".")
@@ -1161,8 +1236,16 @@ def _module_paths(name: str, *, roots: list[str]) -> list[str]:
             found += [package + suffix for suffix in _MODULE_SUFFIXES]
             found += [os.path.join(package, "__init__" + suffix)
                       for suffix in _MODULE_SUFFIXES]
+            for source in _SOURCE_SUFFIXES:
+                # each source's bytecode cache, read in its place
+                found += _bytecode_caches(package + source)
+                found += _bytecode_caches(
+                    os.path.join(package, "__init__" + source))
         found += [os.path.join(base, "__main__" + suffix)
                   for suffix in _MODULE_SUFFIXES]
+        found += [cache for source in _SOURCE_SUFFIXES
+                  for cache in _bytecode_caches(
+                      os.path.join(base, "__main__" + source))]
     return found
 
 
@@ -1270,7 +1353,9 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
     context they are read in, and the command it starts is judged as a
     command of its own, in the context the launchers left it. A file a
     launcher writes inside the repository is refused too, an accepted
-    strictness.
+    strictness. A member past the bounds of what is judged
+    (`_unbounded_member`) is returned unjudged, FAIL-CLOSED (the holder's
+    ruling, openxFactory#656 comment 5989835334).
 
     THE ACCEPTED LIMIT (the holder's rulings, openxFactory#656 comments
     5988088910 and 5988818366): code imported BY NAME from a directory
@@ -1282,6 +1367,16 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
     `-m` module is judged under its start directory and its effective
     `PYTHONPATH` (`_python_roots`), and so is every package and every
     parent module on the way (`_module_paths`)."""
+    unbounded = _unbounded_member(members)
+    if unbounded is not None:
+        return unbounded
+    return _named_inside(members, root=root)
+
+
+def _named_inside(members, *, root: Path | str) -> str | None:
+    """`in_repository_argv` for members within the bounds: the member that
+    names a file inside the served repository, or whose links pass
+    `_LINK_HOPS`, or None."""
     try:
         return _in_repository_member(members, root=root)
     except _TooManyLinks as deep:
@@ -1359,9 +1454,11 @@ def names_a_path_inside(value: str, *, root: Path | str) -> bool:
     rule for an option's value: from `BROKER_WORKING_DIRECTORY` and from the
     served root, every name on the way, links followed. A broker's
     environment carries no such value (F16.1 as T007 batch P amends it;
-    `doxbench_provider.broker_environment`)."""
-    return any(part and in_repository_argv(
-        ["opendox-environment", f"--value={part}"], root=root) is not None
+    `doxbench_provider.broker_environment`), and no part past the bounds of
+    what is judged either (`_unbounded_member`, FAIL-CLOSED; the holder's
+    ruling, openxFactory#656 comment 5989835334)."""
+    return any(part and (_unbounded_member([part]) is not None or _named_inside(
+        ["opendox-environment", f"--value={part}"], root=root) is not None)
         for part in value.split(os.pathsep))
 
 
@@ -1892,7 +1989,10 @@ def _gives_an_inline_script(name: str, rest: tuple[str, ...]) -> bool:
     openxFactory#656 comment 5988818366). Either reading that reaches an
     inline script gives one, an accepted strictness (`node --no-warnings
     /opt/x.js -e ...` is refused). A member read as a value is still judged
-    as a path (`in_repository_argv` judges every member)."""
+    as a path (`in_repository_argv` judges every member). Each state, a
+    member and the operands read before it, is read at most once across
+    every reading, so the scan is linear (the holder's ruling,
+    openxFactory#656 comment 5989835334)."""
     if name == "deno":
         return _deno_subcommand(rest) == "eval"
     spec = _INTERPRETERS.get(name)
@@ -1901,23 +2001,26 @@ def _gives_an_inline_script(name: str, rest: tuple[str, ...]) -> bool:
     pending = [(0, 0)]
     read: set[tuple[int, int]] = set()
     while pending:
-        start = pending.pop()
-        if start in read:
-            continue
-        read.add(start)
-        if _reads_an_inline_script(spec, rest, *start, pending=pending):
+        if _reads_an_inline_script(spec, rest, *pending.pop(),
+                                   pending=pending, read=read):
             return True
     return False
 
 
 def _reads_an_inline_script(spec: _Interpreter, rest: tuple[str, ...],
                             index: int, operands: int, *,
-                            pending: list[tuple[int, int]]) -> bool:
+                            pending: list[tuple[int, int]],
+                            read: set[tuple[int, int]]) -> bool:
     """One reading for `_gives_an_inline_script`, from member `index` of
     `rest` with `operands` of the program's own operands read: whether it
     reaches an inline script. Each other reading it finds, an unknown long
-    option's value, is added to `pending`, as where to read from next."""
+    option's value, is added to `pending`, as where to read from next. A
+    state in `read` was read already, by this reading or another, which
+    read on from it as this one would, so this one stops there."""
     while index < len(rest):
+        if (index, operands) in read:
+            return False
+        read.add((index, operands))
         member = rest[index]
         index += 1
         if member == "--":
@@ -2031,9 +2134,13 @@ def broker_command_refused(members, *,
     script (`REASON_INLINE_SCRIPT`), or, at a known `root`, it names a file inside
     the served repository (`REASON_IN_REPOSITORY`); or, after those, it runs
     an xargs, whose command is built from input that cannot be judged
-    (`REASON_UNREADABLE_COMMAND`; `_builds_its_command`). Asked where trust
-    is recorded and wherever it is judged, and of the console intake's
-    broker."""
+    (`REASON_UNREADABLE_COMMAND`; `_builds_its_command`). A member past the
+    bounds of what is judged is refused as unreadable before anything else
+    is asked (`_unbounded_member`; the holder's ruling, openxFactory#656
+    comment 5989835334). Asked where trust is recorded and wherever it is
+    judged, and of the console intake's broker."""
+    if _unbounded_member(members) is not None:
+        return REASON_UNREADABLE_COMMAND
     unwrapped = _unwrapped(members)
     if unwrapped.unreadable is not None:
         return unwrapped.unreadable_because

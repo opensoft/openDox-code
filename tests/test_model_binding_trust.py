@@ -44,6 +44,8 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import http.server
+import importlib.machinery
+import importlib.util
 import io
 import json
 import os
@@ -3094,8 +3096,6 @@ def _in_repository_argv(served, where, monkeypatch):
         return ["env", "-C", str(elsewhere), sys.executable, "-m",
                 "bytecode"]
     if where == "extension-module":
-        import importlib.machinery
-
         suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
         extension = tool.parent / f"native{suffix}"
         extension.write_bytes(b"")
@@ -3183,6 +3183,50 @@ def _in_repository_argv(served, where, monkeypatch):
         monkeypatch.setenv("PATH", os.path.relpath(program.parent, broker_cwd)
                            + os.pathsep + os.environ.get("PATH", ""))
         return [program.name]
+    if where.endswith("bytecode-cache-linked-into-the-repository"):
+        # r4181465499; the holder's ruling, #656 5989835334: Python imports
+        # a source's bytecode cache from `__pycache__` in its place
+        compiled = tool.parent / "broker.pyc"
+        compiled.write_bytes(b"")
+        elsewhere = served.tmp / "elsewhere"
+        package = elsewhere / "pkg"
+        package.mkdir(parents=True)
+        source, module = {
+            "module-bytecode-cache-linked-into-the-repository": (
+                elsewhere / "broker.py", "broker"),
+            "initializer-bytecode-cache-linked-into-the-repository": (
+                package / "__init__.py", "pkg.mod"),
+            "main-bytecode-cache-linked-into-the-repository": (
+                package / "__main__.py", "pkg"),
+            "another-interpreters-bytecode-cache-linked-into-the-repository": (
+                elsewhere / "broker.py", "broker"),
+            "prefixed-process-bytecode-cache-linked-into-the-repository": (
+                elsewhere / "broker.py", "broker"),
+        }[where]
+        source.write_text("", encoding="utf-8")
+        (package / "mod.py").write_text("", encoding="utf-8")
+        name = Path(importlib.util.cache_from_source(str(source))).name
+        if where.startswith("another-interpreters"):
+            name = f"{source.stem}.cpython-399.pyc"
+        if where.startswith("prefixed-process"):
+            # a cache prefix this process has is not where a broker's own
+            # interpreter reads the cache from
+            monkeypatch.setattr(sys, "pycache_prefix",
+                                str(served.tmp / "prefix"))
+        cache = source.parent / "__pycache__" / name
+        cache.parent.mkdir()
+        cache.symlink_to(compiled)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m", module]
+    if where == "bytecode-cache-directory-linked-into-the-repository":
+        # no cache is there yet, and the directory it would be read from is
+        # a link into the repository
+        caches = tool.parent / "caches"
+        caches.mkdir()
+        elsewhere = served.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "broker.py").write_text("", encoding="utf-8")
+        (elsewhere / "__pycache__").symlink_to(caches)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m", "broker"]
     if where == "parent-module-on-an-assigned-pythonpath":
         # r4181006328: `-m parent.child` runs `parent.py` before it finds
         # `parent` is no package
@@ -3316,6 +3360,12 @@ IN_REPOSITORY = ("absolute", "relative-to-the-broker-directory",
                  "program-past-an-assignment-whose-name-is-no-identifier",
                  "value-of-an-assignment-whose-name-is-no-identifier",
                  "member-an-unknown-option-may-take",
+                 "module-bytecode-cache-linked-into-the-repository",
+                 "initializer-bytecode-cache-linked-into-the-repository",
+                 "main-bytecode-cache-linked-into-the-repository",
+                 "another-interpreters-bytecode-cache-linked-into-the-repository",
+                 "prefixed-process-bytecode-cache-linked-into-the-repository",
+                 "bytecode-cache-directory-linked-into-the-repository",
                  "symlink-in-the-repository-to-outside",
                  "relative-search-path-entry",
                  "climbing-out-of-a-link",
@@ -3389,6 +3439,80 @@ def test_R4_one_working_directory_per_launcher_is_judged(served):
                  ["sudo", "-D", "/tmp", *program]):
         assert trust_mod.broker_command_refused(
             argv, root=served.repo) is None, argv
+
+
+@pytest.mark.parametrize("optimization", ["", 1, 2])
+def test_R6_a_cache_is_judged_by_name_where_its_directory_cannot_be_listed(
+        served, optimization):
+    """r4181465499; the holder's ruling, #656 5989835334: this
+    interpreter's cache name, at every optimization level, is judged
+    whether or not the directory it is in can be listed."""
+    trust_mod = _trust_mod()
+    compiled = served.repo / "broker.pyc"
+    compiled.write_bytes(b"")
+    elsewhere = served.tmp / "elsewhere"
+    elsewhere.mkdir()
+    source = elsewhere / "broker.py"
+    source.write_text("", encoding="utf-8")
+    name = Path(importlib.util.cache_from_source(
+        str(source), optimization=optimization)).name
+    pycache = elsewhere / "__pycache__"
+    pycache.mkdir()
+    (pycache / name).symlink_to(compiled)
+    os.chmod(pycache, 0o300)                # searchable, not listable
+    try:
+        with pytest.raises(OSError):
+            os.listdir(pycache)
+        assert trust_mod.broker_command_refused(
+            ["env", "-C", str(elsewhere), sys.executable, "-m", "broker"],
+            root=served.repo) == trust_mod.REASON_IN_REPOSITORY
+    finally:
+        os.chmod(pycache, 0o700)
+
+
+def test_R6_a_member_past_the_bounds_is_refused_as_unreadable(served):
+    """The summary of review 5411026353; the holder's ruling, #656
+    5989835334: a member longer than PATH_MAX (4096), or holding more than
+    32 absolute paths, is refused as unreadable before it is judged, and
+    `in_repository_argv` returns it unjudged, FAIL-CLOSED, so an
+    environment value past the bounds is no value a broker gets; a member
+    at each bound is judged."""
+    trust_mod = _trust_mod()
+    outside = "/opt/opendox-test/broker"
+    for member in ("a" * 4097, "/a" * 33):
+        for argv in ([outside, member], [member]):
+            assert trust_mod.broker_command_refused(
+                argv, root=served.repo) == (
+                    trust_mod.REASON_UNREADABLE_COMMAND), len(member)
+        assert trust_mod.in_repository_argv(
+            [outside, member], root=served.repo) == member
+        assert trust_mod.names_a_path_inside(member, root=served.repo)
+    for member in ("a" * 4096, "/a" * 32):
+        assert trust_mod.broker_command_refused(
+            [outside, member], root=served.repo) is None, len(member)
+        assert not trust_mod.names_a_path_inside(member, root=served.repo)
+
+
+def test_R6_the_old_worst_cases_are_judged_in_under_a_second(served):
+    """The summary of review 5411026353 ("quadratic memory allocation
+    before trust approval"); the holder's ruling, #656 5989835334: a pull
+    that delivers a bindings document must not hang the judgment. One
+    member of 400 absolute paths took 29 s at fe56c0c4, and 4000 options
+    node does not know took seconds, growing with their square; each is
+    judged now in under a second."""
+    trust_mod = _trust_mod()
+    for argv, reason in (
+            (["/opt/opendox-test/broker", "/x" * 400],
+             trust_mod.REASON_UNREADABLE_COMMAND),
+            (["/opt/opendox-test/broker", "/x" * 2048],
+             trust_mod.REASON_UNREADABLE_COMMAND),
+            (["node", *(["--a"] * 4000)], None),
+            (["node", *(["--a"] * 4000), "-e", "x"],
+             trust_mod.REASON_INLINE_SCRIPT)):
+        started = time.monotonic()
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) == reason, argv[:2]
+        assert time.monotonic() - started < 1, argv[:2]
 
 
 def test_R5_xargs_is_refused_after_the_other_two_judgments(served):
@@ -5087,6 +5211,11 @@ UNREADABLE_COMMANDS = {
     "sudo-path-assignment": ["sudo", "PATH=/opt/opendox-test/bin", "true"],
     "sudo-option-then-assignment": ["sudo", "-u", "bob", "A=b",
                                     "/bin/true"],
+    # the summary of review 5411026353; the holder's ruling, #656
+    # 5989835334: a member past the bounds of what is judged
+    "member-past-the-length-bound": ["/opt/opendox-test/broker",
+                                     "a" * 4097],
+    "member-past-the-path-bound": ["/opt/opendox-test/broker", "/a" * 33],
 }
 
 
