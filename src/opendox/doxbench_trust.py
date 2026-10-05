@@ -333,9 +333,11 @@ REASON_INLINE_SCRIPT = (
 #: more than one name; an option after which what runs cannot be judged
 #: from its words (`env --argv0`, `sudo --chroot`, `sudo -i`); a launcher
 #: given a second working directory (`env -C`, counting an `env -S`
-#: string's, or `sudo -D`; ruling 5988088910); launchers nested past what
-#: is unwrapped; or a path whose symbolic links pass the kernel's own bound,
-#: or loop (`_LINK_HOPS`; ruling 5986391296). What it runs cannot be judged, so it is
+#: string's, or `sudo -D`; ruling 5988088910); an assignment given to sudo
+#: (`sudo A=b`, `PATH=` included), which sudo's policy honours or not; an
+#: xargs, which builds what it runs from its input (ruling 5988818366);
+#: launchers nested past what is unwrapped; or a path whose symbolic links
+#: pass the kernel's own bound, or loop (`_LINK_HOPS`; ruling 5986391296). What it runs cannot be judged, so it is
 #: refused FAIL-CLOSED, with the inline-script remedy. (An `env -S` string
 #: env would not split as a shell does is an inline script:
 #: `REASON_INLINE_SCRIPT`.)
@@ -343,8 +345,10 @@ REASON_UNREADABLE_COMMAND = (
     "its broker command cannot be read to the program it runs (a launcher "
     "option it does not have, or has by more than one name, an option after "
     "which what runs cannot be judged, a launcher given two working "
-    "directories, launchers nested too deeply, or a path whose links go "
-    "deeper than the system follows), so what it runs cannot be judged")
+    "directories, an assignment given to sudo, xargs, which builds what it "
+    "runs from its input, launchers nested too deeply, or a path whose "
+    "links go deeper than the system follows), so what it runs cannot be "
+    "judged")
 
 #: What an operator is told to do about such a binding.
 REMEDY_INLINE_SCRIPT = (
@@ -989,7 +993,10 @@ def _python_roots(context: _Context, *, root: Path | str) -> list[str]:
     the inherited entries after the filter or whatever a launcher assigned
     or cleared, a relative entry (or an empty one) read from the start
     directory (Copilot at openDox-code#86, r4180717772; the holder's ruling,
-    openxFactory#656 comment 5988088910)."""
+    openxFactory#656 comment 5988088910). Not the interpreter's own default
+    import path (its site-packages, a `.pth` file, an editable install):
+    the accepted limit `in_repository_argv` records (r4181006277; ruling
+    5988818366)."""
     entries = (context.pythonpath if context.pythonpath is not None
                else _inherited_pythonpath(root=root))
     return [context.cwd, *(os.path.join(context.cwd, entry)
@@ -1131,7 +1138,11 @@ def _module_paths(name: str, *, roots: list[str]) -> list[str]:
     whether or not a file is there yet: its whole dotted name as a package
     directory (`a/b/c`) and as a module with every import suffix
     (`a/b/c.py`, `a/b/c.pyc`, `a/b/c.<abi>.so`; `_MODULE_SUFFIXES`;
-    r4179241555, r4180041203); every package's initializer on the way
+    r4179241555, r4180041203); every prefix of the dotted name as a module
+    file with every suffix (`a.py`, `a/b.py`, ...), since a parent that is
+    a plain module runs before the import finds it is no package (r4181006328;
+    the holder's ruling, openxFactory#656 comment 5988818366); every
+    package's initializer on the way
     (`a/__init__.py`, `a/b/__init__.py`, ...), which runs first; and the
     final package's `__main__`, which `-m` runs for a package
     (r4180717725; the holder's ruling, openxFactory#656 comment
@@ -1145,6 +1156,7 @@ def _module_paths(name: str, *, roots: list[str]) -> list[str]:
         found += [base, *(base + suffix for suffix in _MODULE_SUFFIXES)]
         for count in range(1, len(parts) + 1):
             package = os.path.join(root, *parts[:count])
+            found += [package + suffix for suffix in _MODULE_SUFFIXES]
             found += [os.path.join(package, "__init__" + suffix)
                       for suffix in _MODULE_SUFFIXES]
         found += [os.path.join(base, "__main__" + suffix)
@@ -1256,7 +1268,18 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
     context they are read in, and the command it starts is judged as a
     command of its own, in the context the launchers left it. A file a
     launcher writes inside the repository is refused too, an accepted
-    strictness."""
+    strictness.
+
+    THE ACCEPTED LIMIT (the holder's rulings, openxFactory#656 comments
+    5988088910 and 5988818366): code imported BY NAME from a directory
+    outside the repository that holds links into it is not judged, which
+    only an operator can set up: a script outside the repository importing
+    from such a directory (Copilot at openDox-code#86, r4180717772), and a
+    module `-m` finds on the interpreter's own default import path, its
+    site-packages, a `.pth` file or an editable install (r4181006277). A
+    `-m` module is judged under its start directory and its effective
+    `PYTHONPATH` (`_python_roots`), and so is every package and every
+    parent module on the way (`_module_paths`)."""
     try:
         return _in_repository_member(members, root=root)
     except _TooManyLinks as deep:
@@ -1498,7 +1521,9 @@ def _launcher(short: str, longs: str = "", *, operands: int = 0,
 #: `taskset`, and wrappers of the same class: `time`, `xargs`, `busybox`
 #: (whose first operand is the applet it runs), `flock`, `sudo`, `doas`.
 #: Each is read by its own getopt grammar, the GNU coreutils, findutils
-#: and util-linux ones where there are several (C1).
+#: and util-linux ones where there are several (C1). An xargs is unwrapped
+#: so what it names is judged, and is then refused as unreadable whatever
+#: it starts (`_builds_its_command`; ruling 5988818366).
 _LAUNCHERS: dict[str, _Launcher] = {
     "env": _launcher(
         "a:C:iS:u:v0",
@@ -1559,8 +1584,14 @@ _UNREADABLE_OPTIONS = frozenset({("env", "a"), ("sudo", "R"), ("sudo", "i")})
 #: openDox-code#86, r4179366319).
 _LAUNCHER_DEPTH = 32
 
-#: `env NAME=value`: an assignment, whose value is judged as a path.
-_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+def _is_assignment(member: str) -> bool:
+    """Whether `member`, after env's options and before the command, is an
+    assignment, as GNU env reads one: any member holding a `=`, whatever
+    its name (`A-B=x`, `1A=x`; Copilot at openDox-code#86, r4181006390; the
+    holder's ruling, openxFactory#656 comment 5988818366). Its value is
+    judged as a path."""
+    return "=" in member
+
 
 #: `nice -5`, `nice --5`, `nice -+5`: an adjustment, nice's own option.
 _NUMERIC_OPTION = re.compile(r"-[-+]?[0-9]+")
@@ -1579,8 +1610,8 @@ class _Unwrapped(NamedTuple):
     `unreadable` is a member that cannot be read to the program it runs: an
     option its launcher does not have, or has by more than one name, an
     option after which a name cannot be judged, an `env -S` string env would
-    not split as a shell does, or a launcher still left at
-    `_LAUNCHER_DEPTH`."""
+    not split as a shell does, an assignment given to sudo, or a launcher
+    still left at `_LAUNCHER_DEPTH`."""
 
     launchers: tuple[tuple[str, _Context], ...]
     values: tuple[tuple[str, _Context], ...]
@@ -1728,7 +1759,8 @@ def _unwrapped(members) -> _Unwrapped:
     from the context every broker starts in, as each changes it: `env -C`
     and `sudo -D`/`--chdir` move the working directory, and `env PATH=...`,
     `env -i` and `env -u PATH` change the search path. Each launcher's
-    operands are judged as its values are."""
+    operands are judged as its values are, and so is every value env
+    assigns (`_is_assignment`)."""
     command = tuple(members)
     context = _broker_context()
     launchers: list[tuple[str, _Context]] = []
@@ -1756,8 +1788,18 @@ def _unwrapped(members) -> _Unwrapped:
             command = (command[0],) + tuple(split) + rest[index:]
             continue
         chdirs = [0]                # the next launcher is another program
+        if name == "sudo" and index < len(rest) and _is_assignment(
+                rest[index]):
+            # sudo's `VAR=value`: whether sudo honours it is its policy's
+            # (`env_reset`, `secure_path`), not the command's words, so it
+            # is refused as unreadable, `PATH=` included (FAIL-CLOSED; the
+            # writer's sibling of r4181006390; the holder's ruling,
+            # openxFactory#656 comment 5988818366)
+            return _Unwrapped(tuple(launchers), tuple(values), (), context,
+                              unreadable=rest[index],
+                              unreadable_because=REASON_UNREADABLE_COMMAND)
         if name == "env":
-            while index < len(rest) and _ASSIGNMENT.match(rest[index]):
+            while index < len(rest) and _is_assignment(rest[index]):
                 variable, assigned = rest[index].split("=", 1)
                 # A search path's every directory is judged (`PATH=a:b`).
                 values.extend((part, context)
@@ -1839,14 +1881,40 @@ def _gives_an_inline_script(name: str, rest: tuple[str, ...]) -> bool:
     (`-Sc`, `-nle`) are read, and an option's value is skipped; and only
     until its script's operand, so an option given to the script itself
     (`python /opt/broker.py -c profile`) is the script's (Copilot at
-    openDox-code#86, r4179241583, r4179241614)."""
+    openDox-code#86, r4179241583, r4179241614).
+
+    A long option the table does not know, given without `=`, is read both
+    ways, FAIL-CLOSED: as a flag, and as taking the next member as its
+    value, the scan going on past it (`node --v8-pool-size 1 -e ...`;
+    Copilot at openDox-code#86, r4181006345; the holder's ruling,
+    openxFactory#656 comment 5988818366). Either reading that reaches an
+    inline script gives one, an accepted strictness (`node --no-warnings
+    /opt/x.js -e ...` is refused). A member read as a value is still judged
+    as a path (`in_repository_argv` judges every member)."""
     if name == "deno":
         return _deno_subcommand(rest) == "eval"
     spec = _INTERPRETERS.get(name)
     if spec is None:
         return False
-    operands = 0
-    index = 0
+    pending = [(0, 0)]
+    read: set[tuple[int, int]] = set()
+    while pending:
+        start = pending.pop()
+        if start in read:
+            continue
+        read.add(start)
+        if _reads_an_inline_script(spec, rest, *start, pending=pending):
+            return True
+    return False
+
+
+def _reads_an_inline_script(spec: _Interpreter, rest: tuple[str, ...],
+                            index: int, operands: int, *,
+                            pending: list[tuple[int, int]]) -> bool:
+    """One reading for `_gives_an_inline_script`, from member `index` of
+    `rest` with `operands` of the program's own operands read: whether it
+    reaches an inline script. Each other reading it finds, an unknown long
+    option's value, is added to `pending`, as where to read from next."""
     while index < len(rest):
         member = rest[index]
         index += 1
@@ -1862,6 +1930,10 @@ def _gives_an_inline_script(name: str, rest: tuple[str, ...]) -> bool:
                 return False
             if option in spec.long_values and not equals:
                 index += 1
+            elif not equals:
+                # an option the table does not know may take the next
+                # member as its value: read that way as well (r4181006345)
+                pending.append((index + 1, operands))
             continue
         if len(member) > 1 and (member[0] == "-" or (
                 spec.plus and member[0] == "+")):
@@ -1938,6 +2010,16 @@ def _inline_member(members) -> str | None:
     return None
 
 
+def _builds_its_command(unwrapped: _Unwrapped) -> bool:
+    """Whether a launcher `unwrapped` holds is xargs, which builds the
+    command it runs from its input: openDox's request on its standard
+    input, or an argument file's contents, neither of which can be judged
+    (Copilot at openDox-code#86, r4181006365, `xargs -a FILE -I S python3
+    S`; the holder's ruling, openxFactory#656 comment 5988818366)."""
+    return any(_launcher_name(launcher, context=context) == "xargs"
+               for launcher, context in unwrapped.launchers)
+
+
 def broker_command_refused(members, *,
                            root: Path | str | None) -> str | None:
     """Why the broker command `members` may never be trusted, or None: it
@@ -1945,8 +2027,10 @@ def broker_command_refused(members, *,
     `env -S` string env would not split as a shell does is
     `REASON_INLINE_SCRIPT`), it gives a shell or an interpreter an inline
     script (`REASON_INLINE_SCRIPT`), or, at a known `root`, it names a file inside
-    the served repository (`REASON_IN_REPOSITORY`). Asked where trust is
-    recorded and wherever it is judged, and of the console intake's
+    the served repository (`REASON_IN_REPOSITORY`); or, after those, it runs
+    an xargs, whose command is built from input that cannot be judged
+    (`REASON_UNREADABLE_COMMAND`; `_builds_its_command`). Asked where trust
+    is recorded and wherever it is judged, and of the console intake's
     broker."""
     unwrapped = _unwrapped(members)
     if unwrapped.unreadable is not None:
@@ -1965,6 +2049,12 @@ def broker_command_refused(members, *,
             return REASON_UNREADABLE_COMMAND
         if named is not None:
             return REASON_IN_REPOSITORY
+    if _builds_its_command(unwrapped):
+        # FAIL-CLOSED, and AFTER the inline-script and in-repository
+        # judgments, so each keeps its name: `xargs -a <root>/args ...` is
+        # in the repository and `xargs -n 1 python3 -c ...` an inline
+        # script (F16.1 as T007 batch P amends it; ruling 5988818366)
+        return REASON_UNREADABLE_COMMAND
     return None
 
 

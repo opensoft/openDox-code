@@ -3183,6 +3183,41 @@ def _in_repository_argv(served, where, monkeypatch):
         monkeypatch.setenv("PATH", os.path.relpath(program.parent, broker_cwd)
                            + os.pathsep + os.environ.get("PATH", ""))
         return [program.name]
+    if where == "parent-module-on-an-assigned-pythonpath":
+        # r4181006328: `-m parent.child` runs `parent.py` before it finds
+        # `parent` is no package
+        library = served.tmp / "library"
+        library.mkdir()
+        (library / "parent.py").symlink_to(tool)
+        return ["env", f"PYTHONPATH={library}", sys.executable, "-m",
+                "parent.child"]
+    if where == "parent-module-in-the-start-directory":
+        elsewhere = served.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "parent.py").symlink_to(tool)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m",
+                "parent.child"]
+    if where == "dotted-package-main-linked-into-the-repository":
+        # `-m pkg.sub` runs `pkg/sub/__main__.py`, under packages outside
+        elsewhere = served.tmp / "elsewhere"
+        (elsewhere / "pkg" / "sub").mkdir(parents=True)
+        (elsewhere / "pkg" / "sub" / "__main__.py").symlink_to(tool)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m",
+                "pkg.sub"]
+    if where == "program-past-an-assignment-whose-name-is-no-identifier":
+        # r4181006390: GNU env reads `A-B=x` as an assignment, so the
+        # program is the next member, found on the assigned `PATH`
+        os.chmod(tool, 0o755)
+        links = served.tmp / "links"
+        links.mkdir()
+        (links / "broker").symlink_to(tool)
+        return ["env", f"PATH={links}", "A-B=x", "broker"]
+    if where == "value-of-an-assignment-whose-name-is-no-identifier":
+        return ["env", f"A-B={tool}", sys.executable, str(served.broker)]
+    if where == "member-an-unknown-option-may-take":
+        # 5988818366: a member read as an unknown option's value is still
+        # judged as a path
+        return ["node", "--frobnicate", str(tool)]
     if where == "search-path-assigned-through-a-link":
         # r4179366288: `env PATH=...` is the path the program is found on.
         program = served.repo / "bin" / "opref-linked"
@@ -3275,6 +3310,12 @@ IN_REPOSITORY = ("absolute", "relative-to-the-broker-directory",
                  "module-on-an-assigned-pythonpath",
                  "module-on-a-relative-pythonpath-entry",
                  "module-on-the-inherited-pythonpath",
+                 "parent-module-on-an-assigned-pythonpath",
+                 "parent-module-in-the-start-directory",
+                 "dotted-package-main-linked-into-the-repository",
+                 "program-past-an-assignment-whose-name-is-no-identifier",
+                 "value-of-an-assignment-whose-name-is-no-identifier",
+                 "member-an-unknown-option-may-take",
                  "symlink-in-the-repository-to-outside",
                  "relative-search-path-entry",
                  "climbing-out-of-a-link",
@@ -3348,6 +3389,34 @@ def test_R4_one_working_directory_per_launcher_is_judged(served):
                  ["sudo", "-D", "/tmp", *program]):
         assert trust_mod.broker_command_refused(
             argv, root=served.repo) is None, argv
+
+
+def test_R5_xargs_is_refused_after_the_other_two_judgments(served):
+    """r4181006365; the holder's ruling, #656 5988818366: every xargs is
+    refused as unreadable, but only after the in-repository and
+    inline-script judgments, so each keeps its name (F16.1 as T007 batch P
+    amends it); an xargs a launcher starts, or an `env -S` string names, is
+    one too, and so is one judged with no root."""
+    trust_mod = _trust_mod()
+    arguments = served.repo / "args"
+    arguments.write_text("x\n", encoding="utf-8")
+    outside = "/opt/opendox-test/broker"
+    for argv, reason in (
+            (["xargs", "-a", str(arguments), outside],
+             trust_mod.REASON_IN_REPOSITORY),
+            (["xargs", "-n", "1", "python3", "-c", "x"],
+             trust_mod.REASON_INLINE_SCRIPT),
+            (["xargs", outside], trust_mod.REASON_UNREADABLE_COMMAND),
+            (["nice", "xargs", outside],
+             trust_mod.REASON_UNREADABLE_COMMAND),
+            (["env", "-S", f"xargs {outside}"],
+             trust_mod.REASON_UNREADABLE_COMMAND)):
+        assert trust_mod.broker_command_refused(
+            argv, root=served.repo) == reason, argv
+    assert trust_mod.broker_command_refused(["xargs", outside], root=None) == (
+        trust_mod.REASON_UNREADABLE_COMMAND)
+    assert trust_mod.broker_command_refused(["nice", outside],
+                                            root=served.repo) is None
 
 
 def test_R4_the_effective_pythonpath_is_what_the_broker_has(
@@ -4581,6 +4650,14 @@ INLINE = {
     "runuser-command": ["runuser", "-u", "bob", "--command=x"],
     "pwsh-policy-then-command": ["pwsh", "-ExecutionPolicy", "Bypass",
                                  "-Command", "x"],
+    # r4181006345; the holder's ruling, #656 5988818366: a long option the
+    # table does not know is read as a flag and as taking the next member
+    "node-unknown-value-option-then-e": ["node", "--v8-pool-size", "1",
+                                         "-e", "x", "--"],
+    "node-flag-then-e": ["node", "--no-warnings", "-e", "x"],
+    "pwsh-flag-then-command": ["pwsh", "-NoProfile", "-Command", "x"],
+    "node-flag-a-file-then-e": ["node", "--no-warnings", "/opt/x.js", "-e",
+                                "x"],
     "pwsh-encoded": ["powershell", "-EncodedCommand", "eAA="],
     "fish-C": ["fish", "-C", "x"],
     "bash-plus-o-then-c": ["bash", "+o", "posix", "-c", "x"],
@@ -4732,6 +4809,13 @@ INLINE_CONTROLS = {
     "julia-attached-target-then-a-file": lambda served: [
         "julia", "-Ccore-avx2", str(served.broker)],
     "raku-given-a-file": lambda served: ["raku", "/opt/x.raku"],
+    "node-flag-then-a-file": lambda served: [
+        "node", "--no-warnings", str(served.broker)],
+    "node-flag-a-file-and-its-own-options": lambda served: [
+        "node", "--no-warnings", str(served.broker), "--flag", "x"],
+    "flock-unknown-option-then-a-program": lambda served: [
+        "flock", "/tmp/opendox-lock", "--verbose", sys.executable,
+        str(served.broker), "-c", "x"],
     "R-given-a-file": lambda served: [
         "R", "-f", str(served.broker), "--args", "-e", "x"],
     "deno-quiet-run": lambda served: [
@@ -4987,6 +5071,19 @@ UNREADABLE_COMMANDS = {
     "env-chdir-again-in-a-split-string": ["env", "-C", "/tmp", "-S",
                                           "-C usr /bin/true"],
     "sudo-chdir-twice": ["sudo", "-D", "/tmp", "--chdir=/usr", "/bin/true"],
+    # r4181006365; the holder's ruling, #656 5988818366: what xargs runs is
+    # built from its input, so every xargs is unreadable, after the
+    # in-repository and inline-script judgments
+    "xargs-building-its-command": ["xargs", "-a", "/opt/opendox-test/args",
+                                   "-I", "SCRIPT", "python3", "SCRIPT"],
+    "xargs-and-a-program-outside": ["xargs", "/opt/opendox-test/broker"],
+    "xargs-abbreviated-option": ["xargs", "--max-a", "1",
+                                 "/opt/opendox-test/broker"],
+    # the writer's sibling, 5988818366: any assignment given to sudo
+    "sudo-assignment": ["sudo", "A=b", "/bin/true"],
+    "sudo-path-assignment": ["sudo", "PATH=/opt/opendox-test/bin", "true"],
+    "sudo-option-then-assignment": ["sudo", "-u", "bob", "A=b",
+                                    "/bin/true"],
 }
 
 
@@ -5128,7 +5225,8 @@ def test_C1_a_launchers_own_options_are_read_as_its_getopt_reads_them(
                  ["nice", "--adj=5", *program],
                  ["timeout", "--sig=KILL", "5", *program],
                  ["stdbuf", "--out", "L", *program],
-                 ["xargs", "--max-a", "1", *program],
+                 ["env", "A-B=x", *program],
+                 ["env", "1A=x", "A.B=y", *program],
                  ["sudo", "--user=bob", *program],
                  ["env", "--default-signal", *program],
                  ["env", "--help"]):
