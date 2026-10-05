@@ -88,6 +88,7 @@ parser at all, so an install with no bindings never needs the dependency.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import re
@@ -594,7 +595,15 @@ def write_settings_document(path: Path, text: str) -> None:
     document made in the meantime (Copilot at openDox-code#86, r4180041167;
     the holder's ruling, openxFactory#656 comment 5986391296). So no reader
     sees part of one, a write that fails leaves none, and one made meanwhile
-    refuses this write (`FileExistsError`) rather than being overwritten."""
+    refuses this write (`FileExistsError`) rather than being overwritten.
+
+    REMOVING THE NEW FILE IS BEST-EFFORT (Copilot at openDox-code#86,
+    r4182645661; the holder's ruling, openxFactory#656 comment 5992038800,
+    deferred to this follow-on): a removal that fails is no failure of the
+    write, so it never reports a document it published as unwritten, nor
+    hides the error that failed a write. Where it fails, the new file is
+    left beside the document: after a publish, a second name of the same
+    file; after a failure, a part of a document no reader looks for."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         staged = path.parent / (f".{path.name}.{secrets.token_hex(8)}"
@@ -604,7 +613,8 @@ def write_settings_document(path: Path, text: str) -> None:
                 _write_all(handle, text)
             path.hardlink_to(staged)
         finally:
-            staged.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                staged.unlink(missing_ok=True)
         return
     with path.open("a", encoding="utf-8"):
         pass                    # this user may write it, or PermissionError
@@ -619,7 +629,8 @@ def write_settings_document(path: Path, text: str) -> None:
         temporary.chmod(mode)
         temporary.replace(path)
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            temporary.unlink(missing_ok=True)
         raise
 
 
@@ -650,7 +661,8 @@ def document_present(path: Path) -> bool:
 #: pull must not be able to hang verdict computation, and each command's
 #: judgment is bounded (`doxbench_trust._WORK_BUDGET`) while their number
 #: is bounded here (Copilot at openDox-code#86, r4182002696; the holder's
-#: ruling, openxFactory#656 comment 5990845570).
+#: ruling, openxFactory#656 comment 5990845570). A write is held to it as
+#: well, before it publishes anything (`BindingStore._save`; r4182645752).
 MAX_JUDGED_MEMBERS = 256
 
 
@@ -1236,16 +1248,40 @@ class BindingStore:
                     f"the bindings document at {self.path} declares the id "
                     f"{binding.id!r} twice")
             seen.add(binding.id)
-        judged = sum(len(binding.broker_argv) for binding in bindings)
-        if judged > MAX_JUDGED_MEMBERS:
-            raise BindingRefused(
-                f"the bindings document at {self.path} declares {judged} "
-                "broker command members across its bindings, more than the "
-                f"{MAX_JUDGED_MEMBERS} judged in one document")
+        self._held_to_the_ceiling(bindings, writing=False)
         return bindings
+
+    def _held_to_the_ceiling(self, bindings: list[ModelProviderBinding], *,
+                             writing: bool) -> None:
+        """Refuse BY NAME `bindings` that declare more broker command
+        members across them than `MAX_JUDGED_MEMBERS`, every one of which
+        is judged where trust is asked, FAIL-CLOSED: as the document is read
+        (Copilot at openDox-code#86, r4182002696), and as it is written,
+        BEFORE anything is published (r4182645752; the holder's ruling,
+        openxFactory#656 comment 5992038800, deferred to this follow-on), so
+        a write past the ceiling leaves the document as it was, still
+        readable, and the CLI takes back the trust it recorded for the form
+        (`cli_model_binding._undone`). The document is named escaped
+        (`shown_path`; r4182645700)."""
+        judged = sum(len(binding.broker_argv) for binding in bindings)
+        if judged <= MAX_JUDGED_MEMBERS:
+            return
+        shown = shown_path(self.path)
+        if writing:
+            raise BindingRefused(
+                f"the bindings document at {shown} would declare {judged} "
+                "broker command members across its bindings, more than the "
+                f"{MAX_JUDGED_MEMBERS} judged in one document, so it was not "
+                "written and nothing in it changed")
+        raise BindingRefused(
+            f"the bindings document at {shown} declares {judged} broker "
+            "command members across its bindings, more than the "
+            f"{MAX_JUDGED_MEMBERS} judged in one document")
 
     def _save(self, bindings: Iterable[ModelProviderBinding]) -> None:
         self._refuse_a_link()
+        bindings = list(bindings)
+        self._held_to_the_ceiling(bindings, writing=True)
         yaml = _yaml_or_refused()
         document = {
             "schema_version": SCHEMA_VERSION,

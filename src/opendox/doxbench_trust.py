@@ -354,7 +354,8 @@ REASON_UNREADABLE_COMMAND = (
     "which what runs cannot be judged, a launcher given two working "
     "directories, an assignment given to sudo, xargs, which builds what it "
     "runs from its input, launchers nested too deeply, a path whose links "
-    "go deeper than the system follows, a member longer than the "
+    "go deeper than the system follows, a module whose bytecode cache "
+    "directory cannot be listed, a member longer than the "
     "system's path limit or holding more than 32 paths, a bare program "
     "name after sudo or doas, or more than its judgment may take), so what "
     "it runs cannot be judged")
@@ -1045,13 +1046,28 @@ def _resolved_path(path: str) -> str:
 _LINK_HOPS = 40
 
 
-class _TooManyLinks(Exception):
-    """A path whose links pass `_LINK_HOPS`, or loop: what it names cannot
-    be judged, so the command is refused as unreadable."""
+class _Unjudgeable(Exception):
+    """A member of a broker command whose files cannot be judged: the
+    command is refused as unreadable, and `in_repository_argv` returns the
+    member, FAIL-CLOSED."""
 
     def __init__(self, member: str):
         super().__init__(member)
         self.member = member
+
+
+class _TooManyLinks(_Unjudgeable):
+    """A path whose links pass `_LINK_HOPS`, or loop: what it names cannot
+    be judged, so the command is refused as unreadable."""
+
+
+class _Unlistable(_Unjudgeable):
+    """A `-m` member one of whose bytecode cache directories cannot be
+    listed, for any reason but its absence (`_bytecode_caches`): a cache
+    in it under another interpreter's tag could not be judged, so the
+    command is refused as unreadable (Copilot at openDox-code#86,
+    r4182645599; the holder's ruling, openxFactory#656 comment 5992038800,
+    deferred to this follow-on)."""
 
 
 def _traversed(path: str) -> list[Path]:
@@ -1248,7 +1264,7 @@ _SOURCE_SUFFIXES: tuple[str, ...] = tuple(
 _OPTIMIZATIONS = ("", 1, 2)
 
 
-def _bytecode_caches(source: str) -> list[str]:
+def _bytecode_caches(source: str, *, unlisted: list[str]) -> list[str]:
     """The bytecode caches Python could import the module whose source is
     `source` from, in its place (Copilot at openDox-code#86, r4181465499;
     the holder's ruling, openxFactory#656 comment 5989835334): this
@@ -1258,7 +1274,21 @@ def _bytecode_caches(source: str) -> list[str]:
     interpreter writes and reads it whatever cache prefix this process
     has; and every cache already there under another interpreter's tag
     (`__pycache__/<stem>.*.pyc`). Each is judged as resolved, links
-    followed."""
+    followed.
+
+    The directory is read as it is listed (`os.scandir`), never whole and
+    never sorted, and a step of the judgment's budget is spent for the
+    listing and before each entry is kept, so a directory of any size
+    costs no more than the budget (r4182645836; the holder's ruling,
+    openxFactory#656 comment 5992038800, deferred to this follow-on). A
+    directory that is not there, or a name on the way to it that is no
+    directory, holds no cache, and nor does a path holding a NUL, which no
+    file system holds (it is judged as written, r4179077018). A listing
+    that fails for any other reason, as one of a directory this user may
+    search but not list does, is added to `unlisted`, FAIL-CLOSED: a cache
+    in it under another interpreter's tag cannot be judged, so the command
+    is refused as unreadable once nothing it names is found inside the
+    repository (`_Unlistable`; r4182645599, deferred likewise)."""
     directory, name = os.path.split(source)
     pycache = os.path.join(directory, "__pycache__")
     caches: list[str] = []
@@ -1270,18 +1300,24 @@ def _bytecode_caches(source: str) -> list[str]:
             break
         caches.append(os.path.join(pycache, os.path.basename(cached)))
     stem = name.rpartition(".")[0]
+    _spend()                                # the listing itself
     try:
-        present = sorted(os.listdir(pycache))
-    except (OSError, ValueError):
-        present = []
-    _spend(1 + len(present))
-    caches += [os.path.join(pycache, entry) for entry in present
-               if entry.startswith(stem + ".") and entry.endswith(".pyc")]
+        with os.scandir(pycache) as listing:
+            for entry in listing:
+                _spend()                    # before the entry is kept
+                if (entry.name.startswith(stem + ".")
+                        and entry.name.endswith(".pyc")):
+                    caches.append(os.path.join(pycache, entry.name))
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        pass                                # no directory: no cache in it
+    except OSError:
+        unlisted.append(pycache)            # FAIL-CLOSED
     return caches
 
 
 
-def _module_paths(name: str, *, roots: list[str]) -> list[str]:
+def _module_paths(name: str, *, roots: list[str],
+                  unlisted: list[str]) -> list[str]:
     """The files a module named after `-m` could be imported from, under
     each of `roots` (`_python_roots`: the start directory, which `python -m`
     imports from first, and the effective `PYTHONPATH`; r4180717772),
@@ -1300,7 +1336,8 @@ def _module_paths(name: str, *, roots: list[str]) -> list[str]:
     (`_bytecode_caches`; r4181465499; the holder's ruling,
     openxFactory#656 comment 5989835334). A namespace package needs no
     `__init__`, so a dotted name can reach any directory under a root;
-    every name on the way is one `_traversed` judges, links followed."""
+    every name on the way is one `_traversed` judges, links followed. A
+    cache directory that cannot be listed is added to `unlisted`."""
     parts = name.split(".")
     found: list[str] = []
     for root in roots:
@@ -1317,14 +1354,17 @@ def _module_paths(name: str, *, roots: list[str]) -> list[str]:
                       for suffix in _MODULE_SUFFIXES]
             for source in _SOURCE_SUFFIXES:
                 # each source's bytecode cache, read in its place
-                found += _bytecode_caches(package + source)
+                found += _bytecode_caches(package + source,
+                                          unlisted=unlisted)
                 found += _bytecode_caches(
-                    os.path.join(package, "__init__" + source))
+                    os.path.join(package, "__init__" + source),
+                    unlisted=unlisted)
         found += [os.path.join(base, "__main__" + suffix)
                   for suffix in _MODULE_SUFFIXES]
         found += [cache for source in _SOURCE_SUFFIXES
                   for cache in _bytecode_caches(
-                      os.path.join(base, "__main__" + source))]
+                      os.path.join(base, "__main__" + source),
+                      unlisted=unlisted)]
     return found
 
 
@@ -1412,8 +1452,10 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
     """The member of a broker command `members` that names a file inside
     the served repository, or None: `in_repository_program`'s rule, for a
     command no binding carries yet (the console intake's broker). A member
-    whose links cannot be followed to an end (`_LINK_HOPS`) is returned as
-    well, FAIL-CLOSED; `broker_command_refused` refuses it as unreadable.
+    whose links cannot be followed to an end (`_LINK_HOPS`), and, where no
+    member names a file inside, one naming a `-m` module a cache directory
+    of which cannot be listed (`_Unlistable`; r4182645599), are returned as
+    well, FAIL-CLOSED; `broker_command_refused` refuses each as unreadable.
 
     It is judged as it runs (`_Context`; Copilot at openDox-code#86,
     r4179241532, r4179366288): from `BROKER_WORKING_DIRECTORY`, on the
@@ -1457,17 +1499,20 @@ def in_repository_argv(members, *, root: Path | str) -> str | None:
 
 def _named_inside(members, *, root: Path | str) -> str | None:
     """`in_repository_argv` for members within the bounds: the member that
-    names a file inside the served repository, or whose links pass
-    `_LINK_HOPS`, or None."""
+    names a file inside the served repository, or whose files cannot be
+    judged (`_Unjudgeable`), or None."""
     try:
         return _in_repository_member(members, root=root)
-    except _TooManyLinks as deep:
-        return deep.member
+    except _Unjudgeable as unjudged:
+        return unjudged.member
 
 
 def _in_repository_member(members, *, root: Path | str) -> str | None:
     """`in_repository_argv`'s work. Raises `_TooManyLinks`, naming the
-    member, for a member whose links pass `_LINK_HOPS`."""
+    member, for a member whose links pass `_LINK_HOPS`; and, once no member
+    names a file inside, `_Unlistable`, naming the first member whose `-m`
+    module has a cache directory that cannot be listed, so a file named
+    inside keeps its name, as xargs's refusal comes after (5988818366)."""
     served = Path(resolved_root(root))
 
     under = str(served).rstrip(os.sep) + os.sep
@@ -1524,6 +1569,7 @@ def _in_repository_member(members, *, root: Path | str) -> str | None:
     context = unwrapped.context
     modules = _module_operands(members)
     positional = False
+    unlistable: str | None = None
     for index, member in enumerate(members):
         if index and member == "--" and not positional:
             positional = True
@@ -1531,10 +1577,15 @@ def _in_repository_member(members, *, root: Path | str) -> str | None:
         found = named(member, option=bool(index) and member.startswith("-")
                       and not positional, first=index == 0, context=context)
         if index in modules and not positional:
+            unlisted: list[str] = []
             found += _module_paths(modules[index], roots=_python_roots(
-                context, root=served))
+                context, root=served), unlisted=unlisted)
+            if unlisted and unlistable is None:
+                unlistable = member
         if judged(member, found):
             return member
+    if unlistable is not None:
+        raise _Unlistable(unlistable)
     return None
 
 
@@ -2315,9 +2366,11 @@ def _command_refused(members, *, root: Path | str | None) -> str | None:
     if root is not None:
         try:
             named = _in_repository_member(members, root=root)
-        except _TooManyLinks:
-            # links past the kernel's own bound, or a loop: what it names
-            # cannot be judged (the holder's ruling, #656 5986391296)
+        except _Unjudgeable:
+            # links past the kernel's own bound, or a loop (the holder's
+            # ruling, #656 5986391296), or a module's cache directory that
+            # cannot be listed (r4182645599; 5992038800): what it names
+            # cannot be judged
             return REASON_UNREADABLE_COMMAND
         if named is not None:
             return REASON_IN_REPOSITORY
