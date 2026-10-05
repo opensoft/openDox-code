@@ -3069,6 +3069,14 @@ def _in_repository_argv(served, where, monkeypatch):
         (package / "inner").symlink_to(tool.parent)
         return ["env", "-C", str(served.tmp), sys.executable, "-m",
                 "pkg.inner.broker"]
+    if where == "dotted-module-linked-at-its-last-name":
+        # r4179241555: every package on the way lies outside, and the file
+        # the whole dotted name reaches is a link into the repository.
+        elsewhere = served.tmp / "elsewhere"
+        (elsewhere / "pkg").mkdir(parents=True)
+        (elsewhere / "pkg" / "broker.py").symlink_to(tool)
+        return ["env", "-C", str(elsewhere), sys.executable, "-m",
+                "pkg.broker"]
     if where == "a-link-inside-in-the-middle-of-a-chain":
         # r4180041184: outside -> repository -> outside, as the script
         return [sys.executable, str(_chain(served, tool, relative=False))]
@@ -3255,6 +3263,7 @@ IN_REPOSITORY = ("absolute", "relative-to-the-broker-directory",
                  "bare-word-after-env-changes-directory",
                  "dotted-module-after-env-changes-directory",
                  "dotted-module-through-a-package-link",
+                 "dotted-module-linked-at-its-last-name",
                  "a-link-inside-in-the-middle-of-a-chain",
                  "a-relative-chain-through-the-repository",
                  "a-chain-through-the-repository-as-the-program",
@@ -4582,6 +4591,8 @@ INLINE = {
     "Rscript-e": ["Rscript", "-e", "x"],
     "R-e": ["R", "--no-echo", "-e", "x"],
     "R-file-then-e": ["R", "-f", "/opt/opendox-test/x.R", "-e", "x"],
+    # Lane openXfactory-3 D7 F1, holder ruled fix now (#656 5988369111)
+    "raku-e": ["raku", "-e", "x"],
     "deno-quiet-eval": ["deno", "--quiet", "eval", "x"],
     "deno-q-eval": ["deno", "-q", "eval", "x"],
     "deno-log-level-eval": ["deno", "--log-level", "info", "eval", "x"],
@@ -4720,6 +4731,7 @@ INLINE_CONTROLS = {
         "julia", "-t", "2", str(served.broker), "-e", "x"],
     "julia-attached-target-then-a-file": lambda served: [
         "julia", "-Ccore-avx2", str(served.broker)],
+    "raku-given-a-file": lambda served: ["raku", "/opt/x.raku"],
     "R-given-a-file": lambda served: [
         "R", "-f", str(served.broker), "--args", "-e", "x"],
     "deno-quiet-run": lambda served: [

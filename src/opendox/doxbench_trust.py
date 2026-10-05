@@ -313,7 +313,11 @@ REMEDY_IN_REPOSITORY = (
 #: ruling, openxFactory#656 comment 5984069416). THE ACCEPTED LIMIT (same
 #: ruling, item 4): a general program that runs code from its own arguments
 #: (`awk`, `sed`, `find -exec`, and the like) is not judged as an inline
-#: script. An `env -S` string env would not split as a shell does (one
+#: script; nor is an interpreter `_INTERPRETERS` does not hold, such as
+#: `guile -c` or `-e`, `elixir -e`, `erl -eval`, `escript`, `groovy -e`,
+#: `scala -e`, `clojure -e`, `gjs -c` and `swipl -g` (lane openXfactory-3
+#: D7 F1; the holder's ruling, openxFactory#656 comment 5988369111). An
+#: `env -S` string env would not split as a shell does (one
 #: holding a backslash, a `$` or a `#`, or quotes that do not close) is
 #: refused as one too: what it runs cannot be read (F16.1 as T007 batch P
 #: amends it; the holder's ruling, openxFactory#656 comment 5985046107, C1).
@@ -1404,6 +1408,10 @@ _INTERPRETERS: dict[str, _Interpreter] = {
     "pypy": _Interpreter(inline="c", takes="WX", ends="m"),
     "jython": _Interpreter(inline="c", takes="WX", ends="m"),
     "perl": _Interpreter(inline="eE", takes="IMm", attached="ixdDC"),
+    # Lane openXfactory-3 D7 F1, holder ruled fix now (openxFactory#656
+    # comment 5988369111): raku, perl6's current name, is read as perl is
+    # (perl6 is perl by its version suffix, `_unversioned`).
+    "raku": _Interpreter(inline="eE", takes="IMm", attached="ixdDC"),
     "ruby": _Interpreter(inline="e", takes="IrCE", attached="FKTxW"),
     "php": _Interpreter(inline="rRBE", takes="cdzt", ends="f"),
     "lua": _Interpreter(inline="e", takes="l"),
@@ -1900,7 +1908,11 @@ def inline_script(members, *, root: Path | str | None = None) -> str | None:
 
     THE ACCEPTED LIMIT (the same ruling, item 4): a general program that
     runs code from its own arguments, such as `awk 'PROGRAM'`, `sed` or
-    `find -exec`, is not judged as an inline script. A member whose own
+    `find -exec`, is not judged as an inline script, nor is an interpreter
+    `_INTERPRETERS` does not hold, such as `guile -c` or `-e`, `elixir -e`,
+    `erl -eval`, `escript`, `groovy -e`, `scala -e`, `clojure -e`, `gjs -c`
+    and `swipl -g` (lane openXfactory-3 D7 F1; the holder's ruling,
+    openxFactory#656 comment 5988369111). A member whose own
     options cannot be read (an unknown leading option of deno's) is
     returned as well, FAIL-CLOSED; `broker_command_refused` refuses it as
     unreadable."""
