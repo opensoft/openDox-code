@@ -45,7 +45,12 @@ What is held:
     tree of their own: the whole set passes, and each kind of gap refuses,
     a changed or dropped marker and a direct URL among them;
   * the publish jobs' digest check: the verified files pass, and a changed
-    byte or a third file refuses.
+    byte or a third file refuses;
+  * the build job records the digests right after the artifact checks, before
+    the smoke test installs and runs any third-party wheel, and re-checks
+    `dist/` after it: a changed byte, a third file or a missing file refuses;
+  * a yanked file: the preflight refuses one the index already holds, and the
+    check after each upload refuses one the index serves.
 """
 
 from __future__ import annotations
@@ -565,6 +570,66 @@ def test_the_publish_jobs_check_the_digests(job: str, change: str, tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
+# The build job records the digests before any third-party code runs
+# (Copilot's review of openDox-code#78: the smoke test installs and runs
+# wheels the lock pins by version but not by hash, and any of them could
+# rewrite `dist/` before digests recorded after it blessed the new bytes).
+
+DIGESTS_STEP = "record the files and their digests"
+SMOKE_STEP = "the built wheel installs into a fresh venv, and opendox --help works"
+RECHECK_STEP = "the smoke test left dist/ as the digests recorded it"
+
+
+def test_the_build_records_the_digests_before_the_smoke_test_and_rechecks_after() -> None:
+    build = _workflow()["jobs"]["build"]
+    steps = build["steps"]
+    names = [step.get("name") or step["uses"].split("@")[0] for step in steps]
+    verify = names.index("verify the artifacts")
+    assert names[verify:] == ["verify the artifacts", DIGESTS_STEP, SMOKE_STEP, RECHECK_STEP,
+                              "actions/upload-artifact"], names
+    assert steps[verify + 1]["id"] == "digests"
+    assert steps[verify + 3]["env"] == {
+        "WHEEL": "${{ steps.digests.outputs.wheel }}",
+        "WHEEL_SHA256": "${{ steps.digests.outputs.wheel-sha256 }}",
+        "SDIST": "${{ steps.digests.outputs.sdist }}",
+        "SDIST_SHA256": "${{ steps.digests.outputs.sdist-sha256 }}",
+    }
+    assert build["outputs"] == {
+        name: f"${{{{ steps.digests.outputs.{name} }}}}"
+        for name in ("wheel", "wheel-sha256", "sdist", "sdist-sha256")}
+
+
+@needs_a_shell
+@pytest.mark.parametrize("change", ["none", "a changed byte", "a third file", "a missing file"])
+def test_the_recheck_refuses_a_dist_the_smoke_test_changed(change: str, tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / WHEEL_FILE).write_bytes(b"the wheel")
+    (dist / SDIST_FILE).write_bytes(b"the sdist")
+    output = tmp_path / "github-output"
+    output.write_text("")
+    record = _run(_step("build", DIGESTS_STEP)["run"], tmp_path,
+                  {"VERSION": "0.1.0", "GITHUB_OUTPUT": str(output)})
+    assert record.returncode == 0, record.stdout + record.stderr
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    recorded = {"WHEEL": outputs["wheel"], "WHEEL_SHA256": outputs["wheel-sha256"],
+                "SDIST": outputs["sdist"], "SDIST_SHA256": outputs["sdist-sha256"]}
+    assert recorded == {"WHEEL": WHEEL_FILE, "SDIST": SDIST_FILE,
+                        "WHEEL_SHA256": hashlib.sha256(b"the wheel").hexdigest(),
+                        "SDIST_SHA256": hashlib.sha256(b"the sdist").hexdigest()}
+    if change == "a changed byte":
+        (dist / WHEEL_FILE).write_bytes(b"the wheeL")
+    elif change == "a third file":
+        (dist / "evil-0.1.0-py3-none-any.whl").write_bytes(b"")
+    elif change == "a missing file":
+        (dist / SDIST_FILE).unlink()
+    result = _run(_step("build", RECHECK_STEP)["run"], tmp_path, recorded)
+    assert (result.returncode == 0) == (change == "none"), result.stdout + result.stderr
+    if change != "none":
+        assert "so the artifact is not uploaded" in result.stdout, result.stdout + result.stderr
+
+
+# ---------------------------------------------------------------------------
 # Re-running an upload, and what each index serves after it.
 
 
@@ -602,8 +667,10 @@ def test_each_upload_is_followed_by_one_index_check_script() -> None:
 
 
 class _Index:
-    """A local JSON API: `answers` is the list of (status, files) it gives,
-    one per request, the last one repeated."""
+    """A local JSON API: `answers` is the list of (status, files) or (status,
+    files, yanked) it gives, one per request, the last one repeated. Each file
+    carries `yanked`, as Warehouse's JSON API does: true for a name in
+    `yanked`, false otherwise."""
 
     def __init__(self, answers: list[tuple[int, dict[str, str]]]) -> None:
         import http.server
@@ -615,8 +682,11 @@ class _Index:
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802 (the stdlib's name)
                 index.requests.append(self.path)
-                status, files = index.answers[min(len(index.requests), len(index.answers)) - 1]
-                body = json.dumps({"urls": [{"filename": name, "digests": {"sha256": digest}}
+                answer = index.answers[min(len(index.requests), len(index.answers)) - 1]
+                status, files = answer[0], answer[1]
+                yanked = answer[2] if len(answer) > 2 else set()
+                body = json.dumps({"urls": [{"filename": name, "digests": {"sha256": digest},
+                                             "yanked": name in yanked}
                                             for name, digest in files.items()]}).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -646,6 +716,8 @@ INDEX_CASES = {
     "it serves a third file": ([(200, {**VERIFIED, "opendox-0.1.0-py2-none-any.whl": "d" * 64})],
                                "after 3 reads"),
     "it refuses the read": ([(403, {})], "HTTP Error 403"),
+    "it serves the verified files, the wheel yanked": ([(200, VERIFIED, {WHEEL_FILE})],
+                                                       "un-yank it on the index, or release a new version"),
 }
 
 
@@ -752,6 +824,10 @@ PREFLIGHT_CASES = {
     "a file nobody verified": ([(200, {"opendox-0.1.0-py2-none-any.whl": "d" * 64})],
                                "would make a mixed release"),
     "the index refuses the read": ([(503, {})], "HTTP Error 503"),
+    "the verified wheel, from an earlier try, yanked": ([(200, {WHEEL_FILE: "a" * 64}, {WHEEL_FILE})],
+                                                        "un-yank it on the index, or release a new version"),
+    "both verified files, the release yanked": ([(200, VERIFIED, {WHEEL_FILE, SDIST_FILE})],
+                                                "un-yank it on the index, or release a new version"),
 }
 
 

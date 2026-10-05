@@ -31,9 +31,10 @@ name: release
 #
 # FOUR JOBS, EACH GATED ON THE ONE BEFORE IT:
 #   build            builds the sdist and the wheel in a clean job, runs
-#                    `twine check`, VERIFIES both before any upload, and
-#                    installs the wheel into a fresh venv. It mints no
-#                    identity token, and its GITHUB_TOKEN reads only.
+#                    `twine check`, VERIFIES both before any upload, records
+#                    their digests, and installs the wheel into a fresh venv,
+#                    after which `dist/` must still match those digests. It
+#                    mints no identity token, and its GITHUB_TOKEN reads only.
 #   testpypi         the dry run: re-checks the root's pin, then publishes
 #                    those exact bytes to TestPyPI, in the `testpypi`
 #                    environment.
@@ -41,7 +42,7 @@ name: release
 #                    venv, as plan 034's T099 falsifier does, and runs it.
 #   pypi             re-checks the root's pin, publishes the same bytes to
 #                    PyPI, in the `pypi` environment, then requires PyPI to
-#                    serve exactly those two files, by digest.
+#                    serve exactly those two files, by digest, neither yanked.
 #
 # NO PyPI TOKEN AND NO STORED SECRET, ANYWHERE. Both uploads use PyPI's
 # trusted publishing (OIDC): the job asks GitHub for a short-lived identity
@@ -478,6 +479,27 @@ jobs:
           print("the artifacts carry what an install runs from")
           PY
 
+      # THE DIGESTS ARE RECORDED HERE, BEFORE ANY THIRD-PARTY CODE RUNS. Up to
+      # this step only the hash-locked release tools and this package's own
+      # build have run. The smoke test after it installs and runs third-party
+      # wheels, which the lock pins by version but not by hash, and any of
+      # them could rewrite `dist/` (a `.pth` file runs at every interpreter
+      # start). So the files are recorded as the artifact checks read them,
+      # the step after the smoke test requires `dist/` to still hold exactly
+      # these bytes, and each publish job checks the artifact against these
+      # digests again before it uploads (Copilot's review of openDox-code#78).
+      - name: record the files and their digests
+        id: digests
+        run: |
+          wheel="opendox-$VERSION-py3-none-any.whl"
+          sdist="opendox-$VERSION.tar.gz"
+          {
+            echo "wheel=$wheel"
+            echo "wheel-sha256=$(sha256sum "dist/$wheel" | cut -d' ' -f1)"
+            echo "sdist=$sdist"
+            echo "sdist-sha256=$(sha256sum "dist/$sdist" | cut -d' ' -f1)"
+          } | tee -a "$GITHUB_OUTPUT"
+
       # THE WHEEL INSTALLS, AND RUNS, OUTSIDE THE CHECKOUT. A fresh venv,
       # `opendox[local]` from the built file (10.3's line, from a file), the
       # dependencies through this package's own lock, and every command run
@@ -552,17 +574,29 @@ jobs:
           fi
           echo "opendox generate-and-open --help names --local"
 
-      - name: record the files and their digests
-        id: digests
+      # THE SMOKE TEST LEFT `dist/` AS THE ARTIFACT CHECKS READ IT: the same
+      # two files, at the digests recorded before it ran. A change refuses
+      # here, before the artifact is uploaded. The publish jobs would refuse
+      # it too, at their own digest check, so nothing changed here can be
+      # published either way; this step names the cause, and names it early.
+      - name: the smoke test left dist/ as the digests recorded it
+        env:
+          WHEEL: ${{ steps.digests.outputs.wheel }}
+          WHEEL_SHA256: ${{ steps.digests.outputs.wheel-sha256 }}
+          SDIST: ${{ steps.digests.outputs.sdist }}
+          SDIST_SHA256: ${{ steps.digests.outputs.sdist-sha256 }}
         run: |
-          wheel="opendox-$VERSION-py3-none-any.whl"
-          sdist="opendox-$VERSION.tar.gz"
-          {
-            echo "wheel=$wheel"
-            echo "wheel-sha256=$(sha256sum "dist/$wheel" | cut -d' ' -f1)"
-            echo "sdist=$sdist"
-            echo "sdist-sha256=$(sha256sum "dist/$sdist" | cut -d' ' -f1)"
-          } | tee -a "$GITHUB_OUTPUT"
+          found="$(find dist -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')"
+          wanted="$(printf '%s\n%s\n' "$SDIST" "$WHEEL" | sort | tr '\n' ' ')"
+          if [ "$found" != "$wanted" ]; then
+            echo "::error::after the smoke test dist/ holds $found, and the digests were recorded for $wanted, so the artifact is not uploaded"
+            exit 1
+          fi
+          if ! printf '%s  %s\n%s  %s\n' "$WHEEL_SHA256" "dist/$WHEEL" "$SDIST_SHA256" "dist/$SDIST" \
+              | sha256sum --strict -c -; then
+            echo "::error::the smoke test changed dist/ after its digests were recorded, so the artifact is not uploaded"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -687,6 +721,15 @@ jobs:
               sys.exit(f"::error::{index} already holds {other} for opendox "
                        f"{os.environ['VERSION']}, which the build job did not verify; "
                        "an upload now would make a mixed release, so nothing is uploaded")
+          # A YANKED FILE STAYS YANKED. skip-existing leaves it in place, and an
+          # unpinned install (10.3's line) skips a yanked file, so a re-run would
+          # go green on a release that line cannot install.
+          yanked = sorted(f["filename"] for f in release["urls"] if f.get("yanked"))
+          if yanked:
+              sys.exit(f"::error::{index} holds {yanked} for opendox {os.environ['VERSION']} "
+                       "at the verified digest, but yanked, and an unpinned install skips a "
+                       "yanked file; un-yank it on the index, or release a new version. "
+                       "Nothing is uploaded")
           print(f"{index} holds {sorted(held)} for opendox {os.environ['VERSION']}, each at "
                 "the verified digest; skip-existing uploads only what is missing")
           PY
@@ -735,7 +778,7 @@ jobs:
       # already holds, instead of stopping on it, and uploads the rest. The
       # step before the pin's re-check refused any file but a verified one at
       # its verified digest, and the JSON step after the upload requires the
-      # index to serve exactly the build job's two digests.
+      # index to serve exactly the build job's two digests, neither yanked.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         timeout-minutes: 10
         with:
@@ -772,11 +815,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      # TestPyPI serves exactly the two files the build job verified. Its JSON
-      # API can lag the upload, answering 404 or a partial release for a
-      # while, so it is read up to READS times, PAUSE seconds apart, until it
-      # serves exactly those two files, before this step refuses. The `pypi`
-      # job runs the same script against PyPI after its upload.
+      # TestPyPI serves exactly the two files the build job verified, neither
+      # yanked. Its JSON API can lag the upload, answering 404 or a partial
+      # release for a while, so it is read up to READS times, PAUSE seconds
+      # apart, until it serves exactly those two files, before this step
+      # refuses. A yanked file refuses at once: waiting does not un-yank it,
+      # and an unpinned install skips it. The `pypi` job runs the same script
+      # against PyPI after its upload.
       - name: TestPyPI serves the files the build job verified
         timeout-minutes: 16
         env:
@@ -799,6 +844,11 @@ jobs:
                   with urllib.request.urlopen(url, timeout=30) as response:
                       release = json.load(response)
                   served = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
+                  yanked = sorted(f["filename"] for f in release["urls"] if f.get("yanked"))
+                  if served == wanted and yanked:
+                      sys.exit(f"::error::{index} serves the verified files, but {yanked} "
+                               "yanked, and an unpinned install skips a yanked file; un-yank "
+                               "it on the index, or release a new version")
                   if served == wanted:
                       break
                   print(f"attempt {attempt}: {index} serves {served} so far")
@@ -811,7 +861,7 @@ jobs:
           else:
               sys.exit(f"::error::after {reads} reads, {index} serves {served}, "
                        f"and the build job verified {wanted}")
-          print(f"{index} serves exactly the verified files: {served}")
+          print(f"{index} serves exactly the verified files, neither yanked: {served}")
           PY
 
       # T099's DRY-RUN FALSIFIER, as plan 034 writes it, in a fresh venv:
@@ -1030,6 +1080,15 @@ jobs:
               sys.exit(f"::error::{index} already holds {other} for opendox "
                        f"{os.environ['VERSION']}, which the build job did not verify; "
                        "an upload now would make a mixed release, so nothing is uploaded")
+          # A YANKED FILE STAYS YANKED. skip-existing leaves it in place, and an
+          # unpinned install (10.3's line) skips a yanked file, so a re-run would
+          # go green on a release that line cannot install.
+          yanked = sorted(f["filename"] for f in release["urls"] if f.get("yanked"))
+          if yanked:
+              sys.exit(f"::error::{index} holds {yanked} for opendox {os.environ['VERSION']} "
+                       "at the verified digest, but yanked, and an unpinned install skips a "
+                       "yanked file; un-yank it on the index, or release a new version. "
+                       "Nothing is uploaded")
           print(f"{index} holds {sorted(held)} for opendox {os.environ['VERSION']}, each at "
                 "the verified digest; skip-existing uploads only what is missing")
           PY
@@ -1078,7 +1137,7 @@ jobs:
       # already holds, instead of stopping on it, and uploads the rest. The
       # step before the pin's re-check refused any file but a verified one at
       # its verified digest, and the JSON step after the upload requires the
-      # index to serve exactly the build job's two digests.
+      # index to serve exactly the build job's two digests, neither yanked.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         timeout-minutes: 10
         with:
@@ -1112,6 +1171,11 @@ jobs:
                   with urllib.request.urlopen(url, timeout=30) as response:
                       release = json.load(response)
                   served = {f["filename"]: f["digests"]["sha256"] for f in release["urls"]}
+                  yanked = sorted(f["filename"] for f in release["urls"] if f.get("yanked"))
+                  if served == wanted and yanked:
+                      sys.exit(f"::error::{index} serves the verified files, but {yanked} "
+                               "yanked, and an unpinned install skips a yanked file; un-yank "
+                               "it on the index, or release a new version")
                   if served == wanted:
                       break
                   print(f"attempt {attempt}: {index} serves {served} so far")
@@ -1124,5 +1188,5 @@ jobs:
           else:
               sys.exit(f"::error::after {reads} reads, {index} serves {served}, "
                        f"and the build job verified {wanted}")
-          print(f"{index} serves exactly the verified files: {served}")
+          print(f"{index} serves exactly the verified files, neither yanked: {served}")
           PY
