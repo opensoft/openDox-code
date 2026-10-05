@@ -34,9 +34,9 @@ not here: see
 and
 [CODE_OF_CONDUCT.md](https://github.com/opensoft/openDox/blob/main/CODE_OF_CONDUCT.md)
 in `opensoft/openDox`. Security reports for this repository go through
-[SECURITY.md](SECURITY.md). The `validate` check is a required status check
+[SECURITY.md](https://github.com/opensoft/openDox-code/blob/main/SECURITY.md). The `validate` check is a required status check
 on `main`, enforced by a repository ruleset — see
-[docs/branch-protection.md](docs/branch-protection.md). It runs the whole
+[docs/branch-protection.md](https://github.com/opensoft/openDox-code/blob/main/docs/branch-protection.md). It runs the whole
 suite, `tests/` and `tests_runtime/`, with the conftest chain in play and a
 PostgreSQL service, and it declares no exclusion (plan 034 T036;
 `add-neutral-product-standalone-operability` requirement 9). Until then it ran
@@ -56,5 +56,5 @@ adds it — the xFactory family's standing rule, levelled across all six
 
 | document | what it is |
 |---|---|
-| [docs/branch-protection.md](docs/branch-protection.md) | the repository ruleset that makes `validate` a required status check on `main`, its `evaluate` → `active` history, and the one policy difference between the two families |
-| [docs/profile-registration-runbook.md](docs/profile-registration-runbook.md) | the host profile: the one `opendox.domain_profile.register()` call a descendant makes at process start, what openDox reads off it, the default profile openDox's entry points register where no host has (and until when a host's registration still replaces it), how a process that builds nothing refuses, and how RULED ASK-4 Q5's one registration serves both legs' accessors without an import between them |
+| [docs/branch-protection.md](https://github.com/opensoft/openDox-code/blob/main/docs/branch-protection.md) | the repository ruleset that makes `validate` a required status check on `main`, its `evaluate` → `active` history, and the one policy difference between the two families |
+| [docs/profile-registration-runbook.md](https://github.com/opensoft/openDox-code/blob/main/docs/profile-registration-runbook.md) | the host profile: the one `opendox.domain_profile.register()` call a descendant makes at process start, what openDox reads off it, the default profile openDox's entry points register where no host has (and until when a host's registration still replaces it), how a process that builds nothing refuses, and how RULED ASK-4 Q5's one registration serves both legs' accessors without an import between them |
